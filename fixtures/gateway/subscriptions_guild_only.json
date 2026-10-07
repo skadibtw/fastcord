@@ -1,0 +1,21 @@
+[
+  {"op": 37, "d": {"subscriptions": {
+    "1": {
+      "typing": true, "threads": false, "activities": false,
+      "member_updates": false, "members": ["5"],
+      "channels": {}, "thread_member_lists": []
+    }
+  }}},
+  {"op": 37, "d": {"subscriptions": {
+    "1": {
+      "typing": false, "threads": false, "activities": false,
+      "member_updates": false, "members": [],
+      "channels": {}, "thread_member_lists": []
+    },
+    "2": {
+      "typing": true, "threads": false, "activities": false,
+      "member_updates": false, "members": ["5"],
+      "channels": {}, "thread_member_lists": []
+    }
+  }}}
+]

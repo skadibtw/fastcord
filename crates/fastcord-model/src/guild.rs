@@ -16,6 +16,9 @@ pub struct GuildMember {
     pub user_id: Snowflake,
     pub nick: Option<String>,
     pub roles: Vec<Snowflake>,
+    /// Only an explicit roles array establishes the member's role set.
+    /// Missing/null startup fields must not authorize channel access.
+    pub roles_known: bool,
     /// Timeout expiry (ISO 8601); a time in the past means the timeout ended.
     pub communication_disabled_until: Option<String>,
 }

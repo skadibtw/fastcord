@@ -446,6 +446,8 @@ The hard product target is **less than 150,000,000 bytes** of steady-state proce
 
 **Renderer backend (ADR 0002):** iced uses wgpu pinned to the platform-native API — DX12 on Windows, Metal on macOS, Vulkan on Linux. OpenGL is excluded; wgpu's automatic selection is not used. Measured on the primary Windows PC with an empty window, release build (2026-10-07, working set): automatic selection 172 MB, DX12 77 MB, Vulkan 96 MB, GL 221 MB, tiny-skia 21 MB. **Risk:** DX12 alone exceeds the 45 MiB "runtime + idle renderer" allowance below; milestone 38 must either reduce renderer overhead (wgpu limits, staging-belt size, atlas sizes) or rebalance the envelope, and the gap must be tracked from the first UI milestone onward.
 
+Milestone 8 pins these APIs through safe compositor configuration. Its Windows release unauthenticated login-screen surrogate averaged 78.147 MB working set over ten minutes (+1.147 MB versus the 77 MB empty-window baseline), with mean private committed memory 84.951 MB. Dedicated/shared GPU allocations are reported separately in `docs/PERFORMANCE.md`. This does not verify the authenticated idle target or close the 45 MiB allowance risk.
+
 Planning envelope (MiB, not MB):
 
 | Component | Planning allowance |

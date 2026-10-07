@@ -1,0 +1,5 @@
+[
+  {"t": "GUILD_ROLE_CREATE", "d": {"guild_id": "100", "role": {"id": "103", "name": "New role", "permissions": "1024", "position": 3, "color": 0, "hoist": false, "managed": false, "mentionable": false}}},
+  {"t": "GUILD_ROLE_UPDATE", "d": {"guild_id": "100", "role": {"id": "101", "name": "Voice disabled", "permissions": "0", "position": 1, "color": 0, "hoist": false, "managed": false, "mentionable": false}}},
+  {"t": "GUILD_ROLE_DELETE", "d": {"guild_id": "100", "role_id": "101"}}
+]

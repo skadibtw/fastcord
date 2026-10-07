@@ -19,9 +19,9 @@ use serde::{Deserialize, Deserializer};
 
 use super::event::{
     ChannelUnread, Dispatch, GroupId, GuildCreate, GuildDelete, GuildMemberEvent,
-    GuildMemberRemove, ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate,
-    MessageDelete, PassiveUpdate, Ready, ReadySupplemental, SessionId, SupplementalGuild,
-    VoiceStateUpdate,
+    GuildMemberRemove, GuildRoleDelete, GuildRoleEvent, GuildUpdate, ListGroup, ListRow,
+    MemberListId, MemberListOp, MemberListUpdate, MessageDelete, PassiveUpdate, Ready,
+    ReadySupplemental, SessionId, SupplementalGuild, VoiceStateUpdate,
 };
 
 /// A known payload that did not decode into its typed form.
@@ -74,8 +74,8 @@ struct MemberWire {
     user_id: Option<Snowflake>,
     #[serde(default)]
     nick: Option<String>,
-    #[serde(default, deserialize_with = "null_default")]
-    roles: Vec<Snowflake>,
+    #[serde(default)]
+    roles: Option<Vec<Snowflake>>,
     #[serde(default)]
     communication_disabled_until: Option<String>,
 }
@@ -113,6 +113,33 @@ struct GuildWire {
     members: Vec<MemberWire>,
     #[serde(default)]
     member_count: u32,
+}
+
+#[derive(Deserialize)]
+struct GuildUpdateWire {
+    id: Snowflake,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    owner_id: Option<Snowflake>,
+    #[serde(default, deserialize_with = "null_default")]
+    roles: Vec<Role>,
+    #[serde(default)]
+    member_count: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct GuildUpdatePresence {
+    #[serde(default, deserialize_with = "field_present")]
+    name: bool,
+    #[serde(default, deserialize_with = "field_present")]
+    icon: bool,
+    #[serde(default, deserialize_with = "field_present")]
+    owner_id: bool,
+    #[serde(default, deserialize_with = "field_present")]
+    roles: bool,
 }
 
 #[derive(Deserialize)]
@@ -334,7 +361,8 @@ impl Normalizer {
         Some(GuildMember {
             user_id,
             nick: wire.nick,
-            roles: wire.roles,
+            roles_known: wire.roles.is_some(),
+            roles: wire.roles.unwrap_or_default(),
             communication_disabled_until: wire.communication_disabled_until,
         })
     }
@@ -488,6 +516,23 @@ fn decode_guild_create(raw: &str) -> Result<GuildCreate, Malformed> {
     })
 }
 
+fn decode_guild_update(raw: &str) -> Result<GuildUpdate, Malformed> {
+    let wire: GuildUpdateWire = json(raw)?;
+    let presence: GuildUpdatePresence = json(raw)?;
+    Ok(GuildUpdate {
+        id: wire.id,
+        name: wire.name,
+        name_present: presence.name,
+        icon: wire.icon,
+        icon_present: presence.icon,
+        owner_id: wire.owner_id,
+        owner_present: presence.owner_id,
+        roles: wire.roles,
+        roles_present: presence.roles,
+        member_count: wire.member_count,
+    })
+}
+
 fn decode_passive_update(raw: &str) -> Result<PassiveUpdate, Malformed> {
     let wire: PassiveUpdateWire = serde_json::from_str(raw).map_err(|_| Malformed)?;
     let mut normalizer = Normalizer::default();
@@ -630,6 +675,7 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         }
         "MESSAGE_DELETE" => json::<MessageDelete>(raw).map(Dispatch::MessageDelete),
         "GUILD_CREATE" => decode_guild_create(raw).map(|g| Dispatch::GuildCreate(Box::new(g))),
+        "GUILD_UPDATE" => decode_guild_update(raw).map(|g| Dispatch::GuildUpdate(Box::new(g))),
         "GUILD_DELETE" => json::<GuildDeleteWire>(raw).map(|g| {
             Dispatch::GuildDelete(GuildDelete {
                 id: g.id,
@@ -652,6 +698,13 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
             decode_member_event(raw).map(|m| Dispatch::GuildMemberUpdate(Box::new(m)))
         }
         "GUILD_MEMBER_REMOVE" => decode_member_remove(raw).map(Dispatch::GuildMemberRemove),
+        "GUILD_ROLE_CREATE" => {
+            json::<GuildRoleEvent>(raw).map(|r| Dispatch::GuildRoleCreate(Box::new(r)))
+        }
+        "GUILD_ROLE_UPDATE" => {
+            json::<GuildRoleEvent>(raw).map(|r| Dispatch::GuildRoleUpdate(Box::new(r)))
+        }
+        "GUILD_ROLE_DELETE" => json::<GuildRoleDelete>(raw).map(Dispatch::GuildRoleDelete),
         "VOICE_STATE_UPDATE" => {
             decode_voice_state(raw).map(|v| Dispatch::VoiceStateUpdate(Box::new(v)))
         }
@@ -950,6 +1003,75 @@ mod tests {
     }
 
     #[test]
+    fn guild_updates_preserve_field_presence_without_decoding_member_or_channel_state() {
+        let Decoded::Event(Dispatch::GuildUpdate(update)) = decode_dispatch(
+            "GUILD_UPDATE",
+            r#"{"id":"100","name":"changed","owner_id":null,"roles":null,"member_count":0,"channels":[{"ignored":true}]}"#,
+        ) else {
+            panic!("GUILD_UPDATE did not decode");
+        };
+        assert_eq!(update.id, id(100));
+        assert_eq!(update.name.as_deref(), Some("changed"));
+        assert!(update.name_present && update.owner_present && update.roles_present);
+        assert!(!update.icon_present);
+        assert!(update.owner_id.is_none() && update.roles.is_empty());
+        assert_eq!(update.member_count, Some(0));
+        let Decoded::Event(Dispatch::GuildUpdate(partial)) =
+            decode_dispatch("GUILD_UPDATE", r#"{"id":"100"}"#)
+        else {
+            panic!("partial GUILD_UPDATE did not decode");
+        };
+        assert!(!partial.name_present && !partial.owner_present && !partial.roles_present);
+        assert!(matches!(
+            decode_dispatch("GUILD_UPDATE", "{}"),
+            Decoded::Malformed
+        ));
+        assert_eq!(Dispatch::GuildUpdate(partial).name(), "GUILD_UPDATE");
+    }
+
+    #[test]
+    fn role_events_decode_real_payload_shapes_and_debug_only_names_the_event() {
+        let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../../fixtures/gateway/guild_role_events.json"
+        ))
+        .unwrap();
+        for fixture in fixtures {
+            let name = fixture["t"].as_str().unwrap();
+            let Decoded::Event(event) = decode_dispatch(name, &fixture["d"].to_string()) else {
+                panic!("{name} did not decode");
+            };
+            assert_eq!(event.name(), name);
+            assert_eq!(format!("{event:?}"), format!("Dispatch::{name}"));
+            match event {
+                Dispatch::GuildRoleCreate(event) => {
+                    assert_eq!(event.guild_id, id(100));
+                    assert_eq!(event.role.id, id(103));
+                    assert_eq!(
+                        event.role.permissions,
+                        fastcord_model::Permissions::VIEW_CHANNEL
+                    );
+                }
+                Dispatch::GuildRoleUpdate(event) => {
+                    assert_eq!(event.guild_id, id(100));
+                    assert_eq!(event.role.id, id(101));
+                    assert_eq!(event.role.permissions, fastcord_model::Permissions::NONE);
+                }
+                Dispatch::GuildRoleDelete(event) => {
+                    assert_eq!((event.guild_id, event.role_id), (id(100), id(101)));
+                }
+                _ => panic!("unexpected role fixture"),
+            }
+        }
+        for name in [
+            "GUILD_ROLE_CREATE",
+            "GUILD_ROLE_UPDATE",
+            "GUILD_ROLE_DELETE",
+        ] {
+            assert!(matches!(decode_dispatch(name, "{}"), Decoded::Malformed));
+        }
+    }
+
+    #[test]
     fn debug_output_never_contains_content_or_session_identifiers() {
         let message = include_str!("../../../../fixtures/model/message_create.json");
         let Decoded::Event(event) = decode_dispatch("MESSAGE_CREATE", message) else {
@@ -974,6 +1096,7 @@ mod tests {
         assert!(!users[2].bot);
         assert_eq!(decoded.ready.guilds[0].members[0].user_id, id(4));
         assert!(decoded.ready.guilds[0].members[0].roles.is_empty());
+        assert!(!decoded.ready.guilds[0].members[0].roles_known);
     }
 
     const LIST_SYNC: &str =

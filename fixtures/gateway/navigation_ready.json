@@ -1,0 +1,43 @@
+{
+  "session_id": "navigation-fixture-session",
+  "resume_gateway_url": "wss://gateway.discord.gg",
+  "user": {"id": "1", "username": "navigation_alt", "global_name": null, "avatar": null},
+  "guilds": [{
+    "id": "100", "name": "Navigation Fixture", "owner_id": "2", "member_count": 3,
+    "roles": [
+      {"id": "100", "name": "@everyone", "permissions": "68608", "position": 0},
+      {"id": "101", "name": "Voice", "permissions": "3145728", "position": 1},
+      {"id": "102", "name": "Allowed", "permissions": "0", "position": 2}
+    ],
+    "channels": [
+      {"id": "3003", "type": 2, "name": "voice-without-connect", "position": 3, "permission_overwrites": [{"id": "1", "type": 1, "allow": "0", "deny": "1048576"}]},
+      {"id": "2002", "type": 0, "name": "first-child", "position": 0, "parent_id": "2000", "permission_overwrites": []},
+      {"id": "2101", "type": 0, "name": "second-group-child", "position": 0, "parent_id": "2100", "permission_overwrites": []},
+      {"id": "1002", "type": 0, "name": "hidden-member", "position": 0, "permission_overwrites": [{"id": "1", "type": 1, "allow": "0", "deny": "1024"}]},
+      {"id": "2000", "type": 4, "name": "First Category", "position": 1, "permission_overwrites": []},
+      {"id": "1000", "type": 0, "name": "uncategorized", "position": 0, "permission_overwrites": []},
+      {"id": "3000", "type": 0, "name": "role-allow-wins", "position": 1, "permission_overwrites": [
+        {"id": "100", "type": 0, "allow": "0", "deny": "1024"},
+        {"id": "101", "type": 0, "allow": "0", "deny": "1024"},
+        {"id": "102", "type": 0, "allow": "1024", "deny": "0"}
+      ]},
+      {"id": "2200", "type": 4, "name": "Forbidden Category", "position": 0, "permission_overwrites": [{"id": "100", "type": 0, "allow": "0", "deny": "1024"}]},
+      {"id": "2301", "type": 0, "name": "missing-category-child", "position": 0, "parent_id": "9999", "permission_overwrites": []},
+      {"id": "1001", "type": 2, "name": "voice", "position": 0, "permission_overwrites": []},
+      {"id": "2003", "type": 2, "name": "tied-position-voice", "position": 0, "parent_id": "2000", "permission_overwrites": []},
+      {"id": "3001", "type": 0, "name": "member-deny-wins", "position": 1, "permission_overwrites": [
+        {"id": "102", "type": 0, "allow": "1024", "deny": "0"},
+        {"id": "1", "type": 1, "allow": "0", "deny": "1024"}
+      ]},
+      {"id": "2100", "type": 4, "name": "Second Category", "position": 1, "permission_overwrites": []},
+      {"id": "2001", "type": 5, "name": "announcement", "position": 1, "parent_id": "2000", "permission_overwrites": []},
+      {"id": "2201", "type": 0, "name": "visible-child-of-hidden-category", "position": 0, "parent_id": "2200", "permission_overwrites": []},
+      {"id": "3002", "type": 0, "name": "read-only", "position": 2, "permission_overwrites": [{"id": "1", "type": 1, "allow": "0", "deny": "2048"}]},
+      {"id": "2400", "type": 4, "name": "Empty Visible Category", "position": 2, "permission_overwrites": []},
+      {"id": "2501", "type": 15, "name": "not-a-text-channel", "position": 0, "permission_overwrites": []},
+      {"id": "2502", "type": 11, "name": "thread-not-in-this-milestone", "position": 0, "parent_id": "1000", "permission_overwrites": []},
+      {"id": "3004", "type": 13, "name": "stage-voice", "position": 4, "permission_overwrites": []}
+    ]
+  }],
+  "merged_members": [[{"user_id": "1", "roles": ["101", "102"], "nick": null}]]
+}

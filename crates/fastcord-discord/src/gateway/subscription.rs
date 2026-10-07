@@ -1,10 +1,10 @@
 //! Lazy guild subscriptions over opcode 37 (SPEC §4.4).
 //!
 //! The consumer states what it wants as a declarative [`SubscriptionTarget`]
-//! (selected channel and member-list viewport, the guild of the active voice
-//! channel, members it needs). The connection task compares that with what it
-//! last transmitted in this session and sends only the difference, coalescing
-//! rapid changes into one frame. Resume replays active state and releases guilds
+//! (selected guild, optional channel/member-list viewport, the guild of the
+//! active voice channel, members it needs). The connection task compares that
+//! with what it last transmitted in this session and sends only the difference,
+//! coalescing rapid changes into one frame. Resume replays active state and releases guilds
 //! no longer wanted without forgetting what the previous connection sent.
 //!
 //! Evidence and open points (docs/PROTOCOL.md, risk U2): the field set and its
@@ -70,9 +70,9 @@ impl GuildSubscription {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Selection {
     guild: Snowflake,
-    channel: Snowflake,
-    /// Rows in view, inclusive.
-    viewport: (u32, u32),
+    channel: Option<Snowflake>,
+    /// Member-list rows in view, inclusive; absent when no sidebar is shown.
+    viewport: Option<(u32, u32)>,
 }
 
 /// The subscriptions the consumer wants right now. Equal targets produce no
@@ -85,17 +85,27 @@ pub struct SubscriptionTarget {
 }
 
 impl SubscriptionTarget {
+    /// Browses `guild` without opening a channel or requesting a member list.
+    pub fn select_guild(&mut self, guild: Snowflake) {
+        self.selected = Some(Selection {
+            guild,
+            channel: None,
+            viewport: None,
+        });
+        self.prune();
+    }
+
     /// Shows `channel` of `guild`. A different channel starts at the top of its
     /// member list; reselecting the current one keeps the viewport.
     pub fn select_channel(&mut self, guild: Snowflake, channel: Snowflake) {
         let same = self
             .selected
-            .is_some_and(|sel| sel.guild == guild && sel.channel == channel);
+            .is_some_and(|sel| sel.guild == guild && sel.channel == Some(channel));
         if !same {
             self.selected = Some(Selection {
                 guild,
-                channel,
-                viewport: (0, 0),
+                channel: Some(channel),
+                viewport: Some((0, 0)),
             });
         }
         self.prune();
@@ -107,11 +117,21 @@ impl SubscriptionTarget {
         self.prune();
     }
 
-    /// The member-list rows in view. Ignored without a selection.
+    /// The member-list rows in view. Ignored without a selected channel.
     pub fn set_viewport(&mut self, first_row: u32, last_row: u32) {
-        if let Some(selected) = &mut self.selected {
+        if let Some(selected) = &mut self.selected
+            && selected.channel.is_some()
+        {
             let first = first_row.min(MAX_ROW);
-            selected.viewport = (first, last_row.clamp(first, MAX_ROW));
+            selected.viewport = Some((first, last_row.clamp(first, MAX_ROW)));
+        }
+    }
+
+    /// Keeps the selected guild/channel but releases all member-list ranges.
+    /// A subsequent [`Self::set_viewport`] shows that sidebar again.
+    pub fn clear_member_viewport(&mut self) {
+        if let Some(selected) = &mut self.selected {
+            selected.viewport = None;
         }
     }
 
@@ -152,7 +172,7 @@ impl SubscriptionTarget {
     }
 
     pub fn selected_channel(&self) -> Option<Snowflake> {
-        self.selected.map(|sel| sel.channel)
+        self.selected.and_then(|sel| sel.channel)
     }
 
     pub fn voice_guild(&self) -> Option<Snowflake> {
@@ -167,7 +187,8 @@ impl SubscriptionTarget {
     /// The live member-list ranges of the selected channel.
     pub fn ranges(&self) -> Vec<MemberRange> {
         self.selected
-            .map_or_else(Vec::new, |sel| live_ranges(sel.viewport))
+            .and_then(|sel| sel.viewport)
+            .map_or_else(Vec::new, live_ranges)
     }
 
     fn is_subscribed_guild(&self, guild: Snowflake) -> bool {
@@ -188,11 +209,15 @@ impl SubscriptionTarget {
         let mut guilds = BTreeMap::new();
         let members = |guild: Snowflake| self.member_interest(guild).collect::<BTreeSet<_>>();
         if let Some(selected) = self.selected {
+            let mut channels = BTreeMap::new();
+            if let (Some(channel), Some(viewport)) = (selected.channel, selected.viewport) {
+                channels.insert(channel, live_ranges(viewport));
+            }
             guilds.insert(
                 selected.guild,
                 GuildSubscription {
                     subscribed: true,
-                    channels: BTreeMap::from([(selected.channel, live_ranges(selected.viewport))]),
+                    channels,
                     members: members(selected.guild),
                 },
             );
@@ -515,6 +540,74 @@ mod tests {
         target.clear_selection();
         target.set_viewport(500, 600);
         assert!(target.ranges().is_empty());
+    }
+
+    #[test]
+    fn guild_only_navigation_matches_fixture_without_requesting_member_lists() {
+        let expected: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../../fixtures/gateway/subscriptions_guild_only.json"
+        ))
+        .unwrap();
+        let mut subscriber = Subscriber::new();
+        let mut target = SubscriptionTarget::default();
+        target.select_guild(id(1));
+        target.set_member_interest(id(1), [id(5)]);
+        target.set_viewport(0, 99);
+        assert_eq!(target.selected_guild(), Some(id(1)));
+        assert!(target.selected_channel().is_none());
+        assert!(target.ranges().is_empty());
+
+        let batches = subscriber.plan(&target).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&batches[0].frame).unwrap(),
+            expected[0]
+        );
+        for batch in batches {
+            subscriber.commit(batch);
+        }
+        target.select_channel(id(1), id(11));
+        target.clear_member_viewport();
+        assert_eq!(target.selected_channel(), Some(id(11)));
+        assert!(target.ranges().is_empty());
+        assert!(
+            subscriber.plan(&target).unwrap().is_empty(),
+            "opening without a sidebar is no new interest"
+        );
+
+        target.select_guild(id(2));
+        target.set_member_interest(id(2), [id(5)]);
+        assert_eq!(target.member_interest(id(1)).count(), 0);
+        let batches = subscriber.plan(&target).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&batches[0].frame).unwrap(),
+            expected[1]
+        );
+        for batch in batches {
+            subscriber.commit(batch);
+        }
+        assert!(subscriber.plan(&target).unwrap().is_empty());
+    }
+
+    #[test]
+    fn clearing_and_reshowing_member_viewport_preserves_selected_channel() {
+        let mut target = SubscriptionTarget::default();
+        target.select_channel(id(1), id(11));
+        assert_eq!(target.ranges(), [(0, 99)]);
+        target.clear_member_viewport();
+        assert_eq!(target.selected_guild(), Some(id(1)));
+        assert_eq!(target.selected_channel(), Some(id(11)));
+        assert!(target.guilds()[&id(1)].channels.is_empty());
+        target.select_channel(id(1), id(11));
+        assert!(
+            target.ranges().is_empty(),
+            "reselection preserves hidden sidebar"
+        );
+        target.set_viewport(150, 170);
+        assert_eq!(target.guilds()[&id(1)].channels[&id(11)], [(100, 199)]);
+        target.select_channel(id(1), id(12));
+        assert_eq!(target.ranges(), [(0, 99)], "new channel retains M7 default");
     }
 
     #[test]

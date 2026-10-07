@@ -2,7 +2,10 @@
 
 mod gateway;
 mod login;
+mod navigation;
 mod qr;
+mod render;
+mod virtual_list;
 
 use std::sync::Arc;
 
@@ -20,9 +23,9 @@ use login::{LoginError, LoginOutcome, Persistence, Session, StoreReady};
 use qr::{Applied, QrAttempt, QrStage};
 
 fn main() -> iced::Result {
-    iced::application(App::boot, App::update, App::view)
+    render::application(App::boot, App::update, App::view)
         .title("fastcord")
-        .window_size((760, 640))
+        .window_size((1080, 640))
         .run()
 }
 
@@ -87,6 +90,11 @@ enum Message {
     RetryDelete,
     Deleted(Result<(), StoreError>),
     Gateway(u64, GatewayStatus),
+    Navigation(u64),
+    SelectGuild(Snowflake),
+    SelectChannel(Snowflake, Snowflake),
+    GuildViewport(virtual_list::Window),
+    ChannelViewport(virtual_list::Window),
 }
 
 impl App {
@@ -234,6 +242,38 @@ impl App {
                     gateway.status = status;
                 }
             }
+            Message::Navigation(id) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase
+                    && gateway.id == id
+                {
+                    let (snapshot, status) = gateway.controls.consume();
+                    gateway.navigation = snapshot;
+                    if let Some(status) = status {
+                        return self.update(Message::Gateway(id, status));
+                    }
+                }
+            }
+            Message::SelectGuild(guild) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.select_guild(guild);
+                    return iced::widget::operation::scroll_to(
+                        "channel-list",
+                        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+                    );
+                }
+            }
+            Message::SelectChannel(guild, channel) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.select_channel(guild, channel);
+                }
+            }
+            Message::GuildViewport(window) | Message::ChannelViewport(window) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway
+                        .controls
+                        .viewport(matches!(message, Message::GuildViewport(_)), window);
+                }
+            }
             Message::Logout => {
                 if let Phase::Account { session, .. } = &self.phase {
                     let account = session.user.id;
@@ -337,22 +377,54 @@ impl App {
     fn enter_account(&mut self, session: Arc<Session>, persistence: Persistence) -> Task<Message> {
         self.gateway_sessions += 1;
         let id = self.gateway_sessions;
+        let controls = gateway::NavigationBridge::new();
         let stream = gateway::status_stream(
             session.client.clone(),
             session.token(),
             fastcord_platform::system_locale(),
+            controls.clone(),
         );
-        let (task, worker) =
-            Task::run(stream, move |status| Message::Gateway(id, status)).abortable();
+        let (task, worker) = Task::run(stream, move |()| Message::Navigation(id)).abortable();
         self.phase = Phase::Account {
             session,
             persistence,
-            gateway: GatewayPanel::new(id, worker),
+            gateway: GatewayPanel::new(id, worker, controls),
         };
         task
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if let Phase::Account {
+            session,
+            persistence,
+            gateway,
+        } = &self.phase
+        {
+            return container(
+                column![
+                    row![
+                        text(format!(
+                            "{} (@{})",
+                            session.user.display_name(),
+                            session.user.username
+                        ))
+                        .size(20),
+                        text(if *persistence == Persistence::Saved {
+                            "Saved login"
+                        } else {
+                            "Memory-only login"
+                        }),
+                        button("Log out").on_press(Message::Logout),
+                    ]
+                    .spacing(16),
+                    text(gateway.status.describe()),
+                    navigation::view(&gateway.navigation),
+                ]
+                .spacing(16),
+            )
+            .padding(20)
+            .into();
+        }
         let content: Element<'_, Message> = match &self.phase {
             Phase::Starting => text("Looking for a saved login in the native credential store…").into(),
             Phase::Login => self.login_view(),
@@ -371,18 +443,7 @@ impl App {
                 text("Continue only if you accept a memory-only session. The token will not be written to a file; you will need to log in again next launch. Previously saved credentials remain until removed."),
                 row![button("Continue without saving").on_press(Message::ContinueInMemory), button("Cancel login").on_press(Message::CancelLogin)].spacing(12),
             ].spacing(20).into(),
-            Phase::Account { session, persistence, gateway } => column![
-                text("Logged in").size(32),
-                text(session.user.display_name()).size(26),
-                text(format!("@{}", session.user.username)),
-                text(format!("Account ID: {}", session.user.id)),
-                text(match persistence {
-                    Persistence::Saved => "Saved securely in the native credential store. This account will be restored on launch.",
-                    Persistence::MemoryOnly => "Memory-only session: this token was not saved. Login is required next launch unless a previously saved credential still exists.",
-                }),
-                text(gateway.status.describe()),
-                button("Log out").on_press(Message::Logout),
-            ].spacing(20).into(),
+            Phase::Account { .. } => unreachable!("account view returned above"),
             Phase::Deleting { .. } => text("Account state cleared. Removing the saved credential…").into(),
             Phase::DeleteFailed { error, .. } => column![
                 text("Account state cleared; logout is not complete").size(26),

@@ -41,9 +41,9 @@ use tokio::sync::oneshot;
 pub use capabilities::{Capability, SELECTED as SELECTED_CAPABILITIES, selected_value};
 pub use event::{
     ChannelUnread, ConnectionState, Dispatch, GatewayEvent, GroupId, GuildCreate, GuildDelete,
-    GuildMemberEvent, GuildMemberRemove, ListGroup, ListRow, MemberListId, MemberListOp,
-    MemberListUpdate, MessageDelete, PassiveUpdate, Ready, ReadySupplemental, ReconnectReason,
-    SessionId, StopReason, SupplementalGuild, VoiceStateUpdate,
+    GuildMemberEvent, GuildMemberRemove, GuildRoleDelete, GuildRoleEvent, GuildUpdate, ListGroup,
+    ListRow, MemberListId, MemberListOp, MemberListUpdate, MessageDelete, PassiveUpdate, Ready,
+    ReadySupplemental, ReconnectReason, SessionId, StopReason, SupplementalGuild, VoiceStateUpdate,
 };
 pub use profile::{
     BUNDLED_BUILD_NUMBER, BuildNumber, BuildSource, ClientProperties, HostOs, PROFILE_VERSION,

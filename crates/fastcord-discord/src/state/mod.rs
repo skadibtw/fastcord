@@ -27,6 +27,7 @@
 
 mod list_id;
 mod member_list;
+pub mod navigation;
 #[cfg(test)]
 mod regressions;
 #[cfg(test)]
@@ -37,14 +38,16 @@ use std::fmt;
 use std::mem::size_of;
 
 use fastcord_model::{
-    Channel, Guild, GuildMember, PermissionOverwrite, Role, Snowflake, User, VoiceState,
+    Channel, Guild, GuildMember, OverwriteKind, PermissionOverwrite, Role, Snowflake, User,
+    VoiceState,
 };
 
 pub use member_list::{MAX_ROWS, MemberList};
 
 use crate::gateway::{
-    Dispatch, GatewayEvent, GuildCreate, GuildMemberEvent, MemberListUpdate, PassiveUpdate, Ready,
-    ReadySupplemental, SubscriptionTarget, VoiceStateUpdate,
+    Dispatch, GatewayEvent, GuildCreate, GuildMemberEvent, GuildRoleDelete, GuildRoleEvent,
+    GuildUpdate, MemberListUpdate, PassiveUpdate, Ready, ReadySupplemental, SubscriptionTarget,
+    VoiceStateUpdate,
 };
 
 /// Budget for guild/channel/role metadata, users, members, voice states, and
@@ -130,6 +133,21 @@ fn sorted_channels(mut channels: Vec<Channel>) -> Vec<Channel> {
     channels
 }
 
+/// Role updates replace one authoritative ID, never OR stale duplicate grants.
+fn sorted_roles(mut roles: Vec<Role>) -> Vec<Role> {
+    roles.sort_by_key(|role| role.id);
+    roles.dedup_by(|later, earlier| {
+        if later.id == earlier.id {
+            std::mem::swap(later, earlier);
+            true
+        } else {
+            false
+        }
+    });
+    roles.shrink_to_fit();
+    roles
+}
+
 struct MemberSlot {
     member: GuildMember,
     /// Store tick of the last write; the oldest unreferenced member goes first.
@@ -162,7 +180,7 @@ impl GuildEntry {
             icon: guild.icon,
             owner_id: guild.owner_id,
             member_count: guild.member_count,
-            roles: guild.roles,
+            roles: sorted_roles(guild.roles),
             channels: sorted_channels(guild.channels),
             members: HashMap::new(),
             voice: HashMap::new(),
@@ -673,6 +691,7 @@ impl Store {
             },
             Dispatch::MessageUpdate(_) | Dispatch::MessageDelete(_) => {}
             Dispatch::GuildCreate(created) => self.guild_create(*created, &mut changes),
+            Dispatch::GuildUpdate(updated) => self.guild_update(*updated, &mut changes),
             Dispatch::GuildDelete(deleted) => {
                 self.remove_guild(deleted.id);
                 if deleted.unavailable {
@@ -699,6 +718,10 @@ impl Store {
                     changes.guilds.insert(removed.guild_id);
                 }
             }
+            Dispatch::GuildRoleCreate(event) | Dispatch::GuildRoleUpdate(event) => {
+                self.role_upsert(*event, &mut changes);
+            }
+            Dispatch::GuildRoleDelete(event) => self.role_remove(event, &mut changes),
             Dispatch::VoiceStateUpdate(update) => self.voice_update(*update, &mut changes),
         }
         self.refresh_list_key(&mut changes);
@@ -815,6 +838,33 @@ impl Store {
         }
     }
 
+    fn guild_update(&mut self, update: GuildUpdate, changes: &mut Changes) {
+        if self.focus.guild == Some(update.id) && update.roles_present {
+            self.focus.list_id = None;
+        }
+        let known = self.with_guild(update.id, |entry| {
+            if update.name_present {
+                entry.name = update.name.unwrap_or_default();
+            }
+            if update.icon_present {
+                entry.icon = update.icon;
+            }
+            if update.owner_present {
+                entry.owner_id = update.owner_id;
+            }
+            if update.roles_present {
+                entry.roles = sorted_roles(update.roles);
+            }
+            if let Some(count) = update.member_count {
+                entry.member_count = count;
+            }
+            entry.recompute_meta();
+        });
+        if known.is_some() {
+            changes.guilds.insert(update.id);
+        }
+    }
+
     fn install_guild(&mut self, guild: Guild) {
         let id = guild.id;
         self.remove_guild(id);
@@ -836,7 +886,7 @@ impl Store {
             entry.icon = guild.icon;
             entry.owner_id = guild.owner_id;
             entry.member_count = guild.member_count;
-            entry.roles = guild.roles;
+            entry.roles = sorted_roles(guild.roles);
             let mut channels = sorted_channels(guild.channels);
             for channel in &mut channels {
                 if let Some(old) = entry.channel(channel.id) {
@@ -969,6 +1019,58 @@ impl Store {
         }
     }
 
+    fn role_upsert(&mut self, event: GuildRoleEvent, changes: &mut Changes) {
+        let guild = event.guild_id;
+        if self.focus.guild == Some(guild) {
+            self.focus.list_id = None;
+        }
+        let known = self.with_guild(guild, |entry| {
+            match entry
+                .roles
+                .binary_search_by_key(&event.role.id, |role| role.id)
+            {
+                Ok(at) => entry.roles[at] = event.role,
+                Err(at) => entry.roles.insert(at, event.role),
+            }
+            entry.recompute_meta();
+        });
+        if known.is_some() {
+            changes.guilds.insert(guild);
+        }
+    }
+
+    fn role_remove(&mut self, event: GuildRoleDelete, changes: &mut Changes) {
+        let guild = event.guild_id;
+        if self.focus.guild == Some(guild) {
+            self.focus.list_id = None;
+        }
+        let removed = self.with_guild(guild, |entry| {
+            let before = entry.roles.len();
+            entry.roles.retain(|role| role.id != event.role_id);
+            let mut changed = before != entry.roles.len();
+            for member in entry.members.values_mut() {
+                let before = member.member.roles.len();
+                member.member.roles.retain(|role| *role != event.role_id);
+                changed |= before != member.member.roles.len();
+            }
+            for channel in &mut entry.channels {
+                let before = channel.permission_overwrites.len();
+                channel.permission_overwrites.retain(|overwrite| {
+                    overwrite.kind != OverwriteKind::Role || overwrite.id != event.role_id
+                });
+                changed |= before != channel.permission_overwrites.len();
+            }
+            if entry.roles.capacity() > entry.roles.len().saturating_mul(2) {
+                entry.roles.shrink_to_fit();
+            }
+            entry.recompute_meta();
+            changed
+        });
+        if removed == Some(true) {
+            changes.guilds.insert(guild);
+        }
+    }
+
     fn passive_update(&mut self, update: PassiveUpdate, changes: &mut Changes) {
         if !self.guilds.contains_key(&update.guild_id) {
             return;
@@ -1060,6 +1162,7 @@ impl Store {
                 }
                 if event.roles_present {
                     previous.member.roles = member.roles;
+                    previous.member.roles_known = member.roles_known;
                 }
                 if event.timeout_present {
                     previous.member.communication_disabled_until =

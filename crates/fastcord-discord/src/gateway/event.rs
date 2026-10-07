@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use fastcord_model::{
-    Channel, Guild, GuildMember, Message, MessageUpdate, Snowflake, User, VoiceState,
+    Channel, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, User, VoiceState,
 };
 
 /// The Gateway session ID. Not a credential on its own (resuming also needs the
@@ -176,6 +176,22 @@ pub enum GuildCreate {
     Unavailable(Snowflake),
 }
 
+/// Partial GUILD_UPDATE; presence bits preserve omitted metadata, while an
+/// explicit null owner cannot leave a stale owner permission bypass behind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuildUpdate {
+    pub id: Snowflake,
+    pub name: Option<String>,
+    pub name_present: bool,
+    pub icon: Option<String>,
+    pub icon_present: bool,
+    pub owner_id: Option<Snowflake>,
+    pub owner_present: bool,
+    pub roles: Vec<Role>,
+    pub roles_present: bool,
+    pub member_count: Option<u32>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuildDelete {
     pub id: Snowflake,
@@ -222,6 +238,19 @@ pub struct GuildMemberEvent {
 pub struct GuildMemberRemove {
     pub guild_id: Snowflake,
     pub user_id: Snowflake,
+}
+
+/// GUILD_ROLE_CREATE or GUILD_ROLE_UPDATE: complete role permission metadata.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct GuildRoleEvent {
+    pub guild_id: Snowflake,
+    pub role: Role,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct GuildRoleDelete {
+    pub guild_id: Snowflake,
+    pub role_id: Snowflake,
 }
 
 /// VOICE_STATE_UPDATE for a guild voice channel, with the member it carries.
@@ -323,6 +352,7 @@ pub enum Dispatch {
     MessageUpdate(Box<MessageUpdate>),
     MessageDelete(MessageDelete),
     GuildCreate(Box<GuildCreate>),
+    GuildUpdate(Box<GuildUpdate>),
     GuildDelete(GuildDelete),
     ChannelCreate(Box<Channel>),
     ChannelUpdate(Box<Channel>),
@@ -332,6 +362,9 @@ pub enum Dispatch {
     GuildMemberAdd(Box<GuildMemberEvent>),
     GuildMemberUpdate(Box<GuildMemberEvent>),
     GuildMemberRemove(GuildMemberRemove),
+    GuildRoleCreate(Box<GuildRoleEvent>),
+    GuildRoleUpdate(Box<GuildRoleEvent>),
+    GuildRoleDelete(GuildRoleDelete),
     VoiceStateUpdate(Box<VoiceStateUpdate>),
 }
 
@@ -345,6 +378,7 @@ impl Dispatch {
             Self::MessageUpdate(_) => "MESSAGE_UPDATE",
             Self::MessageDelete(_) => "MESSAGE_DELETE",
             Self::GuildCreate(_) => "GUILD_CREATE",
+            Self::GuildUpdate(_) => "GUILD_UPDATE",
             Self::GuildDelete(_) => "GUILD_DELETE",
             Self::ChannelCreate(_) => "CHANNEL_CREATE",
             Self::ChannelUpdate(_) => "CHANNEL_UPDATE",
@@ -354,6 +388,9 @@ impl Dispatch {
             Self::GuildMemberAdd(_) => "GUILD_MEMBER_ADD",
             Self::GuildMemberUpdate(_) => "GUILD_MEMBER_UPDATE",
             Self::GuildMemberRemove(_) => "GUILD_MEMBER_REMOVE",
+            Self::GuildRoleCreate(_) => "GUILD_ROLE_CREATE",
+            Self::GuildRoleUpdate(_) => "GUILD_ROLE_UPDATE",
+            Self::GuildRoleDelete(_) => "GUILD_ROLE_DELETE",
             Self::VoiceStateUpdate(_) => "VOICE_STATE_UPDATE",
         }
     }

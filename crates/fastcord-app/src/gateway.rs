@@ -7,13 +7,18 @@
 //! when the account screen is left (which closes the Gateway session cleanly).
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fastcord_discord::gateway::{
-    ConnectionState, Gateway, GatewayEvent, ReconnectReason, StopReason,
+    ConnectionState, Dispatch, Gateway, GatewayEvent, ReconnectReason, StopReason,
 };
 use fastcord_discord::state::Store;
+use fastcord_discord::state::navigation::{Navigation, NavigationSnapshot};
+use fastcord_model::Snowflake;
+use tokio::sync::watch;
+
+use crate::virtual_list::Window;
 use fastcord_discord::{RestClient, UserToken};
 use iced::futures::{Stream, stream};
 use iced::task::Handle;
@@ -104,12 +109,13 @@ fn describe_delay(delay: Duration) -> String {
     }
 }
 
-/// Folds the ordered event stream into the reducer state and status changes.
-/// Everything that is not a status change (messages, guild updates, replay) is
-/// applied to the store here; no view reads it yet.
+/// Folds ordered Gateway events into the single-writer reducer. Navigation
+/// commands are also validated here, never against a stale UI snapshot.
 #[derive(Default)]
 struct Tracker {
     store: Store,
+    navigation: Navigation,
+    navigation_dirty: bool,
 }
 
 impl Tracker {
@@ -144,7 +150,21 @@ impl Tracker {
                 ConnectionState::Stopped(reason) => GatewayStatus::Stopped(reason),
             }),
             dispatch @ GatewayEvent::Dispatch { .. } => {
-                self.store.apply(dispatch);
+                let relevant = !matches!(
+                    &dispatch,
+                    GatewayEvent::Dispatch {
+                        event: Dispatch::MessageCreate(_)
+                            | Dispatch::MessageUpdate(_)
+                            | Dispatch::MessageDelete(_),
+                        ..
+                    }
+                );
+                let changes = self.store.apply(dispatch);
+                self.navigation_dirty =
+                    (relevant && !changes.is_empty()) || self.store.limit_exceeded();
+                if self.navigation_dirty {
+                    self.navigation.reconcile(&self.store);
+                }
                 self.store
                     .limit_exceeded()
                     .then_some(GatewayStatus::Stopped(StopReason::StateTooLarge))
@@ -153,25 +173,174 @@ impl Tracker {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SelectionIntent {
+    Guild(Snowflake),
+    Channel(Snowflake, Snowflake),
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Request {
+    revision: u64,
+    selection: Option<SelectionIntent>,
+    guilds: Window,
+    channels: Window,
+}
+
+#[derive(Default)]
+struct Latest {
+    snapshot: Arc<NavigationSnapshot>,
+    status: Option<GatewayStatus>,
+    notified: bool,
+}
+
+/// One coalesced request and one bounded presentation window per account.
+/// Notifications carry no rows; an unconsumed notification prevents more from
+/// entering iced's queue while the slot continues replacing stale snapshots.
+#[derive(Clone)]
+pub struct NavigationBridge {
+    requests: watch::Sender<Request>,
+    latest: Arc<Mutex<Latest>>,
+}
+
+impl NavigationBridge {
+    pub fn new() -> Self {
+        let (requests, _) = watch::channel(Request::default());
+        Self {
+            requests,
+            latest: Arc::default(),
+        }
+    }
+
+    fn publish(&self, snapshot: NavigationSnapshot, status: Option<GatewayStatus>) -> bool {
+        let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        let status_changed = status
+            .as_ref()
+            .is_some_and(|status| latest.status.as_ref() != Some(status));
+        let snapshot_changed = *latest.snapshot != snapshot;
+        if !status_changed && !snapshot_changed {
+            return false;
+        }
+        if snapshot_changed {
+            latest.snapshot = Arc::new(snapshot);
+        }
+        if let Some(status) = status {
+            latest.status = Some(status);
+        }
+        if latest.notified {
+            false
+        } else {
+            latest.notified = true;
+            true
+        }
+    }
+
+    pub fn consume(&self) -> (Arc<NavigationSnapshot>, Option<GatewayStatus>) {
+        let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        latest.notified = false;
+        (Arc::clone(&latest.snapshot), latest.status.clone())
+    }
+
+    pub fn select_guild(&self, id: Snowflake) {
+        self.requests.send_modify(|request| {
+            request.revision = request.revision.wrapping_add(1);
+            request.selection = Some(SelectionIntent::Guild(id));
+            request.channels = Window::default();
+        });
+    }
+
+    pub fn select_channel(&self, guild: Snowflake, channel: Snowflake) {
+        self.requests.send_modify(|request| {
+            request.revision = request.revision.wrapping_add(1);
+            request.selection = Some(SelectionIntent::Channel(guild, channel));
+        });
+    }
+
+    pub fn viewport(&self, guilds: bool, window: Window) {
+        self.requests.send_if_modified(|request| {
+            let old = if guilds {
+                &mut request.guilds
+            } else {
+                &mut request.channels
+            };
+            if *old == window {
+                return false;
+            }
+            *old = window;
+            true
+        });
+    }
+}
+
 struct Worker {
     start: Option<(RestClient, Arc<UserToken>, String)>,
     gateway: Option<Gateway>,
     tracker: Tracker,
+    bridge: NavigationBridge,
+    requests: watch::Receiver<Request>,
+    revision: u64,
 }
 
-/// A worker stream for one account session. The connection starts when the
-/// stream is first polled (inside iced's Tokio runtime) and ends, closing the
-/// socket with code 1000 so the session ends, when the stream is dropped,
-/// which `Handle::abort` does.
+impl Worker {
+    fn refresh(
+        &mut self,
+        gateway: &Gateway,
+        request: Request,
+        status: Option<GatewayStatus>,
+    ) -> bool {
+        if request.revision != self.revision {
+            match request.selection {
+                Some(SelectionIntent::Guild(guild)) => {
+                    self.tracker
+                        .navigation
+                        .select_guild(&self.tracker.store, guild);
+                }
+                Some(SelectionIntent::Channel(guild, channel))
+                    if self.tracker.navigation.selected_guild() == Some(guild) =>
+                {
+                    self.tracker
+                        .navigation
+                        .select_channel(&self.tracker.store, channel);
+                }
+                _ => {}
+            }
+            self.revision = request.revision;
+        }
+        let target = self
+            .tracker
+            .navigation
+            .subscription_target(&self.tracker.store);
+        self.tracker.store.focus(&target);
+        gateway.subscriptions().update(|current| *current = target);
+        self.bridge.publish(
+            self.tracker.navigation.snapshot(
+                &self.tracker.store,
+                request.guilds.start,
+                request.guilds.count,
+                request.channels.start,
+                request.channels.count,
+            ),
+            status,
+        )
+    }
+}
+
+/// Starts only when iced polls this account-owned stream. Dropping the panel
+/// aborts it and releases the socket, store, presentation slot, and controls.
 pub fn status_stream(
     rest: RestClient,
     token: Arc<UserToken>,
     locale: String,
-) -> impl Stream<Item = GatewayStatus> {
+    bridge: NavigationBridge,
+) -> impl Stream<Item = ()> {
+    let requests = bridge.requests.subscribe();
     let worker = Worker {
         start: Some((rest, token, locale)),
         gateway: None,
         tracker: Tracker::default(),
+        bridge,
+        requests,
+        revision: 0,
     };
     stream::unfold(worker, |mut worker| async move {
         let mut gateway = match worker.gateway.take() {
@@ -182,25 +351,41 @@ pub fn status_stream(
             }
         };
         loop {
-            let event = gateway.next_event().await?;
-            if let Some(status) = worker.tracker.apply(event) {
-                // On a reducer safety failure, dropping the Gateway closes
-                // the socket and ends the stream instead of reconnecting.
-                if status != GatewayStatus::Stopped(StopReason::StateTooLarge) {
-                    worker.gateway = Some(gateway);
+            let (status, requested) = tokio::select! {
+                event = gateway.next_event() => (worker.tracker.apply(event?), false),
+                changed = worker.requests.changed() => {
+                    changed.ok()?;
+                    (None, true)
                 }
-                return Some((status, worker));
+            };
+            if !requested && !worker.tracker.navigation_dirty && status.is_none() {
+                continue;
+            }
+            worker.tracker.navigation_dirty = false;
+            let request = *worker.requests.borrow_and_update();
+            let terminal = matches!(
+                status,
+                Some(GatewayStatus::Stopped(_)) | Some(GatewayStatus::AuthenticationRequired)
+            );
+            let notified = worker.refresh(&gateway, request, status);
+            if terminal {
+                worker.start = None;
+                return notified.then_some(((), worker));
+            }
+            if notified {
+                worker.gateway = Some(gateway);
+                return Some(((), worker));
             }
         }
     })
 }
 
-/// The account screen's connection state. Messages from an earlier session
-/// (identified by `id`) are ignored.
+/// Messages from an earlier session (identified by `id`) are ignored.
 pub struct GatewayPanel {
     pub id: u64,
     pub status: GatewayStatus,
-    /// Aborts the worker, and with it the connection, when dropped.
+    pub navigation: Arc<NavigationSnapshot>,
+    pub controls: NavigationBridge,
     _worker: Handle,
 }
 
@@ -214,12 +399,62 @@ impl fmt::Debug for GatewayPanel {
 }
 
 impl GatewayPanel {
-    pub fn new(id: u64, worker: Handle) -> Self {
+    pub fn new(id: u64, worker: Handle, controls: NavigationBridge) -> Self {
         Self {
             id,
             status: GatewayStatus::Connecting { attempt: 0 },
+            navigation: Arc::default(),
+            controls,
             _worker: worker.abort_on_drop(),
         }
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+
+    #[test]
+    fn requests_coalesce_without_queueing_navigation_or_viewports() {
+        let bridge = NavigationBridge::new();
+        let requests = bridge.requests.subscribe();
+        for id in 0..10_000 {
+            bridge.select_guild(Snowflake(id));
+            bridge.viewport(
+                true,
+                Window {
+                    start: id as usize,
+                    count: 39,
+                },
+            );
+        }
+        let request = *requests.borrow();
+        assert_eq!(request.revision, 10_000);
+        assert!(matches!(
+            request.selection,
+            Some(SelectionIntent::Guild(Snowflake(9_999)))
+        ));
+        assert_eq!(request.guilds.start, 9_999);
+        assert_eq!(request.channels, Window::default());
+    }
+
+    #[test]
+    fn at_most_one_notification_is_queued_and_consumption_gets_latest() {
+        let bridge = NavigationBridge::new();
+        let mut snapshot = NavigationSnapshot::default();
+        snapshot.guilds.total = 1;
+        assert!(bridge.publish(snapshot.clone(), None));
+        for total in 2..10_000 {
+            snapshot.guilds.total = total;
+            assert!(!bridge.publish(snapshot.clone(), None));
+        }
+        assert_eq!(bridge.consume().0.guilds.total, 9_999);
+        assert!(!bridge.publish(snapshot.clone(), None));
+        snapshot.guilds.total = 10_000;
+        assert!(bridge.publish(snapshot, Some(GatewayStatus::AuthenticationRequired)));
+        let (snapshot, status) = bridge.consume();
+        assert_eq!(snapshot.guilds.total, 10_000);
+        assert_eq!(status, Some(GatewayStatus::AuthenticationRequired));
     }
 }
 
@@ -397,6 +632,7 @@ mod tests {
     fn required_state_over_the_cap_is_a_visible_terminal_failure() {
         let mut tracker = Tracker {
             store: Store::with_budget(1),
+            ..Tracker::default()
         };
         let status = tracker.apply(ready_event(3, 0, 1)).unwrap();
         assert_eq!(status, GatewayStatus::Stopped(StopReason::StateTooLarge));
