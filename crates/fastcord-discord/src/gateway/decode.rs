@@ -20,8 +20,8 @@ use serde::{Deserialize, Deserializer};
 use super::event::{
     ChannelUnread, Dispatch, GroupId, GuildCreate, GuildDelete, GuildMemberEvent,
     GuildMemberRemove, GuildRoleDelete, GuildRoleEvent, GuildUpdate, ListGroup, ListRow,
-    MemberListId, MemberListOp, MemberListUpdate, MessageDelete, PassiveUpdate, Ready,
-    ReadySupplemental, SessionId, SupplementalGuild, VoiceStateUpdate,
+    MemberListId, MemberListOp, MemberListUpdate, MessageDelete, MessageDeleteBulk, PassiveUpdate,
+    Ready, ReadySupplemental, SessionId, SupplementalGuild, VoiceStateUpdate,
 };
 
 /// A known payload that did not decode into its typed form.
@@ -674,6 +674,7 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
             json::<MessageUpdate>(raw).map(|m| Dispatch::MessageUpdate(Box::new(m)))
         }
         "MESSAGE_DELETE" => json::<MessageDelete>(raw).map(Dispatch::MessageDelete),
+        "MESSAGE_DELETE_BULK" => json::<MessageDeleteBulk>(raw).map(Dispatch::MessageDeleteBulk),
         "GUILD_CREATE" => decode_guild_create(raw).map(|g| Dispatch::GuildCreate(Box::new(g))),
         "GUILD_UPDATE" => decode_guild_update(raw).map(|g| Dispatch::GuildUpdate(Box::new(g))),
         "GUILD_DELETE" => json::<GuildDeleteWire>(raw).map(|g| {
@@ -1000,6 +1001,26 @@ mod tests {
         ));
         assert!(is_ready_family("READY") && is_ready_family("READY_SUPPLEMENTAL"));
         assert!(!is_ready_family("MESSAGE_CREATE"));
+    }
+
+    #[test]
+    fn bulk_message_deletes_decode_ids_in_wire_order_and_redact_payloads() {
+        let raw = include_str!("../../../../fixtures/gateway/message_delete_bulk.json");
+        let Decoded::Event(event) = decode_dispatch("MESSAGE_DELETE_BULK", raw) else {
+            panic!("MESSAGE_DELETE_BULK did not decode");
+        };
+        assert_eq!(event.name(), "MESSAGE_DELETE_BULK");
+        assert_eq!(format!("{event:?}"), "Dispatch::MESSAGE_DELETE_BULK");
+        let Dispatch::MessageDeleteBulk(deleted) = event else {
+            unreachable!();
+        };
+        assert_eq!(deleted.channel_id, id(500));
+        assert_eq!(deleted.guild_id, Some(id(100)));
+        assert_eq!(deleted.ids, [id(10), id(12), id(11), id(10)]);
+        assert!(matches!(
+            decode_dispatch("MESSAGE_DELETE_BULK", r#"{"channel_id":"500","ids":null}"#),
+            Decoded::Malformed
+        ));
     }
 
     #[test]

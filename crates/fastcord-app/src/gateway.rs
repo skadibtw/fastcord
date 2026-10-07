@@ -18,6 +18,9 @@ use fastcord_discord::state::navigation::{Navigation, NavigationSnapshot};
 use fastcord_model::Snowflake;
 use tokio::sync::watch;
 
+use crate::history::{History, Intent};
+use crate::timeline;
+use crate::variable_list::{Measurement, Viewport};
 use crate::virtual_list::Window;
 use fastcord_discord::{RestClient, UserToken};
 use iced::futures::{Stream, stream};
@@ -114,6 +117,7 @@ fn describe_delay(delay: Duration) -> String {
 #[derive(Default)]
 struct Tracker {
     store: Store,
+    history: History,
     navigation: Navigation,
     navigation_dirty: bool,
 }
@@ -150,12 +154,16 @@ impl Tracker {
                 ConnectionState::Stopped(reason) => GatewayStatus::Stopped(reason),
             }),
             dispatch @ GatewayEvent::Dispatch { .. } => {
+                if let GatewayEvent::Dispatch { event, .. } = &dispatch {
+                    self.history.apply(event);
+                }
                 let relevant = !matches!(
                     &dispatch,
                     GatewayEvent::Dispatch {
                         event: Dispatch::MessageCreate(_)
                             | Dispatch::MessageUpdate(_)
-                            | Dispatch::MessageDelete(_),
+                            | Dispatch::MessageDelete(_)
+                            | Dispatch::MessageDeleteBulk(_),
                         ..
                     }
                 );
@@ -179,19 +187,28 @@ enum SelectionIntent {
     Channel(Snowflake, Snowflake),
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Request {
     revision: u64,
     selection: Option<SelectionIntent>,
     guilds: Window,
     channels: Window,
+    timeline: crate::history::Request,
 }
 
 #[derive(Default)]
 struct Latest {
     snapshot: Arc<NavigationSnapshot>,
+    timeline: Arc<timeline::Snapshot>,
     status: Option<GatewayStatus>,
     notified: bool,
+}
+
+/// What one consumed notification carries to the UI.
+pub struct Consumed {
+    pub navigation: Arc<NavigationSnapshot>,
+    pub timeline: Arc<timeline::Snapshot>,
+    pub status: Option<GatewayStatus>,
 }
 
 /// One coalesced request and one bounded presentation window per account.
@@ -212,17 +229,26 @@ impl NavigationBridge {
         }
     }
 
-    fn publish(&self, snapshot: NavigationSnapshot, status: Option<GatewayStatus>) -> bool {
+    fn publish(
+        &self,
+        snapshot: NavigationSnapshot,
+        timeline: timeline::Snapshot,
+        status: Option<GatewayStatus>,
+    ) -> bool {
         let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
         let status_changed = status
             .as_ref()
             .is_some_and(|status| latest.status.as_ref() != Some(status));
         let snapshot_changed = *latest.snapshot != snapshot;
-        if !status_changed && !snapshot_changed {
+        let timeline_changed = *latest.timeline != timeline;
+        if !status_changed && !snapshot_changed && !timeline_changed {
             return false;
         }
         if snapshot_changed {
             latest.snapshot = Arc::new(snapshot);
+        }
+        if timeline_changed {
+            latest.timeline = Arc::new(timeline);
         }
         if let Some(status) = status {
             latest.status = Some(status);
@@ -235,10 +261,28 @@ impl NavigationBridge {
         }
     }
 
-    pub fn consume(&self) -> (Arc<NavigationSnapshot>, Option<GatewayStatus>) {
+    pub fn consume(&self) -> Consumed {
         let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
         latest.notified = false;
-        (Arc::clone(&latest.snapshot), latest.status.clone())
+        Consumed {
+            navigation: Arc::clone(&latest.snapshot),
+            timeline: Arc::clone(&latest.timeline),
+            status: latest.status.clone(),
+        }
+    }
+
+    /// Atomically takes the request, leaving the one-shot parts (the newest
+    /// viewport and measured heights) consumed so they cannot be replayed
+    /// over a later scroll correction.
+    fn take_request(&self) -> Request {
+        let mut taken = Request::default();
+        self.requests.send_if_modified(|request| {
+            taken = request.clone();
+            request.timeline.viewport = None;
+            request.timeline.measurements.clear();
+            false
+        });
+        taken
     }
 
     pub fn select_guild(&self, id: Snowflake) {
@@ -270,10 +314,30 @@ impl NavigationBridge {
             true
         });
     }
+
+    pub fn timeline_viewport(&self, channel: Snowflake, viewport: Viewport) {
+        self.requests.send_modify(|request| {
+            request.timeline.viewport = Some((channel, viewport));
+        });
+    }
+
+    pub fn timeline_measured(&self, channel: Snowflake, measurement: Measurement) {
+        self.requests.send_modify(|request| {
+            request.timeline.measure(channel, measurement);
+        });
+    }
+
+    pub fn timeline_intent(&self, intent: Intent) {
+        self.requests.send_modify(|request| {
+            request.timeline.revision = request.timeline.revision.wrapping_add(1);
+            request.timeline.intent = Some(intent);
+        });
+    }
 }
 
 struct Worker {
     start: Option<(RestClient, Arc<UserToken>, String)>,
+    rest: RestClient,
     gateway: Option<Gateway>,
     tracker: Tracker,
     bridge: NavigationBridge,
@@ -312,16 +376,20 @@ impl Worker {
             .subscription_target(&self.tracker.store);
         self.tracker.store.focus(&target);
         gateway.subscriptions().update(|current| *current = target);
-        self.bridge.publish(
-            self.tracker.navigation.snapshot(
-                &self.tracker.store,
-                request.guilds.start,
-                request.guilds.count,
-                request.channels.start,
-                request.channels.count,
-            ),
-            status,
-        )
+        let navigation = self.tracker.navigation.snapshot(
+            &self.tracker.store,
+            request.guilds.start,
+            request.guilds.count,
+            request.channels.start,
+            request.channels.count,
+        );
+        // History follows the validated selection: permission loss closes it,
+        // and nothing is fetched until a readable channel is selected.
+        self.tracker
+            .history
+            .refresh(&self.rest, &navigation, &request.timeline);
+        let timeline = self.tracker.history.snapshot();
+        self.bridge.publish(navigation, timeline, status)
     }
 }
 
@@ -334,8 +402,10 @@ pub fn status_stream(
     bridge: NavigationBridge,
 ) -> impl Stream<Item = ()> {
     let requests = bridge.requests.subscribe();
+    let rest_client = rest.clone();
     let worker = Worker {
         start: Some((rest, token, locale)),
+        rest: rest_client,
         gateway: None,
         tracker: Tracker::default(),
         bridge,
@@ -357,12 +427,20 @@ pub fn status_stream(
                     changed.ok()?;
                     (None, true)
                 }
+                page = worker.tracker.history.next_page() => {
+                    let rejected = worker.tracker.history.finish(page);
+                    (rejected.then_some(GatewayStatus::AuthenticationRequired), false)
+                }
             };
-            if !requested && !worker.tracker.navigation_dirty && status.is_none() {
+            if !requested
+                && !worker.tracker.navigation_dirty
+                && !worker.tracker.history.dirty()
+                && status.is_none()
+            {
                 continue;
             }
             worker.tracker.navigation_dirty = false;
-            let request = *worker.requests.borrow_and_update();
+            let request = worker.bridge.take_request();
             let terminal = matches!(
                 status,
                 Some(GatewayStatus::Stopped(_)) | Some(GatewayStatus::AuthenticationRequired)
@@ -385,6 +463,7 @@ pub struct GatewayPanel {
     pub id: u64,
     pub status: GatewayStatus,
     pub navigation: Arc<NavigationSnapshot>,
+    pub timeline: Arc<timeline::Snapshot>,
     pub controls: NavigationBridge,
     _worker: Handle,
 }
@@ -404,6 +483,7 @@ impl GatewayPanel {
             id,
             status: GatewayStatus::Connecting { attempt: 0 },
             navigation: Arc::default(),
+            timeline: Arc::default(),
             controls,
             _worker: worker.abort_on_drop(),
         }
@@ -428,7 +508,7 @@ mod bridge_tests {
                 },
             );
         }
-        let request = *requests.borrow();
+        let request = requests.borrow().clone();
         assert_eq!(request.revision, 10_000);
         assert!(matches!(
             request.selection,
@@ -443,18 +523,78 @@ mod bridge_tests {
         let bridge = NavigationBridge::new();
         let mut snapshot = NavigationSnapshot::default();
         snapshot.guilds.total = 1;
-        assert!(bridge.publish(snapshot.clone(), None));
+        let timeline = timeline::Snapshot::default;
+        assert!(bridge.publish(snapshot.clone(), timeline(), None));
         for total in 2..10_000 {
             snapshot.guilds.total = total;
-            assert!(!bridge.publish(snapshot.clone(), None));
+            assert!(!bridge.publish(snapshot.clone(), timeline(), None));
         }
-        assert_eq!(bridge.consume().0.guilds.total, 9_999);
-        assert!(!bridge.publish(snapshot.clone(), None));
+        assert_eq!(bridge.consume().navigation.guilds.total, 9_999);
+        assert!(!bridge.publish(snapshot.clone(), timeline(), None));
         snapshot.guilds.total = 10_000;
-        assert!(bridge.publish(snapshot, Some(GatewayStatus::AuthenticationRequired)));
-        let (snapshot, status) = bridge.consume();
-        assert_eq!(snapshot.guilds.total, 10_000);
-        assert_eq!(status, Some(GatewayStatus::AuthenticationRequired));
+        assert!(bridge.publish(
+            snapshot,
+            timeline(),
+            Some(GatewayStatus::AuthenticationRequired)
+        ));
+        let consumed = bridge.consume();
+        assert_eq!(consumed.navigation.guilds.total, 10_000);
+        assert_eq!(consumed.status, Some(GatewayStatus::AuthenticationRequired));
+    }
+
+    #[test]
+    fn timeline_snapshots_replace_in_the_latest_slot_with_one_notification() {
+        let bridge = NavigationBridge::new();
+        let navigation = NavigationSnapshot::default();
+        let mut snapshot = timeline::Snapshot {
+            loading: true,
+            ..timeline::Snapshot::default()
+        };
+        assert!(bridge.publish(navigation.clone(), snapshot.clone(), None));
+        snapshot.loading = false;
+        snapshot.has_older = true;
+        assert!(!bridge.publish(navigation.clone(), snapshot, None));
+        let consumed = bridge.consume();
+        assert!(!consumed.timeline.loading);
+        assert!(consumed.timeline.has_older);
+        // Nothing changed: no notification, even though the slot was read.
+        assert!(!bridge.publish(navigation, consumed.timeline.as_ref().clone(), None));
+    }
+
+    #[test]
+    fn one_shot_timeline_inputs_are_taken_once_and_measurements_coalesce() {
+        use crate::variable_list::Measurement;
+        let bridge = NavigationBridge::new();
+        let channel = Snowflake(5);
+        for height in 0..1_000 {
+            bridge.timeline_measured(
+                channel,
+                Measurement {
+                    id: Snowflake(9),
+                    revision: 1,
+                    width_bucket: 3,
+                    height: height as f32,
+                },
+            );
+        }
+        for id in 0..1_000u64 {
+            bridge.timeline_measured(
+                channel,
+                Measurement {
+                    id: Snowflake(id),
+                    revision: 1,
+                    width_bucket: 3,
+                    height: 50.0,
+                },
+            );
+        }
+        bridge.timeline_viewport(channel, Viewport::default());
+        let request = bridge.take_request();
+        assert!(request.timeline.measurements.len() <= 128);
+        assert!(request.timeline.viewport.is_some());
+        let again = bridge.take_request();
+        assert!(again.timeline.measurements.is_empty());
+        assert!(again.timeline.viewport.is_none());
     }
 }
 

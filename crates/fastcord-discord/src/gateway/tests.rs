@@ -546,7 +546,14 @@ async fn resume_replay_is_deduplicated_and_applied_in_order() {
     second
         .dispatch("MESSAGE_DELETE", 5, r#"{"id":"20","channel_id":"500"}"#)
         .await;
-    second.dispatch("RESUMED", 6, "{}").await;
+    second
+        .dispatch(
+            "MESSAGE_DELETE_BULK",
+            6,
+            r#"{"ids":["21","22"],"channel_id":"500"}"#,
+        )
+        .await;
+    second.dispatch("RESUMED", 7, "{}").await;
     let mut delivered = Vec::new();
     loop {
         let (sequence, event) = next_dispatch(&mut gateway).await;
@@ -557,7 +564,12 @@ async fn resume_replay_is_deduplicated_and_applied_in_order() {
     }
     assert_eq!(
         delivered,
-        [(4, "MESSAGE_CREATE"), (5, "MESSAGE_DELETE"), (6, "RESUMED")]
+        [
+            (4, "MESSAGE_CREATE"),
+            (5, "MESSAGE_DELETE"),
+            (6, "MESSAGE_DELETE_BULK"),
+            (7, "RESUMED")
+        ]
     );
     expect_state(&mut gateway, ConnectionState::Ready).await;
     // Replay did not produce a second READY, and nothing else is pending.

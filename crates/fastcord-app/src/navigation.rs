@@ -4,9 +4,13 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, alignment};
 
 use crate::Message;
+use crate::timeline;
 use crate::virtual_list::{self, ROW_HEIGHT};
 
-pub fn view(snapshot: &NavigationSnapshot) -> Element<'_, Message> {
+pub fn view<'a>(
+    snapshot: &'a NavigationSnapshot,
+    history: &'a timeline::Snapshot,
+) -> Element<'a, Message> {
     let guilds = snapshot.guilds.rows.iter().map(|guild| {
         let label = format!(
             "{}{}{}",
@@ -54,17 +58,27 @@ pub fn view(snapshot: &NavigationSnapshot) -> Element<'_, Message> {
         let permissions = selection.permissions;
         match selection.kind {
             ChannelKind::Text | ChannelKind::Announcement => {
-                detail = detail
-                    .push(text(if permissions.read_history {
-                        "You can view this channel and read its history."
+                detail = detail.push(
+                    text(
+                        match (permissions.read_history, permissions.send_messages) {
+                            (false, _) => "You can view this channel, but cannot read its history.",
+                            (true, true) => {
+                                "Message history. You have permission to send messages."
+                            }
+                            (true, false) => {
+                                "Message history. This channel is read-only for your account."
+                            }
+                        },
+                    )
+                    .size(13),
+                );
+                if permissions.read_history {
+                    detail = detail.push(if history.channel_id == Some(selection.channel_id) {
+                        timeline::view(history).map(Message::Timeline)
                     } else {
-                        "You can view this channel, but cannot read its history."
-                    }))
-                    .push(text(if permissions.send_messages {
-                        "You have permission to send messages."
-                    } else {
-                        "This channel is read-only for your account."
-                    }));
+                        text("Loading messages…").size(14).into()
+                    });
+                }
             }
             ChannelKind::Voice => {
                 detail = detail
@@ -105,11 +119,13 @@ pub fn view(snapshot: &NavigationSnapshot) -> Element<'_, Message> {
             )
         ]
         .width(250),
-        container(detail.spacing(12))
+        container(detail.spacing(8).height(Length::Fill))
             .padding(12)
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .height(Length::Fill),
     ]
     .spacing(12)
+    .height(Length::Fill)
     .into()
 }
 

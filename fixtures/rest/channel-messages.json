@@ -1,0 +1,133 @@
+[
+  {
+    "id": "1290000000000000012",
+    "type": 0,
+    "content": "latest message with unicode \u00e9 and <:wave:777>",
+    "channel_id": "500",
+    "author": {
+      "id": "2",
+      "username": "alt_fixture",
+      "avatar": null,
+      "discriminator": "0",
+      "public_flags": 0,
+      "flags": 0,
+      "banner": null,
+      "accent_color": null,
+      "global_name": "Fixture Author",
+      "avatar_decoration_data": null,
+      "banner_color": null,
+      "clan": null,
+      "primary_guild": null
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-07T12:02:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+  },
+  {
+    "id": "1290000000000000011",
+    "type": 0,
+    "content": "an edited message",
+    "channel_id": "500",
+    "author": {
+      "id": "3",
+      "username": "other_fixture",
+      "avatar": "fixtureavatarhash",
+      "discriminator": "0",
+      "public_flags": 0,
+      "global_name": null,
+      "bot": true
+    },
+    "attachments": [],
+    "embeds": [{"type": "link", "url": "https://example.com/page", "title": "Example"}],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": true,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-07T12:01:00.000000+00:00",
+    "edited_timestamp": "2026-10-07T12:05:00.000000+00:00",
+    "flags": 4,
+    "components": [],
+    "reactions": [
+      {
+        "emoji": {"id": null, "name": "\ud83d\udc4d"},
+        "count": 2,
+        "count_details": {"burst": 0, "normal": 2},
+        "burst_colors": [],
+        "me_burst": false,
+        "burst_me": false,
+        "me": true,
+        "burst_count": 0
+      },
+      {
+        "emoji": {"id": "777", "name": "wave", "animated": true},
+        "count": 1,
+        "count_details": {"burst": 0, "normal": 1},
+        "burst_colors": [],
+        "me_burst": false,
+        "burst_me": false,
+        "me": false,
+        "burst_count": 0
+      }
+    ]
+  },
+  {
+    "id": "1290000000000000010",
+    "type": 19,
+    "content": "a reply with an attachment",
+    "channel_id": "500",
+    "author": {
+      "id": "2",
+      "username": "alt_fixture",
+      "avatar": null,
+      "discriminator": "0",
+      "public_flags": 0,
+      "global_name": "Fixture Author"
+    },
+    "attachments": [
+      {
+        "id": "880",
+        "filename": "cat.png",
+        "size": 12345,
+        "url": "https://cdn.example/a/cat.png?ex=SIGNED",
+        "proxy_url": "https://media.example/a/cat.png",
+        "width": 640,
+        "height": 480,
+        "content_type": "image/png",
+        "placeholder": "fixture",
+        "placeholder_version": 1
+      }
+    ],
+    "embeds": [],
+    "mentions": [{"id": "3", "username": "other_fixture", "avatar": null, "discriminator": "0", "global_name": null}],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-07T12:00:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": [],
+    "message_reference": {"type": 0, "channel_id": "500", "message_id": "1289999999999999999"},
+    "referenced_message": {
+      "id": "1289999999999999999",
+      "type": 0,
+      "content": "the message being replied to",
+      "channel_id": "500",
+      "author": {"id": "3", "username": "other_fixture", "avatar": null, "discriminator": "0"},
+      "attachments": [],
+      "embeds": [],
+      "timestamp": "2026-10-07T11:59:00.000000+00:00",
+      "edited_timestamp": null,
+      "flags": 0
+    }
+  }
+]

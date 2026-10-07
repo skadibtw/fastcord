@@ -18,7 +18,7 @@ base64 = "0.22"
 bytes = "1"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
-iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "tokio", "x11", "wayland", "qr_code"] }
+iced = { version = "0.14", default-features = false, features = ["advanced", "wgpu", "tiny-skia", "tokio", "x11", "wayland", "qr_code"] }
 iced_renderer = { version = "0.14", default-features = false }
 keyring-core = "1.0.0"
 parking_lot = "0.12"

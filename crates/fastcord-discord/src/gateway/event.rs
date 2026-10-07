@@ -168,6 +168,15 @@ pub struct MessageDelete {
     pub guild_id: Option<Snowflake>,
 }
 
+/// MESSAGE_DELETE_BULK. The ordered event removes all supplied IDs atomically
+/// from the consumer's current history, without retaining cold tombstones.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct MessageDeleteBulk {
+    pub ids: Vec<Snowflake>,
+    pub channel_id: Snowflake,
+    pub guild_id: Option<Snowflake>,
+}
+
 /// GUILD_CREATE: a joined or newly available guild, or one that is now known
 /// only by ID because of an outage.
 #[derive(Clone, PartialEq, Eq)]
@@ -351,6 +360,7 @@ pub enum Dispatch {
     MessageCreate(Box<Message>),
     MessageUpdate(Box<MessageUpdate>),
     MessageDelete(MessageDelete),
+    MessageDeleteBulk(MessageDeleteBulk),
     GuildCreate(Box<GuildCreate>),
     GuildUpdate(Box<GuildUpdate>),
     GuildDelete(GuildDelete),
@@ -377,6 +387,7 @@ impl Dispatch {
             Self::MessageCreate(_) => "MESSAGE_CREATE",
             Self::MessageUpdate(_) => "MESSAGE_UPDATE",
             Self::MessageDelete(_) => "MESSAGE_DELETE",
+            Self::MessageDeleteBulk(_) => "MESSAGE_DELETE_BULK",
             Self::GuildCreate(_) => "GUILD_CREATE",
             Self::GuildUpdate(_) => "GUILD_UPDATE",
             Self::GuildDelete(_) => "GUILD_DELETE",

@@ -1,11 +1,15 @@
 //! Authenticated Discord control-plane I/O. One [`RestClient`] belongs to one account.
 //! All clones share its rate limits and permanent authentication-stop signal.
 //! The main user [`Gateway`] connection lifecycle lives in [`gateway`]; the
-//! bounded reducer state it feeds lives in [`state`].
+//! bounded reducer state it feeds lives in [`state`]. Channel history is read
+//! through [`history`], and the bounded cache of message bodies the timeline
+//! reads from is [`message_store`].
 
 mod clock;
 mod error;
 pub mod gateway;
+pub mod history;
+pub mod message_store;
 mod rate_limit;
 mod remote_auth;
 mod rest;

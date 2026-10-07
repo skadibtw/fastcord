@@ -131,6 +131,88 @@ fn explicit_null_clears_edited_timestamp() {
 }
 
 #[test]
+fn alters_agrees_with_what_apply_would_change() {
+    let msg: Message = serde_json::from_str(&fixture("message_create.json")).unwrap();
+    let id = "1290000000000000001";
+    let cases = [
+        // An embed-only update carries nothing the client models.
+        (fixture("message_update_partial.json"), false),
+        (fixture("message_update_edit.json"), true),
+        // Repeating the current values changes nothing.
+        (
+            format!(
+                r#"{{"id":"{id}","channel_id":"500","content":"hello <:wave:777>","edited_timestamp":null,"flags":0,"pinned":false}}"#
+            ),
+            false,
+        ),
+        (
+            format!(
+                r#"{{"id":"{id}","channel_id":"500","edited_timestamp":"2026-10-07T12:05:00+00:00"}}"#
+            ),
+            true,
+        ),
+        (
+            format!(r#"{{"id":"{id}","channel_id":"500","content":""}}"#),
+            true,
+        ),
+        (
+            format!(r#"{{"id":"{id}","channel_id":"500","attachments":[]}}"#),
+            true,
+        ),
+        (
+            format!(r#"{{"id":"{id}","channel_id":"500","pinned":true}}"#),
+            true,
+        ),
+        (
+            format!(r#"{{"id":"{id}","channel_id":"500","flags":64}}"#),
+            true,
+        ),
+    ];
+    for (raw, expected) in cases {
+        let update: MessageUpdate = serde_json::from_str(&raw).unwrap();
+        let mut applied = msg.clone();
+        applied.apply(update.clone());
+        assert_eq!(update.alters(&msg), expected, "{raw}");
+        assert_eq!(
+            update.alters(&msg),
+            applied != msg,
+            "alters must agree with apply: {raw}"
+        );
+    }
+}
+
+#[test]
+fn has_fields_ignores_unmodeled_payload_but_counts_an_explicit_null() {
+    let embed_only: MessageUpdate =
+        serde_json::from_str(&fixture("message_update_partial.json")).unwrap();
+    assert!(!embed_only.has_fields());
+    let ids_only: MessageUpdate = serde_json::from_str(r#"{"id":"1","channel_id":"2"}"#).unwrap();
+    assert!(!ids_only.has_fields());
+    for field in [
+        r#""content":"x""#,
+        r#""edited_timestamp":null"#,
+        r#""flags":0"#,
+        r#""pinned":false"#,
+        r#""attachments":[]"#,
+    ] {
+        let raw = format!(r#"{{"id":"1","channel_id":"2",{field}}}"#);
+        let update: MessageUpdate = serde_json::from_str(&raw).unwrap();
+        assert!(update.has_fields(), "{field}");
+    }
+}
+
+#[test]
+fn debug_output_names_ids_but_never_content_or_signed_urls() {
+    let msg: Message = serde_json::from_str(&fixture("message_create.json")).unwrap();
+    let update: MessageUpdate = serde_json::from_str(&fixture("message_update_edit.json")).unwrap();
+    let shown = format!("{msg:?} {update:?} {:?}", msg.attachments);
+    assert!(shown.contains("1290000000000000001"));
+    for secret in ["hello", "edited", "SIGNED", "cat.png", "Alt Account"] {
+        assert!(!shown.contains(secret), "{secret}");
+    }
+}
+
+#[test]
 fn unknown_channel_type_is_preserved() {
     let ch: Channel = serde_json::from_str(r#"{"id":"1","type":99}"#).unwrap();
     assert_eq!(ch.kind.to_u8(), 99);

@@ -42,8 +42,9 @@ pub use capabilities::{Capability, SELECTED as SELECTED_CAPABILITIES, selected_v
 pub use event::{
     ChannelUnread, ConnectionState, Dispatch, GatewayEvent, GroupId, GuildCreate, GuildDelete,
     GuildMemberEvent, GuildMemberRemove, GuildRoleDelete, GuildRoleEvent, GuildUpdate, ListGroup,
-    ListRow, MemberListId, MemberListOp, MemberListUpdate, MessageDelete, PassiveUpdate, Ready,
-    ReadySupplemental, ReconnectReason, SessionId, StopReason, SupplementalGuild, VoiceStateUpdate,
+    ListRow, MemberListId, MemberListOp, MemberListUpdate, MessageDelete, MessageDeleteBulk,
+    PassiveUpdate, Ready, ReadySupplemental, ReconnectReason, SessionId, StopReason,
+    SupplementalGuild, VoiceStateUpdate,
 };
 pub use profile::{
     BUNDLED_BUILD_NUMBER, BuildNumber, BuildSource, ClientProperties, HostOs, PROFILE_VERSION,

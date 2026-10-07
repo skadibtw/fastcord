@@ -1,10 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod gateway;
+mod history;
 mod login;
 mod navigation;
 mod qr;
 mod render;
+mod timeline;
+mod variable_list;
 mod virtual_list;
 
 use std::sync::Arc;
@@ -95,6 +98,7 @@ enum Message {
     SelectChannel(Snowflake, Snowflake),
     GuildViewport(virtual_list::Window),
     ChannelViewport(virtual_list::Window),
+    Timeline(timeline::Event),
 }
 
 impl App {
@@ -246,9 +250,10 @@ impl App {
                 if let Phase::Account { gateway, .. } = &mut self.phase
                     && gateway.id == id
                 {
-                    let (snapshot, status) = gateway.controls.consume();
-                    gateway.navigation = snapshot;
-                    if let Some(status) = status {
+                    let consumed = gateway.controls.consume();
+                    gateway.navigation = consumed.navigation;
+                    gateway.timeline = consumed.timeline;
+                    if let Some(status) = consumed.status {
                         return self.update(Message::Gateway(id, status));
                     }
                 }
@@ -272,6 +277,30 @@ impl App {
                     gateway
                         .controls
                         .viewport(matches!(message, Message::GuildViewport(_)), window);
+                }
+            }
+            Message::Timeline(event) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    let controls = &gateway.controls;
+                    match event {
+                        timeline::Event::Viewport {
+                            channel_id,
+                            viewport,
+                        } => controls.timeline_viewport(channel_id, viewport),
+                        timeline::Event::Measured {
+                            channel_id,
+                            measurement,
+                        } => controls.timeline_measured(channel_id, measurement),
+                        timeline::Event::JumpLatest { channel_id } => {
+                            controls.timeline_intent(history::Intent::Latest(channel_id));
+                        }
+                        timeline::Event::LoadOlder { channel_id } => {
+                            controls.timeline_intent(history::Intent::Older(channel_id));
+                        }
+                        timeline::Event::Retry { channel_id } => {
+                            controls.timeline_intent(history::Intent::Retry(channel_id));
+                        }
+                    }
                 }
             }
             Message::Logout => {
@@ -418,11 +447,13 @@ impl App {
                     ]
                     .spacing(16),
                     text(gateway.status.describe()),
-                    navigation::view(&gateway.navigation),
+                    navigation::view(&gateway.navigation, &gateway.timeline),
                 ]
-                .spacing(16),
+                .spacing(16)
+                .height(Length::Fill),
             )
             .padding(20)
+            .height(Length::Fill)
             .into();
         }
         let content: Element<'_, Message> = match &self.phase {
