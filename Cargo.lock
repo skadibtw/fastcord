@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-app"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "fastcord-model",
  "iced",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-model"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "fastrand"
