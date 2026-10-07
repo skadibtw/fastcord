@@ -63,6 +63,15 @@ challenge on the account, fastcord stops and says so; it never completes or
 bypasses one. Logging out closes the Gateway session, so the account goes
 offline.
 
+Account state is held in one bounded store (12 MiB capacity-accounted budget
+for guild, channel, role, user, member, and voice data). Its subscription API
+follows only the selected server and active voice server, with bounded visible
+member-list ranges; guild/channel navigation UI arrives in the next milestone.
+Passive updates keep other servers' channel and voice markers current. Optional
+unreferenced detail is evicted first, releasing its backing allocations. If
+required identity/permissions or pinned state alone cannot fit, the connection
+stops with a visible safety error instead of silently truncating the account.
+
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).

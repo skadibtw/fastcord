@@ -23,6 +23,7 @@ mod event;
 mod outbox;
 mod pacing;
 mod profile;
+mod subscription;
 mod transport;
 mod url;
 mod wire;
@@ -39,12 +40,17 @@ use tokio::sync::oneshot;
 
 pub use capabilities::{Capability, SELECTED as SELECTED_CAPABILITIES, selected_value};
 pub use event::{
-    ChannelUnread, ConnectionState, Dispatch, GatewayEvent, GuildCreate, GuildDelete,
-    MessageDelete, PassiveUpdate, Ready, ReadySupplemental, ReconnectReason, SessionId, StopReason,
-    SupplementalGuild,
+    ChannelUnread, ConnectionState, Dispatch, GatewayEvent, GroupId, GuildCreate, GuildDelete,
+    GuildMemberEvent, GuildMemberRemove, ListGroup, ListRow, MemberListId, MemberListOp,
+    MemberListUpdate, MessageDelete, PassiveUpdate, Ready, ReadySupplemental, ReconnectReason,
+    SessionId, StopReason, SupplementalGuild, VoiceStateUpdate,
 };
 pub use profile::{
     BUNDLED_BUILD_NUMBER, BuildNumber, BuildSource, ClientProperties, HostOs, PROFILE_VERSION,
+};
+pub use subscription::{
+    GuildSubscription, MAX_MEMBERS_PER_GUILD, MAX_RANGES, MemberRange, RANGE_BLOCK,
+    SubscriptionTarget, Subscriptions,
 };
 
 use crate::{RestClient, UserToken};
@@ -55,6 +61,7 @@ use transport::{LiveTransport, Transport};
 /// A running Gateway connection. Dropping it shuts the connection down.
 pub struct Gateway {
     events: EventReceiver,
+    subscriptions: Subscriptions,
     /// Dropping the sender is the shutdown signal.
     _shutdown: oneshot::Sender<()>,
 }
@@ -84,6 +91,22 @@ impl Gateway {
     pub async fn next_event(&mut self) -> Option<GatewayEvent> {
         self.events.recv().await
     }
+
+    /// The handle through which the consumer states which guilds, member-list
+    /// ranges, and members it needs (opcode 37). Clones share one target.
+    pub fn subscriptions(&self) -> Subscriptions {
+        self.subscriptions.clone()
+    }
+}
+
+/// Decodes a recorded payload the way the connection would, for reducer tests.
+#[cfg(test)]
+pub(crate) fn decode_fixture(name: &str, raw: &str) -> Dispatch {
+    match decode::decode_dispatch(name, raw) {
+        decode::Decoded::Event(event) => event,
+        decode::Decoded::Ready(ready) => Dispatch::Ready(Box::new(ready.ready)),
+        _ => panic!("{name} fixture did not decode"),
+    }
 }
 
 fn start_with<T: Transport, J: JitterSource>(
@@ -93,6 +116,7 @@ fn start_with<T: Transport, J: JitterSource>(
     jitter: J,
 ) -> Gateway {
     let (outbox, events) = outbox::channel();
+    let (subscriptions, wanted) = Subscriptions::new();
     let (shutdown, shutdown_signal) = oneshot::channel();
     tokio::spawn(connection::run(
         transport,
@@ -100,10 +124,12 @@ fn start_with<T: Transport, J: JitterSource>(
         locale,
         jitter,
         outbox,
+        wanted,
         shutdown_signal,
     ));
     Gateway {
         events,
+        subscriptions,
         _shutdown: shutdown,
     }
 }

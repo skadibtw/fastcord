@@ -18,8 +18,10 @@ use fastcord_model::{
 use serde::{Deserialize, Deserializer};
 
 use super::event::{
-    ChannelUnread, Dispatch, GuildCreate, GuildDelete, MessageDelete, PassiveUpdate, Ready,
-    ReadySupplemental, SessionId, SupplementalGuild,
+    ChannelUnread, Dispatch, GroupId, GuildCreate, GuildDelete, GuildMemberEvent,
+    GuildMemberRemove, ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate,
+    MessageDelete, PassiveUpdate, Ready, ReadySupplemental, SessionId, SupplementalGuild,
+    VoiceStateUpdate,
 };
 
 /// A known payload that did not decode into its typed form.
@@ -165,6 +167,124 @@ struct PassiveUpdateWire {
     removed_voice_states: Vec<Snowflake>,
     #[serde(default, deserialize_with = "null_default")]
     updated_members: Vec<MemberWire>,
+}
+
+/// GUILD_MEMBER_ADD / GUILD_MEMBER_UPDATE: the member fields sit beside `guild_id`.
+#[derive(Deserialize)]
+struct GuildIdWire {
+    guild_id: Snowflake,
+    #[serde(default)]
+    user: UserPresence,
+    #[serde(default, deserialize_with = "field_present")]
+    nick: bool,
+    #[serde(default, deserialize_with = "field_present")]
+    roles: bool,
+    #[serde(default, deserialize_with = "field_present")]
+    communication_disabled_until: bool,
+}
+
+fn field_present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(true)
+}
+
+#[derive(Default, Deserialize)]
+struct UserPresence {
+    #[serde(default, deserialize_with = "field_present")]
+    username: bool,
+    #[serde(default, deserialize_with = "field_present")]
+    global_name: bool,
+    #[serde(default, deserialize_with = "field_present")]
+    avatar: bool,
+    #[serde(default, deserialize_with = "field_present")]
+    bot: bool,
+}
+
+#[derive(Deserialize)]
+struct GuildMemberRemoveWire {
+    guild_id: Snowflake,
+    user: WireUser,
+}
+
+#[derive(Deserialize)]
+struct VoiceMemberWire {
+    #[serde(default)]
+    member: Option<MemberWire>,
+}
+
+#[derive(Deserialize)]
+struct ListGroupWire {
+    id: String,
+    #[serde(default)]
+    count: u32,
+}
+
+impl From<ListGroupWire> for ListGroup {
+    fn from(wire: ListGroupWire) -> Self {
+        let id = match wire.id.as_str() {
+            "online" => GroupId::Online,
+            "offline" => GroupId::Offline,
+            other => other
+                .parse::<Snowflake>()
+                .map_or(GroupId::Other, GroupId::Role),
+        };
+        Self {
+            id,
+            count: wire.count,
+        }
+    }
+}
+
+/// A row is `{"group": {...}}` or `{"member": {...}}`.
+#[derive(Default, Deserialize)]
+struct ListItemWire {
+    #[serde(default)]
+    group: Option<ListGroupWire>,
+    #[serde(default)]
+    member: Option<MemberWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "op")]
+enum ListOpWire {
+    #[serde(rename = "SYNC")]
+    Sync {
+        range: (u32, u32),
+        #[serde(default, deserialize_with = "null_default")]
+        items: Vec<ListItemWire>,
+    },
+    #[serde(rename = "INSERT")]
+    Insert {
+        index: u32,
+        #[serde(default)]
+        item: ListItemWire,
+    },
+    #[serde(rename = "UPDATE")]
+    Update {
+        index: u32,
+        #[serde(default)]
+        item: ListItemWire,
+    },
+    #[serde(rename = "DELETE")]
+    Delete { index: u32 },
+    #[serde(rename = "INVALIDATE")]
+    Invalidate { range: (u32, u32) },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+struct MemberListWire {
+    id: String,
+    guild_id: Snowflake,
+    #[serde(default)]
+    member_count: Option<u32>,
+    #[serde(default)]
+    online_count: Option<u32>,
+    #[serde(default)]
+    groups: Option<Vec<ListGroupWire>>,
+    #[serde(default, deserialize_with = "null_default")]
+    ops: Vec<ListOpWire>,
 }
 
 /// Each user once, in first-seen order; a later sighting replaces the earlier.
@@ -382,6 +502,104 @@ fn decode_passive_update(raw: &str) -> Result<PassiveUpdate, Malformed> {
     })
 }
 
+fn decode_member_event(raw: &str) -> Result<GuildMemberEvent, Malformed> {
+    let guild: GuildIdWire = json(raw)?;
+    let wire: MemberWire = json(raw)?;
+    let mut normalizer = Normalizer::default();
+    let member = normalizer.member(wire).ok_or(Malformed)?;
+    Ok(GuildMemberEvent {
+        guild_id: guild.guild_id,
+        member,
+        nick_present: guild.nick,
+        roles_present: guild.roles,
+        timeout_present: guild.communication_disabled_until,
+        username_present: guild.user.username,
+        global_name_present: guild.user.global_name,
+        avatar_present: guild.user.avatar,
+        bot_present: guild.user.bot,
+        users: normalizer.users.into_users(),
+    })
+}
+
+fn decode_member_remove(raw: &str) -> Result<GuildMemberRemove, Malformed> {
+    let wire: GuildMemberRemoveWire = json(raw)?;
+    Ok(GuildMemberRemove {
+        guild_id: wire.guild_id,
+        user_id: wire.user.id,
+    })
+}
+
+fn decode_voice_state(raw: &str) -> Result<VoiceStateUpdate, Malformed> {
+    let state: VoiceState = json(raw)?;
+    let carried: VoiceMemberWire = json(raw)?;
+    let mut normalizer = Normalizer::default();
+    let member = carried.member.and_then(|member| normalizer.member(member));
+    Ok(VoiceStateUpdate {
+        state,
+        member,
+        users: normalizer.users.into_users(),
+    })
+}
+
+fn decode_member_list(raw: &str) -> Result<MemberListUpdate, Malformed> {
+    let wire: MemberListWire = json(raw)?;
+    let mut normalizer = Normalizer::default();
+    let mut members = Vec::new();
+    let mut row = |item: ListItemWire, normalizer: &mut Normalizer| -> ListRow {
+        if let Some(group) = item.group {
+            return ListRow::Group(group.into());
+        }
+        match item.member.and_then(|member| normalizer.member(member)) {
+            Some(member) => {
+                let id = member.user_id;
+                members.push(member);
+                ListRow::Member(id)
+            }
+            None => ListRow::Unreadable,
+        }
+    };
+    let ops = wire
+        .ops
+        .into_iter()
+        .map(|op| match op {
+            ListOpWire::Sync { range, items } => MemberListOp::Sync {
+                start: range.0,
+                end: range.1,
+                rows: items
+                    .into_iter()
+                    .map(|item| row(item, &mut normalizer))
+                    .collect(),
+            },
+            ListOpWire::Insert { index, item } => MemberListOp::Insert {
+                index,
+                row: row(item, &mut normalizer),
+            },
+            ListOpWire::Update { index, item } => MemberListOp::Update {
+                index,
+                row: row(item, &mut normalizer),
+            },
+            ListOpWire::Delete { index } => MemberListOp::Delete { index },
+            ListOpWire::Invalidate { range } => MemberListOp::Invalidate {
+                start: range.0,
+                end: range.1,
+            },
+            ListOpWire::Unknown => MemberListOp::Unknown,
+        })
+        .collect();
+    Ok(MemberListUpdate {
+        guild_id: wire.guild_id,
+        list_id: MemberListId(wire.id),
+        member_count: wire.member_count,
+        online_count: wire.online_count,
+        groups: wire
+            .groups
+            .map(|groups| groups.into_iter().map(ListGroup::from).collect()),
+        ops,
+        members,
+        users: normalizer.users.into_users(),
+    })
+}
+
 /// The outcome of decoding one dispatch payload.
 pub(crate) enum Decoded {
     Ready(Box<DecodedReady>),
@@ -423,6 +641,19 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "CHANNEL_DELETE" => json::<Channel>(raw).map(|c| Dispatch::ChannelDelete(Box::new(c))),
         "PASSIVE_UPDATE_V2" => {
             decode_passive_update(raw).map(|p| Dispatch::PassiveUpdate(Box::new(p)))
+        }
+        "GUILD_MEMBER_LIST_UPDATE" => {
+            decode_member_list(raw).map(|u| Dispatch::MemberListUpdate(Box::new(u)))
+        }
+        "GUILD_MEMBER_ADD" => {
+            decode_member_event(raw).map(|m| Dispatch::GuildMemberAdd(Box::new(m)))
+        }
+        "GUILD_MEMBER_UPDATE" => {
+            decode_member_event(raw).map(|m| Dispatch::GuildMemberUpdate(Box::new(m)))
+        }
+        "GUILD_MEMBER_REMOVE" => decode_member_remove(raw).map(Dispatch::GuildMemberRemove),
+        "VOICE_STATE_UPDATE" => {
+            decode_voice_state(raw).map(|v| Dispatch::VoiceStateUpdate(Box::new(v)))
         }
         _ => return Decoded::Unhandled,
     };
@@ -743,5 +974,176 @@ mod tests {
         assert!(!users[2].bot);
         assert_eq!(decoded.ready.guilds[0].members[0].user_id, id(4));
         assert!(decoded.ready.guilds[0].members[0].roles.is_empty());
+    }
+
+    const LIST_SYNC: &str =
+        include_str!("../../../../fixtures/gateway/member_list_update_sync.json");
+    const LIST_OPS: &str = include_str!("../../../../fixtures/gateway/member_list_update_ops.json");
+    const VOICE_UPDATE: &str = include_str!("../../../../fixtures/gateway/voice_state_update.json");
+    const MEMBER_UPDATE: &str =
+        include_str!("../../../../fixtures/gateway/guild_member_update.json");
+
+    fn member_list(raw: &str) -> MemberListUpdate {
+        match decode_dispatch("GUILD_MEMBER_LIST_UPDATE", raw) {
+            Decoded::Event(Dispatch::MemberListUpdate(update)) => *update,
+            _ => panic!("GUILD_MEMBER_LIST_UPDATE did not decode"),
+        }
+    }
+
+    #[test]
+    fn member_list_sync_decodes_groups_rows_and_normalizes_members_once() {
+        let update = member_list(LIST_SYNC);
+        assert_eq!(update.guild_id, id(41_771_983_423_143_937));
+        assert_eq!(update.list_id, MemberListId("everyone".to_owned()));
+        assert_eq!(
+            (update.member_count, update.online_count),
+            (Some(4), Some(3))
+        );
+        let groups: Vec<(GroupId, u32)> = update
+            .groups
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|g| (g.id.clone(), g.count))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (GroupId::Role(id(41_771_983_444_444_444)), 1),
+                (GroupId::Online, 2),
+                (GroupId::Offline, 1)
+            ]
+        );
+        let [MemberListOp::Sync { start, end, rows }] = update.ops.as_slice() else {
+            panic!("expected one SYNC");
+        };
+        assert_eq!((*start, *end), (0, 99));
+        assert_eq!(rows.len(), 7);
+        assert!(
+            matches!(&rows[0], ListRow::Group(g) if g.id == GroupId::Role(id(41_771_983_444_444_444)))
+        );
+        assert_eq!(rows[1], ListRow::Member(id(175_928_847_299_117_063)));
+        assert!(matches!(&rows[2], ListRow::Group(g) if g.id == GroupId::Online && g.count == 2));
+        assert_eq!(rows[6], ListRow::Member(id(60_606_060_606_060_606)));
+        // Members once, users once, presence ignored.
+        assert_eq!(update.members.len(), 4);
+        assert_eq!(update.members[0].nick.as_deref(), Some("Altie"));
+        assert_eq!(update.members[0].roles, [id(41_771_983_444_444_444)]);
+        assert_eq!(update.users.len(), 4);
+    }
+
+    #[test]
+    fn member_list_ops_decode_each_kind_and_unknown_ones_are_kept_as_unknown() {
+        let update = member_list(LIST_OPS);
+        assert!(matches!(update.ops[0], MemberListOp::Delete { index: 3 }));
+        assert!(matches!(
+            &update.ops[1],
+            MemberListOp::Update { index: 3, row: ListRow::Member(user) }
+                if *user == id(53_908_232_506_183_680)
+        ));
+        assert!(matches!(
+            &update.ops[2],
+            MemberListOp::Update { index: 4, row: ListRow::Group(g) }
+                if g.id == GroupId::Offline && g.count == 2
+        ));
+        assert!(matches!(
+            &update.ops[3],
+            MemberListOp::Insert { index: 5, .. }
+        ));
+        assert_eq!(update.members.len(), 2, "UPDATE and INSERT carry members");
+
+        let raw = r#"{"id":"h","guild_id":"1","ops":[{"op":"INVALIDATE","range":[0,99]},{"op":"SHUFFLE","index":1},{"op":"INSERT","index":2},{"op":"SYNC","range":[5,6],"items":[{},{"member":{"roles":[]}}]}]}"#;
+        let update = member_list(raw);
+        assert_eq!(
+            update.ops[0],
+            MemberListOp::Invalidate { start: 0, end: 99 }
+        );
+        assert_eq!(update.ops[1], MemberListOp::Unknown);
+        // A row that cannot be read still occupies its index.
+        assert_eq!(
+            update.ops[2],
+            MemberListOp::Insert {
+                index: 2,
+                row: ListRow::Unreadable
+            }
+        );
+        assert_eq!(
+            update.ops[3],
+            MemberListOp::Sync {
+                start: 5,
+                end: 6,
+                rows: vec![ListRow::Unreadable, ListRow::Unreadable]
+            }
+        );
+        assert!(update.members.is_empty());
+    }
+
+    #[test]
+    fn member_list_update_without_its_identity_is_malformed() {
+        for raw in [
+            r#"{"ops":[]}"#,
+            r#"{"id":"x","ops":[]}"#,
+            r#"{"id":"x","guild_id":"1","ops":[{"op":"DELETE"}]}"#,
+        ] {
+            assert!(
+                matches!(
+                    decode_dispatch("GUILD_MEMBER_LIST_UPDATE", raw),
+                    Decoded::Malformed
+                ),
+                "{raw}"
+            );
+        }
+        let empty = member_list(r#"{"id":"x","guild_id":"1","groups":null,"ops":null}"#);
+        assert!(empty.ops.is_empty() && empty.groups.is_none());
+    }
+
+    #[test]
+    fn guild_member_events_and_voice_state_decode_with_their_member() {
+        let Decoded::Event(Dispatch::GuildMemberUpdate(update)) =
+            decode_dispatch("GUILD_MEMBER_UPDATE", MEMBER_UPDATE)
+        else {
+            panic!("GUILD_MEMBER_UPDATE did not decode");
+        };
+        assert_eq!(update.guild_id, id(41_771_983_423_143_937));
+        assert_eq!(update.member.user_id, id(80_351_110_224_678_912));
+        assert_eq!(update.member.nick.as_deref(), Some("Nell"));
+        assert_eq!(update.users.len(), 1);
+        assert!(matches!(
+            decode_dispatch("GUILD_MEMBER_ADD", MEMBER_UPDATE),
+            Decoded::Event(Dispatch::GuildMemberAdd(_))
+        ));
+        let Decoded::Event(Dispatch::GuildMemberRemove(removed)) = decode_dispatch(
+            "GUILD_MEMBER_REMOVE",
+            r#"{"guild_id":"4","user":{"id":"5","username":"gone"}}"#,
+        ) else {
+            panic!("GUILD_MEMBER_REMOVE did not decode");
+        };
+        assert_eq!((removed.guild_id, removed.user_id), (id(4), id(5)));
+        // A member event without a user cannot be applied to anything.
+        assert!(matches!(
+            decode_dispatch("GUILD_MEMBER_UPDATE", r#"{"guild_id":"4","roles":[]}"#),
+            Decoded::Malformed
+        ));
+
+        let Decoded::Event(Dispatch::VoiceStateUpdate(voice)) =
+            decode_dispatch("VOICE_STATE_UPDATE", VOICE_UPDATE)
+        else {
+            panic!("VOICE_STATE_UPDATE did not decode");
+        };
+        assert_eq!(voice.state.guild_id, Some(id(41_771_983_423_143_937)));
+        assert_eq!(voice.state.channel_id, Some(id(41_771_983_423_143_939)));
+        assert_eq!(
+            voice.member.as_ref().map(|m| m.user_id),
+            Some(id(53_908_232_506_183_680))
+        );
+        assert_eq!(voice.users.len(), 1);
+        // Leaving a channel carries no member.
+        let Decoded::Event(Dispatch::VoiceStateUpdate(left)) = decode_dispatch(
+            "VOICE_STATE_UPDATE",
+            r#"{"guild_id":"4","channel_id":null,"user_id":"5","session_id":"s"}"#,
+        ) else {
+            panic!("VOICE_STATE_UPDATE did not decode");
+        };
+        assert!(left.state.channel_id.is_none() && left.member.is_none());
     }
 }

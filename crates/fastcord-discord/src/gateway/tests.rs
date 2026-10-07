@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::io::{DuplexStream, duplex};
@@ -24,6 +24,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 
 use super::compression::{MAX_EVENT_BYTES, test_support::ServerCompressor};
 use super::pacing::{JitterSource, SEND_LIMIT, backoff_delay};
+use super::subscription::{COALESCE, CONTROL_RESERVE};
 use super::transport::{DiscoverError, Transport, websocket_config};
 use super::url::GatewayUrl;
 use super::*;
@@ -306,10 +307,18 @@ async fn drain(gateway: &mut Gateway) -> Option<GatewayEvent> {
 
 /// Connects, identifies, and consumes everything through `State(Ready)`.
 async fn ready(jitter: f64) -> (Gateway, Arc<FakeTransport>, Server) {
+    ready_with_heartbeat(jitter, HEARTBEAT_MS).await
+}
+
+async fn ready_with_heartbeat(
+    jitter: f64,
+    interval_ms: u64,
+) -> (Gateway, Arc<FakeTransport>, Server) {
     let transport = FakeTransport::new();
     let mut server = transport.accept().await;
     let mut gateway = start(&transport, jitter);
-    server.handshake().await;
+    server.hello(interval_ms).await;
+    assert_eq!(server.recv().await["op"], 2);
     server.dispatch("READY", 1, READY).await;
     expect_state(&mut gateway, ConnectionState::Connecting { attempt: 0 }).await;
     expect_state(&mut gateway, ConnectionState::AwaitHello).await;
@@ -927,4 +936,471 @@ fn gateway_debug_names_no_account_data() {
         format!("{:?}", SessionId("secret-session".to_owned())),
         "SessionId([REDACTED])"
     );
+}
+
+// ----- lazy subscriptions (opcode 37) -----
+
+const NAVIGATION: &str = include_str!("../../../../fixtures/gateway/subscriptions_navigation.json");
+const FIRST_GUILD: u64 = 41_771_983_423_143_937;
+const FIRST_CHANNEL: u64 = 41_771_983_423_143_938;
+const SECOND_GUILD: u64 = 41_771_983_423_143_941;
+const SECOND_CHANNEL: u64 = 41_771_983_423_143_942;
+
+fn snowflake(value: u64) -> fastcord_model::Snowflake {
+    fastcord_model::Snowflake(value)
+}
+
+impl Server {
+    /// Everything the client has sent that is already waiting, in order.
+    /// Heartbeats are acknowledged. Only opcodes this client is meant to use
+    /// are accepted: in particular opcode 14 must never appear.
+    async fn service(&mut self) -> Vec<Value> {
+        let mut frames = Vec::new();
+        while let Some(Some(Ok(message))) = self.socket.next().now_or_never() {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let frame: Value = serde_json::from_str(text.as_str()).unwrap();
+            let op = frame["op"].as_u64().unwrap();
+            assert!(matches!(op, 1 | 2 | 6 | 37), "unexpected opcode {op}");
+            if op == 1 {
+                self.ack().await;
+            }
+            frames.push(frame);
+        }
+        frames
+    }
+
+    /// The subscription frames sent so far.
+    async fn subscription_frames(&mut self) -> Vec<Value> {
+        self.service()
+            .await
+            .into_iter()
+            .filter(|frame| frame["op"] == 37)
+            .collect()
+    }
+}
+
+/// Lets the client task run for `span` of virtual time.
+async fn settle(span: Duration) {
+    // Process notifications before advancing, then run newly due timers
+    // before observing the socket. Sleep completion alone need not poll peers.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(span).await;
+    tokio::task::yield_now().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_guild_navigation_emits_only_intended_subscriptions() {
+    let (gateway, _transport, mut server) = ready(0.5).await;
+    let subscriptions = gateway.subscriptions();
+    let mut frames = Vec::new();
+
+    // Nothing is sent for a session nobody has asked anything of.
+    settle(Duration::from_secs(2)).await;
+    assert!(server.subscription_frames().await.is_empty());
+
+    // Select a channel of the first guild.
+    subscriptions.update(|target| {
+        target.select_channel(snowflake(FIRST_GUILD), snowflake(FIRST_CHANNEL));
+    });
+    settle(Duration::from_secs(1)).await;
+    frames.extend(server.subscription_frames().await);
+
+    // Navigate to the second guild: one frame releases the first and
+    // subscribes the second; nothing else.
+    subscriptions.update(|target| {
+        target.select_channel(snowflake(SECOND_GUILD), snowflake(SECOND_CHANNEL));
+    });
+    settle(Duration::from_secs(1)).await;
+    frames.extend(server.subscription_frames().await);
+
+    // Joining a call in the first guild keeps it subscribed (and only it).
+    subscriptions.update(|target| target.set_voice_guild(Some(snowflake(FIRST_GUILD))));
+    settle(Duration::from_secs(1)).await;
+    frames.extend(server.subscription_frames().await);
+
+    let expected: Vec<Value> = serde_json::from_str(NAVIGATION).unwrap();
+    assert_eq!(frames, expected);
+
+    // Setting what is already set, in any order, sends nothing.
+    subscriptions.update(|target| {
+        target.set_voice_guild(Some(snowflake(FIRST_GUILD)));
+        target.select_channel(snowflake(SECOND_GUILD), snowflake(SECOND_CHANNEL));
+    });
+    settle(Duration::from_secs(5)).await;
+    assert!(server.subscription_frames().await.is_empty());
+    assert_eq!(
+        subscriptions.snapshot().voice_guild(),
+        Some(snowflake(FIRST_GUILD))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn rapid_selection_changes_are_coalesced_and_only_the_last_state_is_sent() {
+    let (gateway, _transport, mut server) = ready(0.5).await;
+    let subscriptions = gateway.subscriptions();
+    subscriptions.update(|t| t.select_channel(snowflake(1), snowflake(11)));
+    settle(Duration::from_millis(80)).await;
+    subscriptions.update(|t| t.select_channel(snowflake(2), snowflake(22)));
+    settle(Duration::from_millis(80)).await;
+    subscriptions.update(|t| t.select_channel(snowflake(3), snowflake(33)));
+    settle(Duration::from_millis(80)).await;
+    assert!(
+        server.subscription_frames().await.is_empty(),
+        "still inside the coalescing window"
+    );
+    settle(Duration::from_secs(1)).await;
+    let frames = server.subscription_frames().await;
+    assert_eq!(frames.len(), 1);
+    let sent = frames[0]["d"]["subscriptions"].as_object().unwrap();
+    assert_eq!(
+        sent.keys().collect::<Vec<_>>(),
+        ["3"],
+        "1 and 2 were never sent"
+    );
+    assert_eq!(sent["3"]["channels"], json!({"33": [[0, 99]]}));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_viewport_and_member_interest_reach_the_wire_without_resubscribing() {
+    let (gateway, _transport, mut server) = ready(0.5).await;
+    let subscriptions = gateway.subscriptions();
+    subscriptions.update(|t| t.select_channel(snowflake(1), snowflake(11)));
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(server.subscription_frames().await.len(), 1);
+
+    subscriptions.update(|t| {
+        t.set_viewport(120, 180);
+        t.set_member_interest(snowflake(1), [snowflake(7), snowflake(9)]);
+    });
+    settle(Duration::from_secs(1)).await;
+    let frames = server.subscription_frames().await;
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0]["d"]["subscriptions"],
+        json!({"1": {
+            "typing": true, "threads": false, "activities": false, "member_updates": false,
+            "members": ["7", "9"], "channels": {"11": [[100, 199]]},
+            "thread_member_lists": []
+        }})
+    );
+
+    // Scrolling back replaces the old viewport block explicitly, and clearing
+    // the selection releases the guild with every field spelled out.
+    subscriptions.update(|t| t.set_viewport(0, 40));
+    settle(Duration::from_secs(1)).await;
+    let frames = server.subscription_frames().await;
+    assert_eq!(
+        frames[0]["d"]["subscriptions"]["1"]["channels"],
+        json!({"11": [[0, 99]]})
+    );
+    subscriptions.update(|t| t.clear_selection());
+    settle(Duration::from_secs(1)).await;
+    let frames = server.subscription_frames().await;
+    assert_eq!(
+        frames[0]["d"]["subscriptions"],
+        json!({"1": {
+            "typing": false, "threads": false, "activities": false, "member_updates": false,
+            "members": [], "channels": {}, "thread_member_lists": []
+        }})
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscription_chosen_before_ready_is_sent_when_the_session_is_ready() {
+    let transport = FakeTransport::new();
+    let mut server = transport.accept().await;
+    let mut gateway = start(&transport, 0.5);
+    let subscriptions = gateway.subscriptions();
+    subscriptions.update(|t| t.select_channel(snowflake(1), snowflake(11)));
+    server.handshake().await;
+    settle(Duration::from_secs(2)).await;
+    assert!(
+        server.service().await.iter().all(|frame| frame["op"] != 37),
+        "a session that is not ready accepts no subscriptions"
+    );
+    server.dispatch("READY", 1, READY).await;
+    skip_connection_states(&mut gateway).await;
+    next_dispatch(&mut gateway).await;
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(1)).await;
+    let frames = server.subscription_frames().await;
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["d"]["subscriptions"]["1"]["typing"], true);
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_new_connection_sends_the_complete_wanted_state_again() {
+    let (mut gateway, transport, mut first) = ready(0.5).await;
+    let subscriptions = gateway.subscriptions();
+    subscriptions.update(|t| {
+        t.select_channel(snowflake(FIRST_GUILD), snowflake(FIRST_CHANNEL));
+        t.set_voice_guild(Some(snowflake(SECOND_GUILD)));
+    });
+    settle(Duration::from_secs(1)).await;
+    let original = first.subscription_frames().await;
+    assert_eq!(original.len(), 1);
+    assert_eq!(
+        original[0]["d"]["subscriptions"].as_object().unwrap().len(),
+        2
+    );
+
+    // The session ends (4009): a new Identify, a new READY, everything again.
+    let mut second = transport.accept().await;
+    first.close_with(4009).await;
+    expect_reconnecting(&mut gateway).await;
+    second.handshake().await;
+    second.dispatch("READY", 1, READY).await;
+    skip_connection_states(&mut gateway).await;
+    next_dispatch(&mut gateway).await;
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(second.subscription_frames().await, original);
+
+    // A resumed session repeats it as well; the server never has to guess
+    // what survived. Nothing else is added.
+    let mut third = transport.accept().await;
+    second.close_with(4000).await;
+    expect_reconnecting(&mut gateway).await;
+    third.handshake_resume().await;
+    third.dispatch("RESUMED", 2, r#"{"_trace":[]}"#).await;
+    skip_connection_states(&mut gateway).await;
+    next_dispatch(&mut gateway).await;
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(third.subscription_frames().await, original);
+    settle(Duration::from_secs(5)).await;
+    assert!(third.subscription_frames().await.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn resumed_subscriptions_release_disconnected_navigation_even_after_a_failed_connect() {
+    let (mut gateway, transport, mut first) = ready(0.5).await;
+    let subscriptions = gateway.subscriptions();
+    subscriptions.update(|target| {
+        target.select_channel(snowflake(FIRST_GUILD), snowflake(FIRST_CHANNEL));
+        target.set_voice_guild(Some(snowflake(SECOND_GUILD)));
+        target.set_member_interest(snowflake(SECOND_GUILD), [snowflake(7), snowflake(9)]);
+    });
+    settle(Duration::from_secs(1)).await;
+    let original = first.subscription_frames().await;
+    assert_eq!(original.len(), 1);
+
+    transport.refuse();
+    let mut second = transport.accept().await;
+    first.close_with(4000).await;
+    let (attempt, _, reason) = expect_reconnecting(&mut gateway).await;
+    assert_eq!((attempt, reason), (1, ReconnectReason::Closed(Some(4000))));
+    subscriptions.update(|target| target.select_channel(snowflake(3), snowflake(33)));
+    expect_state(&mut gateway, ConnectionState::Connecting { attempt: 1 }).await;
+    let (attempt, _, reason) = expect_reconnecting(&mut gateway).await;
+    assert_eq!((attempt, reason), (2, ReconnectReason::ConnectFailed));
+    let resume = second.handshake_resume().await;
+    assert_eq!(resume["d"]["seq"], 1);
+    skip_connection_states(&mut gateway).await;
+    settle(Duration::from_secs(1)).await;
+    assert!(
+        second.subscription_frames().await.is_empty(),
+        "the old ledger must remain paused until RESUMED"
+    );
+
+    second.dispatch("RESUMED", 2, r#"{"_trace":[]}"#).await;
+    assert_eq!(next_dispatch(&mut gateway).await, (2, Dispatch::Resumed));
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(1)).await;
+    let frames = second.subscription_frames().await;
+    assert_eq!(frames.len(), 1);
+    let sent = frames[0]["d"]["subscriptions"].as_object().unwrap();
+    assert_eq!(sent.len(), 3);
+    let released = json!({
+        "typing": false, "threads": false, "activities": false,
+        "member_updates": false, "members": [],
+        "channels": {}, "thread_member_lists": []
+    });
+    let first_key = FIRST_GUILD.to_string();
+    let second_key = SECOND_GUILD.to_string();
+    assert_eq!(sent[&first_key], released);
+    assert_eq!(
+        sent[&second_key], original[0]["d"]["subscriptions"][&second_key],
+        "the unchanged voice guild is replayed as well"
+    );
+    assert_eq!(sent["3"]["channels"], json!({"33": [[0, 99]]}));
+    assert_eq!(sent["3"]["typing"], true);
+    settle(Duration::from_secs(1)).await;
+    assert!(second.subscription_frames().await.is_empty());
+
+    // Clearing every interest while disconnected still needs releases, not an
+    // empty plan. Already-released guilds must not reappear in the ledger.
+    let mut third = transport.accept().await;
+    second.close_with(4000).await;
+    expect_reconnecting(&mut gateway).await;
+    subscriptions.update(|target| {
+        target.clear_selection();
+        target.set_voice_guild(None);
+    });
+    third.handshake_resume().await;
+    third.dispatch("RESUMED", 3, r#"{"_trace":[]}"#).await;
+    skip_connection_states(&mut gateway).await;
+    assert_eq!(next_dispatch(&mut gateway).await, (3, Dispatch::Resumed));
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(1)).await;
+    let frames = third.subscription_frames().await;
+    assert_eq!(frames.len(), 1);
+    let sent = frames[0]["d"]["subscriptions"].as_object().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent["3"], released);
+    assert_eq!(sent[&second_key], released);
+    assert!(!sent.contains_key(&first_key));
+    assert_eq!(transport.connected().len(), 4);
+    settle(Duration::from_secs(1)).await;
+    assert!(third.subscription_frames().await.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn subscription_churn_never_starves_heartbeats_or_exceeds_the_send_ceiling() {
+    let (gateway, transport, mut server) = ready(0.5).await;
+    let subscriptions = gateway.subscriptions();
+    let started = Instant::now();
+    let mut frames: Vec<(Duration, Value)> = Vec::new();
+    // 150 navigations, 300 ms apart, would be 150 frames without a ceiling.
+    for n in 0..150u64 {
+        subscriptions.update(|t| t.select_channel(snowflake(1 + n % 2), snowflake(11 + n % 2)));
+        settle(Duration::from_millis(300)).await;
+        frames.extend(
+            server
+                .service()
+                .await
+                .into_iter()
+                .map(|frame| (started.elapsed(), frame)),
+        );
+    }
+    // Then keep going until the window has slid and the backlog is sent.
+    for _ in 0..140 {
+        settle(Duration::from_secs(1)).await;
+        frames.extend(
+            server
+                .service()
+                .await
+                .into_iter()
+                .map(|frame| (started.elapsed(), frame)),
+        );
+    }
+    // At no point did 60 s hold more than the ceiling, and subscriptions
+    // always left room for control traffic.
+    for (at, _) in &frames {
+        let window = frames
+            .iter()
+            .filter(|(other, _)| *other + Duration::from_secs(60) > *at && other <= at)
+            .count();
+        assert!(window <= SEND_LIMIT, "{window} frames within 60 s");
+    }
+    let first_minute = frames
+        .iter()
+        .filter(|(at, frame)| *at < Duration::from_secs(45) && frame["op"] == 37)
+        .count();
+    assert!(
+        first_minute <= SEND_LIMIT - CONTROL_RESERVE,
+        "{first_minute} subscription frames"
+    );
+    assert!(
+        first_minute > 50,
+        "the ceiling must not be reached trivially low"
+    );
+    assert!(
+        frames.iter().any(|(_, frame)| frame["op"] == 1),
+        "heartbeats continued"
+    );
+    // The connection survived and the final wanted state did arrive.
+    assert_eq!(transport.connected().len(), 1);
+    let last = frames
+        .iter()
+        .rev()
+        .find(|(_, frame)| frame["op"] == 37)
+        .map(|(_, frame)| frame)
+        .unwrap();
+    let wanted = subscriptions.snapshot();
+    let final_guild = wanted.selected_guild().unwrap().to_string();
+    assert_eq!(last["d"]["subscriptions"][&final_guild]["typing"], true);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_due_heartbeat_precedes_a_subscription_at_the_same_deadline() {
+    let (gateway, _transport, mut server) = ready_with_heartbeat(0.5, 1_000).await;
+    let subscriptions = gateway.subscriptions();
+    settle(COALESCE).await;
+    subscriptions.update(|target| target.select_channel(snowflake(1), snowflake(11)));
+    settle(COALESCE).await;
+    let frames = server.service().await;
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0], json!({"op": 1, "d": 1}));
+    assert_eq!(frames[1]["op"], 37);
+    assert_eq!(frames[1]["d"]["subscriptions"]["1"]["typing"], true);
+}
+
+#[tokio::test(start_paused = true)]
+async fn subscription_churn_reserves_short_interval_heartbeats_for_the_whole_window() {
+    let (gateway, transport, mut server) = ready_with_heartbeat(0.5, 1_000).await;
+    let subscriptions = gateway.subscriptions();
+    let started = Instant::now();
+    let mut frames: Vec<(Duration, Value)> = Vec::new();
+    for n in 0..260u64 {
+        subscriptions.update(|target| {
+            target.select_channel(snowflake(1 + n % 2), snowflake(11 + n % 2));
+        });
+        settle(Duration::from_millis(300)).await;
+        frames.extend(
+            server
+                .service()
+                .await
+                .into_iter()
+                .map(|frame| (started.elapsed(), frame)),
+        );
+    }
+    for (at, _) in &frames {
+        let window = frames
+            .iter()
+            .filter(|(other, _)| *other + Duration::from_secs(60) > *at && other <= at)
+            .count();
+        // Identify is the one frame already consumed by the ready helper.
+        let identify = usize::from(*at < Duration::from_secs(60));
+        assert!(
+            window + identify <= SEND_LIMIT,
+            "{} frames within 60 s",
+            window + identify
+        );
+    }
+    let first_minute = frames
+        .iter()
+        .filter(|(at, frame)| *at < Duration::from_secs(60) && frame["op"] == 37)
+        .count();
+    assert!(first_minute > 0, "optional traffic still makes progress");
+    assert!(
+        first_minute <= SEND_LIMIT - CONTROL_RESERVE - 60,
+        "{first_minute} subscription frames left too little room for one-second heartbeats"
+    );
+    assert_eq!(
+        frames.iter().filter(|(_, frame)| frame["op"] == 1).count(),
+        78
+    );
+    assert_eq!(transport.connected().len(), 1, "no missed heartbeat ACKs");
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_documented_opcodes_are_ever_sent_across_a_whole_session() {
+    let (gateway, _transport, mut server) = ready(0.5).await;
+    let subscriptions = gateway.subscriptions();
+    let mut all = Vec::new();
+    for step in 0..6u64 {
+        subscriptions.update(|t| match step % 3 {
+            0 => t.select_channel(snowflake(1), snowflake(11)),
+            1 => t.set_voice_guild(Some(snowflake(2))),
+            _ => t.clear_selection(),
+        });
+        settle(Duration::from_secs(1)).await;
+        all.extend(server.service().await);
+    }
+    // `service` rejects any opcode but heartbeat, identify, resume, and 37.
+    assert!(all.iter().any(|frame| frame["op"] == 37));
+    assert!(all.iter().all(|frame| frame["op"] != 14));
 }

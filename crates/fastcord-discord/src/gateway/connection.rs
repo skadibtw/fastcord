@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::time::{Instant, sleep, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -33,8 +33,9 @@ use super::decode::{Decoded, decode_dispatch, is_ready_family};
 use super::event::{ConnectionState, ReconnectReason, StopReason};
 use super::event::{Dispatch, GatewayEvent};
 use super::outbox::Outbox;
-use super::pacing::{JitterSource, SendBudget, backoff_delay, invalid_session_delay};
+use super::pacing::{JitterSource, SEND_WINDOW, SendBudget, backoff_delay, invalid_session_delay};
 use super::profile::{ClientProperties, HostOs};
+use super::subscription::{CONTROL_RESERVE, Subscriber, SubscriptionTarget};
 use super::transport::{DiscoverError, Transport};
 use super::url::GatewayUrl;
 use super::wire::{self, Envelope, Hello, op};
@@ -120,6 +121,8 @@ struct Driver<T: Transport, J: JitterSource> {
     jitter: J,
     interrupt: InterruptFuture,
     outbox: Outbox,
+    subscriptions: watch::Receiver<SubscriptionTarget>,
+    subscriber: Subscriber,
     session: Option<Session>,
     identify_rejections: u32,
 }
@@ -130,6 +133,7 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
     locale: String,
     jitter: J,
     outbox: Outbox,
+    subscriptions: watch::Receiver<SubscriptionTarget>,
     shutdown: oneshot::Receiver<()>,
 ) {
     let interrupt = make_interrupt(Arc::clone(&transport), shutdown);
@@ -141,6 +145,8 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
         jitter,
         interrupt,
         outbox,
+        subscriptions,
+        subscriber: Subscriber::new(),
         session: None,
         identify_rejections: 0,
     };
@@ -294,6 +300,8 @@ enum Action {
     Nothing,
     Hello(Duration),
     HeartbeatRequested,
+    Ready,
+    Resumed,
     Reconnect(ReconnectReason, bool),
     Terminal(Terminal),
 }
@@ -308,6 +316,58 @@ where
     )
 }
 
+/// Enough future timed heartbeats for a complete send window, in addition to
+/// the reserve for other control traffic. HELLO intervals are already clamped
+/// to the supported nonzero range.
+fn control_reserve(interval: Duration) -> usize {
+    let heartbeats = SEND_WINDOW.as_nanos().div_ceil(interval.as_nanos()) as usize;
+    CONTROL_RESERVE + heartbeats
+}
+
+enum SubscriptionSendError {
+    Outbound,
+    Network,
+}
+
+/// Sends what brings the server's subscriptions to `target`. Optional traffic
+/// leaves room for future heartbeats and yields between batches once the next
+/// heartbeat is due. A rejected plan is never sent or committed.
+async fn flush_subscriptions<S>(
+    socket: &mut S,
+    subscriber: &mut Subscriber,
+    target: &SubscriptionTarget,
+    budget: &mut SendBudget,
+    interval: Duration,
+    heartbeat_deadline: Instant,
+) -> Result<(), SubscriptionSendError>
+where
+    S: futures_util::Sink<Message, Error = WsError> + Unpin,
+{
+    let reserve = control_reserve(interval);
+    for batch in subscriber
+        .plan(target)
+        .map_err(|_| SubscriptionSendError::Outbound)?
+    {
+        let now = Instant::now();
+        if now >= heartbeat_deadline {
+            // Keep the pending deadline: the biased loop sends the heartbeat
+            // first, then returns to the remaining subscription work.
+            return Ok(());
+        }
+        if budget.remaining(now) <= reserve {
+            subscriber.defer(now);
+            return Ok(());
+        }
+        budget.record(now);
+        if !send(socket, &batch.frame).await {
+            return Err(SubscriptionSendError::Network);
+        }
+        subscriber.commit(batch);
+    }
+    subscriber.settle();
+    Ok(())
+}
+
 async fn connection<T: Transport, J: JitterSource>(
     driver: &mut Driver<T, J>,
     mut socket: T::Socket,
@@ -319,6 +379,8 @@ async fn connection<T: Transport, J: JitterSource>(
         jitter,
         interrupt,
         outbox,
+        subscriptions,
+        subscriber,
         session,
         identify_rejections,
     } = driver;
@@ -330,6 +392,9 @@ async fn connection<T: Transport, J: JitterSource>(
         ready_since: None,
     };
     let mut inflater = Inflater::new();
+    subscriber.pause();
+    // Cleared once every handle is gone: no further changes can arrive.
+    let mut watching = true;
     let mut budget = SendBudget::new();
     // HELLO deadline until HELLO arrives, then the next heartbeat.
     let mut timer = Instant::now() + HELLO_TIMEOUT;
@@ -339,11 +404,6 @@ async fn connection<T: Transport, J: JitterSource>(
         tokio::select! {
             biased;
             reason = interrupt.as_mut() => break Err(reason.into()),
-            delivered = outbox.deliver_one(), if !outbox.is_empty() => {
-                if delivered.is_err() {
-                    break Err(Terminal::Shutdown);
-                }
-            }
             () = sleep_until(timer) => {
                 if !conn.hello_seen {
                     break Ok((ReconnectReason::HelloTimeout, true));
@@ -360,6 +420,38 @@ async fn connection<T: Transport, J: JitterSource>(
                 let seq = session.as_ref().and_then(|s| s.seq);
                 if !send(&mut socket, &wire::heartbeat(seq)).await {
                     break Ok((ReconnectReason::Network, true));
+                }
+            }
+            delivered = outbox.deliver_one(), if !outbox.is_empty() => {
+                if delivered.is_err() {
+                    break Err(Terminal::Shutdown);
+                }
+            }
+            changed = subscriptions.changed(), if watching => {
+                match changed {
+                    Ok(()) => subscriber.changed(Instant::now()),
+                    Err(_) => watching = false,
+                }
+            }
+            () = sleep_until(subscriber.deadline().unwrap_or(timer)), if subscriber.deadline().is_some() => {
+                // Take the latest wanted state; the guard must not live across
+                // the send.
+                let target = subscriptions.borrow_and_update().clone();
+                match flush_subscriptions(
+                    &mut socket,
+                    subscriber,
+                    &target,
+                    &mut budget,
+                    conn.interval,
+                    timer,
+                ).await {
+                    Ok(()) => {}
+                    Err(SubscriptionSendError::Network) => {
+                        break Ok((ReconnectReason::Network, true));
+                    }
+                    Err(SubscriptionSendError::Outbound) => {
+                        break Err(Terminal::Stop(StopReason::SubscriptionTooLarge));
+                    }
                 }
             }
             received = socket.next(), if outbox.len() < OUTBOX_LIMIT => {
@@ -396,6 +488,8 @@ async fn connection<T: Transport, J: JitterSource>(
                 inflater.finish_message();
                 match action {
                     Action::Nothing => {}
+                    Action::Ready => subscriber.start(Instant::now()),
+                    Action::Resumed => subscriber.resume(Instant::now()),
                     Action::Hello(interval) => {
                         conn.interval = interval;
                         timer = Instant::now() + interval.mul_f64(jitter.unit());
@@ -635,7 +729,7 @@ fn on_dispatch(
                 Some(action) => {
                     Action::Terminal(Terminal::Stop(StopReason::ActionRequired(action)))
                 }
-                None => Action::Nothing,
+                None => Action::Ready,
             }
         }
         Decoded::Event(event) => {
@@ -658,7 +752,11 @@ fn on_dispatch(
                 conn.ready_since = Some(now);
                 outbox.push(GatewayEvent::State(ConnectionState::Ready), STATE_COST);
             }
-            Action::Nothing
+            if resumed {
+                Action::Resumed
+            } else {
+                Action::Nothing
+            }
         }
         Decoded::Unhandled => {
             if let (Some(active), Some(_)) = (session.as_mut(), sequence) {
@@ -689,6 +787,20 @@ mod tests {
         fn unit(&mut self) -> f64 {
             self.0
         }
+    }
+
+    #[test]
+    fn subscription_reserve_accounts_for_the_hello_heartbeat_interval() {
+        assert_eq!(control_reserve(MIN_HEARTBEAT), CONTROL_RESERVE + 60);
+        assert_eq!(
+            control_reserve(Duration::from_millis(2_500)),
+            CONTROL_RESERVE + 24
+        );
+        assert_eq!(
+            control_reserve(Duration::from_secs(40)),
+            CONTROL_RESERVE + 2
+        );
+        assert_eq!(control_reserve(MAX_HEARTBEAT), CONTROL_RESERVE + 1);
     }
 
     #[test]

@@ -40,7 +40,7 @@ pub(crate) fn invalid_session_delay(unit: f64) -> Duration {
 
 /// Documented ceiling: 120 commands per connection per 60 seconds.
 pub(crate) const SEND_LIMIT: usize = 120;
-const SEND_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const SEND_WINDOW: Duration = Duration::from_secs(60);
 
 /// Sliding-window count of frames sent on one connection. Heartbeat, Identify,
 /// and Resume are always sent (the connection cannot live without them) but
@@ -70,6 +70,12 @@ impl SendBudget {
     pub(crate) fn has_capacity(&mut self, now: Instant) -> bool {
         self.prune(now);
         self.sent.len() < SEND_LIMIT
+    }
+
+    /// Frames still available in the current window.
+    pub(crate) fn remaining(&mut self, now: Instant) -> usize {
+        self.prune(now);
+        SEND_LIMIT - self.sent.len()
     }
 
     /// Counts a frame that has been sent.

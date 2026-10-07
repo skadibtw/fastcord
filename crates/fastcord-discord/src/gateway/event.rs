@@ -76,6 +76,10 @@ pub enum StopReason {
     IdentifyRejected,
     /// Discovery returned a URL that is not a Discord Gateway.
     InvalidGatewayUrl,
+    /// Locally planned guild subscriptions exceeded the outbound payload ceiling.
+    SubscriptionTooLarge,
+    /// Required normalized state could not fit the metadata safety ceiling.
+    StateTooLarge,
 }
 
 impl fmt::Display for StopReason {
@@ -88,6 +92,8 @@ impl fmt::Display for StopReason {
             Self::ActionRequired(action) => write!(f, "Discord requires an action on this account ({action}). Complete it in the official Discord client; fastcord does not complete or bypass it."),
             Self::IdentifyRejected => f.write_str("Discord repeatedly refused this connection without a reason. Check the account in the official client; fastcord stops instead of retrying."),
             Self::InvalidGatewayUrl => f.write_str("Discord returned a Gateway address that is not a Discord Gateway. fastcord refused to send the login token there."),
+            Self::SubscriptionTooLarge => f.write_str("A guild subscription could not be encoded within Discord's 15 KiB Gateway payload limit. Automatic attempts have stopped."),
+            Self::StateTooLarge => f.write_str("Required account state exceeds fastcord's 12 MiB metadata safety limit. The connection has stopped rather than silently dropping guild identity or permission data."),
         }
     }
 }
@@ -195,6 +201,115 @@ pub struct ChannelUnread {
     pub last_message_id: Option<Snowflake>,
 }
 
+/// GUILD_MEMBER_ADD or GUILD_MEMBER_UPDATE: one member, normalized like READY's
+/// (the user object is reported once in `users`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuildMemberEvent {
+    pub guild_id: Snowflake,
+    pub member: GuildMember,
+    /// Presence bits distinguish omitted update fields from explicit null/empty.
+    pub nick_present: bool,
+    pub roles_present: bool,
+    pub timeout_present: bool,
+    pub username_present: bool,
+    pub global_name_present: bool,
+    pub avatar_present: bool,
+    pub bot_present: bool,
+    pub users: Vec<User>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuildMemberRemove {
+    pub guild_id: Snowflake,
+    pub user_id: Snowflake,
+}
+
+/// VOICE_STATE_UPDATE for a guild voice channel, with the member it carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoiceStateUpdate {
+    pub state: VoiceState,
+    pub member: Option<GuildMember>,
+    pub users: Vec<User>,
+}
+
+/// Which member list of a guild an update belongs to: `everyone`, or a hash of
+/// the channel's permission overwrites. The event does not name the channel.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MemberListId(pub String);
+
+/// A member-list section header.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum GroupId {
+    Online,
+    Offline,
+    /// A hoisted role.
+    Role(Snowflake),
+    /// A group this client does not know.
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListGroup {
+    pub id: GroupId,
+    pub count: u32,
+}
+
+/// One row of a member list. Members are referenced by user ID; the member
+/// objects themselves arrive in [`MemberListUpdate::members`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListRow {
+    Group(ListGroup),
+    Member(Snowflake),
+    /// A row the payload did not let us read. It still occupies its index, so
+    /// the indices of every later row stay right.
+    Unreadable,
+}
+
+/// A member-list operation. Indices are positions in the whole flattened list
+/// (headers and members), not within a requested range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemberListOp {
+    /// The rows of `start..=end` (fewer rows than the span mean the list ends).
+    Sync {
+        start: u32,
+        end: u32,
+        rows: Vec<ListRow>,
+    },
+    Insert {
+        index: u32,
+        row: ListRow,
+    },
+    Update {
+        index: u32,
+        row: ListRow,
+    },
+    Delete {
+        index: u32,
+    },
+    /// The server no longer maintains `start..=end`.
+    Invalidate {
+        start: u32,
+        end: u32,
+    },
+    /// An operation this client does not know: the list can no longer be
+    /// trusted and is emptied until it is synchronized again.
+    Unknown,
+}
+
+/// GUILD_MEMBER_LIST_UPDATE.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberListUpdate {
+    pub guild_id: Snowflake,
+    pub list_id: MemberListId,
+    pub member_count: Option<u32>,
+    pub online_count: Option<u32>,
+    pub groups: Option<Vec<ListGroup>>,
+    pub ops: Vec<MemberListOp>,
+    /// Every member the operations reference.
+    pub members: Vec<GuildMember>,
+    pub users: Vec<User>,
+}
+
 /// Typed dispatch events. Events the client has no handler for are consumed
 /// (their sequence still counts) and never surfaced. Live events keep their
 /// wire shape; only READY-family payloads are normalized.
@@ -213,6 +328,11 @@ pub enum Dispatch {
     ChannelUpdate(Box<Channel>),
     ChannelDelete(Box<Channel>),
     PassiveUpdate(Box<PassiveUpdate>),
+    MemberListUpdate(Box<MemberListUpdate>),
+    GuildMemberAdd(Box<GuildMemberEvent>),
+    GuildMemberUpdate(Box<GuildMemberEvent>),
+    GuildMemberRemove(GuildMemberRemove),
+    VoiceStateUpdate(Box<VoiceStateUpdate>),
 }
 
 impl Dispatch {
@@ -230,6 +350,11 @@ impl Dispatch {
             Self::ChannelUpdate(_) => "CHANNEL_UPDATE",
             Self::ChannelDelete(_) => "CHANNEL_DELETE",
             Self::PassiveUpdate(_) => "PASSIVE_UPDATE_V2",
+            Self::MemberListUpdate(_) => "GUILD_MEMBER_LIST_UPDATE",
+            Self::GuildMemberAdd(_) => "GUILD_MEMBER_ADD",
+            Self::GuildMemberUpdate(_) => "GUILD_MEMBER_UPDATE",
+            Self::GuildMemberRemove(_) => "GUILD_MEMBER_REMOVE",
+            Self::VoiceStateUpdate(_) => "VOICE_STATE_UPDATE",
         }
     }
 }

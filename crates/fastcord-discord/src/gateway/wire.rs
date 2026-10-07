@@ -1,19 +1,25 @@
 //! Gateway frame envelope and the payloads this client sends.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+use fastcord_model::Snowflake;
+
 use super::capabilities;
 use super::profile::ClientProperties;
+use super::subscription::GuildSubscription;
 
 pub(crate) mod op {
     pub(crate) const DISPATCH: u8 = 0;
     pub(crate) const HEARTBEAT: u8 = 1;
     pub(crate) const IDENTIFY: u8 = 2;
     pub(crate) const RESUME: u8 = 6;
+    /// Bulk guild subscriptions. Opcode 14, its deprecated predecessor, is
+    /// never sent (SPEC §4.4).
+    pub(crate) const GUILD_SUBSCRIPTIONS_BULK: u8 = 37;
     pub(crate) const RECONNECT: u8 = 7;
     pub(crate) const INVALID_SESSION: u8 = 9;
     pub(crate) const HELLO: u8 = 10;
@@ -134,6 +140,58 @@ pub(crate) fn resume(token: &str, session_id: &str, seq: u64) -> Result<String, 
             session_id,
             seq,
         },
+    )
+}
+
+/// Every field of one guild's subscription, always explicit: an omitted field
+/// is never assumed to clear anything (SPEC §4.4, U2). `typing` is the flag the
+/// server treats as "subscribed to this guild"; typing indicators themselves
+/// are never shown.
+#[derive(Serialize)]
+struct GuildSubscriptionWire<'a> {
+    typing: bool,
+    threads: bool,
+    activities: bool,
+    member_updates: bool,
+    members: &'a BTreeSet<Snowflake>,
+    channels: BTreeMap<String, &'a [(u32, u32)]>,
+    thread_member_lists: [Snowflake; 0],
+}
+
+#[derive(Serialize)]
+struct SubscriptionsBulk<'a> {
+    subscriptions: BTreeMap<String, GuildSubscriptionWire<'a>>,
+}
+
+/// One opcode 37 frame for the given guilds. Refused when it would exceed the
+/// outbound ceiling; the caller splits across frames, never falls back.
+pub(crate) fn guild_subscriptions_bulk(
+    guilds: &[(Snowflake, &GuildSubscription)],
+) -> Result<String, OutboundError> {
+    let subscriptions = guilds
+        .iter()
+        .map(|(guild, subscription)| {
+            (
+                guild.to_string(),
+                GuildSubscriptionWire {
+                    typing: subscription.subscribed,
+                    threads: false,
+                    activities: false,
+                    member_updates: false,
+                    members: &subscription.members,
+                    channels: subscription
+                        .channels
+                        .iter()
+                        .map(|(channel, ranges)| (channel.to_string(), ranges.as_slice()))
+                        .collect(),
+                    thread_member_lists: [],
+                },
+            )
+        })
+        .collect();
+    frame(
+        op::GUILD_SUBSCRIPTIONS_BULK,
+        &SubscriptionsBulk { subscriptions },
     )
 }
 

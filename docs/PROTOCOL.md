@@ -53,8 +53,50 @@ Decoded straight from the borrowed event text into typed structs that name only 
 - Guild fields come from the guild object or from `properties` (client-state-v2 shape). Channels learn their `guild_id`. Unknown channel types are preserved. Null arrays mean empty. Partial user objects (missing `username`) are accepted.
 - Unavailable (outage or geo-restricted) guilds are listed by ID only.
 - READY_SUPPLEMENTAL: per guild `voice_states` and the remaining members (from its own `merged_members`, parallel to its own `guilds`), plus `lazy_private_channels`. Malformed ones stop like malformed READY.
-- PASSIVE_UPDATE_V2 is decoded (channel unread markers, voice state changes/removals, members) for the reducer of milestone 7.
+- PASSIVE_UPDATE_V2 is decoded and applied by the bounded reducer (milestone 7): channel unread markers, voice state changes/removals, and normalized members.
 - Live dispatch events keep their wire shape (`MESSAGE_CREATE/UPDATE/DELETE`, `GUILD_CREATE/DELETE`, `CHANNEL_CREATE/UPDATE/DELETE`); a payload that does not decode is skipped (its sequence still counts), unknown event names are consumed. `Debug` of events names the event only, never content or URLs.
 
 ### Consumer queue
 Events pass through a byte-bounded queue (2 MiB budget, 256 events): each reserves about twice its frame size and returns it when taken. A slow consumer stops the task from reading the socket instead of growing memory; nothing is dropped, ordering is kept, and heartbeats continue. An event larger than the whole budget (a big READY) is queued alone. Events already decoded are always delivered before a reconnect, so the Resume sequence equals what was delivered.
+
+## Lazy subscriptions and member lists (milestone 7)
+
+Implemented in `fastcord-discord::gateway::subscription` (what is sent) and `fastcord-discord::state` (what is kept). Evidence: the field set and operation semantics below come from community documentation (`discord.py-self`'s `GuildSubscriptions`/`types/gateway.py`, Userdoccers' opcode table) and have **not** been captured from a live session; risk **U2** stays open until the checks in `docs/TESTING.md` have run. `fixtures/gateway/subscriptions_navigation.json` records exactly what fastcord sends for a two-guild navigation; the `member_list_update_*.json`, `voice_state_update.json`, and `guild_member_update.json` fixtures are shaped after the documented payloads with fabricated IDs.
+
+### Opcode 37
+`{"op": 37, "d": {"subscriptions": {"<guild_id>": {...}}}}`. Opcode 14, the deprecated predecessor, is never sent and there is no fallback to it; a payload that cannot fit stops with `SubscriptionTooLarge` rather than being silently dropped. Each guild entry always carries every field:
+
+| Field | Sent | Meaning |
+|---|---|---|
+| `typing` | `true` for a wanted guild, `false` to release it | In the community documentation this flag is what subscribes the connection to the guild (it is how the guild's other fields start to take effect); fastcord sets it for that reason only. TYPING_START is never decoded or shown. |
+| `threads`, `activities`, `member_updates` | always `false` | Not MVP features. |
+| `members` | user IDs, at most 200 per guild | Individually requested members (visible authors, reply targets, voice participants, permission computation). |
+| `channels` | `{channel_id: [[start, end], ...]}` | Member-list ranges of the visible channel only. Empty for a guild that is subscribed only for voice. |
+| `thread_member_lists` | always `[]` | Not MVP. |
+
+Because it is not established whether an omitted field means "unchanged" or "cleared", every field of every changed guild is sent explicitly: the result is the same under either reading. A guild is released by sending it with `typing: false` and everything else empty, never by leaving it out.
+
+What is subscribed: the selected guild (with its selected channel's member list) and the guild of the active voice channel, nothing else. Ranges are the 100-row blocks touched by the viewport, at most three in total; the initial selection requests only `[0, 99]`, and scrolling releases that block when it is no longer visible. Navigating changes only what differs, in one frame, and releases the old guild explicitly. Rapid changes are coalesced: the first change opens a 250 ms window and everything changed within it is sent as one frame; setting what is already sent sends nothing.
+
+Desired state (`SubscriptionTarget`, set through `Gateway::subscriptions()`) is kept apart from the last transmitted session state. A new READY clears that ledger; a RESUMED retains it, explicitly releases guilds removed while disconnected, and resends complete wanted entries because server-side retention is not established. Nothing is sent before READY/RESUMED. Subscription frames count against the 120-per-60 s ceiling; scheduled heartbeats have priority and optional traffic reserves enough slots for HELLO's heartbeat interval plus 20 other control frames. When only the reserve is left, sending is deferred (retried every 5 s) and the latest target wins. Frames are split before the 15 KiB outbound limit; one guild at its caps is about 5 KiB.
+
+### GUILD_MEMBER_LIST_UPDATE
+`{id, guild_id, member_count, online_count, groups: [{id: "online"|"offline"|role_id, count}], ops: [...]}`. `id` is `everyone` or a hash of the channel's permission overwrites; the event does not name a channel, so lists are keyed by `id`. Operations address positions in the **whole flattened list** (section headers count as rows):
+
+- `SYNC {range: [s, e], items}`: the rows of `s..=e` (fewer items than the span means the list ends there).
+- `INSERT {index, item}` / `DELETE {index}`: insert or remove one row; every later row, known or not, shifts by one.
+- `UPDATE {index, item}`: replace one row.
+- `INVALIDATE {range}`: the server no longer maintains `s..=e`; those rows are forgotten, nothing shifts.
+
+An item is `{group: {...}}` or `{member: {user, roles, nick, ...}}` (presence is ignored). Since only subscribed ranges are described, rows are held sparsely as segments of known rows; an INSERT or DELETE moves later segments, touching segments join, and nothing outside what the server told us is invented. A row that cannot be read keeps its index (`Unreadable`); an operation name this client does not know empties the list's rows (counts kept) because it can no longer be trusted. Positions past `u32::MAX` are dropped, and a list never holds more than 1,000 known rows.
+
+Member lists are accepted only for the selected guild and the selected channel's expected list ID; navigation releases old rows and late updates for another permission list are ignored. The expected ID follows [discord.py-self's `GuildChannel.member_list_id`](https://github.com/dolfies/discord.py-self/blob/master/discord/abc.py): `everyone` if the guild's default role grants VIEW_CHANNEL and no overwrite denies it, otherwise the unsigned MurmurHash3 x86-32 (seed zero) of lexically sorted `allow:<id>`/`deny:<id>` view overwrites joined by commas. An incremental event cannot introduce a list before its first SYNC. Rows outside the current subscription ranges are released on viewport changes.
+
+### Events the reducer consumes
+READY and READY_SUPPLEMENTAL (replace/extend state; a READY drops everything the session derived), GUILD_CREATE (a guild already held keeps its members, voice, and unread markers), GUILD_DELETE (outage keeps only the ID), CHANNEL_CREATE/UPDATE/DELETE (DM recipients move to the user table), MESSAGE_CREATE (only the channel's last-message marker, never backwards), PASSIVE_UPDATE_V2 (unread markers, voice states, members of guilds not subscribed; ignored for guilds not held), GUILD_MEMBER_ADD/UPDATE/REMOVE, VOICE_STATE_UPDATE (guild voice only), GUILD_MEMBER_LIST_UPDATE. Missing member/user fields in GUILD_MEMBER_UPDATE preserve old values; explicit null/empty fields clear them. READY's deduplicated users remain available until supplemental members acquire their references. Gateway sequence filtering discards replayed duplicates before the reducer.
+
+### Retention (SPEC §4.5)
+One `Store` is the only writer. Sizes conservatively account for owned String/Vec capacities, hash-table allocation slack, and auxiliary identity/focus tables against a 12 MiB budget. Channel metadata uses compact sorted vectors rather than large hash-table capacity overhead. Above the budget the store sheds toward 80%: nonvisible lists, unreferenced users, then unreferenced members (oldest write first, a user goes with its last member); optional maps are compacted so eviction releases backing memory. Identity and permission data, the current user's own member, voice/requested members, and visible rows are not selectively shed. If required data alone cannot fit, the reducer releases the account store and latches `limit_exceeded()`; the app drops the Gateway and displays terminal `StateTooLarge`. It never displays a silently truncated account as connected.
+
+### Not established (verify live, see docs/TESTING.md)
+Whether `typing: true` is really the subscription flag and whether it is needed for `channels` to take effect; whether omitted fields clear anything (irrelevant to correctness, since none are omitted); which subscriptions the server applies implicitly before any opcode 37; whether subscriptions survive a Resume; whether a voice-guild-only subscription keeps voice states fresh while another guild is selected (the reducer handles VOICE_STATE_UPDATE for it and PASSIVE_UPDATE_V2 for the rest); the real member-list ids for channels with overwrites.

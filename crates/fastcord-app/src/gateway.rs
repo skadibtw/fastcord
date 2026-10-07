@@ -1,16 +1,19 @@
 //! UI-side view of the account's Gateway connection. The protocol, session,
-//! heartbeats, and reconnects live in `fastcord_discord::gateway::Gateway`; this
-//! module only turns its ordered events into the few status changes the screen
-//! shows, and is dropped, with the connection it owns, when the account screen
-//! is left (which closes the Gateway session cleanly).
+//! heartbeats, and reconnects live in `fastcord_discord::gateway::Gateway`; the
+//! account's normalized state lives in `fastcord_discord::state::Store`, which
+//! the worker below owns and is the only writer of (the reducer). This module
+//! turns the ordered events into that state plus the few status changes the
+//! screen shows, and is dropped, with the connection and the state it owns,
+//! when the account screen is left (which closes the Gateway session cleanly).
 
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use fastcord_discord::gateway::{
-    ConnectionState, Dispatch, Gateway, GatewayEvent, ReconnectReason, StopReason,
+    ConnectionState, Gateway, GatewayEvent, ReconnectReason, StopReason,
 };
+use fastcord_discord::state::Store;
 use fastcord_discord::{RestClient, UserToken};
 use iced::futures::{Stream, stream};
 use iced::task::Handle;
@@ -101,15 +104,24 @@ fn describe_delay(delay: Duration) -> String {
     }
 }
 
-/// Folds the ordered event stream into status changes. Everything that is not
-/// a status change (messages, guild updates, replay) is consumed here and is
-/// for the reducer of a later milestone, not for the screen.
+/// Folds the ordered event stream into the reducer state and status changes.
+/// Everything that is not a status change (messages, guild updates, replay) is
+/// applied to the store here; no view reads it yet.
 #[derive(Default)]
 struct Tracker {
-    counts: Counts,
+    store: Store,
 }
 
 impl Tracker {
+    /// What the store holds, for the connected message.
+    fn counts(&self) -> Counts {
+        Counts {
+            guilds: self.store.guild_ids().len(),
+            unavailable: self.store.unavailable_guilds().count(),
+            direct_messages: self.store.private_channels().count(),
+        }
+    }
+
     fn apply(&mut self, event: GatewayEvent) -> Option<GatewayStatus> {
         match event {
             GatewayEvent::State(state) => Some(match state {
@@ -118,7 +130,7 @@ impl Tracker {
                     GatewayStatus::SigningIn
                 }
                 ConnectionState::Resuming => GatewayStatus::Resuming,
-                ConnectionState::Ready => GatewayStatus::Ready(self.counts),
+                ConnectionState::Ready => GatewayStatus::Ready(self.counts()),
                 ConnectionState::Reconnecting {
                     attempt,
                     delay,
@@ -131,22 +143,11 @@ impl Tracker {
                 ConnectionState::AuthenticationRequired => GatewayStatus::AuthenticationRequired,
                 ConnectionState::Stopped(reason) => GatewayStatus::Stopped(reason),
             }),
-            GatewayEvent::Dispatch { event, .. } => {
-                match event {
-                    // A new session replaces everything the old one counted.
-                    Dispatch::Ready(ready) => {
-                        self.counts = Counts {
-                            guilds: ready.guilds.len(),
-                            unavailable: ready.unavailable_guilds.len(),
-                            direct_messages: ready.private_channels.len(),
-                        };
-                    }
-                    Dispatch::ReadySupplemental(supplemental) => {
-                        self.counts.direct_messages += supplemental.lazy_private_channels.len();
-                    }
-                    _ => {}
-                }
-                None
+            dispatch @ GatewayEvent::Dispatch { .. } => {
+                self.store.apply(dispatch);
+                self.store
+                    .limit_exceeded()
+                    .then_some(GatewayStatus::Stopped(StopReason::StateTooLarge))
             }
         }
     }
@@ -183,7 +184,11 @@ pub fn status_stream(
         loop {
             let event = gateway.next_event().await?;
             if let Some(status) = worker.tracker.apply(event) {
-                worker.gateway = Some(gateway);
+                // On a reducer safety failure, dropping the Gateway closes
+                // the socket and ends the stream instead of reconnecting.
+                if status != GatewayStatus::Stopped(StopReason::StateTooLarge) {
+                    worker.gateway = Some(gateway);
+                }
                 return Some((status, worker));
             }
         }
@@ -220,7 +225,7 @@ impl GatewayPanel {
 
 #[cfg(test)]
 mod tests {
-    use fastcord_discord::gateway::{Ready, SessionId};
+    use fastcord_discord::gateway::{Dispatch, GuildDelete, Ready, SessionId};
     use fastcord_model::{Channel, ChannelKind, Guild, Snowflake, User};
 
     use super::*;
@@ -357,6 +362,47 @@ mod tests {
                 direct_messages: 0
             }))
         );
+    }
+    #[test]
+    fn the_worker_applies_events_to_its_store_and_the_counts_follow_it() {
+        let mut tracker = Tracker::default();
+        let _ = tracker.apply(ready_event(3, 0, 1));
+        // A guild is left while connected: the next connected message agrees.
+        let _ = tracker.apply(GatewayEvent::Dispatch {
+            sequence: 2,
+            event: Dispatch::GuildDelete(GuildDelete {
+                id: Snowflake(1),
+                unavailable: false,
+            }),
+        });
+        // A repeated delete (replay) is harmless.
+        let _ = tracker.apply(GatewayEvent::Dispatch {
+            sequence: 3,
+            event: Dispatch::GuildDelete(GuildDelete {
+                id: Snowflake(1),
+                unavailable: false,
+            }),
+        });
+        assert_eq!(
+            tracker.apply(GatewayEvent::State(ConnectionState::Ready)),
+            Some(GatewayStatus::Ready(Counts {
+                guilds: 2,
+                unavailable: 0,
+                direct_messages: 1
+            }))
+        );
+    }
+
+    #[test]
+    fn required_state_over_the_cap_is_a_visible_terminal_failure() {
+        let mut tracker = Tracker {
+            store: Store::with_budget(1),
+        };
+        let status = tracker.apply(ready_event(3, 0, 1)).unwrap();
+        assert_eq!(status, GatewayStatus::Stopped(StopReason::StateTooLarge));
+        assert!(status.describe().contains("12 MiB"));
+        assert!(!status.describe().contains("Connected"));
+        assert!(tracker.store.bytes() <= tracker.store.budget());
     }
 
     #[test]

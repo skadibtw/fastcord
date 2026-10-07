@@ -1,0 +1,17 @@
+{
+  "id": "everyone",
+  "guild_id": "41771983423143937",
+  "member_count": 4,
+  "online_count": 2,
+  "groups": [
+    {"id": "41771983444444444", "count": 1},
+    {"id": "online", "count": 1},
+    {"id": "offline", "count": 2}
+  ],
+  "ops": [
+    {"op": "DELETE", "index": 3},
+    {"op": "UPDATE", "index": 3, "item": {"member": {"user": {"id": "53908232506183680", "username": "mason", "global_name": null, "avatar": null, "discriminator": "0"}, "roles": [], "nick": "M", "presence": {"user": {"id": "53908232506183680"}, "status": "idle"}}}},
+    {"op": "UPDATE", "index": 4, "item": {"group": {"id": "offline", "count": 2}}},
+    {"op": "INSERT", "index": 5, "item": {"member": {"user": {"id": "80351110224678912", "username": "nelly", "global_name": "Nelly", "avatar": null, "discriminator": "0"}, "roles": [], "presence": {"user": {"id": "80351110224678912"}, "status": "offline"}}}}
+  ]
+}

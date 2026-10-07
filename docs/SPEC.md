@@ -132,12 +132,12 @@ Use opcode 37, `{"subscriptions": {guild_id: subscription}}`; opcode 14 is the d
 - Subscribe to the selected guild and the guild containing the active voice channel.
 - Request member-list ranges only for the visible channel/sidebar viewport, rounded to protocol range blocks; begin with one 100-entry range and no more than three live ranges per visible list.
 - Request individual members only when required for visible authors, reply targets, voice participants, or permission computation; evict unreferenced members later.
-- Disable activities and typing subscriptions because neither presence dashboards nor typing indicators are MVP requirements.
+- Do not enable activities or thread subscriptions, and never decode or show typing indicators: none is an MVP requirement. Per the cited community documentation (S3) the wire `typing` flag is what subscribes the connection to a guild, so it is `true` for a subscribed guild (and `false` only to release one); it grants no typing UI.
 - Remove unused ranges on navigation; coalesce rapid selection changes.
 - Implement `SYNC`, `INSERT`, `UPDATE`, `DELETE`, and `INVALIDATE` member-list operations with index-correct behavior.
 - Consume passive guild updates so unsubscribed guild metadata does not become permanently stale.
 
-**UNKNOWN U2:** exact unsubscribe/partial-update semantics for the current server must be captured in the opcode-37 fixture and verified with two guilds, including keeping voice membership fresh while browsing another guild. Do not assume an omitted field clears a subscription. [S2, S3]
+**UNKNOWN U2:** exact unsubscribe/partial-update semantics for the current server must be captured in the opcode-37 fixture and verified with two guilds, including keeping voice membership fresh while browsing another guild. Do not assume an omitted field clears a subscription: milestone 7 therefore sends every field explicitly for every changed guild. The recorded fixture is what fastcord sends; the live capture of the server's behavior is still outstanding (docs/TESTING.md). [S2, S3]
 
 ### 4.5 State ownership and budgets
 
@@ -152,6 +152,8 @@ Initial steady-state caps:
 | Cold-channel markers and bounded pending state | 4 MiB; IDs/cursors, not full histories |
 | Current visible member ranges | Included above; release after navigation unless pinned by voice/visible messages |
 | Queued Gateway/UI deltas | 2 MiB; coalesce replaceable changes, never silently lose ordered mutations |
+
+The metadata reducer charges owned allocation capacities, not just element counts. If required identity/permission or pinned state alone exceeds the safety ceiling after optional eviction, stop the account connection with a visible diagnostic and release the store; never silently truncate a connected account or let mandatory data grow without a cap.
 
 A cache miss refetches the required history or entity. No persistent plaintext message database in MVP. Local settings may store device IDs, volume overrides, recent emoji, and layout, not tokens. Purge account-specific state and cache namespaces on logout.
 

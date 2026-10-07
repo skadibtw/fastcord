@@ -1,0 +1,26 @@
+{
+  "id": "everyone",
+  "guild_id": "41771983423143937",
+  "member_count": 4,
+  "online_count": 3,
+  "groups": [
+    {"id": "41771983444444444", "count": 1},
+    {"id": "online", "count": 2},
+    {"id": "offline", "count": 1}
+  ],
+  "ops": [
+    {
+      "op": "SYNC",
+      "range": [0, 99],
+      "items": [
+        {"group": {"id": "41771983444444444", "count": 1}},
+        {"member": {"user": {"id": "175928847299117063", "username": "alt_fixture", "global_name": "Alt Fixture", "avatar": null, "discriminator": "0"}, "roles": ["41771983444444444"], "nick": "Altie", "joined_at": "2020-01-01T00:00:00.000000+00:00", "presence": {"user": {"id": "175928847299117063"}, "status": "online", "client_status": {"desktop": "online"}, "activities": []}}},
+        {"group": {"id": "online", "count": 2}},
+        {"member": {"user": {"id": "80351110224678912", "username": "nelly", "global_name": "Nelly", "avatar": null, "discriminator": "0"}, "roles": [], "presence": {"user": {"id": "80351110224678912"}, "status": "online", "client_status": {"web": "online"}, "activities": []}}},
+        {"member": {"user": {"id": "53908232506183680", "username": "mason", "global_name": null, "avatar": null, "discriminator": "0"}, "roles": [], "presence": {"user": {"id": "53908232506183680"}, "status": "idle", "client_status": {"mobile": "idle"}, "activities": []}}},
+        {"group": {"id": "offline", "count": 1}},
+        {"member": {"user": {"id": "60606060606060606", "username": "newcomer", "global_name": null, "avatar": null, "discriminator": "0"}, "roles": []}}
+      ]
+    }
+  ]
+}

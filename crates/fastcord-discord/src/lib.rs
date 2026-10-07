@@ -1,6 +1,7 @@
 //! Authenticated Discord control-plane I/O. One [`RestClient`] belongs to one account.
 //! All clones share its rate limits and permanent authentication-stop signal.
-//! The main user [`Gateway`] connection lifecycle lives in [`gateway`].
+//! The main user [`Gateway`] connection lifecycle lives in [`gateway`]; the
+//! bounded reducer state it feeds lives in [`state`].
 
 mod clock;
 mod error;
@@ -10,6 +11,7 @@ mod remote_auth;
 mod rest;
 mod route;
 mod secret;
+pub mod state;
 mod ws;
 
 pub use clock::{Clock, MonotonicClock};

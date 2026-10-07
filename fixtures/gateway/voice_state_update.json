@@ -1,0 +1,13 @@
+{
+  "guild_id": "41771983423143937",
+  "channel_id": "41771983423143939",
+  "user_id": "53908232506183680",
+  "session_id": "voice-session-fixture-2",
+  "deaf": false,
+  "mute": false,
+  "self_deaf": false,
+  "self_mute": false,
+  "self_video": false,
+  "suppress": false,
+  "member": {"user": {"id": "53908232506183680", "username": "mason", "global_name": null, "avatar": null, "discriminator": "0"}, "roles": [], "nick": "M", "joined_at": "2021-01-01T00:00:00.000000+00:00"}
+}
