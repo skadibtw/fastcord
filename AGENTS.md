@@ -16,7 +16,7 @@ model, media, platform <- video   (capture, codecs, packetization)
 all    <-  app                (binary `fastcord`, iced UI, orchestration)
 ```
 
-- `fastcord-model`, `fastcord-discord`, and `fastcord-app` exist so far; create other crates in the milestone that first needs them, never as empty placeholders.
+- `fastcord-model`, `fastcord-discord`, `fastcord-platform`, and `fastcord-app` exist so far; create other crates in the milestone that first needs them, never as empty placeholders.
 - One reducer task owns mutable Discord state; UI receives deltas/read models, never clones of full state.
 - Networking, decoding, and audio never run on the UI thread. Audio callbacks: no locks, allocation, I/O, or inference.
 - Every queue/cache is **byte-bounded**.
@@ -27,6 +27,7 @@ all    <-  app                (binary `fastcord`, iced UI, orchestration)
 |---|---|
 | `crates/fastcord-model` | Pure domain types (`Snowflake`, entities); no I/O, runtime, or GUI deps |
 | `crates/fastcord-discord` | Authenticated REST transport, rate-limit scheduler; later Gateway and bounded state |
+| `crates/fastcord-platform` | Native credential storage; one target-selected keyring backend |
 | `crates/fastcord-app` | iced application; binary name `fastcord` |
 | `docs/` | `SPEC.md` (design + milestones), `RELEASE.md` |
 | `scripts/package.sh` | Per-target release packaging used by CI |

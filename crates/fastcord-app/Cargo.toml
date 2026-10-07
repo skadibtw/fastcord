@@ -13,7 +13,14 @@ path = "src/main.rs"
 
 [dependencies]
 fastcord-model.workspace = true
+fastcord-discord.workspace = true
+fastcord-platform.workspace = true
 iced.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

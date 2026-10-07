@@ -1,0 +1,25 @@
+[package]
+name = "fastcord-platform"
+description = "fastcord native operating-system integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fastcord-model.workspace = true
+keyring-core.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store.workspace = true
+
+[lints]
+workspace = true
