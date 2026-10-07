@@ -3,6 +3,12 @@
 ## Automated (CI, every push)
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Windows, Linux, and macOS. Tests are deterministic and offline: protocol fixtures in `fixtures/`, injected clocks, crypto/media vectors. No live credentials in CI.
 
+### REST transport and scheduler (milestone 4)
+- `cargo test -p fastcord-discord --locked` exercises the real scheduler with an injected monotonic clock and sanitized `fixtures/rest/rate-limits.json`; no sockets, credentials, wall-clock sleeps, or server timestamps are involved.
+- Coverage includes shared bucket hashes across methods/routes without conflating major IDs, fractional resets, global and per-route 429 pauses (body/header/scope), concurrent reservations and out-of-order responses, unknown-route serialization, priority ordering, cancellation, byte budgets, and account-wide stop when the transport observes a 401.
+- Raw `Authorization` headers and token/request Debug redaction are checked offline. Network and 5xx failures are returned to callers for reconciliation/retry policy; only confirmed 429 rejections are rescheduled. A failed or ambiguous message POST must not be retried blindly.
+- Live alt-account `GET /users/@me`, including actual credential validation, is deferred to milestone 5; these offline tests are not a claim of live Discord acceptance.
+
 ## Live / manual
 | Platform | Where | Who | Limits |
 |---|---|---|---|
