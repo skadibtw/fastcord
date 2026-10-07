@@ -14,15 +14,23 @@ fastcord-model = { path = "crates/fastcord-model" }
 fastcord-discord = { path = "crates/fastcord-discord" }
 fastcord-platform = { path = "crates/fastcord-platform" }
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain"] }
+base64 = "0.22"
 bytes = "1"
-iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "tokio", "x11", "wayland"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "tokio", "x11", "wayland", "qr_code"] }
 keyring-core = "1.0.0"
+rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
+rsa = { version = "0.9.10", default-features = false, features = ["std", "u64_digit"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_repr = "0.1"
-tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
-zeroize = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+webpki-roots = "1"
+zeroize = { version = "1", features = ["serde"] }
 windows-native-keyring-store = "1.1.0"
 zbus-secret-service-keyring-store = { version = "1.0.1", default-features = false, features = ["crypto-rust"] }
 
@@ -38,3 +46,11 @@ codegen-units = 1
 strip = "symbols"
 debug = "line-tables-only"
 split-debuginfo = "packed"
+
+# QR login generates a 2048-bit RSA key per attempt; unoptimized bignum code
+# would take many seconds in debug builds.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3

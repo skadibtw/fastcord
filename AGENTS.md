@@ -26,7 +26,7 @@ all    <-  app                (binary `fastcord`, iced UI, orchestration)
 | Path | Purpose |
 |---|---|
 | `crates/fastcord-model` | Pure domain types (`Snowflake`, entities); no I/O, runtime, or GUI deps |
-| `crates/fastcord-discord` | Authenticated REST transport, rate-limit scheduler; later Gateway and bounded state |
+| `crates/fastcord-discord` | Authenticated REST transport, rate-limit scheduler, QR-login remote-auth client (`remote_auth`); later Gateway and bounded state |
 | `crates/fastcord-platform` | Native credential storage; one target-selected keyring backend |
 | `crates/fastcord-app` | iced application; binary name `fastcord` |
 | `docs/` | `SPEC.md` (design + milestones), `RELEASE.md` |

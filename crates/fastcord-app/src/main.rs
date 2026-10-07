@@ -1,19 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod login;
+mod qr;
 
 use std::sync::Arc;
 
-use fastcord_discord::UserToken;
+use fastcord_discord::{RemoteAuthEvent, UserToken};
 use fastcord_model::Snowflake;
 use fastcord_platform::{NativeCredentialStore, StoreError};
 use iced::widget::{
-    button, center, checkbox, column, container, row, scrollable, text, text_input,
+    button, center, checkbox, column, container, qr_code, row, scrollable, text, text_input,
 };
-use iced::{Element, Length, Task};
+use iced::{Color, Element, Length, Task};
 use zeroize::Zeroize;
 
 use login::{LoginError, LoginOutcome, Persistence, Session, StoreReady};
+use qr::{Applied, QrAttempt, QrStage};
 
 fn main() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
@@ -30,6 +32,7 @@ struct App {
     notice: Option<String>,
     store: Option<NativeCredentialStore>,
     saved_accounts: Vec<Snowflake>,
+    qr_attempts: u64,
 }
 
 #[derive(Debug)]
@@ -54,6 +57,7 @@ enum Phase {
         account: Snowflake,
         error: StoreError,
     },
+    Qr(QrAttempt),
 }
 
 // Every message containing a token uses the redacted wrapper; Debug cannot
@@ -64,6 +68,9 @@ enum Message {
     InputTooLong,
     Acknowledge(bool),
     MemoryOnly(bool),
+    StartQr,
+    CancelQr,
+    Qr(u64, RemoteAuthEvent),
     Login,
     RetrySaved,
     StoreReady(Result<StoreReady, StoreError>),
@@ -88,6 +95,7 @@ impl App {
                 notice: None,
                 store: None,
                 saved_accounts: Vec::new(),
+                qr_attempts: 0,
             },
             Task::perform(login::initialize_store(), Message::StoreReady),
         )
@@ -95,6 +103,35 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::StartQr
+                if self.acknowledged && matches!(self.phase, Phase::Login | Phase::Qr(_)) =>
+            {
+                self.notice = None;
+                return self.start_qr();
+            }
+            Message::CancelQr if matches!(self.phase, Phase::Qr(_)) => {
+                // Dropping the attempt aborts its worker: the socket closes and
+                // the attempt's keys are dropped.
+                self.phase = Phase::Login;
+                self.notice = None;
+            }
+            Message::Qr(id, event) if matches!(&self.phase, Phase::Qr(attempt) if attempt.id == id) =>
+            {
+                let Phase::Qr(attempt) = &mut self.phase else {
+                    return Task::none();
+                };
+                if let Applied::Authorized(token) = attempt.apply(event) {
+                    // Same validation and storage path as pasted tokens.
+                    self.phase = Phase::Authenticating {
+                        saved_account: None,
+                    };
+                    self.notice = None;
+                    return Task::perform(
+                        login::token_login(token, self.store.clone(), !self.memory_only),
+                        Message::LoginFinished,
+                    );
+                }
+            }
             Message::TokenEdited(token) if matches!(self.phase, Phase::Login) => {
                 self.token = token;
             }
@@ -265,10 +302,23 @@ impl App {
         )
     }
 
+    /// Starts a fresh attempt (new key pair, new socket). Replacing the phase
+    /// drops any previous attempt, which aborts its worker.
+    fn start_qr(&mut self) -> Task<Message> {
+        self.clear_token();
+        self.qr_attempts += 1;
+        let id = self.qr_attempts;
+        let (task, worker) =
+            Task::run(qr::events(), move |event| Message::Qr(id, event)).abortable();
+        self.phase = Phase::Qr(QrAttempt::new(id, worker));
+        task
+    }
+
     fn view(&self) -> Element<'_, Message> {
         let content: Element<'_, Message> = match &self.phase {
             Phase::Starting => text("Looking for a saved login in the native credential store…").into(),
             Phase::Login => self.login_view(),
+            Phase::Qr(attempt) => self.qr_view(attempt),
             Phase::Authenticating { saved_account } => {
                 text(if saved_account.is_some() {
                     "Restoring saved login: validating the token with Discord…"
@@ -306,22 +356,23 @@ impl App {
     }
 
     fn login_view(&self) -> Element<'_, Message> {
-        // Milestone 5a inserts the real primary QR flow above this advanced
-        // token method; its result reuses login::validate and login::persist.
         let mut content = column![
             text("fastcord").size(36),
-            text("Token login (advanced)").size(24),
             text("Warning: third-party Discord clients violate Discord’s Terms of Service and may get your account banned. Use an alternate account. Never share your token; it grants access to your account. fastcord never asks for your password."),
             checkbox(self.acknowledged).label("I understand the risk and am using an alternate account").on_toggle(Message::Acknowledge),
+            checkbox(self.memory_only).label("Memory-only session (do not save this login)").on_toggle(Message::MemoryOnly),
+            text("Otherwise, the login is saved securely using Windows Credential Manager, macOS Keychain, or Linux Secret Service. Native-store and network operations do not run on the UI thread."),
+            text("Log in with QR code (recommended)").size(24),
+            text("Open Discord on your phone, go to Settings, choose Scan QR Code, and scan the code fastcord shows. You never handle the token yourself."),
+            button("Show QR code").on_press_maybe(self.acknowledged.then_some(Message::StartQr)),
+            text("Token login (advanced)").size(24),
             text_input("Paste your alt-account token", self.token.expose_secret())
                 .id("token-input")
                 .secure(true)
                 .on_input(token_edited)
                 .on_submit_maybe(self.can_login().then_some(Message::Login))
                 .padding(12),
-            checkbox(self.memory_only).label("Memory-only session (do not save this token)").on_toggle(Message::MemoryOnly),
-            text("Otherwise, save securely using Windows Credential Manager, macOS Keychain, or Linux Secret Service. Native-store and network operations do not run on the UI thread."),
-            button("Log in").on_press_maybe(self.can_login().then_some(Message::Login)),
+            button("Log in with token").on_press_maybe(self.can_login().then_some(Message::Login)),
         ].spacing(16).width(Length::Fill);
         if let Some(notice) = &self.notice {
             content = content.push(text(notice));
@@ -339,6 +390,65 @@ impl App {
         content
             .push(button("Retry saved login").on_press(Message::RetrySaved))
             .into()
+    }
+
+    fn qr_view<'a>(&'a self, attempt: &'a QrAttempt) -> Element<'a, Message> {
+        let mut content = column![text("Log in with QR code").size(32)]
+            .spacing(20)
+            .width(Length::Fill);
+        content = match &attempt.stage {
+            QrStage::Connecting => content.push(text(
+                "Connecting to Discord’s QR login service and generating a one-time key…",
+            )),
+            QrStage::Showing { code, expires_in } => content
+                .push(
+                    container(
+                        qr_code(code)
+                            .cell_size(7)
+                            // Scanners expect dark modules on a light field in any theme.
+                            .style(|_| qr_code::Style {
+                                cell: Color::BLACK,
+                                background: Color::WHITE,
+                            }),
+                    )
+                    .padding(8)
+                    .style(|_| container::background(Color::WHITE)),
+                )
+                .push(text(
+                    "On your phone: Discord, Settings, Scan QR Code. Then confirm the login on the phone.",
+                ))
+                .push(text(format!(
+                    "This code expires in {}. Only scan a code shown by fastcord on this screen.",
+                    qr::describe_lifetime(*expires_in)
+                )))
+                .push(
+                    row![
+                        button("Generate new code").on_press(Message::StartQr),
+                        button("Cancel").on_press(Message::CancelQr),
+                    ]
+                    .spacing(12),
+                ),
+            QrStage::Scanned(user) => content
+                .push(text(format!("Scanned by @{}", user.username)).size(26))
+                .push(text(format!("Account ID: {}", user.id)))
+                .push(text(
+                    "Confirm the login on your phone. If this is not your alt account, cancel on the phone or here.",
+                ))
+                .push(button("Cancel").on_press(Message::CancelQr)),
+            QrStage::Ended(error) => {
+                let mut actions = row![].spacing(12);
+                if error.can_regenerate() {
+                    actions = actions.push(button("Generate new code").on_press(Message::StartQr));
+                }
+                content
+                    .push(text(error.to_string()))
+                    .push(actions.push(button("Back to login").on_press(Message::CancelQr)))
+            }
+        };
+        if self.memory_only {
+            content = content.push(text("Memory-only session: this login will not be saved."));
+        }
+        content.into()
     }
 }
 
@@ -501,5 +611,144 @@ mod tests {
         let _ = app.update(Message::CancelLogin);
         assert!(matches!(app.phase, Phase::Login));
         assert!(app.token.expose_secret().is_empty());
+    }
+
+    fn qr_link() -> fastcord_discord::QrLink {
+        fastcord_discord::QrLink::new(
+            "UZ0-kOVzXDZTFVV5_QlpURSO2BQHrtkKWHNpIGoDI0k",
+            std::time::Duration::from_secs(300),
+        )
+    }
+
+    fn qr_stage(app: &App) -> &QrStage {
+        match &app.phase {
+            Phase::Qr(attempt) => &attempt.stage,
+            other => panic!("expected the QR screen, found {other:?}"),
+        }
+    }
+
+    fn qr_id(app: &App) -> u64 {
+        match &app.phase {
+            Phase::Qr(attempt) => attempt.id,
+            other => panic!("expected the QR screen, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn qr_login_starts_only_after_the_warning_is_acknowledged() {
+        let mut app = login_app();
+        let _ = app.update(Message::StartQr);
+        assert!(matches!(app.phase, Phase::Login));
+        let _ = app.update(Message::Acknowledge(true));
+        let _ = app.update(token_edited("dummy-offline-secret".into()));
+        let _ = app.update(Message::StartQr);
+        assert!(matches!(qr_stage(&app), QrStage::Connecting));
+        // A half-typed token must not linger while another method runs.
+        assert!(app.token.expose_secret().is_empty());
+    }
+
+    #[test]
+    fn qr_events_drive_the_screen_and_authorization_uses_the_token_path() {
+        let mut app = login_app();
+        app.acknowledged = true;
+        let _ = app.update(Message::StartQr);
+        let id = qr_id(&app);
+        let _ = app.update(Message::Qr(id, RemoteAuthEvent::Qr(qr_link())));
+        assert!(matches!(qr_stage(&app), QrStage::Showing { .. }));
+        let user = fastcord_discord::RemoteUser {
+            id: Snowflake(175_928_847_299_117_063),
+            username: "alt_fixture".to_owned(),
+            avatar: None,
+        };
+        let _ = app.update(Message::Qr(id, RemoteAuthEvent::PendingUser(user)));
+        assert!(matches!(qr_stage(&app), QrStage::Scanned(_)));
+        let token = Arc::new(UserToken::new("dummy-offline-secret".to_owned()));
+        let _ = app.update(Message::Qr(id, RemoteAuthEvent::Authorized(token)));
+        // Validation and storage happen in the same worker as token paste.
+        assert!(matches!(
+            app.phase,
+            Phase::Authenticating {
+                saved_account: None
+            }
+        ));
+        assert!(app.token.expose_secret().is_empty());
+    }
+
+    #[test]
+    fn regenerating_uses_a_new_attempt_and_ignores_the_old_one() {
+        let mut app = login_app();
+        app.acknowledged = true;
+        let _ = app.update(Message::StartQr);
+        let first = qr_id(&app);
+        let _ = app.update(Message::Qr(first, RemoteAuthEvent::Qr(qr_link())));
+        let _ = app.update(Message::StartQr);
+        let second = qr_id(&app);
+        assert_ne!(first, second);
+        assert!(matches!(qr_stage(&app), QrStage::Connecting));
+        // Stragglers from the replaced attempt, even an authorization, do nothing.
+        let _ = app.update(Message::Qr(first, RemoteAuthEvent::Qr(qr_link())));
+        let token = Arc::new(UserToken::new("dummy-offline-secret".to_owned()));
+        let _ = app.update(Message::Qr(first, RemoteAuthEvent::Authorized(token)));
+        assert!(matches!(qr_stage(&app), QrStage::Connecting));
+    }
+
+    #[test]
+    fn cancel_returns_to_login_and_drops_the_attempt() {
+        let mut app = login_app();
+        app.acknowledged = true;
+        let _ = app.update(Message::StartQr);
+        let id = qr_id(&app);
+        let _ = app.update(Message::Qr(id, RemoteAuthEvent::Qr(qr_link())));
+        let _ = app.update(Message::CancelQr);
+        assert!(matches!(app.phase, Phase::Login));
+        assert!(app.acknowledged, "cancel keeps the acknowledgement");
+        let token = Arc::new(UserToken::new("dummy-offline-secret".to_owned()));
+        let _ = app.update(Message::Qr(id, RemoteAuthEvent::Authorized(token)));
+        assert!(matches!(app.phase, Phase::Login));
+    }
+
+    #[test]
+    fn timeout_phone_cancel_and_captcha_end_the_attempt_with_clear_text() {
+        use fastcord_discord::RemoteAuthError;
+        for (error, regenerate) in [
+            (RemoteAuthError::Expired, true),
+            (RemoteAuthError::CancelledOnPhone, true),
+            (RemoteAuthError::Captcha, false),
+        ] {
+            let mut app = login_app();
+            app.acknowledged = true;
+            let _ = app.update(Message::StartQr);
+            let id = qr_id(&app);
+            let _ = app.update(Message::Qr(id, RemoteAuthEvent::Qr(qr_link())));
+            let _ = app.update(Message::Qr(id, RemoteAuthEvent::Failed(error)));
+            assert!(matches!(qr_stage(&app), QrStage::Ended(e) if *e == error));
+            assert_eq!(error.can_regenerate(), regenerate);
+            // Regenerating from an ended attempt starts a clean one.
+            if regenerate {
+                let _ = app.update(Message::StartQr);
+                assert!(matches!(qr_stage(&app), QrStage::Connecting));
+            }
+        }
+        assert!(RemoteAuthError::Captcha.to_string().contains("token login"));
+        assert!(
+            RemoteAuthError::Captcha
+                .to_string()
+                .contains("official Discord client")
+        );
+    }
+
+    #[test]
+    fn qr_messages_and_phases_never_print_codes_users_or_tokens() {
+        let token = Arc::new(UserToken::new("dummy-offline-secret".to_owned()));
+        let message = Message::Qr(1, RemoteAuthEvent::Authorized(token));
+        assert!(!format!("{message:?}").contains("dummy-offline-secret"));
+        let message = Message::Qr(1, RemoteAuthEvent::Qr(qr_link()));
+        assert!(!format!("{message:?}").contains("UZ0-kOVz"));
+        let mut app = login_app();
+        app.acknowledged = true;
+        let _ = app.update(Message::StartQr);
+        let id = qr_id(&app);
+        let _ = app.update(Message::Qr(id, RemoteAuthEvent::Qr(qr_link())));
+        assert!(!format!("{:?}", app.phase).contains("UZ0-kOVz"));
     }
 }

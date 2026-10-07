@@ -17,10 +17,21 @@ cargo build --release -p fastcord-app
 
 ## Login
 
-The current app supports advanced token paste and local logout. The login screen
-explains the Terms of Service/account-ban risk, requires acknowledgement, and
-masks the token like a password. It validates the token once with Discord's
-`GET /users/@me` before showing the account.
+The login screen explains the Terms of Service/account-ban risk and requires
+acknowledgement before any login method can start. Two methods are offered:
+
+- **QR code (recommended).** Shows a QR code; scan it with Discord on your phone
+  (Settings, Scan QR Code) and confirm there. fastcord uses Discord's remote-auth
+  protocol with a fresh RSA key pair per attempt, so you never handle the token.
+  The screen shows which account scanned the code. Cancel, **Generate new code**,
+  and the server-side expiry (about 5 minutes) all work; keys and tickets live only
+  in memory and are dropped when an attempt ends. If Discord demands a CAPTCHA,
+  fastcord stops and points you to token login or the official client; it does not
+  solve or bypass CAPTCHAs.
+- **Token login (advanced).** Paste a token into the masked field.
+
+Either way the resulting token is validated once with Discord's `GET /users/@me`
+before the account is shown, then follows the same storage path below.
 
 By default, the validated token is saved under service `fastcord` and the Discord
 account ID in Windows Credential Manager, macOS Keychain, or Linux Secret Service.
@@ -37,8 +48,7 @@ use **Forget saved login** or log out of the restored account to remove them.
 **Log out** stops authenticated work, drops account state and in-memory secrets,
 and removes the saved account credential. If removal fails, the app says logout
 is incomplete and offers a retry; it does not pretend the credential is gone.
-Local logout does not revoke every Discord session. QR login is milestone 5a,
-not an inactive button in the current UI.
+Local logout does not revoke every Discord session.
 
 ## License
 
