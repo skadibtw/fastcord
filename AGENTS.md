@@ -26,10 +26,10 @@ all    <-  app                (binary `fastcord`, iced UI, orchestration)
 | Path | Purpose |
 |---|---|
 | `crates/fastcord-model` | Pure domain types (`Snowflake`, entities); no I/O, runtime, or GUI deps |
-| `crates/fastcord-discord` | Authenticated REST transport, rate-limit scheduler, QR-login remote-auth client (`remote_auth`); later Gateway and bounded state |
+| `crates/fastcord-discord` | Authenticated REST transport, rate-limit scheduler, QR-login remote-auth client (`remote_auth`), main user Gateway lifecycle (`gateway`: zlib-stream, Identify profile, heartbeat/Resume/reconnect, READY normalization); later bounded state |
 | `crates/fastcord-platform` | Native credential storage; one target-selected keyring backend |
 | `crates/fastcord-app` | iced application; binary name `fastcord` |
-| `docs/` | `SPEC.md` (design + milestones), `RELEASE.md` |
+| `docs/` | `SPEC.md` (design + milestones), `PROTOCOL.md` (what is actually sent/expected on the wire), `TESTING.md`, `RELEASE.md` |
 | `scripts/package.sh` | Per-target release packaging used by CI |
 | `packaging/macos/Info.plist` | `.app` bundle template (`@VERSION@` substituted) |
 | `.github/workflows/` | `ci.yml` (fmt/clippy/test, 3 OS), `release.yml` (tag → GitHub Release) |

@@ -50,6 +50,19 @@ and removes the saved account credential. If removal fails, the app says logout
 is incomplete and offers a retry; it does not pretend the credential is gone.
 Local logout does not revoke every Discord session.
 
+## Connection
+
+After login the account screen connects to Discord's Gateway (v10, zlib-stream
+compression) and shows its state: connected (with server and direct-message
+counts), reconnecting, a rejected login (back to the login screen), or stopped
+with the reason. It identifies as the Discord web client (Chrome profile, current
+build number fetched from discord.com, bundled fallback); the exact payload is
+documented in [docs/PROTOCOL.md](docs/PROTOCOL.md). Dropped connections resume
+the session with bounded, jittered backoff. If Discord demands an action or a
+challenge on the account, fastcord stops and says so; it never completes or
+bypasses one. Logging out closes the Gateway session, so the account goes
+offline.
+
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).

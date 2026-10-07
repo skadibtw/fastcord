@@ -1,0 +1,66 @@
+{
+  "_trace": ["[\"gateway-prd-fixture\",{\"micros\":0.0}]"],
+  "v": 10,
+  "user": {"id": "175928847299117063", "username": "alt_fixture", "global_name": "Alt Fixture", "avatar": null, "discriminator": "0", "bot": false, "flags": 0, "mfa_enabled": false},
+  "users": [
+    {"id": "175928847299117063", "username": "alt_fixture", "global_name": "Alt Fixture", "avatar": null, "discriminator": "0"},
+    {"id": "80351110224678912", "username": "nelly", "global_name": "Nelly", "avatar": "8342729096ea3675442027381ff50dfe", "discriminator": "0"},
+    {"id": "53908232506183680", "username": "mason", "global_name": null, "avatar": null, "discriminator": "0"},
+    {"id": "90101010101010101", "username": "groupmate", "global_name": "Group Mate", "avatar": null, "discriminator": "0", "bot": true}
+  ],
+  "guilds": [
+    {
+      "id": "41771983423143937",
+      "name": "Test Server",
+      "icon": null,
+      "owner_id": "80351110224678912",
+      "member_count": 42,
+      "large": false,
+      "joined_at": "2020-01-01T00:00:00.000000+00:00",
+      "roles": [
+        {"id": "41771983423143937", "name": "@everyone", "permissions": "1071698660929", "position": 0, "color": 0},
+        {"id": "41771983444444444", "name": "Mods", "permissions": "8", "position": 1, "color": 255}
+      ],
+      "channels": [
+        {"id": "41771983423143938", "type": 0, "name": "general", "position": 0, "permission_overwrites": [], "last_message_id": "175928847299117100", "topic": "ignored"},
+        {"id": "41771983423143939", "type": 2, "name": "Voice", "position": 1, "permission_overwrites": [{"id": "41771983444444444", "type": 0, "allow": "1048576", "deny": "0"}]},
+        {"id": "41771983423143950", "type": 15, "name": "forum-from-the-future", "position": 2, "permission_overwrites": []}
+      ],
+      "threads": [{"id": "999", "type": 11, "name": "skipped", "parent_id": "41771983423143938"}],
+      "stage_instances": [],
+      "guild_scheduled_events": [],
+      "stickers": [],
+      "emojis": [{"id": "777", "name": "wave", "animated": false}],
+      "premium_subscription_count": 0
+    },
+    {"id": "41771983423143940", "unavailable": true},
+    {
+      "id": "41771983423143941",
+      "name": "Second Server",
+      "icon": "a_icon_hash",
+      "owner_id": "175928847299117063",
+      "member_count": 3,
+      "roles": [{"id": "41771983423143941", "name": "@everyone", "permissions": "104320577", "position": 0}],
+      "channels": [{"id": "41771983423143942", "type": 0, "name": "lobby", "permission_overwrites": []}]
+    }
+  ],
+  "merged_members": [
+    [{"user_id": "175928847299117063", "roles": ["41771983444444444"], "nick": "Altie", "joined_at": "2020-01-01T00:00:00.000000+00:00", "flags": 0, "mute": false, "deaf": false}],
+    [],
+    [{"user_id": "175928847299117063", "roles": [], "communication_disabled_until": "2099-01-01T00:00:00.000000+00:00"}]
+  ],
+  "merged_presences": {"friends": [], "guilds": [[], [], []]},
+  "private_channels": [
+    {"id": "300000000000000001", "type": 1, "recipient_ids": ["80351110224678912"], "last_message_id": "175928847299117200"},
+    {"id": "300000000000000002", "type": 3, "name": "Study group", "recipient_ids": ["53908232506183680", "90101010101010101"]}
+  ],
+  "relationships": [{"id": "80351110224678912", "type": 1, "user_id": "80351110224678912"}],
+  "experiments": [{"hash": 1, "revision": 2, "bucket": 3, "nested": [[1, 2], {"a": null}]}],
+  "user_settings_proto": "CgA=",
+  "session_id": "fixture-session-id-0001",
+  "session_type": "normal",
+  "static_client_session_id": "fixture-static-0001",
+  "resume_gateway_url": "wss://gateway-us-east1-b.discord.gg",
+  "geo_ordered_rtc_regions": ["rotterdam", "frankfurt"],
+  "country_code": "US"
+}

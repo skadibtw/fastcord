@@ -99,7 +99,7 @@ Process READY without retaining a duplicate untyped JSON tree. Use a streaming/v
 
 ### 4.2 Lifecycle
 
-Use an explicit connection state machine: `Disconnected -> Connecting -> AwaitHello -> Identifying/Resuming -> Ready -> Reconnecting`, plus terminal `AuthenticationRequired`.
+Use an explicit connection state machine: `Disconnected -> Connecting -> AwaitHello -> Identifying/Resuming -> Ready -> Reconnecting`, plus terminal `AuthenticationRequired` and terminal `Stopped(reason)` for conditions reconnecting cannot fix (payload rejected, too many sessions, an account action Discord requires, repeated Invalid Session, an event over the safety ceiling, undecodable READY). `Disconnected` is the absence of a running Gateway handle; the handle's first event is `Connecting`. Implemented in `fastcord-discord::gateway`; wire details and evidence status are in `docs/PROTOCOL.md`.
 
 - Start heartbeat scheduling from HELLO's interval; jitter the first heartbeat, send the latest dispatch sequence (or null), answer server heartbeat requests immediately, and require ACK progress.
 - On a missed ACK, close and reconnect; never keep displaying the connection as healthy.

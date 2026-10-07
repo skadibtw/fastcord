@@ -30,6 +30,14 @@ impl fmt::Debug for Session {
     }
 }
 
+impl Session {
+    /// The validated token, for the Gateway's Identify. Redacted everywhere it
+    /// is held; never formatted.
+    pub fn token(&self) -> Arc<UserToken> {
+        Arc::clone(&self.token)
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         self.client.stop_authenticated_work();

@@ -1,0 +1,273 @@
+//! Events the Gateway task delivers to its single consumer (the reducer).
+
+use std::fmt;
+use std::time::Duration;
+
+use fastcord_model::{
+    Channel, Guild, GuildMember, Message, MessageUpdate, Snowflake, User, VoiceState,
+};
+
+/// The Gateway session ID. Not a credential on its own (resuming also needs the
+/// token), but redacted in `Debug` like everything session-related.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SessionId(pub(crate) String);
+
+impl SessionId {
+    pub fn new(id: String) -> Self {
+        Self(id)
+    }
+
+    /// Voice signaling correlates its join attempts with this session ID.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SessionId([REDACTED])")
+    }
+}
+
+/// Why the connection is being re-established.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconnectReason {
+    /// Opcode 7: the server is migrating the session.
+    ServerRequested,
+    /// No heartbeat ACK arrived within an interval; the connection is dead.
+    HeartbeatTimeout,
+    /// HELLO never arrived.
+    HelloTimeout,
+    /// A frame or the compression stream could not be decoded; the zlib
+    /// dictionary cannot be trusted any more, so the connection is replaced.
+    Protocol,
+    /// Opcode 9.
+    InvalidSession {
+        resumable: bool,
+    },
+    /// The server closed the socket (with an optional close code).
+    Closed(Option<u16>),
+    /// The socket failed mid-stream.
+    Network,
+    ConnectFailed,
+    /// `GET /gateway` failed.
+    DiscoveryFailed,
+}
+
+/// A terminal condition that is neither a login problem nor recoverable by
+/// reconnecting. Automatic attempts have stopped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StopReason {
+    /// One event exceeded the 16 MiB client safety ceiling, so account state
+    /// would otherwise be silently truncated.
+    EventTooLarge,
+    /// READY or READY_SUPPLEMENTAL could not be decoded (payload drift).
+    MalformedReady,
+    /// The server closed with a code that reconnecting cannot fix (rejected
+    /// payload, invalid version, invalid intents, and similar).
+    Rejected(u16),
+    /// More Gateway sessions are open than the account may have.
+    TooManySessions,
+    /// Discord requires the account holder to act first (a challenge, terms,
+    /// verification). fastcord never completes or bypasses these.
+    ActionRequired(String),
+    /// Repeated Invalid Session answers to Identify: the profile or account is
+    /// being refused without an explicit close code.
+    IdentifyRejected,
+    /// Discovery returned a URL that is not a Discord Gateway.
+    InvalidGatewayUrl,
+}
+
+impl fmt::Display for StopReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EventTooLarge => f.write_str("Discord sent an event larger than fastcord's 16 MiB safety limit, so the account state could not be loaded safely."),
+            Self::MalformedReady => f.write_str("Discord's startup data (READY) could not be decoded. Discord may have changed its protocol; update fastcord."),
+            Self::Rejected(code) => write!(f, "Discord closed the Gateway connection with code {code}, which reconnecting cannot fix."),
+            Self::TooManySessions => f.write_str("This account has too many open Discord sessions. Close one and log in again."),
+            Self::ActionRequired(action) => write!(f, "Discord requires an action on this account ({action}). Complete it in the official Discord client; fastcord does not complete or bypass it."),
+            Self::IdentifyRejected => f.write_str("Discord repeatedly refused this connection without a reason. Check the account in the official client; fastcord stops instead of retrying."),
+            Self::InvalidGatewayUrl => f.write_str("Discord returned a Gateway address that is not a Discord Gateway. fastcord refused to send the login token there."),
+        }
+    }
+}
+
+/// The explicit connection state machine (SPEC §4.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// Opening a connection. `attempt` counts consecutive failed attempts.
+    Connecting {
+        attempt: u32,
+    },
+    AwaitHello,
+    Identifying,
+    Resuming,
+    Ready,
+    /// Waiting `delay` before the next attempt.
+    Reconnecting {
+        attempt: u32,
+        delay: Duration,
+        reason: ReconnectReason,
+    },
+    /// Terminal: the token is no longer accepted. Return to login.
+    AuthenticationRequired,
+    /// Terminal: see [`StopReason`].
+    Stopped(StopReason),
+}
+
+impl ConnectionState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::AuthenticationRequired | Self::Stopped(_))
+    }
+}
+
+/// Normalized READY. User objects are stored once in `users`; guilds, private
+/// channels, and members reference them by ID. The current user's member is
+/// the only member of each guild until READY_SUPPLEMENTAL.
+///
+/// A READY always replaces everything derived from a previous session.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Ready {
+    pub session_id: SessionId,
+    pub user: User,
+    pub users: Vec<User>,
+    pub guilds: Vec<Guild>,
+    /// Guilds in an outage or geo-restricted: known by ID only.
+    pub unavailable_guilds: Vec<Snowflake>,
+    pub private_channels: Vec<Channel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SupplementalGuild {
+    pub id: Snowflake,
+    pub voice_states: Vec<VoiceState>,
+    pub members: Vec<GuildMember>,
+}
+
+/// Normalized READY_SUPPLEMENTAL: the rest of what PRIORITIZED_READY_PAYLOAD
+/// held back from READY.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadySupplemental {
+    pub guilds: Vec<SupplementalGuild>,
+    /// Users newly seen in this event; READY's `users` table still applies.
+    pub users: Vec<User>,
+    /// Private channels omitted from READY.
+    pub lazy_private_channels: Vec<Channel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct MessageDelete {
+    pub id: Snowflake,
+    pub channel_id: Snowflake,
+    pub guild_id: Option<Snowflake>,
+}
+
+/// GUILD_CREATE: a joined or newly available guild, or one that is now known
+/// only by ID because of an outage.
+#[derive(Clone, PartialEq, Eq)]
+pub enum GuildCreate {
+    Available { guild: Guild, users: Vec<User> },
+    Unavailable(Snowflake),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuildDelete {
+    pub id: Snowflake,
+    /// `true`: an outage, the guild is still joined. `false`: removed.
+    pub unavailable: bool,
+}
+
+/// PASSIVE_UPDATE_V2 for a guild this connection is not subscribed to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PassiveUpdate {
+    pub guild_id: Snowflake,
+    pub channels: Vec<ChannelUnread>,
+    pub updated_voice_states: Vec<VoiceState>,
+    pub removed_voice_states: Vec<Snowflake>,
+    pub members: Vec<GuildMember>,
+    pub users: Vec<User>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct ChannelUnread {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub last_message_id: Option<Snowflake>,
+}
+
+/// Typed dispatch events. Events the client has no handler for are consumed
+/// (their sequence still counts) and never surfaced. Live events keep their
+/// wire shape; only READY-family payloads are normalized.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Dispatch {
+    Ready(Box<Ready>),
+    ReadySupplemental(Box<ReadySupplemental>),
+    /// Replay after a successful Resume is complete. State is kept.
+    Resumed,
+    MessageCreate(Box<Message>),
+    MessageUpdate(Box<MessageUpdate>),
+    MessageDelete(MessageDelete),
+    GuildCreate(Box<GuildCreate>),
+    GuildDelete(GuildDelete),
+    ChannelCreate(Box<Channel>),
+    ChannelUpdate(Box<Channel>),
+    ChannelDelete(Box<Channel>),
+    PassiveUpdate(Box<PassiveUpdate>),
+}
+
+impl Dispatch {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Ready(_) => "READY",
+            Self::ReadySupplemental(_) => "READY_SUPPLEMENTAL",
+            Self::Resumed => "RESUMED",
+            Self::MessageCreate(_) => "MESSAGE_CREATE",
+            Self::MessageUpdate(_) => "MESSAGE_UPDATE",
+            Self::MessageDelete(_) => "MESSAGE_DELETE",
+            Self::GuildCreate(_) => "GUILD_CREATE",
+            Self::GuildDelete(_) => "GUILD_DELETE",
+            Self::ChannelCreate(_) => "CHANNEL_CREATE",
+            Self::ChannelUpdate(_) => "CHANNEL_UPDATE",
+            Self::ChannelDelete(_) => "CHANNEL_DELETE",
+            Self::PassiveUpdate(_) => "PASSIVE_UPDATE_V2",
+        }
+    }
+}
+
+// Debug names the event only: payloads carry message content, signed
+// attachment URLs, and account data that must stay out of logs.
+impl fmt::Debug for Dispatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Dispatch::{}", self.name())
+    }
+}
+
+impl fmt::Debug for Ready {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ready")
+            .field("guilds", &self.guilds.len())
+            .field("unavailable_guilds", &self.unavailable_guilds.len())
+            .field("private_channels", &self.private_channels.len())
+            .field("users", &self.users.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for GuildCreate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GuildCreate")
+    }
+}
+
+/// What the Gateway task hands the reducer, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GatewayEvent {
+    State(ConnectionState),
+    /// A dispatch with its sequence number. Delivered in sequence order; a
+    /// sequence already delivered (replay overlap after Resume) is dropped
+    /// before it gets here.
+    Dispatch {
+        sequence: u64,
+        event: Dispatch,
+    },
+}

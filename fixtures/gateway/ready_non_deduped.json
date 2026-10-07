@@ -1,0 +1,22 @@
+{
+  "v": 10,
+  "user": {"id": "175928847299117063", "username": "alt_fixture", "global_name": "Alt Fixture", "avatar": null, "discriminator": "0"},
+  "guilds": [
+    {
+      "id": "41771983423143937",
+      "properties": {"name": "Nested Server", "icon": null, "owner_id": "80351110224678912"},
+      "member_count": 5,
+      "roles": [{"id": "41771983423143937", "name": "@everyone", "permissions": "1071698660929", "position": 0}],
+      "channels": [{"id": "41771983423143938", "type": 0, "name": "general", "permission_overwrites": []}],
+      "members": [
+        {"user": {"id": "175928847299117063", "username": "alt_fixture", "global_name": "Alt Fixture", "avatar": null}, "roles": [], "nick": null},
+        {"user": {"id": "80351110224678912", "username": "nelly", "global_name": "Nelly", "avatar": null}, "roles": []}
+      ]
+    }
+  ],
+  "private_channels": [
+    {"id": "300000000000000001", "type": 1, "recipients": [{"id": "80351110224678912", "username": "nelly", "global_name": "Nelly", "avatar": null}]}
+  ],
+  "session_id": "fixture-session-id-0002",
+  "resume_gateway_url": "wss://gateway-us-east1-c.discord.gg"
+}

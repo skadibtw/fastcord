@@ -1,0 +1,29 @@
+{
+  "guilds": [
+    {
+      "id": "41771983423143937",
+      "voice_states": [
+        {"channel_id": "41771983423143939", "user_id": "80351110224678912", "session_id": "voice-session-fixture", "deaf": false, "mute": false, "self_deaf": false, "self_mute": true, "self_video": false, "suppress": false, "request_to_speak_timestamp": null}
+      ],
+      "activity_instances": []
+    },
+    {"id": "41771983423143940"},
+    {"id": "41771983423143941", "voice_states": []}
+  ],
+  "merged_members": [
+    [
+      {"user_id": "80351110224678912", "roles": [], "nick": null, "joined_at": "2019-01-01T00:00:00.000000+00:00"},
+      {"user_id": "53908232506183680", "roles": ["41771983444444444"]},
+      {"user": {"id": "60606060606060606", "username": "newcomer", "global_name": null, "avatar": null}, "roles": []}
+    ],
+    [],
+    [{"user_id": "80351110224678912", "roles": []}]
+  ],
+  "merged_presences": {"friends": [], "guilds": [[], [], []]},
+  "lazy_private_channels": [
+    {"id": "300000000000000003", "type": 1, "recipient_ids": ["53908232506183680"]},
+    {"id": "300000000000000004", "type": 1, "recipients": [{"id": "70707070707070707", "username": "embedded", "global_name": null, "avatar": null}]}
+  ],
+  "disclose": [],
+  "game_invites": []
+}

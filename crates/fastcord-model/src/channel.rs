@@ -113,6 +113,11 @@ pub struct Channel {
     /// DM and group-DM participants (excluding the current user).
     #[serde(default)]
     pub recipients: Vec<User>,
+    /// DM and group-DM participants by ID. Gateway READY with deduplicated user
+    /// objects sends only IDs (the users arrive once, in the `users` array);
+    /// normalized channels always reference participants this way.
+    #[serde(default)]
+    pub recipient_ids: Vec<Snowflake>,
     #[serde(default)]
     pub last_message_id: Option<Snowflake>,
 }

@@ -8,10 +8,11 @@ mod message;
 mod permissions;
 mod snowflake;
 mod user;
+mod voice;
 mod wire;
 
 pub use channel::{Channel, ChannelKind};
-pub use guild::Role;
+pub use guild::{Guild, GuildMember, Role};
 pub use message::{Attachment, Emoji, Message, MessageReference, MessageUpdate, Reaction};
 pub use permissions::{
     GuildScope, MemberScope, OverwriteKind, PermissionOverwrite, Permissions, channel_permissions,
@@ -19,3 +20,4 @@ pub use permissions::{
 };
 pub use snowflake::{ParseSnowflakeError, Snowflake};
 pub use user::User;
+pub use voice::VoiceState;

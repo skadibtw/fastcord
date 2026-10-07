@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod gateway;
 mod login;
 mod qr;
 
@@ -14,6 +15,7 @@ use iced::widget::{
 use iced::{Color, Element, Length, Task};
 use zeroize::Zeroize;
 
+use gateway::{GatewayPanel, GatewayStatus};
 use login::{LoginError, LoginOutcome, Persistence, Session, StoreReady};
 use qr::{Applied, QrAttempt, QrStage};
 
@@ -33,6 +35,7 @@ struct App {
     store: Option<NativeCredentialStore>,
     saved_accounts: Vec<Snowflake>,
     qr_attempts: u64,
+    gateway_sessions: u64,
 }
 
 #[derive(Debug)]
@@ -49,6 +52,7 @@ enum Phase {
     Account {
         session: Arc<Session>,
         persistence: Persistence,
+        gateway: GatewayPanel,
     },
     Deleting {
         account: Snowflake,
@@ -82,6 +86,7 @@ enum Message {
     Forget(Snowflake),
     RetryDelete,
     Deleted(Result<(), StoreError>),
+    Gateway(u64, GatewayStatus),
 }
 
 impl App {
@@ -96,6 +101,7 @@ impl App {
                 store: None,
                 saved_accounts: Vec::new(),
                 qr_attempts: 0,
+                gateway_sessions: 0,
             },
             Task::perform(login::initialize_store(), Message::StoreReady),
         )
@@ -191,11 +197,8 @@ impl App {
                         {
                             self.saved_accounts.push(session.user.id);
                         }
-                        self.phase = Phase::Account {
-                            session,
-                            persistence,
-                        };
                         self.notice = None;
+                        return self.enter_account(session, persistence);
                     }
                     Ok(LoginOutcome::NeedsMemoryConsent(session, error)) => {
                         self.phase = Phase::MemoryConsent { session, error };
@@ -208,14 +211,28 @@ impl App {
             }
             Message::ContinueInMemory => {
                 if let Phase::MemoryConsent { session, .. } = &self.phase {
-                    self.phase = Phase::Account {
-                        session: Arc::clone(session),
-                        persistence: Persistence::MemoryOnly,
-                    };
+                    let session = Arc::clone(session);
+                    return self.enter_account(session, Persistence::MemoryOnly);
                 }
             }
             Message::CancelLogin if matches!(self.phase, Phase::MemoryConsent { .. }) => {
                 self.reset_login();
+            }
+            Message::Gateway(id, status) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == id) =>
+            {
+                if status == GatewayStatus::AuthenticationRequired {
+                    // Discord rejected the token: stop all of this account's
+                    // work and return to login.
+                    if let Phase::Account { session, .. } = &self.phase {
+                        session.client.stop_authenticated_work();
+                    }
+                    self.reset_login();
+                    self.notice = Some(
+                        "Discord no longer accepts this login (the token was revoked, expired, or reset). Log in again. A saved copy of the old token can be removed with Forget saved login.".to_owned(),
+                    );
+                } else if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.status = status;
+                }
             }
             Message::Logout => {
                 if let Phase::Account { session, .. } = &self.phase {
@@ -314,6 +331,27 @@ impl App {
         task
     }
 
+    /// Shows the account and starts its Gateway connection. The connection
+    /// belongs to the panel: leaving the account screen (logout, rejected
+    /// token) drops it, which closes the Gateway session.
+    fn enter_account(&mut self, session: Arc<Session>, persistence: Persistence) -> Task<Message> {
+        self.gateway_sessions += 1;
+        let id = self.gateway_sessions;
+        let stream = gateway::status_stream(
+            session.client.clone(),
+            session.token(),
+            fastcord_platform::system_locale(),
+        );
+        let (task, worker) =
+            Task::run(stream, move |status| Message::Gateway(id, status)).abortable();
+        self.phase = Phase::Account {
+            session,
+            persistence,
+            gateway: GatewayPanel::new(id, worker),
+        };
+        task
+    }
+
     fn view(&self) -> Element<'_, Message> {
         let content: Element<'_, Message> = match &self.phase {
             Phase::Starting => text("Looking for a saved login in the native credential store…").into(),
@@ -333,7 +371,7 @@ impl App {
                 text("Continue only if you accept a memory-only session. The token will not be written to a file; you will need to log in again next launch. Previously saved credentials remain until removed."),
                 row![button("Continue without saving").on_press(Message::ContinueInMemory), button("Cancel login").on_press(Message::CancelLogin)].spacing(12),
             ].spacing(20).into(),
-            Phase::Account { session, persistence } => column![
+            Phase::Account { session, persistence, gateway } => column![
                 text("Logged in").size(32),
                 text(session.user.display_name()).size(26),
                 text(format!("@{}", session.user.username)),
@@ -342,6 +380,7 @@ impl App {
                     Persistence::Saved => "Saved securely in the native credential store. This account will be restored on launch.",
                     Persistence::MemoryOnly => "Memory-only session: this token was not saved. Login is required next launch unless a previously saved credential still exists.",
                 }),
+                text(gateway.status.describe()),
                 button("Log out").on_press(Message::Logout),
             ].spacing(20).into(),
             Phase::Deleting { .. } => text("Account state cleared. Removing the saved credential…").into(),
@@ -750,5 +789,98 @@ mod tests {
         let id = qr_id(&app);
         let _ = app.update(Message::Qr(id, RemoteAuthEvent::Qr(qr_link())));
         assert!(!format!("{:?}", app.phase).contains("UZ0-kOVz"));
+    }
+
+    fn gateway_status(app: &App) -> (u64, GatewayStatus) {
+        match &app.phase {
+            Phase::Account { gateway, .. } => (gateway.id, gateway.status.clone()),
+            other => panic!("expected the account screen, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_account_screen_owns_a_gateway_that_starts_connecting() {
+        let mut app = login_app();
+        drop(authenticate(&mut app, Persistence::Saved));
+        let (id, status) = gateway_status(&app);
+        assert_eq!(status, GatewayStatus::Connecting { attempt: 0 });
+        assert!(status.describe().starts_with("Connecting to Discord"));
+        // A second session gets a new identity.
+        app.phase = Phase::Login;
+        drop(authenticate(&mut app, Persistence::MemoryOnly));
+        assert_ne!(gateway_status(&app).0, id);
+    }
+
+    #[test]
+    fn memory_only_continuation_also_starts_the_gateway() {
+        let mut app = login_app();
+        app.phase = Phase::MemoryConsent {
+            session: login::fixture_session(),
+            error: StoreError::Locked,
+        };
+        let _ = app.update(Message::ContinueInMemory);
+        assert_eq!(
+            gateway_status(&app).1,
+            GatewayStatus::Connecting { attempt: 0 }
+        );
+    }
+
+    #[test]
+    fn gateway_status_updates_apply_but_stale_sessions_are_ignored() {
+        let mut app = login_app();
+        drop(authenticate(&mut app, Persistence::Saved));
+        let (id, _) = gateway_status(&app);
+        let counts = gateway::Counts {
+            guilds: 2,
+            unavailable: 0,
+            direct_messages: 1,
+        };
+        let _ = app.update(Message::Gateway(id, GatewayStatus::Ready(counts)));
+        assert_eq!(gateway_status(&app).1, GatewayStatus::Ready(counts));
+        // A straggler from an earlier session must not change the screen.
+        let _ = app.update(Message::Gateway(id + 1, GatewayStatus::Resuming));
+        assert_eq!(gateway_status(&app).1, GatewayStatus::Ready(counts));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_stops_everything_and_returns_to_login() {
+        let mut app = login_app();
+        let session = authenticate(&mut app, Persistence::Saved);
+        let client = session.client.clone();
+        let account = session.user.id;
+        drop(session);
+        let (id, _) = gateway_status(&app);
+        let _ = app.update(Message::Gateway(id, GatewayStatus::AuthenticationRequired));
+        client.authentication_required().await;
+        assert!(matches!(app.phase, Phase::Login));
+        assert!(app.notice.as_deref().unwrap().contains("no longer accepts"));
+        assert!(app.token.expose_secret().is_empty());
+        // The saved credential is not silently deleted; the user decides.
+        assert!(app.saved_accounts.contains(&account));
+    }
+
+    #[tokio::test]
+    async fn logout_drops_the_gateway_with_the_account_screen() {
+        let mut app = login_app();
+        drop(authenticate(&mut app, Persistence::Saved));
+        let (id, _) = gateway_status(&app);
+        let _ = app.update(Message::Logout);
+        assert!(matches!(app.phase, Phase::Deleting { .. }));
+        // Late status from the closed connection changes nothing.
+        let _ = app.update(Message::Gateway(id, GatewayStatus::Resuming));
+        assert!(matches!(app.phase, Phase::Deleting { .. }));
+    }
+
+    #[test]
+    fn gateway_messages_and_phases_never_print_secrets() {
+        let mut app = login_app();
+        drop(authenticate(&mut app, Persistence::Saved));
+        let (id, _) = gateway_status(&app);
+        let message = Message::Gateway(
+            id,
+            GatewayStatus::Stopped(fastcord_discord::gateway::StopReason::EventTooLarge),
+        );
+        assert!(!format!("{message:?}").contains("dummy-offline-secret"));
+        assert!(!format!("{:?}", app.phase).contains("dummy-offline-secret"));
     }
 }

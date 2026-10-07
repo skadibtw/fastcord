@@ -11,6 +11,23 @@ use zeroize::{Zeroize, Zeroizing};
 
 const SERVICE: &str = "fastcord";
 
+/// The user's primary locale as a BCP 47 tag (for example `en-US`), reported in
+/// the Gateway client profile. Falls back to `en-US` when the OS reports none
+/// or something that is not a plausible tag.
+pub fn system_locale() -> String {
+    sys_locale::get_locale()
+        .filter(|tag| is_locale_tag(tag))
+        .unwrap_or_else(|| "en-US".to_owned())
+}
+
+fn is_locale_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 35
+        && tag.split('-').all(|part| {
+            (1..=8).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+}
+
 /// Deliberately categorical: native errors may contain secret data or attributes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreError {
@@ -164,6 +181,24 @@ impl NativeCredentialStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locale_tags_are_validated_before_being_reported() {
+        for good in ["en-US", "ru", "zh-Hant-TW", "sr-Latn-RS"] {
+            assert!(is_locale_tag(good), "{good}");
+        }
+        for bad in [
+            "",
+            "en_US.UTF-8",
+            "en US",
+            "-",
+            "en--US",
+            "waytoolongsubtag-x",
+        ] {
+            assert!(!is_locale_tag(bad), "{bad}");
+        }
+        assert!(is_locale_tag(&system_locale()));
+    }
 
     fn mock_store() -> NativeCredentialStore {
         NativeCredentialStore {
