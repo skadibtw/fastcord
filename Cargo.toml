@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-only"
+repository = "https://github.com/skadibtw/fastcord"
+
+[workspace.dependencies]
+fastcord-model = { path = "crates/fastcord-model" }
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "thread-pool", "x11", "wayland"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+debug = "line-tables-only"
+split-debuginfo = "packed"

@@ -1,0 +1,19 @@
+[package]
+name = "fastcord-app"
+description = "fastcord desktop application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "fastcord"
+path = "src/main.rs"
+
+[dependencies]
+fastcord-model.workspace = true
+iced.workspace = true
+
+[lints]
+workspace = true
