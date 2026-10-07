@@ -1,0 +1,24 @@
+{
+  "id": "1290000000000000001",
+  "channel_id": "500",
+  "guild_id": "100",
+  "author": {"id": "2", "username": "alt", "global_name": "Alt Account", "avatar": null, "discriminator": "0"},
+  "content": "hello <:wave:777>",
+  "timestamp": "2026-10-07T12:00:00.000000+00:00",
+  "edited_timestamp": null,
+  "type": 19,
+  "flags": 0,
+  "pinned": false,
+  "tts": false,
+  "mention_everyone": false,
+  "mentions": [],
+  "embeds": [],
+  "components": [],
+  "attachments": [
+    {"id": "880", "filename": "cat.png", "size": 12345, "url": "https://cdn.example/a/cat.png?ex=SIGNED", "proxy_url": "https://media.example/a/cat.png", "content_type": "image/png", "width": 640, "height": 480}
+  ],
+  "reactions": [
+    {"count": 2, "me": true, "emoji": {"id": null, "name": "\ud83d\udc4d"}, "burst_count": 0}
+  ],
+  "message_reference": {"type": 0, "message_id": "1289999999999999999", "channel_id": "500", "guild_id": "100"}
+}

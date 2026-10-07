@@ -43,6 +43,18 @@ impl FromStr for Snowflake {
     }
 }
 
+impl serde::Serialize for Snowflake {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        crate::wire::serialize_u64_str(self.0, s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Snowflake {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::wire::deserialize_u64_str(d).map(Snowflake)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,5 +79,17 @@ mod tests {
             "18446744073709551615".parse::<Snowflake>(),
             Ok(Snowflake(u64::MAX))
         );
+    }
+
+    #[test]
+    fn serde_uses_decimal_strings_and_accepts_integers() {
+        let id: Snowflake = serde_json::from_str("\"41771983423143937\"").unwrap();
+        assert_eq!(id, Snowflake(41_771_983_423_143_937));
+        assert_eq!(serde_json::to_string(&id).unwrap(), "\"41771983423143937\"");
+        assert_eq!(
+            serde_json::from_str::<Snowflake>("7").unwrap(),
+            Snowflake(7)
+        );
+        assert!(serde_json::from_str::<Snowflake>("\"-7\"").is_err());
     }
 }

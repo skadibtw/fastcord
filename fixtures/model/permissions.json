@@ -1,0 +1,88 @@
+[
+  {
+    "name": "owner gets everything even when overwrites deny",
+    "guild": {"id": "100", "owner_id": "1", "roles": [{"id": "100", "name": "@everyone", "permissions": "0"}]},
+    "member": {"user_id": "1", "roles": []},
+    "channel": {"id": "500", "type": 0, "guild_id": "100", "permission_overwrites": [
+      {"id": "100", "type": 0, "allow": "0", "deny": "1024"}
+    ]},
+    "allow": ["VIEW_CHANNEL", "SEND_MESSAGES", "ADMINISTRATOR"],
+    "deny": []
+  },
+  {
+    "name": "administrator role bypasses channel denies",
+    "guild": {"id": "100", "owner_id": "9", "roles": [
+      {"id": "100", "name": "@everyone", "permissions": "0"},
+      {"id": "201", "name": "admin", "permissions": "8"}
+    ]},
+    "member": {"user_id": "2", "roles": ["201"]},
+    "channel": {"id": "500", "type": 0, "guild_id": "100", "permission_overwrites": [
+      {"id": "2", "type": 1, "allow": "0", "deny": "3072"}
+    ]},
+    "allow": ["VIEW_CHANNEL", "SEND_MESSAGES"],
+    "deny": []
+  },
+  {
+    "name": "role deny then role allow: allow wins across roles",
+    "guild": {"id": "100", "owner_id": "9", "roles": [
+      {"id": "100", "name": "@everyone", "permissions": "68608"},
+      {"id": "201", "name": "muted", "permissions": "0"},
+      {"id": "202", "name": "speaker", "permissions": "0"}
+    ]},
+    "member": {"user_id": "2", "roles": ["201", "202"]},
+    "channel": {"id": "500", "type": 0, "guild_id": "100", "permission_overwrites": [
+      {"id": "201", "type": 0, "allow": "0", "deny": "2048"},
+      {"id": "202", "type": 0, "allow": "2048", "deny": "0"}
+    ]},
+    "allow": ["VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY"],
+    "deny": ["ADMINISTRATOR"]
+  },
+  {
+    "name": "member overwrite beats role allow",
+    "guild": {"id": "100", "owner_id": "9", "roles": [
+      {"id": "100", "name": "@everyone", "permissions": "68608"},
+      {"id": "202", "name": "speaker", "permissions": "0"}
+    ]},
+    "member": {"user_id": "2", "roles": ["202"]},
+    "channel": {"id": "500", "type": 0, "guild_id": "100", "permission_overwrites": [
+      {"id": "202", "type": 0, "allow": "2048", "deny": "0"},
+      {"id": "2", "type": 1, "allow": "0", "deny": "2048"}
+    ]},
+    "allow": ["VIEW_CHANNEL", "READ_MESSAGE_HISTORY"],
+    "deny": ["SEND_MESSAGES", "ATTACH_FILES", "EMBED_LINKS", "MENTION_EVERYONE"]
+  },
+  {
+    "name": "everyone overwrite hides channel; nothing else survives",
+    "guild": {"id": "100", "owner_id": "9", "roles": [
+      {"id": "100", "name": "@everyone", "permissions": "3197952"}
+    ]},
+    "member": {"user_id": "2", "roles": []},
+    "channel": {"id": "600", "type": 2, "guild_id": "100", "permission_overwrites": [
+      {"id": "100", "type": 0, "allow": "0", "deny": "1024"}
+    ]},
+    "allow": [],
+    "deny": ["VIEW_CHANNEL", "CONNECT", "SPEAK", "SEND_MESSAGES"]
+  },
+  {
+    "name": "missing optional fields use defaults; overwrite for another member ignored",
+    "guild": {"id": "100", "owner_id": "9", "roles": [
+      {"id": "100", "name": "@everyone", "permissions": "3148800"}
+    ]},
+    "member": {"user_id": "2", "roles": []},
+    "channel": {"id": "600", "type": 2, "permission_overwrites": [
+      {"id": "3", "type": 1, "allow": "0", "deny": "1048576"}
+    ]},
+    "allow": ["VIEW_CHANNEL", "CONNECT", "SPEAK"],
+    "deny": ["STREAM"]
+  },
+  {
+    "name": "timed-out member keeps only view and history",
+    "guild": {"id": "100", "owner_id": "9", "roles": [
+      {"id": "100", "name": "@everyone", "permissions": "68672"}
+    ]},
+    "member": {"user_id": "2", "roles": [], "timed_out": true},
+    "channel": {"id": "500", "type": 0, "guild_id": "100"},
+    "allow": ["VIEW_CHANNEL", "READ_MESSAGE_HISTORY"],
+    "deny": ["SEND_MESSAGES", "ADD_REACTIONS"]
+  }
+]

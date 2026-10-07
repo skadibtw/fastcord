@@ -12,6 +12,9 @@ repository = "https://github.com/skadibtw/fastcord"
 [workspace.dependencies]
 fastcord-model = { path = "crates/fastcord-model" }
 iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "thread-pool", "x11", "wayland"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_repr = "0.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
