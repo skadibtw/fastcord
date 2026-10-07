@@ -2,7 +2,7 @@
 
 ## 1. Decision
 
-Build fastcord as a single-process, native Rust desktop application using Rust 1.99.0 stable, the MSVC target on Windows, and iced 0.14 with its wgpu renderer. Separate Discord protocol/state, real-time audio, video/capture, platform integration, and presentation into a small acyclic Cargo workspace. Use a direct user-account Gateway/REST implementation rather than adapting a bot framework; a bounded, single-writer state store; native UDP/RTP media with both required transport AEAD and DAVE; `davey` for the DAVE/MLS implementation; `opus2` with bundled libopus; `cpal` for microphone/playback; and `nnnoiseless` for microphone noise suppression. Use OS screen-capture APIs, H.264 as the interoperable send baseline, FFmpeg libraries for receive codecs and hardware codec integration, and iced shader rendering for video. All networking, decoding, and audio processing stay outside the UI thread. Ship Windows, Linux, and macOS artifacts through GitHub Actions, with bounded caches and event-driven rendering designed around an idle process-memory target below 150 MB.
+Build fastcord as a single-process, native Rust desktop application using Rust 1.99.0 stable, the MSVC target on Windows, and iced 0.14 with its wgpu renderer. Separate Discord protocol/state, real-time audio, video/capture, platform integration, and presentation into a small acyclic Cargo workspace. Use a direct user-account Gateway/REST implementation rather than adapting a bot framework; a bounded, single-writer state store; native UDP/RTP media with both required transport AEAD and DAVE; `davey` for the DAVE/MLS implementation; `opus2` with bundled libopus; `cpal` for microphone/playback; and `nnnoiseless` for microphone noise suppression. Use OS screen-capture APIs, H.264 as the interoperable send baseline, OS-native video codecs (Media Foundation, VideoToolbox, VA-API) plus `dav1d` for AV1 decode (no FFmpeg; see `docs/adr/0001-video-codecs.md`), and iced shader rendering for video. All networking, decoding, and audio processing stay outside the UI thread. Ship Windows, Linux, and macOS artifacts through GitHub Actions, with bounded caches and event-driven rendering designed around an idle process-memory target below 150 MB.
 
 ## 2. Scope, evidence, and invariants
 
@@ -123,7 +123,7 @@ Select named flags, not a copied magic integer:
 
 Implement the corresponding normalized `users`, `merged_members`, READY_SUPPLEMENTAL, and passive-update shapes before enabling them. Do not enable protobuf user settings, reaction debouncing, client-state-v2, or token-refresh capabilities without their handlers. Send an empty guild-version cache on a cold login rather than claiming cached versions that are not persisted. [S1, S3]
 
-Identify properties are a centralized versioned client-compatibility profile. Use truthful OS information and a stable application identity; do not generate a different browser fingerprint every reconnect. **UNKNOWN U1:** server acceptance of a minimal third-party profile and selected capability set is not established. Milestone 6 must record a sanitized accepted payload and stop on a server challenge; this spec does not authorize CAPTCHA bypass or stealth fingerprint evasion.
+Identify properties use a centralized, versioned **web-client profile** (ADR 0005): `browser: "Chrome"`, a matching `browser_user_agent`/`browser_version`, truthful `os`/`os_version`/`system_locale`, `release_channel: "stable"`, and a current `client_build_number`. The build number is fetched from discord.com web assets at startup (cached with a timestamp) with the value bundled at release time as fallback. Keep the profile stable across reconnects; never randomize it. **UNKNOWN U1:** server acceptance of this profile with the selected capability set is not established. Milestone 6 must record a sanitized accepted payload and stop on a server challenge; this spec does not authorize CAPTCHA bypass. **UNKNOWN U1b:** the official web client negotiates voice through WebRTC, whereas fastcord uses the native UDP voice protocol; whether a web profile plus `protocol: "udp"` is accepted or flagged must be verified in milestone 17 on the alt account.
 
 ### 4.4 Lazy subscriptions
 
@@ -241,7 +241,7 @@ Use `opus2` 0.4 with `backend-libopus`, `static`, and `bundled`; its documented 
 
 Official Discord documentation says E2EE is required from March 1, 2026 for DM/GDM calls, voice channels, and Go Live. DAVE is not an optional later milestone and a transport-only voice demo does not satisfy voice acceptance. [S8]
 
-Select **`davey` 0.1.4 as a direct Rust DAVE implementation built on OpenMLS**. It is not a binding to official libdave. Use it through a narrow internal `DaveSession` adapter, without optional Python or Node bindings. Its documented codec enum includes Opus, H.264, VP8, VP9, and AV1. Pin the exact version and run official-protocol/reference interoperability vectors. [S11]
+Select **`davey` (latest 0.1.x, pinned) as a direct Rust DAVE implementation built on OpenMLS** (ADR 0003). It is not a binding to official libdave. Production evidence: `@discordjs/voice` ships `@snazzah/davey` as its only supported DAVE library, and discord.py-self uses it. Use it through a narrow internal `DaveSession` adapter, without optional Python or Node bindings. Its documented codec enum includes Opus, H.264, VP8, VP9, and AV1. Pin the exact version and run official-protocol/reference interoperability vectors. [S11]
 
 Official **libdave** is the reference implementation and test oracle. It is C++ with MLS++ and OpenSSL/BoringSSL dependencies; a Rust integration would require a C-ABI wrapper, ownership-safe handles, and pinned native build recipes. Do not claim `davey` provides that wrapper. Do not ship two DAVE engines in parallel. If the chosen engine fails an acceptance vector, fix/update it or make an explicit one-engine cutover; do not silently fall back to unencrypted transport. [S12]
 
@@ -298,11 +298,11 @@ On hot-unplug or device error, close the old stream and show the affected device
 
 ### 7.4 Noise suppression
 
-Use **`nnnoiseless` 0.5.2**, a Rust RNNoise implementation, on microphone audio only. Its low-level API minimizes copies, maintains state across calls, and expects f32 samples scaled to the i16 numeric range. Use 480-sample/10 ms blocks, discard/handle the documented initial delayed output correctly, and rescale afterward. Supply an on/off setting; bypass completely when disabled or microphone-muted. Never apply speech suppression to music/game/stream audio. [S15]
+Offer a setting with three modes (ADR 0004): **Off**, **Light** (default) — `nnnoiseless` 0.5.2, a Rust RNNoise implementation — and **High quality** — DeepFilterNet 3 via its Rust crate. Apply to microphone audio only. Both engines sit behind one `Denoiser` trait in `fastcord-audio`. The DeepFilterNet model and runtime load only when High quality is selected and are dropped when the user switches away, so Light/Off users pay no memory for it. `nnnoiseless`'s low-level API minimizes copies, maintains state across calls, and expects f32 samples scaled to the i16 numeric range: use 480-sample/10 ms blocks, handle the documented initial delayed output, and rescale afterward. DeepFilterNet adds lookahead latency; account for it in the §12.2 local-latency budget and show it in the setting description. Bypass completely when Off or microphone-muted. Never apply speech suppression to music/game/stream audio. [S15]
 
 CPU cost is an estimate, not a result: target **1–5% of one modern x86 core** for the mono denoiser and **p95 <0.5 ms per 10 ms block** in a release build on the recorded reference Windows machine. The original RNNoise paper reports roughly 40 MFLOPS and 1.3% of a Haswell i7-4800MQ core for its non-vectorized C implementation; that number is not a benchmark of this Rust crate. Measure the exact shipped model/build. [S16]
 
-Reject DeepFilterNet as the initial choice because the MVP favors a small fixed-state implementation and an explicit low CPU budget over a larger inference/model integration. Noise suppression is not acoustic echo cancellation; recommend a headset and do not claim speakerphone-quality AEC.
+DeepFilterNet is not the default because its CPU/RAM cost (estimated 5–15% of one core, +10–20 MB) conflicts with the low-resource goal; it is opt-in for users who need Krisp-like suppression of non-stationary noise (keyboard, voices). Record measured CPU, RAM, and latency for both engines on the reference PC in milestones 23 and 23a. Noise suppression is not acoustic echo cancellation; recommend a headset and do not claim speakerphone-quality AEC.
 
 ## 8. Screen sharing: send, watch, and stream audio
 
@@ -325,9 +325,18 @@ A share is not ordinary camera video on the parent voice connection. Remain join
 
 Send **H.264** by default, a single screen layer at up to 1280×720 and 30 fps, using a low-latency profile with no B-frames. Start around 2.5 Mbit/s and obey negotiated/server limits and network feedback. A software encoder must remain available when hardware is absent. Higher quality is not required to claim the baseline works; do not display a quality choice that is not implemented.
 
-Use `openh264` for the software H.264 encoder. Use FFmpeg `libavcodec`/`libavutil` through `ffmpeg-next` and narrowly isolated FFI for hardware paths and receive decoding. Do not spawn an `ffmpeg` child process or pipe raw frames between processes. Build only needed media components and keep decoder contexts lazy. [S18, S19]
+Use OS-native codec APIs per platform (decision record: `docs/adr/0001-video-codecs.md`):
 
-Receive H.264, VP8, VP9, and AV1 when they are enabled in the pinned decoder build. Implement each advertised codec's RTP depacketizer and DAVE transform selection; merely having an FFmpeg decoder is insufficient. Advertise encode/decode support separately, using only working paths. H.265 is not selected or advertised for MVP, even though community documentation now lists it. The server-selected payload type, RTX payload type, and codec are authoritative. [S9, S11]
+| Codec | Windows | macOS | Linux |
+|---|---|---|---|
+| H.264 encode | Media Foundation: hardware MFT preferred, Microsoft software MFT fallback | VideoToolbox (hardware, Apple software fallback) | VA-API; `openh264` software fallback |
+| H.264 decode | Media Foundation with D3D11VA; software MFT fallback | VideoToolbox | VA-API; `openh264` software fallback |
+| AV1 decode | `dav1d`; Media Foundation hardware AV1 where the GPU/driver exposes it | `dav1d`; VideoToolbox hardware where available | `dav1d`; VA-API hardware where available |
+| VP8/VP9 decode | `libvpx`, only if live tests (U4) show Discord senders actually emit them | same | same |
+
+FFmpeg is not used. Do not spawn codec child processes or pipe raw frames between processes. Keep decoder contexts lazy and create them only for the negotiated codec. [S18, S19]
+
+Receive H.264 and AV1; add VP8/VP9 only when U4 evidence requires them. Implement each advertised codec's RTP depacketizer and DAVE transform selection; merely having a decoder is insufficient. Advertise encode/decode support separately, using only working paths. H.265 is not selected or advertised for MVP, even though community documentation now lists it. The server-selected payload type, RTX payload type, and codec are authoritative. [S9, S11]
 
 **UNKNOWN U4:** the current server's negotiation with official desktop/mobile viewers, especially AV1 senders and H.264 profile selection, requires live interoperability tests. Test actual emitted/received codecs rather than assuming the codec preference list guarantees a selection.
 
@@ -359,9 +368,9 @@ Target macOS 13+ for the full audio/video capture baseline. Check each optional 
 
 Select capabilities at runtime:
 
-- Windows: D3D11VA decode; hardware H.264 via Media Foundation or available NVENC/QSV encoder support in the pinned FFmpeg build.
-- Linux: VA-API decode/encode where present, with NVENC an available explicit path on supported NVIDIA installations.
-- macOS: VideoToolbox decode/encode.
+- Windows: Windows.Graphics.Capture D3D11 textures feed the hardware Media Foundation H.264 encoder directly (zero-copy, shared D3D11 device); decode through Media Foundation with D3D11VA surfaces.
+- Linux: VA-API decode/encode where present; `openh264` software otherwise.
+- macOS: VideoToolbox decode/encode with IOSurface-backed frames.
 
 The deterministic preference is platform-native hardware, then another tested hardware backend, then software. A configured explicit backend that fails shows its failure; automatic mode may choose the software path and report that choice. Hardware names are candidates, not a guarantee that the current runner/GPU/driver exposes them. [S19]
 
@@ -415,7 +424,7 @@ No fixed 60 Hz subscription. Enable animation ticks only for currently visible a
 
 ## 11. Login and token storage
 
-MVP login is **explicit token paste** with a clear account/ToS warning and password-style input. There is no embedded Discord login page, token extraction, browser-store scraping, or password collection. Validate the token once with `GET /users/@me` before establishing the Gateway.
+MVP login offers two methods (ADR 0006): **QR code** (primary, shown first) and **explicit token paste** (advanced) with a clear account/ToS warning and password-style input. There is no embedded Discord login page, token extraction, browser-store scraping, or password collection. Validate the resulting token once with `GET /users/@me` before establishing the Gateway.
 
 Use the keyring ecosystem with one selected native backend per OS: Windows Credential Manager, macOS Keychain, and Linux Secret Service. Prefer `keyring-core` plus the exact backend crate, not the CLI feature that pulls every store. Native-store calls run off the UI thread. Store under application service `fastcord` and account ID after validation. [S26]
 
@@ -423,7 +432,7 @@ If a secure store is unavailable/locked, offer an explicitly nonpersistent sessi
 
 Use secret wrapper types, no `Debug` serialization of tokens, and zeroization of owned secret buffers where feasible. This cannot guarantee erasure of arbitrary copies inside third-party TLS/HTTP/GUI internals; do not promise that it can. Do not read the clipboard automatically or erase unrelated clipboard content.
 
-QR remote authentication is not the selected login method. It introduces RSA/WebSocket remote-auth state, user confirmation, and token exchange with undocumented user-facing behavior. Password login, MFA entry, CAPTCHA solving, and account verification are not implemented. If Discord requires a challenge, stop the affected action and direct the user to the official client; do not retry indefinitely. The accepted ToS risk does not guarantee the account will remain usable.
+QR login implements Discord's remote-auth protocol: a dedicated WebSocket (`wss://remote-auth-gateway.discord.gg`), an ephemeral RSA-OAEP key pair generated per attempt, the fingerprint rendered as a QR code (`https://discord.com/ra/{fingerprint}`), display of the pending user after the phone scans, and the encrypted ticket exchanged for the token through the documented REST call. Keys and tickets live in memory only and are dropped on success, cancel, or timeout; the QR expires with the server's timeout and can be regenerated explicitly. If the exchange requires a CAPTCHA, stop and offer token paste or the official client. Password login, MFA entry, CAPTCHA solving, and account verification are not implemented. If Discord requires a challenge, stop the affected action and direct the user to the official client; do not retry indefinitely. The accepted ToS risk does not guarantee the account will remain usable. **UNKNOWN U6:** current remote-auth opcode set and ticket-exchange endpoint must be captured from the community documentation and verified with the alt account in milestone 5a.
 
 ## 12. Performance budgets and measurement
 
@@ -432,6 +441,8 @@ All figures in this section are design targets until milestone 38 records result
 ### 12.1 Idle target
 
 The hard product target is **less than 150,000,000 bytes** of steady-state process-resident memory on the primary Windows scenario, with working set and private committed memory both reported. Other OS measurements report RSS and their platform-specific private/footprint metric. Report dedicated/shared GPU memory separately; do not hide it in an RSS comparison.
+
+**Renderer backend (ADR 0002):** iced uses wgpu pinned to the platform-native API — DX12 on Windows, Metal on macOS, Vulkan on Linux. OpenGL is excluded; wgpu's automatic selection is not used. Measured on the primary Windows PC with an empty window, release build (2026-10-07, working set): automatic selection 172 MB, DX12 77 MB, Vulkan 96 MB, GL 221 MB, tiny-skia 21 MB. **Risk:** DX12 alone exceeds the 45 MiB "runtime + idle renderer" allowance below; milestone 38 must either reduce renderer overhead (wgpu limits, staging-belt size, atlas sizes) or rebalance the envelope, and the gap must be tracked from the first UI milestone onward.
 
 Planning envelope (MiB, not MB):
 
@@ -518,7 +529,7 @@ Build/test/package jobs upload immutable artifacts. A final publication job gets
 
 A dry-run workflow-dispatch path exercises the same packaging without publishing a real release. Signing/notarization credentials are owner-provided secrets: configure optional Windows signing and macOS Developer ID/notarization when available; otherwise explicitly label artifacts unsigned/unnotarized and test the documented local launch path. Missing signing keys must not produce a fake notarization claim.
 
-Ship corresponding native sources/configuration and all required third-party notices. The existing GPL v3 license text does not remove FFmpeg/OpenH264/asset attribution or codec-patent questions. FFmpeg builds must not enable nonredistributable `nonfree` combinations. Prefer a narrow LGPL-compatible FFmpeg configuration and source-built OpenH264; do not assume a source-built codec inherits patent coverage associated with a vendor's separately distributed binary. [S18, S19, S25]
+Ship all required third-party notices (dav1d, libvpx if used, openh264 on Linux, Twemoji). H.264 patent licensing on Windows and macOS is provided by the OS codecs. On Linux, prefer a system VA-API driver; the `openh264` software fallback compiled from source does not inherit Cisco's binary patent coverage, so the Linux package must document this or load Cisco's prebuilt binary at runtime. [S18, S25]
 
 ## 14. Rejected alternatives
 
@@ -531,12 +542,12 @@ Ship corresponding native sources/configuration and all required third-party not
 | DAVE later / transport encryption only | Officially incompatible with required post-March-2026 media sessions |
 | zstd and zlib both in MVP | Adds another decompression path without a demonstrated product need; zlib-stream is the selected supported path |
 | Full member/presence/history cache | Conflicts with byte-bounded memory and lazy user-client subscriptions |
-| FFmpeg subprocess/raw-frame pipes | Adds process lifecycle and unnecessary raw-frame copying; use libraries and owned frame pools |
+| FFmpeg (library or subprocess) | Heavy MSVC/native build, 20–40 MB of DLLs, LGPL linking constraints, `ffmpeg-next` in maintenance mode, and zero-copy still needs per-OS interop; OS-native codecs plus `dav1d` cover the required codecs with smaller binaries (ADR 0001) |
 | Browser-style WebRTC stack for the native baseline | Adds a second transport/signaling model and heavier integration; direct UDP matches the documented native route, with blocked-UDP limitations explicit |
 | CPU RGBA conversion plus new iced image per video frame | Repeats conversion/upload/allocation and undermines memory/frame-time budgets |
-| DeepFilterNet first | Larger model/inference integration is not justified before the small RNNoise path is measured |
+| DeepFilterNet as the default | CPU/RAM cost conflicts with the low-resource goal; offered as opt-in High quality mode instead (ADR 0004) |
 | OS emoji fonts as the sole renderer | Inconsistent asset/version/color support across targets; attributed Twemoji gives a deterministic baseline |
-| Password/CAPTCHA/QR login in MVP | More unstable user-auth surfaces and challenge handling, while explicit token login already satisfies the accepted project model |
+| Password/CAPTCHA login in MVP | More unstable user-auth surfaces and challenge handling; QR remote auth plus token paste cover login (ADR 0006) |
 | Plaintext token configuration fallback | Turns a missing keyring into credential exposure; explicit memory-only login is safer and honest |
 
 These are project design decisions, not benchmark claims about the alternatives.
@@ -559,7 +570,7 @@ These are project design decisions, not benchmark claims about the alternatives.
 | GPU/driver/shared-memory variability | Idle target or stable video misses | Measure CPU and GPU residency on reference machines; lazy initialization and bounded pools |
 | Account enforcement/ToS changes | Account suspension or permanent API incompatibility | Up-front risk warning and alt account; no technical guarantee or evasion mechanism |
 | Signing keys and distribution permissions | OS warnings or blocked app launch | Release notes and packaged-app launch checks; owner must supply credentials for signed distribution |
-| Codec/FFmpeg/asset licensing | Release cannot legally redistribute a build | Native build manifest and notice/source audit before publication; legal review where necessary |
+| Codec/asset licensing | Release cannot legally redistribute a build | Notice audit before publication; OS codecs on Windows/macOS; Linux `openh264` policy per ADR 0001 |
 
 A compatibility unknown is not permission to ship a stub. The relevant milestone stays incomplete until its acceptance criteria pass or the user explicitly approves a scope change.
 
@@ -567,11 +578,14 @@ A compatibility unknown is not permission to ship a stub. The relevant milestone
 
 Each item is one coherent feature commit containing its implementation, deterministic tests, and the relevant README/protocol/testing/changelog update. Later acceptance does not retroactively excuse an earlier broken feature. Platform/media test fixtures are sanitized; live tests use the accepted alt account and a cooperating test participant. An implementer performs the checks below; none have been run for this specification.
 
+Live-test platforms (see `docs/TESTING.md`): **Windows** — the maintainer's PC, run by the agent; **Linux** — a Hyper-V VM on the same PC (Wayland + PipeWire), run by the agent, with no GPU passthrough, so VA-API paths stay unverified until tested on real hardware; **macOS** — the maintainer's own Mac, run manually by the maintainer from a CI-built package. A macOS milestone is complete only after the maintainer reports its acceptance checks passing.
+
 1. **Workspace skeleton + CI.** Add workspace, exact toolchain, minimal real iced window, model crate, lockfile, README, and three-OS CI. Acceptance: fmt/clippy/tests pass on all three OS families; the window opens/closes locally; no fake feature buttons.
 2. **Tag-triggered release workflow.** Add real packaging, four target artifacts, checksum/source bundles, and gated publication. Acceptance: dry run packages the minimal app on all targets and packaged binaries launch without a Rust installation; a prerelease tag publishes the expected asset set atomically after successful builds.
 3. **Typed protocol model and permissions.** Add snowflakes, entities, partial-message semantics, channel types, and overwrite calculation. Acceptance: owner/admin, role allow/deny, member overwrite, missing fields, and inaccessible channel fixtures pass.
 4. **REST transport and rate-limit scheduler.** Implement route/bucket/global scheduling and error categories. Acceptance: deterministic clock tests cover shared buckets with different major IDs, fractional resets, global 429, concurrent reservation, and 401 stop.
 5. **Token login and native credential storage.** Implement token-paste validation, saved login, memory-only mode, logout. Acceptance: correct account shown; invalid token stops; locked store is explained; restart restores only a saved token; logout removes it; secret-redaction tests pass.
+5a. **QR login.** Remote-auth WebSocket, per-attempt RSA key pair, QR rendering in iced, pending-user confirmation, ticket exchange, then the milestone 5 storage path. Acceptance: scanning with the alt account's phone app logs in and stores the token; cancel/timeout/regenerate work; keys and tickets never reach logs; a CAPTCHA response stops with a clear message.
 6. **Compressed user Gateway lifecycle.** Implement v10 zlib-stream, selected capabilities, READY normalization, heartbeat, Resume, reconnect, and auth stop. Acceptance: fragmented-compression fixtures, READY_SUPPLEMENTAL, replay/dedup, and a live reconnect work; accepted Identify profile is documented.
 7. **Bounded state and lazy subscriptions.** Implement opcode 37, member-range operations, passive updates, and eviction. Acceptance: two-guild navigation emits only intended subscriptions; visible/member state remains correct; byte caps hold during large fixtures; no opcode-14 fallback.
 8. **Guild/channel navigation.** Render virtualized guild/channel lists and permissions. Acceptance: accessible guild/text/voice channels appear, selection survives updates, forbidden channels cannot be opened, and navigation does not fetch every history.
@@ -589,18 +603,19 @@ Each item is one coherent feature commit containing its implementation, determin
 20. **Voice playback, jitter, and mixing.** Connect DAVE media to adaptive jitter, FEC/PLC, mixing, and real call output. Acceptance: bidirectional official-client audio works under reordering/loss; four remote speakers mix without clipping/queue growth; joins/leaves release decoders.
 21. **Voice controls and speaking UI.** Add join/leave controls, mute/deafen, per-user gain, speaking indicators. Acceptance: mute sends no audible microphone data; deafen also mutes capture; gains affect only selected user locally; speaking attribution survives SSRC changes.
 22. **Audio-device selection.** Add settings, persistence, system-default choice, hotplug/errors. Acceptance: switching input/output during a call works; unplugging an explicit headset does not silently route to speakers; restart restores valid choices.
-23. **Noise suppression.** Integrate nnnoiseless with scaling/delay and on/off setting. Acceptance: deterministic noisy speech fixture improves the selected quality metric without clipping; release cost is recorded against the 10 ms budget; mute/disabled mode does no inference.
+23. **Noise suppression: Off/Light setting.** `Denoiser` trait, nnnoiseless with scaling/delay, persisted Off/Light setting. Acceptance: deterministic noisy speech fixture improves the selected quality metric without clipping; release cost is recorded against the 10 ms budget; Off/mute does no inference.
+23a. **Noise suppression: High quality mode.** DeepFilterNet 3 behind the same trait, lazily loaded and dropped on switch-away. Acceptance: keyboard/background-voice fixture suppressed better than Light; measured CPU, RAM, and added latency recorded; switching modes mid-call causes no audio gap longer than one frame; RAM returns to the Light baseline after switching away.
 24. **Go Live connection lifecycle.** Implement create/watch/pause/delete/ping signaling and independent stream DAVE group identity. Acceptance: real owner/viewer sessions establish independently of parent voice; correct stream MLS group is verified; failure/end does not kill parent voice; no claim of finished video yet.
 25. **H.264 RTP receive/send and video feedback.** Add packetization/reassembly, DAVE frame boundary, RTCP/NACK/RTX/PLI, bounded pacer/retransmit buffers. Acceptance: fragmented/keyframe/loss fixtures reconstruct exactly; official-client H.264 stream packets decrypt and depacketize; feedback produces fresh-nonce retransmissions.
-26. **Additional negotiated video receive codecs.** Add VP8/VP9/AV1 depacketizers and DAVE transforms. Acceptance: codec-specific packet/frame vectors and real/reference streams decode to expected frames; only supported codecs are advertised.
-27. **Cross-platform codec build and software path.** Package pinned FFmpeg libraries and OpenH264; expose software encode/decode interfaces. Acceptance: every release target builds/loads native libraries; H.264 encode and all advertised receive codecs work from fixtures; source/notices included; no external ffmpeg executable needed.
+26. **AV1 receive (and VP8/VP9 only if U4 requires).** Add AV1 depacketizer, DAVE transform, and `dav1d` decode. Acceptance: AV1 packet/frame vectors and a real AV1 stream decode to expected frames; only supported codecs are advertised.
+27. **Windows codec path.** Media Foundation H.264 encode/decode (hardware MFT preferred, software MFT fallback) behind the `video` codec trait. Acceptance: fixture H.264 round trip on the hardware and software MFT; the selected backend is reported; no FFmpeg dependency.
 28. **Video playback in iced.** Implement frame leases, reusable YUV shader textures, aspect/color handling, visibility gating. Acceptance: a real watched stream displays without per-frame image encoding; resize/minimize works; texture/frame pool remains bounded and releases on unwatch.
-29. **Windows screen-share capture/send.** Connect Windows.Graphics.Capture to software H.264/DAVE/RTP. Acceptance: display and window share are visible in an official client at 720p30; resize/source close/permission denial are handled; microphone voice remains live.
-30. **Linux screen-share capture/send.** Implement portal/PipeWire capture and release packaging requirements. Acceptance: supported Wayland desktop display/window share reaches official client; portal cancellation/session close works; unsupported portal setup is diagnosed.
-31. **macOS screen-share capture/send.** Implement ScreenCaptureKit capture and bundle permissions. Acceptance: packaged app shares window/display to official client; denial/revoke/source close and Retina scaling behave correctly on supported macOS.
-32. **Windows hardware codec path.** Add D3D11VA decode and tested hardware H.264 selection with surface lifetime handling. Acceptance: an actual supported GPU uses the selected encoder/decoder; software path still works; GPU reset/backend failure is visible and automatic mode recovers safely.
-33. **Linux hardware codec path.** Add VA-API and supported optional NVENC capability selection. Acceptance: actual hardware path is measured on a supported driver; absent hardware does not prevent software share/watch; no leaked surfaces after cycles.
-34. **macOS hardware codec path.** Add VideoToolbox encode/decode. Acceptance: hardware-backed 720p30 send/watch on Apple Silicon; Intel package remains functional through a tested supported path; pool lifetimes survive stop/start.
+29. **Windows screen-share capture/send.** Connect Windows.Graphics.Capture to Media Foundation H.264/DAVE/RTP. Acceptance: display and window share are visible in an official client at 720p30; resize/source close/permission denial are handled; microphone voice remains live.
+30. **Linux codec path.** VA-API H.264 encode/decode with `openh264` software fallback. Acceptance: fixture round trip on a VA-API driver and on the software path; absent hardware does not prevent share/watch; no leaked surfaces after cycles.
+31. **macOS codec path.** VideoToolbox H.264 encode/decode. Acceptance: hardware-backed 720p30 encode/decode on Apple Silicon; Intel package works through a tested path; pool lifetimes survive stop/start.
+32. **Windows zero-copy video.** Share one D3D11 device between capture and the hardware encoder; hand decoded D3D11 surfaces to rendering without CPU readback where safe. Acceptance: measured CPU drop versus milestone 29 at 720p30; GPU reset/backend failure is visible and automatic mode recovers to the copy path.
+33. **Linux screen-share capture/send.** Implement portal/PipeWire capture and release packaging requirements. Acceptance: supported Wayland desktop display/window share reaches official client; portal cancellation/session close works; unsupported portal setup is diagnosed.
+34. **macOS screen-share capture/send.** Implement ScreenCaptureKit capture and bundle permissions. Acceptance: packaged app shares window/display to official client; denial/revoke/source close and Retina scaling behave correctly on supported macOS.
 35. **Windows stream audio.** Add WASAPI loopback selection, Opus SOUNDSHARE, and common stream-audio receive/mix/synchronization. Acceptance: official viewer hears selected app/system audio aligned with video; microphone remains separate; fastcord output exclusion or explicit broad-capture warning is demonstrated.
 36. **Linux stream audio.** Add PipeWire audio source/monitor selection and explicit routing UI. Acceptance: selected source reaches official viewer with sync; no assumption that screen portal provides audio; whole-output echo risk is correctly indicated and separate routing works.
 37. **macOS stream audio.** Add ScreenCaptureKit audio and self-exclusion. Acceptance: official viewer hears stream audio with sync; source/permission changes stop only affected media; fastcord is excluded on supported mode.
@@ -611,21 +626,21 @@ Each item is one coherent feature commit containing its implementation, determin
 | Required capability | Milestones |
 |---|---|
 | Workspace + three-OS CI | 1 |
-| Tag releases | 2, 27, 38 |
-| User login and secure token storage | 4–6 |
+| Tag releases | 2, 38 |
+| User login (QR + token) and secure token storage | 4–5a, 6 |
 | Gateway, lazy subscriptions, bounded cache | 3, 6–9 |
 | Guild/text lists and history | 8–9 |
 | Send/edit/delete/reply | 10–12 |
 | DMs and group DMs | 13, reusing 9–12 |
-| Attachments view | 14, with common media decoding from 27 |
+| Attachments view | 14 (images inline; video/audio attachments open in the OS default player — no media demuxer in MVP) |
 | Unicode/custom/picker/animated emoji | 15 |
 | Reactions | 16 |
 | Voice join/leave and audio | 17–21 |
 | Mute/deafen, per-user volume, speaking | 21 |
 | Audio devices | 19, 22 |
-| Noise suppression | 23 |
-| Screen-share watch | 24–28, 32–34 |
-| Screen-share send on all OSes | 24–27, 29–34 |
+| Noise suppression | 23, 23a |
+| Screen-share watch | 24–28, 30–32 |
+| Screen-share send on all OSes | 24–25, 27, 29–34 |
 | Stream audio send/watch | 35–37 |
 | Performance targets and packaged interoperability | 38 |
 
@@ -651,7 +666,7 @@ Implementation does not exist yet; `LICENSE:1–35` is the only repository codeb
 - **S16 — RNNoise original complexity estimate:** https://arxiv.org/pdf/1709.08243
 - **S17 — Go Live main-Gateway signaling:** https://docs.discord.food/gateway/gateway-events
 - **S18 — OpenH264 Rust encode/decode binding:** https://docs.rs/crate/openh264/0.9.8
-- **S19 — FFmpeg hardware-decoder API, platform builds, licensing:** https://ffmpeg.org/doxygen/trunk/hw_decode_8c-example.html ; https://ffmpeg.org/platform.html ; https://www.ffmpeg.org/legal.html
+- **S19 — OS-native codecs and dav1d:** https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder ; https://developer.apple.com/documentation/videotoolbox ; https://code.videolan.org/videolan/dav1d
 - **S20 — Windows.Graphics.Capture:** https://learn.microsoft.com/en-us/windows/apps/develop/media-authoring-processing/screen-capture
 - **S21 — Windows application loopback capture and minimum build:** https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample
 - **S22 — Linux ScreenCast portal lifecycle and PipeWire targeting:** https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html
@@ -660,4 +675,3 @@ Implementation does not exist yet; `LICENSE:1–35` is the only repository codeb
 - **S25 — Twemoji and graphics attribution:** https://github.com/jdecked/twemoji/blob/main/README.md
 - **S26 — Keyring ecosystem and selective credential backends:** https://github.com/open-source-cooperative/keyring-rs
 
-The parent should persist this specification first, then verify that the file is English, includes all sections and coverage rows, and links from the repository documentation. Implementation validation belongs to the ordered milestones; this architectural delivery has not exercised it.

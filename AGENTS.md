@@ -60,7 +60,7 @@ On the maintainer's Windows box, agent shells may not have `cargo` on `PATH`; ca
 
 ## Runtime/Tooling Preferences
 - Rust via rustup; Windows needs VS Build Tools with the C++ workload (MSVC linker).
-- GUI: iced with wgpu (tiny-skia fallback). Planned: `reqwest`+rustls, `cpal`, `opus2` (bundled libopus), `nnnoiseless`, `davey` (DAVE), FFmpeg/OpenH264 for video.
+- GUI: iced with wgpu (tiny-skia fallback). Planned: `reqwest`+rustls, `cpal`, `opus2` (bundled libopus), `nnnoiseless`, `davey` (DAVE). Video: OS-native codecs (Media Foundation / VideoToolbox / VA-API) + `dav1d`; **no FFmpeg** (`docs/adr/`).
 - GitHub Actions are pinned by commit SHA; keep it that way when adding steps.
 
 ## Workflow
