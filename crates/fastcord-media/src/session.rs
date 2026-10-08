@@ -67,6 +67,9 @@ struct Attempt {
     channel_id: Snowflake,
     session_id: Option<String>,
     server: Option<(VoiceToken, String)>,
+    /// `Some` binds credentials to a channel; `None` marks a token update
+    /// whose target channel is identified only by a later state event.
+    server_channel_id: Option<Snowflake>,
     /// Whether credentials were handed out at least once; from then on a
     /// state in another channel of the same server is a server-side move.
     connected: bool,
@@ -83,6 +86,7 @@ impl fmt::Debug for Attempt {
             )
             .field("server", &self.server)
             .field("connected", &self.connected)
+            .field("server_channel_id", &self.server_channel_id)
             .finish()
     }
 }
@@ -113,6 +117,7 @@ impl JoinCorrelator {
             channel_id,
             session_id: None,
             server: None,
+            server_channel_id: None,
             connected: false,
         });
         self.bump()
@@ -161,14 +166,26 @@ impl JoinCorrelator {
                 Correlation::Ignored
             }
             Some(channel) => {
-                // A different channel after connecting is a server-side move.
-                // Its new token arrives in a VOICE_SERVER_UPDATE (before or
-                // after this state); that update, not the move, reconnects.
+                let channel_changed = channel != attempt.channel_id;
+                if channel_changed
+                    && attempt
+                        .server_channel_id
+                        .is_some_and(|server_channel| server_channel != channel)
+                {
+                    attempt.server = None;
+                    attempt.server_channel_id = None;
+                }
+                if channel_changed
+                    && attempt.server.is_some()
+                    && attempt.server_channel_id.is_none()
+                {
+                    attempt.server_channel_id = Some(channel);
+                }
                 attempt.channel_id = channel;
                 let session_changed =
                     attempt.session_id.as_deref() != Some(state.session_id.as_str());
                 attempt.session_id = Some(state.session_id.clone());
-                if session_changed {
+                if session_changed || channel_changed {
                     self.try_connect()
                 } else {
                     Correlation::Waiting
@@ -189,21 +206,34 @@ impl JoinCorrelator {
         if !ours {
             return Correlation::Ignored;
         }
+        let channel_changed = attempt.guild_id.is_some()
+            && update
+                .channel_id
+                .is_some_and(|channel_id| channel_id != attempt.channel_id);
+        if let Some(channel_id) = update.channel_id
+            && attempt.guild_id.is_some()
+        {
+            attempt.channel_id = channel_id;
+        }
         match update.endpoint.as_deref() {
             None | Some("") => {
                 attempt.server = None;
-                self.bump();
+                attempt.server_channel_id = None;
                 Correlation::Reallocating
             }
             Some(endpoint) => {
-                if attempt
-                    .server
-                    .as_ref()
-                    .is_some_and(|(token, old)| *token == update.token && old == endpoint)
+                if !channel_changed
+                    && attempt
+                        .server
+                        .as_ref()
+                        .is_some_and(|(token, old)| *token == update.token && old == endpoint)
                 {
                     return Correlation::Waiting;
                 }
                 attempt.server = Some((update.token.clone(), endpoint.to_owned()));
+                attempt.server_channel_id = update
+                    .channel_id
+                    .or_else(|| (!attempt.connected).then_some(attempt.channel_id));
                 self.try_connect()
             }
         }
@@ -393,33 +423,39 @@ mod tests {
     }
 
     #[test]
-    fn a_server_side_move_waits_for_the_new_token() {
+    fn a_server_side_move_refreshes_credentials_in_either_event_order() {
         let mut join = JoinCorrelator::new(ME);
         join.join(Some(GUILD), LOBBY);
         join.voice_state(&state(ME, Some(GUILD), Some(LOBBY), "s"));
         let first = connect(join.voice_server(&server(Some(GUILD), None, "t1", Some("a:443"))));
+
         assert!(matches!(
             join.voice_state(&state(ME, Some(GUILD), Some(OTHER), "s")),
             Correlation::Waiting
         ));
-        let moved = connect(join.voice_server(&server(Some(GUILD), None, "t2", Some("a:443"))));
-        assert_eq!(moved.channel_id, OTHER);
+        let moved =
+            connect(join.voice_server(&server(Some(GUILD), Some(OTHER), "t2", Some("a:443"))));
         assert!(moved.generation > first.generation);
+        assert_eq!(moved.channel_id, OTHER);
+        assert_eq!(moved.token.expose_secret(), "t2");
 
-        // The new token may also come first: it reconnects at once, and the
-        // later state only relabels the channel without a second connection.
         let token_first =
             connect(join.voice_server(&server(Some(GUILD), None, "t3", Some("a:443"))));
-        assert!(token_first.generation > moved.generation);
+        assert_eq!(token_first.channel_id, OTHER);
+        let state_after_token =
+            connect(join.voice_state(&state(ME, Some(GUILD), Some(LOBBY), "s")));
+        assert!(state_after_token.generation > token_first.generation);
+        assert_eq!(state_after_token.channel_id, LOBBY);
+        assert_eq!(state_after_token.token.expose_secret(), "t3");
         assert!(matches!(
-            join.voice_state(&state(ME, Some(GUILD), Some(LOBBY), "s")),
+            join.voice_state(&state(ME, Some(GUILD), Some(OTHER), "s")),
             Correlation::Waiting
         ));
-        let generation = join.generation();
-        let relabelled =
-            connect(join.voice_server(&server(Some(GUILD), None, "t4", Some("a:443"))));
-        assert_eq!(relabelled.channel_id, LOBBY);
-        assert!(relabelled.generation > generation);
+        let next =
+            connect(join.voice_server(&server(Some(GUILD), Some(OTHER), "t4", Some("a:443"))));
+        assert!(next.generation > state_after_token.generation);
+        assert_eq!(next.channel_id, OTHER);
+        assert_eq!(next.token.expose_secret(), "t4");
     }
 
     #[test]

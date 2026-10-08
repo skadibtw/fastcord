@@ -1,6 +1,5 @@
-//! Voice Gateway v8 JSON payloads: what fastcord sends and the subset of
-//! server payloads it reads. Unknown fields are ignored; unknown opcodes are
-//! skipped by the driver.
+//! Voice Gateway v8 JSON payloads and DAVE binary opcode framing. Unknown
+//! non-DAVE opcodes are skipped by the driver.
 
 use std::net::SocketAddr;
 
@@ -16,10 +15,8 @@ use crate::session::VoiceCredentials;
 /// The voice Gateway version, always explicit in the URL (SPEC §6.1).
 pub(crate) const VERSION: u8 = 8;
 
-/// The highest DAVE protocol version this build implements. DAVE arrives
-/// with milestone 18; until then fastcord truthfully advertises none, and a
-/// server that requires E2EE closes with 4017.
-pub(crate) const MAX_DAVE_PROTOCOL_VERSION: u16 = 0;
+/// DAVE protocol v1, the only version implemented by fastcord-media.
+pub(crate) const MAX_DAVE_PROTOCOL_VERSION: u16 = 1;
 
 pub(crate) mod op {
     pub(crate) const IDENTIFY: u8 = 0;
@@ -35,6 +32,127 @@ pub(crate) mod op {
     pub(crate) const CLIENTS_CONNECT: u8 = 11;
     pub(crate) const VIDEO: u8 = 12;
     pub(crate) const CLIENT_DISCONNECT: u8 = 13;
+    pub(crate) const DAVE_PREPARE_TRANSITION: u8 = 21;
+    pub(crate) const DAVE_EXECUTE_TRANSITION: u8 = 22;
+    pub(crate) const DAVE_TRANSITION_READY: u8 = 23;
+    pub(crate) const DAVE_PREPARE_EPOCH: u8 = 24;
+    pub(crate) const DAVE_EXTERNAL_SENDER: u8 = 25;
+    pub(crate) const DAVE_KEY_PACKAGE: u8 = 26;
+    pub(crate) const DAVE_PROPOSALS: u8 = 27;
+    pub(crate) const DAVE_COMMIT_WELCOME: u8 = 28;
+    pub(crate) const DAVE_ANNOUNCE_COMMIT: u8 = 29;
+    pub(crate) const DAVE_WELCOME: u8 = 30;
+    pub(crate) const DAVE_INVALID_COMMIT_WELCOME: u8 = 31;
+}
+
+pub(crate) enum ServerBinary<'a> {
+    ExternalSender(&'a [u8]),
+    Proposals {
+        operation: u8,
+        payload: &'a [u8],
+    },
+    Commit {
+        transition_id: u16,
+        payload: &'a [u8],
+    },
+    Welcome {
+        transition_id: u16,
+        payload: &'a [u8],
+    },
+    Unknown,
+}
+
+pub(crate) struct SequencedBinary<'a> {
+    pub(crate) sequence: u16,
+    pub(crate) message: ServerBinary<'a>,
+}
+
+/// Server binary frames are `sequence:u16be + opcode:u8 + payload`.
+pub(crate) fn server_binary(frame: &[u8]) -> Result<SequencedBinary<'_>, ()> {
+    if frame.len() < 3 {
+        return Err(());
+    }
+    let sequence = u16::from_be_bytes([frame[0], frame[1]]);
+    let message = match frame[2] {
+        op::DAVE_EXTERNAL_SENDER if frame.len() > 3 => ServerBinary::ExternalSender(&frame[3..]),
+        op::DAVE_PROPOSALS if frame.len() > 4 && frame[3] <= 1 => ServerBinary::Proposals {
+            operation: frame[3],
+            payload: &frame[4..],
+        },
+        op::DAVE_ANNOUNCE_COMMIT if frame.len() > 5 => ServerBinary::Commit {
+            transition_id: u16::from_be_bytes([frame[3], frame[4]]),
+            payload: &frame[5..],
+        },
+        op::DAVE_WELCOME if frame.len() > 5 => ServerBinary::Welcome {
+            transition_id: u16::from_be_bytes([frame[3], frame[4]]),
+            payload: &frame[5..],
+        },
+        op::DAVE_EXTERNAL_SENDER
+        | op::DAVE_PROPOSALS
+        | op::DAVE_ANNOUNCE_COMMIT
+        | op::DAVE_WELCOME => return Err(()),
+        _ => ServerBinary::Unknown,
+    };
+    Ok(SequencedBinary { sequence, message })
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DavePrepareTransition {
+    pub(crate) protocol_version: u16,
+    pub(crate) transition_id: u16,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DaveTransition {
+    pub(crate) transition_id: u16,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DavePrepareEpoch {
+    pub(crate) protocol_version: u16,
+    pub(crate) epoch: u64,
+}
+
+fn transition_payload(transition_id: u16) -> impl Serialize {
+    #[derive(Serialize)]
+    struct Payload {
+        transition_id: u16,
+    }
+    Payload { transition_id }
+}
+
+pub(crate) fn dave_transition_ready(transition_id: u16) -> String {
+    frame(
+        op::DAVE_TRANSITION_READY,
+        &transition_payload(transition_id),
+    )
+}
+
+pub(crate) fn dave_invalid_commit_welcome(transition_id: u16) -> String {
+    frame(
+        op::DAVE_INVALID_COMMIT_WELCOME,
+        &transition_payload(transition_id),
+    )
+}
+
+/// Client binary frames contain an opcode and payload, never the server's
+/// sequence-number prefix.
+pub(crate) fn dave_key_package(key_package: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(key_package.len() + 1);
+    frame.push(op::DAVE_KEY_PACKAGE);
+    frame.extend_from_slice(key_package);
+    frame
+}
+
+pub(crate) fn dave_commit_welcome(commit: &[u8], welcome: Option<&[u8]>) -> Vec<u8> {
+    let welcome_len = welcome.map_or(0, <[u8]>::len);
+    let mut frame = Vec::with_capacity(commit.len() + welcome_len + 1);
+    frame.push(op::DAVE_COMMIT_WELCOME);
+    frame.extend_from_slice(commit);
+    if let Some(welcome) = welcome {
+        frame.extend_from_slice(welcome);
+    }
+    frame
 }
 
 /// Speaking flags (opcode 5).
@@ -292,7 +410,7 @@ mod tests {
                 "user_id": "104694319306248192",
                 "session_id": "fixture-session",
                 "token": "fixture-voice-token",
-                "max_dave_protocol_version": 0
+                "max_dave_protocol_version": 1
             }})
         );
         assert_eq!(
@@ -337,19 +455,59 @@ mod tests {
             json!({"op": 5, "d": {"speaking": 1, "delay": 0, "ssrc": 12871}})
         );
     }
+    #[test]
+    fn dave_json_and_binary_opcodes_match_reference_framing() {
+        assert_eq!(
+            value(&dave_transition_ready(42)),
+            json!({"op": 23, "d": {"transition_id": 42}})
+        );
+        assert_eq!(
+            value(&dave_invalid_commit_welcome(42)),
+            json!({"op": 31, "d": {"transition_id": 42}})
+        );
+
+        assert_eq!(dave_key_package(&[0xAA, 0xBB]), [26, 0xAA, 0xBB]);
+        assert_eq!(
+            dave_commit_welcome(&[0x11, 0x22], Some(&[0x33, 0x44])),
+            [28, 0x11, 0x22, 0x33, 0x44]
+        );
+        assert_eq!(dave_commit_welcome(&[0x11], None), [28, 0x11]);
+
+        let proposal = server_binary(&[0x12, 0x34, 27, 0, 3, 0xAA, 0xBB]).unwrap();
+        assert_eq!(proposal.sequence, 0x1234);
+        assert!(matches!(
+            proposal.message,
+            ServerBinary::Proposals {
+                operation: 0,
+                payload: [3, 0xAA, 0xBB]
+            }
+        ));
+
+        let commit = server_binary(&[0xAB, 0xCD, 29, 0x01, 0x23, 0x99]).unwrap();
+        assert_eq!(commit.sequence, 0xABCD);
+        assert!(matches!(
+            commit.message,
+            ServerBinary::Commit {
+                transition_id: 0x0123,
+                payload: [0x99]
+            }
+        ));
+        assert!(server_binary(&[0, 1, 27, 2, 0]).is_err());
+        assert!(server_binary(&[0, 1, 29, 0, 1]).is_err());
+    }
 
     #[test]
     fn session_description_key_must_be_exactly_32_bytes() {
         let key: Vec<u8> = (0..32).collect();
-        let text = json!({"mode": "aead_aes256_gcm_rtpsize", "secret_key": key, "audio_codec": "opus", "dave_protocol_version": 0, "media_session_id": "m"}).to_string();
+        let text = json!({"mode": "aead_aes256_gcm_rtpsize", "secret_key": key, "audio_codec": "opus", "dave_protocol_version": 1, "media_session_id": "m"}).to_string();
         let description: SessionDescription = serde_json::from_str(&text).unwrap();
         assert_eq!(description.secret_key[31], 31);
-        assert_eq!(description.dave_protocol_version, 0);
+        assert_eq!(description.dave_protocol_version, 1);
         for bad in [vec![0u8; 31], vec![0u8; 33]] {
-            let text = json!({"mode": "m", "secret_key": bad, "audio_codec": "opus", "dave_protocol_version": 0}).to_string();
+            let text = json!({"mode": "m", "secret_key": bad, "audio_codec": "opus", "dave_protocol_version": 1}).to_string();
             assert!(serde_json::from_str::<SessionDescription>(&text).is_err());
         }
-        let text = json!({"mode": "m", "secret_key": vec![256u16; 32], "audio_codec": "opus", "dave_protocol_version": 0}).to_string();
+        let text = json!({"mode": "m", "secret_key": vec![256u16; 32], "audio_codec": "opus", "dave_protocol_version": 1}).to_string();
         assert!(serde_json::from_str::<SessionDescription>(&text).is_err());
     }
 }

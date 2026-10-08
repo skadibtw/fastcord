@@ -57,6 +57,11 @@ pub enum VoiceStatus {
     Discovering,
     /// Select Protocol sent, waiting for the transport key.
     Negotiating,
+    /// Transport is established, but DAVE has not executed a key-ready
+    /// transition yet. Local media remains paused.
+    Rekeying {
+        transition_id: Option<u16>,
+    },
     /// Media flows.
     Connected {
         mode: TransportMode,
@@ -81,6 +86,8 @@ pub enum CloseReason {
     AuthenticationFailed,
     /// The channel requires DAVE end-to-end encryption (4017).
     E2eeRequired,
+    /// DAVE negotiation or authenticated frame processing failed closed.
+    DaveUnavailable,
     /// 4021.
     RateLimited,
     /// 4011.
@@ -107,9 +114,8 @@ impl fmt::Display for CloseReason {
             Self::Disconnected => f.write_str("disconnected from voice"),
             Self::SessionInvalid => f.write_str("voice session expired"),
             Self::AuthenticationFailed => f.write_str("voice server rejected the session"),
-            Self::E2eeRequired => {
-                f.write_str("this call requires end-to-end encryption (DAVE), not yet supported")
-            }
+            Self::E2eeRequired => f.write_str("this call requires end-to-end encryption (DAVE)"),
+            Self::DaveUnavailable => f.write_str("voice could not establish DAVE encryption"),
             Self::RateLimited => f.write_str("voice server rate limit reached"),
             Self::ServerNotFound => f.write_str("voice server not found"),
             Self::UdpUnreachable => f.write_str("UDP to the voice server is blocked"),

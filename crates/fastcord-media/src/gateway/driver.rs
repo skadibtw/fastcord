@@ -29,6 +29,7 @@ use super::transport::{Network, Signaling, UdpLink, voice_url};
 use super::wire::{self, op};
 use super::{CloseReason, Counters, MediaCommand, ReceivedAudio, VoiceEvent, VoiceStatus};
 use crate::crypto::{CryptoError, RTCP_CLEAR_LEN, TransportCipher, TransportKey, TransportMode};
+use crate::dave::DaveSession;
 use crate::rtcp::{self, Compound, RtcpPacket, SenderInfo};
 use crate::rtp::{OPUS_FRAME_TICKS, OPUS_PAYLOAD_TYPE, RtpHeader, RtpSender, SequenceTracker};
 use crate::session::VoiceCredentials;
@@ -49,9 +50,11 @@ const MAX_HEARTBEAT: Duration = Duration::from_secs(60);
 /// Consecutive failed (re)connections before giving up.
 const MAX_RECONNECTS: u32 = 5;
 const FRAME: Duration = Duration::from_millis(20);
-/// Sent before stopping so receivers do not interpolate across the gap.
+/// Sent as a protocol tail only when it can be protected by DAVE.
 const SILENCE_FRAMES: u8 = 5;
 const OPUS_SILENCE: [u8; 3] = [0xF8, 0xFF, 0xFE];
+const MAX_DAVE_MESSAGE: usize = 1024 * 1024;
+const MAX_DAVE_AUDIO_FRAME: usize = super::MAX_OPUS_FRAME + 64;
 /// Seconds from 1900 (NTP) to 1970 (Unix).
 const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
 
@@ -176,6 +179,8 @@ struct Driver<S, N: Network> {
     seq_ack: Option<u64>,
     udp: Option<Udp<N::Udp>>,
     media: Option<Media>,
+    dave: Option<DaveSession>,
+    expected_users: Vec<u64>,
     ssrcs: SsrcMap,
     sequences: HashMap<u32, SequenceTracker>,
     pending: PendingSsrc<PendingAudio>,
@@ -195,6 +200,7 @@ pub(crate) async fn run<S: Signaling, N: Network>(
     channels: Channels,
 ) {
     let heartbeat_nonce = options.nonce_seed;
+    let local_user_id = credentials.user_id.0;
     let mut driver = Driver {
         signaling,
         network,
@@ -204,6 +210,8 @@ pub(crate) async fn run<S: Signaling, N: Network>(
         seq_ack: None,
         udp: None,
         media: None,
+        dave: None,
+        expected_users: vec![local_user_id],
         ssrcs: SsrcMap::default(),
         sequences: HashMap::new(),
         pending: PendingSsrc::default(),
@@ -307,10 +315,13 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         }
     }
 
-    /// Forgets everything tied to one voice session: UDP, key, SSRCs.
+    /// Forgets everything tied to one voice session, including DAVE/MLS keys.
     fn reset_session(&mut self) {
         self.udp = None;
         self.media = None;
+        self.dave = None;
+        self.expected_users.clear();
+        self.expected_users.push(self.credentials.user_id.0);
         self.ssrcs.clear();
         self.sequences.clear();
         self.pending.clear();
@@ -327,12 +338,18 @@ impl<S: Signaling, N: Network> Driver<S, N> {
     }
 
     fn connected_status(&self) -> VoiceStatus {
-        match &self.udp {
-            Some(udp) => VoiceStatus::Connected {
+        let Some(udp) = &self.udp else {
+            return VoiceStatus::Closed(CloseReason::Protocol(None));
+        };
+        if self.dave.as_ref().is_some_and(DaveSession::is_send_ready) {
+            VoiceStatus::Connected {
                 mode: udp.mode,
                 ssrc: udp.ssrc,
-            },
-            None => VoiceStatus::Closed(CloseReason::Protocol(None)),
+            }
+        } else {
+            VoiceStatus::Rekeying {
+                transition_id: self.dave.as_ref().and_then(DaveSession::transition_id),
+            }
         }
     }
 
@@ -353,7 +370,9 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let mut buffer = vec![0; MAX_DATAGRAM];
         loop {
             let wake = conn.next_wake(self.pending.next_expiry());
-            let media_open = conn.phase == Phase::Connected && self.media.is_some();
+            let media_open = conn.phase == Phase::Connected
+                && self.media.is_some()
+                && self.dave.as_ref().is_some_and(DaveSession::is_send_ready);
             let result = tokio::select! {
                 _ = &mut self.ch.leave => {
                     let close = Message::Close(Some(CloseFrame {
@@ -393,6 +412,17 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             _ => Err(conn.retry()),
         }
     }
+    async fn send_binary(
+        &self,
+        conn: &Conn,
+        socket: &mut S::Socket,
+        frame: Vec<u8>,
+    ) -> Result<(), End> {
+        match timeout(SEND_TIMEOUT, socket.send(Message::Binary(frame.into()))).await {
+            Ok(Ok(())) => Ok(()),
+            _ => Err(conn.retry()),
+        }
+    }
 
     async fn on_message(
         &mut self,
@@ -403,12 +433,14 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         match message {
             Some(Ok(Message::Text(text))) => self.on_text(conn, socket, text.as_str()).await,
             Some(Ok(Message::Binary(bytes))) => {
-                // Server binary messages (DAVE, milestone 18) start with a
-                // sequence number that heartbeats must acknowledge.
-                if bytes.len() >= 3 {
-                    self.seq_ack = Some(u64::from(u16::from_be_bytes([bytes[0], bytes[1]])));
+                if bytes.len() > MAX_DAVE_MESSAGE {
+                    Counters::add(&self.ch.counters.rejected_malformed, 1);
+                    return Err(End::Close(CloseReason::DaveUnavailable));
                 }
-                Ok(())
+                let binary = wire::server_binary(&bytes)
+                    .map_err(|_| End::Close(CloseReason::Protocol(None)))?;
+                self.seq_ack = Some(u64::from(binary.sequence));
+                self.on_binary(conn, socket, binary.message).await
             }
             Some(Ok(Message::Close(frame))) => Err(match frame {
                 Some(frame) => close_code(frame.code.into(), conn),
@@ -495,16 +527,29 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 let Some(udp) = &self.udp else {
                     return Err(protocol());
                 };
-                // fastcord offered no DAVE version, so 0 is the only answer
-                // it can honor; anything else would mean unprotected frames.
+                if description.dave_protocol_version != wire::MAX_DAVE_PROTOCOL_VERSION {
+                    return Err(End::Close(if description.dave_protocol_version == 0 {
+                        CloseReason::E2eeRequired
+                    } else {
+                        CloseReason::DaveUnavailable
+                    }));
+                }
                 if TransportMode::from_wire(&description.mode) != Some(udp.mode)
-                    || description.dave_protocol_version != wire::MAX_DAVE_PROTOCOL_VERSION
                     || description.audio_codec != "opus"
                 {
                     return Err(protocol());
                 }
                 let key = TransportKey::from_slice(&description.secret_key[..])
                     .map_err(|_| protocol())?;
+                let mut dave = DaveSession::new(
+                    description.dave_protocol_version,
+                    self.credentials.user_id.0,
+                    self.credentials.channel_id.0,
+                )
+                .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                let key_package = dave
+                    .create_key_package()
+                    .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
                 let (sequence, timestamp) = self
                     .options
                     .rtp_start
@@ -518,13 +563,28 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     octets: 0,
                     reported_packets: 0,
                 });
+                self.dave = Some(dave);
+                self.send_binary(conn, socket, wire::dave_key_package(&key_package))
+                    .await?;
                 conn.progressed = true;
                 conn.phase = Phase::Connected;
                 conn.deadline = None;
                 conn.report_at = Some(now + REPORT_INTERVAL);
-                self.set_status(self.connected_status());
+                self.set_status(VoiceStatus::Rekeying {
+                    transition_id: None,
+                });
             }
             op::RESUMED if conn.phase == Phase::Resuming => {
+                let Some(dave) = self.dave.as_mut() else {
+                    return Err(End::Close(CloseReason::DaveUnavailable));
+                };
+                if !dave.is_receive_ready() {
+                    let key_package = dave
+                        .create_key_package()
+                        .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                    self.send_binary(conn, socket, wire::dave_key_package(&key_package))
+                        .await?;
+                }
                 conn.progressed = true;
                 conn.phase = Phase::Connected;
                 conn.deadline = None;
@@ -575,20 +635,191 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             }
             op::CLIENTS_CONNECT => {
                 if let Some(connect) = decode::<wire::ClientsConnect>(envelope.d) {
+                    for user_id in &connect.user_ids {
+                        let user_id = user_id.0;
+                        if !self.expected_users.contains(&user_id) {
+                            self.expected_users.push(user_id);
+                        }
+                    }
                     self.event(VoiceEvent::ClientsConnected(connect.user_ids));
+                } else {
+                    return Err(protocol());
                 }
             }
             op::CLIENT_DISCONNECT => {
-                if let Some(disconnect) = decode::<wire::ClientDisconnect>(envelope.d) {
-                    self.ssrcs.remove_user(disconnect.user_id);
-                    self.mappings_changed();
-                    self.event(VoiceEvent::ClientDisconnected(disconnect.user_id));
+                let disconnect: wire::ClientDisconnect = decode(envelope.d).ok_or_else(protocol)?;
+                if disconnect.user_id == self.credentials.user_id {
+                    return Err(End::Close(CloseReason::Disconnected));
                 }
+                self.expected_users
+                    .retain(|user_id| *user_id != disconnect.user_id.0);
+                self.ssrcs.remove_user(disconnect.user_id);
+                self.mappings_changed();
+                self.event(VoiceEvent::ClientDisconnected(disconnect.user_id));
             }
-            // Session updates, client flags/platform, media sink wants, and
-            // anything newer carry nothing an audio-only client acts on.
+            op::DAVE_PREPARE_TRANSITION => {
+                let prepare: wire::DavePrepareTransition =
+                    decode(envelope.d).ok_or_else(protocol)?;
+                let ready = {
+                    let Some(dave) = self.dave.as_mut() else {
+                        return Err(End::Close(CloseReason::DaveUnavailable));
+                    };
+                    let ready = dave
+                        .prepare_transition(prepare.transition_id, prepare.protocol_version)
+                        .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                    if prepare.transition_id == 0 {
+                        dave.execute_transition(0)
+                            .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                        false
+                    } else {
+                        ready
+                    }
+                };
+                if ready {
+                    self.send_text(
+                        conn,
+                        socket,
+                        &wire::dave_transition_ready(prepare.transition_id),
+                    )
+                    .await?;
+                }
+                self.set_status(self.connected_status());
+            }
+            op::DAVE_EXECUTE_TRANSITION => {
+                let transition: wire::DaveTransition = decode(envelope.d).ok_or_else(protocol)?;
+                self.dave
+                    .as_mut()
+                    .ok_or(End::Close(CloseReason::DaveUnavailable))?
+                    .execute_transition(transition.transition_id)
+                    .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                self.set_status(self.connected_status());
+            }
+            op::DAVE_PREPARE_EPOCH => {
+                let prepare: wire::DavePrepareEpoch = decode(envelope.d).ok_or_else(protocol)?;
+                if prepare.protocol_version != wire::MAX_DAVE_PROTOCOL_VERSION {
+                    return Err(End::Close(CloseReason::DaveUnavailable));
+                }
+                let key_package = self
+                    .dave
+                    .as_mut()
+                    .ok_or(End::Close(CloseReason::DaveUnavailable))?
+                    .prepare_epoch(prepare.epoch)
+                    .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                if let Some(key_package) = key_package {
+                    self.send_binary(conn, socket, wire::dave_key_package(&key_package))
+                        .await?;
+                }
+                self.set_status(self.connected_status());
+            }
             _ => {}
         }
+        Ok(())
+    }
+
+    async fn on_binary(
+        &mut self,
+        conn: &mut Conn,
+        socket: &mut S::Socket,
+        message: wire::ServerBinary<'_>,
+    ) -> Result<(), End> {
+        if matches!(message, wire::ServerBinary::Unknown) {
+            return Ok(());
+        }
+        if conn.phase != Phase::Connected || self.media.is_none() {
+            return Err(End::Close(CloseReason::Protocol(None)));
+        }
+        if self.dave.is_none() {
+            return Err(End::Close(CloseReason::DaveUnavailable));
+        }
+        match message {
+            wire::ServerBinary::ExternalSender(sender) => {
+                self.dave
+                    .as_mut()
+                    .ok_or(End::Close(CloseReason::DaveUnavailable))?
+                    .set_external_sender(sender)
+                    .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+            }
+            wire::ServerBinary::Proposals { operation, payload } => {
+                let commit_welcome = self
+                    .dave
+                    .as_mut()
+                    .ok_or(End::Close(CloseReason::DaveUnavailable))?
+                    .process_proposals(operation, payload, &self.expected_users)
+                    .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                if let Some(commit_welcome) = commit_welcome {
+                    let frame = wire::dave_commit_welcome(
+                        &commit_welcome.commit,
+                        commit_welcome.welcome.as_deref(),
+                    );
+                    self.send_binary(conn, socket, frame).await?;
+                }
+            }
+            wire::ServerBinary::Commit {
+                transition_id,
+                payload,
+            } => {
+                let processed = self
+                    .dave
+                    .as_mut()
+                    .ok_or(End::Close(CloseReason::DaveUnavailable))?
+                    .process_commit(transition_id, payload);
+                if processed.is_err() {
+                    self.recover_dave(conn, socket, transition_id).await?;
+                    return Ok(());
+                }
+                self.send_text(conn, socket, &wire::dave_transition_ready(transition_id))
+                    .await?;
+                self.set_status(VoiceStatus::Rekeying {
+                    transition_id: Some(transition_id),
+                });
+            }
+            wire::ServerBinary::Welcome {
+                transition_id,
+                payload,
+            } => {
+                let processed = self
+                    .dave
+                    .as_mut()
+                    .ok_or(End::Close(CloseReason::DaveUnavailable))?
+                    .process_welcome(transition_id, payload);
+                if processed.is_err() {
+                    self.recover_dave(conn, socket, transition_id).await?;
+                    return Ok(());
+                }
+                self.send_text(conn, socket, &wire::dave_transition_ready(transition_id))
+                    .await?;
+                self.set_status(VoiceStatus::Rekeying {
+                    transition_id: Some(transition_id),
+                });
+            }
+            wire::ServerBinary::Unknown => {}
+        }
+        Ok(())
+    }
+
+    async fn recover_dave(
+        &mut self,
+        conn: &mut Conn,
+        socket: &mut S::Socket,
+        transition_id: u16,
+    ) -> Result<(), End> {
+        let key_package = self
+            .dave
+            .as_mut()
+            .ok_or(End::Close(CloseReason::DaveUnavailable))?
+            .recover(transition_id)
+            .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+        self.send_text(
+            conn,
+            socket,
+            &wire::dave_invalid_commit_welcome(transition_id),
+        )
+        .await?;
+        self.send_binary(conn, socket, wire::dave_key_package(&key_package))
+            .await?;
+        self.set_status(VoiceStatus::Rekeying {
+            transition_id: Some(transition_id),
+        });
         Ok(())
     }
 
@@ -628,6 +859,17 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             Counters::add(&self.ch.counters.rejected_malformed, 1);
             return;
         }
+        let Some(dave) = self.dave.as_mut() else {
+            Counters::add(&self.ch.counters.rejected_authentication, 1);
+            return;
+        };
+        let payload = match dave.decrypt_opus(owner.user_id.0, &audio.payload) {
+            Ok(payload) => payload,
+            Err(_) => {
+                Counters::add(&self.ch.counters.rejected_authentication, 1);
+                return;
+            }
+        };
         let sequence = self
             .sequences
             .entry(ssrc)
@@ -638,7 +880,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             ssrc,
             sequence,
             timestamp: audio.timestamp,
-            payload: audio.payload,
+            payload,
         };
         match self.ch.audio.try_send(received) {
             Ok(()) => {}
@@ -737,7 +979,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             Counters::add(&counters.rejected_malformed, 1);
             return;
         }
-        if body.payload.is_empty() || body.payload.len() > super::MAX_OPUS_FRAME {
+        if body.payload.is_empty() || body.payload.len() > MAX_DAVE_AUDIO_FRAME {
             Counters::add(&counters.rejected_malformed, 1);
             return;
         }
@@ -834,6 +1076,21 @@ impl<S: Signaling, N: Network> Driver<S, N> {
 
     /// Seals one Opus payload as the next RTP packet and sends it.
     async fn send_rtp(&mut self, payload: &[u8]) -> Result<(), End> {
+        // davey intentionally bypasses DAVE for the synthesized Opus silence
+        // sentinel. Never put that transport-only frame on the wire.
+        if payload == OPUS_SILENCE {
+            return Ok(());
+        }
+        let Some(dave) = self.dave.as_mut() else {
+            return Err(End::Close(CloseReason::DaveUnavailable));
+        };
+        if !dave.is_send_ready() {
+            return Ok(());
+        }
+        let encrypted = dave
+            .encrypt_opus(payload)
+            .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+        let payload = encrypted.as_ref();
         let (Some(media), Some(udp)) = (&mut self.media, &self.udp) else {
             return Ok(());
         };

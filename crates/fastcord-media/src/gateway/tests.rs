@@ -25,14 +25,24 @@ use super::driver::Options;
 use super::transport::{ConnectError, Network, Signaling, UdpLink, websocket_config};
 use super::*;
 use crate::crypto::{RTCP_CLEAR_LEN, TransportCipher, TransportKey};
-use crate::rtcp::{self as rtcp_wire, Compound, RtcpPacket};
-use crate::rtp::{ExtensionPreamble, ONE_BYTE_PROFILE, RtpHeader};
+use crate::dave::DaveSession;
+use crate::rtp::RtpHeader;
 use crate::udp::DISCOVERY_LEN;
+use openmls::prelude::{
+    BasicCredential, Ciphersuite, ExternalProposal, ExternalSender, GroupEpoch, GroupId,
+    KeyPackageIn, MlsMessageIn, MlsMessageOut, SenderExtensionIndex, Welcome,
+};
+use openmls::versions::ProtocolVersion;
+use openmls_basic_credential::SignatureKeyPair;
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::OpenMlsProvider;
+use tls_codec::{DeserializeBytes, Serialize, VLBytes};
 
 const KEY: [u8; 32] = [0x5A; 32];
 const SSRC: u32 = 12_871;
 const ME: Snowflake = Snowflake(104_694_319_306_248_192);
 const ALICE: Snowflake = Snowflake(852_892_297_661_906_993);
+const CAROL: Snowflake = Snowflake(4);
 const GUILD: Snowflake = Snowflake(41_771_983_423_143_937);
 /// Long enough that heartbeats never interfere unless a test wants them.
 const QUIET_HEARTBEAT_MS: f64 = 60_000.0;
@@ -374,7 +384,7 @@ fn session_description(mode: &str) -> Value {
         "mode": mode,
         "secret_key": KEY,
         "video_codec": "H264",
-        "dave_protocol_version": 0
+        "dave_protocol_version": 1
     }})
 }
 
@@ -400,13 +410,93 @@ async fn connected(harness: &mut Harness, ws: &mut Ws) -> (Udp, TransportCipher)
     ws.send(session_description("aead_aes256_gcm_rtpsize"))
         .await;
     harness
-        .wait_status(|s| matches!(s, VoiceStatus::Connected { .. }))
+        .wait_status(|s| matches!(s, VoiceStatus::Rekeying { .. }))
         .await;
+    let Message::Binary(key_package) = ws.0.next().await.unwrap().unwrap() else {
+        panic!("expected DAVE key package")
+    };
+    assert!(key_package.len() > 1 && key_package[0] == 26);
     let key = TransportKey::from_slice(&KEY).unwrap();
     (
         udp,
         TransportCipher::new(TransportMode::Aes256GcmRtpSize, &key),
     )
+}
+
+struct TestDaveGroup {
+    peer: DaveSession,
+    provider: OpenMlsRustCrypto,
+    delivery_signer: SignatureKeyPair,
+    external_sender_bytes: Vec<u8>,
+}
+
+/// Installs a valid initial group through an external Add proposal and Welcome.
+async fn install_test_dave_group(harness: &Harness, ws: &mut Ws) -> TestDaveGroup {
+    const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256;
+    let channel_id = credentials("fixture.discord.media:443").channel_id.0;
+    let Message::Binary(client_key_package) = ws.0.next().await.unwrap().unwrap() else {
+        panic!("expected DAVE key package")
+    };
+    assert_eq!(client_key_package[0], 26);
+
+    let provider = OpenMlsRustCrypto::default();
+    let delivery_signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).unwrap();
+    delivery_signer.store(provider.storage()).unwrap();
+    let external_sender = ExternalSender::new(
+        delivery_signer.public().into(),
+        BasicCredential::new(b"voice-gateway".to_vec()).into(),
+    );
+    let external_sender_bytes = external_sender.tls_serialize_detached().unwrap();
+    let mut peer = DaveSession::new(1, ALICE.0, channel_id).unwrap();
+    peer.set_external_sender(&external_sender_bytes).unwrap();
+    let client_key_package = KeyPackageIn::tls_deserialize_exact_bytes(&client_key_package[1..])
+        .unwrap()
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .unwrap();
+    let add = ExternalProposal::new_add::<OpenMlsRustCrypto>(
+        client_key_package,
+        GroupId::from_slice(&channel_id.to_be_bytes()),
+        GroupEpoch::from(peer.epoch().unwrap()),
+        &delivery_signer,
+        SenderExtensionIndex::new(0),
+    )
+    .unwrap();
+    let proposal_payload = dave_proposal_payload(&add);
+    let initial = peer
+        .process_proposals(0, &proposal_payload, &[ALICE.0, ME.0])
+        .unwrap()
+        .unwrap();
+    peer.process_commit(1, &initial.commit).unwrap();
+    assert!(peer.prepare_transition(1, 1).unwrap());
+    peer.execute_transition(1).unwrap();
+
+    let mut external_sender_frame = vec![0, 0, 25];
+    external_sender_frame.extend_from_slice(&external_sender_bytes);
+    ws.0.send(Message::binary(external_sender_frame))
+        .await
+        .unwrap();
+    ws.send(json!({"op": 21, "d": {"protocol_version": 1, "transition_id": 1}}))
+        .await;
+    let mut frame = vec![0, 1, 30, 0, 1];
+    frame.extend_from_slice(initial.welcome.as_deref().unwrap());
+    ws.0.send(Message::binary(frame)).await.unwrap();
+    assert_eq!(ws.recv_op(23).await["d"]["transition_id"], 1);
+    ws.send(json!({"op": 22, "d": {"transition_id": 1}})).await;
+    harness
+        .wait_status(|status| matches!(status, VoiceStatus::Connected { .. }))
+        .await;
+    TestDaveGroup {
+        peer,
+        provider,
+        delivery_signer,
+        external_sender_bytes,
+    }
+}
+
+fn dave_proposal_payload(proposal: &MlsMessageOut) -> Vec<u8> {
+    VLBytes::new(proposal.tls_serialize_detached().unwrap())
+        .tls_serialize_detached()
+        .unwrap()
 }
 
 /// Opens one client RTP datagram with the session key.
@@ -419,6 +509,89 @@ fn open_rtp(cipher: &TransportCipher, datagram: &[u8]) -> (RtpHeader, Vec<u8>, u
     let payload = header.split_body(&body).unwrap().payload.to_vec();
     (header, payload, nonce)
 }
+#[tokio::test(start_paused = true)]
+async fn driver_processes_authenticated_proposals_commits_and_encrypted_opus() {
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    let (mut udp, _) = negotiate(&mut harness, &mut ws, &BOTH_MODES).await;
+    let channel_id = credentials("fixture.discord.media:443").channel_id.0;
+    ws.send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let mut fixture = install_test_dave_group(&harness, &mut ws).await;
+
+    let mut carol = DaveSession::new(1, CAROL.0, channel_id).unwrap();
+    carol
+        .set_external_sender(&fixture.external_sender_bytes)
+        .unwrap();
+    let key_package =
+        KeyPackageIn::tls_deserialize_exact_bytes(&carol.create_key_package().unwrap())
+            .unwrap()
+            .validate(fixture.provider.crypto(), ProtocolVersion::Mls10)
+            .unwrap();
+    let proposal = ExternalProposal::new_add::<OpenMlsRustCrypto>(
+        key_package,
+        GroupId::from_slice(&channel_id.to_be_bytes()),
+        GroupEpoch::from(fixture.peer.epoch().unwrap()),
+        &fixture.delivery_signer,
+        SenderExtensionIndex::new(0),
+    )
+    .unwrap();
+    let proposal_payload = dave_proposal_payload(&proposal);
+    let expected_users = [ME.0, ALICE.0, CAROL.0];
+    fixture
+        .peer
+        .process_proposals(0, &proposal_payload, &expected_users)
+        .unwrap()
+        .unwrap();
+    ws.send(json!({"op": 11, "d": {"user_ids": [ALICE.0.to_string(), CAROL.0.to_string()]}}))
+        .await;
+    let mut proposal_frame = vec![0, 2, 27, 0];
+    proposal_frame.extend_from_slice(&proposal_payload);
+    ws.0.send(Message::binary(proposal_frame)).await.unwrap();
+
+    let Message::Binary(commit_welcome) = ws.0.next().await.unwrap().unwrap() else {
+        panic!("expected DAVE commit/welcome response")
+    };
+    assert_eq!(commit_welcome[0], 28);
+    let encoded_commit = &commit_welcome[1..];
+    let (_, welcome_remainder) = MlsMessageIn::tls_deserialize_bytes(encoded_commit).unwrap();
+    let commit_len = encoded_commit.len() - welcome_remainder.len();
+    let commit = encoded_commit[..commit_len].to_vec();
+    assert!(!welcome_remainder.is_empty());
+    let welcome = Welcome::tls_deserialize_exact_bytes(welcome_remainder).unwrap();
+    let welcome = welcome.tls_serialize_detached().unwrap();
+    fixture.peer.process_commit(2, &commit).unwrap();
+    carol.process_welcome(2, &welcome).unwrap();
+
+    let mut announce = vec![0, 3, 29, 0, 2];
+    announce.extend_from_slice(&commit);
+    ws.0.send(Message::binary(announce)).await.unwrap();
+    assert_eq!(ws.recv_op(23).await["d"]["transition_id"], 2);
+    ws.send(json!({"op": 22, "d": {"transition_id": 2}})).await;
+    assert!(fixture.peer.prepare_transition(2, 1).unwrap());
+    fixture.peer.execute_transition(2).unwrap();
+    assert!(carol.prepare_transition(2, 1).unwrap());
+    carol.execute_transition(2).unwrap();
+    harness
+        .wait_status(|status| matches!(status, VoiceStatus::Connected { .. }))
+        .await;
+
+    harness
+        .session
+        .media()
+        .send_opus(b"actual-runtime-dave-encrypted-frame".to_vec())
+        .unwrap();
+    assert_eq!(ws.recv_op(5).await["d"]["speaking"], 1);
+    let datagram = udp.recv().await;
+    let key = TransportKey::from_slice(&KEY).unwrap();
+    let cipher = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &key);
+    let encrypted = open_rtp(&cipher, &datagram).1;
+    assert_ne!(encrypted, b"actual-runtime-dave-encrypted-frame");
+    assert_eq!(
+        fixture.peer.decrypt_opus(ME.0, &encrypted).unwrap(),
+        b"actual-runtime-dave-encrypted-frame"
+    );
+}
 
 /// One server RTP datagram from `ssrc`.
 fn server_rtp(sender: &mut TransportCipher, ssrc: u32, sequence: u16, payload: &[u8]) -> Vec<u8> {
@@ -429,96 +602,38 @@ fn server_rtp(sender: &mut TransportCipher, ssrc: u32, sequence: u16, payload: &
     out
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
-
 #[tokio::test(start_paused = true)]
-async fn the_handshake_runs_in_order_and_media_leaves_only_encrypted_after_speaking() {
+async fn transport_ready_keeps_media_paused_until_authenticated_dave_keys() {
     let (mut harness, signaling) = Harness::start(options());
     let mut ws = signaling.accept().await;
     let media = harness.session.media();
-    // Queued before the key exists; released only once it does.
     media.send_opus(b"OPUS-FRAME-1".to_vec()).unwrap();
     media.send_opus(b"OPUS-FRAME-2".to_vec()).unwrap();
 
-    ws.hello(QUIET_HEARTBEAT_MS).await;
-    assert_eq!(
-        ws.recv_op(0).await,
-        json!({"op": 0, "d": {
-            "server_id": "41771983423143937",
-            "user_id": "104694319306248192",
-            "session_id": "fixture-session",
-            "token": "fixture-voice-token",
-            "max_dave_protocol_version": 0
-        }})
-    );
-    assert_eq!(harness.session.status(), VoiceStatus::Identifying);
-    assert_eq!(signaling.urls(), ["wss://fixture.discord.media:443/?v=8"]);
-    ws.send(ready(&BOTH_MODES)).await;
-    let mut udp = harness.udp().await;
-    assert_eq!(*harness.binds.lock(), [server_addr()]);
-    let discovery = udp.recv().await;
-    assert_eq!(harness.session.status(), VoiceStatus::Discovering);
-    udp.answer_discovery(&discovery);
-    assert_eq!(
-        ws.recv_op(1).await,
-        json!({"op": 1, "d": {
-            "protocol": "udp",
-            "data": {"address": "203.0.113.7", "port": 50123, "mode": "aead_aes256_gcm_rtpsize"},
-            "codecs": [{"name": "opus", "type": "audio", "priority": 1000, "payload_type": 120}]
-        }})
-    );
-    assert_eq!(harness.session.status(), VoiceStatus::Negotiating);
-    // Nothing but discovery has gone out over UDP while negotiating.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(udp.drain().iter().all(|d| is_ping(d)));
-
+    let (mut udp, select) = negotiate(&mut harness, &mut ws, &BOTH_MODES).await;
+    assert_eq!(select["d"]["data"]["mode"], "aead_aes256_gcm_rtpsize");
     ws.send(session_description("aead_aes256_gcm_rtpsize"))
         .await;
-    let first = udp.recv().await;
-    // The Speaking announcement was written before the first RTP packet.
-    assert_eq!(
-        ws.try_recv(),
-        Some(json!({"op": 5, "d": {"speaking": 1, "delay": 0, "ssrc": SSRC}}))
-    );
-    let second = udp.recv().await;
+    assert!(matches!(
+        harness
+            .wait_status(|status| matches!(status, VoiceStatus::Rekeying { .. }))
+            .await,
+        VoiceStatus::Rekeying { .. }
+    ));
+    let Message::Binary(key_package) = ws.0.next().await.unwrap().unwrap() else {
+        panic!("expected DAVE key package")
+    };
+    assert!(key_package.len() > 1 && key_package[0] == 26);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(udp.drain().iter().all(|datagram| is_ping(datagram)));
+    assert_eq!(harness.session.stats().rtp_sent, 0);
+    assert_eq!(media.send_opus(b"still-paused".to_vec()), Ok(()));
     assert_eq!(
         harness.session.status(),
-        VoiceStatus::Connected {
-            mode: TransportMode::Aes256GcmRtpSize,
-            ssrc: SSRC
+        VoiceStatus::Rekeying {
+            transition_id: None
         }
     );
-    let key = TransportKey::from_slice(&KEY).unwrap();
-    let cipher = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &key);
-    let (header, payload, nonce) = open_rtp(&cipher, &first);
-    assert_eq!(
-        (
-            header.ssrc,
-            header.payload_type,
-            header.sequence,
-            header.timestamp
-        ),
-        (SSRC, 120, 100, 1_000)
-    );
-    assert_eq!((payload.as_slice(), nonce), (&b"OPUS-FRAME-1"[..], 0));
-    let (header, payload, nonce) = open_rtp(&cipher, &second);
-    assert_eq!((header.sequence, header.timestamp), (101, 1_960));
-    assert_eq!((payload.as_slice(), nonce), (&b"OPUS-FRAME-2"[..], 1));
-
-    // Later frames go straight out; the speaking state is not repeated.
-    media.send_opus(b"OPUS-FRAME-3".to_vec()).unwrap();
-    let third = udp.recv().await;
-    assert_eq!(open_rtp(&cipher, &third).1, b"OPUS-FRAME-3");
-    assert_eq!(ws.try_recv(), None);
-    for datagram in &udp.log {
-        assert!(
-            !contains(datagram, b"OPUS-FRAME"),
-            "plaintext media on the wire"
-        );
-    }
-    assert_eq!(harness.session.stats().rtp_sent, 3);
 }
 
 #[tokio::test(start_paused = true)]
@@ -556,14 +671,13 @@ async fn xchacha_is_chosen_without_aes_acceleration() {
     ws.send(session_description("aead_xchacha20_poly1305_rtpsize"))
         .await;
     harness
-        .session
-        .media()
-        .send_opus(b"frame".to_vec())
-        .unwrap();
-    let datagram = udp.recv().await;
-    let key = TransportKey::from_slice(&KEY).unwrap();
-    let cipher = TransportCipher::new(TransportMode::XChaCha20Poly1305RtpSize, &key);
-    assert_eq!(open_rtp(&cipher, &datagram).1, b"frame");
+        .wait_status(|status| matches!(status, VoiceStatus::Rekeying { .. }))
+        .await;
+    let Message::Binary(key_package) = ws.0.next().await.unwrap().unwrap() else {
+        panic!("expected DAVE key package")
+    };
+    assert!(key_package.len() > 1 && key_package[0] == 26);
+    assert!(udp.drain().iter().all(|datagram| is_ping(datagram)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -584,12 +698,6 @@ async fn a_bad_session_description_never_releases_media() {
     for description in [
         // Not the mode that was selected.
         session_description("aead_xchacha20_poly1305_rtpsize"),
-        // DAVE was not offered.
-        {
-            let mut d = session_description("aead_aes256_gcm_rtpsize");
-            d["d"]["dave_protocol_version"] = json!(1);
-            d
-        },
         // A 31-byte key.
         {
             let mut d = session_description("aead_aes256_gcm_rtpsize");
@@ -630,14 +738,22 @@ async fn a_bad_session_description_never_releases_media() {
         assert!(sent.iter().all(|d| is_ping(d)), "{sent:?}");
         assert_eq!(harness.session.stats().rtp_sent, 0);
     }
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    let (mut udp, _) = negotiate(&mut harness, &mut ws, &BOTH_MODES).await;
+    let mut unsupported = session_description("aead_aes256_gcm_rtpsize");
+    unsupported["d"]["dave_protocol_version"] = json!(0);
+    ws.send(unsupported).await;
+    assert_eq!(harness.closed().await, CloseReason::E2eeRequired);
+    assert!(udp.drain().iter().all(|datagram| is_ping(datagram)));
 }
 
 #[tokio::test(start_paused = true)]
-async fn heartbeats_ack_sequences_and_a_missed_ack_resumes_with_the_same_key() {
+async fn heartbeats_ack_sequences_and_resume_keeps_transport_without_releasing_media() {
     let (mut harness, signaling) = Harness::start(options());
     let mut ws = signaling.accept().await;
     let mut second = signaling.accept().await;
-    let (mut udp, cipher) = connected(&mut harness, &mut ws).await;
+    let (mut udp, _cipher) = connected(&mut harness, &mut ws).await;
     // A numbered JSON message, then a numbered binary message.
     ws.send(json!({"op": 11, "d": {"user_ids": ["852892297661906993"]}, "seq": 5}))
         .await;
@@ -645,9 +761,7 @@ async fn heartbeats_ack_sequences_and_a_missed_ack_resumes_with_the_same_key() {
         harness.event().await,
         VoiceEvent::ClientsConnected(vec![ALICE])
     );
-    ws.0.send(Message::binary(vec![0, 7, 25, 0xAA]))
-        .await
-        .unwrap();
+    ws.0.send(Message::binary(vec![0, 7, 99])).await.unwrap();
 
     let start = Instant::now();
     let heartbeat = ws.recv_raw().await;
@@ -672,19 +786,18 @@ async fn heartbeats_ack_sequences_and_a_missed_ack_resumes_with_the_same_key() {
     );
     second.send(json!({"op": 9, "d": null})).await;
     harness
-        .wait_status(|s| matches!(s, VoiceStatus::Connected { .. }))
+        .wait_status(|s| matches!(s, VoiceStatus::Rekeying { .. }))
         .await;
-    // Same UDP socket and key; the nonce keeps counting.
     assert_eq!(harness.binds.lock().len(), 1);
     harness
         .session
         .media()
         .send_opus(b"after".to_vec())
         .unwrap();
-    let datagram = udp.recv().await;
-    let (_, payload, nonce) = open_rtp(&cipher, &datagram);
-    assert_eq!((payload.as_slice(), nonce), (&b"after"[..], 0));
-    assert_eq!(second.recv_op(5).await["d"]["speaking"], 1);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(udp.drain().iter().all(|datagram| is_ping(datagram)));
+    assert_eq!(harness.session.stats().rtp_sent, 0);
+    assert!(second.try_recv().is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -817,16 +930,14 @@ async fn ip_discovery_retries_then_reports_blocked_udp() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn received_audio_is_attributed_only_through_ssrc_mappings() {
+async fn received_media_requires_dave_decryption_after_ssrc_attribution() {
     let (mut harness, signaling) = Harness::start(options());
     let mut ws = signaling.accept().await;
     let (udp, _) = connected(&mut harness, &mut ws).await;
     let key = TransportKey::from_slice(&KEY).unwrap();
     let mut sender = TransportCipher::starting_at(TransportMode::Aes256GcmRtpSize, &key, 500);
 
-    // Media races ahead of Speaking: held, then attributed.
-    udp.send(server_rtp(&mut sender, 555, 65_535, b"alice-1"));
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    udp.send(server_rtp(&mut sender, 555, 1, b"transport-only-plaintext"));
     ws.send(json!({"op": 5, "d": {"speaking": 1, "ssrc": 555, "user_id": "852892297661906993"}}))
         .await;
     assert_eq!(
@@ -837,97 +948,24 @@ async fn received_audio_is_attributed_only_through_ssrc_mappings() {
             flags: 1
         }
     );
-    let first = harness.session.next_audio().await.unwrap();
-    assert_eq!(
-        (first.user_id, first.ssrc, first.payload.as_slice()),
-        (ALICE, 555, &b"alice-1"[..])
-    );
-    // The sequence wraps; the extended sequence keeps increasing.
-    udp.send(server_rtp(&mut sender, 555, 0, b"alice-2"));
-    let second = harness.session.next_audio().await.unwrap();
-    assert_eq!(second.sequence, first.sequence + 1);
-    assert_eq!(second.payload, b"alice-2");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(harness.session.next_audio().now_or_never().is_none());
+    assert_eq!(harness.session.stats().rejected_authentication, 1);
 
-    // Extension elements are encrypted with the payload and stripped from it.
-    let header = RtpHeader {
-        extension: Some(ExtensionPreamble {
-            profile: ONE_BYTE_PROFILE,
-            words: 1,
-        }),
-        ..RtpHeader::new(120, 1, 960, 555)
-    };
-    let mut clear = Vec::new();
-    header.write(&mut clear);
-    let mut body = vec![0x90, 0x03, 0, 0];
-    body.extend_from_slice(b"alice-3");
-    let mut datagram = Vec::new();
-    sender.seal(&clear, &body, &mut datagram).unwrap();
-    udp.send(datagram);
-    assert_eq!(
-        harness.session.next_audio().await.unwrap().payload,
-        b"alice-3"
-    );
-
-    // Never announced: dropped after the hold window, not given to Alice.
-    udp.send(server_rtp(&mut sender, 556, 1, b"stranger"));
-    // Tampered, foreign, and malformed datagrams.
-    let mut tampered = server_rtp(&mut sender, 555, 2, b"evil");
-    tampered[14] ^= 0xFF;
-    udp.send(tampered);
-    udp.send_from(
-        server_rtp(&mut sender, 555, 3, b"spoof"),
-        "198.51.100.99:50001".parse().unwrap(),
-    );
-    udp.send(vec![0x80, 0x78, 0, 1]);
-    udp.send(server_rtp(&mut sender, 555, 4, b""));
-    udp.send(server_rtp(&mut sender, 555, 5, &[0; MAX_OPUS_FRAME + 1]));
-    let malformed_extension = RtpHeader {
-        extension: Some(ExtensionPreamble {
-            profile: ONE_BYTE_PROFILE,
-            words: 1,
-        }),
-        ..RtpHeader::new(120, 6, 5_760, 555)
-    };
-    let mut clear = Vec::new();
-    malformed_extension.write(&mut clear);
-    let body = vec![0x9F, 0, 0, 0, b'x'];
-    let mut datagram = Vec::new();
-    sender.seal(&clear, &body, &mut datagram).unwrap();
-    udp.send(datagram);
+    udp.send(server_rtp(&mut sender, 556, 2, b"unannounced"));
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let stats = harness.session.stats();
-    assert_eq!(stats.dropped_unknown_ssrc, 1);
-    assert_eq!(stats.rejected_authentication, 1);
-    assert_eq!(stats.rejected_source, 1);
-    assert_eq!(stats.rejected_malformed, 4);
-    assert_eq!(stats.rtp_received, 4);
-
-    // After Client Disconnect, Alice's SSRC is no longer hers.
+    assert_eq!(harness.session.stats().dropped_unknown_ssrc, 1);
     ws.send(json!({"op": 13, "d": {"user_id": "852892297661906993"}}))
         .await;
     assert_eq!(harness.event().await, VoiceEvent::ClientDisconnected(ALICE));
-    udp.send(server_rtp(&mut sender, 555, 4, b"after-leave"));
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(harness.session.stats().dropped_unknown_ssrc, 2);
     assert!(harness.session.next_audio().now_or_never().is_none());
-
-    // Video events map the audio SSRC too.
-    ws.send(json!({"op": 12, "d": {"user_id": "852892297661906993", "audio_ssrc": 777, "video_ssrc": 778,
-        "streams": [{"ssrc": 778, "rtx_ssrc": 779, "rid": "100", "quality": 100, "active": true}]}}))
-        .await;
-    udp.send(server_rtp(&mut sender, 777, 9, b"alice-video-audio"));
-    let audio = harness.session.next_audio().await.unwrap();
-    assert_eq!(
-        (audio.user_id, audio.payload.as_slice()),
-        (ALICE, &b"alice-video-audio"[..])
-    );
 }
 
 #[tokio::test(start_paused = true)]
-async fn rtcp_reports_about_our_stream_surface_and_we_send_sender_reports() {
+async fn receiver_reports_are_received_while_local_media_stays_paused() {
     let (mut harness, signaling) = Harness::start(options());
     let mut ws = signaling.accept().await;
-    let (mut udp, cipher) = connected(&mut harness, &mut ws).await;
+    let (mut udp, _cipher) = connected(&mut harness, &mut ws).await;
     let key = TransportKey::from_slice(&KEY).unwrap();
     let mut sender = TransportCipher::starting_at(TransportMode::Aes256GcmRtpSize, &key, 900);
 
@@ -957,30 +995,12 @@ async fn rtcp_reports_about_our_stream_surface_and_we_send_sender_reports() {
         }
     );
 
-    // After sending media, a sender report follows within 5 s.
     let media = harness.session.media();
     media.send_opus(b"one".to_vec()).unwrap();
     media.send_opus(b"two".to_vec()).unwrap();
-    udp.recv().await;
-    udp.recv().await;
-    let report = loop {
-        let datagram = udp.recv().await;
-        if rtcp_wire::is_rtcp(&datagram) {
-            break datagram;
-        }
-    };
-    let mut body = Vec::new();
-    let nonce = cipher.open(&report, RTCP_CLEAR_LEN, &mut body).unwrap();
-    assert_eq!(nonce, 2);
-    let mut plain = report[..RTCP_CLEAR_LEN].to_vec();
-    plain.extend_from_slice(&body);
-    let Some(Ok(RtcpPacket::SenderReport(sr))) = Compound::new(&plain).next() else {
-        panic!("not a sender report");
-    };
-    assert_eq!(sr.ssrc, SSRC);
-    assert_eq!(sr.info.packet_count, 2);
-    assert_eq!(sr.info.octet_count, 6);
-    assert_eq!(sr.info.rtp_timestamp, 1_000 + 2 * 960);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(udp.drain().iter().all(|datagram| is_ping(datagram)));
+    assert_eq!(harness.session.stats().rtp_sent, 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1005,62 +1025,32 @@ async fn udp_pings_measure_latency() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn ending_speech_sends_five_paced_silence_frames_then_speaking_off() {
+async fn silence_tail_and_transport_nonces_wait_for_dave_keys() {
     let (mut harness, signaling) = Harness::start(options());
     let mut ws = signaling.accept().await;
-    let (mut udp, cipher) = connected(&mut harness, &mut ws).await;
+    let (mut udp, _) = connected(&mut harness, &mut ws).await;
     let media = harness.session.media();
     media.send_opus(b"voice".to_vec()).unwrap();
-    udp.recv().await;
-    assert_eq!(ws.recv_op(5).await["d"]["speaking"], 1);
     media.end_speech().unwrap();
-    let start = Instant::now();
-    let mut times = Vec::new();
-    for _ in 0..5 {
-        let datagram = udp.recv().await;
-        assert_eq!(open_rtp(&cipher, &datagram).1, [0xF8, 0xFF, 0xFE]);
-        times.push(Instant::now() - start);
-    }
-    assert_eq!(
-        times,
-        (0..5)
-            .map(|i| Duration::from_millis(20 * i))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        ws.recv_op(5).await,
-        json!({"op": 5, "d": {"speaking": 0, "delay": 0, "ssrc": SSRC}})
-    );
-    // Speaking again is announced again.
-    media.send_opus(b"again".to_vec()).unwrap();
-    udp.recv().await;
-    assert_eq!(ws.recv_op(5).await["d"]["speaking"], 1);
-}
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(udp.drain().iter().all(|datagram| is_ping(datagram)));
+    assert!(ws.try_recv().is_none());
+    assert_eq!(harness.session.stats().rtp_sent, 0);
 
-#[tokio::test(start_paused = true)]
-async fn nonce_exhaustion_stops_media_while_rtp_sequence_wraps_freely() {
-    let (mut harness, signaling) = Harness::start(Options {
+    let (mut nonce_harness, nonce_signaling) = Harness::start(Options {
         first_nonce: u32::MAX - 1,
         rtp_start: Some((u16::MAX, u32::MAX - 959)),
         ..options()
     });
-    let mut ws = signaling.accept().await;
-    let (mut udp, cipher) = connected(&mut harness, &mut ws).await;
-    let media = harness.session.media();
+    let mut nonce_ws = nonce_signaling.accept().await;
+    let (mut nonce_udp, _) = connected(&mut nonce_harness, &mut nonce_ws).await;
+    let media = nonce_harness.session.media();
     for frame in [&b"a"[..], b"b", b"c"] {
         media.send_opus(frame.to_vec()).unwrap();
     }
-    let (first, _, first_nonce) = open_rtp(&cipher, &udp.recv().await);
-    let (second, _, second_nonce) = open_rtp(&cipher, &udp.recv().await);
-    // The RTP sequence and timestamp wrap; the transport nonce does not.
-    assert_eq!((first.sequence, second.sequence), (u16::MAX, 0));
-    assert_eq!((first.timestamp, second.timestamp), (u32::MAX - 959, 0));
-    assert_eq!((first_nonce, second_nonce), (u32::MAX - 1, u32::MAX));
-    assert_eq!(harness.closed().await, CloseReason::KeyExhausted);
-    // The third frame was never sent under a reused nonce.
-    let rest = udp.drain();
-    assert!(rest.iter().all(|d| is_ping(d)), "{rest:?}");
-    assert_eq!(harness.session.stats().rtp_sent, 2);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(nonce_udp.drain().iter().all(|datagram| is_ping(datagram)));
+    assert_eq!(nonce_harness.session.stats().rtp_sent, 0);
 }
 
 #[tokio::test(start_paused = true)]

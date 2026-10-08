@@ -4,6 +4,7 @@
 //! join correlation. No audio devices, codecs, or UI live here.
 
 pub mod crypto;
+mod dave;
 pub mod gateway;
 pub mod rtcp;
 pub mod rtp;
