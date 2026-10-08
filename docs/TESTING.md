@@ -3,6 +3,11 @@
 ## Automated (CI, every push)
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Windows, Linux, and macOS. Tests are deterministic and offline: protocol fixtures in `fixtures/`, injected clocks, crypto/media vectors. No live credentials in CI.
 
+### Windows Media Foundation codecs (M27)
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --all-targets --locked`: passed. The workspace includes fastcord-video's offline H.264 SPS-bound regression, exact software decoding, software encoder/decoder round trips, backend-selection policy, and automatic backend reporting.
+- `cargo test -p fastcord-video --locked -- --ignored --nocapture`: passed on AMD Radeon RX 9070 XT. The real Media Foundation hardware decoder reproduced the I_PCM fixture bit-exactly; the hardware H.264 encoder round-tripped the fixture and 75-frame pattern through the hardware decoder and again through the software decoder.
+- Pending hardware fallback live case: no stream provoking `MF_E_UNSUPPORTED_D3D_TYPE` on this GPU was available, so the runtime stream-specific hardware-to-software retry was not exercised on a real unsupported profile/resolution. Other pending live checks for macOS/Linux codec backends are outside M27's Windows implementation.
+
 ### REST transport and scheduler (milestone 4)
 - `cargo test -p fastcord-discord --locked` exercises the real scheduler with an injected monotonic clock and sanitized `fixtures/rest/rate-limits.json`; no sockets, credentials, wall-clock sleeps, or server timestamps are involved.
 - Coverage includes shared bucket hashes across methods/routes without conflating major IDs, fractional resets, global and per-route 429 pauses (body/header/scope), concurrent reservations and out-of-order responses, unknown-route serialization, priority ordering, cancellation, byte budgets, and account-wide stop when the transport observes a 401.
@@ -38,6 +43,12 @@
 | Windows | Maintainer's PC | Agent | Primary target; real GPU, audio devices, capture |
 | Linux | Hyper-V VM on the same PC (Wayland + PipeWire) | Agent | No GPU passthrough: VA-API hardware paths unverified; software paths and portal capture testable |
 | macOS | Maintainer's Mac | Maintainer, from a CI-built package | Agent prepares a checklist per milestone; milestone completes when the maintainer reports pass |
+
+### Windows Media Foundation codecs (M27)
+- `cargo test -p fastcord-video --all-targets --locked -- --include-ignored --nocapture`: 33 passed, 0 failed. This includes exact decode of `fixtures/video/ipcm-128x96.h264`, fixture decode/re-encode/decode on explicit software and hardware paths, and the 75-frame encoder/decoder round trips.
+- Observed hardware path: encoder `AMDh264Encoder` on AMD Radeon RX 9070 XT; decoder `Microsoft H264 Video Decoder MFT` with D3D11VA on the same adapter. Hardware decode was copied to NV12 through a reusable CPU-readable D3D11 staging texture.
+- Observed software path: encoder `H264 Encoder MFT`; decoder `Microsoft H264 Video Decoder MFT`. Automatic selection chose hardware for both encoder and decoder on this machine. The implementation adds no FFmpeg dependency.
+- **Pending live check:** no authorized alt-account session was available, so official-client Go Live interoperability was not exercised; that live check remains for the screen-share milestone (M29).
 
 ### Interop partner for voice and Go Live
 - **fastcord** runs as the **alt account** (already logged in on discord.com in the maintainer's browser; obtain login via QR/token from that session).

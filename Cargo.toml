@@ -47,6 +47,8 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 webpki-roots = "1"
+windows = "0.62"
+windows-core = "0.62"
 zeroize = { version = "1", features = ["serde"] }
 windows-native-keyring-store = "1.1.0"
 zbus-secret-service-keyring-store = { version = "1.0.1", default-features = false, features = ["crypto-rust"] }
