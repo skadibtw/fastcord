@@ -13,7 +13,8 @@
 use std::collections::HashMap;
 
 use fastcord_model::{
-    Channel, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, User, VoiceState,
+    Channel, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, User, VoiceServerUpdate,
+    VoiceState,
 };
 use serde::{Deserialize, Deserializer};
 
@@ -709,6 +710,9 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "VOICE_STATE_UPDATE" => {
             decode_voice_state(raw).map(|v| Dispatch::VoiceStateUpdate(Box::new(v)))
         }
+        "VOICE_SERVER_UPDATE" => {
+            json::<VoiceServerUpdate>(raw).map(|v| Dispatch::VoiceServerUpdate(Box::new(v)))
+        }
         _ => return Decoded::Unhandled,
     };
     event.map_or(Decoded::Malformed, Decoded::Event)
@@ -1124,6 +1128,8 @@ mod tests {
         include_str!("../../../../fixtures/gateway/member_list_update_sync.json");
     const LIST_OPS: &str = include_str!("../../../../fixtures/gateway/member_list_update_ops.json");
     const VOICE_UPDATE: &str = include_str!("../../../../fixtures/gateway/voice_state_update.json");
+    const VOICE_SERVER: &str =
+        include_str!("../../../../fixtures/gateway/voice_server_update.json");
     const MEMBER_UPDATE: &str =
         include_str!("../../../../fixtures/gateway/guild_member_update.json");
 
@@ -1289,5 +1295,42 @@ mod tests {
             panic!("VOICE_STATE_UPDATE did not decode");
         };
         assert!(left.state.channel_id.is_none() && left.member.is_none());
+    }
+
+    #[test]
+    fn voice_server_updates_decode_and_never_show_the_token() {
+        let Decoded::Event(event) = decode_dispatch("VOICE_SERVER_UPDATE", VOICE_SERVER) else {
+            panic!("VOICE_SERVER_UPDATE did not decode");
+        };
+        assert_eq!(event.name(), "VOICE_SERVER_UPDATE");
+        let Dispatch::VoiceServerUpdate(update) = &event else {
+            panic!("unexpected event {event:?}");
+        };
+        assert_eq!(update.token.expose_secret(), "fixture-voice-token");
+        assert_eq!(update.guild_id, Some(id(41_771_983_423_143_937)));
+        assert_eq!(update.channel_id, None);
+        assert_eq!(
+            update.endpoint.as_deref(),
+            Some("fixture.discord.media:443")
+        );
+        let shown = format!("{event:?} {update:?}");
+        assert!(!shown.contains("fixture-voice-token"), "{shown}");
+
+        // The voice server went away: disconnect and wait for the next one.
+        let Decoded::Event(Dispatch::VoiceServerUpdate(reallocating)) = decode_dispatch(
+            "VOICE_SERVER_UPDATE",
+            r#"{"token":"fixture-voice-token","guild_id":"4","endpoint":null}"#,
+        ) else {
+            panic!("VOICE_SERVER_UPDATE did not decode");
+        };
+        assert_eq!(reallocating.endpoint, None);
+        assert_eq!(reallocating.guild_id, Some(id(4)));
+        assert!(!format!("{reallocating:?}").contains("fixture-voice-token"));
+
+        // Without a token there is nothing to connect with.
+        assert!(matches!(
+            decode_dispatch("VOICE_SERVER_UPDATE", r#"{"guild_id":"4","endpoint":null}"#),
+            Decoded::Malformed
+        ));
     }
 }

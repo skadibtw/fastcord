@@ -26,6 +26,7 @@ mod profile;
 mod subscription;
 mod transport;
 mod url;
+mod voice;
 mod wire;
 
 #[cfg(test)]
@@ -53,6 +54,7 @@ pub use subscription::{
     GuildSubscription, MAX_MEMBERS_PER_GUILD, MAX_RANGES, MemberRange, RANGE_BLOCK,
     SubscriptionTarget, Subscriptions,
 };
+pub use voice::VoiceStateControl;
 
 use crate::{RestClient, UserToken};
 use outbox::EventReceiver;
@@ -63,6 +65,7 @@ use transport::{LiveTransport, Transport};
 pub struct Gateway {
     events: EventReceiver,
     subscriptions: Subscriptions,
+    voice: VoiceStateControl,
     /// Dropping the sender is the shutdown signal.
     _shutdown: oneshot::Sender<()>,
 }
@@ -98,6 +101,12 @@ impl Gateway {
     pub fn subscriptions(&self) -> Subscriptions {
         self.subscriptions.clone()
     }
+
+    /// The handle through which the consumer joins, moves between, or leaves
+    /// voice channels and calls (opcode 4). Clones share one target.
+    pub fn voice_state(&self) -> VoiceStateControl {
+        self.voice.clone()
+    }
 }
 
 /// Decodes a recorded payload the way the connection would, for reducer tests.
@@ -118,6 +127,7 @@ fn start_with<T: Transport, J: JitterSource>(
 ) -> Gateway {
     let (outbox, events) = outbox::channel();
     let (subscriptions, wanted) = Subscriptions::new();
+    let (voice, voice_wanted) = VoiceStateControl::new();
     let (shutdown, shutdown_signal) = oneshot::channel();
     tokio::spawn(connection::run(
         transport,
@@ -125,12 +135,16 @@ fn start_with<T: Transport, J: JitterSource>(
         locale,
         jitter,
         outbox,
-        wanted,
+        connection::Wanted {
+            subscriptions: wanted,
+            voice: voice_wanted,
+        },
         shutdown_signal,
     ));
     Gateway {
         events,
         subscriptions,
+        voice,
         _shutdown: shutdown,
     }
 }

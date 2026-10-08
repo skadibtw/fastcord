@@ -78,6 +78,21 @@ impl SendBudget {
         SEND_LIMIT - self.sent.len()
     }
 
+    /// When more than `reserve` frames will be available again if nothing else
+    /// is sent meanwhile; `now` if they already are.
+    pub(crate) fn free_at(&mut self, now: Instant, reserve: usize) -> Instant {
+        self.prune(now);
+        // Frames that must leave the window before one more fits above the reserve.
+        let excess = (self.sent.len() + reserve + 1).saturating_sub(SEND_LIMIT);
+        match excess.checked_sub(1) {
+            None => now,
+            Some(index) => self
+                .sent
+                .get(index)
+                .map_or(now + SEND_WINDOW, |at| *at + SEND_WINDOW),
+        }
+    }
+
     /// Counts a frame that has been sent.
     pub(crate) fn record(&mut self, now: Instant) {
         self.prune(now);
@@ -149,5 +164,24 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(budget.has_capacity(Instant::now()));
         assert!(Instant::now().duration_since(start) >= SEND_WINDOW);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn free_at_names_when_frames_above_a_reserve_return() {
+        let mut budget = SendBudget::new();
+        let start = Instant::now();
+        for _ in 0..110 {
+            budget.record(Instant::now());
+            tokio::time::advance(Duration::from_millis(500)).await;
+        }
+        let now = Instant::now();
+        assert_eq!(budget.free_at(now, 5), now);
+        // Eleven frames must leave; the eleventh was sent at 5 s.
+        let at = budget.free_at(now, 20);
+        assert_eq!(at, start + Duration::from_secs(65));
+        assert_eq!(budget.remaining(at - Duration::from_millis(100)), 20);
+        assert_eq!(budget.remaining(at), 21);
+        // A reserve the window can never satisfy waits a whole window, never spins.
+        assert_eq!(budget.free_at(at, SEND_LIMIT), at + SEND_WINDOW);
     }
 }

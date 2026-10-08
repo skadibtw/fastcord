@@ -4,7 +4,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fastcord_model::{
-    Channel, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, User, VoiceState,
+    Channel, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, User, VoiceServerUpdate,
+    VoiceState,
 };
 
 /// The Gateway session ID. Not a credential on its own (resuming also needs the
@@ -376,6 +377,9 @@ pub enum Dispatch {
     GuildRoleUpdate(Box<GuildRoleEvent>),
     GuildRoleDelete(GuildRoleDelete),
     VoiceStateUpdate(Box<VoiceStateUpdate>),
+    /// The voice server for the account's voice connection; for the voice
+    /// layer, not the reducer. A `None` endpoint means it is being reallocated.
+    VoiceServerUpdate(Box<VoiceServerUpdate>),
 }
 
 impl Dispatch {
@@ -403,6 +407,7 @@ impl Dispatch {
             Self::GuildRoleUpdate(_) => "GUILD_ROLE_UPDATE",
             Self::GuildRoleDelete(_) => "GUILD_ROLE_DELETE",
             Self::VoiceStateUpdate(_) => "VOICE_STATE_UPDATE",
+            Self::VoiceServerUpdate(_) => "VOICE_SERVER_UPDATE",
         }
     }
 }

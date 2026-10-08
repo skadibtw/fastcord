@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 serde.workspace = true
 serde_repr.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

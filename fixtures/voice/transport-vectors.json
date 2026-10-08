@@ -1,0 +1,81 @@
+{
+  "_source": "Generated with pycryptodome 3.24.0 (AES.MODE_GCM; ChaCha20_Poly1305 with a 24-byte nonce, i.e. XChaCha20-Poly1305), independent of the RustCrypto crates under test; the AES-GCM packets were cross-checked with Node.js/OpenSSL. Layout of Discord's rtpsize modes: clear header (RTP fixed header + CSRCs + extension preamble, or the 8-byte RTCP header) as AAD, ciphertext, 16-byte tag, 4-byte big-endian nonce suffix; AEAD nonce = the suffix followed by zero bytes (12 bytes total for AES-GCM, 24 for XChaCha20). Keys are fabricated test keys.",
+  "modes": [
+    {
+      "mode": "aead_aes256_gcm_rtpsize",
+      "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "vectors": [
+        {
+          "name": "rtp-minimal",
+          "kind": "rtp",
+          "nonce": 0,
+          "clear": "80780001000003c012345678",
+          "plaintext": "f8fffe",
+          "packet": "80780001000003c012345678f6434b03b7a1888befe7e485ad057bee0dbc4300000000"
+        },
+        {
+          "name": "rtp-csrc-extension",
+          "kind": "rtp",
+          "nonce": 16909060,
+          "clear": "92f8ffffffffffff0badf00d1111111122222222bede0002",
+          "plaintext": "10859002000000000102030405060708090a0b0c0d0e0f1011121314",
+          "packet": "92f8ffffffffffff0badf00d1111111122222222bede000231d04d5f17917871fae594bfb5c6b066f91551fdddaf064359e32a4b46ee49f8e27dd4fcc7118f15f42f589c01020304"
+        },
+        {
+          "name": "rtp-padding-last-nonce",
+          "kind": "rtp",
+          "nonce": 4294967295,
+          "clear": "a078123400012c00cafebabe",
+          "plaintext": "0102030405000003",
+          "packet": "a078123400012c00cafebabe988da9cb3d86aea44e4b66364c3c836259ecea6814f9a7c7ffffffff"
+        },
+        {
+          "name": "rtcp-receiver-report",
+          "kind": "rtcp",
+          "nonce": 7,
+          "clear": "81c90007deadbeef",
+          "plaintext": "0badf00d0a00002a0001ffff000000101122334400010000",
+          "packet": "81c90007deadbeef544a248c702823a1efd36b3a01ca89ded56c6e2247e5756e50c6ee857bbd11ad88ae7d4afd6aa66f00000007"
+        }
+      ]
+    },
+    {
+      "mode": "aead_xchacha20_poly1305_rtpsize",
+      "key": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "vectors": [
+        {
+          "name": "rtp-minimal",
+          "kind": "rtp",
+          "nonce": 0,
+          "clear": "80780001000003c012345678",
+          "plaintext": "f8fffe",
+          "packet": "80780001000003c012345678a2a8af8bd565c2d1d2ab1458152ee6a98840b800000000"
+        },
+        {
+          "name": "rtp-csrc-extension",
+          "kind": "rtp",
+          "nonce": 16909060,
+          "clear": "92f8ffffffffffff0badf00d1111111122222222bede0002",
+          "plaintext": "10859002000000000102030405060708090a0b0c0d0e0f1011121314",
+          "packet": "92f8ffffffffffff0badf00d1111111122222222bede0002c853fc57053f32f3d6e74a7a3b895b0d251d31f7ccd59ab165f54e9950db943ab9ca6829b86ceb1be82a296301020304"
+        },
+        {
+          "name": "rtp-padding-last-nonce",
+          "kind": "rtp",
+          "nonce": 4294967295,
+          "clear": "a078123400012c00cafebabe",
+          "plaintext": "0102030405000003",
+          "packet": "a078123400012c00cafebabe6cb87fe549c51ca145e4b282758ab10ab8ab6a80ca17b5afffffffff"
+        },
+        {
+          "name": "rtcp-receiver-report",
+          "kind": "rtcp",
+          "nonce": 7,
+          "clear": "81c90007deadbeef",
+          "plaintext": "0badf00d0a00002a0001ffff000000101122334400010000",
+          "packet": "81c90007deadbeef4f90168e4b34c1f89ff364525639c7c6de8f72db8fa8c05bb82ec4be16c4f419bb5a9c22456c944600000007"
+        }
+      ]
+    }
+  ]
+}

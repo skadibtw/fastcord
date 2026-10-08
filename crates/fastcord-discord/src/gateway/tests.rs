@@ -965,7 +965,8 @@ fn snowflake(value: u64) -> fastcord_model::Snowflake {
 impl Server {
     /// Everything the client has sent that is already waiting, in order.
     /// Heartbeats are acknowledged. Only opcodes this client is meant to use
-    /// are accepted: in particular opcode 14 must never appear.
+    /// are accepted (heartbeat, identify, voice state, resume, subscriptions):
+    /// in particular opcode 14 must never appear.
     async fn service(&mut self) -> Vec<Value> {
         let mut frames = Vec::new();
         while let Some(Some(Ok(message))) = self.socket.next().now_or_never() {
@@ -974,7 +975,7 @@ impl Server {
             };
             let frame: Value = serde_json::from_str(text.as_str()).unwrap();
             let op = frame["op"].as_u64().unwrap();
-            assert!(matches!(op, 1 | 2 | 6 | 37), "unexpected opcode {op}");
+            assert!(matches!(op, 1 | 2 | 4 | 6 | 37), "unexpected opcode {op}");
             if op == 1 {
                 self.ack().await;
             }
@@ -1412,7 +1413,273 @@ async fn only_documented_opcodes_are_ever_sent_across_a_whole_session() {
         settle(Duration::from_secs(1)).await;
         all.extend(server.service().await);
     }
-    // `service` rejects any opcode but heartbeat, identify, resume, and 37.
+    // `service` rejects any opcode but heartbeat, identify, voice state,
+    // resume, and 37.
     assert!(all.iter().any(|frame| frame["op"] == 37));
     assert!(all.iter().all(|frame| frame["op"] != 14));
+}
+
+// ----- voice state (opcode 4) -----
+
+const VOICE_CHANNEL: u64 = 41_771_983_423_143_939;
+
+fn voice_join(channel: u64) -> fastcord_model::VoiceStateRequest {
+    fastcord_model::VoiceStateRequest::join(
+        Some(snowflake(FIRST_GUILD)),
+        snowflake(channel),
+        true,
+        false,
+    )
+}
+
+fn voice_leave() -> fastcord_model::VoiceStateRequest {
+    fastcord_model::VoiceStateRequest::leave(Some(snowflake(FIRST_GUILD)))
+}
+
+/// The exact opcode 4 frame for joining `channel` of the first guild muted.
+fn join_frame(channel: u64) -> Value {
+    json!({"op": 4, "d": {
+        "guild_id": FIRST_GUILD.to_string(),
+        "channel_id": channel.to_string(),
+        "self_mute": true,
+        "self_deaf": false,
+        "self_video": false
+    }})
+}
+
+impl Server {
+    /// The voice state frames sent so far.
+    async fn voice_frames(&mut self) -> Vec<Value> {
+        self.service()
+            .await
+            .into_iter()
+            .filter(|frame| frame["op"] == 4)
+            .collect()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_voice_join_is_sent_once_with_the_exact_opcode_4_body() {
+    let (gateway, _transport, mut server) = ready(0.5).await;
+    let voice = gateway.voice_state();
+    settle(Duration::from_secs(2)).await;
+    assert!(
+        server.voice_frames().await.is_empty(),
+        "nothing is sent for a voice state nobody asked for"
+    );
+
+    voice.request(voice_join(VOICE_CHANNEL));
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(server.voice_frames().await, [join_frame(VOICE_CHANNEL)]);
+    assert_eq!(voice.current(), Some(voice_join(VOICE_CHANNEL)));
+
+    // Asking again for what this session already holds sends nothing.
+    voice.clone().request(voice_join(VOICE_CHANNEL));
+    settle(Duration::from_secs(30)).await;
+    assert!(server.voice_frames().await.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_voice_request_made_while_identifying_is_sent_after_ready() {
+    let transport = FakeTransport::new();
+    let mut server = transport.accept().await;
+    let mut gateway = start(&transport, 0.5);
+    let voice = gateway.voice_state();
+    server.handshake().await;
+    voice.request(voice_join(VOICE_CHANNEL));
+    settle(Duration::from_secs(2)).await;
+    assert!(
+        server.voice_frames().await.is_empty(),
+        "a session that is not ready is sent no voice state"
+    );
+    server.dispatch("READY", 1, READY).await;
+    skip_connection_states(&mut gateway).await;
+    next_dispatch(&mut gateway).await;
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(server.voice_frames().await, [join_frame(VOICE_CHANNEL)]);
+    settle(Duration::from_secs(5)).await;
+    assert!(server.voice_frames().await.is_empty(), "sent exactly once");
+}
+
+#[tokio::test(start_paused = true)]
+async fn rapid_voice_requests_coalesce_into_only_the_latest() {
+    let (gateway, _transport, mut server) = ready(0.5).await;
+    let voice = gateway.voice_state();
+    voice.request(voice_join(VOICE_CHANNEL));
+    voice.request(voice_join(VOICE_CHANNEL + 1));
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(
+        server.voice_frames().await,
+        [join_frame(VOICE_CHANNEL + 1)],
+        "the superseded join was never sent"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn leaving_voice_sends_a_null_channel() {
+    let (gateway, _transport, mut server) = ready(0.5).await;
+    let voice = gateway.voice_state();
+    voice.request(voice_join(VOICE_CHANNEL));
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(server.voice_frames().await.len(), 1);
+    voice.request(voice_leave());
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(
+        server.voice_frames().await,
+        [json!({"op": 4, "d": {
+            "guild_id": FIRST_GUILD.to_string(),
+            "channel_id": null,
+            "self_mute": false,
+            "self_deaf": false,
+            "self_video": false
+        }})]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resume_resends_only_a_voice_state_changed_while_disconnected() {
+    let (mut gateway, transport, mut first) = ready(0.5).await;
+    let voice = gateway.voice_state();
+    voice.request(voice_join(VOICE_CHANNEL));
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(first.voice_frames().await, [join_frame(VOICE_CHANNEL)]);
+
+    // The resumed session kept the join: nothing is sent again.
+    let mut second = transport.accept().await;
+    first.close_with(4000).await;
+    expect_reconnecting(&mut gateway).await;
+    second.handshake_resume().await;
+    second.dispatch("RESUMED", 2, r#"{"_trace":[]}"#).await;
+    skip_connection_states(&mut gateway).await;
+    assert_eq!(next_dispatch(&mut gateway).await, (2, Dispatch::Resumed));
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(5)).await;
+    assert!(second.voice_frames().await.is_empty());
+
+    // A move made while disconnected waits for RESUMED, then goes out once.
+    let mut third = transport.accept().await;
+    second.close_with(4000).await;
+    expect_reconnecting(&mut gateway).await;
+    voice.request(voice_join(VOICE_CHANNEL + 1));
+    third.handshake_resume().await;
+    skip_connection_states(&mut gateway).await;
+    settle(Duration::from_secs(1)).await;
+    assert!(
+        third.voice_frames().await.is_empty(),
+        "nothing is sent while Resuming"
+    );
+    third.dispatch("RESUMED", 3, r#"{"_trace":[]}"#).await;
+    assert_eq!(next_dispatch(&mut gateway).await, (3, Dispatch::Resumed));
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(third.voice_frames().await, [join_frame(VOICE_CHANNEL + 1)]);
+    settle(Duration::from_secs(5)).await;
+    assert!(third.voice_frames().await.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fresh_identify_resends_a_wanted_join_but_never_a_leave() {
+    let (mut gateway, transport, mut first) = ready(0.5).await;
+    let voice = gateway.voice_state();
+    voice.request(voice_join(VOICE_CHANNEL));
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(first.voice_frames().await, [join_frame(VOICE_CHANNEL)]);
+
+    // Non-resumable Invalid Session: the new session holds no voice state.
+    let mut second = transport.accept().await;
+    first.send_json(json!({"op": 9, "d": false})).await;
+    let (_, _, reason) = expect_reconnecting(&mut gateway).await;
+    assert_eq!(reason, ReconnectReason::InvalidSession { resumable: false });
+    second.handshake().await;
+    second.dispatch("READY", 1, READY).await;
+    skip_connection_states(&mut gateway).await;
+    next_dispatch(&mut gateway).await;
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(second.voice_frames().await, [join_frame(VOICE_CHANNEL)]);
+
+    voice.request(voice_leave());
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(second.voice_frames().await.len(), 1);
+
+    // The session ends (4009): a wanted leave is already true of a new one.
+    let mut third = transport.accept().await;
+    second.close_with(4009).await;
+    expect_reconnecting(&mut gateway).await;
+    third.handshake().await;
+    third.dispatch("READY", 1, READY).await;
+    skip_connection_states(&mut gateway).await;
+    next_dispatch(&mut gateway).await;
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(5)).await;
+    assert!(third.voice_frames().await.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_voice_request_flood_never_starves_heartbeats_or_exceeds_the_send_ceiling() {
+    let (gateway, transport, mut server) = ready(0.5).await;
+    let voice = gateway.voice_state();
+    let started = Instant::now();
+    let mut frames: Vec<(Duration, Value)> = Vec::new();
+    // 300 distinct requests, 200 ms apart, would be 300 frames in a minute.
+    for n in 0..300u64 {
+        voice.request(voice_join(VOICE_CHANNEL + n));
+        settle(Duration::from_millis(200)).await;
+        frames.extend(
+            server
+                .service()
+                .await
+                .into_iter()
+                .map(|frame| (started.elapsed(), frame)),
+        );
+    }
+    // Then keep going until the window has slid and the backlog is sent.
+    for _ in 0..100 {
+        settle(Duration::from_secs(1)).await;
+        frames.extend(
+            server
+                .service()
+                .await
+                .into_iter()
+                .map(|frame| (started.elapsed(), frame)),
+        );
+    }
+    for (at, _) in &frames {
+        let window = frames
+            .iter()
+            .filter(|(other, _)| *other + Duration::from_secs(60) > *at && other <= at)
+            .count();
+        // Identify is the one frame already consumed by the ready helper.
+        let identify = usize::from(*at < Duration::from_secs(60));
+        assert!(
+            window + identify <= SEND_LIMIT,
+            "{} frames within 60 s",
+            window + identify
+        );
+    }
+    let first_minute = frames
+        .iter()
+        .filter(|(at, frame)| *at < Duration::from_secs(60) && frame["op"] == 4)
+        .count();
+    assert!(
+        first_minute > 100,
+        "{first_minute} voice frames: the ceiling must not be reached trivially low"
+    );
+    // Heartbeats at 20 s, 60 s, 100 s, and 140 s, every one on time and acked.
+    let heartbeats: Vec<Duration> = frames
+        .iter()
+        .filter(|(_, frame)| frame["op"] == 1)
+        .map(|(at, _)| *at)
+        .collect();
+    assert_eq!(heartbeats.len(), 4, "{heartbeats:?}");
+    assert_eq!(transport.connected().len(), 1, "no missed heartbeat ACKs");
+    // The newest wanted state did arrive, and last.
+    let last = frames
+        .iter()
+        .rev()
+        .find(|(_, frame)| frame["op"] == 4)
+        .map(|(_, frame)| frame)
+        .unwrap();
+    assert_eq!(*last, join_frame(VOICE_CHANNEL + 299));
 }

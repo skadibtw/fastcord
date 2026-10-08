@@ -725,6 +725,8 @@ impl Store {
             }
             Dispatch::GuildRoleDelete(event) => self.role_remove(event, &mut changes),
             Dispatch::VoiceStateUpdate(update) => self.voice_update(*update, &mut changes),
+            // Voice connection state is owned by the voice layer.
+            Dispatch::VoiceServerUpdate(_) => {}
         }
         self.refresh_list_key(&mut changes);
         changes

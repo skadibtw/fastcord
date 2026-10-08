@@ -14,12 +14,17 @@
 //!   reconnects, so the sequence used to Resume is exactly what was delivered.
 //! - Resume survives connect failures (a network outage says nothing about the
 //!   session); only the server (opcode 9, close codes 4003/4007/4009) ends it.
+//! - Opcode 4 is sent only while Ready, and only when the wanted voice state
+//!   differs from what this session last sent. That record survives
+//!   reconnects: a Resume keeps the server's voice state, a fresh READY
+//!   starts without one.
 
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fastcord_model::VoiceStateRequest;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{oneshot, watch};
 use tokio::time::{Instant, sleep, sleep_until, timeout};
@@ -38,6 +43,7 @@ use super::profile::{ClientProperties, HostOs};
 use super::subscription::{CONTROL_RESERVE, Subscriber, SubscriptionTarget};
 use super::transport::{DiscoverError, Transport};
 use super::url::GatewayUrl;
+use super::voice;
 use super::wire::{self, Envelope, Hello, op};
 use crate::UserToken;
 
@@ -125,6 +131,15 @@ struct Driver<T: Transport, J: JitterSource> {
     subscriber: Subscriber,
     session: Option<Session>,
     identify_rejections: u32,
+    voice: watch::Receiver<Option<VoiceStateRequest>>,
+    /// The last opcode 4 this session accepted from us, across reconnects.
+    voice_sent: Option<VoiceStateRequest>,
+}
+
+/// What the consumer wants the session to hold, as the handles set it.
+pub(crate) struct Wanted {
+    pub(crate) subscriptions: watch::Receiver<SubscriptionTarget>,
+    pub(crate) voice: watch::Receiver<Option<VoiceStateRequest>>,
 }
 
 pub(crate) async fn run<T: Transport, J: JitterSource>(
@@ -133,9 +148,13 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
     locale: String,
     jitter: J,
     outbox: Outbox,
-    subscriptions: watch::Receiver<SubscriptionTarget>,
+    wanted: Wanted,
     shutdown: oneshot::Receiver<()>,
 ) {
+    let Wanted {
+        subscriptions,
+        voice,
+    } = wanted;
     let interrupt = make_interrupt(Arc::clone(&transport), shutdown);
     let mut driver = Driver {
         transport,
@@ -149,6 +168,8 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
         subscriber: Subscriber::new(),
         session: None,
         identify_rejections: 0,
+        voice,
+        voice_sent: None,
     };
     let terminal = match drive(&mut driver, &locale).await {
         Err(terminal) => terminal,
@@ -316,12 +337,16 @@ where
     )
 }
 
-/// Enough future timed heartbeats for a complete send window, in addition to
-/// the reserve for other control traffic. HELLO intervals are already clamped
-/// to the supported nonzero range.
+/// Enough future timed heartbeats for a complete send window. HELLO intervals
+/// are already clamped to the supported nonzero range.
+fn heartbeat_reserve(interval: Duration) -> usize {
+    SEND_WINDOW.as_nanos().div_ceil(interval.as_nanos()) as usize
+}
+
+/// The heartbeat reserve plus room for other control traffic (opcode 4,
+/// answers to server heartbeat requests), which optional traffic leaves alone.
 fn control_reserve(interval: Duration) -> usize {
-    let heartbeats = SEND_WINDOW.as_nanos().div_ceil(interval.as_nanos()) as usize;
-    CONTROL_RESERVE + heartbeats
+    CONTROL_RESERVE + heartbeat_reserve(interval)
 }
 
 enum SubscriptionSendError {
@@ -368,6 +393,42 @@ where
     Ok(())
 }
 
+enum VoiceFlush {
+    Done,
+    /// The send ceiling has no room above the heartbeat reserve before this.
+    RetryAt(Instant),
+    Network,
+}
+
+/// Sends the wanted voice state unless this session already holds it. It may
+/// use the control reserve that subscriptions leave alone, but never the room
+/// kept for a full window of timed heartbeats.
+async fn flush_voice<S>(
+    socket: &mut S,
+    wanted: Option<VoiceStateRequest>,
+    sent: &mut Option<VoiceStateRequest>,
+    budget: &mut SendBudget,
+    interval: Duration,
+) -> VoiceFlush
+where
+    S: futures_util::Sink<Message, Error = WsError> + Unpin,
+{
+    let Some(request) = wanted.filter(|_| voice::needs_send(wanted, *sent)) else {
+        return VoiceFlush::Done;
+    };
+    let now = Instant::now();
+    let reserve = heartbeat_reserve(interval);
+    if budget.remaining(now) <= reserve {
+        return VoiceFlush::RetryAt(budget.free_at(now, reserve));
+    }
+    budget.record(now);
+    if !send(socket, &wire::voice_state_update(&request)).await {
+        return VoiceFlush::Network;
+    }
+    *sent = Some(request);
+    VoiceFlush::Done
+}
+
 async fn connection<T: Transport, J: JitterSource>(
     driver: &mut Driver<T, J>,
     mut socket: T::Socket,
@@ -383,6 +444,8 @@ async fn connection<T: Transport, J: JitterSource>(
         subscriber,
         session,
         identify_rejections,
+        voice,
+        voice_sent,
     } = driver;
     let mut conn = Conn {
         hello_seen: false,
@@ -395,6 +458,11 @@ async fn connection<T: Transport, J: JitterSource>(
     subscriber.pause();
     // Cleared once every handle is gone: no further changes can arrive.
     let mut watching = true;
+    let mut voice_watching = true;
+    // Opcode 4 may be sent only after READY or RESUMED on this connection.
+    let mut voice_live = false;
+    // When to compare the wanted voice state with what the session holds.
+    let mut voice_due: Option<Instant> = None;
     let mut budget = SendBudget::new();
     // HELLO deadline until HELLO arrives, then the next heartbeat.
     let mut timer = Instant::now() + HELLO_TIMEOUT;
@@ -425,6 +493,22 @@ async fn connection<T: Transport, J: JitterSource>(
             delivered = outbox.deliver_one(), if !outbox.is_empty() => {
                 if delivered.is_err() {
                     break Err(Terminal::Shutdown);
+                }
+            }
+            changed = voice.changed(), if voice_watching => {
+                match changed {
+                    Ok(()) => voice_due = Some(Instant::now()),
+                    Err(_) => voice_watching = false,
+                }
+            }
+            () = sleep_until(voice_due.unwrap_or(timer)), if voice_live && voice_due.is_some() => {
+                // The newest wanted state wins; earlier ones were never sent.
+                let wanted = *voice.borrow_and_update();
+                voice_due = None;
+                match flush_voice(&mut socket, wanted, voice_sent, &mut budget, conn.interval).await {
+                    VoiceFlush::Done => {}
+                    VoiceFlush::RetryAt(at) => voice_due = Some(at),
+                    VoiceFlush::Network => break Ok((ReconnectReason::Network, true)),
                 }
             }
             changed = subscriptions.changed(), if watching => {
@@ -488,8 +572,23 @@ async fn connection<T: Transport, J: JitterSource>(
                 inflater.finish_message();
                 match action {
                     Action::Nothing => {}
-                    Action::Ready => subscriber.start(Instant::now()),
-                    Action::Resumed => subscriber.resume(Instant::now()),
+                    Action::Ready => {
+                        let now = Instant::now();
+                        subscriber.start(now);
+                        // A new session holds no voice state of ours: a wanted
+                        // join is sent again, a wanted leave is already true.
+                        *voice_sent = None;
+                        voice_live = true;
+                        voice_due = Some(now);
+                    }
+                    Action::Resumed => {
+                        let now = Instant::now();
+                        subscriber.resume(now);
+                        // The session kept what was sent; only a change made
+                        // meanwhile goes out.
+                        voice_live = true;
+                        voice_due = Some(now);
+                    }
                     Action::Hello(interval) => {
                         conn.interval = interval;
                         timer = Instant::now() + interval.mul_f64(jitter.unit());

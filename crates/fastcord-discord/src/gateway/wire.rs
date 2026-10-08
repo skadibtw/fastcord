@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-use fastcord_model::Snowflake;
+use fastcord_model::{Snowflake, VoiceStateRequest};
 
 use super::capabilities;
 use super::profile::ClientProperties;
@@ -16,6 +16,7 @@ pub(crate) mod op {
     pub(crate) const DISPATCH: u8 = 0;
     pub(crate) const HEARTBEAT: u8 = 1;
     pub(crate) const IDENTIFY: u8 = 2;
+    pub(crate) const VOICE_STATE_UPDATE: u8 = 4;
     pub(crate) const RESUME: u8 = 6;
     /// Bulk guild subscriptions. Opcode 14, its deprecated predecessor, is
     /// never sent (SPEC §4.4).
@@ -143,6 +144,13 @@ pub(crate) fn resume(token: &str, session_id: &str, seq: u64) -> Result<String, 
     )
 }
 
+/// One opcode 4 frame. The body is the model's serialization of the request.
+pub(crate) fn voice_state_update(request: &VoiceStateRequest) -> String {
+    // Two decimal IDs and three flags: serialization cannot fail and the frame
+    // stays far below the outbound ceiling.
+    frame(op::VOICE_STATE_UPDATE, request).expect("opcode 4 frame always serializes")
+}
+
 /// Every field of one guild's subscription, always explicit: an omitted field
 /// is never assumed to clear anything (SPEC §4.4, U2). `typing` is the flag the
 /// server treats as "subscribed to this guild"; typing indicators themselves
@@ -238,6 +246,27 @@ mod tests {
         );
         assert_eq!(heartbeat(Some(7)), r#"{"op":1,"d":7}"#);
         assert_eq!(heartbeat(None), r#"{"op":1,"d":null}"#);
+    }
+
+    #[test]
+    fn voice_state_update_wraps_the_model_body_in_opcode_4() {
+        let join = VoiceStateRequest::join(Some(Snowflake(41)), Snowflake(127), true, false);
+        let sent: Value = serde_json::from_str(&voice_state_update(&join)).unwrap();
+        assert_eq!(
+            sent,
+            json!({"op": 4, "d": {
+                "guild_id": "41", "channel_id": "127",
+                "self_mute": true, "self_deaf": false, "self_video": false
+            }})
+        );
+        let leave: Value =
+            serde_json::from_str(&voice_state_update(&VoiceStateRequest::leave(None))).unwrap();
+        assert_eq!(leave["op"], 4);
+        assert_eq!(
+            leave["d"],
+            serde_json::to_value(VoiceStateRequest::leave(None)).unwrap()
+        );
+        assert_eq!(leave["d"]["channel_id"], Value::Null);
     }
 
     #[test]

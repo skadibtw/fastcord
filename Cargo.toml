@@ -13,10 +13,13 @@ repository = "https://github.com/skadibtw/fastcord"
 fastcord-model = { path = "crates/fastcord-model" }
 fastcord-discord = { path = "crates/fastcord-discord" }
 fastcord-platform = { path = "crates/fastcord-platform" }
+fastcord-media = { path = "crates/fastcord-media" }
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain"] }
 base64 = "0.22"
 bytes = "1"
 cpal = "0.18"
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 iced = { version = "0.14", default-features = false, features = ["advanced", "wgpu", "tiny-skia", "tokio", "x11", "wayland", "qr_code"] }
