@@ -20,6 +20,12 @@
 //! only says so. An edit being saved shows its new text at once, marked as
 //! saving, and falls back to Discord's copy if it fails.
 //!
+//! Where the user may send, hovering a message also offers Reply, which hands
+//! it to the composer. A reply shows one line above itself naming what it
+//! answers (resolved by the worker: loaded, deleted, or still loading);
+//! clicking that line jumps to the original, which the worker loads first when
+//! it is not retained, and the row jumped to stays tinted while it is near.
+//!
 //! [`VariableList`]: crate::variable_list::VariableList
 use std::sync::Arc;
 
@@ -52,6 +58,8 @@ pub struct Row {
     pub own: bool,
     /// Its unfinished edit or deletion.
     pub change: Option<RowChange>,
+    /// What it replies to, for a reply.
+    pub reply: Option<ReplyLine>,
 }
 
 #[cfg(test)]
@@ -62,7 +70,42 @@ impl Row {
             revision,
             own: false,
             change: None,
+            reply: None,
         }
+    }
+}
+
+/// The line a reply shows above itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplyLine {
+    /// The message it answers: where clicking the line jumps to.
+    pub target: Snowflake,
+    pub state: ReplyState,
+}
+
+/// What is known about the message a reply answers.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ReplyState {
+    /// Its author's name and the start of its text (at most
+    /// [`REPLY_PREVIEW_CHARS`](fastcord_model::REPLY_PREVIEW_CHARS) characters).
+    Message { author: String, content: String },
+    /// It was deleted.
+    Deleted,
+    /// It is being loaded.
+    Loading,
+    /// It could not be loaded; a jump tries again.
+    Unavailable,
+}
+
+// The quoted text never reaches a log.
+impl std::fmt::Debug for ReplyState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Message { .. } => "Message",
+            Self::Deleted => "Deleted",
+            Self::Loading => "Loading",
+            Self::Unavailable => "Unavailable",
+        })
     }
 }
 
@@ -91,8 +134,14 @@ pub struct Snapshot {
     pub outbox: Vec<OutboxItem>,
     /// The user may send to this channel (validated by the worker).
     pub can_send: bool,
-    /// Why the last edit or deletion could not be carried out, if it could not.
+    /// Why the last edit, deletion, or jump could not be carried out, if it could not.
     pub notice: Option<&'static str>,
+    /// The row a jump went to, tinted while it is near the viewport.
+    pub highlight: Option<Snowflake>,
+    /// Messages of this channel known to be deleted (at most
+    /// [`MAX_REFERENCES`](crate::history::MAX_REFERENCES)), so the composer
+    /// can tell that the message being replied to is gone.
+    pub deleted: Vec<Snowflake>,
 }
 
 /// What the UI is doing with a row that the snapshot does not know about.
@@ -100,6 +149,8 @@ pub struct Snapshot {
 pub struct Interaction {
     /// The message whose text is in the composer for editing.
     pub editing: Option<Snowflake>,
+    /// The message the composer is replying to.
+    pub replying: Option<Snowflake>,
     /// The message whose deletion waits for confirmation.
     pub confirming: Option<Snowflake>,
 }
@@ -147,6 +198,16 @@ pub enum Event {
         message_id: Snowflake,
     },
     DismissChange {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    /// Reply to a message (the composer takes it).
+    Reply {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    /// Show a message, loading the history around it first if necessary.
+    JumpTo {
         channel_id: Snowflake,
         message_id: Snowflake,
     },
@@ -203,7 +264,14 @@ pub fn view(snapshot: &Snapshot, interaction: Interaction) -> Element<'_, Event>
                 id: row.message.id,
                 revision: row.revision,
             },
-            message_view(row, channel_id, interaction),
+            message_view(
+                row,
+                channel_id,
+                interaction,
+                snapshot.can_send,
+                snapshot.highlight == Some(row.message.id)
+                    || interaction.replying == Some(row.message.id),
+            ),
         )
     });
     let list = variable_list::view(
@@ -303,7 +371,7 @@ fn jump_layer(channel_id: Snowflake) -> Element<'static, Event> {
 /// UI's interaction state alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RowState {
-    /// Someone else's message: nothing to offer.
+    /// Someone else's message: no Edit or Delete actions.
     Plain,
     /// The user's message: Edit and Delete while hovered.
     Actions,
@@ -350,7 +418,13 @@ fn row_button(label: &'static str, event: Event) -> button::Button<'static, Even
 
 /// Author, time, wrapped content, attachment lines, and the controls of the
 /// user's own messages. Plain text only: no embeds, markdown, or emoji assets yet.
-fn message_view(row: &Row, channel_id: Snowflake, interaction: Interaction) -> Element<'_, Event> {
+fn message_view(
+    row: &Row,
+    channel_id: Snowflake,
+    interaction: Interaction,
+    can_reply: bool,
+    highlighted: bool,
+) -> Element<'_, Event> {
     let message = &*row.message;
     let message_id = message.id;
     let state = row_state(row, interaction);
@@ -362,6 +436,17 @@ fn message_view(row: &Row, channel_id: Snowflake, interaction: Interaction) -> E
     ]
     .spacing(8)
     .align_y(Vertical::Center);
+    if highlighted {
+        header = header.push(
+            text(if interaction.replying == Some(message_id) {
+                "Reply target"
+            } else {
+                "Jumped here"
+            })
+            .size(12)
+            .style(text::secondary),
+        );
+    }
     if message.edited_timestamp.is_some() {
         header = header.push(text("(edited)").size(12).style(text::secondary));
     }
@@ -373,7 +458,35 @@ fn message_view(row: &Row, channel_id: Snowflake, interaction: Interaction) -> E
         }) => text,
         _ => message.content.as_str(),
     };
-    let mut body = column![header].spacing(2);
+    let mut body = column![].spacing(2);
+    if let Some(reply) = &row.reply {
+        let label = match &reply.state {
+            ReplyState::Message { author, content } => {
+                format!("Replying to {author}: {content}")
+            }
+            ReplyState::Deleted => "Original message was deleted.".to_owned(),
+            ReplyState::Loading => "Loading the original message…".to_owned(),
+            ReplyState::Unavailable => "Original message unavailable.".to_owned(),
+        };
+        let preview = text(label)
+            .size(12)
+            .width(Length::Fill)
+            .wrapping(text::Wrapping::WordOrGlyph);
+        body = if reply.state == ReplyState::Deleted {
+            body.push(preview.style(text::secondary))
+        } else {
+            body.push(
+                button(preview)
+                    .on_press(Event::JumpTo {
+                        channel_id,
+                        message_id: reply.target,
+                    })
+                    .padding([2, 4])
+                    .style(button::secondary),
+            )
+        };
+    }
+    body = body.push(header);
     if !content.is_empty() {
         body = body.push(
             text(content)
@@ -460,33 +573,47 @@ fn message_view(row: &Row, channel_id: Snowflake, interaction: Interaction) -> E
         bottom: 6.0,
         left: 12.0,
     });
-    if !matches!(state, RowState::Actions | RowState::Failed { .. }) {
+    let can_reply = can_reply && interaction.editing.is_none();
+    let show_own_actions = matches!(state, RowState::Actions | RowState::Failed { .. });
+    let show_reply = can_reply
+        && matches!(
+            state,
+            RowState::Plain | RowState::Actions | RowState::Failed { .. }
+        );
+    if !show_own_actions && !show_reply {
         return base.into();
     }
-    // Shown over the top right of the row while the pointer is on it; the row's
-    // height, and so the measured layout, does not depend on it.
-    let actions = container(
-        row![
-            row_button("Edit", edit),
-            row_button(
-                "Delete",
-                Event::Delete {
-                    channel_id,
-                    message_id,
-                },
-            ),
-        ]
-        .spacing(4),
-    )
-    .width(Length::Fill)
-    .align_x(Horizontal::Right)
-    .padding(Padding {
-        top: 4.0,
-        right: 12.0,
-        bottom: 0.0,
-        left: 0.0,
-    });
-    hover(base, actions)
+    // Hover controls are layered over the top right so the measured row height
+    // does not depend on whether the pointer is on it.
+    let mut actions = row![].spacing(4);
+    if show_own_actions {
+        actions = actions.push(row_button("Edit", edit)).push(row_button(
+            "Delete",
+            Event::Delete {
+                channel_id,
+                message_id,
+            },
+        ));
+    }
+    if show_reply {
+        actions = actions.push(row_button(
+            "Reply",
+            Event::Reply {
+                channel_id,
+                message_id,
+            },
+        ));
+    }
+    let overlay = container(actions)
+        .width(Length::Fill)
+        .align_x(Horizontal::Right)
+        .padding(Padding {
+            top: 4.0,
+            right: 12.0,
+            bottom: 0.0,
+            left: 0.0,
+        });
+    hover(base, overlay)
 }
 
 /// What to show for a message without text or attachments.
@@ -962,13 +1089,81 @@ mod tests {
         ] {
             assert!(found.contains(&event), "{event:?} in {found:?}");
         }
-        // Nothing anywhere acts on someone else's message, and nothing deletes
-        // without a confirmation first.
+        // No Edit or Delete acts on someone else's messages, and deletion
+        // needs a confirmation first.
         assert!(!found.iter().any(|event| names(event, 1)), "{found:?}");
         assert!(
             !found
                 .iter()
                 .any(|event| matches!(event, Event::ConfirmDelete { .. }))
+        );
+    }
+
+    #[test]
+    fn replies_are_offered_for_other_and_own_messages_only_when_sendable() {
+        let mut snapshot = mixed();
+        snapshot.can_send = true;
+        let found = clickable(&snapshot, Interaction::default());
+        for message_id in [1, 2, 3] {
+            assert!(
+                found.contains(&Event::Reply {
+                    channel_id: CHANNEL,
+                    message_id: Snowflake(message_id),
+                }),
+                "{found:?}"
+            );
+        }
+
+        snapshot.can_send = false;
+        let found = clickable(&snapshot, Interaction::default());
+        assert!(
+            !found
+                .iter()
+                .any(|event| matches!(event, Event::Reply { .. }))
+        );
+    }
+
+    #[test]
+    fn reply_previews_jump_to_the_exact_target_except_when_deleted() {
+        let line = |state| {
+            Some(ReplyLine {
+                target: Snowflake(42),
+                state,
+            })
+        };
+        let mut snapshot = mixed();
+        snapshot.rows = vec![Row {
+            reply: line(ReplyState::Message {
+                author: "Alice".to_owned(),
+                content: "quoted text".to_owned(),
+            }),
+            ..Row::new(message(1, "answer"), 1)
+        }];
+        snapshot.window = Window {
+            range: 0..1,
+            ..snapshot.window
+        };
+        for state in [
+            ReplyState::Message {
+                author: "Alice".to_owned(),
+                content: "quoted text".to_owned(),
+            },
+            ReplyState::Loading,
+            ReplyState::Unavailable,
+        ] {
+            snapshot.rows[0].reply = line(state);
+            assert!(
+                clickable(&snapshot, Interaction::default()).contains(&Event::JumpTo {
+                    channel_id: CHANNEL,
+                    message_id: Snowflake(42),
+                })
+            );
+        }
+        snapshot.rows[0].reply = line(ReplyState::Deleted);
+        assert!(
+            !clickable(&snapshot, Interaction::default())
+                .iter()
+                .any(|event| matches!(event, Event::JumpTo { .. }))
         );
     }
 
@@ -979,6 +1174,7 @@ mod tests {
             Interaction {
                 confirming: Some(Snowflake(2)),
                 editing: Some(Snowflake(3)),
+                replying: None,
             },
         );
         assert!(found.contains(&Event::ConfirmDelete {
@@ -1007,6 +1203,7 @@ mod tests {
         let ui = Interaction {
             confirming: Some(Snowflake(2)),
             editing: Some(Snowflake(2)),
+            replying: None,
         };
         let edit = saving(ChangeKind::Edit(Arc::from("new")));
         assert_eq!(row_state(&edit, ui), RowState::Saving { delete: false });

@@ -45,7 +45,9 @@ use std::mem::size_of;
 use std::slice;
 use std::sync::Arc;
 
-use fastcord_model::{Attachment, Message, MessageUpdate, Reaction, Snowflake};
+use fastcord_model::{
+    Attachment, Message, MessageUpdate, Reaction, Referenced, ReplyPreview, Snowflake, User,
+};
 
 use crate::gateway::Dispatch;
 use crate::history::{HistoryCursor, MESSAGE_PAGE_LIMIT};
@@ -86,10 +88,12 @@ fn attachment_heap(attachment: &Attachment) -> usize {
         + text(&attachment.content_type)
 }
 
+fn user_heap(user: &User) -> usize {
+    user.username.capacity() + text(&user.global_name) + text(&user.avatar)
+}
+
 fn message_heap(message: &Message) -> usize {
-    message.author.username.capacity()
-        + text(&message.author.global_name)
-        + text(&message.author.avatar)
+    user_heap(&message.author)
         + message.content.capacity()
         + message.timestamp.capacity()
         + text(&message.edited_timestamp)
@@ -106,6 +110,12 @@ fn message_heap(message: &Message) -> usize {
             .iter()
             .map(|reaction| text(&reaction.emoji.name))
             .sum::<usize>()
+        + match &message.referenced_message {
+            Referenced::Message(preview) => {
+                size_of::<ReplyPreview>() + user_heap(&preview.author) + preview.content.capacity()
+            }
+            Referenced::Unknown | Referenced::Deleted => 0,
+        }
 }
 
 fn update_heap(update: &MessageUpdate) -> usize {
@@ -139,10 +149,14 @@ fn shrink_text(value: &mut Option<String>) {
     }
 }
 
+fn compact_user(user: &mut User) {
+    user.username.shrink_to_fit();
+    shrink_text(&mut user.global_name);
+    shrink_text(&mut user.avatar);
+}
+
 fn compact(message: &mut Message) {
-    message.author.username.shrink_to_fit();
-    shrink_text(&mut message.author.global_name);
-    shrink_text(&mut message.author.avatar);
+    compact_user(&mut message.author);
     message.content.shrink_to_fit();
     message.timestamp.shrink_to_fit();
     shrink_text(&mut message.edited_timestamp);
@@ -157,6 +171,10 @@ fn compact(message: &mut Message) {
     message.reactions.shrink_to_fit();
     for reaction in &mut message.reactions {
         shrink_text(&mut reaction.emoji.name);
+    }
+    if let Referenced::Message(preview) = &mut message.referenced_message {
+        compact_user(&mut preview.author);
+        preview.content.shrink_to_fit();
     }
 }
 
@@ -662,6 +680,13 @@ impl MessageStore {
             .flat_map(|cache| cache.messages.iter().map(|slot| (slot.id, slot.revision)))
     }
 
+    /// Retained messages, oldest first, borrowed rather than shared.
+    pub fn messages(&self, channel: Snowflake) -> impl Iterator<Item = &Message> + '_ {
+        self.cache(channel)
+            .into_iter()
+            .flat_map(|cache| cache.messages.iter().map(|slot| &*slot.message))
+    }
+
     /// A shared handle to a retained message. Holding it keeps that body alive
     /// outside the store's accounting, so a consumer must bound what it holds.
     pub fn get(&self, channel: Snowflake, id: Snowflake) -> Option<Arc<Message>> {
@@ -696,6 +721,15 @@ impl MessageStore {
             older,
             newer,
         })
+    }
+
+    /// Whether the channel's run vouches for `id`: a message with that ID is
+    /// then either held or intentionally absent (deleted, or too large to hold),
+    /// so asking Discord for it again cannot find it.
+    pub fn covers(&self, channel: Snowflake, id: Snowflake) -> bool {
+        self.cache(channel)
+            .and_then(|cache| cache.coverage)
+            .is_some_and(|(lo, hi)| (lo..=hi).contains(&id.0))
     }
 
     pub fn channel_len(&self, channel: Snowflake) -> usize {
@@ -818,7 +852,11 @@ impl MessageStore {
     /// the server sent it. Pages attach to the channel's run: `Latest` starts
     /// or extends it at the live edge (replacing a run it cannot reach),
     /// `Before` and `After` extend it in their direction, and a page that does
-    /// not touch the run is [`PageMerge::Stale`].
+    /// not touch the run is [`PageMerge::Stale`]. `Around` (a jump) extends the
+    /// run it touches and otherwise replaces it with a run of just that page,
+    /// which vouches only for the IDs between its first and last message (a
+    /// short page cannot tell which side ran out); an empty `Around` page
+    /// changes nothing.
     pub fn merge_page(&mut self, token: PageToken, messages: Vec<Message>) -> PageMerge {
         let Some(at) = self
             .pending
@@ -838,7 +876,7 @@ impl MessageStore {
         let mut page = Vec::with_capacity(received);
         for message in messages {
             let on_side = match cursor {
-                HistoryCursor::Latest => true,
+                HistoryCursor::Latest | HistoryCursor::Around(_) => true,
                 HistoryCursor::Before(before) => message.id < before,
                 HistoryCursor::After(after) => message.id > after,
             };
@@ -848,7 +886,7 @@ impl MessageStore {
                 rejected += 1;
             }
         }
-        if received > 0 && page.is_empty() {
+        if (received > 0 || matches!(cursor, HistoryCursor::Around(_))) && page.is_empty() {
             return PageMerge::Applied {
                 received,
                 held: self.channel_len(channel),
@@ -877,6 +915,7 @@ impl MessageStore {
                     u64::MAX
                 },
             ),
+            HistoryCursor::Around(_) => (first.unwrap_or(0), last.unwrap_or(0)),
         };
 
         // Where it goes: onto the run it touches, or (Latest only) a new run.
@@ -888,7 +927,9 @@ impl MessageStore {
             {
                 Target::Merge { ci, lo, hi }
             }
-            _ if cursor == HistoryCursor::Latest => Target::Fresh,
+            _ if matches!(cursor, HistoryCursor::Latest | HistoryCursor::Around(_)) => {
+                Target::Fresh
+            }
             _ => return PageMerge::Stale,
         };
         let live_before = match target {
@@ -939,17 +980,22 @@ impl MessageStore {
         match target {
             Target::Fresh => {
                 cache.coverage = first.zip(last);
-                cache.older_exhausted = !full;
-                cache.live = true;
+                let around = matches!(cursor, HistoryCursor::Around(_));
+                cache.older_exhausted = !full && !around;
+                cache.live = !around;
             }
             Target::Merge { lo, hi, .. } => {
                 let page_lo = match cursor {
                     HistoryCursor::After(after) => Some(after.0.saturating_add(1)),
-                    HistoryCursor::Latest | HistoryCursor::Before(_) => first,
+                    HistoryCursor::Latest | HistoryCursor::Before(_) | HistoryCursor::Around(_) => {
+                        first
+                    }
                 };
                 let page_hi = match cursor {
                     HistoryCursor::Before(before) => Some(before.0.saturating_sub(1)),
-                    HistoryCursor::Latest | HistoryCursor::After(_) => last,
+                    HistoryCursor::Latest | HistoryCursor::After(_) | HistoryCursor::Around(_) => {
+                        last
+                    }
                 };
                 cache.coverage =
                     Some((lo.min(page_lo.unwrap_or(lo)), hi.max(page_hi.unwrap_or(hi))));
@@ -960,6 +1006,7 @@ impl MessageStore {
                     }
                     HistoryCursor::Before(_) => cache.older_exhausted |= !full,
                     HistoryCursor::After(_) => cache.live |= !full,
+                    HistoryCursor::Around(_) => {}
                 }
             }
         }
@@ -972,6 +1019,8 @@ impl MessageStore {
                     cache.focus = Some(edge);
                 }
             }
+            // The reader is being taken to the jump's target.
+            HistoryCursor::Around(target) => cache.focus = Some(target),
         }
         cache.used = self.tick;
 

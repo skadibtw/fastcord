@@ -178,3 +178,29 @@ An edit's REST answer (the full message) is applied through the same store path 
 
 ### Bounds
 At most 16 changes, each holding at most 4,000 characters of new text; failed changes of messages no longer held (channel closed, message evicted) are dropped with their row, and a failure that arrives for such a message while its channel is still open is reported in the composer area. Edit and delete commands travel through the same 32-entry command queue as sends; a full queue refuses the action and keeps the editor's text. Once the queue has accepted an edit the composer leaves editing mode, so an edit the worker then refuses (the message was deleted or evicted meanwhile, or 16 changes are already unfinished) is reported in the composer area and its text is not kept. Edit text never appears in `Debug` output or logs.
+
+## Replies (milestone 12)
+
+Implemented by `fastcord-model::Message` (reply references and bounded nested previews), `fastcord-discord::send` (the create body), `fastcord-discord::history` (target reads), `fastcord-app::history` (visible-reference loading and jumps), and the timeline/composer. Wire shapes are captured with fabricated IDs in `fixtures/rest/message-reply-request.json` and `fixtures/rest/message-reply-response.json`; they follow Discord's Create Message schema and documented user-client behavior. No live capture is available yet.
+
+### Send and mention policy
+
+A reply uses the ordinary `POST /channels/{channel}/messages` `Priority::UserWrite` route with:
+
+```json
+{"content":"…","nonce":"1290000000000000002","enforce_nonce":true,"tts":false,"flags":0,
+ "allowed_mentions":{"parse":["users","roles"],"replied_user":false},
+ "message_reference":{"type":0,"message_id":"1289999999999999999","fail_if_not_exists":true}}
+```
+
+`type: 0` is a normal message reference, not a forward. `channel_id` is omitted because the reference must be to the message's own channel. `fail_if_not_exists` prevents a deleted target from silently becoming an ordinary message. A reply always supplies `allowed_mentions.replied_user`, including `false`; the checkbox defaults off and records the user's per-reply choice. A plain send has neither `message_reference` nor `replied_user`.
+
+If Discord refuses a reply because its target was deleted after composition, the 400 is a definite not-sent result and remains visible in the outbox; the UI never retries it automatically or drops the reference. A target already known deleted disables Send until the user cancels or chooses another reply.
+
+### Preview and jump
+
+Only `type: 19` messages whose `message_reference.message_id` names the same channel are presented as replies. A missing `referenced_message` is unknown; `null` is deleted; an object is reduced to its display name (at most 128 Unicode scalar values), ID, and at most 200 characters of content. Unknown previews are fetched only for reply rows in the visible timeline, at most one speculative request at a time and with no more than 128 bounded resolution/deletion records.
+
+The preview fetch uses `GET /channels/{channel}/messages?limit=1&around={message_id}` at speculative-read priority. It accepts only the exact requested ID; an adjacent message is never used as the preview. `Ok(None)` means the target is deleted. Clicking a non-deleted preview jumps locally if the target is retained; otherwise a user-priority `limit=49` `around` history page loads it (an odd limit avoids Discord's possible extra record for even limits while keeping responses within the hard 50-message decoder cap). If the target is absent from that page, the viewport is not moved to a neighbor and the target is shown as deleted; if it cannot be retained, it is shown as unavailable. Deleted targets do not offer a jump.
+
+References and previews are memory-only. Reply text and preview text are omitted from `Debug`; the message store charges nested previews to its existing byte budget. Live official-client interoperability remains outstanding (docs/TESTING.md).

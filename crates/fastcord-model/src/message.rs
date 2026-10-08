@@ -1,7 +1,16 @@
 use std::fmt;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 use crate::wire::{double_option, lenient_nonce};
 use crate::{Snowflake, User};
+
+/// Message type of a reply (`REPLY`).
+pub const REPLY_KIND: u8 = 19;
+
+/// Characters of a replied-to message's text a [`ReplyPreview`] keeps: enough
+/// for the one line a reply shows above itself, never the whole body.
+pub const REPLY_PREVIEW_CHARS: usize = 200;
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
@@ -83,6 +92,13 @@ pub struct Message {
     pub reactions: Vec<Reaction>,
     #[serde(default)]
     pub message_reference: Option<MessageReference>,
+    /// What Discord reported about the message a reply answers.
+    #[serde(
+        default,
+        skip_serializing_if = "Referenced::is_unknown",
+        serialize_with = "Referenced::serialize_field"
+    )]
+    pub referenced_message: Referenced,
     /// The client-chosen nonce echoed by Discord (up to 25 characters), when
     /// there is one. Only used to recognize a message this client sent.
     #[serde(
@@ -91,6 +107,98 @@ pub struct Message {
         skip_serializing_if = "Option::is_none"
     )]
     pub nonce: Option<String>,
+}
+
+/// The part of a replied-to message a reply's preview line shows: who wrote it
+/// and the start of its text (at most [`REPLY_PREVIEW_CHARS`] characters). It
+/// is presentation data, not a message body, so it is cut rather than refused.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReplyPreview {
+    pub id: Snowflake,
+    pub author: User,
+    pub content: String,
+}
+
+impl ReplyPreview {
+    pub fn of(message: &Message) -> Self {
+        Self::new(message.id, message.author.clone(), &message.content)
+    }
+
+    pub fn new(id: Snowflake, author: User, content: &str) -> Self {
+        Self {
+            id,
+            author,
+            content: content.chars().take(REPLY_PREVIEW_CHARS).collect(),
+        }
+    }
+}
+
+/// The fields of a nested `referenced_message` a preview needs; everything else
+/// (including its own nested references) is skipped while decoding.
+#[derive(Deserialize, Serialize)]
+struct WirePreview<'a> {
+    id: Snowflake,
+    author: std::borrow::Cow<'a, User>,
+    #[serde(default)]
+    content: std::borrow::Cow<'a, str>,
+}
+
+/// What Discord reported about the message a reply answers
+/// (`referenced_message`, SPEC §5.2): absent means Discord did not look it up,
+/// `null` means it was deleted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Referenced {
+    /// The field was absent: the replied-to message's state is unknown.
+    #[default]
+    Unknown,
+    /// The field was `null`: the replied-to message was deleted.
+    Deleted,
+    Message(Box<ReplyPreview>),
+}
+
+impl Referenced {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    /// The wire form: `null` for a deleted message, a partial message object
+    /// otherwise. [`Unknown`](Self::Unknown) is never serialized (the field is
+    /// skipped).
+    fn serialize_field<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Unknown | Self::Deleted => serializer.serialize_none(),
+            Self::Message(preview) => WirePreview {
+                id: preview.id,
+                author: std::borrow::Cow::Borrowed(&preview.author),
+                content: std::borrow::Cow::Borrowed(&preview.content),
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Referenced {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(
+            match Option::<WirePreview<'_>>::deserialize(deserializer)? {
+                None => Self::Deleted,
+                Some(wire) => Self::Message(Box::new(ReplyPreview::new(
+                    wire.id,
+                    wire.author.into_owned(),
+                    &wire.content,
+                ))),
+            },
+        )
+    }
+}
+
+// The replied-to text never reaches a default logging path.
+impl fmt::Debug for ReplyPreview {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReplyPreview")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A MESSAGE_UPDATE payload. Discord may omit any field except the IDs;
@@ -159,6 +267,21 @@ impl Message {
         if let Some(attachments) = update.attachments {
             self.attachments = attachments;
         }
+    }
+
+    /// The message this one replies to, when it is a reply within its own
+    /// channel. Replies always answer a message of the same channel; any other
+    /// reference (a crosspost's source, a forward) is not a reply target.
+    pub fn replied_to(&self) -> Option<Snowflake> {
+        if self.kind != REPLY_KIND {
+            return None;
+        }
+        let reference = self.message_reference.as_ref()?;
+        reference
+            .channel_id
+            .is_none_or(|channel| channel == self.channel_id)
+            .then_some(reference.message_id)
+            .flatten()
     }
 }
 

@@ -68,6 +68,8 @@ const EPSILON: f32 = 0.75;
 const REPORT_STEP: f32 = 4.0;
 /// The viewport counts as being at the bottom within this distance.
 const BOTTOM_SLACK: f32 = 2.0;
+/// A jump puts its row this fraction of the viewport below the top.
+const JUMP_FROM_TOP: f32 = 0.25;
 
 /// A message in display order (oldest first). `revision` changes whenever the
 /// message body does, which is when its cached height stops being trustworthy.
@@ -533,6 +535,34 @@ impl VariableList {
             target: ScrollTarget::Bottom,
             only_from: None,
         });
+    }
+
+    /// Scrolls so that row `id` is in view, a quarter of the viewport below
+    /// the top, and stops following the bottom: a jump to a message. Returns
+    /// `false`, changing nothing, when the row is not retained.
+    pub fn jump_to(&mut self, id: Snowflake) -> bool {
+        if !self.index.contains_key(&id) {
+            return false;
+        }
+        let anchor = Anchor {
+            id,
+            in_row: -(self.height * JUMP_FROM_TOP),
+        };
+        self.anchor = Some(anchor);
+        self.follow = false;
+        self.request = Some(ScrollRequest {
+            serial: next_serial(),
+            target: ScrollTarget::Anchor(anchor),
+            only_from: None,
+        });
+        true
+    }
+
+    /// Whether row `id` is among the rows [`window`](Self::window) builds.
+    pub fn in_window(&self, id: Snowflake) -> bool {
+        self.index
+            .get(&id)
+            .is_some_and(|at| self.overscan().contains(at))
     }
 
     /// The scroll the widget has not acknowledged yet. Put it in every snapshot.

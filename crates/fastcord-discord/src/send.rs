@@ -1,5 +1,5 @@
-//! Creating messages (`POST /channels/{id}/messages`) with a stable nonce and an
-//! explicit mention policy (SPEC §5.1, §5.2).
+//! Creating messages and replies (`POST /channels/{id}/messages`) with a stable
+//! nonce and an explicit mention policy (SPEC §5.1, §5.2).
 //!
 //! A send is a write whose outcome can be unknowable: a connection that drops
 //! after the request left may or may not have created the message. This module
@@ -127,6 +127,16 @@ impl MentionPolicy {
     }
 }
 
+/// The message a new message answers, and whether its author is notified.
+/// A reply always answers a message of the channel it is posted to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplyTo {
+    pub message: Snowflake,
+    /// Sent as `allowed_mentions.replied_user`: never left to Discord's
+    /// default, so the user's choice is what happens.
+    pub mention_author: bool,
+}
+
 /// Why a draft cannot be sent at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComposeError {
@@ -153,6 +163,7 @@ pub struct OutgoingMessage {
     content: String,
     nonce: Nonce,
     mentions: MentionPolicy,
+    reply: Option<ReplyTo>,
 }
 
 impl OutgoingMessage {
@@ -169,7 +180,16 @@ impl OutgoingMessage {
             content: content.to_owned(),
             nonce,
             mentions,
+            reply: None,
         })
+    }
+
+    /// Makes the message a reply. Discord is asked to refuse it if the
+    /// message it answers no longer exists (`fail_if_not_exists`), so a reply
+    /// is never silently posted as a plain message.
+    pub fn replying_to(mut self, reply: Option<ReplyTo>) -> Self {
+        self.reply = reply;
+        self
     }
 
     pub fn nonce(&self) -> Nonce {
@@ -185,7 +205,13 @@ impl OutgoingMessage {
             flags: 0,
             allowed_mentions: AllowedMentions {
                 parse: self.mentions.parse(),
+                replied_user: self.reply.map(|reply| reply.mention_author),
             },
+            message_reference: self.reply.map(|reply| WireReference {
+                kind: 0,
+                message_id: reply.message,
+                fail_if_not_exists: true,
+            }),
         }
     }
 }
@@ -196,6 +222,7 @@ impl fmt::Debug for OutgoingMessage {
             .field("nonce", &self.nonce)
             .field("content_chars", &self.content.chars().count())
             .field("mentions", &self.mentions)
+            .field("reply", &self.reply)
             .finish()
     }
 }
@@ -208,11 +235,25 @@ struct CreateMessage<'a> {
     tts: bool,
     flags: u8,
     allowed_mentions: AllowedMentions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_reference: Option<WireReference>,
 }
 
 #[derive(Serialize)]
 struct AllowedMentions {
     parse: Vec<&'static str>,
+    /// Present exactly for replies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replied_user: Option<bool>,
+}
+
+/// `message_reference` of a reply: type 0 (`DEFAULT`), never a forward.
+#[derive(Serialize)]
+struct WireReference {
+    #[serde(rename = "type")]
+    kind: u8,
+    message_id: Snowflake,
+    fail_if_not_exists: bool,
 }
 
 /// How a failed send ended. Neither case is ever retried by the transport.
@@ -345,6 +386,69 @@ mod tests {
         assert_eq!(sent, recorded);
         // The wire nonce is a string, never a JSON integer that could lose precision.
         assert!(sent["nonce"].is_string());
+    }
+
+    #[test]
+    fn reply_body_matches_the_recorded_shape_and_always_states_the_author_mention() {
+        const REPLY_REQUEST: &str =
+            include_str!("../../../fixtures/rest/message-reply-request.json");
+        let target = Snowflake(1_289_999_999_999_999_999);
+        let reply = |mention_author| {
+            OutgoingMessage::new(
+                "replying from fastcord",
+                Nonce(1_290_000_000_000_000_002),
+                MentionPolicy::default(),
+            )
+            .unwrap()
+            .replying_to(Some(ReplyTo {
+                message: target,
+                mention_author,
+            }))
+        };
+        let sent = serde_json::to_value(reply(false).body()).unwrap();
+        let recorded: serde_json::Value = serde_json::from_str(REPLY_REQUEST).unwrap();
+        assert_eq!(sent, recorded);
+        // The ID is a decimal string, and Discord must refuse the reply rather
+        // than post a plain message when the target no longer exists.
+        assert_eq!(
+            sent["message_reference"]["message_id"],
+            "1289999999999999999"
+        );
+        assert_eq!(sent["message_reference"]["fail_if_not_exists"], true);
+        // Mentioning the author is the user's explicit choice either way.
+        let pinging = serde_json::to_value(reply(true).body()).unwrap();
+        assert_eq!(
+            pinging["allowed_mentions"],
+            serde_json::json!({"parse": ["users", "roles"], "replied_user": true})
+        );
+        // Without a reply the body has neither field, exactly as before.
+        let plain = OutgoingMessage::new("hi", nonce(1), MentionPolicy::default())
+            .unwrap()
+            .replying_to(None);
+        let plain = serde_json::to_value(plain.body()).unwrap();
+        assert!(plain.get("message_reference").is_none());
+        assert!(plain["allowed_mentions"].get("replied_user").is_none());
+        // Debug shows the reply's target and choice, never the text.
+        let shown = format!("{:?}", reply(true));
+        assert!(shown.contains("mention_author: true") && !shown.contains("replying from"));
+    }
+
+    #[test]
+    fn a_created_reply_decodes_with_its_reference_and_preview() {
+        const REPLY_RESPONSE: &str =
+            include_str!("../../../fixtures/rest/message-reply-response.json");
+        let message = parse_created(REPLY_RESPONSE.as_bytes(), Snowflake(500)).unwrap();
+        assert_eq!(message.kind, fastcord_model::REPLY_KIND);
+        assert!(Nonce(1_290_000_000_000_000_002).matches(message.nonce.as_deref().unwrap()));
+        assert_eq!(
+            message.replied_to(),
+            Some(Snowflake(1_289_999_999_999_999_999))
+        );
+        let fastcord_model::Referenced::Message(preview) = &message.referenced_message else {
+            panic!("the created reply carries its target");
+        };
+        assert_eq!(preview.author.display_name(), "other_fixture");
+        assert_eq!(preview.content, "the message being replied to");
     }
 
     #[test]

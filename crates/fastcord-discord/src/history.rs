@@ -5,6 +5,11 @@
 //! memory is the [`message_store`](crate::message_store)'s job; this module
 //! only builds the route, decodes the page with a hard record limit, and checks
 //! that the response belongs to the requested channel and cursor.
+//!
+//! A single message (a reply's target) is read the way user clients read one:
+//! the one-message page around its ID ([`RestClient::channel_message`]).
+//! Discord's `GET /channels/{channel}/messages/{message}` is not usable by user
+//! accounts.
 
 use std::fmt;
 
@@ -14,11 +19,15 @@ use serde::{Deserialize, Deserializer};
 
 use crate::{Clock, Method, Priority, RestClient, RestError, RestRequest, Route};
 
-/// Discord's default page size and the only one this client requests.
+/// Discord's around pagination may return one extra item for an even limit.
+/// Keep the requested count odd so the strict 50-record decoder remains safe.
+const AROUND_PAGE_LIMIT: usize = 49;
+
+/// Discord's ordinary page size and the hard upper bound for decoded records.
 pub const MESSAGE_PAGE_LIMIT: usize = 50;
 
-/// Which page of a channel's history to read. The three cursors are mutually
-/// exclusive, as in the API. Reply jumps (`around`) are a separate feature.
+/// Which page of a channel's history to read. The cursors are mutually
+/// exclusive, as in the API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HistoryCursor {
     /// The newest messages.
@@ -28,18 +37,31 @@ pub enum HistoryCursor {
     Before(Snowflake),
     /// The messages immediately newer than this one.
     After(Snowflake),
+    /// The messages surrounding this one, itself included if it exists: a jump
+    /// to a message that is not retained (a reply's target).
+    Around(Snowflake),
 }
 
 fn history_route(channel: Snowflake, cursor: HistoryCursor) -> Result<Route, RestError> {
+    let limit = if matches!(cursor, HistoryCursor::Around(_)) {
+        AROUND_PAGE_LIMIT
+    } else {
+        MESSAGE_PAGE_LIMIT
+    };
+    page_route(channel, cursor, limit)
+}
+
+fn page_route(channel: Snowflake, cursor: HistoryCursor, limit: usize) -> Result<Route, RestError> {
     let path = match cursor {
-        HistoryCursor::Latest => {
-            format!("/channels/{channel}/messages?limit={MESSAGE_PAGE_LIMIT}")
-        }
+        HistoryCursor::Latest => format!("/channels/{channel}/messages?limit={limit}"),
         HistoryCursor::Before(id) => {
-            format!("/channels/{channel}/messages?limit={MESSAGE_PAGE_LIMIT}&before={id}")
+            format!("/channels/{channel}/messages?limit={limit}&before={id}")
         }
         HistoryCursor::After(id) => {
-            format!("/channels/{channel}/messages?limit={MESSAGE_PAGE_LIMIT}&after={id}")
+            format!("/channels/{channel}/messages?limit={limit}&after={id}")
+        }
+        HistoryCursor::Around(id) => {
+            format!("/channels/{channel}/messages?limit={limit}&around={id}")
         }
     };
     Route::new(Method::GET, &path)
@@ -64,6 +86,35 @@ impl<C: Clock> RestClient<C> {
         let response = self.execute(request).await?;
         parse_page(response.body(), channel, cursor)
     }
+
+    /// Reads one message of `channel` for a reply preview: the one-message page
+    /// around it, as user clients do. `Ok(None)` means Discord has no message
+    /// with that ID there (it was deleted); a neighbouring message the page
+    /// may hold instead is never taken for it. This is a speculative read: it
+    /// yields to anything the user asked for.
+    pub async fn channel_message(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+    ) -> Result<Option<Message>, RestError> {
+        let route = page_route(channel, HistoryCursor::Around(message), 1)?;
+        let response = self
+            .execute(RestRequest::new(route, Priority::SpeculativeRead))
+            .await?;
+        parse_single(response.body(), channel, message)
+    }
+}
+
+pub(crate) fn parse_single(
+    body: &[u8],
+    channel: Snowflake,
+    message: Snowflake,
+) -> Result<Option<Message>, RestError> {
+    let page = parse_page(body, channel, HistoryCursor::Around(message))?;
+    if page.len() > 1 {
+        return Err(RestError::InvalidJson);
+    }
+    Ok(page.into_iter().find(|found| found.id == message))
 }
 
 pub(crate) fn parse_page(
@@ -75,7 +126,7 @@ pub(crate) fn parse_page(
     let consistent = page.0.iter().all(|message| {
         message.channel_id == channel
             && match cursor {
-                HistoryCursor::Latest => true,
+                HistoryCursor::Latest | HistoryCursor::Around(_) => true,
                 HistoryCursor::Before(id) => message.id < id,
                 HistoryCursor::After(id) => message.id > id,
             }
@@ -136,16 +187,23 @@ mod tests {
     }
 
     #[test]
-    fn history_routes_use_one_fixed_limit_and_exclusive_cursors() {
+    fn history_routes_use_bounded_limits_and_exclusive_cursors() {
         let latest = history_route(id(500), HistoryCursor::Latest).unwrap();
         let before = history_route(id(500), HistoryCursor::Before(id(12))).unwrap();
         let after = history_route(id(500), HistoryCursor::After(id(12))).unwrap();
+        let around = history_route(id(500), HistoryCursor::Around(id(12))).unwrap();
+        let single = page_route(id(500), HistoryCursor::Around(id(12)), 1).unwrap();
         let expected = [
             "/channels/500/messages?limit=50",
             "/channels/500/messages?limit=50&before=12",
             "/channels/500/messages?limit=50&after=12",
+            "/channels/500/messages?limit=49&around=12",
+            "/channels/500/messages?limit=1&around=12",
         ];
-        for (route, path) in [&latest, &before, &after].into_iter().zip(expected) {
+        for (route, path) in [&latest, &before, &after, &around, &single]
+            .into_iter()
+            .zip(expected)
+        {
             assert_eq!(
                 route.url.as_str(),
                 format!("https://discord.com/api/v10{path}")
@@ -160,12 +218,48 @@ mod tests {
         // Cursors are request parameters, not rate-limit identity.
         assert_eq!(latest.key(), before.key());
         assert_eq!(latest.key(), after.key());
+        assert_eq!(latest.key(), around.key());
+        assert_eq!(latest.key(), single.key());
         assert_eq!(latest.key().major().channel_id(), Some(id(500)));
         assert_ne!(
             latest.key(),
             history_route(id(501), HistoryCursor::Latest).unwrap().key()
         );
         assert_eq!(HistoryCursor::default(), HistoryCursor::Latest);
+    }
+
+    #[test]
+    fn a_single_message_is_only_ever_the_exact_id_asked_for() {
+        let page: Vec<Message> = serde_json::from_str(PAGE).unwrap();
+        let body = |messages: &[Message]| serde_json::to_vec(messages).unwrap();
+        let reply = &page[2];
+        // The one-message page around the ID holds it.
+        let found = parse_single(&body(std::slice::from_ref(reply)), id(500), reply.id).unwrap();
+        assert_eq!(found.as_ref().map(|message| message.id), Some(reply.id));
+        assert_eq!(found.unwrap().referenced_message, reply.referenced_message);
+        // A deleted message: Discord answers with nothing, or with a neighbour,
+        // which is never taken for it.
+        assert_eq!(parse_single(b"[]", id(500), reply.id), Ok(None));
+        assert_eq!(
+            parse_single(&body(&page[..1]), id(500), reply.id),
+            Ok(None),
+            "a neighbour is not the message"
+        );
+        // Anything but one message of this channel is not trusted at all.
+        assert_eq!(
+            parse_single(&body(&page[1..]), id(500), reply.id),
+            Err(RestError::InvalidJson),
+            "more than the one record asked for"
+        );
+        assert_eq!(
+            parse_single(&body(std::slice::from_ref(reply)), id(501), reply.id),
+            Err(RestError::InvalidJson),
+            "another channel"
+        );
+        assert_eq!(
+            parse_single(b"{}", id(500), reply.id),
+            Err(RestError::InvalidJson)
+        );
     }
 
     #[test]
@@ -206,6 +300,20 @@ mod tests {
                 .and_then(|r| r.message_id),
             Some(id(1_289_999_999_999_999_999))
         );
+        // A reply carries what its target looked like; plain messages do not.
+        assert_eq!(
+            messages[2].replied_to(),
+            Some(id(1_289_999_999_999_999_999))
+        );
+        match &messages[2].referenced_message {
+            fastcord_model::Referenced::Message(preview) => {
+                assert_eq!(preview.author.display_name(), "other_fixture");
+                assert_eq!(preview.content, "the message being replied to");
+            }
+            other => panic!("expected a preview, got {other:?}"),
+        }
+        assert!(messages[0].referenced_message.is_unknown());
+        assert_eq!(messages[0].replied_to(), None);
     }
 
     #[test]
@@ -267,6 +375,12 @@ mod tests {
             parsed(&repeated(MESSAGE_PAGE_LIMIT)).map(|messages| messages.len()),
             Ok(MESSAGE_PAGE_LIMIT)
         );
+        let around = |body: &[u8]| parse_page(body, id(500), HistoryCursor::Around(id(20)));
+        assert_eq!(
+            around(&repeated(MESSAGE_PAGE_LIMIT)).map(|messages| messages.len()),
+            Ok(MESSAGE_PAGE_LIMIT),
+            "the 50-record decoder accepts a possible limit+1 response to limit=49"
+        );
         assert_eq!(
             parsed(&repeated(MESSAGE_PAGE_LIMIT + 1)),
             Err(RestError::InvalidJson)
@@ -297,11 +411,16 @@ mod tests {
             HistoryCursor::Latest,
             HistoryCursor::Before(id(9)),
             HistoryCursor::After(id(9)),
+            HistoryCursor::Around(id(9)),
         ] {
             assert!(matches!(
                 client.channel_messages(id(500), cursor).await,
                 Err(RestError::AuthenticationRequired)
             ));
         }
+        assert_eq!(
+            client.channel_message(id(500), id(9)).await,
+            Err(RestError::AuthenticationRequired)
+        );
     }
 }

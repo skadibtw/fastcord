@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::composer::Composer;
 use crate::history::{History, Intent};
-use crate::outbox::{OpId, Slots};
+use crate::outbox::{OpId, Reply, Slots};
 use crate::timeline;
 use crate::variable_list::{Measurement, Viewport};
 use crate::virtual_list::Window;
@@ -221,6 +221,7 @@ pub enum Command {
         channel: Snowflake,
         content: String,
         everyone: bool,
+        reply: Option<Reply>,
     },
     Retry(OpId),
     Discard(OpId),
@@ -325,7 +326,13 @@ impl NavigationBridge {
     /// Queues a message for sending. Returns whether it was accepted; on
     /// `false` (the outbox is full or the worker is gone) nothing was queued
     /// and the caller must keep the text.
-    pub fn send_message(&self, channel: Snowflake, content: String, everyone: bool) -> bool {
+    pub fn send_message(
+        &self,
+        channel: Snowflake,
+        content: String,
+        everyone: bool,
+        reply: Option<Reply>,
+    ) -> bool {
         if !self.outbox_slots.reserve() {
             return false;
         }
@@ -335,6 +342,7 @@ impl NavigationBridge {
                 channel,
                 content,
                 everyone,
+                reply,
             })
             .is_ok();
         if !queued {
@@ -508,8 +516,9 @@ impl Worker {
                 channel,
                 content,
                 everyone,
+                reply,
             } => {
-                history.send(&self.rest, channel, &content, everyone);
+                history.send(&self.rest, channel, &content, everyone, reply);
             }
             Command::Retry(id) => history.retry_send(&self.rest, id),
             Command::Discard(id) => history.discard_send(id),
@@ -709,6 +718,7 @@ impl GatewayPanel {
     pub fn interaction(&self) -> timeline::Interaction {
         timeline::Interaction {
             editing: self.composer.editing(),
+            replying: self.composer.replying(),
             confirming: self
                 .confirm_delete
                 .filter(|(channel, _)| self.timeline.channel_id == Some(*channel))
@@ -716,10 +726,9 @@ impl GatewayPanel {
         }
     }
 
-    /// Applies a timeline action on one of the user's messages. Edit moves the
-    /// message into the composer; Delete only asks for confirmation, and only
-    /// the confirmation queues the deletion. Returns whether the editor should
-    /// take the keyboard focus.
+    /// Applies a timeline action for the open channel. Reply selects a loaded
+    /// target locally; Edit moves text into the composer; Delete waits for
+    /// confirmation before it is queued. Returns whether to focus the editor.
     pub fn message_action(&mut self, event: timeline::Event) -> bool {
         use timeline::Event;
         let open = self.timeline.channel_id;
@@ -730,6 +739,13 @@ impl GatewayPanel {
             } if open == Some(channel_id) => {
                 self.confirm_delete = None;
                 return self.composer.begin_edit(&self.timeline, message_id);
+            }
+            Event::Reply {
+                channel_id,
+                message_id,
+            } if open == Some(channel_id) && self.timeline.can_send => {
+                self.confirm_delete = None;
+                return self.composer.begin_reply(&self.timeline, message_id);
             }
             Event::Delete {
                 channel_id,
@@ -883,10 +899,10 @@ mod bridge_tests {
         let mut commands = bridge.take_commands().unwrap();
         assert!(bridge.take_commands().is_none(), "one worker end");
         for n in 0..MAX_OUTBOX {
-            assert!(bridge.send_message(Snowflake(1), format!("message {n}"), false));
+            assert!(bridge.send_message(Snowflake(1), format!("message {n}"), false, None));
         }
         // However stale the UI's view, a full outbox refuses and keeps nothing.
-        assert!(!bridge.send_message(Snowflake(1), "one too many".to_owned(), true));
+        assert!(!bridge.send_message(Snowflake(1), "one too many".to_owned(), true, None,));
         for n in 0..MAX_OUTBOX {
             match commands.try_recv().unwrap() {
                 Command::Send { content, .. } => assert_eq!(content, format!("message {n}")),
@@ -896,7 +912,7 @@ mod bridge_tests {
         assert!(commands.try_recv().is_err());
         // The worker frees slots as operations leave the outbox.
         bridge.outbox_slots.release();
-        assert!(bridge.send_message(Snowflake(1), "fits again".to_owned(), false));
+        assert!(bridge.send_message(Snowflake(1), "fits again".to_owned(), false, None));
         // Retry and discard are never merged either; Debug never shows text.
         assert!(bridge.retry_send(OpId(3)));
         assert!(bridge.discard_send(OpId(3)));
@@ -908,7 +924,7 @@ mod bridge_tests {
         drop(commands);
         bridge.outbox_slots.release();
         let used = bridge.outbox_slots.used();
-        assert!(!bridge.send_message(Snowflake(1), "lost?".to_owned(), false));
+        assert!(!bridge.send_message(Snowflake(1), "lost?".to_owned(), false, None));
         assert_eq!(bridge.outbox_slots.used(), used);
     }
 
@@ -1061,9 +1077,36 @@ mod bridge_tests {
             panel.interaction(),
             timeline::Interaction {
                 editing: Some(Snowflake(7)),
+                replying: None,
                 confirming: None,
             }
         );
+    }
+
+    #[test]
+    fn reply_selection_uses_the_loaded_row_and_requires_send_permission() {
+        use timeline::Event;
+
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut panel = panel(&bridge);
+        assert!(panel.message_action(Event::Reply {
+            channel_id: Snowflake(500),
+            message_id: Snowflake(8),
+        }));
+        assert_eq!(panel.interaction().replying, Some(Snowflake(8)));
+        assert!(commands.try_recv().is_err(), "reply selection is local");
+
+        panel.composer.cancel_reply();
+        panel.timeline = Arc::new(timeline::Snapshot {
+            can_send: false,
+            ..(*panel.timeline).clone()
+        });
+        assert!(!panel.message_action(Event::Reply {
+            channel_id: Snowflake(500),
+            message_id: Snowflake(8),
+        }));
+        assert!(panel.composer.replying().is_none());
     }
 }
 

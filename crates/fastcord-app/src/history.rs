@@ -7,6 +7,7 @@
 //! Sends, and edits and deletions of the user's own messages, start only from
 //! explicit commands and are checked here against the store, never against
 //! what a possibly stale UI showed.
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -20,13 +21,13 @@ use fastcord_discord::{
     ComposeError, EditedMessage, MentionPolicy, NonceGenerator, RestClient, RestError, SendError,
     edit_response_update, is_own_message,
 };
-use fastcord_model::{Message, Snowflake};
+use fastcord_model::{Message, Referenced, Snowflake};
 use iced::futures::StreamExt;
 use iced::futures::stream::FuturesUnordered;
 
 use crate::changes::{self, ChangeKind, ChangeRequest, Changes};
-use crate::outbox::{Finished, OpId, Outbox, Slots};
-use crate::timeline::{Row, Snapshot};
+use crate::outbox::{Finished, MAX_REPLY_AUTHOR_CHARS, OpId, Outbox, Reply, Slots};
+use crate::timeline::{ReplyLine, ReplyState, Row, Snapshot};
 use crate::variable_list::{Item, Measurement, VariableList, Viewport};
 
 /// Message bodies one snapshot may hold. Together with the latest slot and the
@@ -35,6 +36,8 @@ pub const SNAPSHOT_BODY_BUDGET: usize = MAX_MESSAGE_BYTES;
 /// Measured heights waiting for the worker; the widget reports at most one per
 /// built row, so more than this are stale duplicates.
 const MAX_MEASUREMENTS: usize = 128;
+/// Preview resolutions and deletion markers retained for the open channel.
+pub const MAX_REFERENCES: usize = 128;
 
 const OVERSIZE: &str = "A message is too large to display and was left out.";
 const NOT_OPEN: &str = "That message's channel is no longer open.";
@@ -44,10 +47,31 @@ const EMPTY_EDIT: &str = "A message needs some text. Delete it instead.";
 const LONG_EDIT: &str = "The message is too long for Discord.";
 const DELETED_WHILE_EDITING: &str = "That message was deleted before your edit was saved.";
 const UNSHOWN_FAILURE: &str = "A change to a message that is no longer shown failed.";
+const DELETED_JUMP: &str = "That message was deleted and cannot be opened.";
+const UNAVAILABLE_JUMP: &str = "That message is unavailable and cannot be opened.";
 
 type PageFuture = Pin<Box<dyn Future<Output = Result<Vec<Message>, RestError>> + Send>>;
+type ReferenceFuture =
+    Pin<Box<dyn Future<Output = (Snowflake, Result<Option<Message>, RestError>)> + Send>>;
 type SendFuture = Pin<Box<dyn Future<Output = (OpId, Result<Box<Message>, SendError>)> + Send>>;
 type ChangeFuture = Pin<Box<dyn Future<Output = ChangeDone> + Send>>;
+
+enum ReferenceState {
+    Preview { author: String, content: String },
+    Deleted,
+    Unavailable,
+}
+
+fn reply_author(author: &str) -> String {
+    author.chars().take(MAX_REPLY_AUTHOR_CHARS).collect()
+}
+
+fn reply_content(content: &str) -> String {
+    content
+        .chars()
+        .take(fastcord_model::REPLY_PREVIEW_CHARS)
+        .collect()
+}
 
 /// Discord's answer to an edit or deletion of one of the user's messages.
 pub struct ChangeDone {
@@ -61,9 +85,11 @@ pub enum ChangeResult {
     Deleted(Result<(), RestError>),
 }
 
-/// A finished request of the worker: a history page, a send, or a change.
+/// A finished request of the worker: a history page, a reply preview, a send,
+/// or a change.
 pub enum Completed {
     Page(Result<Vec<Message>, RestError>),
+    Reference(Snowflake, Box<Result<Option<Message>, RestError>>),
     Send(OpId, Result<Box<Message>, SendError>),
     Change(ChangeDone),
 }
@@ -74,6 +100,10 @@ pub enum Intent {
     Older(Snowflake),
     Latest(Snowflake),
     Retry(Snowflake),
+    JumpTo {
+        channel: Snowflake,
+        message: Snowflake,
+    },
 }
 
 /// The timeline's one-shot inputs to the worker, coalesced.
@@ -114,6 +144,12 @@ pub struct History {
     /// The page whose failure the Retry action repeats.
     failed: Option<HistoryCursor>,
     pending: Option<(PageToken, PageFuture)>,
+    /// One speculative fetch for a visible reply preview at a time.
+    reference_pending: Option<(Snowflake, ReferenceFuture)>,
+    /// Bounded previews and known-deleted targets for the open channel.
+    references: VecDeque<(Snowflake, ReferenceState)>,
+    /// The row reached by the last Jump to a reply target.
+    highlight: Option<Snowflake>,
     /// A page just landed: the list may still be short of the viewport.
     check_paging: bool,
     dirty: bool,
@@ -154,6 +190,9 @@ impl History {
     /// Releases everything: a new session (READY) or a closed channel.
     fn reset(&mut self) {
         self.cancel();
+        self.reference_pending = None;
+        self.references.clear();
+        self.highlight = None;
         self.store.clear();
         self.list = VariableList::default();
         self.channel = None;
@@ -174,6 +213,38 @@ impl History {
         {
             self.dirty = true;
         }
+    }
+
+    fn reference_state(&self, target: Snowflake) -> Option<&ReferenceState> {
+        self.references
+            .iter()
+            .find(|(id, _)| *id == target)
+            .map(|(_, state)| state)
+    }
+
+    fn remember_reference(&mut self, target: Snowflake, state: ReferenceState) {
+        if let Some(at) = self.references.iter().position(|(id, _)| *id == target) {
+            self.references.remove(at);
+        }
+        self.references.push_back((target, state));
+        while self.references.len() > MAX_REFERENCES {
+            self.references.pop_front();
+        }
+    }
+
+    fn mark_reference_deleted(&mut self, channel: Snowflake, target: Snowflake) {
+        if self.channel != Some(channel) {
+            return;
+        }
+        if self
+            .reference_pending
+            .as_ref()
+            .is_some_and(|(id, _)| *id == target)
+        {
+            self.reference_pending = None;
+        }
+        self.remember_reference(target, ReferenceState::Deleted);
+        self.dirty = true;
     }
 
     /// Applies an ordered Gateway event before the metadata store sees it.
@@ -225,6 +296,17 @@ impl History {
     /// Applies a message event, from the Gateway or from a REST answer, to the
     /// store: the one path every message change takes.
     fn apply_store(&mut self, event: &Dispatch) {
+        match event {
+            Dispatch::MessageDelete(deleted) => {
+                self.mark_reference_deleted(deleted.channel_id, deleted.id);
+            }
+            Dispatch::MessageDeleteBulk(deleted) => {
+                for id in &deleted.ids {
+                    self.mark_reference_deleted(deleted.channel_id, *id);
+                }
+            }
+            _ => {}
+        }
         let change = self.store.apply_dispatch(event);
         if change.changed {
             self.dirty = true;
@@ -244,6 +326,7 @@ impl History {
         channel: Snowflake,
         content: &str,
         everyone: bool,
+        reply: Option<Reply>,
     ) -> OpId {
         let allowed = self.sendable == Some(channel);
         let nonce = self.nonces.next_now();
@@ -253,8 +336,7 @@ impl History {
         };
         let id = self
             .outbox
-            .enqueue(channel, content, mentions, nonce, allowed);
-        // Sending from the bottom follows the new message, as the official
+            .enqueue(channel, content, mentions, reply, nonce, allowed);
         // client does; away from the live edge nothing moves.
         let live = self
             .store
@@ -578,6 +660,60 @@ impl History {
         self.dirty = true;
     }
 
+    fn start_reference(&mut self, rest: &RestClient, target: Snowflake) {
+        let Some(channel) = self.channel else {
+            return;
+        };
+        if self.reference_pending.is_some()
+            || self.reference_state(target).is_some()
+            || self.store.get(channel, target).is_some()
+            || self.store.covers(channel, target)
+        {
+            return;
+        }
+        let rest = rest.clone();
+        self.reference_pending = Some((
+            target,
+            Box::pin(async move { (target, rest.channel_message(channel, target).await) }),
+        ));
+        self.dirty = true;
+    }
+
+    /// Resolve only replies in the rows the variable list is building. One
+    /// speculative request at a time keeps both traffic and pending state small.
+    fn resolve_visible_references(&mut self, rest: &RestClient) {
+        let Some(channel) = self.channel else {
+            return;
+        };
+        if self.reference_pending.is_some() {
+            return;
+        }
+        let window = self.list.window();
+        let target = self
+            .store
+            .ids(channel)
+            .skip(window.range.start)
+            .take(window.range.len())
+            .find_map(|id| {
+                let message = self.store.get(channel, id)?;
+                let target = message.replied_to()?;
+                match &message.referenced_message {
+                    Referenced::Deleted => None,
+                    Referenced::Message(preview) if preview.id == target => None,
+                    _ if self.store.get(channel, target).is_some()
+                        || self.store.covers(channel, target)
+                        || self.reference_state(target).is_some() =>
+                    {
+                        None
+                    }
+                    _ => Some(target),
+                }
+            });
+        if let Some(target) = target {
+            self.start_reference(rest, target);
+        }
+    }
+
     /// Brings history in line with the validated selection and applies the
     /// timeline's one-shot inputs. Permission loss or deselection closes it.
     pub fn refresh(
@@ -623,6 +759,13 @@ impl History {
                 self.dirty |= self.list.measure(*measurement);
             }
         }
+        if self
+            .highlight
+            .is_some_and(|message| !self.list.in_window(message))
+        {
+            self.highlight = None;
+            self.dirty = true;
+        }
         if request.revision != self.revision {
             self.revision = request.revision;
             self.intent(rest, request.intent);
@@ -630,6 +773,7 @@ impl History {
         if request.viewport.is_some() || self.check_paging {
             self.page_for_position(rest);
         }
+        self.resolve_visible_references(rest);
     }
 
     fn intent(&mut self, rest: &RestClient, intent: Option<Intent>) {
@@ -662,6 +806,32 @@ impl History {
                     self.start(rest, cursor);
                 }
             }
+            Some(Intent::JumpTo {
+                channel: target,
+                message,
+            }) if target == channel => {
+                self.cancel();
+                self.failed = None;
+                self.error = None;
+                self.notice = None;
+                self.highlight = None;
+                if self.store.get(channel, message).is_some() {
+                    if self.list.jump_to(message) {
+                        self.highlight = Some(message);
+                    } else {
+                        self.notice = Some(UNAVAILABLE_JUMP);
+                    }
+                    self.dirty = true;
+                } else if matches!(self.reference_state(message), Some(ReferenceState::Deleted)) {
+                    self.notice = Some(DELETED_JUMP);
+                    self.dirty = true;
+                } else if self.store.covers(channel, message) {
+                    self.notice = Some(UNAVAILABLE_JUMP);
+                    self.dirty = true;
+                } else {
+                    self.start(rest, HistoryCursor::Around(message));
+                }
+            }
             _ => {}
         }
     }
@@ -691,10 +861,16 @@ impl History {
         }
     }
 
-    /// Resolves when an in-flight page, send, or change does; never resolves with none.
+    /// Resolves when an in-flight page, reply preview, send, or change does.
     pub async fn next_completed(&mut self) -> Completed {
         let page = async {
             match &mut self.pending {
+                Some((_, future)) => future.await,
+                None => std::future::pending().await,
+            }
+        };
+        let reference = async {
+            match &mut self.reference_pending {
                 Some((_, future)) => future.await,
                 None => std::future::pending().await,
             }
@@ -713,6 +889,7 @@ impl History {
         };
         tokio::select! {
             page = page => Completed::Page(page),
+            (target, result) = reference => Completed::Reference(target, Box::new(result)),
             (id, result) = send => Completed::Send(id, result),
             done = change => Completed::Change(done),
         }
@@ -722,39 +899,80 @@ impl History {
     pub fn complete(&mut self, rest: &RestClient, completed: Completed) -> bool {
         match completed {
             Completed::Page(result) => self.finish(result),
+            Completed::Reference(target, result) => self.finish_reference(target, *result),
             Completed::Send(id, result) => self.finish_send(rest, id, result),
             Completed::Change(done) => self.finish_change(done),
         }
     }
 
-    /// Applies a finished page. Returns whether Discord rejected the login.
+    /// Applies a finished history page. Returns whether Discord rejected the login.
     pub fn finish(&mut self, result: Result<Vec<Message>, RestError>) -> bool {
         let Some((token, _)) = self.pending.take() else {
             return false;
         };
         let cursor = token.cursor();
+        let jump_target = match cursor {
+            HistoryCursor::Around(target) => Some(target),
+            _ => None,
+        };
         self.dirty = true;
         match result {
-            Ok(page) => match self.store.merge_page(token, page) {
-                PageMerge::Applied { rejected, .. } => {
-                    if rejected > 0 {
-                        self.error = Some(OVERSIZE);
-                    }
-                    self.synchronize();
-                    if cursor == HistoryCursor::Latest {
-                        self.list.jump_latest();
-                    }
-                    self.check_paging = true;
-                    false
+            Ok(page) => {
+                if let Some(target) = jump_target
+                    && (matches!(self.reference_state(target), Some(ReferenceState::Deleted))
+                        || !page.iter().any(|message| message.id == target))
+                {
+                    self.store.cancel_page(token);
+                    self.remember_reference(target, ReferenceState::Deleted);
+                    self.notice = Some(DELETED_JUMP);
+                    return false;
                 }
-                PageMerge::Stale => {
-                    // Nothing changed; the same request is still available.
-                    self.failed = Some(cursor);
-                    self.error =
-                        Some("The channel changed while loading. Retry to load a current page.");
-                    false
+                let jump = jump_target
+                    .map(|target| (target, page.iter().any(|message| message.id == target)));
+                match self.store.merge_page(token, page) {
+                    PageMerge::Applied { rejected, .. } => {
+                        if rejected > 0 {
+                            self.error = Some(OVERSIZE);
+                        }
+                        self.synchronize();
+                        if cursor == HistoryCursor::Latest {
+                            self.list.jump_latest();
+                        }
+                        if let Some((target, appeared)) = jump {
+                            if self
+                                .channel
+                                .is_some_and(|channel| self.store.get(channel, target).is_some())
+                            {
+                                if self.list.jump_to(target) {
+                                    self.highlight = Some(target);
+                                } else {
+                                    self.notice = Some(UNAVAILABLE_JUMP);
+                                }
+                            } else if matches!(
+                                self.reference_state(target),
+                                Some(ReferenceState::Deleted)
+                            ) || !appeared
+                            {
+                                self.remember_reference(target, ReferenceState::Deleted);
+                                self.notice = Some(DELETED_JUMP);
+                            } else {
+                                self.remember_reference(target, ReferenceState::Unavailable);
+                                self.notice = Some(UNAVAILABLE_JUMP);
+                            }
+                        }
+                        self.check_paging = true;
+                        false
+                    }
+                    PageMerge::Stale => {
+                        // Nothing changed; the same request is still available.
+                        self.failed = Some(cursor);
+                        self.error = Some(
+                            "The channel changed while loading. Retry to load a current page.",
+                        );
+                        false
+                    }
                 }
-            },
+            }
             Err(error) => {
                 self.store.cancel_page(token);
                 self.failed = Some(cursor);
@@ -772,6 +990,93 @@ impl History {
                 error == RestError::AuthenticationRequired
             }
         }
+    }
+
+    fn finish_reference(
+        &mut self,
+        target: Snowflake,
+        result: Result<Option<Message>, RestError>,
+    ) -> bool {
+        let Some((pending, _)) = self.reference_pending.take() else {
+            return false;
+        };
+        if pending != target {
+            return false;
+        }
+        if matches!(self.reference_state(target), Some(ReferenceState::Deleted)) {
+            return false;
+        }
+        let channel = self.channel;
+        let authentication_required = match result {
+            Ok(Some(message)) if Some(message.channel_id) == channel && message.id == target => {
+                self.remember_reference(
+                    target,
+                    ReferenceState::Preview {
+                        author: reply_author(message.author.display_name()),
+                        content: reply_content(&message.content),
+                    },
+                );
+                false
+            }
+            Ok(None) => {
+                self.remember_reference(target, ReferenceState::Deleted);
+                false
+            }
+            Ok(Some(_)) => {
+                self.remember_reference(target, ReferenceState::Unavailable);
+                false
+            }
+            Err(error) => {
+                self.remember_reference(target, ReferenceState::Unavailable);
+                error == RestError::AuthenticationRequired
+            }
+        };
+        self.dirty = true;
+        authentication_required
+    }
+
+    fn reply_line(&self, channel: Snowflake, message: &Message) -> Option<ReplyLine> {
+        let target = message.replied_to()?;
+        let state = if matches!(self.reference_state(target), Some(ReferenceState::Deleted)) {
+            ReplyState::Deleted
+        } else {
+            match &message.referenced_message {
+                Referenced::Deleted => ReplyState::Deleted,
+                Referenced::Message(preview) if preview.id == target => ReplyState::Message {
+                    author: reply_author(preview.author.display_name()),
+                    content: reply_content(&preview.content),
+                },
+                _ => {
+                    if let Some(referenced) = self.store.get(channel, target) {
+                        ReplyState::Message {
+                            author: reply_author(referenced.author.display_name()),
+                            content: reply_content(&referenced.content),
+                        }
+                    } else {
+                        match self.reference_state(target) {
+                            Some(ReferenceState::Preview { author, content }) => {
+                                ReplyState::Message {
+                                    author: author.clone(),
+                                    content: content.clone(),
+                                }
+                            }
+                            Some(ReferenceState::Deleted) => ReplyState::Deleted,
+                            Some(ReferenceState::Unavailable) => ReplyState::Unavailable,
+                            None if self.store.covers(channel, target) => ReplyState::Unavailable,
+                            None if self
+                                .reference_pending
+                                .as_ref()
+                                .is_some_and(|(pending, _)| *pending == target) =>
+                            {
+                                ReplyState::Loading
+                            }
+                            None => ReplyState::Loading,
+                        }
+                    }
+                }
+            }
+        };
+        Some(ReplyLine { target, state })
     }
 
     /// The bounded read model: only the built window's messages, trimmed to
@@ -828,13 +1133,20 @@ impl History {
                 let revision = self.store.revision(channel, message.id).unwrap_or(0);
                 let own = self.user.is_some_and(|user| is_own_message(&message, user));
                 let change = self.changes.of(channel, message.id);
+                let reply = self.reply_line(channel, &message);
                 Row {
                     message,
                     revision,
                     own,
                     change,
+                    reply,
                 }
             })
+            .collect();
+        let deleted: Vec<Snowflake> = self
+            .references
+            .iter()
+            .filter_map(|(id, state)| matches!(state, ReferenceState::Deleted).then_some(*id))
             .collect();
         let bounds = self.store.window(channel);
         Snapshot {
@@ -848,6 +1160,8 @@ impl History {
             error: self.error,
             outbox: self.outbox.items(),
             can_send: self.sendable == Some(channel),
+            highlight: self.highlight,
+            deleted,
             notice: self.notice,
         }
     }
@@ -859,7 +1173,7 @@ mod tests {
     use fastcord_discord::message_store::{MAX_MESSAGES_PER_CHANNEL, MESSAGE_BUDGET};
     use fastcord_discord::state::navigation::{ChannelSelection, PermissionSummary};
     use fastcord_discord::{NetworkFailure, RetryableFailure, StatusCode, UserToken};
-    use fastcord_model::{Attachment, MessageUpdate, User};
+    use fastcord_model::{Attachment, MessageReference, MessageUpdate, User};
 
     use super::*;
     use crate::changes::{ChangeState, RowChange};
@@ -895,6 +1209,7 @@ mod tests {
             attachments: Vec::new(),
             reactions: Vec::new(),
             message_reference: None,
+            referenced_message: Referenced::Unknown,
             nonce: None,
         }
     }
@@ -903,12 +1218,27 @@ mod tests {
         message_with(n, format!("fixture message {n}"))
     }
 
+    fn reply_message(n: u64, target: Snowflake) -> Message {
+        let mut reply = message(n);
+        reply.kind = 19;
+        reply.message_reference = Some(MessageReference {
+            message_id: Some(target),
+            channel_id: Some(CHANNEL),
+            guild_id: None,
+        });
+        reply
+    }
+
     /// What Discord answers for a cursor over messages `1..=newest`, newest first.
     fn serve(cursor: HistoryCursor, newest: u64) -> Vec<Message> {
         let (low, high) = match cursor {
             HistoryCursor::Latest => (newest.saturating_sub(49).max(1), newest),
             HistoryCursor::Before(id) => (id.0.saturating_sub(50).max(1), id.0.saturating_sub(1)),
             HistoryCursor::After(id) => (id.0 + 1, (id.0 + 50).min(newest)),
+            HistoryCursor::Around(id) => (
+                id.0.saturating_sub(24).max(1),
+                id.0.saturating_add(24).min(newest),
+            ),
         };
         (low..=high).rev().map(message).collect()
     }
@@ -972,6 +1302,174 @@ mod tests {
         history.refresh(&rest(), &navigation(true), &Request::default());
         assert_eq!(cursor(history), Some(HistoryCursor::Latest));
         assert!(!history.finish(Ok(serve(HistoryCursor::Latest, NEWEST))));
+    }
+
+    #[test]
+    fn visible_replies_load_uncached_targets_and_follow_deletions() {
+        let rest = rest();
+        let mut history = History::default();
+        open_latest(&mut history);
+        let target = Snowflake(9_000);
+        let deleted = Snowflake(8_999);
+        let first_reply = Snowflake(NEWEST + 1);
+        let second_reply = Snowflake(NEWEST + 2);
+        history.apply(&Dispatch::MessageCreate(Box::new(reply_message(
+            first_reply.0,
+            target,
+        ))));
+        history.apply(&Dispatch::MessageCreate(Box::new(reply_message(
+            second_reply.0,
+            deleted,
+        ))));
+
+        history.refresh(&rest, &navigation(true), &viewport(second_reply, 0.0, true));
+        assert_eq!(
+            history.reference_pending.as_ref().map(|(id, _)| *id),
+            Some(target)
+        );
+        assert!(!history.finish_reference(target, Ok(Some(message(target.0)))));
+
+        history.refresh(&rest, &navigation(true), &Request::default());
+        assert_eq!(
+            history.reference_pending.as_ref().map(|(id, _)| *id),
+            Some(deleted)
+        );
+        assert!(!history.finish_reference(deleted, Ok(None)));
+        let snapshot = history.snapshot();
+        let row = |id| {
+            snapshot
+                .rows
+                .iter()
+                .find(|row| row.message.id == id)
+                .unwrap()
+        };
+        assert!(matches!(
+            &row(first_reply).reply.as_ref().unwrap().state,
+            ReplyState::Message { author, content }
+                if author == "author5" && content == "fixture message 9000"
+        ));
+        assert_eq!(
+            row(second_reply).reply.as_ref().unwrap().state,
+            ReplyState::Deleted
+        );
+        assert!(snapshot.deleted.contains(&deleted));
+
+        history.apply(&Dispatch::MessageDelete(MessageDelete {
+            id: target,
+            channel_id: CHANNEL,
+            guild_id: None,
+        }));
+        let snapshot = history.snapshot();
+        let row = snapshot
+            .rows
+            .iter()
+            .find(|row| row.message.id == first_reply)
+            .unwrap();
+        assert_eq!(row.reply.as_ref().unwrap().state, ReplyState::Deleted);
+        assert!(snapshot.deleted.contains(&target));
+    }
+
+    #[test]
+    fn reply_jump_loads_around_missing_targets_and_does_not_jump_to_neighbors() {
+        let rest = rest();
+        let mut history = History::default();
+        open_latest(&mut history);
+        let cached = Snowflake(NEWEST - 1);
+        history.refresh(
+            &rest,
+            &navigation(true),
+            &Request {
+                revision: 1,
+                intent: Some(Intent::JumpTo {
+                    channel: CHANNEL,
+                    message: cached,
+                }),
+                ..Request::default()
+            },
+        );
+        assert_eq!(cursor(&history), None);
+        assert_eq!(history.highlight, Some(cached));
+        assert!(matches!(
+            history.list.scroll_request().unwrap().target,
+            ScrollTarget::Anchor(anchor) if anchor.id == cached
+        ));
+
+        let uncached = Snowflake(9_000);
+        history.refresh(
+            &rest,
+            &navigation(true),
+            &Request {
+                revision: 2,
+                intent: Some(Intent::JumpTo {
+                    channel: CHANNEL,
+                    message: uncached,
+                }),
+                ..Request::default()
+            },
+        );
+        assert_eq!(cursor(&history), Some(HistoryCursor::Around(uncached)));
+        assert!(!history.finish(Ok(serve(HistoryCursor::Around(uncached), NEWEST,))));
+        assert!(history.store.get(CHANNEL, uncached).is_some());
+        assert_eq!(history.snapshot().highlight, Some(uncached));
+        let retained: Vec<_> = history.store.ids(CHANNEL).collect();
+        let anchor = history.list.anchor();
+        let scroll = history.list.scroll_request();
+        assert!(
+            anchor.is_some(),
+            "the successful jump established a reader anchor"
+        );
+
+        let deleted = Snowflake(8_000);
+        history.refresh(
+            &rest,
+            &navigation(true),
+            &Request {
+                revision: 3,
+                intent: Some(Intent::JumpTo {
+                    channel: CHANNEL,
+                    message: deleted,
+                }),
+                ..Request::default()
+            },
+        );
+        let mut neighbors = serve(HistoryCursor::Around(deleted), NEWEST);
+        neighbors.retain(|message| message.id != deleted);
+        assert!(!history.finish(Ok(neighbors)));
+        let snapshot = history.snapshot();
+        assert!(!snapshot.rows.iter().any(|row| row.message.id == deleted));
+        assert!(snapshot.deleted.contains(&deleted));
+        assert_eq!(snapshot.notice, Some(DELETED_JUMP));
+        assert_ne!(snapshot.highlight, Some(deleted));
+        assert_eq!(history.store.ids(CHANNEL).collect::<Vec<_>>(), retained);
+        assert_eq!(history.list.anchor(), anchor);
+        assert_eq!(history.list.scroll_request(), scroll);
+
+        let raced = Snowflake(8_100);
+        history.refresh(
+            &rest,
+            &navigation(true),
+            &Request {
+                revision: 4,
+                intent: Some(Intent::JumpTo {
+                    channel: CHANNEL,
+                    message: raced,
+                }),
+                ..Request::default()
+            },
+        );
+        assert_eq!(cursor(&history), Some(HistoryCursor::Around(raced)));
+        history.apply(&Dispatch::MessageDelete(MessageDelete {
+            id: raced,
+            channel_id: CHANNEL,
+            guild_id: None,
+        }));
+        assert!(!history.finish(Ok(serve(HistoryCursor::Around(raced), NEWEST))));
+        let snapshot = history.snapshot();
+        assert!(snapshot.deleted.contains(&raced));
+        assert_eq!(snapshot.notice, Some(DELETED_JUMP));
+        assert_eq!(history.store.ids(CHANNEL).collect::<Vec<_>>(), retained);
+        assert_eq!(history.list.anchor(), anchor);
+        assert_eq!(history.list.scroll_request(), scroll);
     }
 
     #[test]
@@ -1259,7 +1757,7 @@ mod tests {
         let retained = history.store.ids(CHANNEL).count();
 
         // REST answer first, then the Gateway's copy.
-        let first = history.send(&rest, CHANNEL, "first", false);
+        let first = history.send(&rest, CHANNEL, "first", false, None);
         assert_eq!(take_posts(&mut history), 1);
         assert_eq!(history.snapshot().outbox.len(), 1, "shown as sending");
         let nonce = wire_nonce(&history, first);
@@ -1275,7 +1773,7 @@ mod tests {
         );
 
         // Gateway copy first, then the REST answer.
-        let second = history.send(&rest, CHANNEL, "second", false);
+        let second = history.send(&rest, CHANNEL, "second", false, None);
         assert_eq!(take_posts(&mut history), 1);
         let nonce = wire_nonce(&history, second);
         let created = own(NEWEST + 2, "second", Some(nonce));
@@ -1294,7 +1792,7 @@ mod tests {
     fn an_ambiguous_failure_waits_for_the_user_and_resolves_from_the_gateway() {
         let rest = rest();
         let mut history = sending_history();
-        let id = history.send(&rest, CHANNEL, "maybe", false);
+        let id = history.send(&rest, CHANNEL, "maybe", false, None);
         assert_eq!(take_posts(&mut history), 1);
         let timeout = SendError::Ambiguous(RestError::Retryable(RetryableFailure::Network(
             NetworkFailure::Timeout,
@@ -1306,7 +1804,7 @@ mod tests {
         // Nothing the worker does by itself posts it again.
         history.refresh(&rest, &navigation(true), &Request::default());
         history.apply(&Dispatch::MessageCreate(Box::new(message(NEWEST + 1))));
-        let other = history.send(&rest, CHANNEL, "unrelated", false);
+        let other = history.send(&rest, CHANNEL, "unrelated", false, None);
         let other_nonce = wire_nonce(&history, other);
         history.apply(&Dispatch::MessageCreate(own(
             NEWEST + 2,
@@ -1345,7 +1843,7 @@ mod tests {
     fn an_explicit_retry_posts_once_more_with_the_same_nonce_while_permitted() {
         let rest = rest();
         let mut history = sending_history();
-        let id = history.send(&rest, CHANNEL, "again", true);
+        let id = history.send(&rest, CHANNEL, "again", true, None);
         take_posts(&mut history);
         let nonce = wire_nonce(&history, id);
         let refused = SendError::NotSent(RestError::Http(StatusCode::BAD_REQUEST));
@@ -1390,11 +1888,11 @@ mod tests {
     fn sends_to_a_channel_that_cannot_be_sent_to_are_kept_but_never_posted() {
         let rest = rest();
         let mut history = sending_history();
-        let id = history.send(&rest, Snowflake(999), "elsewhere", false);
+        let id = history.send(&rest, Snowflake(999), "elsewhere", false, None);
         assert_eq!(take_posts(&mut history), 0);
         assert!(history.outbox.nonce_of(id).is_some(), "the text is kept");
         // A login rejected while sending is reported to the worker.
-        let id = history.send(&rest, CHANNEL, "x", false);
+        let id = history.send(&rest, CHANNEL, "x", false, None);
         take_posts(&mut history);
         assert!(history.complete(
             &rest,
@@ -1620,6 +2118,18 @@ mod tests {
     fn a_deletion_removes_the_row_once_and_a_404_counts_as_deleted() {
         let rest = rest();
         let (mut history, id) = with_own_message();
+        let reply_id = Snowflake(NEWEST + 5);
+        history.apply(&Dispatch::MessageCreate(Box::new(reply_message(
+            reply_id.0, id,
+        ))));
+        history.refresh(&rest, &navigation(true), &Request::default());
+        let before_delete = history.snapshot();
+        let mut composer = crate::composer::Composer::default();
+        composer.select(Some(CHANNEL));
+        assert!(composer.begin_reply(&before_delete, id));
+        composer.perform(iced::widget::text_editor::Action::Edit(
+            iced::widget::text_editor::Edit::Paste(std::sync::Arc::new("answer".to_owned())),
+        ));
         history.delete_message(&rest, CHANNEL, id);
         assert_eq!(take_changes(&mut history), 1);
         assert_eq!(
@@ -1628,6 +2138,35 @@ mod tests {
         );
         history.complete(&rest, answered(id, ChangeResult::Deleted(Ok(()))));
         assert!(history.store.get(CHANNEL, id).is_none());
+        let after_delete = history.snapshot();
+        assert!(after_delete.deleted.contains(&id));
+        let reply_row = after_delete
+            .rows
+            .iter()
+            .find(|row| row.message.id == reply_id)
+            .unwrap();
+        assert_eq!(
+            reply_row.reply.as_ref().unwrap().state,
+            ReplyState::Deleted,
+            "REST confirmation invalidates embedded/cached reply previews immediately"
+        );
+        let bridge = crate::gateway::NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        crate::composer::update(
+            &mut composer,
+            crate::composer::Event::Send,
+            &after_delete,
+            &bridge,
+        );
+        assert!(
+            commands.try_recv().is_err(),
+            "the REST-known deletion disables reply send"
+        );
+        assert_eq!(composer.replying(), Some(id));
+        assert_eq!(
+            composer.submission(true, 0).unwrap().content.trim(),
+            "answer"
+        );
         history.apply(&Dispatch::MessageDelete(MessageDelete {
             id,
             channel_id: CHANNEL,

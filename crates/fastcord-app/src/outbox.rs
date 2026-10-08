@@ -21,14 +21,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fastcord_discord::{
-    ComposeError, MentionPolicy, NetworkFailure, Nonce, OutgoingMessage, RestError,
+    ComposeError, MentionPolicy, NetworkFailure, Nonce, OutgoingMessage, ReplyTo, RestError,
     RetryableFailure, SendError,
 };
-use fastcord_model::Snowflake;
+use fastcord_model::{REPLY_PREVIEW_CHARS, Snowflake};
 
 /// Unconfirmed messages, across all channels, the composer accepts before the
 /// user has to retry or discard some.
 pub const MAX_OUTBOX: usize = 16;
+/// Display names retained with unfinished replies are clipped to this many
+/// Unicode scalar values.
+pub const MAX_REPLY_AUTHOR_CHARS: usize = 128;
 
 /// The outbox's capacity, shared by the UI and the account worker. A send is
 /// queued only after [`reserve`](Self::reserve) succeeds; the slot is freed
@@ -67,6 +70,42 @@ impl Slots {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct OpId(pub u64);
 
+/// The message a send answers, as the user chose it. Text and author are only
+/// for the composer/outbox preview and are never included in `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Reply {
+    pub message: Snowflake,
+    pub author: Arc<str>,
+    pub content: Arc<str>,
+    pub mention_author: bool,
+}
+
+impl fmt::Debug for Reply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reply")
+            .field("message", &self.message)
+            .field("mention_author", &self.mention_author)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Reply {
+    fn wire(&self) -> ReplyTo {
+        ReplyTo {
+            message: self.message,
+            mention_author: self.mention_author,
+        }
+    }
+}
+
+fn bound_reply_text(value: Arc<str>, max_chars: usize) -> Arc<str> {
+    if value.chars().take(max_chars + 1).count() <= max_chars {
+        value
+    } else {
+        Arc::from(value.chars().take(max_chars).collect::<String>())
+    }
+}
+
 const NOT_ALLOWED: &str = "The channel was closed, or you cannot send messages in it.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +123,7 @@ struct Op {
     content: Arc<str>,
     nonce: Nonce,
     mentions: MentionPolicy,
+    reply: Option<Reply>,
     phase: Phase,
 }
 
@@ -105,6 +145,7 @@ pub struct OutboxItem {
     pub id: OpId,
     pub channel_id: Snowflake,
     pub content: Arc<str>,
+    pub reply: Option<Reply>,
     pub state: OutboxState,
 }
 
@@ -113,6 +154,7 @@ impl fmt::Debug for OutboxItem {
         f.debug_struct("OutboxItem")
             .field("id", &self.id)
             .field("channel_id", &self.channel_id)
+            .field("reply", &self.reply.as_ref().map(|reply| reply.message))
             .field("state", &self.state)
             .finish_non_exhaustive()
     }
@@ -130,12 +172,15 @@ pub enum Finished {
 }
 
 /// A fixed, secret-free sentence for a failed send.
-fn reason(error: SendError) -> &'static str {
+fn reason(error: SendError, reply: bool) -> &'static str {
     match error {
         SendError::NotSent(error) => match error {
             RestError::PermissionDenied => "Discord did not allow you to send messages here.",
             RestError::ResourceGone => "This channel is no longer available.",
             RestError::AuthenticationRequired => "Discord no longer accepts this login.",
+            RestError::Http(status) if status.as_u16() == 400 && reply => {
+                "Discord rejected the reply; the message it answers may be deleted, unavailable, not replyable, or the text may be too long."
+            }
             RestError::Http(status) if status.as_u16() == 400 => {
                 "Discord rejected the message; it may be too long or empty."
             }
@@ -206,9 +251,15 @@ impl Outbox {
         channel: Snowflake,
         content: &str,
         mentions: MentionPolicy,
+        reply: Option<Reply>,
         nonce: Nonce,
         allowed: bool,
     ) -> OpId {
+        let reply = reply.map(|mut reply| {
+            reply.author = bound_reply_text(reply.author, MAX_REPLY_AUTHOR_CHARS);
+            reply.content = bound_reply_text(reply.content, REPLY_PREVIEW_CHARS);
+            reply
+        });
         self.next_id += 1;
         let id = OpId(self.next_id);
         self.ops.push_back(Op {
@@ -217,6 +268,7 @@ impl Outbox {
             content: Arc::from(content),
             nonce,
             mentions,
+            reply,
             phase: if allowed {
                 Phase::Queued
             } else {
@@ -240,8 +292,10 @@ impl Outbox {
             if op.phase != Phase::Queued || busy.contains(&op.channel) {
                 continue;
             }
+            let reply = op.reply.as_ref().map(Reply::wire);
             match OutgoingMessage::new(&op.content, op.nonce, op.mentions) {
                 Ok(message) => {
+                    let message = message.replying_to(reply);
                     op.phase = Phase::InFlight;
                     busy.push(op.channel);
                     ready.push((op.id, op.channel, message));
@@ -267,10 +321,12 @@ impl Outbox {
                 Finished::Confirmed
             }
             Err(error) => {
-                self.ops[at].phase = if error.is_ambiguous() {
-                    Phase::Uncertain(reason(error))
+                let op = &mut self.ops[at];
+                let reason = reason(error, op.reply.is_some());
+                op.phase = if error.is_ambiguous() {
+                    Phase::Uncertain(reason)
                 } else {
-                    Phase::Failed(reason(error))
+                    Phase::Failed(reason)
                 };
                 Finished::Kept
             }
@@ -329,6 +385,7 @@ impl Outbox {
                 id: op.id,
                 channel_id: op.channel,
                 content: Arc::clone(&op.content),
+                reply: op.reply.clone(),
                 state: match op.phase {
                     Phase::Queued | Phase::InFlight => OutboxState::Sending,
                     Phase::Failed(reason) => OutboxState::Failed(reason),
@@ -365,7 +422,7 @@ mod tests {
         fn send(&mut self, channel: Snowflake, text: &str) -> OpId {
             let nonce = self.nonces.next(1_790_000_000_000, 0);
             self.outbox
-                .enqueue(channel, text, MentionPolicy::default(), nonce, true)
+                .enqueue(channel, text, MentionPolicy::default(), None, nonce, true)
         }
 
         fn states(&self, channel: Snowflake) -> Vec<OutboxState> {
@@ -421,6 +478,74 @@ mod tests {
         // An answer for an operation that is not in flight changes nothing.
         assert_eq!(f.outbox.finish(refused, Ok(())), Finished::Unknown);
         assert_eq!(f.outbox.len(), 2);
+    }
+
+    #[test]
+    fn a_reply_keeps_its_target_and_choice_through_failure_and_retry() {
+        let mut f = Fixture::new();
+        let reply = Reply {
+            message: Snowflake(42),
+            author: Arc::from("Other"),
+            content: Arc::from("original text"),
+            mention_author: false,
+        };
+        let nonce = f.nonces.next(1_790_000_000_000, 0);
+        let id = f.outbox.enqueue(
+            A,
+            "answer",
+            MentionPolicy::default(),
+            Some(reply.clone()),
+            nonce,
+            true,
+        );
+        let posted = f.outbox.take_ready().remove(0).2;
+        let shown = format!("{posted:?}");
+        assert!(
+            shown.contains("message: Snowflake(42)") && shown.contains("mention_author: false"),
+            "{shown}"
+        );
+        // A refused reply says that its target may be gone.
+        let refused = SendError::NotSent(RestError::Http(StatusCode::BAD_REQUEST));
+        f.outbox.finish(id, Err(refused));
+        let item = f.outbox.items().remove(0);
+        assert_eq!(item.reply, Some(reply));
+        assert!(matches!(item.state, OutboxState::Failed(text) if text.contains("answers")));
+        // A retry posts the same reply with the same nonce.
+        assert!(f.outbox.retry(id));
+        assert_eq!(f.outbox.take_ready().remove(0).2, posted);
+        // A plain message refused the same way is not described as a reply.
+        let plain = f.send(B, "plain");
+        f.outbox.take_ready();
+        f.outbox.finish(plain, Err(refused));
+        assert!(matches!(f.states(B)[0], OutboxState::Failed(text) if !text.contains("answers")));
+        // The author's name is display data and never reaches Debug output.
+        let shown = format!("{:?}", f.outbox.items());
+        assert!(!shown.contains("Other") && !shown.contains("original text"));
+    }
+
+    #[test]
+    fn reply_preview_strings_are_bounded_at_the_outbox_boundary() {
+        let mut outbox = Outbox::default();
+        let nonce = NonceGenerator::default().next(1_790_000_000_000, 0);
+        outbox.enqueue(
+            A,
+            "answer",
+            MentionPolicy::default(),
+            Some(Reply {
+                message: Snowflake(42),
+                author: Arc::from("é".repeat(MAX_REPLY_AUTHOR_CHARS + 1)),
+                content: Arc::from("🙂".repeat(fastcord_model::REPLY_PREVIEW_CHARS + 1)),
+                mention_author: false,
+            }),
+            nonce,
+            true,
+        );
+        let reply = outbox.items().remove(0).reply.unwrap();
+        assert_eq!(reply.author.chars().count(), MAX_REPLY_AUTHOR_CHARS);
+        assert_eq!(
+            reply.content.chars().count(),
+            fastcord_model::REPLY_PREVIEW_CHARS
+        );
     }
 
     #[test]
@@ -493,7 +618,14 @@ mod tests {
     fn a_channel_that_cannot_be_sent_to_keeps_the_text_as_a_failed_operation() {
         let mut outbox = Outbox::default();
         let nonce = NonceGenerator::default().next(1_790_000_000_000, 0);
-        let id = outbox.enqueue(A, "typed text", MentionPolicy::default(), nonce, false);
+        let id = outbox.enqueue(
+            A,
+            "typed text",
+            MentionPolicy::default(),
+            None,
+            nonce,
+            false,
+        );
         assert!(outbox.take_ready().is_empty(), "never posted");
         let items = outbox.items();
         assert_eq!(&*items[0].content, "typed text");
@@ -536,7 +668,7 @@ mod tests {
         ];
         let mut seen = std::collections::BTreeSet::new();
         for error in cases {
-            let text = reason(error);
+            let text = reason(error, false);
             assert!(text.ends_with('.') && !text.contains("502") && !text.contains("http"));
             // Ambiguity is always spelled out; a refusal never claims it.
             assert_eq!(
@@ -566,7 +698,7 @@ mod tests {
         for n in 0..MAX_OUTBOX {
             assert!(slots.reserve(), "slot {n}");
             let nonce = nonces.next(1_790_000_000_000, 0);
-            ids.push(outbox.enqueue(A, "x", MentionPolicy::default(), nonce, true));
+            ids.push(outbox.enqueue(A, "x", MentionPolicy::default(), None, nonce, true));
         }
         assert!(!slots.reserve(), "the outbox is full");
         assert_eq!(slots.used(), MAX_OUTBOX);

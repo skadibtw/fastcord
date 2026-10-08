@@ -22,7 +22,7 @@ use iced::{Element, Length, Padding};
 
 use crate::changes::RowChange;
 use crate::gateway::NavigationBridge;
-use crate::outbox::{MAX_OUTBOX, OpId, OutboxItem, OutboxState};
+use crate::outbox::{MAX_OUTBOX, MAX_REPLY_AUTHOR_CHARS, OpId, OutboxItem, OutboxState, Reply};
 use crate::timeline::Snapshot;
 
 /// The editor refuses to grow past this many characters, twice the longest
@@ -59,6 +59,8 @@ pub enum Event {
     Action(Act),
     Send,
     Everyone(bool),
+    ReplyMention(bool),
+    CancelReply,
     Retry(OpId),
     Discard(OpId),
     /// Move a failed message's text back into the editor and drop the failure.
@@ -68,13 +70,23 @@ pub enum Event {
 }
 
 /// A draft the user chose to send.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct Submission {
     pub channel: Snowflake,
     pub content: String,
     pub everyone: bool,
+    pub reply: Option<Reply>,
 }
 
+impl fmt::Debug for Submission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Submission")
+            .field("channel", &self.channel)
+            .field("everyone", &self.everyone)
+            .field("reply", &self.reply.as_ref().map(|reply| reply.message))
+            .finish_non_exhaustive()
+    }
+}
 /// New text the user chose to save for one of their messages.
 #[derive(PartialEq, Eq)]
 pub struct EditSubmission {
@@ -99,6 +111,7 @@ struct Editing {
     allow_empty: bool,
     draft: String,
     everyone: bool,
+    replying: Option<Reply>,
 }
 
 /// Unsent text per channel: bounded in count and, through the editor's cap, in size.
@@ -133,6 +146,8 @@ pub struct Composer {
     blank: bool,
     /// The user's choice for the message being written; never carried over.
     everyone: bool,
+    /// The target and explicit replied-user notification choice.
+    replying: Option<Reply>,
     notice: Option<&'static str>,
     drafts: Drafts,
     /// Editing one of the user's messages of `channel` instead of writing one.
@@ -148,6 +163,7 @@ impl Default for Composer {
             trimmed_chars: 0,
             blank: true,
             everyone: false,
+            replying: None,
             notice: None,
             drafts: Drafts::default(),
             editing: None,
@@ -181,6 +197,7 @@ impl Composer {
         self.content.perform(Action::Move(Motion::DocumentEnd));
         self.channel = channel;
         self.everyone = false;
+        self.replying = None;
         self.notice = None;
         self.recount();
     }
@@ -210,6 +227,58 @@ impl Composer {
     pub fn set_everyone(&mut self, allowed: bool) {
         self.everyone = allowed;
     }
+    /// Selects a loaded message as the reply target without disturbing the
+    /// draft. A new target starts with replied-user notification off.
+    pub fn begin_reply(&mut self, snapshot: &Snapshot, message: Snowflake) -> bool {
+        let Some(channel) = self
+            .channel
+            .filter(|&open| snapshot.channel_id == Some(open) && snapshot.can_send)
+        else {
+            return false;
+        };
+        if self.editing.is_some() {
+            return false;
+        }
+        let Some(row) = snapshot
+            .rows
+            .iter()
+            .find(|row| row.message.id == message && row.message.channel_id == channel)
+        else {
+            return false;
+        };
+        self.replying = Some(Reply {
+            message,
+            author: Arc::from(
+                row.message
+                    .author
+                    .display_name()
+                    .chars()
+                    .take(MAX_REPLY_AUTHOR_CHARS)
+                    .collect::<String>(),
+            ),
+            content: Arc::from(reply_preview(&row.message.content)),
+            mention_author: false,
+        });
+        self.notice = None;
+        true
+    }
+
+    pub fn set_reply_mention(&mut self, allowed: bool) {
+        if let Some(reply) = &mut self.replying {
+            reply.mention_author = allowed;
+        }
+    }
+
+    pub fn cancel_reply(&mut self) {
+        self.replying = None;
+        self.notice = None;
+    }
+
+    fn reply_deleted(&self, snapshot: &Snapshot) -> bool {
+        self.replying
+            .as_ref()
+            .is_some_and(|reply| snapshot.deleted.contains(&reply.message))
+    }
 
     /// Whether Send is available: there is an open channel the account may
     /// send to, something to send within Discord's limit, and room in the
@@ -232,12 +301,18 @@ impl Composer {
             channel,
             content: self.content.text(),
             everyone: self.everyone,
+            reply: self.replying.clone(),
         })
     }
 
     /// The message whose text is being edited, if any.
     pub fn editing(&self) -> Option<Snowflake> {
         self.editing.as_ref().map(|editing| editing.message)
+    }
+
+    /// The message the current draft replies to, if any.
+    pub fn replying(&self) -> Option<Snowflake> {
+        self.replying.as_ref().map(|reply| reply.message)
     }
 
     /// Puts one of the user's messages of the open channel into the editor:
@@ -271,19 +346,21 @@ impl Composer {
             self.notice = Some("That message is too long to edit here.");
             return false;
         }
-        let (draft, everyone) = match self.editing.take() {
-            Some(editing) => (editing.draft, editing.everyone),
-            None => (self.content.text(), self.everyone),
+        let (draft, everyone, replying) = match self.editing.take() {
+            Some(editing) => (editing.draft, editing.everyone, editing.replying),
+            None => (self.content.text(), self.everyone, self.replying.take()),
         };
         self.editing = Some(Editing {
             message,
             allow_empty: !row.message.attachments.is_empty(),
             draft,
             everyone,
+            replying,
         });
         self.content = Content::with_text(text);
         self.content.perform(Action::Move(Motion::DocumentEnd));
         self.everyone = false;
+        self.replying = None;
         self.notice = None;
         self.recount();
         true
@@ -297,6 +374,7 @@ impl Composer {
         self.content = Content::with_text(&editing.draft);
         self.content.perform(Action::Move(Motion::DocumentEnd));
         self.everyone = editing.everyone;
+        self.replying = editing.replying;
         self.notice = None;
         self.recount();
     }
@@ -330,6 +408,7 @@ impl Composer {
     pub fn sent(&mut self) {
         self.content = Content::new();
         self.everyone = false;
+        self.replying = None;
         self.notice = None;
         self.recount();
     }
@@ -359,6 +438,22 @@ impl Composer {
         self.recount();
         true
     }
+    /// Restores a failed send with its original reply target and notification
+    /// choice. A nonblank draft can only merge when its reply metadata matches.
+    pub fn restore_send(&mut self, text: &str, reply: Option<Reply>) -> bool {
+        let replacing = self.blank;
+        if !replacing && self.replying != reply {
+            self.notice = Some("Finish the current draft before editing this failed send.");
+            return false;
+        }
+        if !self.restore(text) {
+            return false;
+        }
+        if replacing {
+            self.replying = reply;
+        }
+        true
+    }
 }
 
 /// Applies one composer event. Typing stays local; a send, retry, or discard
@@ -373,6 +468,8 @@ pub fn update(
     match event {
         Event::Action(Act(action)) => composer.perform(action),
         Event::Everyone(allowed) => composer.set_everyone(allowed),
+        Event::ReplyMention(allowed) => composer.set_reply_mention(allowed),
+        Event::CancelReply => composer.cancel_reply(),
         Event::Send if composer.editing.is_some() => {
             if let Some(edit) = composer.edit_submission() {
                 if bridge.edit_message(edit.channel, edit.message, edit.content) {
@@ -385,11 +482,20 @@ pub fn update(
             }
         }
         Event::Send => {
+            if composer.reply_deleted(snapshot) {
+                composer.notice = Some(REPLY_DELETED);
+                return;
+            }
             let open = snapshot.can_send && snapshot.channel_id == composer.channel;
             let Some(submission) = composer.submission(open, snapshot.outbox.len()) else {
                 return;
             };
-            if bridge.send_message(submission.channel, submission.content, submission.everyone) {
+            if bridge.send_message(
+                submission.channel,
+                submission.content,
+                submission.everyone,
+                submission.reply,
+            ) {
                 composer.sent();
             } else {
                 composer.notice = Some(NOT_QUEUED);
@@ -416,7 +522,7 @@ pub fn update(
             });
             // The text moves only if it fits; the failed entry goes once it has.
             if let Some(item) = failed
-                && composer.restore(&item.content)
+                && composer.restore_send(&item.content, item.reply.clone())
                 && !bridge.discard_send(id)
             {
                 composer.notice = Some(BUSY);
@@ -429,6 +535,7 @@ const BUSY: &str = "That is not possible right now (busy or disconnected); try a
 const EMPTY_EDIT: &str = "A message needs some text. Use Delete to remove it instead.";
 const NOT_QUEUED: &str =
     "Not sent: too many messages are waiting, or the connection has stopped. Your text is kept.";
+const REPLY_DELETED: &str = "That message was deleted. Choose another message to reply to.";
 
 fn preview(content: &str) -> String {
     let mut shown: String = content
@@ -437,6 +544,18 @@ fn preview(content: &str) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     if content.chars().nth(PREVIEW_CHARS).is_some() {
+        shown.push('…');
+    }
+    shown
+}
+
+fn reply_preview(content: &str) -> String {
+    let mut chars = content
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c });
+    let mut shown: String = chars.by_ref().take(PREVIEW_CHARS).collect();
+    if chars.next().is_some() {
+        shown.pop();
         shown.push('…');
     }
     shown
@@ -466,6 +585,15 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
     let mut content = column![].spacing(4);
     if !here {
         content = content.push(text("In another channel").size(11).style(text::secondary));
+    }
+    if let Some(reply) = &item.reply {
+        content = content.push(
+            text(format!("Replying to {}: {}", reply.author, reply.content))
+                .size(11)
+                .width(Length::Fill)
+                .wrapping(text::Wrapping::WordOrGlyph)
+                .style(text::secondary),
+        );
     }
     content = match item.state {
         OutboxState::Sending => content
@@ -530,6 +658,35 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         layout = layout.push(text(notice).size(12).style(text::danger));
     }
     let editing = composer.editing.is_some();
+    if let Some(reply) = &composer.replying {
+        let deleted = snapshot.deleted.contains(&reply.message);
+        let label = if deleted {
+            "That message was deleted; choose another reply target.".to_owned()
+        } else {
+            format!("Replying to {}: {}", reply.author, reply.content)
+        };
+        let mut summary = row![
+            text(label)
+                .size(12)
+                .width(Length::Fill)
+                .wrapping(text::Wrapping::WordOrGlyph),
+        ]
+        .spacing(8)
+        .align_y(iced::alignment::Vertical::Center);
+        if deleted {
+            summary = summary.push(text("Deleted").size(12).style(text::danger));
+        } else if !editing {
+            summary = summary.push(
+                checkbox(reply.mention_author)
+                    .label("Notify replied user")
+                    .on_toggle(Event::ReplyMention)
+                    .size(14)
+                    .text_size(12),
+            );
+        }
+        summary = summary.push(small_button("Cancel reply", Event::CancelReply));
+        layout = layout.push(summary);
+    }
     if !snapshot.can_send && !editing {
         // Without the editor's controls row, a refused action is said here.
         if let Some(notice) = composer.notice {
@@ -592,7 +749,8 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         );
         (
             "Send",
-            composer.ready(snapshot.can_send, snapshot.outbox.len()),
+            composer.ready(snapshot.can_send, snapshot.outbox.len())
+                && !composer.reply_deleted(snapshot),
         )
     };
     controls = controls.push(space::horizontal());
@@ -705,6 +863,132 @@ mod tests {
     }
 
     #[test]
+    fn replying_preserves_the_draft_and_sends_the_explicit_author_choice() {
+        use crate::gateway::Command;
+
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut snapshot = open(A, Vec::new());
+        snapshot.rows = vec![sent(7, "quoted message", false, None)];
+        let mut composer = composer_in(A);
+        type_text(&mut composer, "my answer");
+
+        assert!(composer.begin_reply(&snapshot, Snowflake(7)));
+        let initial = composer.submission(true, 0).unwrap();
+        assert_eq!(initial.content, "my answer");
+        let target = initial.reply.as_ref().unwrap();
+        assert_eq!(target.message, Snowflake(7));
+        assert_eq!(&*target.author, "fixture");
+        assert_eq!(&*target.content, "quoted message");
+        assert!(
+            !target.mention_author,
+            "replied-user mention is off by default"
+        );
+        assert!(!format!("{initial:?}").contains("quoted message"));
+
+        update(&mut composer, Event::ReplyMention(true), &snapshot, &bridge);
+        update(&mut composer, Event::Send, &snapshot, &bridge);
+        match commands.try_recv().unwrap() {
+            Command::Send {
+                channel,
+                content,
+                everyone,
+                reply: Some(reply),
+            } => {
+                assert_eq!((channel, content.trim(), everyone), (A, "my answer", false));
+                assert_eq!(reply.message, Snowflake(7));
+                assert!(reply.mention_author);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(composer.blank && composer.replying.is_none());
+    }
+
+    #[test]
+    fn a_deleted_reply_target_keeps_the_draft_and_never_sends_plain_text() {
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut snapshot = open(A, Vec::new());
+        snapshot.rows = vec![sent(7, "original", false, None)];
+        let mut composer = composer_in(A);
+        assert!(composer.begin_reply(&snapshot, Snowflake(7)));
+        type_text(&mut composer, "answer");
+        snapshot.deleted.push(Snowflake(7));
+
+        update(&mut composer, Event::Send, &snapshot, &bridge);
+        assert!(commands.try_recv().is_err());
+        assert_eq!(composer.content.text(), "answer");
+        assert!(composer.replying.is_some());
+        assert_eq!(composer.notice, Some(REPLY_DELETED));
+    }
+    #[test]
+    fn editing_a_failed_reply_restores_its_reference_and_blocks_a_deleted_target() {
+        use crate::gateway::Command;
+
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let reply = Reply {
+            message: Snowflake(7),
+            author: Arc::from("fixture"),
+            content: Arc::from("original"),
+            mention_author: true,
+        };
+        let mut snapshot = open(
+            A,
+            vec![OutboxItem {
+                id: OpId(9),
+                channel_id: A,
+                content: Arc::from("answer"),
+                reply: Some(reply.clone()),
+                state: OutboxState::Failed("Discord rejected the reply."),
+            }],
+        );
+        snapshot.deleted.push(Snowflake(7));
+        let mut composer = composer_in(A);
+
+        update(&mut composer, Event::Edit(OpId(9)), &snapshot, &bridge);
+        assert!(matches!(commands.try_recv(), Ok(Command::Discard(OpId(9)))));
+        assert_eq!(composer.content.text().trim(), "answer");
+        assert_eq!(composer.replying(), Some(Snowflake(7)));
+        assert_eq!(
+            composer.submission(true, 0).unwrap().reply,
+            Some(reply.clone())
+        );
+
+        update(&mut composer, Event::Send, &snapshot, &bridge);
+        assert!(
+            commands.try_recv().is_err(),
+            "no plain message may be queued"
+        );
+        assert_eq!(composer.content.text().trim(), "answer");
+        assert_eq!(composer.replying(), Some(Snowflake(7)));
+        assert_eq!(composer.notice, Some(REPLY_DELETED));
+    }
+
+    #[test]
+    fn restoring_a_failed_send_does_not_replace_incompatible_draft_metadata() {
+        let mut composer = composer_in(A);
+        type_text(&mut composer, "current draft");
+        let current = Reply {
+            message: Snowflake(1),
+            author: Arc::from("current"),
+            content: Arc::from("current target"),
+            mention_author: false,
+        };
+        let failed = Reply {
+            message: Snowflake(2),
+            author: Arc::from("failed"),
+            content: Arc::from("failed target"),
+            mention_author: true,
+        };
+        composer.replying = Some(current.clone());
+        assert!(!composer.restore_send("failed text", Some(failed)));
+        assert_eq!(composer.content.text(), "current draft");
+        assert_eq!(composer.replying, Some(current));
+        assert!(composer.notice.is_some());
+    }
+
+    #[test]
     fn a_draft_over_discords_limit_cannot_be_sent_and_the_editor_is_capped() {
         let mut composer = composer_in(A);
         paste(&mut composer, &"x".repeat(MAX_CONTENT_CHARS));
@@ -810,6 +1094,9 @@ mod tests {
         let shown = preview(&long);
         assert_eq!(shown.chars().count(), PREVIEW_CHARS + 1);
         assert!(shown.ends_with('…'));
+        let reply = reply_preview(&long);
+        assert_eq!(reply.chars().count(), PREVIEW_CHARS);
+        assert!(reply.ends_with('…'));
         assert_eq!(
             preview(&"y".repeat(PREVIEW_CHARS)).chars().count(),
             PREVIEW_CHARS
@@ -856,6 +1143,7 @@ mod tests {
                 channel,
                 content,
                 everyone,
+                ..
             } => {
                 assert_eq!(
                     (channel, content.trim(), everyone),
@@ -882,6 +1170,7 @@ mod tests {
             id: OpId(id),
             channel_id: A,
             content: Arc::from(format!("text {id}")),
+            reply: None,
             state,
         };
         let snapshot = open(
@@ -938,11 +1227,13 @@ mod tests {
                 attachments: Vec::new(),
                 reactions: Vec::new(),
                 message_reference: None,
+                referenced_message: fastcord_model::Referenced::Unknown,
                 nonce: None,
             }),
             revision: 1,
             own,
             change,
+            reply: None,
         }
     }
 
@@ -1098,6 +1389,7 @@ mod tests {
             id: OpId(1),
             channel_id: A,
             content: Arc::from("unsent"),
+            reply: None,
             state: OutboxState::Failed("refused"),
         };
         let bridge = NavigationBridge::new();

@@ -1,8 +1,8 @@
 //! Fixture-driven tests for wire decoding and permission computation.
 
 use fastcord_model::{
-    Channel, GuildScope, MemberScope, Message, MessageUpdate, Permissions, Role, Snowflake,
-    channel_permissions,
+    Channel, GuildScope, MemberScope, Message, MessageUpdate, Permissions, REPLY_PREVIEW_CHARS,
+    Referenced, Role, Snowflake, channel_permissions,
 };
 use serde::Deserialize;
 
@@ -136,6 +136,118 @@ fn nonce_is_kept_when_it_is_a_short_string_or_integer_and_never_fails_the_messag
     // Serializing never invents one.
     let plain = serde_json::to_value(decode(None)).unwrap();
     assert!(plain.get("nonce").is_none());
+}
+
+#[test]
+fn referenced_message_tells_unknown_deleted_and_present_apart() {
+    let base: serde_json::Value = serde_json::from_str(&fixture("message_create.json")).unwrap();
+    let decode = |referenced: Option<serde_json::Value>| -> Message {
+        let mut value = base.clone();
+        if let Some(referenced) = referenced {
+            value["referenced_message"] = referenced;
+        }
+        serde_json::from_value(value).unwrap()
+    };
+    // Absent: Discord did not look the message up.
+    let unknown = decode(None);
+    assert_eq!(unknown.referenced_message, Referenced::Unknown);
+    assert_eq!(
+        unknown.replied_to(),
+        Some(Snowflake(1_289_999_999_999_999_999))
+    );
+    // `null`: it was deleted.
+    assert_eq!(
+        decode(Some(serde_json::Value::Null)).referenced_message,
+        Referenced::Deleted
+    );
+    // An object: only the author, the ID, and the start of the text are kept;
+    // its own nested reference and unknown fields are skipped.
+    let long = "\u{e9}".repeat(REPLY_PREVIEW_CHARS + 50);
+    let present = decode(Some(serde_json::json!({
+        "id": "1289999999999999999",
+        "type": 19,
+        "channel_id": "500",
+        "content": long,
+        "author": {"id": "3", "username": "other_fixture", "global_name": "Other", "discriminator": "0"},
+        "attachments": [],
+        "embeds": [{"type": "rich"}],
+        "timestamp": "2026-10-07T11:59:00.000000+00:00",
+        "message_reference": {"message_id": "1289999999999999998"},
+        "referenced_message": {"id": "1289999999999999998", "content": "deeper", "author": {"id": "4", "username": "x"}}
+    })));
+    let Referenced::Message(preview) = &present.referenced_message else {
+        panic!("expected a preview");
+    };
+    assert_eq!(preview.id, Snowflake(1_289_999_999_999_999_999));
+    assert_eq!(preview.author.display_name(), "Other");
+    assert_eq!(
+        preview.content.chars().count(),
+        REPLY_PREVIEW_CHARS,
+        "cut to the preview length, in characters"
+    );
+    assert!(preview.content.chars().all(|c| c == '\u{e9}'));
+    // A missing text is empty rather than a decoding failure.
+    let textless = decode(Some(
+        serde_json::json!({"id": "9", "author": {"id": "3", "username": "u"}}),
+    ));
+    assert!(matches!(&textless.referenced_message, Referenced::Message(p) if p.content.is_empty()));
+    // The three states survive a round trip in their wire form.
+    for message in [&unknown, &decode(Some(serde_json::Value::Null)), &present] {
+        let wire = serde_json::to_value(message).unwrap();
+        assert_eq!(
+            wire.get("referenced_message").is_some(),
+            !message.referenced_message.is_unknown()
+        );
+        let again: Message = serde_json::from_value(wire).unwrap();
+        assert_eq!(&again, message);
+    }
+    // The quoted text never reaches Debug output.
+    assert!(!format!("{present:?} {:?}", present.referenced_message).contains('\u{e9}'));
+}
+
+#[test]
+fn only_same_channel_replies_have_a_reply_target() {
+    let base: serde_json::Value = serde_json::from_str(&fixture("message_create.json")).unwrap();
+    let with = |kind: u8, reference: serde_json::Value| -> Option<Snowflake> {
+        let mut value = base.clone();
+        value["type"] = kind.into();
+        value["message_reference"] = reference;
+        serde_json::from_value::<Message>(value)
+            .unwrap()
+            .replied_to()
+    };
+    let target = Some(Snowflake(7));
+    assert_eq!(
+        with(
+            19,
+            serde_json::json!({"message_id": "7", "channel_id": "500"})
+        ),
+        target
+    );
+    assert_eq!(
+        with(19, serde_json::json!({"message_id": "7"})),
+        target,
+        "the channel is implied"
+    );
+    // A reference to another channel (a crosspost or forward source), a
+    // reference on a message that is not a reply, and a reference without a
+    // message are not reply targets.
+    assert_eq!(
+        with(
+            19,
+            serde_json::json!({"message_id": "7", "channel_id": "501"})
+        ),
+        None
+    );
+    assert_eq!(
+        with(
+            0,
+            serde_json::json!({"message_id": "7", "channel_id": "500"})
+        ),
+        None
+    );
+    assert_eq!(with(19, serde_json::json!({"channel_id": "500"})), None);
+    assert_eq!(with(19, serde_json::Value::Null), None);
 }
 
 #[test]

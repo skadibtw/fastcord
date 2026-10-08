@@ -1053,6 +1053,94 @@ fn a_page_that_does_not_touch_the_run_is_stale_and_latest_replaces_a_distant_run
 }
 
 #[test]
+fn a_jump_replaces_a_distant_run_extends_a_touching_one_and_pages_onward() {
+    let mut store = MessageStore::new();
+    load(&mut store, HistoryCursor::Latest, 951..=1_000);
+
+    // A jump far back (to message 500, deleted meanwhile): the page around it
+    // replaces the live run, vouches for its own span only, and is not live.
+    let token = store.begin_page(CHANNEL, HistoryCursor::Around(id(500)));
+    let mut around = page(476..=525);
+    around.retain(|message| message.id != id(500));
+    let around = through_rest(CHANNEL, HistoryCursor::Around(id(500)), &around);
+    assert_eq!(applied(store.merge_page(token, around)), (49, 49, 0));
+    assert_eq!(ids_of(&store, CHANNEL).first(), Some(&476));
+    assert_eq!(ids_of(&store, CHANNEL).last(), Some(&525));
+    assert!(store.get(CHANNEL, id(500)).is_none());
+    assert!(
+        store.covers(CHANNEL, id(500)),
+        "the page proves 500 is gone, so it is not asked for again"
+    );
+    assert!(!store.covers(CHANNEL, id(475)) && !store.covers(CHANNEL, id(526)));
+    let window = store.window(CHANNEL).unwrap();
+    assert_eq!(window.older, Some(HistoryCursor::Before(id(476))));
+    assert_eq!(window.newer, Some(HistoryCursor::After(id(525))));
+    check(&store);
+
+    // A jump to a message just past the run extends it instead.
+    let merge = load(&mut store, HistoryCursor::Around(id(540)), 515..=564);
+    assert_eq!(applied(merge), (50, 88, 0));
+    let held = ids_of(&store, CHANNEL);
+    assert_eq!((held[0], held[held.len() - 1]), (476, 564));
+    assert_eq!(
+        store.window(CHANNEL).unwrap().newer,
+        Some(HistoryCursor::After(id(564))),
+        "a jump never claims the live edge"
+    );
+
+    // Paging on from there reaches the live edge as usual.
+    let merge = load(&mut store, HistoryCursor::After(id(564)), 565..=590);
+    assert_eq!(applied(merge).0, 26);
+    assert_eq!(store.window(CHANNEL).unwrap().newer, None);
+    check(&store);
+
+    // A jump whose page is empty (nothing there at all) changes nothing.
+    let before = ids_of(&store, CHANNEL);
+    let merge = load_empty(&mut store, HistoryCursor::Around(id(9_999)));
+    assert_eq!(applied(merge), (0, before.len(), 0));
+    assert_eq!(ids_of(&store, CHANNEL), before);
+    // Nor does one for another channel's messages.
+    let token = store.begin_page(CHANNEL, HistoryCursor::Around(id(50)));
+    let foreign = page_in(OTHER, 26..=75);
+    assert_eq!(
+        applied(store.merge_page(token, foreign)),
+        (50, before.len(), 50)
+    );
+    assert_eq!(ids_of(&store, CHANNEL), before);
+    check(&store);
+}
+
+#[test]
+fn a_jump_keeps_its_target_when_the_run_is_trimmed_and_respects_gateway_deletes() {
+    let mut store = MessageStore::new();
+    fill(&mut store, CHANNEL, 10_000);
+    assert_eq!(store.channel_len(CHANNEL), MAX_MESSAGES_PER_CHANNEL);
+    // Jumping just below the oldest held message: the run grows past 500,
+    // and the end far from the target (the newest messages) is what goes.
+    let oldest = ids_of(&store, CHANNEL)[0];
+    let target = oldest - 20;
+    let token = store.begin_page(CHANNEL, HistoryCursor::Around(id(target)));
+    // The target's neighbour is deleted over the Gateway meanwhile.
+    store.apply_dispatch(&delete(CHANNEL, target + 1));
+    let messages = through_rest(
+        CHANNEL,
+        HistoryCursor::Around(id(target)),
+        &page(target - 25..=target + 24),
+    );
+    applied(store.merge_page(token, messages));
+    let held = ids_of(&store, CHANNEL);
+    assert_eq!(held.len(), MAX_MESSAGES_PER_CHANNEL);
+    assert_eq!(held[0], target - 25);
+    assert!(store.get(CHANNEL, id(target)).is_some());
+    assert!(
+        store.get(CHANNEL, id(target + 1)).is_none(),
+        "a deletion that raced with the jump is not resurrected"
+    );
+    assert!(store.window(CHANNEL).unwrap().newer.is_some());
+    check(&store);
+}
+
+#[test]
 fn short_pages_prove_the_ends_of_history_and_rejected_records_are_counted() {
     let mut store = MessageStore::new();
     load(&mut store, HistoryCursor::Latest, 10..=12);

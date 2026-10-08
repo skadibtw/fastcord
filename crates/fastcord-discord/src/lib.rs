@@ -34,5 +34,5 @@ pub use route::{MajorParameter, Route, RouteKey};
 pub use secret::UserToken;
 pub use send::{
     ComposeError, MAX_CONTENT_CHARS, MentionPolicy, Nonce, NonceGenerator, OutgoingMessage,
-    SendError,
+    ReplyTo, SendError,
 };

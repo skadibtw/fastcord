@@ -294,6 +294,13 @@ impl App {
                         timeline::Event::JumpLatest { channel_id } => {
                             controls.timeline_intent(history::Intent::Latest(channel_id));
                         }
+                        timeline::Event::JumpTo {
+                            channel_id,
+                            message_id,
+                        } => controls.timeline_intent(history::Intent::JumpTo {
+                            channel: channel_id,
+                            message: message_id,
+                        }),
                         timeline::Event::LoadOlder { channel_id } => {
                             controls.timeline_intent(history::Intent::Older(channel_id));
                         }
@@ -301,6 +308,7 @@ impl App {
                             controls.timeline_intent(history::Intent::Retry(channel_id));
                         }
                         action @ (timeline::Event::Edit { .. }
+                        | timeline::Event::Reply { .. }
                         | timeline::Event::Delete { .. }
                         | timeline::Event::ConfirmDelete { .. }
                         | timeline::Event::CancelDelete

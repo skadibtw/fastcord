@@ -1,0 +1,9 @@
+{
+  "content": "replying from fastcord",
+  "nonce": "1290000000000000002",
+  "enforce_nonce": true,
+  "tts": false,
+  "flags": 0,
+  "allowed_mentions": {"parse": ["users", "roles"], "replied_user": false},
+  "message_reference": {"type": 0, "message_id": "1289999999999999999", "fail_if_not_exists": true}
+}
