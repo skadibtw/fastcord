@@ -6,7 +6,8 @@
 //! first, then software in automatic mode, and the backend actually in use is
 //! always reported ([`Backend`], [`Selected::rejected`]). FFmpeg is not used.
 //!
-//! Windows uses Media Foundation ([`media_foundation`]).
+//! Windows uses Media Foundation ([`media_foundation`]); macOS uses VideoToolbox
+//! ([`videotoolbox`]) with IOSurface-backed pixel buffers.
 
 pub mod codec;
 pub mod frame;
@@ -16,6 +17,8 @@ pub mod media_foundation;
 mod select;
 #[cfg(test)]
 mod test_vectors;
+#[cfg(target_os = "macos")]
+pub mod videotoolbox;
 
 pub use codec::{
     Backend, BackendKind, BackendPreference, CodecError, DecodedFrame, EncodedFrame, EncoderConfig,

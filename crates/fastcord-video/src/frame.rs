@@ -128,6 +128,15 @@ impl<'a> Nv12<'a> {
         let start = row * self.uv_stride;
         &self.uv[start..start + self.chroma_row_bytes()]
     }
+    /// Byte distance between successive rows of the luma plane.
+    pub fn luma_stride(&self) -> usize {
+        self.y_stride
+    }
+
+    /// Byte distance between successive rows of the interleaved chroma plane.
+    pub fn chroma_stride(&self) -> usize {
+        self.uv_stride
+    }
 
     /// Bytes of a tightly packed copy (see [`Nv12::packed`]).
     pub fn packed_len(&self) -> usize {

@@ -3,6 +3,11 @@
 ## Automated (CI, every push)
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Windows, Linux, and macOS. Tests are deterministic and offline: protocol fixtures in `fixtures/`, injected clocks, crypto/media vectors. No live credentials in CI.
 
+### macOS VideoToolbox codecs (M31)
+- The normal macOS CI test suite runs `videotoolbox::tests::software_encoder_and_decoder_round_trip_and_restart`, covering real VideoToolbox software H.264 encode/decode and dropping/reopening the sessions. `macos-intel-codec` cross-compiles `fastcord-video` for `x86_64-apple-darwin`; this is a compile check, not an Intel runtime claim.
+- On a Mac with H.264 hardware encode and decode, run `cargo test -p fastcord-video --locked -- videotoolbox::tests::hardware_encode_decode_720p30 --ignored --nocapture`. It asserts hardware is actually selected and round-trips 720p30.
+- **Pending maintainer acceptance:** run that 720p30 hardware test on Apple Silicon and Intel, and repeatedly stop/start the stream while checking that IOSurface-backed frame pools are released and recreated. No Mac runtime result is claimed until the maintainer reports it.
+
 ### Windows Media Foundation codecs (M27)
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --all-targets --locked`: passed. The workspace includes fastcord-video's offline H.264 SPS-bound regression, exact software decoding, software encoder/decoder round trips, backend-selection policy, and automatic backend reporting.
 - `cargo test -p fastcord-video --locked -- --ignored --nocapture`: passed on AMD Radeon RX 9070 XT. The real Media Foundation hardware decoder reproduced the I_PCM fixture bit-exactly; the hardware H.264 encoder round-tripped the fixture and 75-frame pattern through the hardware decoder and again through the software decoder.

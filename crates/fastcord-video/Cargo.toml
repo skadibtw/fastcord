@@ -24,5 +24,9 @@ windows = { workspace = true, features = [
     "Win32_System_Variant",
 ] }
 
+[build-dependencies]
+cc = "1"
+
+
 [lints]
 workspace = true
