@@ -41,3 +41,56 @@ where
 {
     Option::<T>::deserialize(d).map(Some)
 }
+
+/// Longest nonce Discord accepts and therefore the longest this client keeps.
+pub(crate) const MAX_NONCE_CHARS: usize = 25;
+
+/// A message nonce as other clients and bots send it: a string or an integer
+/// of up to [`MAX_NONCE_CHARS`] characters. Anything else (a longer string, a
+/// float, a boolean, a structure) is dropped as "no nonce" rather than failing
+/// the whole message, since the nonce is only ever used to recognize our own.
+pub(crate) fn lenient_nonce<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Option<String>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a message nonce")
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok((v.chars().count() <= MAX_NONCE_CHARS).then(|| v.to_owned()))
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+        fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+            d.deserialize_any(V)
+        }
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            while seq.next_element::<de::IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+        fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            while map
+                .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
+                .is_some()
+            {}
+            Ok(None)
+        }
+    }
+    d.deserialize_any(V)
+}

@@ -2,8 +2,9 @@
 //! All clones share its rate limits and permanent authentication-stop signal.
 //! The main user [`Gateway`] connection lifecycle lives in [`gateway`]; the
 //! bounded reducer state it feeds lives in [`state`]. Channel history is read
-//! through [`history`], and the bounded cache of message bodies the timeline
-//! reads from is [`message_store`].
+//! through [`history`], the bounded cache of message bodies the timeline
+//! reads from is [`message_store`], and messages are created, never re-posted
+//! by the transport, through [`RestClient::create_message`].
 
 mod clock;
 mod error;
@@ -15,6 +16,7 @@ mod remote_auth;
 mod rest;
 mod route;
 mod secret;
+mod send;
 pub mod state;
 mod ws;
 
@@ -26,3 +28,7 @@ pub use reqwest::{Method, StatusCode};
 pub use rest::{Priority, RestClient, RestRequest, RestResponse};
 pub use route::{MajorParameter, Route, RouteKey};
 pub use secret::UserToken;
+pub use send::{
+    ComposeError, MAX_CONTENT_CHARS, MentionPolicy, Nonce, NonceGenerator, OutgoingMessage,
+    SendError,
+};

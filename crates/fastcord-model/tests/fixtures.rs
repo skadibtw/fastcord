@@ -96,6 +96,49 @@ fn message_create_decodes_and_ignores_unknown_fields() {
 }
 
 #[test]
+fn nonce_is_kept_when_it_is_a_short_string_or_integer_and_never_fails_the_message() {
+    let base: serde_json::Value = serde_json::from_str(&fixture("message_create.json")).unwrap();
+    let decode = |nonce: Option<serde_json::Value>| -> Message {
+        let mut value = base.clone();
+        if let Some(nonce) = nonce {
+            value["nonce"] = nonce;
+        }
+        serde_json::from_value(value).expect("a hostile nonce must not drop the message")
+    };
+    assert_eq!(decode(None).nonce, None, "absent");
+    assert_eq!(decode(Some(serde_json::Value::Null)).nonce, None, "null");
+    assert_eq!(
+        decode(Some("1290000000000000000".into())).nonce.as_deref(),
+        Some("1290000000000000000"),
+        "the web client's snowflake-valued string"
+    );
+    assert_eq!(
+        decode(Some(serde_json::json!(1_290_000_000_000_000_000_u64)))
+            .nonce
+            .as_deref(),
+        Some("1290000000000000000"),
+        "integers (bots) become their decimal text"
+    );
+    assert_eq!(
+        decode(Some("n".repeat(25).into())).nonce.as_deref(),
+        Some("n".repeat(25).as_str()),
+        "25 characters is the limit"
+    );
+    for hostile in [
+        serde_json::json!("n".repeat(26)),
+        serde_json::json!(1.5),
+        serde_json::json!(true),
+        serde_json::json!([1, 2, {"a": "b"}]),
+        serde_json::json!({"nested": {"deep": [1]}}),
+    ] {
+        assert_eq!(decode(Some(hostile)).nonce, None);
+    }
+    // Serializing never invents one.
+    let plain = serde_json::to_value(decode(None)).unwrap();
+    assert!(plain.get("nonce").is_none());
+}
+
+#[test]
 fn partial_update_keeps_omitted_fields() {
     let mut msg: Message = serde_json::from_str(&fixture("message_create.json")).unwrap();
     let before = msg.clone();

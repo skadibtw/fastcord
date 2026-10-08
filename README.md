@@ -85,6 +85,21 @@ channel and 2,000 globally). Variable-height rows build widgets only around the
 viewport, with measured heights and message-ID scroll anchoring. Attachment
 metadata is shown; fetching and viewing attachment images is milestone 14.
 
+## Sending messages
+
+Where your account may send, a composer sits under the timeline: Enter sends,
+Shift+Enter starts a new line, and unsent drafts are kept per channel while you
+look elsewhere. Mentions of users and roles you type notify them; `@everyone`
+and `@here` notify only when you tick the box for that message.
+
+A message you sent shows as "Sending…" until Discord confirms it, then appears
+once in the timeline. fastcord never sends a message again by itself. If
+Discord refused it, it is marked "Not sent" with Retry, Edit, and Discard. If
+the connection failed while sending, Discord may or may not have it, so it is
+marked "Not confirmed": it resolves by itself if Discord reports it, and Retry
+send cannot post it twice within a few minutes, because it reuses the original
+nonce.
+
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).

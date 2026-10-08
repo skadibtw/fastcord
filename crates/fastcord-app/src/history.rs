@@ -13,9 +13,12 @@ use fastcord_discord::message_store::{
     MAX_MESSAGE_BYTES, MessageStore, PageMerge, PageToken, message_bytes,
 };
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot};
-use fastcord_discord::{RestClient, RestError};
+use fastcord_discord::{MentionPolicy, NonceGenerator, RestClient, RestError, SendError};
 use fastcord_model::{Message, Snowflake};
+use iced::futures::StreamExt;
+use iced::futures::stream::FuturesUnordered;
 
+use crate::outbox::{Finished, OpId, Outbox, Slots};
 use crate::timeline::{Row, Snapshot};
 use crate::variable_list::{Item, Measurement, VariableList, Viewport};
 
@@ -29,6 +32,13 @@ const MAX_MEASUREMENTS: usize = 128;
 const OVERSIZE: &str = "A message is too large to display and was left out.";
 
 type PageFuture = Pin<Box<dyn Future<Output = Result<Vec<Message>, RestError>> + Send>>;
+type SendFuture = Pin<Box<dyn Future<Output = (OpId, Result<Box<Message>, SendError>)> + Send>>;
+
+/// A finished request of the worker: a history page or a message send.
+pub enum Completed {
+    Page(Result<Vec<Message>, RestError>),
+    Send(OpId, Result<Box<Message>, SendError>),
+}
 
 /// An explicit user action from the timeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,9 +89,24 @@ pub struct History {
     /// A page just landed: the list may still be short of the viewport.
     check_paging: bool,
     dirty: bool,
+    /// The account's own ID (from READY): only its messages can be ours.
+    user: Option<Snowflake>,
+    /// The open channel when the user may send to it.
+    sendable: Option<Snowflake>,
+    outbox: Outbox,
+    nonces: NonceGenerator,
+    sends: FuturesUnordered<SendFuture>,
 }
 
 impl History {
+    /// A history whose outbox frees the UI's reserved `slots`.
+    pub fn new(slots: Slots) -> Self {
+        Self {
+            outbox: Outbox::new(slots),
+            ..Self::default()
+        }
+    }
+
     pub fn dirty(&self) -> bool {
         self.dirty
     }
@@ -105,10 +130,26 @@ impl History {
     }
 
     /// Applies an ordered Gateway event before the metadata store sees it.
+    /// A `MESSAGE_CREATE` of the user's own message that carries an unconfirmed
+    /// send's nonce confirms that send, whether or not the REST answer came
+    /// first; the store ignores the second copy of a message it already holds.
     pub fn apply(&mut self, event: &Dispatch) {
-        if matches!(event, Dispatch::Ready(_)) {
-            self.reset();
-            return;
+        match event {
+            Dispatch::Ready(ready) => {
+                self.user = Some(ready.user.id);
+                self.reset();
+                return;
+            }
+            Dispatch::MessageCreate(message) => {
+                let ours = self.user == Some(message.author.id);
+                if ours
+                    && let Some(nonce) = message.nonce.as_deref()
+                    && self.outbox.confirm(message.channel_id, nonce)
+                {
+                    self.dirty = true;
+                }
+            }
+            _ => {}
         }
         let change = self.store.apply_dispatch(event);
         if change.changed {
@@ -117,6 +158,106 @@ impl History {
         if change.rejected > 0 {
             self.error = Some(OVERSIZE);
             self.dirty = true;
+        }
+    }
+
+    /// Records a message to send and starts posting it. `channel` must be the
+    /// open channel and sendable, or the text is kept as a failed operation.
+    /// Returns the operation's identity.
+    pub fn send(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        content: &str,
+        everyone: bool,
+    ) -> OpId {
+        let allowed = self.sendable == Some(channel);
+        let nonce = self.nonces.next_now();
+        let mentions = MentionPolicy {
+            everyone,
+            ..MentionPolicy::default()
+        };
+        let id = self
+            .outbox
+            .enqueue(channel, content, mentions, nonce, allowed);
+        // Sending from the bottom follows the new message, as the official
+        // client does; away from the live edge nothing moves.
+        let live = self
+            .store
+            .window(channel)
+            .is_some_and(|window| window.newer.is_none());
+        if allowed && live && self.channel == Some(channel) {
+            self.list.jump_latest();
+        }
+        self.start_sends(rest);
+        self.dirty = true;
+        id
+    }
+
+    /// The user's explicit retry of a failed or unconfirmed send.
+    pub fn retry_send(&mut self, rest: &RestClient, id: OpId) {
+        let allowed = self
+            .outbox
+            .channel_of(id)
+            .is_some_and(|channel| self.sendable == Some(channel));
+        if allowed && self.outbox.retry(id) {
+            self.start_sends(rest);
+        }
+        self.dirty = true;
+    }
+
+    /// The user's explicit discard of a failed or unconfirmed send.
+    pub fn discard_send(&mut self, id: OpId) {
+        if self.outbox.discard(id) {
+            self.dirty = true;
+        }
+    }
+
+    /// Posts what is ready: one request per channel at a time, each exactly once.
+    fn start_sends(&mut self, rest: &RestClient) {
+        for (id, channel, message) in self.outbox.take_ready() {
+            let rest = rest.clone();
+            self.sends.push(Box::pin(async move {
+                (
+                    id,
+                    rest.create_message(channel, &message).await.map(Box::new),
+                )
+            }));
+        }
+    }
+
+    /// Applies a send's answer. Returns whether Discord rejected the login.
+    /// Discord's answer is confirmation: the created message goes into the
+    /// store through the same path as the Gateway's copy, which makes whichever
+    /// arrives second a no-op. An answer for an operation the Gateway already
+    /// confirmed is dropped, so a message deleted in between is not resurrected.
+    fn finish_send(
+        &mut self,
+        rest: &RestClient,
+        id: OpId,
+        result: Result<Box<Message>, SendError>,
+    ) -> bool {
+        self.dirty = true;
+        let rejected = match result {
+            Ok(message) => {
+                if self.outbox.finish(id, Ok(())) == Finished::Confirmed {
+                    self.apply_created(message);
+                }
+                false
+            }
+            Err(error) => {
+                self.outbox.finish(id, Err(error));
+                error.cause() == RestError::AuthenticationRequired
+            }
+        };
+        self.start_sends(rest);
+        rejected
+    }
+
+    fn apply_created(&mut self, message: Box<Message>) {
+        let change = self.store.apply_dispatch(&Dispatch::MessageCreate(message));
+        if change.rejected > 0 {
+            self.error = Some(OVERSIZE);
         }
     }
 
@@ -188,6 +329,13 @@ impl History {
                     selection.kind,
                     ChannelKind::Text | ChannelKind::Announcement
                 ) && selection.permissions.read_history
+            })
+            .map(|selection| selection.channel_id);
+        self.sendable = navigation
+            .selection
+            .as_ref()
+            .filter(|selection| {
+                Some(selection.channel_id) == selected && selection.permissions.send_messages
             })
             .map(|selection| selection.channel_id);
         if selected != self.channel {
@@ -278,11 +426,31 @@ impl History {
         }
     }
 
-    /// Resolves when the in-flight page does; never resolves with none.
-    pub async fn next_page(&mut self) -> Result<Vec<Message>, RestError> {
-        match &mut self.pending {
-            Some((_, future)) => future.await,
-            None => std::future::pending().await,
+    /// Resolves when an in-flight page or send does; never resolves with none.
+    pub async fn next_completed(&mut self) -> Completed {
+        let page = async {
+            match &mut self.pending {
+                Some((_, future)) => future.await,
+                None => std::future::pending().await,
+            }
+        };
+        let send = async {
+            match self.sends.next().await {
+                Some((id, result)) => (id, result),
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            page = page => Completed::Page(page),
+            (id, result) = send => Completed::Send(id, result),
+        }
+    }
+
+    /// Applies whatever finished. Returns whether Discord rejected the login.
+    pub fn complete(&mut self, rest: &RestClient, completed: Completed) -> bool {
+        match completed {
+            Completed::Page(result) => self.finish(result),
+            Completed::Send(id, result) => self.finish_send(rest, id, result),
         }
     }
 
@@ -398,19 +566,22 @@ impl History {
             has_older: bounds.is_some_and(|window| window.older.is_some()),
             has_newer: bounds.is_some_and(|window| window.newer.is_some()),
             error: self.error,
+            outbox: self.outbox.items(),
+            can_send: self.sendable == Some(channel),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use fastcord_discord::UserToken;
     use fastcord_discord::gateway::{MessageDelete, MessageDeleteBulk};
     use fastcord_discord::message_store::{MAX_MESSAGES_PER_CHANNEL, MESSAGE_BUDGET};
     use fastcord_discord::state::navigation::{ChannelSelection, PermissionSummary};
+    use fastcord_discord::{NetworkFailure, RetryableFailure, StatusCode, UserToken};
     use fastcord_model::{MessageUpdate, User};
 
     use super::*;
+    use crate::outbox::OutboxState;
     use crate::variable_list::{Anchor, ScrollTarget};
 
     const CHANNEL: Snowflake = Snowflake(777);
@@ -442,6 +613,7 @@ mod tests {
             attachments: Vec::new(),
             reactions: Vec::new(),
             message_reference: None,
+            nonce: None,
         }
     }
 
@@ -760,5 +932,194 @@ mod tests {
             request.measure(CHANNEL, measure(id, 3, 10.0));
         }
         assert!(request.measurements.len() <= MAX_MEASUREMENTS);
+    }
+
+    const SELF: Snowflake = Snowflake(42);
+
+    /// The account's own message `n`, as Discord echoes it.
+    fn own(n: u64, content: &str, nonce: Option<String>) -> Box<Message> {
+        let mut message = message_with(n, content.to_owned());
+        message.author.id = SELF;
+        message.nonce = nonce;
+        Box::new(message)
+    }
+
+    /// An open, sendable channel at its live edge, as the account `SELF`.
+    fn sending_history() -> History {
+        let mut history = History::new(Slots::default());
+        history.user = Some(SELF);
+        open_latest(&mut history);
+        history
+    }
+
+    fn wire_nonce(history: &History, id: OpId) -> String {
+        history.outbox.nonce_of(id).unwrap().to_string()
+    }
+
+    fn copies(history: &History, id: u64) -> usize {
+        history
+            .store
+            .ids(CHANNEL)
+            .filter(|held| *held == Snowflake(id))
+            .count()
+    }
+
+    /// Drops the request futures as if their posts had been made; tests never
+    /// poll them, so nothing reaches the network.
+    fn take_posts(history: &mut History) -> usize {
+        std::mem::take(&mut history.sends).len()
+    }
+
+    #[test]
+    fn either_arrival_order_of_rest_and_gateway_shows_the_message_once() {
+        let rest = rest();
+        let mut history = sending_history();
+        let retained = history.store.ids(CHANNEL).count();
+
+        // REST answer first, then the Gateway's copy.
+        let first = history.send(&rest, CHANNEL, "first", false);
+        assert_eq!(take_posts(&mut history), 1);
+        assert_eq!(history.snapshot().outbox.len(), 1, "shown as sending");
+        let nonce = wire_nonce(&history, first);
+        let created = own(NEWEST + 1, "first", Some(nonce));
+        assert!(!history.complete(&rest, Completed::Send(first, Ok(created.clone()))));
+        assert!(history.snapshot().outbox.is_empty());
+        assert_eq!(copies(&history, NEWEST + 1), 1);
+        history.apply(&Dispatch::MessageCreate(created));
+        assert_eq!(
+            copies(&history, NEWEST + 1),
+            1,
+            "the Gateway copy is not a second row"
+        );
+
+        // Gateway copy first, then the REST answer.
+        let second = history.send(&rest, CHANNEL, "second", false);
+        assert_eq!(take_posts(&mut history), 1);
+        let nonce = wire_nonce(&history, second);
+        let created = own(NEWEST + 2, "second", Some(nonce));
+        history.apply(&Dispatch::MessageCreate(created.clone()));
+        assert!(
+            history.snapshot().outbox.is_empty(),
+            "confirmed by the Gateway"
+        );
+        assert!(!history.complete(&rest, Completed::Send(second, Ok(created))));
+        assert_eq!(copies(&history, NEWEST + 2), 1);
+        assert_eq!(history.store.ids(CHANNEL).count(), retained + 2);
+        assert_eq!(take_posts(&mut history), 0, "nothing was posted again");
+    }
+
+    #[test]
+    fn an_ambiguous_failure_waits_for_the_user_and_resolves_from_the_gateway() {
+        let rest = rest();
+        let mut history = sending_history();
+        let id = history.send(&rest, CHANNEL, "maybe", false);
+        assert_eq!(take_posts(&mut history), 1);
+        let timeout = SendError::Ambiguous(RestError::Retryable(RetryableFailure::Network(
+            NetworkFailure::Timeout,
+        )));
+        assert!(!history.complete(&rest, Completed::Send(id, Err(timeout))));
+        let shown = history.snapshot().outbox;
+        assert!(matches!(shown[0].state, OutboxState::Uncertain(_)));
+
+        // Nothing the worker does by itself posts it again.
+        history.refresh(&rest, &navigation(true), &Request::default());
+        history.apply(&Dispatch::MessageCreate(Box::new(message(NEWEST + 1))));
+        let other = history.send(&rest, CHANNEL, "unrelated", false);
+        let other_nonce = wire_nonce(&history, other);
+        history.apply(&Dispatch::MessageCreate(own(
+            NEWEST + 2,
+            "unrelated",
+            Some(other_nonce),
+        )));
+        assert_eq!(
+            take_posts(&mut history),
+            1,
+            "only the new message was posted"
+        );
+        assert!(matches!(
+            history.snapshot().outbox[0].state,
+            OutboxState::Uncertain(_)
+        ));
+
+        // Someone else's message with the same nonce text is not ours.
+        let nonce = wire_nonce(&history, id);
+        let mut foreign = own(NEWEST + 3, "maybe", Some(nonce.clone()));
+        foreign.author.id = Snowflake(7);
+        history.apply(&Dispatch::MessageCreate(foreign));
+        assert_eq!(history.snapshot().outbox.len(), 1);
+
+        // Discord did create it: the Gateway copy resolves it without a post.
+        history.apply(&Dispatch::MessageCreate(own(
+            NEWEST + 4,
+            "maybe",
+            Some(nonce),
+        )));
+        assert!(history.snapshot().outbox.is_empty());
+        assert_eq!(copies(&history, NEWEST + 4), 1);
+        assert_eq!(take_posts(&mut history), 0);
+    }
+
+    #[test]
+    fn an_explicit_retry_posts_once_more_with_the_same_nonce_while_permitted() {
+        let rest = rest();
+        let mut history = sending_history();
+        let id = history.send(&rest, CHANNEL, "again", true);
+        take_posts(&mut history);
+        let nonce = wire_nonce(&history, id);
+        let refused = SendError::NotSent(RestError::Http(StatusCode::BAD_REQUEST));
+        history.complete(&rest, Completed::Send(id, Err(refused)));
+        assert!(matches!(
+            history.snapshot().outbox[0].state,
+            OutboxState::Failed(_)
+        ));
+
+        // Without send permission the retry does nothing.
+        let mut read_only = navigation(true);
+        read_only
+            .selection
+            .as_mut()
+            .unwrap()
+            .permissions
+            .send_messages = false;
+        history.refresh(&rest, &read_only, &Request::default());
+        assert!(!history.snapshot().can_send);
+        history.retry_send(&rest, id);
+        assert_eq!(take_posts(&mut history), 0);
+
+        history.refresh(&rest, &navigation(true), &Request::default());
+        history.retry_send(&rest, id);
+        assert_eq!(take_posts(&mut history), 1);
+        assert_eq!(
+            wire_nonce(&history, id),
+            nonce,
+            "Discord dedupes by this nonce"
+        );
+        // A second retry while it is in flight is ignored.
+        history.retry_send(&rest, id);
+        assert_eq!(take_posts(&mut history), 0);
+        // The answer to the retry confirms it.
+        let created = own(NEWEST + 1, "again", Some(nonce));
+        history.complete(&rest, Completed::Send(id, Ok(created)));
+        assert!(history.snapshot().outbox.is_empty());
+        assert_eq!(copies(&history, NEWEST + 1), 1);
+    }
+
+    #[test]
+    fn sends_to_a_channel_that_cannot_be_sent_to_are_kept_but_never_posted() {
+        let rest = rest();
+        let mut history = sending_history();
+        let id = history.send(&rest, Snowflake(999), "elsewhere", false);
+        assert_eq!(take_posts(&mut history), 0);
+        assert!(history.outbox.nonce_of(id).is_some(), "the text is kept");
+        // A login rejected while sending is reported to the worker.
+        let id = history.send(&rest, CHANNEL, "x", false);
+        take_posts(&mut history);
+        assert!(history.complete(
+            &rest,
+            Completed::Send(
+                id,
+                Err(SendError::NotSent(RestError::AuthenticationRequired))
+            )
+        ));
     }
 }

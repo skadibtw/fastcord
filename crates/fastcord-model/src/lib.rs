@@ -18,6 +18,6 @@ pub use permissions::{
     GuildScope, MemberScope, OverwriteKind, PermissionOverwrite, Permissions, channel_permissions,
     guild_permissions,
 };
-pub use snowflake::{ParseSnowflakeError, Snowflake};
+pub use snowflake::{DISCORD_EPOCH_MS, ParseSnowflakeError, Snowflake};
 pub use user::User;
 pub use voice::VoiceState;

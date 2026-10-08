@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::wire::double_option;
+use crate::wire::{double_option, lenient_nonce};
 use crate::{Snowflake, User};
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -83,6 +83,14 @@ pub struct Message {
     pub reactions: Vec<Reaction>,
     #[serde(default)]
     pub message_reference: Option<MessageReference>,
+    /// The client-chosen nonce echoed by Discord (up to 25 characters), when
+    /// there is one. Only used to recognize a message this client sent.
+    #[serde(
+        default,
+        deserialize_with = "lenient_nonce",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub nonce: Option<String>,
 }
 
 /// A MESSAGE_UPDATE payload. Discord may omit any field except the IDs;

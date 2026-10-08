@@ -1,0 +1,33 @@
+{
+  "id": "1290000000000000099",
+  "type": 0,
+  "content": "hello from fastcord \u00e9 <@2>",
+  "channel_id": "500",
+  "author": {
+    "id": "2",
+    "username": "alt_fixture",
+    "avatar": null,
+    "discriminator": "0",
+    "public_flags": 0,
+    "flags": 0,
+    "banner": null,
+    "accent_color": null,
+    "global_name": "Fixture Author",
+    "avatar_decoration_data": null,
+    "banner_color": null,
+    "clan": null,
+    "primary_guild": null
+  },
+  "attachments": [],
+  "embeds": [],
+  "mentions": [{"id": "2", "username": "alt_fixture", "avatar": null, "discriminator": "0", "global_name": "Fixture Author"}],
+  "mention_roles": [],
+  "pinned": false,
+  "mention_everyone": false,
+  "tts": false,
+  "timestamp": "2026-10-08T09:00:00.000000+00:00",
+  "edited_timestamp": null,
+  "flags": 0,
+  "components": [],
+  "nonce": "1290000000000000001"
+}

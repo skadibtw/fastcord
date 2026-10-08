@@ -1,0 +1,8 @@
+{
+  "content": "hello from fastcord \u00e9 <@2>",
+  "nonce": "1290000000000000001",
+  "enforce_nonce": true,
+  "tts": false,
+  "flags": 0,
+  "allowed_mentions": {"parse": ["users", "roles"]}
+}

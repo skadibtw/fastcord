@@ -124,3 +124,37 @@ Only for an explicit reason, for the channel the reducer validated as selected, 
 
 ### Retention
 The store holds one contiguous run per channel with a coverage ID range. Over 500 messages the end farthest from the reader's anchor goes (the live end is kept while the reader is at the bottom). Over 2,000 messages or 16 MiB the least recently used channel sheds first. Sizes are capacity-based and include the Arc header. A body larger than 512 KiB is rejected and reported, never truncated. UI snapshots hold at most 512 KiB of bodies (window spacers are recomputed when trimmed), and the layout index holds only numbers: at most 500 rows, two width buckets each.
+
+## Sending messages (milestone 10)
+
+Implemented in `fastcord-discord::send` (the request and failure classification), `fastcord-app::outbox` (operations and reconciliation), and `fastcord-app::composer` (the editor). Evidence: field semantics come from Discord's public "Create Message" documentation (`nonce` is an integer or a string of up to 25 characters; with `enforce_nonce` Discord checks the nonce for uniqueness among the author's messages of the past few minutes and returns the existing message instead of creating another) and community user-client documentation; `fixtures/rest/message-create-request.json` and `fixtures/rest/message-create-response.json` are sanitized, fabricated-ID payloads in those shapes. No live capture exists yet (see `docs/TESTING.md`).
+
+### Request
+`POST /channels/{channel}/messages`, `Priority::UserWrite`, through the shared scheduler (major parameter = channel), with exactly this body:
+
+```json
+{"content": "…", "nonce": "1290000000000000001", "enforce_nonce": true, "tts": false, "flags": 0,
+ "allowed_mentions": {"parse": ["users", "roles"]}}
+```
+
+- `content`: the draft with surrounding whitespace trimmed, interior text as written. Empty text or more than 4,000 characters is refused locally; whether 2,000 (no Nitro) applies is left to Discord, whose 400 is shown as a failed send.
+- `nonce`: a snowflake-shaped `u64` sent as a decimal string (at most 19 characters): milliseconds since the Discord epoch in the high 42 bits, 22 bits of operating-system entropy below, strictly increasing within the process. It is chosen once per operation and reused by every explicit retry.
+- `allowed_mentions` is always sent, never left to Discord's default: `users` and `roles` parse, `everyone` (which covers `@here`) only when the user ticked "Allow @everyone and @here to notify" for this message. The choice resets after every send and on every channel switch. Replies add `replied_user` in milestone 12.
+- No attachments, embeds, stickers, components, or TTS.
+
+### Outcomes
+The transport never re-posts. A `429` proves nothing was created, so the scheduler waits as told and posts again. Every other outcome is classified once:
+
+| Outcome | Meaning | Shown as |
+|---|---|---|
+| 2xx with a decodable message of the channel | created | message in the timeline |
+| connect failure, local validation, stopped account, 4xx (400, 401, 403, 404, 413, …) | definitely not created | "Not sent" with Retry, Edit, Discard |
+| timeout after connecting, broken or unreadable response, oversized or undecodable 2xx body, 5xx | may have been created | "Not confirmed" with Retry send, Discard |
+
+A 401 also stops the account and returns to login, as everywhere else.
+
+### Reconciliation
+An operation is confirmed by whichever comes first: its REST answer, or a Gateway `MESSAGE_CREATE` in the same channel whose author is the READY user and whose `nonce` is the operation's decimal text. The second arrival is a no-op: a REST answer for an operation the Gateway already confirmed is dropped, and the message store ignores an ID it already holds, so the message is shown once in either order. Messages by other authors carrying the same nonce text are never taken as ours. Nonces are decoded leniently (a string of at most 25 characters or an integer; anything else counts as no nonce) and never make a message undecodable. An unconfirmed operation stays until the Gateway confirms it or the user retries or discards it; a retry within Discord's nonce window returns the message Discord already has.
+
+### Ordering and bounds
+One `POST` per channel is in flight; later messages of that channel wait until the earlier one is answered, so they arrive in the order written. Sends are checked against `SEND_MESSAGES` of the reducer-validated open channel when queued and when retried; the server stays authoritative. At most 16 operations exist across channels: the UI reserves a slot atomically before it queues a send (a full outbox refuses and keeps the draft), and the slot is freed when the operation leaves. The command queue holds 32 entries, the editor at most 8,000 characters, and drafts are remembered for the 16 most recent channels. Message text never appears in `Debug` output or logs.

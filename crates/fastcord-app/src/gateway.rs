@@ -16,9 +16,11 @@ use fastcord_discord::gateway::{
 use fastcord_discord::state::Store;
 use fastcord_discord::state::navigation::{Navigation, NavigationSnapshot};
 use fastcord_model::Snowflake;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
+use crate::composer::Composer;
 use crate::history::{History, Intent};
+use crate::outbox::{OpId, Slots};
 use crate::timeline;
 use crate::variable_list::{Measurement, Viewport};
 use crate::virtual_list::Window;
@@ -211,6 +213,41 @@ pub struct Consumed {
     pub status: Option<GatewayStatus>,
 }
 
+/// An explicit, ordered user action on the outbox. Unlike the coalesced
+/// [`Request`], none of these may be dropped or merged, so they travel through
+/// a small bounded queue of their own.
+pub enum Command {
+    Send {
+        channel: Snowflake,
+        content: String,
+        everyone: bool,
+    },
+    Retry(OpId),
+    Discard(OpId),
+}
+
+// Message text never reaches a log.
+impl fmt::Debug for Command {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Send {
+                channel, everyone, ..
+            } => f
+                .debug_struct("Send")
+                .field("channel", channel)
+                .field("everyone", everyone)
+                .finish_non_exhaustive(),
+            Self::Retry(id) => f.debug_tuple("Retry").field(id).finish(),
+            Self::Discard(id) => f.debug_tuple("Discard").field(id).finish(),
+        }
+    }
+}
+
+/// Commands waiting for the worker; a full queue refuses the action instead of
+/// buffering without bound (the composer then keeps the user's text). Sends
+/// are further limited by the outbox [`Slots`].
+const COMMAND_QUEUE: usize = 32;
+
 /// One coalesced request and one bounded presentation window per account.
 /// Notifications carry no rows; an unconsumed notification prevents more from
 /// entering iced's queue while the slot continues replacing stale snapshots.
@@ -218,15 +255,59 @@ pub struct Consumed {
 pub struct NavigationBridge {
     requests: watch::Sender<Request>,
     latest: Arc<Mutex<Latest>>,
+    commands: mpsc::Sender<Command>,
+    command_receiver: Arc<Mutex<Option<mpsc::Receiver<Command>>>>,
+    outbox_slots: Slots,
 }
 
 impl NavigationBridge {
     pub fn new() -> Self {
         let (requests, _) = watch::channel(Request::default());
+        let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
         Self {
             requests,
             latest: Arc::default(),
+            commands,
+            command_receiver: Arc::new(Mutex::new(Some(receiver))),
+            outbox_slots: Slots::default(),
         }
+    }
+
+    /// The worker's end of the command queue; there is only one.
+    pub(crate) fn take_commands(&self) -> Option<mpsc::Receiver<Command>> {
+        self.command_receiver
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    /// Queues a message for sending. Returns whether it was accepted; on
+    /// `false` (the outbox is full or the worker is gone) nothing was queued
+    /// and the caller must keep the text.
+    pub fn send_message(&self, channel: Snowflake, content: String, everyone: bool) -> bool {
+        if !self.outbox_slots.reserve() {
+            return false;
+        }
+        let queued = self
+            .commands
+            .try_send(Command::Send {
+                channel,
+                content,
+                everyone,
+            })
+            .is_ok();
+        if !queued {
+            self.outbox_slots.release();
+        }
+        queued
+    }
+
+    pub fn retry_send(&self, id: OpId) -> bool {
+        self.commands.try_send(Command::Retry(id)).is_ok()
+    }
+
+    pub fn discard_send(&self, id: OpId) -> bool {
+        self.commands.try_send(Command::Discard(id)).is_ok()
     }
 
     fn publish(
@@ -342,10 +423,27 @@ struct Worker {
     tracker: Tracker,
     bridge: NavigationBridge,
     requests: watch::Receiver<Request>,
+    commands: mpsc::Receiver<Command>,
     revision: u64,
 }
 
 impl Worker {
+    /// Applies one explicit outbox action.
+    fn command(&mut self, command: Command) {
+        let history = &mut self.tracker.history;
+        match command {
+            Command::Send {
+                channel,
+                content,
+                everyone,
+            } => {
+                history.send(&self.rest, channel, &content, everyone);
+            }
+            Command::Retry(id) => history.retry_send(&self.rest, id),
+            Command::Discard(id) => history.discard_send(id),
+        }
+    }
+
     fn refresh(
         &mut self,
         gateway: &Gateway,
@@ -403,13 +501,19 @@ pub fn status_stream(
 ) -> impl Stream<Item = ()> {
     let requests = bridge.requests.subscribe();
     let rest_client = rest.clone();
+    // There is one worker per bridge; a second one would simply get no commands.
+    let commands = bridge.take_commands().unwrap_or_else(|| mpsc::channel(1).1);
     let worker = Worker {
         start: Some((rest, token, locale)),
         rest: rest_client,
         gateway: None,
-        tracker: Tracker::default(),
+        tracker: Tracker {
+            history: History::new(bridge.outbox_slots.clone()),
+            ..Tracker::default()
+        },
         bridge,
         requests,
+        commands,
         revision: 0,
     };
     stream::unfold(worker, |mut worker| async move {
@@ -427,9 +531,13 @@ pub fn status_stream(
                     changed.ok()?;
                     (None, true)
                 }
-                page = worker.tracker.history.next_page() => {
-                    let rejected = worker.tracker.history.finish(page);
+                completed = worker.tracker.history.next_completed() => {
+                    let rejected = worker.tracker.history.complete(&worker.rest, completed);
                     (rejected.then_some(GatewayStatus::AuthenticationRequired), false)
+                }
+                Some(command) = worker.commands.recv() => {
+                    worker.command(command);
+                    (None, false)
                 }
             };
             if !requested
@@ -465,6 +573,8 @@ pub struct GatewayPanel {
     pub navigation: Arc<NavigationSnapshot>,
     pub timeline: Arc<timeline::Snapshot>,
     pub controls: NavigationBridge,
+    /// The draft and composer state; local to the UI until the user sends.
+    pub composer: Composer,
     _worker: Handle,
 }
 
@@ -485,6 +595,7 @@ impl GatewayPanel {
             navigation: Arc::default(),
             timeline: Arc::default(),
             controls,
+            composer: Composer::default(),
             _worker: worker.abort_on_drop(),
         }
     }
@@ -595,6 +706,42 @@ mod bridge_tests {
         let again = bridge.take_request();
         assert!(again.timeline.measurements.is_empty());
         assert!(again.timeline.viewport.is_none());
+    }
+
+    #[test]
+    fn sends_are_ordered_unmerged_and_bounded_by_outbox_slots() {
+        use crate::outbox::MAX_OUTBOX;
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        assert!(bridge.take_commands().is_none(), "one worker end");
+        for n in 0..MAX_OUTBOX {
+            assert!(bridge.send_message(Snowflake(1), format!("message {n}"), false));
+        }
+        // However stale the UI's view, a full outbox refuses and keeps nothing.
+        assert!(!bridge.send_message(Snowflake(1), "one too many".to_owned(), true));
+        for n in 0..MAX_OUTBOX {
+            match commands.try_recv().unwrap() {
+                Command::Send { content, .. } => assert_eq!(content, format!("message {n}")),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(commands.try_recv().is_err());
+        // The worker frees slots as operations leave the outbox.
+        bridge.outbox_slots.release();
+        assert!(bridge.send_message(Snowflake(1), "fits again".to_owned(), false));
+        // Retry and discard are never merged either; Debug never shows text.
+        assert!(bridge.retry_send(OpId(3)));
+        assert!(bridge.discard_send(OpId(3)));
+        let shown = format!("{:?}", commands.try_recv().unwrap());
+        assert!(!shown.contains("fits") && shown.contains("Send"));
+        assert!(matches!(commands.try_recv(), Ok(Command::Retry(OpId(3)))));
+        assert!(matches!(commands.try_recv(), Ok(Command::Discard(OpId(3)))));
+        // A gone worker refuses the send and returns its slot.
+        drop(commands);
+        bridge.outbox_slots.release();
+        let used = bridge.outbox_slots.used();
+        assert!(!bridge.send_message(Snowflake(1), "lost?".to_owned(), false));
+        assert_eq!(bridge.outbox_slots.used(), used);
     }
 }
 

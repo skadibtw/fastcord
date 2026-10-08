@@ -93,6 +93,7 @@ fn message_heap(message: &Message) -> usize {
         + message.content.capacity()
         + message.timestamp.capacity()
         + text(&message.edited_timestamp)
+        + text(&message.nonce)
         + message.attachments.capacity() * size_of::<Attachment>()
         + message
             .attachments
@@ -145,6 +146,7 @@ fn compact(message: &mut Message) {
     message.content.shrink_to_fit();
     message.timestamp.shrink_to_fit();
     shrink_text(&mut message.edited_timestamp);
+    shrink_text(&mut message.nonce);
     message.attachments.shrink_to_fit();
     for attachment in &mut message.attachments {
         attachment.filename.shrink_to_fit();

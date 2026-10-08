@@ -4,12 +4,14 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, alignment};
 
 use crate::Message;
+use crate::composer::{self, Composer};
 use crate::timeline;
 use crate::virtual_list::{self, ROW_HEIGHT};
 
 pub fn view<'a>(
     snapshot: &'a NavigationSnapshot,
     history: &'a timeline::Snapshot,
+    composer: &'a Composer,
 ) -> Element<'a, Message> {
     let guilds = snapshot.guilds.rows.iter().map(|guild| {
         let label = format!(
@@ -73,11 +75,14 @@ pub fn view<'a>(
                     .size(13),
                 );
                 if permissions.read_history {
-                    detail = detail.push(if history.channel_id == Some(selection.channel_id) {
-                        timeline::view(history).map(Message::Timeline)
+                    if history.channel_id == Some(selection.channel_id) {
+                        // The timeline takes the free height; the composer sits below it.
+                        detail = detail
+                            .push(timeline::view(history).map(Message::Timeline))
+                            .push(composer::view(composer, history).map(Message::Composer));
                     } else {
-                        text("Loading messages…").size(14).into()
-                    });
+                        detail = detail.push(text("Loading messages…").size(14));
+                    }
                 }
             }
             ChannelKind::Voice => {

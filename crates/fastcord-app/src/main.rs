@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod composer;
 mod gateway;
 mod history;
 mod login;
 mod navigation;
+mod outbox;
 mod qr;
 mod render;
 mod timeline;
@@ -99,6 +101,7 @@ enum Message {
     GuildViewport(virtual_list::Window),
     ChannelViewport(virtual_list::Window),
     Timeline(timeline::Event),
+    Composer(composer::Event),
 }
 
 impl App {
@@ -253,6 +256,8 @@ impl App {
                     let consumed = gateway.controls.consume();
                     gateway.navigation = consumed.navigation;
                     gateway.timeline = consumed.timeline;
+                    // Drafts follow the open channel.
+                    gateway.composer.select(gateway.timeline.channel_id);
                     if let Some(status) = consumed.status {
                         return self.update(Message::Gateway(id, status));
                     }
@@ -300,6 +305,20 @@ impl App {
                         timeline::Event::Retry { channel_id } => {
                             controls.timeline_intent(history::Intent::Retry(channel_id));
                         }
+                    }
+                }
+            }
+            Message::Composer(event) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    let refocus = matches!(event, composer::Event::Send | composer::Event::Edit(_));
+                    composer::update(
+                        &mut gateway.composer,
+                        event,
+                        &gateway.timeline,
+                        &gateway.controls,
+                    );
+                    if refocus {
+                        return iced::widget::operation::focus(composer::EDITOR_ID);
                     }
                 }
             }
@@ -447,7 +466,7 @@ impl App {
                     ]
                     .spacing(16),
                     text(gateway.status.describe()),
-                    navigation::view(&gateway.navigation, &gateway.timeline),
+                    navigation::view(&gateway.navigation, &gateway.timeline, &gateway.composer),
                 ]
                 .spacing(16)
                 .height(Length::Fill),

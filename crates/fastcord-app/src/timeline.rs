@@ -23,6 +23,7 @@ use iced::font::{Font, Weight};
 use iced::widget::{button, column, container, row, stack, text};
 use iced::{Element, Length, Padding};
 
+use crate::outbox::OutboxItem;
 use crate::variable_list::{self, Item, Measurement, Report, ScrollRequest, Viewport, Window};
 
 /// Closer to the first retained message than this, the view offers to load older ones.
@@ -62,6 +63,11 @@ pub struct Snapshot {
     pub has_newer: bool,
     /// A fixed, secret-free description of why the last page failed.
     pub error: Option<&'static str>,
+    /// Unconfirmed sends of every channel, oldest first (at most
+    /// [`MAX_OUTBOX`](crate::outbox::MAX_OUTBOX)).
+    pub outbox: Vec<OutboxItem>,
+    /// The user may send to this channel (validated by the worker).
+    pub can_send: bool,
 }
 
 /// What the timeline asks of the worker. Each event names its channel.
