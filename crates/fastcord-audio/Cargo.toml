@@ -1,0 +1,20 @@
+[package]
+name = "fastcord-audio"
+description = "fastcord real-time audio engine: devices, conversion, rings, Opus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cpal.workspace = true
+opus2.workspace = true
+rubato.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+parking_lot.workspace = true
+
+[lints]
+workspace = true

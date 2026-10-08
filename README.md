@@ -8,7 +8,7 @@ Status: early development. See [docs/SPEC.md](docs/SPEC.md) for the design and m
 
 ## Build
 
-Requires Rust (pinned by `rust-toolchain.toml`) and, on Windows, Visual Studio Build Tools with the C++ workload.
+Requires Rust (pinned by `rust-toolchain.toml`), CMake (the audio engine builds the bundled libopus), on Windows Visual Studio Build Tools with the C++ workload, and on Linux the ALSA development headers (`libasound2-dev`).
 
 ```sh
 cargo run -p fastcord-app          # debug

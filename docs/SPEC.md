@@ -280,6 +280,7 @@ media session -> per-SSRC encoded jitter queue
 ```
 
 Use preallocated rings with approximately 40 ms normal buffering and a hard 100 ms cap. On an output underrun emit silence and count it; on capture overrun discard the oldest stale input rather than increasing latency indefinitely. Session teardown and device replacement happen on the owner thread.
+On a fatal device error, close only the failed direction and its endpoint; discard queued playback packets and terminate the capture channel while leaving the healthy direction running. Bound playback packet attempts per owner pass so malformed packets cannot stall teardown. Resampling uses a 256-tap Blackman-Harris sinc filter that preserves the 20 kHz passband between 44.1 and 48 kHz, and integer device output saturates at its representable limits.
 
 ### 7.2 Jitter, mixing, and controls
 

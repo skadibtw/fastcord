@@ -16,7 +16,7 @@ model, media, platform <- video   (capture, codecs, packetization)
 all    <-  app                (binary `fastcord`, iced UI, orchestration)
 ```
 
-- `fastcord-model`, `fastcord-discord`, `fastcord-platform`, and `fastcord-app` exist so far; create other crates in the milestone that first needs them, never as empty placeholders.
+- `fastcord-model`, `fastcord-discord`, `fastcord-platform`, `fastcord-audio`, and `fastcord-app` exist so far; create other crates in the milestone that first needs them, never as empty placeholders.
 - One reducer task owns mutable Discord state; UI receives deltas/read models, never clones of full state.
 - Networking, decoding, and audio never run on the UI thread. Audio callbacks: no locks, allocation, I/O, or inference.
 - Every queue/cache is **byte-bounded**.
@@ -29,6 +29,7 @@ all    <-  app                (binary `fastcord`, iced UI, orchestration)
 | `crates/fastcord-discord` | Authenticated REST transport, rate-limit scheduler, QR-login remote-auth client (`remote_auth`), main user Gateway lifecycle and opcode-37 subscriptions (`gateway`), single-writer bounded normalized account state (`state`), typed channel-history reads (`history`), byte-bounded message bodies with focus-based retention and in-flight page reconciliation (`message_store`), message creation with nonce, explicit mention policy, and not-sent/ambiguous failure classification (`send`), own-message ownership, content-only edits, deletion, and edit-answer ordering (`edit`) |
 | `crates/fastcord-platform` | Native credential storage; one target-selected keyring backend |
 | `crates/fastcord-app` | iced application; binary name `fastcord`; history coordinator with send and edit/delete reconciliation (`history`), unconfirmed-send outbox (`outbox`), unfinished edits/deletions of own messages (`changes`), message composer with edit mode (`composer`), variable-height virtual list (`variable_list`), and message timeline with own-message actions (`timeline`) |
+| `crates/fastcord-audio` | Audio engine: cpal device enumeration/selection by stable ID, owner thread per call, lock-free preallocated SPSC rings, format/rate conversion (rubato), Opus encode/decode with FEC/PLC (`opus2`, bundled libopus), callback allocation audit marker (`audit`) |
 | `docs/` | `SPEC.md` (design + milestones), `PROTOCOL.md` (what is actually sent/expected on the wire), `TESTING.md`, `RELEASE.md` |
 | `scripts/package.sh` | Per-target release packaging used by CI |
 | `packaging/macos/Info.plist` | `.app` bundle template (`@VERSION@` substituted) |
@@ -43,7 +44,7 @@ cargo run -p fastcord-app
 cargo build --release -p fastcord-app
 gh workflow run release.yml        # release dry run, no publish
 ```
-On the maintainer's Windows box, agent shells may not have `cargo` on `PATH`; call `C:/Users/user/.cargo/bin/cargo.exe` directly.
+On the maintainer's Windows box, agent shells may not have `cargo` on `PATH`; call `C:/Users/user/.cargo/bin/cargo.exe` directly. Building `fastcord-audio` compiles the bundled libopus with CMake; if `cmake` is not on `PATH`, set `CMAKE` to the Visual Studio Build Tools copy (`C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe`). Linux builds need `libasound2-dev` (ALSA headers for cpal).
 
 ## Code Conventions & Common Patterns
 - Edition 2024, resolver 3, toolchain pinned to 1.99.0 (`rust-toolchain.toml`). Workspace lints: `unsafe_code = "deny"`, clippy `all` warn; CI denies warnings.
@@ -62,7 +63,7 @@ On the maintainer's Windows box, agent shells may not have `cargo` on `PATH`; ca
 
 ## Runtime/Tooling Preferences
 - Rust via rustup; Windows needs VS Build Tools with the C++ workload (MSVC linker).
-- GUI: iced with wgpu (tiny-skia fallback). Planned: `reqwest`+rustls, `cpal`, `opus2` (bundled libopus), `nnnoiseless`, `davey` (DAVE). Video: OS-native codecs (Media Foundation / VideoToolbox / VA-API) + `dav1d`; **no FFmpeg** (`docs/adr/`).
+- GUI: iced with wgpu (tiny-skia fallback). Audio: `cpal`, `opus2` (bundled libopus, needs CMake), `rubato`. Planned: `nnnoiseless`, `davey` (DAVE). Video: OS-native codecs (Media Foundation / VideoToolbox / VA-API) + `dav1d`; **no FFmpeg** (`docs/adr/`).
 - GitHub Actions are pinned by commit SHA; keep it that way when adding steps.
 
 ## Workflow
