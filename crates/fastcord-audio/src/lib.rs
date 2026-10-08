@@ -16,6 +16,7 @@ pub mod codec;
 pub mod device;
 mod engine;
 mod error;
+mod jitter;
 mod pipeline;
 mod resample;
 mod ring;
@@ -29,5 +30,5 @@ pub use engine::{
     AudioEngine, DeviceFormat, EngineChannels, EngineConfig, EngineEvent, EngineStats,
 };
 pub use error::AudioError;
-pub use pipeline::CapturedFrame;
+pub use pipeline::{CapturedFrame, RemoteFrame};
 pub use resample::UnsupportedRate;

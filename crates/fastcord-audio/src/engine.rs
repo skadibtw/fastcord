@@ -13,14 +13,15 @@ use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use crate::callback::{InputCallback, OutputCallback, StreamCounters};
 use tokio::sync::mpsc;
 
-use crate::callback::{InputCallback, OutputCallback, StreamCounters};
 use crate::codec::{DEFAULT_BITRATE, EncodedPacket};
 use crate::device::{Backend, CpalBackend, DeviceChoice, DeviceErrorKind, Direction, StreamFormat};
 use crate::error::AudioError;
 use crate::pipeline::{
-    CapturePipeline, CapturedFrame, PipelineCounters, PlaybackPipeline, RING_LIMIT_MS, frames_for,
+    CapturePipeline, CapturedFrame, PipelineCounters, PlaybackPipeline, RING_LIMIT_MS, RemoteFrame,
+    frames_for,
 };
 use crate::ring::sample_ring;
 
@@ -30,8 +31,8 @@ use crate::ring::sample_ring;
 const TICK: Duration = Duration::from_millis(5);
 /// Encoded frames buffered toward the media session (320 ms, ≤ 24 KiB).
 const CAPTURE_QUEUE: usize = 16;
-/// Encoded packets buffered toward playback (320 ms, ≤ 24 KiB).
-const PLAYBACK_QUEUE: usize = 16;
+/// Local and remote encoded packets buffered toward playback.
+const PLAYBACK_QUEUE: usize = 64;
 const EVENT_QUEUE: usize = 8;
 
 /// What the engine should open.
@@ -89,6 +90,8 @@ pub struct EngineChannels {
     pub captured: Option<mpsc::Receiver<CapturedFrame>>,
     /// Opus packets to play (present when an output was opened).
     pub playback: Option<mpsc::Sender<EncodedPacket>>,
+    /// Decrypted, DAVE-authenticated packets tagged by their RTP SSRC.
+    pub remote_audio: Option<mpsc::Sender<RemoteFrame>>,
     pub events: mpsc::Receiver<EngineEvent>,
 }
 
@@ -194,6 +197,7 @@ impl AudioEngine {
         }
         let (captured_tx, captured_rx) = mpsc::channel(CAPTURE_QUEUE);
         let (playback_tx, playback_rx) = mpsc::channel(PLAYBACK_QUEUE);
+        let (remote_tx, remote_rx) = mpsc::channel(PLAYBACK_QUEUE);
         let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
         let (stop_tx, stop_rx) = std_mpsc::channel();
         let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Ready>(1);
@@ -208,6 +212,7 @@ impl AudioEngine {
                     stop: stop_rx,
                     captured: Some(captured_tx),
                     playback: Some(playback_rx),
+                    remote_audio: Some(remote_rx),
                     events: events_tx,
                 };
                 run_owner(make_backend(), config, &thread_shared, io, ready_tx);
@@ -235,6 +240,7 @@ impl AudioEngine {
         let channels = EngineChannels {
             captured: has_input.then_some(captured_rx),
             playback: has_output.then_some(playback_tx),
+            remote_audio: has_output.then_some(remote_tx),
             events: events_rx,
         };
         Ok((engine, channels))
@@ -309,6 +315,7 @@ struct OwnerIo {
     stop: std_mpsc::Receiver<()>,
     captured: Option<mpsc::Sender<CapturedFrame>>,
     playback: Option<mpsc::Receiver<EncodedPacket>>,
+    remote_audio: Option<mpsc::Receiver<RemoteFrame>>,
     events: mpsc::Sender<EngineEvent>,
 }
 
@@ -392,6 +399,7 @@ fn run_owner<B: Backend>(
         {
             // Dropping the receiver closes senders and discards queued packets.
             drop(io.playback.take());
+            drop(io.remote_audio.take());
             playback = None;
             let _ = io.events.try_send(EngineEvent::StreamFailed {
                 direction: Direction::Output,
@@ -407,6 +415,14 @@ fn run_owner<B: Backend>(
                         .fetch_add(1, Ordering::Relaxed);
                 }
             });
+        }
+        if let Some((_, pipeline)) = playback.as_mut()
+            && let Some(remote) = io.remote_audio.as_mut()
+        {
+            for _ in 0..PLAYBACK_QUEUE {
+                let Ok(packet) = remote.try_recv() else { break };
+                pipeline.push_remote(packet);
+            }
         }
         if let (Some((_, pipeline)), Some(playback_receiver)) =
             (playback.as_mut(), io.playback.as_mut())
@@ -425,9 +441,12 @@ fn run_owner<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::FRAME_SAMPLES;
+    use crate::codec::{FRAME_SAMPLES, VoiceEncoder};
     use crate::device::DeviceKey;
     use crate::resample::tests::tone_level;
+    use fastcord_media::TransportMode;
+    use fastcord_media::crypto::{TransportCipher, TransportKey};
+    use fastcord_media::rtp::RtpHeader;
     use parking_lot::Mutex;
     use std::sync::Weak;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -719,6 +738,91 @@ mod tests {
         // Local latency: capture to playback start well inside 80 ms plus the
         // fake devices' 10 ms periods and the 20 ms forwarding granularity.
         assert!(start < 48_000 / 4, "audio started after {start} samples");
+    }
+
+    #[test]
+    fn encrypted_multi_peer_rtp_reorders_recovers_loss_and_reaches_output() {
+        let mut fake = host(48_000, 48_000);
+        fake.manual_callbacks = true;
+        let backend = fake.clone();
+        let config = EngineConfig {
+            input: None,
+            output: Some(DeviceChoice::SystemDefault),
+            bitrate: DEFAULT_BITRATE,
+        };
+        let (engine, channels) = AudioEngine::start_with(config, move || backend).unwrap();
+        let remote = channels.remote_audio.unwrap();
+
+        let key = TransportKey::from_slice(&[7; 32]).unwrap();
+        let mut sender = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &key);
+        let receiver = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &key);
+        let mut speakers = Vec::new();
+        for ssrc in 1..=4 {
+            let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
+            let mut frames = Vec::new();
+            for sequence in 0..3 {
+                let pcm = std::array::from_fn(|sample| {
+                    0.4 * (std::f32::consts::TAU
+                        * 440.0
+                        * (sample + sequence * FRAME_SAMPLES) as f32
+                        / 48_000.0)
+                        .sin()
+                });
+                let mut packet = EncodedPacket::empty();
+                encoder.encode_mono(&pcm, &mut packet).unwrap();
+                frames.push(packet);
+            }
+            speakers.push((ssrc, frames));
+        }
+
+        let mut decrypted = Vec::new();
+        for (ssrc, frames) in &speakers {
+            // seq 2 arrives before seq 0; seq 1 is lost. The packet at seq 2
+            // carries in-band FEC for seq 1.
+            for sequence in [2_usize, 0] {
+                let header = RtpHeader::new(
+                    fastcord_media::rtp::OPUS_PAYLOAD_TYPE,
+                    sequence as u16,
+                    sequence as u32 * FRAME_SAMPLES as u32,
+                    *ssrc,
+                );
+                let mut clear = Vec::new();
+                header.write(&mut clear);
+                let mut encrypted = Vec::new();
+                sender
+                    .seal(&clear, frames[sequence].as_bytes(), &mut encrypted)
+                    .unwrap();
+                let parsed = RtpHeader::parse(&encrypted).unwrap();
+                let mut payload = Vec::new();
+                receiver
+                    .open(&encrypted, parsed.clear_len(), &mut payload)
+                    .unwrap();
+                decrypted.push(RemoteFrame {
+                    ssrc: *ssrc,
+                    sequence: sequence as u64,
+                    timestamp: header.timestamp,
+                    packet: EncodedPacket::from_slice(&payload).unwrap(),
+                });
+            }
+        }
+        for frame in decrypted {
+            remote.try_send(frame).unwrap();
+        }
+        let heap_before = crate::alloc_counter::callback_heap_ops();
+        let owner = &engine.shared.owner_service;
+        let mut generation = owner.generation();
+        for _ in 0..36 {
+            fake.driver.step(Direction::Output);
+            generation = owner.wait_after(generation);
+        }
+        assert_eq!(crate::alloc_counter::callback_heap_ops(), heap_before);
+        assert!(
+            fake.played.lock().iter().any(|sample| sample.abs() > 0.02),
+            "decrypted multi-peer audio reached the fake output device"
+        );
+        let probes = engine.callback_probes();
+        drop(engine);
+        assert_torn_down(&fake, probes);
     }
 
     #[test]

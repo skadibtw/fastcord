@@ -14,6 +14,7 @@ fastcord-model = { path = "crates/fastcord-model" }
 fastcord-discord = { path = "crates/fastcord-discord" }
 fastcord-platform = { path = "crates/fastcord-platform" }
 fastcord-media = { path = "crates/fastcord-media" }
+fastcord-audio = { path = "crates/fastcord-audio" }
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain"] }
 base64 = "0.22"

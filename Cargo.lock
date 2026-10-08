@@ -1420,7 +1420,9 @@ dependencies = [
 name = "fastcord-app"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "fastcord-audio",
  "fastcord-discord",
+ "fastcord-media",
  "fastcord-model",
  "fastcord-platform",
  "iced",
@@ -1435,6 +1437,7 @@ name = "fastcord-audio"
 version = "0.1.0-alpha.1"
 dependencies = [
  "cpal",
+ "fastcord-media",
  "opus2",
  "parking_lot 0.12.5",
  "rubato",

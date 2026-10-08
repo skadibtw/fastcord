@@ -6,6 +6,10 @@
 //! screen shows, and is dropped, with the connection and the state it owns,
 //! when the account screen is left (which closes the Gateway session cleanly).
 
+mod voice_audio;
+
+use voice_audio::VoiceAudioState;
+
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,7 +19,8 @@ use fastcord_discord::gateway::{
 };
 use fastcord_discord::state::Store;
 use fastcord_discord::state::navigation::{Navigation, NavigationSnapshot};
-use fastcord_model::Snowflake;
+use fastcord_media::{Correlation, JoinCorrelator};
+use fastcord_model::{Snowflake, VoiceStateRequest};
 use tokio::sync::{mpsc, watch};
 
 use crate::composer::Composer;
@@ -296,6 +301,8 @@ const COMMAND_QUEUE: usize = 32;
 #[derive(Clone)]
 pub struct NavigationBridge {
     requests: watch::Sender<Request>,
+    voice_requests: watch::Sender<Option<VoiceStateRequest>>,
+    voice_audio: watch::Sender<VoiceAudioState>,
     latest: Arc<Mutex<Latest>>,
     commands: mpsc::Sender<Command>,
     command_receiver: Arc<Mutex<Option<mpsc::Receiver<Command>>>>,
@@ -305,14 +312,38 @@ pub struct NavigationBridge {
 impl NavigationBridge {
     pub fn new() -> Self {
         let (requests, _) = watch::channel(Request::default());
+        let (voice_requests, _) = watch::channel(None);
+        let (voice_audio, _) = watch::channel(VoiceAudioState::Idle);
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
         Self {
             requests,
+            voice_requests,
+            voice_audio,
             latest: Arc::default(),
             commands,
             command_receiver: Arc::new(Mutex::new(Some(receiver))),
             outbox_slots: Slots::default(),
         }
+    }
+
+    /// The audio side of the current call, for the voice controls (milestone 21).
+    #[expect(
+        dead_code,
+        reason = "shown by the voice controls added in milestone 21"
+    )]
+    pub fn voice_audio_state(&self) -> VoiceAudioState {
+        *self.voice_audio.borrow()
+    }
+
+    /// Requests a voice join, move, or leave. This is the application path
+    /// used by explicit voice controls (milestone 21); no audio connection
+    /// starts beforehand.
+    #[expect(
+        dead_code,
+        reason = "called by the voice controls added in milestone 21"
+    )]
+    pub fn request_voice_state(&self, request: VoiceStateRequest) {
+        self.voice_requests.send_replace(Some(request));
     }
 
     /// The worker's end of the command queue; there is only one.
@@ -503,8 +534,12 @@ struct Worker {
     tracker: Tracker,
     bridge: NavigationBridge,
     requests: watch::Receiver<Request>,
+    voice_requests: watch::Receiver<Option<VoiceStateRequest>>,
     commands: mpsc::Receiver<Command>,
     revision: u64,
+    voice_correlator: Option<JoinCorrelator>,
+    voice_task: Option<tokio::task::JoinHandle<()>>,
+    voice_cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Worker {
@@ -536,6 +571,93 @@ impl Worker {
             Command::DismissChange { channel, message } => {
                 history.dismiss_change(channel, message);
             }
+        }
+    }
+
+    fn request_voice_state(&mut self, gateway: &Gateway) -> bool {
+        let Some(request) = *self.voice_requests.borrow_and_update() else {
+            return false;
+        };
+        if let Some(channel) = request.channel_id {
+            if let Some(correlator) = self.voice_correlator.as_mut() {
+                correlator.join(request.guild_id, channel);
+            }
+        } else {
+            if let Some(correlator) = self.voice_correlator.as_mut() {
+                correlator.leave();
+            }
+        }
+        gateway.voice_state().request(request);
+        true
+    }
+
+    fn voice_dispatch(&mut self, event: &GatewayEvent) -> Option<Correlation> {
+        let GatewayEvent::Dispatch { event, .. } = event else {
+            return None;
+        };
+        match event {
+            Dispatch::Ready(ready) => {
+                self.voice_correlator = Some(JoinCorrelator::new(ready.user.id));
+                if let Some(request) = *self.voice_requests.borrow()
+                    && let Some(channel) = request.channel_id
+                {
+                    self.voice_correlator
+                        .as_mut()
+                        .unwrap()
+                        .join(request.guild_id, channel);
+                }
+            }
+            Dispatch::VoiceStateUpdate(update) => {
+                if let Some(correlator) = self.voice_correlator.as_mut() {
+                    let correlation = correlator.voice_state(&update.state);
+                    return Some(correlation);
+                }
+            }
+            Dispatch::VoiceServerUpdate(update) => {
+                if let Some(correlator) = self.voice_correlator.as_mut() {
+                    let correlation = correlator.voice_server(update);
+                    return Some(correlation);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Ends the current call's audio: asks it to leave gracefully (speech ended, voice session
+    /// closed, devices released) and waits for that, aborting only if it takes too long.
+    async fn stop_voice(&mut self) {
+        if let Some(tx) = self.voice_cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(mut task) = self.voice_task.take()
+            && tokio::time::timeout(Duration::from_secs(5), &mut task)
+                .await
+                .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+            self.bridge.voice_audio.send_replace(VoiceAudioState::Idle);
+        }
+    }
+
+    async fn handle_correlation(&mut self, correlation: Correlation) {
+        match correlation {
+            Correlation::Connect(credentials) => {
+                // The previous call must have released its audio devices before this one
+                // opens them: `stop_voice` returns only after that task has ended.
+                self.stop_voice().await;
+                self.bridge.voice_audio.send_replace(VoiceAudioState::Idle);
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                self.voice_cancel_tx = Some(tx);
+                self.voice_task = Some(tokio::spawn(voice_audio::run(
+                    credentials,
+                    rx,
+                    self.bridge.voice_audio.clone(),
+                )));
+            }
+            Correlation::Ended | Correlation::Reallocating => self.stop_voice().await,
+            Correlation::Ignored | Correlation::Waiting => {}
         }
     }
 
@@ -586,6 +708,15 @@ impl Worker {
     }
 }
 
+impl Drop for Worker {
+    fn drop(&mut self) {
+        // Abort the task if it exists; proper await happens in status_stream before Drop
+        if let Some(task) = self.voice_task.take() {
+            task.abort();
+        }
+    }
+}
+
 /// Starts only when iced polls this account-owned stream. Dropping the panel
 /// aborts it and releases the socket, store, presentation slot, and controls.
 pub fn status_stream(
@@ -595,6 +726,7 @@ pub fn status_stream(
     bridge: NavigationBridge,
 ) -> impl Stream<Item = ()> {
     let requests = bridge.requests.subscribe();
+    let voice_requests = bridge.voice_requests.subscribe();
     let rest_client = rest.clone();
     // There is one worker per bridge; a second one would simply get no commands.
     let commands = bridge.take_commands().unwrap_or_else(|| mpsc::channel(1).1);
@@ -608,8 +740,12 @@ pub fn status_stream(
         },
         bridge,
         requests,
+        voice_requests,
         commands,
         revision: 0,
+        voice_correlator: None,
+        voice_task: None,
+        voice_cancel_tx: None,
     };
     stream::unfold(worker, |mut worker| async move {
         let mut gateway = match worker.gateway.take() {
@@ -621,10 +757,27 @@ pub fn status_stream(
         };
         loop {
             let (status, requested) = tokio::select! {
-                event = gateway.next_event() => (worker.tracker.apply(event?), false),
+                event = gateway.next_event() => {
+                    let event = event?;
+                    let correlation = worker.voice_dispatch(&event);
+                    let status = worker.tracker.apply(event);
+                    if let Some(correlation) = correlation {
+                        worker.handle_correlation(correlation).await;
+                    }
+                    (status, false)
+                }
                 changed = worker.requests.changed() => {
                     changed.ok()?;
                     (None, true)
+                }
+                changed = worker.voice_requests.changed() => {
+                    changed.ok()?;
+                    worker.stop_voice().await;
+                    if worker.request_voice_state(&gateway) {
+                        (None, true)
+                    } else {
+                        (None, false)
+                    }
                 }
                 completed = worker.tracker.history.next_completed() => {
                     let rejected = worker.tracker.history.complete(&worker.rest, completed);
@@ -651,6 +804,7 @@ pub fn status_stream(
             let notified = worker.refresh(&gateway, request, status);
             if terminal {
                 worker.start = None;
+                worker.stop_voice().await;
                 return notified.then_some(((), worker));
             }
             if notified {

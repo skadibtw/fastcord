@@ -9,7 +9,6 @@
 //!
 //! All buffers are sized when a stream opens; steady-state processing does
 //! not allocate.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::channels::{downmix_to_mono, stereo_to_device};
@@ -19,6 +18,7 @@ use crate::codec::{
 };
 use crate::device::StreamFormat;
 use crate::error::AudioError;
+use crate::jitter::JitterMixer;
 use crate::resample::RateConverter;
 use crate::ring::{RingConsumer, RingProducer};
 
@@ -36,6 +36,15 @@ pub struct CapturedFrame {
     /// Frame number since capture started; the RTP timestamp advances by
     /// [`FRAME_SAMPLES`] per frame.
     pub sequence: u64,
+}
+
+/// One authenticated remote Opus packet offered to the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFrame {
+    pub ssrc: u32,
+    pub sequence: u64,
+    pub timestamp: u32,
+    pub packet: EncodedPacket,
 }
 
 /// Engine-thread counters (lock-free, read by [`crate::EngineStats`]).
@@ -143,6 +152,8 @@ pub(crate) struct PlaybackPipeline {
     target: usize,
     decoder: VoiceDecoder,
     pcm: Box<[f32]>,
+    mixer: JitterMixer,
+    mixed: Box<[f32; FRAME_SAMPLES * CHANNELS]>,
     converter: RateConverter,
     /// Converted stereo at the device rate not yet accepted by the ring.
     pending: Vec<f32>,
@@ -161,11 +172,17 @@ impl PlaybackPipeline {
             target: target_frames * format.channels,
             decoder: VoiceDecoder::new()?,
             pcm: vec![0.0; MAX_FRAME_SAMPLES * CHANNELS].into_boxed_slice(),
+            mixer: JitterMixer::new()?,
+            mixed: Box::new([0.0; FRAME_SAMPLES * CHANNELS]),
             converter: RateConverter::new(SAMPLE_RATE, format.rate, CHANNELS, 480)?,
             pending: Vec::with_capacity(pending_frames * CHANNELS),
             pending_start: 0,
             ring,
         })
+    }
+
+    pub(crate) fn push_remote(&mut self, frame: RemoteFrame) {
+        self.mixer.push(frame);
     }
 
     /// Keeps the playback ring near its target, pulling packets from `next`
@@ -184,7 +201,23 @@ impl PlaybackPipeline {
             if attempts == PLAYBACK_PACKET_BUDGET {
                 return;
             }
-            let Some(packet) = next() else { return };
+            let Some(packet) = next() else {
+                if self.mixer.mix(&mut self.mixed, std::time::Instant::now()) {
+                    self.pending_start = 0;
+                    self.pending.clear();
+                    let Self {
+                        converter,
+                        pending,
+                        mixed,
+                        ..
+                    } = self;
+                    converter.process(mixed.as_slice(), &mut |block: &[f32]| {
+                        pending.extend_from_slice(block);
+                    });
+                    continue;
+                }
+                return;
+            };
             attempts += 1;
             let frames = match self.decoder.decode(packet.as_bytes(), &mut self.pcm) {
                 Ok(frames) => frames,
