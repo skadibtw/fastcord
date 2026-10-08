@@ -213,9 +213,9 @@ pub struct Consumed {
     pub status: Option<GatewayStatus>,
 }
 
-/// An explicit, ordered user action on the outbox. Unlike the coalesced
-/// [`Request`], none of these may be dropped or merged, so they travel through
-/// a small bounded queue of their own.
+/// An explicit, ordered user action on the outbox or on one of the user's
+/// messages. Unlike the coalesced [`Request`], none of these may be dropped or
+/// merged, so they travel through a small bounded queue of their own.
 pub enum Command {
     Send {
         channel: Snowflake,
@@ -224,6 +224,25 @@ pub enum Command {
     },
     Retry(OpId),
     Discard(OpId),
+    /// Save new text for one of the user's messages.
+    Edit {
+        channel: Snowflake,
+        message: Snowflake,
+        content: String,
+    },
+    /// Delete one of the user's messages (the user confirmed it).
+    Delete {
+        channel: Snowflake,
+        message: Snowflake,
+    },
+    RetryChange {
+        channel: Snowflake,
+        message: Snowflake,
+    },
+    DismissChange {
+        channel: Snowflake,
+        message: Snowflake,
+    },
 }
 
 // Message text never reaches a log.
@@ -239,6 +258,28 @@ impl fmt::Debug for Command {
                 .finish_non_exhaustive(),
             Self::Retry(id) => f.debug_tuple("Retry").field(id).finish(),
             Self::Discard(id) => f.debug_tuple("Discard").field(id).finish(),
+            Self::Edit {
+                channel, message, ..
+            } => f
+                .debug_struct("Edit")
+                .field("channel", channel)
+                .field("message", message)
+                .finish_non_exhaustive(),
+            Self::Delete { channel, message } => f
+                .debug_struct("Delete")
+                .field("channel", channel)
+                .field("message", message)
+                .finish(),
+            Self::RetryChange { channel, message } => f
+                .debug_struct("RetryChange")
+                .field("channel", channel)
+                .field("message", message)
+                .finish(),
+            Self::DismissChange { channel, message } => f
+                .debug_struct("DismissChange")
+                .field("channel", channel)
+                .field("message", message)
+                .finish(),
         }
     }
 }
@@ -308,6 +349,37 @@ impl NavigationBridge {
 
     pub fn discard_send(&self, id: OpId) -> bool {
         self.commands.try_send(Command::Discard(id)).is_ok()
+    }
+
+    /// Queues new text for one of the user's messages. Returns whether it was
+    /// accepted; on `false` nothing was queued and the caller keeps the text.
+    pub fn edit_message(&self, channel: Snowflake, message: Snowflake, content: String) -> bool {
+        self.commands
+            .try_send(Command::Edit {
+                channel,
+                message,
+                content,
+            })
+            .is_ok()
+    }
+
+    /// Queues the confirmed deletion of one of the user's messages.
+    pub fn delete_message(&self, channel: Snowflake, message: Snowflake) -> bool {
+        self.commands
+            .try_send(Command::Delete { channel, message })
+            .is_ok()
+    }
+
+    pub fn retry_change(&self, channel: Snowflake, message: Snowflake) -> bool {
+        self.commands
+            .try_send(Command::RetryChange { channel, message })
+            .is_ok()
+    }
+
+    pub fn dismiss_change(&self, channel: Snowflake, message: Snowflake) -> bool {
+        self.commands
+            .try_send(Command::DismissChange { channel, message })
+            .is_ok()
     }
 
     fn publish(
@@ -428,7 +500,7 @@ struct Worker {
 }
 
 impl Worker {
-    /// Applies one explicit outbox action.
+    /// Applies one explicit outbox or message action.
     fn command(&mut self, command: Command) {
         let history = &mut self.tracker.history;
         match command {
@@ -441,6 +513,20 @@ impl Worker {
             }
             Command::Retry(id) => history.retry_send(&self.rest, id),
             Command::Discard(id) => history.discard_send(id),
+            Command::Edit {
+                channel,
+                message,
+                content,
+            } => history.edit_message(&self.rest, channel, message, &content),
+            Command::Delete { channel, message } => {
+                history.delete_message(&self.rest, channel, message);
+            }
+            Command::RetryChange { channel, message } => {
+                history.retry_change(&self.rest, channel, message);
+            }
+            Command::DismissChange { channel, message } => {
+                history.dismiss_change(channel, message);
+            }
         }
     }
 
@@ -575,6 +661,8 @@ pub struct GatewayPanel {
     pub controls: NavigationBridge,
     /// The draft and composer state; local to the UI until the user sends.
     pub composer: Composer,
+    /// The user's message (channel, message) whose deletion waits for confirmation.
+    pub confirm_delete: Option<(Snowflake, Snowflake)>,
     _worker: Handle,
 }
 
@@ -595,9 +683,89 @@ impl GatewayPanel {
             navigation: Arc::default(),
             timeline: Arc::default(),
             controls,
+            confirm_delete: None,
             composer: Composer::default(),
             _worker: worker.abort_on_drop(),
         }
+    }
+
+    /// Takes the worker's latest snapshots. Drafts and editing follow the open
+    /// channel; a deletion waiting for confirmation does not survive leaving it.
+    pub fn consume(&mut self) -> Option<GatewayStatus> {
+        let consumed = self.controls.consume();
+        self.navigation = consumed.navigation;
+        self.timeline = consumed.timeline;
+        self.composer.select(self.timeline.channel_id);
+        if self
+            .confirm_delete
+            .is_some_and(|(channel, _)| self.timeline.channel_id != Some(channel))
+        {
+            self.confirm_delete = None;
+        }
+        consumed.status
+    }
+
+    /// What the timeline shows about rows the UI is working on.
+    pub fn interaction(&self) -> timeline::Interaction {
+        timeline::Interaction {
+            editing: self.composer.editing(),
+            confirming: self
+                .confirm_delete
+                .filter(|(channel, _)| self.timeline.channel_id == Some(*channel))
+                .map(|(_, message)| message),
+        }
+    }
+
+    /// Applies a timeline action on one of the user's messages. Edit moves the
+    /// message into the composer; Delete only asks for confirmation, and only
+    /// the confirmation queues the deletion. Returns whether the editor should
+    /// take the keyboard focus.
+    pub fn message_action(&mut self, event: timeline::Event) -> bool {
+        use timeline::Event;
+        let open = self.timeline.channel_id;
+        let queued = match event {
+            Event::Edit {
+                channel_id,
+                message_id,
+            } if open == Some(channel_id) => {
+                self.confirm_delete = None;
+                return self.composer.begin_edit(&self.timeline, message_id);
+            }
+            Event::Delete {
+                channel_id,
+                message_id,
+            } if open == Some(channel_id) => {
+                self.confirm_delete = Some((channel_id, message_id));
+                true
+            }
+            Event::ConfirmDelete {
+                channel_id,
+                message_id,
+            } if self.confirm_delete == Some((channel_id, message_id)) => {
+                self.confirm_delete = None;
+                if self.composer.editing() == Some(message_id) {
+                    self.composer.cancel_edit();
+                }
+                self.controls.delete_message(channel_id, message_id)
+            }
+            Event::CancelDelete => {
+                self.confirm_delete = None;
+                true
+            }
+            Event::RetryChange {
+                channel_id,
+                message_id,
+            } => self.controls.retry_change(channel_id, message_id),
+            Event::DismissChange {
+                channel_id,
+                message_id,
+            } => self.controls.dismiss_change(channel_id, message_id),
+            _ => true,
+        };
+        if !queued {
+            self.composer.refused();
+        }
+        false
     }
 }
 
@@ -742,6 +910,160 @@ mod bridge_tests {
         let used = bridge.outbox_slots.used();
         assert!(!bridge.send_message(Snowflake(1), "lost?".to_owned(), false));
         assert_eq!(bridge.outbox_slots.used(), used);
+    }
+
+    #[test]
+    fn message_changes_queue_in_order_and_never_show_their_text() {
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let (c, m) = (Snowflake(500), Snowflake(7));
+        assert!(bridge.edit_message(c, m, "secret words".to_owned()));
+        assert!(bridge.delete_message(c, m));
+        assert!(bridge.retry_change(c, m));
+        assert!(bridge.dismiss_change(c, m));
+        let shown = format!("{:?}", commands.try_recv().unwrap());
+        assert!(
+            shown.contains("Edit") && !shown.contains("secret"),
+            "{shown}"
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Delete { channel, message }) if (channel, message) == (c, m)
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::RetryChange { .. })
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::DismissChange { .. })
+        ));
+        // A full queue refuses rather than buffering without bound.
+        for _ in 0..COMMAND_QUEUE {
+            assert!(bridge.delete_message(c, m));
+        }
+        assert!(!bridge.edit_message(c, m, "more".to_owned()));
+        assert!(!bridge.delete_message(c, m));
+    }
+
+    fn panel(bridge: &NavigationBridge) -> GatewayPanel {
+        let (_, handle) = iced::Task::<()>::none().abortable();
+        let mut panel = GatewayPanel::new(1, handle, bridge.clone());
+        let mine = |id: u64, own: bool| timeline::Row {
+            own,
+            ..timeline::Row::new(
+                Arc::new(
+                    serde_json::from_value(serde_json::json!({
+                        "id": id.to_string(),
+                        "channel_id": "500",
+                        "author": {"id": "42", "username": "alt"},
+                        "content": "hello",
+                        "timestamp": "2026-10-08T09:00:00.000000+00:00",
+                    }))
+                    .unwrap(),
+                ),
+                1,
+            )
+        };
+        panel.timeline = Arc::new(timeline::Snapshot {
+            channel_id: Some(Snowflake(500)),
+            rows: vec![mine(7, true), mine(8, false)],
+            can_send: true,
+            ..timeline::Snapshot::default()
+        });
+        panel.composer.select(Some(Snowflake(500)));
+        panel
+    }
+
+    #[test]
+    fn deleting_requires_the_confirmation_of_the_same_message() {
+        use timeline::Event;
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut panel = panel(&bridge);
+        let (channel_id, message_id) = (Snowflake(500), Snowflake(7));
+        // A confirmation nobody asked for, or for another message, does nothing.
+        panel.message_action(Event::ConfirmDelete {
+            channel_id,
+            message_id,
+        });
+        assert!(commands.try_recv().is_err());
+        panel.message_action(Event::Delete {
+            channel_id,
+            message_id,
+        });
+        assert_eq!(panel.interaction().confirming, Some(message_id));
+        assert!(commands.try_recv().is_err(), "asking is not deleting");
+        panel.message_action(Event::ConfirmDelete {
+            channel_id,
+            message_id: Snowflake(8),
+        });
+        assert!(commands.try_recv().is_err());
+        panel.message_action(Event::CancelDelete);
+        assert_eq!(panel.interaction().confirming, None);
+        // Asked, then confirmed: exactly one deletion.
+        panel.message_action(Event::Delete {
+            channel_id,
+            message_id,
+        });
+        panel.message_action(Event::ConfirmDelete {
+            channel_id,
+            message_id,
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Delete { message, .. }) if message == message_id
+        ));
+        assert!(commands.try_recv().is_err());
+        assert_eq!(panel.interaction().confirming, None);
+        // A pending confirmation does not survive leaving the channel.
+        panel.message_action(Event::Delete {
+            channel_id,
+            message_id,
+        });
+        bridge.publish(
+            NavigationSnapshot::default(),
+            timeline::Snapshot::default(),
+            None,
+        );
+        panel.consume();
+        assert_eq!(panel.confirm_delete, None);
+    }
+
+    #[test]
+    fn edit_moves_only_the_users_message_into_the_composer() {
+        use timeline::Event;
+        let bridge = NavigationBridge::new();
+        let _commands = bridge.take_commands().unwrap();
+        let mut panel = panel(&bridge);
+        let channel_id = Snowflake(500);
+        let foreign = Event::Edit {
+            channel_id,
+            message_id: Snowflake(8),
+        };
+        assert!(!panel.message_action(foreign), "not the user's message");
+        let other_channel = Event::Edit {
+            channel_id: Snowflake(501),
+            message_id: Snowflake(7),
+        };
+        assert!(!panel.message_action(other_channel));
+        assert_eq!(panel.interaction().editing, None);
+        panel.message_action(Event::Delete {
+            channel_id,
+            message_id: Snowflake(7),
+        });
+        let edit = Event::Edit {
+            channel_id,
+            message_id: Snowflake(7),
+        };
+        assert!(panel.message_action(edit), "the editor takes focus");
+        assert_eq!(
+            panel.interaction(),
+            timeline::Interaction {
+                editing: Some(Snowflake(7)),
+                confirming: None,
+            }
+        );
     }
 }
 

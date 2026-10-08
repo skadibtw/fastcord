@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod changes;
 mod composer;
 mod gateway;
 mod history;
@@ -252,15 +253,9 @@ impl App {
             Message::Navigation(id) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase
                     && gateway.id == id
+                    && let Some(status) = gateway.consume()
                 {
-                    let consumed = gateway.controls.consume();
-                    gateway.navigation = consumed.navigation;
-                    gateway.timeline = consumed.timeline;
-                    // Drafts follow the open channel.
-                    gateway.composer.select(gateway.timeline.channel_id);
-                    if let Some(status) = consumed.status {
-                        return self.update(Message::Gateway(id, status));
-                    }
+                    return self.update(Message::Gateway(id, status));
                 }
             }
             Message::SelectGuild(guild) => {
@@ -285,7 +280,7 @@ impl App {
                 }
             }
             Message::Timeline(event) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
                     let controls = &gateway.controls;
                     match event {
                         timeline::Event::Viewport {
@@ -304,6 +299,16 @@ impl App {
                         }
                         timeline::Event::Retry { channel_id } => {
                             controls.timeline_intent(history::Intent::Retry(channel_id));
+                        }
+                        action @ (timeline::Event::Edit { .. }
+                        | timeline::Event::Delete { .. }
+                        | timeline::Event::ConfirmDelete { .. }
+                        | timeline::Event::CancelDelete
+                        | timeline::Event::RetryChange { .. }
+                        | timeline::Event::DismissChange { .. }) => {
+                            if gateway.message_action(action) {
+                                return iced::widget::operation::focus(composer::EDITOR_ID);
+                            }
                         }
                     }
                 }
@@ -466,7 +471,12 @@ impl App {
                     ]
                     .spacing(16),
                     text(gateway.status.describe()),
-                    navigation::view(&gateway.navigation, &gateway.timeline, &gateway.composer),
+                    navigation::view(
+                        &gateway.navigation,
+                        &gateway.timeline,
+                        &gateway.composer,
+                        gateway.interaction(),
+                    ),
                 ]
                 .spacing(16)
                 .height(Length::Fill),

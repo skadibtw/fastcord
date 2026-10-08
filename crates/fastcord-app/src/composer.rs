@@ -20,6 +20,7 @@ use iced::widget::{
 };
 use iced::{Element, Length, Padding};
 
+use crate::changes::RowChange;
 use crate::gateway::NavigationBridge;
 use crate::outbox::{MAX_OUTBOX, OpId, OutboxItem, OutboxState};
 use crate::timeline::Snapshot;
@@ -62,6 +63,8 @@ pub enum Event {
     Discard(OpId),
     /// Move a failed message's text back into the editor and drop the failure.
     Edit(OpId),
+    /// Stop editing a sent message and bring the draft back.
+    CancelEdit,
 }
 
 /// A draft the user chose to send.
@@ -70,6 +73,32 @@ pub struct Submission {
     pub channel: Snowflake,
     pub content: String,
     pub everyone: bool,
+}
+
+/// New text the user chose to save for one of their messages.
+#[derive(PartialEq, Eq)]
+pub struct EditSubmission {
+    pub channel: Snowflake,
+    pub message: Snowflake,
+    pub content: String,
+}
+
+impl fmt::Debug for EditSubmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EditSubmission")
+            .field("channel", &self.channel)
+            .field("message", &self.message)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A sent message whose text is in the editor, and the draft it displaced.
+struct Editing {
+    message: Snowflake,
+    /// The message has attachments, so it may be saved without text.
+    allow_empty: bool,
+    draft: String,
+    everyone: bool,
 }
 
 /// Unsent text per channel: bounded in count and, through the editor's cap, in size.
@@ -106,6 +135,8 @@ pub struct Composer {
     everyone: bool,
     notice: Option<&'static str>,
     drafts: Drafts,
+    /// Editing one of the user's messages of `channel` instead of writing one.
+    editing: Option<Editing>,
 }
 
 impl Default for Composer {
@@ -119,6 +150,7 @@ impl Default for Composer {
             everyone: false,
             notice: None,
             drafts: Drafts::default(),
+            editing: None,
         }
     }
 }
@@ -132,11 +164,13 @@ impl Composer {
     }
 
     /// Follows the open channel: the draft of the one being left is kept, the
-    /// one being entered is restored. The `@everyone` choice never survives a switch.
+    /// one being entered is restored. The `@everyone` choice never survives a
+    /// switch, and neither does editing a message.
     pub fn select(&mut self, channel: Option<Snowflake>) {
         if self.channel == channel {
             return;
         }
+        self.cancel_edit();
         if let Some(old) = self.channel {
             self.drafts.put(old, self.content.text());
         }
@@ -182,6 +216,7 @@ impl Composer {
     /// outbox. Reads only cached counts, so the view can ask every frame.
     fn ready(&self, can_send: bool, outbox_len: usize) -> bool {
         self.channel.is_some()
+            && self.editing.is_none()
             && can_send
             && outbox_len < MAX_OUTBOX
             && !self.blank
@@ -198,6 +233,97 @@ impl Composer {
             content: self.content.text(),
             everyone: self.everyone,
         })
+    }
+
+    /// The message whose text is being edited, if any.
+    pub fn editing(&self) -> Option<Snowflake> {
+        self.editing.as_ref().map(|editing| editing.message)
+    }
+
+    /// Puts one of the user's messages of the open channel into the editor:
+    /// the text of its failed edit if it has one, otherwise its current text.
+    /// The draft is set aside and comes back when editing ends. Only rows the
+    /// worker marked as the user's own qualify, and none with a change still
+    /// being saved. Returns whether editing started.
+    pub fn begin_edit(&mut self, snapshot: &Snapshot, message: Snowflake) -> bool {
+        let Some(channel) = self
+            .channel
+            .filter(|&open| snapshot.channel_id == Some(open))
+        else {
+            return false;
+        };
+        let Some(row) = snapshot
+            .rows
+            .iter()
+            .find(|row| row.message.id == message && row.message.channel_id == channel && row.own)
+        else {
+            return false;
+        };
+        if row.change.as_ref().is_some_and(RowChange::saving) {
+            return false;
+        }
+        let text = row
+            .change
+            .as_ref()
+            .and_then(RowChange::failed_edit)
+            .unwrap_or(&row.message.content);
+        if text.chars().count() > MAX_EDITOR_CHARS {
+            self.notice = Some("That message is too long to edit here.");
+            return false;
+        }
+        let (draft, everyone) = match self.editing.take() {
+            Some(editing) => (editing.draft, editing.everyone),
+            None => (self.content.text(), self.everyone),
+        };
+        self.editing = Some(Editing {
+            message,
+            allow_empty: !row.message.attachments.is_empty(),
+            draft,
+            everyone,
+        });
+        self.content = Content::with_text(text);
+        self.content.perform(Action::Move(Motion::DocumentEnd));
+        self.everyone = false;
+        self.notice = None;
+        self.recount();
+        true
+    }
+
+    /// Ends editing and brings the set-aside draft back. Nothing is saved.
+    pub fn cancel_edit(&mut self) {
+        let Some(editing) = self.editing.take() else {
+            return;
+        };
+        self.content = Content::with_text(&editing.draft);
+        self.content.perform(Action::Move(Motion::DocumentEnd));
+        self.everyone = editing.everyone;
+        self.notice = None;
+        self.recount();
+    }
+
+    /// Whether Save is available: within Discord's limit, and not empty
+    /// unless the message keeps attachments (an empty message is a delete).
+    fn edit_ready(&self) -> bool {
+        self.editing.as_ref().is_some_and(|editing| {
+            (!self.blank || editing.allow_empty) && self.trimmed_chars <= MAX_CONTENT_CHARS
+        })
+    }
+
+    /// The edited text as a save request, if it may be saved. Does not end
+    /// editing; [`cancel_edit`](Self::cancel_edit) does, once the worker has
+    /// accepted the request.
+    pub fn edit_submission(&self) -> Option<EditSubmission> {
+        let editing = self.editing.as_ref().filter(|_| self.edit_ready())?;
+        Some(EditSubmission {
+            channel: self.channel?,
+            message: editing.message,
+            content: self.content.text(),
+        })
+    }
+
+    /// An edit or delete action the worker's queue did not accept.
+    pub fn refused(&mut self) {
+        self.notice = Some(BUSY);
     }
 
     /// The worker accepted the draft: empty the editor.
@@ -247,6 +373,17 @@ pub fn update(
     match event {
         Event::Action(Act(action)) => composer.perform(action),
         Event::Everyone(allowed) => composer.set_everyone(allowed),
+        Event::Send if composer.editing.is_some() => {
+            if let Some(edit) = composer.edit_submission() {
+                if bridge.edit_message(edit.channel, edit.message, edit.content) {
+                    composer.cancel_edit();
+                } else {
+                    composer.notice = Some(BUSY);
+                }
+            } else if composer.blank {
+                composer.notice = Some(EMPTY_EDIT);
+            }
+        }
         Event::Send => {
             let open = snapshot.can_send && snapshot.channel_id == composer.channel;
             let Some(submission) = composer.submission(open, snapshot.outbox.len()) else {
@@ -258,6 +395,7 @@ pub fn update(
                 composer.notice = Some(NOT_QUEUED);
             }
         }
+        Event::CancelEdit => composer.cancel_edit(),
         Event::Retry(id) => {
             if !bridge.retry_send(id) {
                 composer.notice = Some(BUSY);
@@ -269,6 +407,8 @@ pub fn update(
             }
         }
         Event::Edit(id) => {
+            // Moving a failed send's text in ends editing a sent message first.
+            composer.cancel_edit();
             let failed = snapshot.outbox.iter().find(|item| {
                 item.id == id
                     && Some(item.channel_id) == composer.channel
@@ -286,6 +426,7 @@ pub fn update(
 }
 
 const BUSY: &str = "That is not possible right now (busy or disconnected); try again.";
+const EMPTY_EDIT: &str = "A message needs some text. Use Delete to remove it instead.";
 const NOT_QUEUED: &str =
     "Not sent: too many messages are waiting, or the connection has stopped. Your text is kept.";
 
@@ -373,7 +514,8 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
 }
 
 /// The unconfirmed-message strip, then the editor with its controls. The
-/// editor and Send are present only where the account may send.
+/// editor and Send are present only where the account may send; editing one
+/// of the user's messages brings the editor wherever the message is shown.
 pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, Event> {
     let mut layout = column![].spacing(6);
     if !snapshot.outbox.is_empty() {
@@ -384,19 +526,49 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         .spacing(6);
         layout = layout.push(container(scrollable(strip)).max_height(STRIP_HEIGHT));
     }
-    if !snapshot.can_send {
+    if let Some(notice) = snapshot.notice {
+        layout = layout.push(text(notice).size(12).style(text::danger));
+    }
+    let editing = composer.editing.is_some();
+    if !snapshot.can_send && !editing {
+        // Without the editor's controls row, a refused action is said here.
+        if let Some(notice) = composer.notice {
+            layout = layout.push(text(notice).size(12).style(text::secondary));
+        }
         return layout.into();
+    }
+    if editing {
+        layout = layout.push(
+            row![
+                text("Editing your message").size(12),
+                text("Enter saves, Escape cancels.")
+                    .size(12)
+                    .style(text::secondary),
+                space::horizontal(),
+                small_button("Cancel", Event::CancelEdit),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center),
+        );
     }
     let editor = text_editor(&composer.content)
         .id(EDITOR_ID)
-        .placeholder("Message (Enter to send, Shift+Enter for a new line)")
+        .placeholder(if editing {
+            "Edited message (Enter to save, Escape to cancel)"
+        } else {
+            "Message (Enter to send, Shift+Enter for a new line)"
+        })
         .on_action(|action| Event::Action(Act(action)))
-        .key_binding(|press| {
-            let enter = matches!(press.key.as_ref(), keyboard::Key::Named(key::Named::Enter));
-            if enter && !press.modifiers.shift() && matches!(press.status, Status::Focused { .. }) {
-                Some(Binding::Custom(Event::Send))
-            } else {
-                Binding::from_key_press(press)
+        .key_binding(move |press| {
+            let focused = matches!(press.status, Status::Focused { .. });
+            match press.key.as_ref() {
+                keyboard::Key::Named(key::Named::Enter) if focused && !press.modifiers.shift() => {
+                    Some(Binding::Custom(Event::Send))
+                }
+                keyboard::Key::Named(key::Named::Escape) if focused && editing => {
+                    Some(Binding::Custom(Event::CancelEdit))
+                }
+                _ => Binding::from_key_press(press),
             }
         })
         .size(14)
@@ -405,22 +577,30 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         .max_height(150);
     layout = layout.push(editor);
 
-    let submittable = composer.ready(snapshot.can_send, snapshot.outbox.len());
-    let mut controls = row![
-        checkbox(composer.everyone)
-            .label("Allow @everyone and @here to notify")
-            .on_toggle(Event::Everyone)
-            .size(14)
-            .text_size(12),
-        space::horizontal(),
-    ]
-    .spacing(12)
-    .align_y(iced::alignment::Vertical::Center);
+    let mut controls = row![]
+        .spacing(12)
+        .align_y(iced::alignment::Vertical::Center);
+    let (label, submittable) = if editing {
+        ("Save", composer.edit_ready())
+    } else {
+        controls = controls.push(
+            checkbox(composer.everyone)
+                .label("Allow @everyone and @here to notify")
+                .on_toggle(Event::Everyone)
+                .size(14)
+                .text_size(12),
+        );
+        (
+            "Send",
+            composer.ready(snapshot.can_send, snapshot.outbox.len()),
+        )
+    };
+    controls = controls.push(space::horizontal());
     if let Some(note) = length_note(composer, snapshot.outbox.len()) {
         controls = controls.push(text(note).size(12).style(text::secondary));
     }
     controls = controls.push(
-        button(text("Send").size(13))
+        button(text(label).size(13))
             .on_press_maybe(submittable.then_some(Event::Send))
             .padding([4, 14]),
     );
@@ -432,7 +612,7 @@ fn length_note(composer: &Composer, outbox_len: usize) -> Option<String> {
     if let Some(notice) = composer.notice {
         return Some(notice.to_owned());
     }
-    if outbox_len >= MAX_OUTBOX {
+    if outbox_len >= MAX_OUTBOX && composer.editing.is_none() {
         return Some("Retry or discard unsent messages first.".to_owned());
     }
     if composer.trimmed_chars > MAX_CONTENT_CHARS {
@@ -733,5 +913,205 @@ mod tests {
         update(&mut composer, Event::Discard(OpId(2)), &snapshot, &bridge);
         assert!(matches!(commands.try_recv(), Ok(Command::Retry(OpId(2)))));
         assert!(matches!(commands.try_recv(), Ok(Command::Discard(OpId(2)))));
+    }
+
+    fn sent(id: u64, content: &str, own: bool, change: Option<RowChange>) -> crate::timeline::Row {
+        use fastcord_model::{Message, User};
+        crate::timeline::Row {
+            message: Arc::new(Message {
+                id: Snowflake(id),
+                channel_id: A,
+                guild_id: None,
+                author: User {
+                    id: Snowflake(if own { 42 } else { 7 }),
+                    username: "fixture".to_owned(),
+                    global_name: None,
+                    avatar: None,
+                    bot: false,
+                },
+                content: content.to_owned(),
+                timestamp: "2026-10-08T09:00:00.000000+00:00".to_owned(),
+                edited_timestamp: None,
+                kind: 0,
+                flags: 0,
+                pinned: false,
+                attachments: Vec::new(),
+                reactions: Vec::new(),
+                message_reference: None,
+                nonce: None,
+            }),
+            revision: 1,
+            own,
+            change,
+        }
+    }
+
+    fn showing(rows: Vec<crate::timeline::Row>) -> Snapshot {
+        Snapshot {
+            rows,
+            ..open(A, Vec::new())
+        }
+    }
+
+    #[test]
+    fn editing_sets_the_draft_aside_and_saving_or_cancelling_brings_it_back() {
+        use crate::gateway::Command;
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let snapshot = showing(vec![sent(7, "original", true, None)]);
+        let mut composer = composer_in(A);
+        type_text(&mut composer, "half-written");
+        composer.set_everyone(true);
+        assert!(composer.begin_edit(&snapshot, Snowflake(7)));
+        assert_eq!(composer.editing(), Some(Snowflake(7)));
+        assert_eq!(composer.content.text(), "original");
+        assert!(!composer.everyone, "@everyone belongs to the draft");
+        type_text(&mut composer, " text");
+        assert_eq!(
+            composer.submission(true, 0),
+            None,
+            "Enter saves, never sends"
+        );
+        update(&mut composer, Event::Send, &snapshot, &bridge);
+        match commands.try_recv().unwrap() {
+            Command::Edit {
+                channel,
+                message,
+                content,
+            } => assert_eq!(
+                (channel, message, content.as_str()),
+                (A, Snowflake(7), "original text")
+            ),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(commands.try_recv().is_err(), "nothing was sent");
+        assert_eq!(composer.editing(), None);
+        assert_eq!(composer.content.text(), "half-written");
+        assert!(composer.everyone, "the draft's choice comes back with it");
+        // Escape (CancelEdit) saves nothing and restores the draft too.
+        assert!(composer.begin_edit(&snapshot, Snowflake(7)));
+        type_text(&mut composer, " never saved");
+        update(&mut composer, Event::CancelEdit, &snapshot, &bridge);
+        assert!(commands.try_recv().is_err());
+        assert_eq!(composer.content.text(), "half-written");
+        // Without a worker the edited text stays in the editor.
+        assert!(composer.begin_edit(&snapshot, Snowflake(7)));
+        drop(commands);
+        update(&mut composer, Event::Send, &snapshot, &bridge);
+        assert_eq!(composer.editing(), Some(Snowflake(7)));
+        assert_eq!(composer.notice, Some(BUSY));
+    }
+
+    #[test]
+    fn only_the_users_rows_without_a_change_in_progress_can_be_edited() {
+        use crate::changes::{ChangeKind, ChangeState};
+        let change = |state| {
+            Some(RowChange {
+                kind: ChangeKind::Edit(Arc::from("my fix")),
+                state,
+            })
+        };
+        let snapshot = showing(vec![
+            sent(1, "theirs", false, None),
+            sent(2, "mine", true, change(ChangeState::Saving)),
+            sent(3, "mine too", true, change(ChangeState::Failed("refused"))),
+            sent(4, "mine as well", true, None),
+        ]);
+        let mut composer = composer_in(A);
+        assert!(
+            !composer.begin_edit(&snapshot, Snowflake(1)),
+            "someone else's"
+        );
+        assert!(!composer.begin_edit(&snapshot, Snowflake(2)), "being saved");
+        assert!(!composer.begin_edit(&snapshot, Snowflake(99)), "not shown");
+        let elsewhere = Snapshot {
+            channel_id: Some(B),
+            ..snapshot.clone()
+        };
+        assert!(
+            !composer.begin_edit(&elsewhere, Snowflake(4)),
+            "another channel"
+        );
+        assert_eq!(composer.editing(), None);
+        // A failed edit comes back as the user wrote it, not as Discord has it.
+        type_text(&mut composer, "draft");
+        assert!(composer.begin_edit(&snapshot, Snowflake(3)));
+        assert_eq!(composer.content.text(), "my fix");
+        // Switching to another message keeps the original draft aside.
+        assert!(composer.begin_edit(&snapshot, Snowflake(4)));
+        assert_eq!(composer.content.text(), "mine as well");
+        composer.cancel_edit();
+        assert_eq!(composer.content.text(), "draft");
+    }
+
+    #[test]
+    fn an_empty_edit_is_refused_unless_attachments_remain() {
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut with_file = sent(8, "caption", true, None);
+        Arc::make_mut(&mut with_file.message)
+            .attachments
+            .push(fastcord_model::Attachment {
+                id: Snowflake(80),
+                filename: "file.txt".to_owned(),
+                size: 3,
+                url: "https://cdn.example/file.txt".to_owned(),
+                proxy_url: None,
+                content_type: None,
+                width: None,
+                height: None,
+            });
+        let snapshot = showing(vec![sent(7, "text", true, None), with_file]);
+        let mut composer = composer_in(A);
+        assert!(composer.begin_edit(&snapshot, Snowflake(7)));
+        composer.content = Content::new();
+        composer.recount();
+        assert!(composer.edit_submission().is_none());
+        update(&mut composer, Event::Send, &snapshot, &bridge);
+        assert!(commands.try_recv().is_err());
+        assert_eq!(composer.notice, Some(EMPTY_EDIT));
+        assert!(composer.begin_edit(&snapshot, Snowflake(8)));
+        composer.content = Content::new();
+        composer.recount();
+        update(&mut composer, Event::Send, &snapshot, &bridge);
+        assert!(commands.try_recv().is_ok(), "the file remains the message");
+        // Over Discord's limit, Save is unavailable as Send is.
+        assert!(composer.begin_edit(&snapshot, Snowflake(7)));
+        paste(&mut composer, &"x".repeat(MAX_CONTENT_CHARS));
+        assert!(composer.edit_submission().is_none());
+    }
+
+    #[test]
+    fn switching_channels_ends_editing_and_keeps_the_draft() {
+        let snapshot = showing(vec![sent(7, "original", true, None)]);
+        let mut composer = composer_in(A);
+        type_text(&mut composer, "draft for A");
+        assert!(composer.begin_edit(&snapshot, Snowflake(7)));
+        composer.select(Some(B));
+        assert_eq!(composer.editing(), None);
+        assert!(composer.blank);
+        composer.select(Some(A));
+        assert_eq!(composer.content.text(), "draft for A");
+        // Moving a failed send back into the editor also ends editing first.
+        assert!(composer.begin_edit(&snapshot, Snowflake(7)));
+        let failed = OutboxItem {
+            id: OpId(1),
+            channel_id: A,
+            content: Arc::from("unsent"),
+            state: OutboxState::Failed("refused"),
+        };
+        let bridge = NavigationBridge::new();
+        let _commands = bridge.take_commands().unwrap();
+        update(
+            &mut composer,
+            Event::Edit(OpId(1)),
+            &Snapshot {
+                outbox: vec![failed],
+                ..snapshot
+            },
+            &bridge,
+        );
+        assert_eq!(composer.editing(), None);
+        assert_eq!(composer.content.text(), "draft for A\n\nunsent");
     }
 }

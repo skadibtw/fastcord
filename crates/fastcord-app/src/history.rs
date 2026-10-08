@@ -4,20 +4,27 @@
 //! only reads the snapshot. Nothing is fetched until a readable channel is
 //! selected, and a page is requested only for a reason: opening the channel,
 //! scrolling near the end of what is retained, an explicit button, or retry.
+//! Sends, and edits and deletions of the user's own messages, start only from
+//! explicit commands and are checked here against the store, never against
+//! what a possibly stale UI showed.
 use std::pin::Pin;
 use std::sync::Arc;
 
-use fastcord_discord::gateway::Dispatch;
+use fastcord_discord::gateway::{Dispatch, MessageDelete};
 use fastcord_discord::history::HistoryCursor;
 use fastcord_discord::message_store::{
     MAX_MESSAGE_BYTES, MessageStore, PageMerge, PageToken, message_bytes,
 };
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot};
-use fastcord_discord::{MentionPolicy, NonceGenerator, RestClient, RestError, SendError};
+use fastcord_discord::{
+    ComposeError, EditedMessage, MentionPolicy, NonceGenerator, RestClient, RestError, SendError,
+    edit_response_update, is_own_message,
+};
 use fastcord_model::{Message, Snowflake};
 use iced::futures::StreamExt;
 use iced::futures::stream::FuturesUnordered;
 
+use crate::changes::{self, ChangeKind, ChangeRequest, Changes};
 use crate::outbox::{Finished, OpId, Outbox, Slots};
 use crate::timeline::{Row, Snapshot};
 use crate::variable_list::{Item, Measurement, VariableList, Viewport};
@@ -30,14 +37,35 @@ pub const SNAPSHOT_BODY_BUDGET: usize = MAX_MESSAGE_BYTES;
 const MAX_MEASUREMENTS: usize = 128;
 
 const OVERSIZE: &str = "A message is too large to display and was left out.";
+const NOT_OPEN: &str = "That message's channel is no longer open.";
+const NOT_LOADED: &str = "That message is no longer loaded; it may have been deleted.";
+const NOT_OWN: &str = "Only your own messages can be edited or deleted.";
+const EMPTY_EDIT: &str = "A message needs some text. Delete it instead.";
+const LONG_EDIT: &str = "The message is too long for Discord.";
+const DELETED_WHILE_EDITING: &str = "That message was deleted before your edit was saved.";
+const UNSHOWN_FAILURE: &str = "A change to a message that is no longer shown failed.";
 
 type PageFuture = Pin<Box<dyn Future<Output = Result<Vec<Message>, RestError>> + Send>>;
 type SendFuture = Pin<Box<dyn Future<Output = (OpId, Result<Box<Message>, SendError>)> + Send>>;
+type ChangeFuture = Pin<Box<dyn Future<Output = ChangeDone> + Send>>;
 
-/// A finished request of the worker: a history page or a message send.
+/// Discord's answer to an edit or deletion of one of the user's messages.
+pub struct ChangeDone {
+    pub channel: Snowflake,
+    pub message: Snowflake,
+    pub result: ChangeResult,
+}
+
+pub enum ChangeResult {
+    Edited(Result<Box<Message>, RestError>),
+    Deleted(Result<(), RestError>),
+}
+
+/// A finished request of the worker: a history page, a send, or a change.
 pub enum Completed {
     Page(Result<Vec<Message>, RestError>),
     Send(OpId, Result<Box<Message>, SendError>),
+    Change(ChangeDone),
 }
 
 /// An explicit user action from the timeline.
@@ -96,6 +124,12 @@ pub struct History {
     outbox: Outbox,
     nonces: NonceGenerator,
     sends: FuturesUnordered<SendFuture>,
+    /// Edits and deletions of the user's own messages.
+    changes: Changes,
+    change_requests: FuturesUnordered<ChangeFuture>,
+    /// Why the last edit or delete command could not be carried out, or the
+    /// outcome of one that has no row to show it on.
+    notice: Option<&'static str>,
 }
 
 impl History {
@@ -125,14 +159,29 @@ impl History {
         self.channel = None;
         self.error = None;
         self.failed = None;
+        self.notice = None;
         self.check_paging = false;
+        self.prune_changes();
         self.dirty = true;
+    }
+
+    /// Failed changes are shown on their message's row; without the row they go.
+    fn prune_changes(&mut self) {
+        let store = &self.store;
+        if self
+            .changes
+            .retain_held(|channel, message| store.revision(channel, message).is_some())
+        {
+            self.dirty = true;
+        }
     }
 
     /// Applies an ordered Gateway event before the metadata store sees it.
     /// A `MESSAGE_CREATE` of the user's own message that carries an unconfirmed
     /// send's nonce confirms that send, whether or not the REST answer came
     /// first; the store ignores the second copy of a message it already holds.
+    /// An update carrying a failed edit's text, or a deletion, settles that
+    /// message's change.
     pub fn apply(&mut self, event: &Dispatch) {
         match event {
             Dispatch::Ready(ready) => {
@@ -149,8 +198,33 @@ impl History {
                     self.dirty = true;
                 }
             }
+            Dispatch::MessageUpdate(update) => {
+                if let Some(content) = update.content.as_deref()
+                    && self
+                        .changes
+                        .observed_text(update.channel_id, update.id, content)
+                {
+                    self.dirty = true;
+                }
+            }
+            Dispatch::MessageDelete(deleted) => {
+                self.dirty |= self
+                    .changes
+                    .observed_delete(deleted.channel_id, std::slice::from_ref(&deleted.id));
+            }
+            Dispatch::MessageDeleteBulk(deleted) => {
+                self.dirty |= self
+                    .changes
+                    .observed_delete(deleted.channel_id, &deleted.ids);
+            }
             _ => {}
         }
+        self.apply_store(event);
+    }
+
+    /// Applies a message event, from the Gateway or from a REST answer, to the
+    /// store: the one path every message change takes.
+    fn apply_store(&mut self, event: &Dispatch) {
         let change = self.store.apply_dispatch(event);
         if change.changed {
             self.dirty = true;
@@ -210,6 +284,196 @@ impl History {
     pub fn discard_send(&mut self, id: OpId) {
         if self.outbox.discard(id) {
             self.dirty = true;
+        }
+    }
+
+    /// The held message `message` of the open `channel`, if the user may
+    /// change it: the store's copy decides, not what the UI displayed.
+    fn changeable(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+    ) -> Result<Arc<Message>, &'static str> {
+        if self.channel != Some(channel) {
+            return Err(NOT_OPEN);
+        }
+        let held = self.store.get(channel, message).ok_or(NOT_LOADED)?;
+        match self.user {
+            Some(user) if is_own_message(&held, user) => Ok(held),
+            _ => Err(NOT_OWN),
+        }
+    }
+
+    /// The user's explicit edit of one of their messages. Only `content` is
+    /// sent, so the message keeps its attachments. Text equal to the current
+    /// text needs no request (and settles a failed edit of the message).
+    pub fn edit_message(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        message: Snowflake,
+        content: &str,
+    ) {
+        self.dirty = true;
+        self.notice = None;
+        let held = match self.changeable(channel, message) {
+            Ok(held) => held,
+            Err(notice) => {
+                self.notice = Some(notice);
+                return;
+            }
+        };
+        let allow_empty = !held.attachments.is_empty();
+        let edit = match EditedMessage::new(content, allow_empty) {
+            Ok(edit) => edit,
+            Err(ComposeError::Empty) => {
+                self.notice = Some(EMPTY_EDIT);
+                return;
+            }
+            Err(ComposeError::TooLong) => {
+                self.notice = Some(LONG_EDIT);
+                return;
+            }
+        };
+        if edit.content() == held.content {
+            // Back to Discord's text: a failed edit of it is moot.
+            let failed_edit = self
+                .changes
+                .of(channel, message)
+                .is_some_and(|change| change.failed_edit().is_some());
+            if failed_edit {
+                self.changes.dismiss(channel, message);
+            }
+            return;
+        }
+        let kind = ChangeKind::Edit(Arc::from(edit.content()));
+        match self.changes.begin(channel, message, kind, allow_empty) {
+            Ok(()) => self.start_change(rest, channel, message, ChangeRequest::Edit(edit)),
+            Err(notice) => self.notice = Some(notice),
+        }
+    }
+
+    /// The user's explicit, confirmed deletion of one of their messages.
+    pub fn delete_message(&mut self, rest: &RestClient, channel: Snowflake, message: Snowflake) {
+        self.dirty = true;
+        self.notice = None;
+        if let Err(notice) = self.changeable(channel, message) {
+            self.notice = Some(notice);
+            return;
+        }
+        match self
+            .changes
+            .begin(channel, message, ChangeKind::Delete, false)
+        {
+            Ok(()) => self.start_change(rest, channel, message, ChangeRequest::Delete),
+            Err(notice) => self.notice = Some(notice),
+        }
+    }
+
+    /// The user's explicit retry of a failed edit or deletion, re-checked
+    /// against the store like a new one.
+    pub fn retry_change(&mut self, rest: &RestClient, channel: Snowflake, message: Snowflake) {
+        self.dirty = true;
+        self.notice = None;
+        if let Err(notice) = self.changeable(channel, message) {
+            self.notice = Some(notice);
+            return;
+        }
+        if let Some(request) = self.changes.retry(channel, message) {
+            self.start_change(rest, channel, message, request);
+        }
+    }
+
+    /// The user's dismissal of a failed edit or deletion.
+    pub fn dismiss_change(&mut self, channel: Snowflake, message: Snowflake) {
+        if self.changes.dismiss(channel, message) {
+            self.dirty = true;
+        }
+    }
+
+    /// Makes the request once; its answer comes back through [`Completed`].
+    fn start_change(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        message: Snowflake,
+        request: ChangeRequest,
+    ) {
+        let rest = rest.clone();
+        self.change_requests.push(Box::pin(async move {
+            let result = match request {
+                ChangeRequest::Edit(edit) => ChangeResult::Edited(
+                    rest.edit_message(channel, message, &edit)
+                        .await
+                        .map(Box::new),
+                ),
+                ChangeRequest::Delete => {
+                    ChangeResult::Deleted(rest.delete_message(channel, message).await)
+                }
+            };
+            ChangeDone {
+                channel,
+                message,
+                result,
+            }
+        }));
+    }
+
+    /// Applies Discord's answer to a change. Returns whether Discord rejected
+    /// the login. The answer goes into the store through the same path as the
+    /// Gateway's report of it, so whichever arrives second changes nothing; an
+    /// edit's answer older than an edit the Gateway already reported is not
+    /// applied, and neither can recreate a message that is gone.
+    fn finish_change(&mut self, done: ChangeDone) -> bool {
+        let ChangeDone {
+            channel,
+            message,
+            result,
+        } = done;
+        self.dirty = true;
+        let (error, edit) = match result {
+            ChangeResult::Edited(Ok(answer)) => {
+                self.changes.finish(channel, message, Ok(()));
+                let held = self.store.get(channel, message);
+                if let Some(update) = edit_response_update(held.as_deref(), *answer) {
+                    self.apply_store(&Dispatch::MessageUpdate(Box::new(update)));
+                }
+                return false;
+            }
+            ChangeResult::Deleted(Ok(())) => (None, false),
+            ChangeResult::Edited(Err(error)) => (Some(error), true),
+            ChangeResult::Deleted(Err(error)) => (Some(error), false),
+        };
+        match error {
+            // Deleted, or (404) already gone: either way the message no longer
+            // exists, and an edit of it cannot be saved.
+            None | Some(RestError::ResourceGone) => {
+                self.changes.finish(channel, message, Ok(()));
+                self.apply_store(&Dispatch::MessageDelete(MessageDelete {
+                    id: message,
+                    channel_id: channel,
+                    guild_id: None,
+                }));
+                if edit {
+                    self.notice = Some(DELETED_WHILE_EDITING);
+                }
+                false
+            }
+            Some(error) => {
+                let reason = if edit {
+                    changes::edit_failure(error)
+                } else {
+                    changes::delete_failure(error)
+                };
+                if self.changes.finish(channel, message, Err(reason))
+                    && self.store.revision(channel, message).is_none()
+                {
+                    // No row can show this failure; say so once and let it go.
+                    self.changes.dismiss(channel, message);
+                    self.notice = Some(UNSHOWN_FAILURE);
+                }
+                error == RestError::AuthenticationRequired
+            }
         }
     }
 
@@ -279,6 +543,7 @@ impl History {
             .is_none_or(|window| window.newer.is_none());
         self.list.set_live(live);
         self.focus();
+        self.prune_changes();
     }
 
     /// `None` is the live edge: the newest rows are the ones to keep.
@@ -426,7 +691,7 @@ impl History {
         }
     }
 
-    /// Resolves when an in-flight page or send does; never resolves with none.
+    /// Resolves when an in-flight page, send, or change does; never resolves with none.
     pub async fn next_completed(&mut self) -> Completed {
         let page = async {
             match &mut self.pending {
@@ -440,9 +705,16 @@ impl History {
                 None => std::future::pending().await,
             }
         };
+        let change = async {
+            match self.change_requests.next().await {
+                Some(done) => done,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             page = page => Completed::Page(page),
             (id, result) = send => Completed::Send(id, result),
+            done = change => Completed::Change(done),
         }
     }
 
@@ -451,6 +723,7 @@ impl History {
         match completed {
             Completed::Page(result) => self.finish(result),
             Completed::Send(id, result) => self.finish_send(rest, id, result),
+            Completed::Change(done) => self.finish_change(done),
         }
     }
 
@@ -553,7 +826,14 @@ impl History {
             .into_iter()
             .map(|(message, _)| {
                 let revision = self.store.revision(channel, message.id).unwrap_or(0);
-                Row { message, revision }
+                let own = self.user.is_some_and(|user| is_own_message(&message, user));
+                let change = self.changes.of(channel, message.id);
+                Row {
+                    message,
+                    revision,
+                    own,
+                    change,
+                }
             })
             .collect();
         let bounds = self.store.window(channel);
@@ -568,6 +848,7 @@ impl History {
             error: self.error,
             outbox: self.outbox.items(),
             can_send: self.sendable == Some(channel),
+            notice: self.notice,
         }
     }
 }
@@ -578,9 +859,10 @@ mod tests {
     use fastcord_discord::message_store::{MAX_MESSAGES_PER_CHANNEL, MESSAGE_BUDGET};
     use fastcord_discord::state::navigation::{ChannelSelection, PermissionSummary};
     use fastcord_discord::{NetworkFailure, RetryableFailure, StatusCode, UserToken};
-    use fastcord_model::{MessageUpdate, User};
+    use fastcord_model::{Attachment, MessageUpdate, User};
 
     use super::*;
+    use crate::changes::{ChangeState, RowChange};
     use crate::outbox::OutboxState;
     use crate::variable_list::{Anchor, ScrollTarget};
 
@@ -1121,5 +1403,358 @@ mod tests {
                 Err(SendError::NotSent(RestError::AuthenticationRequired))
             )
         ));
+    }
+
+    /// Drops the change request futures as if they had been sent; tests never
+    /// poll them, so nothing reaches the network.
+    fn take_changes(history: &mut History) -> usize {
+        std::mem::take(&mut history.change_requests).len()
+    }
+
+    fn attachment() -> Attachment {
+        Attachment {
+            id: Snowflake(77),
+            filename: "cat.png".to_owned(),
+            size: 1_024,
+            url: "https://cdn.example/attachments/cat.png".to_owned(),
+            proxy_url: None,
+            content_type: Some("image/png".to_owned()),
+            width: Some(64),
+            height: Some(64),
+        }
+    }
+
+    /// A sending history that also holds the account's own message
+    /// `NEWEST + 1`, which has an attachment.
+    fn with_own_message() -> (History, Snowflake) {
+        let mut history = sending_history();
+        let mut message = own(NEWEST + 1, "tpyo", None);
+        message.attachments.push(attachment());
+        history.apply(&Dispatch::MessageCreate(message));
+        (history, Snowflake(NEWEST + 1))
+    }
+
+    fn held(history: &History, id: Snowflake) -> Arc<Message> {
+        history.store.get(CHANNEL, id).unwrap()
+    }
+
+    /// Discord's full answer to an edit: the held message with new text and time.
+    fn edited(history: &History, id: Snowflake, content: &str, at: &str) -> Box<Message> {
+        let mut message = (*held(history, id)).clone();
+        message.content = content.to_owned();
+        message.edited_timestamp = Some(at.to_owned());
+        Box::new(message)
+    }
+
+    /// The Gateway's MESSAGE_UPDATE for an edit: text and time only.
+    fn gateway_edit(id: Snowflake, content: &str, at: &str) -> Dispatch {
+        Dispatch::MessageUpdate(Box::new(MessageUpdate {
+            id,
+            channel_id: CHANNEL,
+            content: Some(content.to_owned()),
+            edited_timestamp: Some(Some(at.to_owned())),
+            flags: None,
+            pinned: None,
+            attachments: None,
+        }))
+    }
+
+    /// The row as the timeline would show it now (the worker synchronizes the
+    /// layout index on every refresh before it publishes).
+    fn row_of(history: &mut History, id: Snowflake) -> Row {
+        history.refresh(&rest(), &navigation(true), &Request::default());
+        history
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.message.id == id)
+            .unwrap()
+    }
+
+    fn answered(id: Snowflake, result: ChangeResult) -> Completed {
+        Completed::Change(ChangeDone {
+            channel: CHANNEL,
+            message: id,
+            result,
+        })
+    }
+
+    const T1: &str = "2026-10-08T09:01:00.000000+00:00";
+    const T2: &str = "2026-10-08T09:02:00.000000+00:00";
+    const T3: &str = "2026-10-08T09:03:00.000000+00:00";
+    const T4: &str = "2026-10-08T09:04:00.000000+00:00";
+
+    #[test]
+    fn an_edit_changes_only_the_text_and_either_arrival_order_shows_it_once() {
+        let rest = rest();
+        let (mut history, id) = with_own_message();
+        let row = row_of(&mut history, id);
+        assert!(row.own && row.change.is_none());
+
+        // REST answer first, then the Gateway's echo.
+        history.edit_message(&rest, CHANNEL, id, "  typo fixed \n");
+        assert_eq!(take_changes(&mut history), 1);
+        let row = row_of(&mut history, id);
+        assert_eq!(
+            row.change,
+            Some(RowChange {
+                kind: ChangeKind::Edit(Arc::from("typo fixed")),
+                state: ChangeState::Saving,
+            }),
+            "shown as being saved, trimmed"
+        );
+        assert_eq!(
+            row.message.content, "tpyo",
+            "the store keeps Discord's copy"
+        );
+        let answer = edited(&history, id, "typo fixed", T1);
+        assert!(!history.complete(&rest, answered(id, ChangeResult::Edited(Ok(answer)))));
+        let row = row_of(&mut history, id);
+        assert!(row.change.is_none());
+        assert_eq!(row.message.content, "typo fixed");
+        assert_eq!(row.message.attachments, vec![attachment()]);
+        let revision = row.revision;
+        history.apply(&gateway_edit(id, "typo fixed", T1));
+        assert_eq!(
+            history.store.revision(CHANNEL, id),
+            Some(revision),
+            "the echo changes nothing"
+        );
+
+        // The Gateway first (it omits attachments), then the REST answer.
+        history.edit_message(&rest, CHANNEL, id, "second");
+        assert_eq!(take_changes(&mut history), 1);
+        history.apply(&gateway_edit(id, "second", T2));
+        assert!(
+            row_of(&mut history, id).change.is_some_and(|c| c.saving()),
+            "the change waits for its own answer"
+        );
+        assert_eq!(held(&history, id).attachments, vec![attachment()]);
+        let answer = edited(&history, id, "second", T2);
+        history.complete(&rest, answered(id, ChangeResult::Edited(Ok(answer))));
+        let row = row_of(&mut history, id);
+        assert!(row.change.is_none());
+        assert_eq!(row.message.content, "second");
+        assert_eq!(row.message.attachments, vec![attachment()]);
+
+        // Another client edits again before this answer arrives: the older
+        // answer does not overwrite the newer text.
+        history.edit_message(&rest, CHANNEL, id, "third");
+        assert_eq!(take_changes(&mut history), 1);
+        let stale = edited(&history, id, "third", T3);
+        history.apply(&gateway_edit(id, "fourth", T4));
+        history.complete(&rest, answered(id, ChangeResult::Edited(Ok(stale))));
+        assert_eq!(held(&history, id).content, "fourth");
+        assert_eq!(held(&history, id).attachments, vec![attachment()]);
+        assert_eq!(
+            history
+                .store
+                .ids(CHANNEL)
+                .filter(|held| *held == id)
+                .count(),
+            1
+        );
+        assert_eq!(take_changes(&mut history), 0, "nothing was sent again");
+    }
+
+    #[test]
+    fn only_the_users_own_loaded_messages_of_the_open_channel_are_changed() {
+        let rest = rest();
+        let (mut history, id) = with_own_message();
+        // Someone else's message (author 1 + n % 7, never SELF).
+        let theirs = Snowflake(NEWEST);
+        assert!(!row_of(&mut history, theirs).own);
+        history.edit_message(&rest, CHANNEL, theirs, "hijack");
+        assert_eq!(history.snapshot().notice, Some(NOT_OWN));
+        history.delete_message(&rest, CHANNEL, theirs);
+        assert_eq!(history.snapshot().notice, Some(NOT_OWN));
+        // A system message naming the user as its author.
+        let mut joined = own(NEWEST + 2, "", None);
+        joined.kind = 7;
+        history.apply(&Dispatch::MessageCreate(joined));
+        assert!(!row_of(&mut history, Snowflake(NEWEST + 2)).own);
+        history.delete_message(&rest, CHANNEL, Snowflake(NEWEST + 2));
+        assert_eq!(history.snapshot().notice, Some(NOT_OWN));
+        // Not loaded, or not in the open channel.
+        history.delete_message(&rest, CHANNEL, Snowflake(5));
+        assert_eq!(history.snapshot().notice, Some(NOT_LOADED));
+        history.edit_message(&rest, Snowflake(778), id, "elsewhere");
+        assert_eq!(history.snapshot().notice, Some(NOT_OPEN));
+        assert_eq!(take_changes(&mut history), 0);
+        // Before READY nothing is anyone's own.
+        let mut anonymous = History::default();
+        open_latest(&mut anonymous);
+        anonymous.apply(&Dispatch::MessageCreate(own(NEWEST + 1, "x", None)));
+        anonymous.delete_message(&rest, CHANNEL, Snowflake(NEWEST + 1));
+        assert_eq!(anonymous.snapshot().notice, Some(NOT_OWN));
+        assert_eq!(take_changes(&mut anonymous), 0);
+        // The user's own message is accepted, and a valid command clears the notice.
+        history.delete_message(&rest, CHANNEL, id);
+        assert_eq!(take_changes(&mut history), 1);
+        assert_eq!(history.snapshot().notice, None);
+    }
+
+    #[test]
+    fn edits_are_validated_and_unchanged_text_needs_no_request() {
+        let rest = rest();
+        let (mut history, id) = with_own_message();
+        history.apply(&Dispatch::MessageCreate(own(NEWEST + 2, "plain", None)));
+        let plain = Snowflake(NEWEST + 2);
+        history.edit_message(&rest, CHANNEL, plain, " \n ");
+        assert_eq!(history.snapshot().notice, Some(EMPTY_EDIT));
+        history.edit_message(&rest, CHANNEL, plain, &"x".repeat(4_001));
+        assert_eq!(history.snapshot().notice, Some(LONG_EDIT));
+        history.edit_message(&rest, CHANNEL, plain, "  plain ");
+        assert_eq!(history.snapshot().notice, None);
+        assert_eq!(take_changes(&mut history), 0, "nothing changed");
+        // With an attachment the text may go; the attachment stays the message.
+        history.edit_message(&rest, CHANNEL, id, "");
+        assert_eq!(take_changes(&mut history), 1);
+        // One change per message at a time.
+        history.delete_message(&rest, CHANNEL, id);
+        assert_eq!(history.snapshot().notice, Some(changes::BUSY));
+        assert_eq!(take_changes(&mut history), 0);
+    }
+
+    #[test]
+    fn a_deletion_removes_the_row_once_and_a_404_counts_as_deleted() {
+        let rest = rest();
+        let (mut history, id) = with_own_message();
+        history.delete_message(&rest, CHANNEL, id);
+        assert_eq!(take_changes(&mut history), 1);
+        assert_eq!(
+            row_of(&mut history, id).change.map(|change| change.kind),
+            Some(ChangeKind::Delete)
+        );
+        history.complete(&rest, answered(id, ChangeResult::Deleted(Ok(()))));
+        assert!(history.store.get(CHANNEL, id).is_none());
+        history.apply(&Dispatch::MessageDelete(MessageDelete {
+            id,
+            channel_id: CHANNEL,
+            guild_id: None,
+        }));
+        assert_eq!(history.changes.len(), 0);
+
+        // The Gateway first: the change ends, the late answer changes nothing.
+        history.apply(&Dispatch::MessageCreate(own(NEWEST + 2, "two", None)));
+        let two = Snowflake(NEWEST + 2);
+        history.delete_message(&rest, CHANNEL, two);
+        history.apply(&Dispatch::MessageDelete(MessageDelete {
+            id: two,
+            channel_id: CHANNEL,
+            guild_id: None,
+        }));
+        assert_eq!(history.changes.len(), 0);
+        history.complete(&rest, answered(two, ChangeResult::Deleted(Ok(()))));
+        assert!(history.store.get(CHANNEL, two).is_none());
+
+        // Already gone (404): deleted, not a failure.
+        history.apply(&Dispatch::MessageCreate(own(NEWEST + 3, "three", None)));
+        let three = Snowflake(NEWEST + 3);
+        history.delete_message(&rest, CHANNEL, three);
+        history.complete(
+            &rest,
+            answered(three, ChangeResult::Deleted(Err(RestError::ResourceGone))),
+        );
+        assert!(history.store.get(CHANNEL, three).is_none());
+        assert_eq!(history.changes.len(), 0);
+        assert_eq!(history.snapshot().notice, None);
+
+        // An edit answered 404: the message is gone, and the user is told.
+        history.apply(&Dispatch::MessageCreate(own(NEWEST + 4, "four", None)));
+        let four = Snowflake(NEWEST + 4);
+        history.edit_message(&rest, CHANNEL, four, "four!");
+        history.complete(
+            &rest,
+            answered(four, ChangeResult::Edited(Err(RestError::ResourceGone))),
+        );
+        assert!(history.store.get(CHANNEL, four).is_none());
+        assert_eq!(history.snapshot().notice, Some(DELETED_WHILE_EDITING));
+        assert_eq!(take_changes(&mut history), 3, "one request per action");
+    }
+
+    #[test]
+    fn failed_changes_wait_for_the_user_and_resolve_from_the_gateway() {
+        let rest = rest();
+        let (mut history, id) = with_own_message();
+        let timeout = RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout));
+        history.edit_message(&rest, CHANNEL, id, "maybe saved");
+        take_changes(&mut history);
+        assert!(!history.complete(&rest, answered(id, ChangeResult::Edited(Err(timeout)))));
+        let change = row_of(&mut history, id).change.unwrap();
+        assert!(
+            matches!(change.state, ChangeState::Failed(reason) if reason.contains("may have been saved"))
+        );
+        assert_eq!(change.failed_edit(), Some("maybe saved"));
+        // Nothing the worker does by itself asks again.
+        history.refresh(&rest, &navigation(true), &Request::default());
+        history.apply(&Dispatch::MessageCreate(Box::new(message(NEWEST + 5))));
+        history.apply(&gateway_edit(id, "another client's text", T1));
+        assert_eq!(take_changes(&mut history), 0);
+        assert!(row_of(&mut history, id).change.is_some());
+        // It was saved after all: the Gateway reports exactly that text.
+        history.apply(&gateway_edit(id, "maybe saved", T2));
+        assert!(row_of(&mut history, id).change.is_none());
+        assert_eq!(held(&history, id).content, "maybe saved");
+
+        // A refused deletion is retried only on request, once, then dismissed.
+        history.delete_message(&rest, CHANNEL, id);
+        take_changes(&mut history);
+        history.complete(
+            &rest,
+            answered(id, ChangeResult::Deleted(Err(RestError::PermissionDenied))),
+        );
+        assert!(matches!(
+            row_of(&mut history, id).change.unwrap().state,
+            ChangeState::Failed(reason) if reason.contains("not allow")
+        ));
+        history.retry_change(&rest, CHANNEL, id);
+        assert_eq!(take_changes(&mut history), 1);
+        history.retry_change(&rest, CHANNEL, id);
+        assert_eq!(take_changes(&mut history), 0, "already being saved");
+        history.complete(
+            &rest,
+            answered(id, ChangeResult::Deleted(Err(RestError::PermissionDenied))),
+        );
+        history.dismiss_change(CHANNEL, id);
+        assert!(row_of(&mut history, id).change.is_none());
+        assert_eq!(held(&history, id).content, "maybe saved", "still there");
+
+        // A login rejected while saving is reported to the worker.
+        history.edit_message(&rest, CHANNEL, id, "x");
+        assert_eq!(take_changes(&mut history), 1);
+        assert!(history.complete(
+            &rest,
+            answered(
+                id,
+                ChangeResult::Edited(Err(RestError::AuthenticationRequired))
+            )
+        ));
+
+        // A failure for a message that left with its channel keeps nothing.
+        history.retry_change(&rest, CHANNEL, id);
+        assert_eq!(take_changes(&mut history), 1);
+        history.refresh(&rest, &NavigationSnapshot::default(), &Request::default());
+        history.complete(&rest, answered(id, ChangeResult::Edited(Err(timeout))));
+        assert_eq!(history.changes.len(), 0);
+    }
+
+    #[test]
+    fn unfinished_changes_are_bounded() {
+        use crate::changes::MAX_CHANGES;
+        let rest = rest();
+        let mut history = sending_history();
+        for n in 1..=MAX_CHANGES as u64 + 1 {
+            history.apply(&Dispatch::MessageCreate(own(NEWEST + n, "mine", None)));
+        }
+        for n in 1..=MAX_CHANGES as u64 {
+            history.delete_message(&rest, CHANNEL, Snowflake(NEWEST + n));
+        }
+        assert_eq!(take_changes(&mut history), MAX_CHANGES);
+        let last = Snowflake(NEWEST + MAX_CHANGES as u64 + 1);
+        history.edit_message(&rest, CHANNEL, last, "one too many");
+        assert_eq!(history.snapshot().notice, Some(changes::FULL));
+        assert_eq!(take_changes(&mut history), 0);
+        assert!(row_of(&mut history, last).change.is_none());
     }
 }

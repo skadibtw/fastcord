@@ -1441,6 +1441,32 @@ pub(crate) mod harness {
                 offset,
             );
         }
+
+        /// The pointer moves to `(x, y)` and clicks there, as a user does;
+        /// returns whatever the widgets published on the way.
+        pub fn click(&mut self, x: f32, y: f32) -> Vec<Message> {
+            let position = core::Point::new(x, y);
+            let cursor = mouse::Cursor::Available(position);
+            let mut messages = Vec::new();
+            for event in [
+                mouse::Event::CursorMoved { position },
+                mouse::Event::ButtonPressed(mouse::Button::Left),
+                mouse::Event::ButtonReleased(mouse::Button::Left),
+            ] {
+                let mut shell = core::Shell::new(&mut messages);
+                self.element.as_widget_mut().update(
+                    &mut self.tree,
+                    &core::Event::Mouse(event),
+                    core::Layout::new(&self.node),
+                    cursor,
+                    &self.renderer,
+                    &mut core::clipboard::Null,
+                    &mut shell,
+                    &core::Rectangle::with_size(self.size),
+                );
+            }
+            messages
+        }
     }
 }
 

@@ -100,6 +100,16 @@ marked "Not confirmed": it resolves by itself if Discord reports it, and Retry
 send cannot post it twice within a few minutes, because it reuses the original
 nonce.
 
+## Editing and deleting your messages
+
+Point at one of your own messages to show Edit and Delete; other people's
+messages, and system messages, never offer them. Edit moves the text into the
+message box (your unsent draft is set aside and comes back afterwards): Enter
+saves, Escape cancels. Only the text is changed, so attachments stay. Delete
+asks for confirmation in the message itself. A change that Discord did not
+confirm stays on the message with Retry and Dismiss; fastcord never retries by
+itself. Edits and deletions made in another client appear here as well.
+
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).

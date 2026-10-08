@@ -14,15 +14,22 @@
 //! grow when they arrive, and the measured-height path keeps the reader's
 //! position when they do.
 //!
+//! The user's own messages (the worker decides which those are) offer Edit and
+//! Delete while hovered; other people's messages offer neither. Deleting asks
+//! for confirmation in the row first. Editing happens in the composer; the row
+//! only says so. An edit being saved shows its new text at once, marked as
+//! saving, and falls back to Discord's copy if it fails.
+//!
 //! [`VariableList`]: crate::variable_list::VariableList
 use std::sync::Arc;
 
 use fastcord_model::{Attachment, Message, Snowflake};
 use iced::alignment::{Horizontal, Vertical};
 use iced::font::{Font, Weight};
-use iced::widget::{button, column, container, row, stack, text};
+use iced::widget::{button, column, container, hover, row, stack, text};
 use iced::{Element, Length, Padding};
 
+use crate::changes::{ChangeKind, ChangeState, RowChange};
 use crate::outbox::OutboxItem;
 use crate::variable_list::{self, Item, Measurement, Report, ScrollRequest, Viewport, Window};
 
@@ -41,6 +48,22 @@ const BOLD: Font = Font {
 pub struct Row {
     pub message: Arc<Message>,
     pub revision: u64,
+    /// The user wrote it and may edit and delete it (decided by the worker).
+    pub own: bool,
+    /// Its unfinished edit or deletion.
+    pub change: Option<RowChange>,
+}
+
+#[cfg(test)]
+impl Row {
+    pub fn new(message: Arc<Message>, revision: u64) -> Self {
+        Self {
+            message,
+            revision,
+            own: false,
+            change: None,
+        }
+    }
 }
 
 /// Everything the timeline view needs, and nothing else. `rows` are exactly
@@ -68,6 +91,17 @@ pub struct Snapshot {
     pub outbox: Vec<OutboxItem>,
     /// The user may send to this channel (validated by the worker).
     pub can_send: bool,
+    /// Why the last edit or deletion could not be carried out, if it could not.
+    pub notice: Option<&'static str>,
+}
+
+/// What the UI is doing with a row that the snapshot does not know about.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Interaction {
+    /// The message whose text is in the composer for editing.
+    pub editing: Option<Snowflake>,
+    /// The message whose deletion waits for confirmation.
+    pub confirming: Option<Snowflake>,
 }
 
 /// What the timeline asks of the worker. Each event names its channel.
@@ -92,6 +126,29 @@ pub enum Event {
     },
     Retry {
         channel_id: Snowflake,
+    },
+    /// Put one of the user's messages into the composer for editing.
+    Edit {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    /// Ask to delete one of the user's messages (confirmation follows).
+    Delete {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    ConfirmDelete {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    CancelDelete,
+    RetryChange {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    DismissChange {
+        channel_id: Snowflake,
+        message_id: Snowflake,
     },
 }
 
@@ -136,7 +193,7 @@ impl Controls {
     }
 }
 
-pub fn view(snapshot: &Snapshot) -> Element<'_, Event> {
+pub fn view(snapshot: &Snapshot, interaction: Interaction) -> Element<'_, Event> {
     let Some(channel_id) = snapshot.channel_id else {
         return centered("Select a channel to read its messages.");
     };
@@ -146,7 +203,7 @@ pub fn view(snapshot: &Snapshot) -> Element<'_, Event> {
                 id: row.message.id,
                 revision: row.revision,
             },
-            message_view(&row.message),
+            message_view(row, channel_id, interaction),
         )
     });
     let list = variable_list::view(
@@ -242,9 +299,61 @@ fn jump_layer(channel_id: Snowflake) -> Element<'static, Event> {
     .into()
 }
 
-/// Author, time, wrapped content, and attachment lines. Plain text only: no
-/// embeds, markdown, or emoji assets yet.
-fn message_view(message: &Message) -> Element<'_, Event> {
+/// What a row offers besides the message itself, decided from the row and the
+/// UI's interaction state alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowState {
+    /// Someone else's message: nothing to offer.
+    Plain,
+    /// The user's message: Edit and Delete while hovered.
+    Actions,
+    /// The composer holds this message's text.
+    Editing,
+    /// Delete was pressed; the deletion waits for confirmation.
+    Confirming,
+    /// An edit or deletion is on its way to Discord.
+    Saving { delete: bool },
+    /// Discord did not accept the change: the reason, Retry, and Dismiss, and
+    /// Edit and Delete while hovered.
+    Failed { delete: bool, reason: &'static str },
+}
+
+fn row_state(row: &Row, interaction: Interaction) -> RowState {
+    if !row.own {
+        return RowState::Plain;
+    }
+    let id = Some(row.message.id);
+    let change = row
+        .change
+        .as_ref()
+        .map(|change| (change.kind == ChangeKind::Delete, change.state));
+    match change {
+        Some((delete, ChangeState::Saving)) => RowState::Saving { delete },
+        _ if interaction.confirming == id => RowState::Confirming,
+        _ if interaction.editing == id => RowState::Editing,
+        Some((delete, ChangeState::Failed(reason))) => RowState::Failed { delete, reason },
+        None => RowState::Actions,
+    }
+}
+
+fn row_button(label: &'static str, event: Event) -> button::Button<'static, Event> {
+    button(text(label).size(12))
+        .on_press(event)
+        .padding(Padding {
+            top: 2.0,
+            right: 8.0,
+            bottom: 2.0,
+            left: 8.0,
+        })
+        .style(button::secondary)
+}
+
+/// Author, time, wrapped content, attachment lines, and the controls of the
+/// user's own messages. Plain text only: no embeds, markdown, or emoji assets yet.
+fn message_view(row: &Row, channel_id: Snowflake, interaction: Interaction) -> Element<'_, Event> {
+    let message = &*row.message;
+    let message_id = message.id;
+    let state = row_state(row, interaction);
     let mut header = row![
         text(message.author.display_name()).font(BOLD).size(15),
         text(format_timestamp(&message.timestamp))
@@ -256,10 +365,18 @@ fn message_view(message: &Message) -> Element<'_, Event> {
     if message.edited_timestamp.is_some() {
         header = header.push(text("(edited)").size(12).style(text::secondary));
     }
+    // An edit being saved shows its new text right away.
+    let content = match &row.change {
+        Some(RowChange {
+            kind: ChangeKind::Edit(text),
+            state: ChangeState::Saving,
+        }) => text,
+        _ => message.content.as_str(),
+    };
     let mut body = column![header].spacing(2);
-    if !message.content.is_empty() {
+    if !content.is_empty() {
         body = body.push(
-            text(message.content.as_str())
+            text(content)
                 .size(14)
                 .width(Length::Fill)
                 .wrapping(text::Wrapping::WordOrGlyph),
@@ -276,15 +393,100 @@ fn message_view(message: &Message) -> Element<'_, Event> {
                 .style(text::secondary),
         );
     }
-    container(body)
-        .width(Length::Fill)
-        .padding(Padding {
-            top: 6.0,
-            right: 16.0,
-            bottom: 6.0,
-            left: 12.0,
-        })
-        .into()
+    let status = |line: &'static str| text(line).size(12).style(text::secondary);
+    let retry = row_button(
+        "Retry",
+        Event::RetryChange {
+            channel_id,
+            message_id,
+        },
+    );
+    let dismiss = row_button(
+        "Dismiss",
+        Event::DismissChange {
+            channel_id,
+            message_id,
+        },
+    );
+    let edit = Event::Edit {
+        channel_id,
+        message_id,
+    };
+    body = match state {
+        RowState::Plain | RowState::Actions => body,
+        RowState::Saving { delete: false } => body.push(status("Saving your edit…")),
+        RowState::Saving { delete: true } => body.push(status("Deleting…")),
+        RowState::Editing => body.push(status(
+            "Editing in the message box below. Enter saves, Escape cancels.",
+        )),
+        RowState::Confirming => body.push(
+            row![
+                text("Delete this message? This cannot be undone.")
+                    .size(12)
+                    .style(text::danger),
+                row_button(
+                    "Delete",
+                    Event::ConfirmDelete {
+                        channel_id,
+                        message_id,
+                    },
+                )
+                .style(button::danger),
+                row_button("Cancel", Event::CancelDelete),
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center),
+        ),
+        RowState::Failed { delete, reason } => {
+            // The reason names the action and whether it may have taken effect.
+            let actions = if delete {
+                row![retry, dismiss]
+            } else {
+                row![retry, row_button("Edit", edit), dismiss]
+            };
+            body.push(
+                text(reason)
+                    .size(12)
+                    .width(Length::Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph)
+                    .style(text::danger),
+            )
+            .push(actions.spacing(8))
+        }
+    };
+    let base = container(body).width(Length::Fill).padding(Padding {
+        top: 6.0,
+        right: 16.0,
+        bottom: 6.0,
+        left: 12.0,
+    });
+    if !matches!(state, RowState::Actions | RowState::Failed { .. }) {
+        return base.into();
+    }
+    // Shown over the top right of the row while the pointer is on it; the row's
+    // height, and so the measured layout, does not depend on it.
+    let actions = container(
+        row![
+            row_button("Edit", edit),
+            row_button(
+                "Delete",
+                Event::Delete {
+                    channel_id,
+                    message_id,
+                },
+            ),
+        ]
+        .spacing(4),
+    )
+    .width(Length::Fill)
+    .align_x(Horizontal::Right)
+    .padding(Padding {
+        top: 4.0,
+        right: 12.0,
+        bottom: 0.0,
+        left: 0.0,
+    });
+    hover(base, actions)
 }
 
 /// What to show for a message without text or attachments.
@@ -391,10 +593,7 @@ mod tests {
 
     fn snapshot(rows: u64, history: usize) -> Snapshot {
         let rows: Vec<Row> = (1..=rows)
-            .map(|n| Row {
-                message: message(n, "hello world"),
-                revision: 1,
-            })
+            .map(|n| Row::new(message(n, "hello world"), 1))
             .collect();
         let built = rows.len();
         Snapshot {
@@ -416,7 +615,7 @@ mod tests {
     }
 
     fn built_nodes(snapshot: &Snapshot) -> usize {
-        let element = view(snapshot);
+        let element = view(snapshot, Interaction::default());
         nodes(&Tree::new(&element))
     }
 
@@ -503,13 +702,17 @@ mod tests {
     fn debug_output_never_contains_bodies_or_signed_urls() {
         let state = Snapshot {
             rows: vec![Row {
-                message: message(7, "private conversation"),
-                revision: 3,
+                own: true,
+                change: Some(RowChange {
+                    kind: ChangeKind::Edit(Arc::from("private edit")),
+                    state: ChangeState::Saving,
+                }),
+                ..Row::new(message(7, "private conversation"), 3)
             }],
             ..snapshot(0, 1)
         };
         let printed = format!("{state:?} {:?}", state.rows[0]);
-        assert!(!printed.contains("private conversation"), "{printed}");
+        assert!(!printed.contains("private"), "{printed}");
         assert!(
             !printed.contains("SIGNED") && !printed.contains("cdn.example"),
             "{printed}"
@@ -590,10 +793,7 @@ mod tests {
         let long = "A long message that must wrap onto several lines when the window is narrow. "
             .repeat(8);
         let rows: Vec<Row> = (1..=12)
-            .map(|n| Row {
-                message: message(n, if n % 3 == 0 { "short" } else { &long }),
-                revision: 1,
-            })
+            .map(|n| Row::new(message(n, if n % 3 == 0 { "short" } else { &long }), 1))
             .collect();
         let mut totals = Vec::new();
         for width in [320.0, 640.0, 1100.0] {
@@ -610,7 +810,7 @@ mod tests {
                 rows: rows.clone(),
                 ..Snapshot::default()
             };
-            let mut ui = Ui::new(width, 500.0, view(&snapshot));
+            let mut ui = Ui::new(width, 500.0, view(&snapshot, Interaction::default()));
             let events = ui.redraw();
             ui.draw();
             let mut viewport = None;
@@ -656,5 +856,187 @@ mod tests {
             totals[0] >= totals[1] && totals[1] >= totals[2],
             "{totals:?}"
         );
+    }
+
+    const CHANNEL: Snowflake = Snowflake(500);
+
+    fn own(row: Row, change: Option<RowChange>) -> Row {
+        Row {
+            own: true,
+            change,
+            ..row
+        }
+    }
+
+    fn failed(kind: ChangeKind) -> Option<RowChange> {
+        Some(RowChange {
+            kind,
+            state: ChangeState::Failed("refused"),
+        })
+    }
+
+    /// Someone else's message 1, the user's message 2, and the user's message
+    /// 3 whose edit failed.
+    fn mixed() -> Snapshot {
+        let rows = vec![
+            Row::new(message(1, "theirs"), 1),
+            own(Row::new(message(2, "mine"), 1), None),
+            own(
+                Row::new(message(3, "mine too"), 1),
+                failed(ChangeKind::Edit(Arc::from("mine, fixed"))),
+            ),
+        ];
+        Snapshot {
+            channel_id: Some(CHANNEL),
+            window: Window {
+                range: 0..rows.len(),
+                height: 400.0,
+                at_bottom: true,
+                ..Window::default()
+            },
+            rows,
+            ..Snapshot::default()
+        }
+    }
+
+    /// Everything a user can trigger by pointing at and clicking anywhere in
+    /// the timeline, in first-found order, without layout reports.
+    fn clickable(snapshot: &Snapshot, interaction: Interaction) -> Vec<Event> {
+        let mut ui = Ui::new(640.0, 400.0, view(snapshot, interaction));
+        ui.redraw();
+        ui.draw();
+        let mut found = Vec::new();
+        for y in (0..400).step_by(5) {
+            for x in (0..640).step_by(5) {
+                for event in ui.click(x as f32, y as f32) {
+                    if !matches!(event, Event::Viewport { .. } | Event::Measured { .. })
+                        && !found.contains(&event)
+                    {
+                        found.push(event);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    fn names(event: &Event, id: u64) -> bool {
+        let message = Snowflake(id);
+        matches!(
+            *event,
+            Event::Edit { message_id, .. }
+                | Event::Delete { message_id, .. }
+                | Event::ConfirmDelete { message_id, .. }
+                | Event::RetryChange { message_id, .. }
+                | Event::DismissChange { message_id, .. }
+                if message_id == message
+        )
+    }
+
+    #[test]
+    fn only_the_users_own_messages_offer_edit_and_delete() {
+        let found = clickable(&mixed(), Interaction::default());
+        let at = |message_id: u64| (CHANNEL, Snowflake(message_id));
+        let edit = |(channel_id, message_id)| Event::Edit {
+            channel_id,
+            message_id,
+        };
+        let delete = |(channel_id, message_id)| Event::Delete {
+            channel_id,
+            message_id,
+        };
+        assert!(found.contains(&edit(at(2))), "{found:?}");
+        assert!(found.contains(&delete(at(2))), "{found:?}");
+        // A failed edit offers Retry and Dismiss, and the row stays editable.
+        for event in [
+            edit(at(3)),
+            delete(at(3)),
+            Event::RetryChange {
+                channel_id: CHANNEL,
+                message_id: Snowflake(3),
+            },
+            Event::DismissChange {
+                channel_id: CHANNEL,
+                message_id: Snowflake(3),
+            },
+        ] {
+            assert!(found.contains(&event), "{event:?} in {found:?}");
+        }
+        // Nothing anywhere acts on someone else's message, and nothing deletes
+        // without a confirmation first.
+        assert!(!found.iter().any(|event| names(event, 1)), "{found:?}");
+        assert!(
+            !found
+                .iter()
+                .any(|event| matches!(event, Event::ConfirmDelete { .. }))
+        );
+    }
+
+    #[test]
+    fn deleting_needs_a_confirmation_in_the_row() {
+        let found = clickable(
+            &mixed(),
+            Interaction {
+                confirming: Some(Snowflake(2)),
+                editing: Some(Snowflake(3)),
+            },
+        );
+        assert!(found.contains(&Event::ConfirmDelete {
+            channel_id: CHANNEL,
+            message_id: Snowflake(2),
+        }));
+        assert!(found.contains(&Event::CancelDelete));
+        // While confirming or editing, a row offers nothing else.
+        assert!(!found.iter().any(|event| matches!(
+            event,
+            Event::Edit { .. } | Event::Delete { .. } | Event::RetryChange { .. }
+        )));
+    }
+
+    #[test]
+    fn a_change_being_saved_offers_nothing_and_the_row_says_so() {
+        let saving = |kind| {
+            own(
+                Row::new(message(2, "mine"), 1),
+                Some(RowChange {
+                    kind,
+                    state: ChangeState::Saving,
+                }),
+            )
+        };
+        let ui = Interaction {
+            confirming: Some(Snowflake(2)),
+            editing: Some(Snowflake(2)),
+        };
+        let edit = saving(ChangeKind::Edit(Arc::from("new")));
+        assert_eq!(row_state(&edit, ui), RowState::Saving { delete: false });
+        let delete = saving(ChangeKind::Delete);
+        assert_eq!(row_state(&delete, ui), RowState::Saving { delete: true });
+        let snapshot = Snapshot {
+            rows: vec![delete],
+            ..mixed()
+        };
+        let snapshot = Snapshot {
+            window: Window {
+                range: 0..1,
+                ..snapshot.window.clone()
+            },
+            ..snapshot
+        };
+        assert!(clickable(&snapshot, Interaction::default()).is_empty());
+        // States for the rest.
+        let mine = own(Row::new(message(2, "mine"), 1), None);
+        assert_eq!(row_state(&mine, Interaction::default()), RowState::Actions);
+        let theirs = Row::new(message(2, "theirs"), 1);
+        assert_eq!(row_state(&theirs, ui), RowState::Plain);
+        let lost = own(mine, failed(ChangeKind::Delete));
+        assert_eq!(
+            row_state(&lost, Interaction::default()),
+            RowState::Failed {
+                delete: true,
+                reason: "refused"
+            }
+        );
+        assert_eq!(row_state(&lost, ui), RowState::Confirming);
     }
 }

@@ -26,9 +26,9 @@ all    <-  app                (binary `fastcord`, iced UI, orchestration)
 | Path | Purpose |
 |---|---|
 | `crates/fastcord-model` | Pure domain types (`Snowflake`, entities); no I/O, runtime, or GUI deps |
-| `crates/fastcord-discord` | Authenticated REST transport, rate-limit scheduler, QR-login remote-auth client (`remote_auth`), main user Gateway lifecycle and opcode-37 subscriptions (`gateway`), single-writer bounded normalized account state (`state`), typed channel-history reads (`history`), byte-bounded message bodies with focus-based retention and in-flight page reconciliation (`message_store`), message creation with nonce, explicit mention policy, and not-sent/ambiguous failure classification (`send`) |
+| `crates/fastcord-discord` | Authenticated REST transport, rate-limit scheduler, QR-login remote-auth client (`remote_auth`), main user Gateway lifecycle and opcode-37 subscriptions (`gateway`), single-writer bounded normalized account state (`state`), typed channel-history reads (`history`), byte-bounded message bodies with focus-based retention and in-flight page reconciliation (`message_store`), message creation with nonce, explicit mention policy, and not-sent/ambiguous failure classification (`send`), own-message ownership, content-only edits, deletion, and edit-answer ordering (`edit`) |
 | `crates/fastcord-platform` | Native credential storage; one target-selected keyring backend |
-| `crates/fastcord-app` | iced application; binary name `fastcord`; history coordinator and send reconciliation (`history`), unconfirmed-send outbox (`outbox`), message composer (`composer`), variable-height virtual list (`variable_list`), and message timeline (`timeline`) |
+| `crates/fastcord-app` | iced application; binary name `fastcord`; history coordinator with send and edit/delete reconciliation (`history`), unconfirmed-send outbox (`outbox`), unfinished edits/deletions of own messages (`changes`), message composer with edit mode (`composer`), variable-height virtual list (`variable_list`), and message timeline with own-message actions (`timeline`) |
 | `docs/` | `SPEC.md` (design + milestones), `PROTOCOL.md` (what is actually sent/expected on the wire), `TESTING.md`, `RELEASE.md` |
 | `scripts/package.sh` | Per-target release packaging used by CI |
 | `packaging/macos/Info.plist` | `.app` bundle template (`@VERSION@` substituted) |
