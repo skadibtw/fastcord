@@ -722,23 +722,27 @@ impl History {
         navigation: &NavigationSnapshot,
         request: &Request,
     ) {
-        let selected = navigation
-            .selection
-            .as_ref()
+        let guild_selection = navigation.selection.as_ref();
+        let private_selection = navigation.private_selection.as_ref();
+        let selected = guild_selection
             .filter(|selection| {
                 matches!(
                     selection.kind,
                     ChannelKind::Text | ChannelKind::Announcement
                 ) && selection.permissions.read_history
             })
-            .map(|selection| selection.channel_id);
-        self.sendable = navigation
-            .selection
-            .as_ref()
+            .map(|selection| selection.channel_id)
+            .or_else(|| private_selection.map(|selection| selection.channel_id));
+        self.sendable = guild_selection
             .filter(|selection| {
                 Some(selection.channel_id) == selected && selection.permissions.send_messages
             })
-            .map(|selection| selection.channel_id);
+            .map(|selection| selection.channel_id)
+            .or_else(|| {
+                private_selection
+                    .filter(|selection| Some(selection.channel_id) == selected)
+                    .map(|selection| selection.channel_id)
+            });
         if selected != self.channel {
             // Revisits fetch a fresh page instead of keeping hidden histories.
             self.reset();
@@ -2295,5 +2299,27 @@ mod tests {
         assert_eq!(history.snapshot().notice, Some(changes::FULL));
         assert_eq!(take_changes(&mut history), 0);
         assert!(row_of(&mut history, last).change.is_none());
+    }
+    #[test]
+    fn selected_private_conversation_uses_the_existing_history_and_send_path() {
+        let rest = rest();
+        let mut history = History::new(Slots::default());
+        let channel = Snowflake(300_000_000_000_000_001);
+        let navigation = NavigationSnapshot {
+            private_selection: Some(
+                fastcord_discord::state::navigation::PrivateChannelSelection {
+                    channel_id: channel,
+                    name: "Nelly".to_owned(),
+                },
+            ),
+            ..NavigationSnapshot::default()
+        };
+        history.refresh(&rest, &navigation, &Request::default());
+        assert_eq!(history.snapshot().channel_id, Some(channel));
+        assert!(history.snapshot().can_send);
+
+        history.refresh(&rest, &NavigationSnapshot::default(), &Request::default());
+        assert_eq!(history.snapshot().channel_id, None);
+        assert!(!history.snapshot().can_send);
     }
 }

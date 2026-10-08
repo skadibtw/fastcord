@@ -19,10 +19,11 @@ use fastcord_model::{
 use serde::{Deserialize, Deserializer};
 
 use super::event::{
-    ChannelUnread, Dispatch, GroupId, GuildCreate, GuildDelete, GuildMemberEvent,
-    GuildMemberRemove, GuildRoleDelete, GuildRoleEvent, GuildUpdate, ListGroup, ListRow,
-    MemberListId, MemberListOp, MemberListUpdate, MessageDelete, MessageDeleteBulk, PassiveUpdate,
-    Ready, ReadySupplemental, SessionId, SupplementalGuild, VoiceStateUpdate,
+    ChannelRecipientAdd, ChannelRecipientRemove, ChannelUnread, Dispatch, GroupId, GuildCreate,
+    GuildDelete, GuildMemberEvent, GuildMemberRemove, GuildRoleDelete, GuildRoleEvent, GuildUpdate,
+    ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate, MessageDelete,
+    MessageDeleteBulk, PassiveUpdate, Ready, ReadySupplemental, SessionId, SupplementalGuild,
+    VoiceStateUpdate,
 };
 
 /// A known payload that did not decode into its typed form.
@@ -231,6 +232,11 @@ struct UserPresence {
 #[derive(Deserialize)]
 struct GuildMemberRemoveWire {
     guild_id: Snowflake,
+    user: WireUser,
+}
+#[derive(Deserialize)]
+struct ChannelRecipientRemoveWire {
+    channel_id: Snowflake,
     user: WireUser,
 }
 
@@ -574,6 +580,13 @@ fn decode_member_remove(raw: &str) -> Result<GuildMemberRemove, Malformed> {
         user_id: wire.user.id,
     })
 }
+fn decode_channel_recipient_remove(raw: &str) -> Result<ChannelRecipientRemove, Malformed> {
+    let wire: ChannelRecipientRemoveWire = json(raw)?;
+    Ok(ChannelRecipientRemove {
+        channel_id: wire.channel_id,
+        user_id: wire.user.id,
+    })
+}
 
 fn decode_voice_state(raw: &str) -> Result<VoiceStateUpdate, Malformed> {
     let state: VoiceState = json(raw)?;
@@ -687,6 +700,11 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "CHANNEL_CREATE" => json::<Channel>(raw).map(|c| Dispatch::ChannelCreate(Box::new(c))),
         "CHANNEL_UPDATE" => json::<Channel>(raw).map(|c| Dispatch::ChannelUpdate(Box::new(c))),
         "CHANNEL_DELETE" => json::<Channel>(raw).map(|c| Dispatch::ChannelDelete(Box::new(c))),
+        "CHANNEL_RECIPIENT_ADD" => {
+            json::<ChannelRecipientAdd>(raw).map(|c| Dispatch::ChannelRecipientAdd(Box::new(c)))
+        }
+        "CHANNEL_RECIPIENT_REMOVE" => decode_channel_recipient_remove(raw)
+            .map(|event| Dispatch::ChannelRecipientRemove(Box::new(event))),
         "PASSIVE_UPDATE_V2" => {
             decode_passive_update(raw).map(|p| Dispatch::PassiveUpdate(Box::new(p)))
         }
@@ -1297,6 +1315,27 @@ mod tests {
         assert!(left.state.channel_id.is_none() && left.member.is_none());
     }
 
+    #[test]
+    fn channel_recipient_events_decode_their_distinct_wire_shapes() {
+        let Decoded::Event(Dispatch::ChannelRecipientAdd(added)) = decode_dispatch(
+            "CHANNEL_RECIPIENT_ADD",
+            r#"{"channel_id":"300","user":{"id":"42","username":"new","global_name":null,"avatar":null}}"#,
+        ) else {
+            panic!("CHANNEL_RECIPIENT_ADD did not decode");
+        };
+        assert_eq!(added.channel_id, id(300));
+        assert_eq!(added.user.id, id(42));
+        assert_eq!(added.user.username, "new");
+
+        let Decoded::Event(Dispatch::ChannelRecipientRemove(removed)) = decode_dispatch(
+            "CHANNEL_RECIPIENT_REMOVE",
+            r#"{"channel_id":"300","user":{"id":"42"}}"#,
+        ) else {
+            panic!("CHANNEL_RECIPIENT_REMOVE did not decode");
+        };
+        assert_eq!(removed.channel_id, id(300));
+        assert_eq!(removed.user_id, id(42));
+    }
     #[test]
     fn voice_server_updates_decode_and_never_show_the_token() {
         let Decoded::Event(event) = decode_dispatch("VOICE_SERVER_UPDATE", VOICE_SERVER) else {

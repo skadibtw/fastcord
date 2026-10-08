@@ -10,7 +10,10 @@ mod voice_audio;
 
 use voice_audio::VoiceAudioState;
 
+use std::collections::VecDeque;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,16 +23,16 @@ use fastcord_discord::gateway::{
 use fastcord_discord::state::Store;
 use fastcord_discord::state::navigation::{Navigation, NavigationSnapshot};
 use fastcord_media::{Correlation, JoinCorrelator};
-use fastcord_model::{Snowflake, VoiceStateRequest};
+use fastcord_model::{Channel, Snowflake, VoiceStateRequest};
 use tokio::sync::{mpsc, watch};
 
 use crate::composer::Composer;
-use crate::history::{History, Intent};
+use crate::history::{Completed, History, Intent};
 use crate::outbox::{OpId, Reply, Slots};
 use crate::timeline;
 use crate::variable_list::{Measurement, Viewport};
 use crate::virtual_list::Window;
-use fastcord_discord::{RestClient, UserToken};
+use fastcord_discord::{PrivateChannelError, RestClient, UserToken};
 use iced::futures::{Stream, stream};
 use iced::task::Handle;
 
@@ -192,6 +195,7 @@ impl Tracker {
 enum SelectionIntent {
     Guild(Snowflake),
     Channel(Snowflake, Snowflake),
+    PrivateChannel(Snowflake),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -200,6 +204,7 @@ struct Request {
     selection: Option<SelectionIntent>,
     guilds: Window,
     channels: Window,
+    private_channels: Window,
     timeline: crate::history::Request,
 }
 
@@ -208,7 +213,9 @@ struct Latest {
     snapshot: Arc<NavigationSnapshot>,
     timeline: Arc<timeline::Snapshot>,
     status: Option<GatewayStatus>,
+    private_notice: Option<String>,
     notified: bool,
+    private_notice_pending: bool,
 }
 
 /// What one consumed notification carries to the UI.
@@ -216,6 +223,7 @@ pub struct Consumed {
     pub navigation: Arc<NavigationSnapshot>,
     pub timeline: Arc<timeline::Snapshot>,
     pub status: Option<GatewayStatus>,
+    pub private_notice: Option<String>,
 }
 
 /// An explicit, ordered user action on the outbox or on one of the user's
@@ -249,6 +257,7 @@ pub enum Command {
         channel: Snowflake,
         message: Snowflake,
     },
+    OpenPrivate(Vec<Snowflake>),
 }
 
 // Message text never reaches a log.
@@ -286,6 +295,7 @@ impl fmt::Debug for Command {
                 .field("channel", channel)
                 .field("message", message)
                 .finish(),
+            Self::OpenPrivate(_) => f.write_str("OpenPrivate([selected recipients])"),
         }
     }
 }
@@ -460,7 +470,37 @@ impl NavigationBridge {
             navigation: Arc::clone(&latest.snapshot),
             timeline: Arc::clone(&latest.timeline),
             status: latest.status.clone(),
+            private_notice: latest.private_notice.clone(),
         }
+    }
+    fn set_private_notice(&self, notice: String) {
+        let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        latest.private_notice = Some(notice);
+        latest.notified = true;
+        latest.private_notice_pending = true;
+    }
+    fn clear_private_notice(&self) {
+        let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        if latest.private_notice.take().is_some() {
+            latest.notified = true;
+            latest.private_notice_pending = true;
+        }
+    }
+    fn clear_private_notice_on_selection_change(&self, selection: Option<Snowflake>) {
+        let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = latest
+            .snapshot
+            .private_selection
+            .as_ref()
+            .map(|selection| selection.channel_id);
+        if previous != selection && latest.private_notice.take().is_some() {
+            latest.notified = true;
+            latest.private_notice_pending = true;
+        }
+    }
+    fn take_private_notice_pending(&self) -> bool {
+        let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut latest.private_notice_pending)
     }
 
     /// Atomically takes the request, leaving the one-shot parts (the newest
@@ -478,6 +518,7 @@ impl NavigationBridge {
     }
 
     pub fn select_guild(&self, id: Snowflake) {
+        self.clear_private_notice();
         self.requests.send_modify(|request| {
             request.revision = request.revision.wrapping_add(1);
             request.selection = Some(SelectionIntent::Guild(id));
@@ -486,6 +527,7 @@ impl NavigationBridge {
     }
 
     pub fn select_channel(&self, guild: Snowflake, channel: Snowflake) {
+        self.clear_private_notice();
         self.requests.send_modify(|request| {
             request.revision = request.revision.wrapping_add(1);
             request.selection = Some(SelectionIntent::Channel(guild, channel));
@@ -503,6 +545,15 @@ impl NavigationBridge {
                 return false;
             }
             *old = window;
+            true
+        });
+    }
+    pub fn private_viewport(&self, window: Window) {
+        self.requests.send_if_modified(|request| {
+            if request.private_channels == window {
+                return false;
+            }
+            request.private_channels = window;
             true
         });
     }
@@ -525,6 +576,41 @@ impl NavigationBridge {
             request.timeline.intent = Some(intent);
         });
     }
+    pub fn select_private_channel(&self, channel: Snowflake) {
+        self.clear_private_notice();
+        self.requests.send_modify(|request| {
+            request.revision = request.revision.wrapping_add(1);
+            request.selection = Some(SelectionIntent::PrivateChannel(channel));
+        });
+    }
+
+    pub fn open_private_channel(&self, recipients: Vec<Snowflake>) -> bool {
+        if recipients.is_empty()
+            || recipients.len() > fastcord_discord::MAX_PRIVATE_RECIPIENTS
+            || recipients
+                .iter()
+                .enumerate()
+                .any(|(index, id)| recipients[..index].contains(id))
+        {
+            return false;
+        }
+        self.commands
+            .try_send(Command::OpenPrivate(recipients))
+            .is_ok()
+    }
+}
+
+type PrivateListFuture = Pin<Box<dyn Future<Output = (u64, Result<Vec<Channel>, String>)> + Send>>;
+type PrivateOpenFuture =
+    Pin<Box<dyn Future<Output = (u64, Result<Channel, PrivateChannelError>)> + Send>>;
+
+enum WorkerInput {
+    Request,
+    VoiceRequest,
+    History(Completed),
+    Command(Command),
+    PrivateList(u64, Result<Vec<Channel>, String>),
+    PrivateOpen(u64, Result<Channel, PrivateChannelError>),
 }
 
 struct Worker {
@@ -540,6 +626,187 @@ struct Worker {
     voice_correlator: Option<JoinCorrelator>,
     voice_task: Option<tokio::task::JoinHandle<()>>,
     voice_cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    private_list_generation: u64,
+    private_list_loaded_generation: Option<u64>,
+    private_list_task: Option<PrivateListFuture>,
+    private_open_task: Option<PrivateOpenFuture>,
+    pending_private_opens: VecDeque<Vec<Snowflake>>,
+}
+
+impl Worker {
+    fn begin_private_list_fetch(&mut self) -> u64 {
+        self.private_list_generation = self.private_list_generation.wrapping_add(1);
+        self.private_list_loaded_generation = None;
+        self.private_list_task = None;
+        self.private_open_task = None;
+        self.pending_private_opens.clear();
+        self.bridge.clear_private_notice();
+        self.private_list_generation
+    }
+
+    fn finish_private_list_fetch(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<Channel>, String>,
+    ) -> Option<GatewayStatus> {
+        if generation != self.private_list_generation
+            || self.private_list_loaded_generation == Some(generation)
+        {
+            return None;
+        }
+        match result {
+            Ok(channels) => {
+                for channel in channels {
+                    self.tracker.store.apply(GatewayEvent::Dispatch {
+                        sequence: 0,
+                        event: Dispatch::ChannelCreate(Box::new(channel)),
+                    });
+                }
+                self.tracker.navigation_dirty = true;
+                self.private_list_loaded_generation = Some(generation);
+                self.tracker
+                    .store
+                    .limit_exceeded()
+                    .then_some(GatewayStatus::Stopped(StopReason::StateTooLarge))
+            }
+            Err(error) => {
+                self.bridge
+                    .set_private_notice(format!("Could not refresh direct conversations: {error}"));
+                self.tracker.navigation_dirty = true;
+                None
+            }
+        }
+    }
+}
+
+impl Worker {
+    fn apply_gateway_event(
+        &mut self,
+        event: GatewayEvent,
+        start_private_list: impl FnOnce(&mut Self),
+    ) -> Option<GatewayStatus> {
+        let ready = matches!(
+            &event,
+            GatewayEvent::Dispatch {
+                event: Dispatch::Ready(_),
+                ..
+            }
+        );
+        let status = self.tracker.apply(event);
+        if ready {
+            start_private_list(self);
+        }
+        status
+    }
+    fn start_private_list_fetch_with(
+        &mut self,
+        future: impl Future<Output = Result<Vec<Channel>, String>> + Send + 'static,
+    ) -> u64 {
+        let generation = self.begin_private_list_fetch();
+        self.private_list_task = Some(Box::pin(async move { (generation, future.await) }));
+        generation
+    }
+
+    fn start_private_list_fetch(&mut self) -> u64 {
+        let rest = self.rest.clone();
+        self.start_private_list_fetch_with(async move {
+            rest.private_channels()
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn start_private_open(&mut self, recipients: Vec<Snowflake>) {
+        let generation = self.private_list_generation;
+        let rest = self.rest.clone();
+        self.private_open_task = Some(Box::pin(async move {
+            (generation, rest.open_private_channel(&recipients).await)
+        }));
+    }
+    fn queue_private_open(&mut self, recipients: Vec<Snowflake>) {
+        if self.private_open_task.is_some() {
+            self.pending_private_opens.push_back(recipients);
+        } else {
+            self.start_private_open(recipients);
+        }
+    }
+
+    fn start_next_private_open(&mut self) {
+        if self.private_open_task.is_none()
+            && let Some(recipients) = self.pending_private_opens.pop_front()
+        {
+            self.start_private_open(recipients);
+        }
+    }
+    fn finish_private_open(
+        &mut self,
+        generation: u64,
+        result: Result<Channel, PrivateChannelError>,
+    ) -> Option<GatewayStatus> {
+        if generation != self.private_list_generation {
+            return None;
+        }
+        match result {
+            Ok(channel) => {
+                let channel_id = channel.id;
+                self.tracker.store.apply(GatewayEvent::Dispatch {
+                    sequence: 0,
+                    event: Dispatch::ChannelCreate(Box::new(channel)),
+                });
+                self.tracker.navigation.reconcile(&self.tracker.store);
+                self.tracker
+                    .navigation
+                    .select_private_channel(&self.tracker.store, channel_id);
+                self.tracker.navigation_dirty = true;
+            }
+            Err(error) => {
+                self.bridge
+                    .set_private_notice(format!("Could not open direct conversation: {error:?}"));
+                self.tracker.navigation_dirty = true;
+            }
+        }
+        self.tracker
+            .store
+            .limit_exceeded()
+            .then_some(GatewayStatus::Stopped(StopReason::StateTooLarge))
+    }
+
+    async fn next_input(&mut self) -> Option<WorkerInput> {
+        tokio::select! {
+            changed = self.requests.changed() => {
+                changed.ok().map(|()| WorkerInput::Request)
+            }
+            changed = self.voice_requests.changed() => {
+                changed.ok().map(|()| WorkerInput::VoiceRequest)
+            }
+            completed = self.tracker.history.next_completed() => {
+                Some(WorkerInput::History(completed))
+            }
+            Some(command) = self.commands.recv(),
+                if self.pending_private_opens.len() < COMMAND_QUEUE =>
+            {
+                Some(WorkerInput::Command(command))
+            }
+            completed = async {
+                match self.private_list_task.as_mut() {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                self.private_list_task = None;
+                Some(WorkerInput::PrivateList(completed.0, completed.1))
+            }
+            completed = async {
+                match self.private_open_task.as_mut() {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                self.private_open_task = None;
+                Some(WorkerInput::PrivateOpen(completed.0, completed.1))
+            }
+        }
+    }
 }
 
 impl Worker {
@@ -571,6 +838,7 @@ impl Worker {
             Command::DismissChange { channel, message } => {
                 history.dismiss_change(channel, message);
             }
+            Command::OpenPrivate(_) => {}
         }
     }
 
@@ -660,7 +928,6 @@ impl Worker {
             Correlation::Ignored | Correlation::Waiting => {}
         }
     }
-
     fn refresh(
         &mut self,
         gateway: &Gateway,
@@ -681,6 +948,11 @@ impl Worker {
                         .navigation
                         .select_channel(&self.tracker.store, channel);
                 }
+                Some(SelectionIntent::PrivateChannel(channel)) => {
+                    self.tracker
+                        .navigation
+                        .select_private_channel(&self.tracker.store, channel);
+                }
                 _ => {}
             }
             self.revision = request.revision;
@@ -691,12 +963,23 @@ impl Worker {
             .subscription_target(&self.tracker.store);
         self.tracker.store.focus(&target);
         gateway.subscriptions().update(|current| *current = target);
-        let navigation = self.tracker.navigation.snapshot(
+        let navigation = self.tracker.navigation.snapshot_with_private(
             &self.tracker.store,
             request.guilds.start,
             request.guilds.count,
             request.channels.start,
             request.channels.count,
+            request.private_channels.start
+                ..request
+                    .private_channels
+                    .start
+                    .saturating_add(request.private_channels.count),
+        );
+        self.bridge.clear_private_notice_on_selection_change(
+            navigation
+                .private_selection
+                .as_ref()
+                .map(|selection| selection.channel_id),
         );
         // History follows the validated selection: permission loss closes it,
         // and nothing is fetched until a readable channel is selected.
@@ -746,6 +1029,11 @@ pub fn status_stream(
         voice_correlator: None,
         voice_task: None,
         voice_cancel_tx: None,
+        private_list_generation: 0,
+        private_list_task: None,
+        private_open_task: None,
+        pending_private_opens: VecDeque::new(),
+        private_list_loaded_generation: None,
     };
     stream::unfold(worker, |mut worker| async move {
         let mut gateway = match worker.gateway.take() {
@@ -760,32 +1048,48 @@ pub fn status_stream(
                 event = gateway.next_event() => {
                     let event = event?;
                     let correlation = worker.voice_dispatch(&event);
-                    let status = worker.tracker.apply(event);
+                    let status = worker.apply_gateway_event(event, |worker| {
+                        worker.start_private_list_fetch();
+                    });
                     if let Some(correlation) = correlation {
                         worker.handle_correlation(correlation).await;
                     }
                     (status, false)
                 }
-                changed = worker.requests.changed() => {
-                    changed.ok()?;
-                    (None, true)
-                }
-                changed = worker.voice_requests.changed() => {
-                    changed.ok()?;
-                    worker.stop_voice().await;
-                    if worker.request_voice_state(&gateway) {
-                        (None, true)
-                    } else {
-                        (None, false)
+                input = worker.next_input() => {
+                    let input = input?;
+                    match input {
+                        WorkerInput::Request => (None, true),
+                        WorkerInput::VoiceRequest => {
+                            worker.stop_voice().await;
+                            if worker.request_voice_state(&gateway) {
+                                (None, true)
+                            } else {
+                                (None, false)
+                            }
+                        }
+                        WorkerInput::History(completed) => {
+                            let rejected = worker.tracker.history.complete(&worker.rest, completed);
+                            (rejected.then_some(GatewayStatus::AuthenticationRequired), false)
+                        }
+                        WorkerInput::Command(Command::OpenPrivate(recipients)) => {
+                            worker.queue_private_open(recipients);
+                            (None, false)
+                        }
+                        WorkerInput::Command(command) => {
+                            worker.command(command);
+                            (None, false)
+                        }
+                        WorkerInput::PrivateList(generation, result) => {
+                            let status = worker.finish_private_list_fetch(generation, result);
+                            (status, false)
+                        }
+                        WorkerInput::PrivateOpen(generation, result) => {
+                            let status = worker.finish_private_open(generation, result);
+                            worker.start_next_private_open();
+                            (status, false)
+                        }
                     }
-                }
-                completed = worker.tracker.history.next_completed() => {
-                    let rejected = worker.tracker.history.complete(&worker.rest, completed);
-                    (rejected.then_some(GatewayStatus::AuthenticationRequired), false)
-                }
-                Some(command) = worker.commands.recv() => {
-                    worker.command(command);
-                    (None, false)
                 }
             };
             if !requested
@@ -801,7 +1105,9 @@ pub fn status_stream(
                 status,
                 Some(GatewayStatus::Stopped(_)) | Some(GatewayStatus::AuthenticationRequired)
             );
-            let notified = worker.refresh(&gateway, request, status);
+            let snapshot_notification = worker.refresh(&gateway, request, status);
+            let notice_notification = worker.bridge.take_private_notice_pending();
+            let notified = notice_notification || snapshot_notification;
             if terminal {
                 worker.start = None;
                 worker.stop_voice().await;
@@ -815,6 +1121,12 @@ pub fn status_stream(
     })
 }
 
+#[derive(Debug, Default)]
+pub struct PrivateConversationUi {
+    pub recipients: String,
+    pub notice: Option<String>,
+}
+
 /// Messages from an earlier session (identified by `id`) are ignored.
 pub struct GatewayPanel {
     pub id: u64,
@@ -826,6 +1138,7 @@ pub struct GatewayPanel {
     pub composer: Composer,
     /// The user's message (channel, message) whose deletion waits for confirmation.
     pub confirm_delete: Option<(Snowflake, Snowflake)>,
+    pub private: Box<PrivateConversationUi>,
     _worker: Handle,
 }
 
@@ -847,6 +1160,7 @@ impl GatewayPanel {
             timeline: Arc::default(),
             controls,
             confirm_delete: None,
+            private: Box::default(),
             composer: Composer::default(),
             _worker: worker.abort_on_drop(),
         }
@@ -858,6 +1172,7 @@ impl GatewayPanel {
         let consumed = self.controls.consume();
         self.navigation = consumed.navigation;
         self.timeline = consumed.timeline;
+        self.private.notice = consumed.private_notice;
         self.composer.select(self.timeline.channel_id);
         if self
             .confirm_delete
@@ -1315,6 +1630,257 @@ mod tests {
                 private_channels: (0..dms as u64).map(dm).collect(),
             })),
         }
+    }
+    fn worker() -> Worker {
+        let bridge = NavigationBridge::new();
+        let rest =
+            RestClient::new(UserToken::new("offline-fixture-credential".to_owned())).unwrap();
+        Worker {
+            start: None,
+            rest: rest.clone(),
+            gateway: None,
+            tracker: Tracker::default(),
+            requests: bridge.requests.subscribe(),
+            voice_requests: bridge.voice_requests.subscribe(),
+            commands: bridge.take_commands().unwrap(),
+            revision: 0,
+            voice_correlator: None,
+            voice_task: None,
+            voice_cancel_tx: None,
+            private_list_generation: 0,
+            private_list_loaded_generation: None,
+            private_list_task: None,
+            private_open_task: None,
+            pending_private_opens: VecDeque::new(),
+            bridge,
+        }
+    }
+    fn private_channel(id: u64) -> Channel {
+        Channel {
+            id: Snowflake(id),
+            kind: ChannelKind::Dm,
+            guild_id: None,
+            name: None,
+            position: None,
+            parent_id: None,
+            permission_overwrites: Vec::new(),
+            recipients: Vec::new(),
+            recipient_ids: Vec::new(),
+            last_message_id: None,
+        }
+    }
+
+    #[test]
+    fn private_list_fetch_failure_retries_on_the_next_ready_generation() {
+        let mut worker = worker();
+        worker
+            .bridge
+            .set_private_notice("previous session failed".to_owned());
+        worker.begin_private_list_fetch();
+        assert!(worker.bridge.consume().private_notice.is_none());
+        worker.tracker.apply(ready_event(0, 0, 0));
+        let first_generation = worker.begin_private_list_fetch();
+        assert_eq!(
+            worker.finish_private_list_fetch(first_generation, Err("offline".to_owned())),
+            None
+        );
+        assert_eq!(worker.private_list_loaded_generation, None);
+        assert!(
+            worker
+                .bridge
+                .consume()
+                .private_notice
+                .as_deref()
+                .unwrap()
+                .contains("offline")
+        );
+
+        worker.tracker.apply(ready_event(0, 0, 0));
+        let second_generation = worker.begin_private_list_fetch();
+        assert_ne!(first_generation, second_generation);
+        assert_eq!(
+            worker.finish_private_list_fetch(second_generation, Ok(vec![private_channel(300)]),),
+            None
+        );
+        assert_eq!(
+            worker.private_list_loaded_generation,
+            Some(second_generation)
+        );
+        assert!(
+            worker
+                .tracker
+                .store
+                .private_channel(Snowflake(300))
+                .is_some()
+        );
+        assert!(worker.bridge.consume().private_notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn late_list_failure_marks_the_worker_dirty_for_notice_publication() {
+        let mut worker = worker();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        worker.apply_gateway_event(ready_event(0, 0, 0), |worker| {
+            worker.start_private_list_fetch_with(async move { receiver.await.unwrap() });
+        });
+        // READY's snapshot was already published before its list request failed.
+        worker.tracker.navigation_dirty = false;
+
+        sender.send(Err("offline".to_owned())).unwrap();
+        let WorkerInput::PrivateList(generation, result) = worker.next_input().await.unwrap()
+        else {
+            panic!("expected the stalled list completion");
+        };
+        worker.finish_private_list_fetch(generation, result);
+        assert!(
+            worker.tracker.navigation_dirty,
+            "the worker must publish the new notice even after READY was already consumed"
+        );
+    }
+
+    #[test]
+    fn late_private_list_result_cannot_overwrite_a_new_ready_generation() {
+        let mut worker = worker();
+        worker.tracker.apply(ready_event(0, 0, 0));
+        let stale_generation = worker.begin_private_list_fetch();
+        worker.tracker.apply(ready_event(0, 0, 0));
+        let current_generation = worker.begin_private_list_fetch();
+
+        worker.finish_private_list_fetch(stale_generation, Ok(vec![private_channel(301)]));
+        assert!(
+            worker
+                .tracker
+                .store
+                .private_channel(Snowflake(301))
+                .is_none()
+        );
+        assert_eq!(
+            worker.finish_private_open(stale_generation, Ok(private_channel(303))),
+            None
+        );
+        assert!(
+            worker
+                .tracker
+                .store
+                .private_channel(Snowflake(303))
+                .is_none()
+        );
+        worker.finish_private_list_fetch(current_generation, Ok(vec![private_channel(302)]));
+        assert!(
+            worker
+                .tracker
+                .store
+                .private_channel(Snowflake(302))
+                .is_some()
+        );
+        assert_eq!(
+            worker.private_list_loaded_generation,
+            Some(current_generation)
+        );
+    }
+    #[tokio::test]
+    async fn stalled_private_list_does_not_block_ready_voice_or_commands() {
+        let mut worker = worker();
+        worker.rest.stop_authenticated_work();
+        let (old_sender, old_receiver) = tokio::sync::oneshot::channel();
+        let generation = worker.apply_gateway_event(ready_event(0, 0, 0), |worker| {
+            worker.start_private_list_fetch_with(async move { old_receiver.await.unwrap() });
+        });
+        assert_eq!(generation, None);
+        let old_generation = worker.private_list_generation;
+
+        assert!(worker.bridge.open_private_channel(vec![Snowflake(90)]));
+        assert!(worker.bridge.send_message(
+            Snowflake(300),
+            "fixture command".to_owned(),
+            false,
+            None
+        ));
+        worker
+            .bridge
+            .voice_requests
+            .send_replace(Some(VoiceStateRequest::join(
+                Some(Snowflake(1)),
+                Snowflake(2),
+                false,
+                false,
+            )));
+
+        let (mut saw_open, mut saw_send, mut saw_voice, mut saw_open_result) =
+            (false, false, false, false);
+        for _ in 0..8 {
+            match worker.next_input().await.unwrap() {
+                WorkerInput::Command(Command::OpenPrivate(recipients)) => {
+                    worker.queue_private_open(recipients);
+                    saw_open = true;
+                }
+                WorkerInput::Command(command @ Command::Send { .. }) => {
+                    worker.command(command);
+                    saw_send = true;
+                }
+                WorkerInput::VoiceRequest => saw_voice = true,
+                WorkerInput::PrivateOpen(generation, result) => {
+                    worker.finish_private_open(generation, result);
+                    worker.start_next_private_open();
+                    saw_open_result = true;
+                }
+                WorkerInput::History(completed) => {
+                    worker.tracker.history.complete(&worker.rest, completed);
+                }
+                _ => panic!("unexpected worker input while list REST is stalled"),
+            }
+            if saw_open && saw_send && saw_voice && saw_open_result {
+                break;
+            }
+        }
+        assert!(saw_open && saw_send && saw_voice && saw_open_result);
+        assert!(worker.tracker.history.dirty());
+
+        let (new_sender, new_receiver) = tokio::sync::oneshot::channel();
+        worker.apply_gateway_event(ready_event(0, 0, 0), |worker| {
+            worker.start_private_list_fetch_with(async move { new_receiver.await.unwrap() });
+        });
+        assert_ne!(worker.private_list_generation, old_generation);
+        assert!(
+            old_sender.send(Ok(vec![private_channel(301)])).is_err(),
+            "a later READY cancels the stale pending REST future"
+        );
+
+        new_sender.send(Ok(vec![private_channel(302)])).unwrap();
+        loop {
+            match worker.next_input().await.unwrap() {
+                WorkerInput::PrivateList(generation, result) => {
+                    worker.finish_private_list_fetch(generation, result);
+                    break;
+                }
+                WorkerInput::History(completed) => {
+                    worker.tracker.history.complete(&worker.rest, completed);
+                }
+                _ => panic!("unexpected worker input before current list completion"),
+            }
+        }
+        assert!(
+            worker
+                .tracker
+                .store
+                .private_channel(Snowflake(302))
+                .is_some()
+        );
+        assert!(
+            worker
+                .tracker
+                .store
+                .private_channel(Snowflake(301))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn changing_conversation_clears_a_stale_private_notice() {
+        let bridge = NavigationBridge::new();
+        bridge.set_private_notice("request failed".to_owned());
+        bridge.select_private_channel(Snowflake(300));
+        assert!(bridge.consume().private_notice.is_none());
     }
 
     #[test]

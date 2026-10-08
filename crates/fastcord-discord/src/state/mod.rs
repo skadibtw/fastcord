@@ -707,6 +707,41 @@ impl Store {
                 self.channel_upsert(*channel, &mut changes);
             }
             Dispatch::ChannelDelete(channel) => self.channel_remove(&channel, &mut changes),
+            Dispatch::ChannelRecipientAdd(event) => {
+                if self.private_channels.contains_key(&event.channel_id) {
+                    let user_id = event.user.id;
+                    let user_changed = self.users.get(&user_id) != Some(&event.user);
+                    if user_changed {
+                        self.put_user(event.user);
+                    }
+                    let (added, cost_delta) = {
+                        let channel = self.private_channels.get_mut(&event.channel_id).unwrap();
+                        let before = channel_bytes(channel);
+                        let added = !channel.recipient_ids.contains(&user_id);
+                        if added {
+                            channel.recipient_ids.push(user_id);
+                        }
+                        (added, channel_bytes(channel) - before)
+                    };
+                    self.private_bytes += cost_delta;
+                    changes.private_channels |= user_changed || added;
+                }
+            }
+            Dispatch::ChannelRecipientRemove(event) => {
+                if self.current_user == Some(event.user_id) {
+                    if let Some(channel) = self.private_channels.remove(&event.channel_id) {
+                        self.private_bytes -= channel_bytes(&channel);
+                        compact_map(&mut self.private_channels);
+                        changes.private_channels = true;
+                        self.sweep_users();
+                    }
+                } else if let Some(channel) = self.private_channels.get_mut(&event.channel_id) {
+                    let before = channel.recipient_ids.len();
+                    channel.recipient_ids.retain(|&id| id != event.user_id);
+                    changes.private_channels |= before != channel.recipient_ids.len();
+                    self.sweep_users();
+                }
+            }
             Dispatch::PassiveUpdate(update) => self.passive_update(*update, &mut changes),
             Dispatch::MemberListUpdate(update) => self.member_list_update(*update, &mut changes),
             Dispatch::GuildMemberAdd(event) => self.member_event(*event, true, &mut changes),

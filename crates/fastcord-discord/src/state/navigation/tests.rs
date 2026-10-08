@@ -908,3 +908,31 @@ fn timeout_permissions_use_injected_clock_without_polling_or_expired_restriction
         assert_eq!(text.send_messages, !blocked);
     }
 }
+#[test]
+fn private_conversations_are_listed_by_latest_activity_and_open_only_known_ids() {
+    let (mut store, mut navigation) = setup(READY);
+    let dm = id(300_000_000_000_000_001);
+    let group = id(300_000_000_000_000_002);
+    assert!(!navigation.select_private_channel(&store, id(999_999)));
+    assert!(navigation.select_private_channel(&store, dm));
+    navigation.reconcile(&store);
+    let snapshot = navigation.snapshot(&store, 0, 20, 0, 20);
+    assert_eq!(snapshot.private_selection.as_ref().unwrap().channel_id, dm);
+    assert_eq!(snapshot.private_selection.as_ref().unwrap().name, "Nelly");
+    assert_eq!(snapshot.private_channels.rows[0].id, dm);
+    assert_eq!(snapshot.private_channels.rows[0].label, "Nelly");
+    assert_eq!(snapshot.private_channels.rows[1].id, group);
+    assert_eq!(snapshot.private_channels.rows[1].label, "Study group");
+    assert!(snapshot.selected_guild.is_none());
+
+    assert!(navigation.select_guild(&store, id(FIRST)));
+    assert!(navigation.private_selection(&store).is_none());
+    assert!(navigation.select_private_channel(&store, group));
+    apply(
+        &mut store,
+        "CHANNEL_DELETE",
+        r#"{"id":"300000000000000002","type":3}"#,
+    );
+    navigation.reconcile(&store);
+    assert!(navigation.private_selection(&store).is_none());
+}

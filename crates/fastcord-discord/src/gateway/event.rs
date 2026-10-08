@@ -348,6 +348,17 @@ pub struct MemberListUpdate {
     pub members: Vec<GuildMember>,
     pub users: Vec<User>,
 }
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct ChannelRecipientAdd {
+    pub channel_id: Snowflake,
+    pub user: User,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelRecipientRemove {
+    pub channel_id: Snowflake,
+    pub user_id: Snowflake,
+}
 
 /// Typed dispatch events. Events the client has no handler for are consumed
 /// (their sequence still counts) and never surfaced. Live events keep their
@@ -368,6 +379,8 @@ pub enum Dispatch {
     ChannelCreate(Box<Channel>),
     ChannelUpdate(Box<Channel>),
     ChannelDelete(Box<Channel>),
+    ChannelRecipientAdd(Box<ChannelRecipientAdd>),
+    ChannelRecipientRemove(Box<ChannelRecipientRemove>),
     PassiveUpdate(Box<PassiveUpdate>),
     MemberListUpdate(Box<MemberListUpdate>),
     GuildMemberAdd(Box<GuildMemberEvent>),
@@ -398,6 +411,8 @@ impl Dispatch {
             Self::ChannelCreate(_) => "CHANNEL_CREATE",
             Self::ChannelUpdate(_) => "CHANNEL_UPDATE",
             Self::ChannelDelete(_) => "CHANNEL_DELETE",
+            Self::ChannelRecipientAdd(_) => "CHANNEL_RECIPIENT_ADD",
+            Self::ChannelRecipientRemove(_) => "CHANNEL_RECIPIENT_REMOVE",
             Self::PassiveUpdate(_) => "PASSIVE_UPDATE_V2",
             Self::MemberListUpdate(_) => "GUILD_MEMBER_LIST_UPDATE",
             Self::GuildMemberAdd(_) => "GUILD_MEMBER_ADD",

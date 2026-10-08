@@ -1,6 +1,6 @@
 //! Presentation of compact reducer-owned navigation windows, never full state.
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot};
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, alignment};
 
 use crate::Message;
@@ -13,6 +13,8 @@ pub fn view<'a>(
     history: &'a timeline::Snapshot,
     composer: &'a Composer,
     interaction: timeline::Interaction,
+    recipients: &'a str,
+    private_notice: Option<&'a str>,
 ) -> Element<'a, Message> {
     let guilds = snapshot.guilds.rows.iter().map(|guild| {
         let label = format!(
@@ -53,8 +55,33 @@ pub fn view<'a>(
             .map(|guild| Message::SelectChannel(guild, channel.id));
         fixed_button(label, intent)
     });
+    let private_channels = snapshot.private_channels.rows.iter().map(|channel| {
+        fixed_button(
+            format!(
+                "{}{}",
+                if channel.selected { "› " } else { "" },
+                channel.label
+            ),
+            Some(Message::SelectPrivateChannel(channel.id)),
+        )
+    });
     let mut detail = column![text("Choose a channel").size(24)];
-    if snapshot.permissions_pending {
+    if let Some(selection) = &snapshot.private_selection {
+        detail = column![
+            text(&selection.name).size(24),
+            text(
+                "Private conversation. Discord remains authoritative for message access and writes."
+            )
+            .size(13),
+        ];
+        if history.channel_id == Some(selection.channel_id) {
+            detail = detail
+                .push(timeline::view(history, interaction).map(Message::Timeline))
+                .push(composer::view(composer, history).map(Message::Composer));
+        } else {
+            detail = detail.push(text("Loading messages…").size(14));
+        }
+    } else if snapshot.permissions_pending {
         detail = detail.push(text("Waiting for your server membership and permissions. Channels remain closed until Discord supplies them."));
     } else if let Some(selection) = &snapshot.selection {
         detail = column![text(&selection.name).size(24)];
@@ -104,16 +131,43 @@ pub fn view<'a>(
     }
     row![
         column![
-            text("Servers"),
-            virtual_list::view(
-                "guild-list",
-                snapshot.guilds.offset,
-                snapshot.guilds.total,
-                guilds,
-                Message::GuildViewport
+            scrollable(
+                column![
+                    text("Servers"),
+                    virtual_list::view(
+                        "guild-list",
+                        snapshot.guilds.offset,
+                        snapshot.guilds.total,
+                        guilds,
+                        Message::GuildViewport
+                    ),
+                    text("Direct conversations"),
+                    virtual_list::view(
+                        "private-list",
+                        snapshot.private_channels.offset,
+                        snapshot.private_channels.total,
+                        private_channels,
+                        Message::PrivateViewport
+                    ),
+                ]
+                .spacing(4)
             )
+            .height(Length::Fill),
+            column![
+                text_input("Recipient IDs (comma separated)", recipients)
+                    .on_input(Message::PrivateRecipients)
+                    .size(12),
+                button("Open selected recipients").on_press(Message::OpenPrivate),
+                text(
+                    private_notice.unwrap_or("Select 1–9 recipient IDs to open a DM or group DM.")
+                )
+                .size(12),
+            ]
+            .spacing(4),
         ]
-        .width(190),
+        .spacing(4)
+        .height(Length::Fill)
+        .width(210),
         column![
             text("Channels"),
             virtual_list::view(
@@ -151,4 +205,44 @@ fn fixed_button<'a>(label: String, intent: Option<Message>) -> Element<'a, Messa
     .align_y(alignment::Vertical::Center)
     .clip(true)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fastcord_discord::state::navigation::{PrivateChannelRow, PrivateChannelSelection, Window};
+
+    #[test]
+    fn fixture_private_channel_builds_the_full_timeline_and_composer_view() {
+        let channel = fastcord_model::Snowflake(300_000_000_000_000_001);
+        let snapshot = NavigationSnapshot {
+            private_channels: Window {
+                offset: 0,
+                total: 1,
+                rows: vec![PrivateChannelRow {
+                    id: channel,
+                    label: "Nelly".to_owned(),
+                    selected: true,
+                }],
+            },
+            private_selection: Some(PrivateChannelSelection {
+                channel_id: channel,
+                name: "Nelly".to_owned(),
+            }),
+            ..NavigationSnapshot::default()
+        };
+        let timeline = timeline::Snapshot {
+            channel_id: Some(channel),
+            ..timeline::Snapshot::default()
+        };
+        let composer = Composer::default();
+        let _view = view(
+            &snapshot,
+            &timeline,
+            &composer,
+            timeline::Interaction::default(),
+            "80351110224678912",
+            None,
+        );
+    }
 }

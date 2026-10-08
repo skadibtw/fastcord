@@ -8,6 +8,7 @@
 //! of guild navigation.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use fastcord_model::{
     Channel, ChannelKind as ModelChannelKind, GuildScope, MemberScope, Permissions, Snowflake,
@@ -118,6 +119,19 @@ pub struct ChannelRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrivateChannelRow {
+    pub id: Snowflake,
+    pub label: String,
+    pub selected: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrivateChannelSelection {
+    pub channel_id: Snowflake,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelSelection {
     pub guild_id: Snowflake,
     pub channel_id: Snowflake,
@@ -130,6 +144,8 @@ pub struct ChannelSelection {
 pub struct NavigationSnapshot {
     pub guilds: Window<GuildRow>,
     pub channels: Window<ChannelRow>,
+    pub private_channels: Window<PrivateChannelRow>,
+    pub private_selection: Option<PrivateChannelSelection>,
     pub selected_guild: Option<Snowflake>,
     pub selection: Option<ChannelSelection>,
     /// Available guild lacks authoritative own-member/role/owner data.
@@ -144,6 +160,7 @@ pub struct Navigation {
     selected_guild: Option<Snowflake>,
     selected_channel: Option<Snowflake>,
     remembered: BTreeMap<Snowflake, Snowflake>,
+    selected_private_channel: Option<Snowflake>,
 }
 
 impl Navigation {
@@ -166,6 +183,7 @@ impl Navigation {
             self.account = account;
             self.selected_guild = None;
             self.selected_channel = None;
+            self.selected_private_channel = None;
             self.remembered = BTreeMap::new();
         }
         self.remembered.retain(|guild_id, channel_id| {
@@ -175,11 +193,19 @@ impl Navigation {
                 store.unavailable.contains(guild_id)
             }
         });
-        if !self
-            .selected_guild
-            .is_some_and(|guild| known_guild(store, guild))
+        self.selected_private_channel = self.selected_private_channel.filter(|id| {
+            store
+                .private_channel(*id)
+                .is_some_and(is_private_conversation)
+        });
+        if self.selected_private_channel.is_none()
+            && !self
+                .selected_guild
+                .is_some_and(|guild| known_guild(store, guild))
         {
             self.selected_guild = store.guild_ids().first().copied();
+        } else if self.selected_private_channel.is_some() {
+            self.selected_guild = None;
         }
         self.selected_channel = self.selected_guild.and_then(|guild| {
             store.guild(guild)?;
@@ -193,6 +219,7 @@ impl Navigation {
             return false;
         }
         self.reconcile(store);
+        self.selected_private_channel = None;
         self.selected_guild = Some(guild_id);
         self.selected_channel = self.remembered.get(&guild_id).copied();
         true
@@ -213,9 +240,69 @@ impl Navigation {
         if enabled_channel(store, guild, channel_id).is_none() {
             return false;
         }
+        self.selected_private_channel = None;
         self.selected_channel = Some(channel_id);
         self.remembered.insert(guild_id, channel_id);
         true
+    }
+
+    /// Selects only a private channel present in reducer-owned state.
+    pub fn select_private_channel(&mut self, store: &Store, channel_id: Snowflake) -> bool {
+        if self.account != store.current_user().map(|user| user.id)
+            || !store
+                .private_channel(channel_id)
+                .is_some_and(is_private_conversation)
+        {
+            return false;
+        }
+        self.selected_private_channel = Some(channel_id);
+        self.selected_guild = None;
+        self.selected_channel = None;
+        true
+    }
+
+    pub fn private_window(
+        &self,
+        store: &Store,
+        offset: usize,
+        count: usize,
+    ) -> Window<PrivateChannelRow> {
+        let mut channels: Vec<_> = store
+            .private_channels()
+            .filter(|channel| is_private_conversation(channel))
+            .collect();
+        channels.sort_by_key(|channel| (std::cmp::Reverse(channel.last_message_id), channel.id));
+        let total = channels.len();
+        let offset = offset.min(total);
+        let rows = channels
+            .into_iter()
+            .skip(offset)
+            .take(count.min(MAX_WINDOW_ROWS))
+            .map(|channel| PrivateChannelRow {
+                id: channel.id,
+                label: private_name(store, channel),
+                selected: self.selected_private_channel == Some(channel.id),
+            })
+            .collect();
+        Window {
+            offset,
+            total,
+            rows,
+        }
+    }
+
+    pub fn private_selection(&self, store: &Store) -> Option<PrivateChannelSelection> {
+        if self.account != store.current_user().map(|user| user.id) {
+            return None;
+        }
+        let channel = store.private_channel(self.selected_private_channel?)?;
+        if !is_private_conversation(channel) {
+            return None;
+        }
+        Some(PrivateChannelSelection {
+            channel_id: channel.id,
+            name: private_name(store, channel),
+        })
     }
 
     /// READY/GUILD_CREATE order for available guilds, then outage IDs in numeric
@@ -319,6 +406,25 @@ impl Navigation {
         channel_offset: usize,
         channel_count: usize,
     ) -> NavigationSnapshot {
+        self.snapshot_with_private(
+            store,
+            guild_offset,
+            guild_count,
+            channel_offset,
+            channel_count,
+            0..MAX_WINDOW_ROWS,
+        )
+    }
+
+    pub fn snapshot_with_private(
+        &self,
+        store: &Store,
+        guild_offset: usize,
+        guild_count: usize,
+        channel_offset: usize,
+        channel_count: usize,
+        private_rows: Range<usize>,
+    ) -> NavigationSnapshot {
         let selected_guild = self.selected_guild.filter(|id| {
             self.account == store.current_user().map(|user| user.id) && known_guild(store, *id)
         });
@@ -328,6 +434,12 @@ impl Navigation {
         NavigationSnapshot {
             guilds: self.guild_window(store, guild_offset, guild_count),
             channels: self.channel_window(store, channel_offset, channel_count),
+            private_channels: self.private_window(
+                store,
+                private_rows.start,
+                private_rows.end.saturating_sub(private_rows.start),
+            ),
+            private_selection: self.private_selection(store),
             selected_guild,
             selection: self.selection(store),
             permissions_pending,
@@ -378,6 +490,27 @@ fn capped_name(value: Option<&str>, fallback: &str) -> String {
         end -= 1;
     }
     value[..end].to_owned()
+}
+
+fn is_private_conversation(channel: &Channel) -> bool {
+    matches!(
+        channel.kind,
+        ModelChannelKind::Dm | ModelChannelKind::GroupDm
+    ) && channel.guild_id.is_none()
+}
+
+fn private_name(store: &Store, channel: &Channel) -> String {
+    if let Some(name) = channel.name.as_deref().filter(|name| !name.is_empty()) {
+        return capped_name(Some(name), "Private conversation");
+    }
+    let label = channel
+        .recipient_ids
+        .iter()
+        .filter_map(|id| store.user(*id))
+        .map(|user| user.display_name())
+        .collect::<Vec<_>>()
+        .join(", ");
+    capped_name(Some(&label), "Private conversation")
 }
 
 enum PermissionContext<'a> {

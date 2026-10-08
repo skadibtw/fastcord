@@ -609,6 +609,58 @@ fn direct_message_channels_are_normalized_and_track_their_last_message() {
 }
 
 #[test]
+fn private_recipient_events_are_idempotent_and_self_removal_drops_the_conversation() {
+    let mut store = ready_store();
+    let channel = id(300_000_000_000_000_001);
+    let recipient = id(4242);
+    let added = r#"{"channel_id":"300000000000000001","user":{"id":"4242","username":"fresh","global_name":null,"avatar":null}}"#;
+    assert!(apply(&mut store, "CHANNEL_RECIPIENT_ADD", added).private_channels);
+    assert!(!apply(&mut store, "CHANNEL_RECIPIENT_ADD", added).private_channels);
+    let dm = store.private_channel(channel).unwrap();
+    assert!(dm.recipient_ids.contains(&recipient));
+    assert_eq!(
+        dm.recipient_ids
+            .iter()
+            .filter(|&&id| id == recipient)
+            .count(),
+        1
+    );
+    assert!(dm.recipients.is_empty());
+    assert_eq!(store.user(recipient).unwrap().username, "fresh");
+
+    let removed = r#"{"channel_id":"300000000000000001","user":{"id":"4242"}}"#;
+    assert!(apply(&mut store, "CHANNEL_RECIPIENT_REMOVE", removed).private_channels);
+    assert!(!apply(&mut store, "CHANNEL_RECIPIENT_REMOVE", removed).private_channels);
+    assert!(
+        !store
+            .private_channel(channel)
+            .unwrap()
+            .recipient_ids
+            .contains(&recipient)
+    );
+    assert!(store.user(recipient).is_none());
+    check(&store);
+    for user_id in 5_000..5_008 {
+        let add = format!(
+            r#"{{"channel_id":"300000000000000001","user":{{"id":"{user_id}","username":"user-{user_id}"}}}}"#
+        );
+        assert!(apply(&mut store, "CHANNEL_RECIPIENT_ADD", &add).private_channels);
+    }
+    check(&store);
+    assert_eq!(
+        store.bytes(),
+        store.recount(),
+        "recipient Vec capacity growth must be charged before self-removal"
+    );
+
+    let self_removed = r#"{"channel_id":"300000000000000001","user":{"id":"175928847299117063"}}"#;
+
+    assert!(apply(&mut store, "CHANNEL_RECIPIENT_REMOVE", self_removed).private_channels);
+    assert!(store.private_channel(channel).is_none());
+    assert!(!apply(&mut store, "CHANNEL_RECIPIENT_REMOVE", self_removed).private_channels);
+    check(&store);
+}
+#[test]
 fn guild_message_markers_advance_and_message_deletes_change_nothing_here() {
     let mut store = ready_store();
     let Dispatch::MessageCreate(mut message) = decode_fixture("MESSAGE_CREATE", MESSAGE) else {

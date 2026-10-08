@@ -28,6 +28,9 @@ use gateway::{GatewayPanel, GatewayStatus};
 use login::{LoginError, LoginOutcome, Persistence, Session, StoreReady};
 use qr::{Applied, QrAttempt, QrStage};
 
+const MAX_PRIVATE_RECIPIENT_INPUT_BYTES: usize = 256;
+const MAX_PRIVATE_RECIPIENTS: usize = fastcord_discord::MAX_PRIVATE_RECIPIENTS;
+
 fn main() -> iced::Result {
     render::application(App::boot, App::update, App::view)
         .title("fastcord")
@@ -102,6 +105,10 @@ enum Message {
     GuildViewport(virtual_list::Window),
     ChannelViewport(virtual_list::Window),
     Timeline(timeline::Event),
+    SelectPrivateChannel(Snowflake),
+    PrivateRecipients(String),
+    OpenPrivate,
+    PrivateViewport(virtual_list::Window),
     Composer(composer::Event),
 }
 
@@ -272,11 +279,51 @@ impl App {
                     gateway.controls.select_channel(guild, channel);
                 }
             }
+            Message::SelectPrivateChannel(channel) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.select_private_channel(channel);
+                }
+            }
+            Message::PrivateRecipients(value) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    if value.len() <= MAX_PRIVATE_RECIPIENT_INPUT_BYTES {
+                        gateway.private.recipients = value;
+                        gateway.private.notice = None;
+                    } else {
+                        gateway.private.notice =
+                            Some("Recipient selection is limited to 256 UTF-8 bytes.".to_owned());
+                    }
+                }
+            }
+            Message::OpenPrivate => {
+                if let Phase::Account {
+                    session, gateway, ..
+                } = &mut self.phase
+                {
+                    match parse_private_recipients(&gateway.private.recipients, session.user.id) {
+                        Ok(recipients) => {
+                            gateway.private.notice =
+                                Some(if gateway.controls.open_private_channel(recipients) {
+                                    "Opening the selected private conversation…".to_owned()
+                                } else {
+                                    "The private conversation request could not be queued."
+                                        .to_owned()
+                                });
+                        }
+                        Err(error) => gateway.private.notice = Some(error.to_owned()),
+                    }
+                }
+            }
             Message::GuildViewport(window) | Message::ChannelViewport(window) => {
                 if let Phase::Account { gateway, .. } = &self.phase {
                     gateway
                         .controls
                         .viewport(matches!(message, Message::GuildViewport(_)), window);
+                }
+            }
+            Message::PrivateViewport(window) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.private_viewport(window);
                 }
             }
             Message::Timeline(event) => {
@@ -484,6 +531,8 @@ impl App {
                         &gateway.timeline,
                         &gateway.composer,
                         gateway.interaction(),
+                        &gateway.private.recipients,
+                        gateway.private.notice.as_deref(),
                     ),
                 ]
                 .spacing(16)
@@ -618,6 +667,38 @@ impl App {
         }
         content.into()
     }
+}
+
+fn parse_private_recipients(
+    input: &str,
+    account: Snowflake,
+) -> Result<Vec<Snowflake>, &'static str> {
+    if input.len() > MAX_PRIVATE_RECIPIENT_INPUT_BYTES {
+        return Err("Recipient selection exceeds 256 UTF-8 bytes.");
+    }
+    let mut recipients = Vec::new();
+    for token in input.split(|character: char| character == ',' || character.is_whitespace()) {
+        if token.is_empty() {
+            continue;
+        }
+        let id = token
+            .parse::<Snowflake>()
+            .map_err(|_| "Enter recipient snowflake IDs separated by commas.")?;
+        if id == account {
+            return Err("Your own account ID is not a recipient.");
+        }
+        if recipients.contains(&id) {
+            return Err("Each recipient ID must appear only once.");
+        }
+        if recipients.len() == MAX_PRIVATE_RECIPIENTS {
+            return Err("A private conversation can include at most 9 other recipients.");
+        }
+        recipients.push(id);
+    }
+    if recipients.is_empty() {
+        return Err("Select at least one recipient ID.");
+    }
+    Ok(recipients)
 }
 
 fn token_edited(mut value: String) -> Message {
@@ -1011,5 +1092,31 @@ mod tests {
         );
         assert!(!format!("{message:?}").contains("dummy-offline-secret"));
         assert!(!format!("{:?}", app.phase).contains("dummy-offline-secret"));
+    }
+    #[test]
+    fn private_recipient_selection_is_manual_bounded_and_unique() {
+        let account = Snowflake(1);
+        assert_eq!(
+            parse_private_recipients(" 42, 43 ", account).unwrap(),
+            [Snowflake(42), Snowflake(43)]
+        );
+        assert!(parse_private_recipients("", account).is_err());
+        assert!(parse_private_recipients("42,42", account).is_err());
+        assert!(parse_private_recipients("1", account).is_err());
+        assert!(parse_private_recipients("not-an-id", account).is_err());
+        assert!(
+            parse_private_recipients(
+                &(1..=MAX_PRIVATE_RECIPIENTS + 1)
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                account
+            )
+            .is_err()
+        );
+        assert!(
+            parse_private_recipients(&"x".repeat(MAX_PRIVATE_RECIPIENT_INPUT_BYTES + 1), account)
+                .is_err()
+        );
     }
 }
