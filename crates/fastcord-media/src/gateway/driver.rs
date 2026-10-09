@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
@@ -86,6 +87,7 @@ pub(crate) struct Channels {
     pub(crate) events: mpsc::Sender<VoiceEvent>,
     pub(crate) audio: mpsc::Sender<ReceivedAudio>,
     pub(crate) media: mpsc::Receiver<MediaCommand>,
+    pub(crate) queued_audio: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) leave: oneshot::Receiver<()>,
     pub(crate) counters: Arc<Counters>,
 }
@@ -392,7 +394,12 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     Err(_) => Ok(()),
                 },
                 command = self.ch.media.recv(), if media_open => match command {
-                    Some(command) => self.on_media(&mut conn, &mut socket, command).await,
+                    Some(command) => {
+                        if matches!(&command, MediaCommand::Opus(_)) {
+                            self.ch.queued_audio.fetch_sub(1, Ordering::AcqRel);
+                        }
+                        self.on_media(&mut conn, &mut socket, command).await
+                    }
                     // Every sender is gone: nothing more to send, keep receiving.
                     None => Ok(()),
                 },

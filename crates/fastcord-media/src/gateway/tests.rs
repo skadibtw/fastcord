@@ -663,6 +663,8 @@ async fn the_media_queue_is_bounded_and_rejects_invalid_frames() {
         media.send_opus(vec![1; 10]).unwrap();
     }
     assert_eq!(media.send_opus(vec![1; 10]), Err(MediaSendError::Full));
+    media.end_speech().unwrap();
+    assert_eq!(media.send_opus(vec![1; 10]), Err(MediaSendError::Full));
     assert_eq!(
         media.send_opus(Vec::new()),
         Err(MediaSendError::InvalidFrame)

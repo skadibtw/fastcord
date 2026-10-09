@@ -93,6 +93,13 @@ impl CapturePipeline {
         })
     }
 
+    /// Discards device samples without downmixing, resampling, encoding, or inference.
+    pub(crate) fn discard(&mut self) {
+        while self.ring.pop(&mut self.device) != 0 {}
+        self.filled = 0;
+        self.converter.reset();
+        self.frame.fill(0.0);
+    }
     /// Drains the capture ring, emitting every completed frame.
     pub(crate) fn run(
         &mut self,
@@ -158,6 +165,7 @@ pub(crate) struct PlaybackPipeline {
     /// Converted stereo at the device rate not yet accepted by the ring.
     pending: Vec<f32>,
     pending_start: usize,
+    enabled: bool,
 }
 
 impl PlaybackPipeline {
@@ -177,12 +185,28 @@ impl PlaybackPipeline {
             converter: RateConverter::new(SAMPLE_RATE, format.rate, CHANNELS, 480)?,
             pending: Vec::with_capacity(pending_frames * CHANNELS),
             pending_start: 0,
+            enabled: true,
             ring,
         })
     }
 
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if !enabled {
+            self.ring.clear();
+            self.pending.clear();
+            self.pending_start = 0;
+            self.mixer.clear();
+        }
+    }
     pub(crate) fn push_remote(&mut self, frame: RemoteFrame) {
         self.mixer.push(frame);
+    }
+    pub(crate) fn set_gain(&mut self, ssrc: u32, gain: f32) {
+        self.mixer.set_gain(ssrc, gain);
     }
 
     /// Keeps the playback ring near its target, pulling packets from `next`
@@ -276,6 +300,27 @@ mod tests {
         let (producer, consumer) = sample_ring(channels, frames_for(rate, RING_LIMIT_MS));
         let pipeline = PlaybackPipeline::new(format(rate, channels), producer).unwrap();
         (consumer, pipeline)
+    }
+    #[test]
+    fn muted_capture_discards_samples_without_encoding() {
+        let (mut ring, mut pipeline) = capture(48_000, 1);
+        // Several 20 ms frames' worth, so removing `discard()` makes `run` emit and panic.
+        ring.push_overwrite(std::iter::repeat_n(0.5, 4_800));
+        pipeline.discard();
+        let counters = PipelineCounters::default();
+        pipeline.run(&counters, &mut |_| panic!("muted capture emitted a frame"));
+        assert_eq!(counters.frames_encoded.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn disabled_playback_clears_queued_audible_samples() {
+        let (consumer, mut pipeline) = playback(48_000, 2);
+        pipeline.ring.push_overwrite([0.5; 8].into_iter());
+        assert_eq!(consumer.len(), 8);
+        pipeline.set_enabled(false);
+        assert_eq!(consumer.len(), 0);
+        pipeline.set_enabled(true);
+        assert_eq!(consumer.len(), 0);
     }
 
     /// Feeds `signal` (mono, at `rate`) through a `channels`-wide capture

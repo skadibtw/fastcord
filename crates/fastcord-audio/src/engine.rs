@@ -8,7 +8,7 @@
 //! threads) and then joins the owner thread.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -82,6 +82,17 @@ pub enum EngineEvent {
         kind: DeviceErrorKind,
     },
 }
+/// Runtime changes to an active call. Commands are bounded and serviced by the
+/// engine owner; audio callbacks never touch control state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EngineControl {
+    /// Stop processing microphone samples while retaining the input stream.
+    CaptureEnabled(bool),
+    /// Suppress all remote playback locally.
+    OutputEnabled(bool),
+    /// Linear gain for one remote RTP SSRC. Values are clamped to 0–2.
+    RemoteGain { ssrc: u32, gain: f32 },
+}
 
 /// Channels connecting the engine to the media session.
 #[derive(Debug)]
@@ -92,6 +103,8 @@ pub struct EngineChannels {
     pub playback: Option<mpsc::Sender<EncodedPacket>>,
     /// Decrypted, DAVE-authenticated packets tagged by their RTP SSRC.
     pub remote_audio: Option<mpsc::Sender<RemoteFrame>>,
+    /// Runtime controls, applied by the owner thread.
+    pub controls: mpsc::Sender<EngineControl>,
     pub events: mpsc::Receiver<EngineEvent>,
 }
 
@@ -119,6 +132,7 @@ pub struct EngineStats {
 struct Shared {
     input: Arc<StreamCounters>,
     output: Arc<StreamCounters>,
+    capture_enabled: Arc<AtomicBool>,
     pipeline: PipelineCounters,
     #[cfg(test)]
     owner_service: OwnerService,
@@ -198,10 +212,12 @@ impl AudioEngine {
         let (captured_tx, captured_rx) = mpsc::channel(CAPTURE_QUEUE);
         let (playback_tx, playback_rx) = mpsc::channel(PLAYBACK_QUEUE);
         let (remote_tx, remote_rx) = mpsc::channel(PLAYBACK_QUEUE);
+        let (controls_tx, controls_rx) = mpsc::channel(32);
         let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
         let (stop_tx, stop_rx) = std_mpsc::channel();
         let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Ready>(1);
         let shared = Arc::new(Shared::default());
+        shared.capture_enabled.store(true, Ordering::Release);
         let has_input = config.input.is_some();
         let has_output = config.output.is_some();
         let thread_shared = Arc::clone(&shared);
@@ -213,6 +229,7 @@ impl AudioEngine {
                     captured: Some(captured_tx),
                     playback: Some(playback_rx),
                     remote_audio: Some(remote_rx),
+                    controls: controls_rx,
                     events: events_tx,
                 };
                 run_owner(make_backend(), config, &thread_shared, io, ready_tx);
@@ -241,6 +258,7 @@ impl AudioEngine {
             captured: has_input.then_some(captured_rx),
             playback: has_output.then_some(playback_tx),
             remote_audio: has_output.then_some(remote_tx),
+            controls: controls_tx,
             events: events_rx,
         };
         Ok((engine, channels))
@@ -316,6 +334,7 @@ struct OwnerIo {
     captured: Option<mpsc::Sender<CapturedFrame>>,
     playback: Option<mpsc::Receiver<EncodedPacket>>,
     remote_audio: Option<mpsc::Receiver<RemoteFrame>>,
+    controls: mpsc::Receiver<EngineControl>,
     events: mpsc::Sender<EngineEvent>,
 }
 
@@ -323,13 +342,14 @@ fn open_capture<B: Backend>(
     backend: &mut B,
     choice: &DeviceChoice,
     counters: &Arc<StreamCounters>,
+    enabled: &Arc<AtomicBool>,
     bitrate: u32,
 ) -> Result<(B::Stream, CapturePipeline, StreamFormat), AudioError> {
     let mut consumer = None;
     let (stream, format) = backend.open_input(choice, counters, &mut |format| {
         let (producer, ring) = sample_ring(format.channels, frames_for(format.rate, RING_LIMIT_MS));
         consumer = Some(ring);
-        InputCallback::new(producer, Arc::clone(counters))
+        InputCallback::new(producer, Arc::clone(counters), Arc::clone(enabled))
     })?;
     let ring = consumer.ok_or(AudioError::EngineThread)?;
     let pipeline = CapturePipeline::new(format, ring, bitrate)?;
@@ -364,8 +384,13 @@ fn run_owner<B: Backend>(
     let opened = (|| {
         let mut formats = (None, None);
         if let Some(choice) = &config.input {
-            let (stream, pipeline, format) =
-                open_capture(&mut backend, choice, &shared.input, config.bitrate)?;
+            let (stream, pipeline, format) = open_capture(
+                &mut backend,
+                choice,
+                &shared.input,
+                &shared.capture_enabled,
+                config.bitrate,
+            )?;
             capture = Some((stream, pipeline));
             formats.0 = Some(format.into());
         }
@@ -383,7 +408,28 @@ fn run_owner<B: Backend>(
     }
 
     // Dropping the engine handle disconnects the stop channel, ending the loop.
+    let mut capture_enabled = true;
+    let mut output_enabled = true;
     while let Err(std_mpsc::RecvTimeoutError::Timeout) = io.stop.recv_timeout(TICK) {
+        while let Ok(control) = io.controls.try_recv() {
+            match control {
+                EngineControl::CaptureEnabled(enabled) => {
+                    capture_enabled = enabled;
+                    shared.capture_enabled.store(enabled, Ordering::Release);
+                }
+                EngineControl::OutputEnabled(enabled) => {
+                    output_enabled = enabled;
+                    if let Some((_, pipeline)) = playback.as_mut() {
+                        pipeline.set_enabled(enabled);
+                    }
+                }
+                EngineControl::RemoteGain { ssrc, gain } => {
+                    if let Some((_, pipeline)) = playback.as_mut() {
+                        pipeline.set_gain(ssrc, gain);
+                    }
+                }
+            }
+        }
         if capture.is_some()
             && let Some(kind) = shared.input.fault()
         {
@@ -406,28 +452,41 @@ fn run_owner<B: Backend>(
                 kind,
             });
         }
-        if let (Some((_, pipeline)), Some(captured)) = (capture.as_mut(), io.captured.as_ref()) {
-            pipeline.run(&shared.pipeline, &mut |frame| {
-                if captured.try_send(frame).is_err() {
-                    shared
-                        .pipeline
-                        .frames_dropped
-                        .fetch_add(1, Ordering::Relaxed);
+        if let Some((_, pipeline)) = capture.as_mut() {
+            if capture_enabled {
+                if let Some(captured) = io.captured.as_ref() {
+                    pipeline.run(&shared.pipeline, &mut |frame| {
+                        if captured.try_send(frame).is_err() {
+                            shared
+                                .pipeline
+                                .frames_dropped
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
                 }
-            });
-        }
-        if let Some((_, pipeline)) = playback.as_mut()
-            && let Some(remote) = io.remote_audio.as_mut()
-        {
-            for _ in 0..PLAYBACK_QUEUE {
-                let Ok(packet) = remote.try_recv() else { break };
-                pipeline.push_remote(packet);
+            } else {
+                pipeline.discard();
             }
         }
-        if let (Some((_, pipeline)), Some(playback_receiver)) =
-            (playback.as_mut(), io.playback.as_mut())
-        {
-            pipeline.run(&shared.pipeline, &mut || playback_receiver.try_recv().ok());
+        if let Some((_, pipeline)) = playback.as_mut() {
+            if output_enabled {
+                if let Some(remote) = io.remote_audio.as_mut() {
+                    for _ in 0..PLAYBACK_QUEUE {
+                        let Ok(packet) = remote.try_recv() else { break };
+                        pipeline.push_remote(packet);
+                    }
+                }
+                if let Some(playback_receiver) = io.playback.as_mut() {
+                    pipeline.run(&shared.pipeline, &mut || playback_receiver.try_recv().ok());
+                }
+            } else {
+                while io
+                    .remote_audio
+                    .as_mut()
+                    .is_some_and(|rx| rx.try_recv().is_ok())
+                {}
+                while io.playback.as_mut().is_some_and(|rx| rx.try_recv().is_ok()) {}
+            }
         }
         #[cfg(test)]
         shared.owner_service.notify();
@@ -741,6 +800,46 @@ mod tests {
     }
 
     #[test]
+    fn capture_control_stops_processing_and_resumes_without_stale_samples() {
+        let mut fake = host(48_000, 48_000);
+        fake.manual_callbacks = true;
+        let backend = fake.clone();
+        let (engine, mut channels) =
+            AudioEngine::start_with(EngineConfig::default(), move || backend).unwrap();
+        let controls = channels.controls;
+        let mut captured = channels.captured.take().unwrap();
+        let owner = &engine.shared.owner_service;
+        let mut generation = owner.generation();
+        controls
+            .blocking_send(EngineControl::CaptureEnabled(false))
+            .unwrap();
+        generation = owner.wait_after(generation);
+        for _ in 0..4 {
+            fake.driver.step(Direction::Input);
+            generation = owner.wait_after(generation);
+        }
+        assert_eq!(engine.stats().frames_encoded, 0);
+        assert!(captured.try_recv().is_err());
+
+        controls
+            .blocking_send(EngineControl::CaptureEnabled(true))
+            .unwrap();
+        generation = owner.wait_after(generation);
+        for _ in 0..4 {
+            fake.driver.step(Direction::Input);
+            generation = owner.wait_after(generation);
+            if captured.try_recv().is_ok() {
+                break;
+            }
+        }
+        assert_eq!(engine.stats().frames_encoded, 1);
+        drop(captured);
+        let probes = engine.callback_probes();
+        drop(engine);
+        assert_torn_down(&fake, probes);
+        let _ = generation;
+    }
+    #[test]
     fn encrypted_multi_peer_rtp_reorders_recovers_loss_and_reaches_output() {
         let mut fake = host(48_000, 48_000);
         fake.manual_callbacks = true;
@@ -1019,6 +1118,67 @@ mod tests {
         println!("no callback heap operations; callbacks dropped after teardown");
     }
 
+    /// Real devices: muting stops capture processing and deafening stops
+    /// playback decoding, and both resume, while real callbacks keep running.
+    #[test]
+    #[ignore = "needs real audio devices"]
+    fn live_mute_and_deafen_controls_gate_real_devices() {
+        let (engine, mut channels) = AudioEngine::start(EngineConfig::default()).unwrap();
+        let mut captured = channels.captured.take().unwrap();
+        let playback = channels.playback.take().unwrap();
+        let controls = channels.controls;
+        let settle = || std::thread::sleep(Duration::from_millis(400));
+        let drain = |rx: &mut mpsc::Receiver<CapturedFrame>| while rx.try_recv().is_ok() {};
+
+        settle();
+        assert!(engine.stats().frames_encoded > 0, "capture never started");
+
+        controls
+            .blocking_send(EngineControl::CaptureEnabled(false))
+            .unwrap();
+        settle();
+        drain(&mut captured);
+        let muted = engine.stats();
+        settle();
+        let still_muted = engine.stats();
+        assert_eq!(muted.frames_encoded, still_muted.frames_encoded);
+        assert!(still_muted.input_callbacks > muted.input_callbacks);
+        controls
+            .blocking_send(EngineControl::CaptureEnabled(true))
+            .unwrap();
+        settle();
+        assert!(engine.stats().frames_encoded > still_muted.frames_encoded);
+
+        controls
+            .blocking_send(EngineControl::OutputEnabled(false))
+            .unwrap();
+        settle();
+        let decoded = engine.stats().packets_decoded;
+        let mut encoder = crate::VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
+        for _ in 0..8 {
+            let mut packet = EncodedPacket::empty();
+            encoder
+                .encode_mono(&[0.0; FRAME_SAMPLES], &mut packet)
+                .unwrap();
+            playback.blocking_send(packet).unwrap();
+        }
+        settle();
+        assert_eq!(engine.stats().packets_decoded, decoded);
+        controls
+            .blocking_send(EngineControl::OutputEnabled(true))
+            .unwrap();
+        for _ in 0..4 {
+            let mut packet = EncodedPacket::empty();
+            encoder
+                .encode_mono(&[0.0; FRAME_SAMPLES], &mut packet)
+                .unwrap();
+            playback.blocking_send(packet).unwrap();
+        }
+        settle();
+        assert!(engine.stats().packets_decoded > decoded);
+        println!("{:#?}", engine.stats());
+    }
+
     /// Real output device: an Opus-encoded 440 Hz tone played through the
     /// engine is recorded back with WASAPI loopback capture of the same
     /// device and must be the dominant component of what the device played.
@@ -1082,7 +1242,13 @@ mod tests {
             .into_iter()
             .fold(0.0f32, f32::max);
         println!("440 Hz level {wanted:.4}, strongest off-tone {off:.4}");
-        assert_eq!(stats.packets_decoded, 100);
+        // The device paces playback in real time; packets still queued at teardown are not decoded.
+        assert!(
+            stats.packets_decoded >= 50,
+            "{} packets decoded",
+            stats.packets_decoded
+        );
+        assert_eq!(stats.decode_errors, 0);
         assert!(wanted > 0.01, "tone not heard on the device");
         assert!(wanted > 10.0 * off, "tone not dominant");
     }

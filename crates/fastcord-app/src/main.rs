@@ -12,14 +12,15 @@ mod render;
 mod timeline;
 mod variable_list;
 mod virtual_list;
+mod voice_settings;
 
 use std::sync::Arc;
 
 use fastcord_discord::{RemoteAuthEvent, UserToken};
-use fastcord_model::Snowflake;
+use fastcord_model::{Snowflake, VoiceStateRequest};
 use fastcord_platform::{NativeCredentialStore, StoreError};
 use iced::widget::{
-    button, center, checkbox, column, container, qr_code, row, scrollable, text, text_input,
+    button, center, checkbox, column, container, qr_code, row, scrollable, slider, text, text_input,
 };
 use iced::{Color, Element, Length, Task};
 use zeroize::Zeroize;
@@ -64,7 +65,7 @@ enum Phase {
     Account {
         session: Arc<Session>,
         persistence: Persistence,
-        gateway: GatewayPanel,
+        gateway: Box<GatewayPanel>,
     },
     Deleting {
         account: Snowflake,
@@ -102,8 +103,14 @@ enum Message {
     Navigation(u64),
     SelectGuild(Snowflake),
     SelectChannel(Snowflake, Snowflake),
+    LeaveVoice,
     GuildViewport(virtual_list::Window),
     ChannelViewport(virtual_list::Window),
+    SetSelfMute(bool),
+    SetDeafen(bool),
+    SetParticipantVolume(Snowflake, u16),
+    CommitParticipantVolume(Snowflake),
+    PresetParticipantVolume(Snowflake, u16),
     Timeline(timeline::Event),
     SelectPrivateChannel(Snowflake),
     PrivateRecipients(String),
@@ -258,10 +265,14 @@ impl App {
                 }
             }
             Message::Navigation(id) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase
+                let status = if let Phase::Account { gateway, .. } = &mut self.phase
                     && gateway.id == id
-                    && let Some(status) = gateway.consume()
                 {
+                    gateway.consume()
+                } else {
+                    None
+                };
+                if let Some(status) = status {
                     return self.update(Message::Gateway(id, status));
                 }
             }
@@ -275,8 +286,73 @@ impl App {
                 }
             }
             Message::SelectChannel(guild, channel) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    let join = gateway.navigation.selected_guild == Some(guild)
+                        && gateway.navigation.channels.rows.iter().any(|row| {
+                            row.id == channel
+                                && row.kind
+                                    == fastcord_discord::state::navigation::ChannelKind::Voice
+                                && row.enabled
+                        });
                     gateway.controls.select_channel(guild, channel);
+                    if join {
+                        gateway.voice_guild = Some(guild);
+                        let controls = gateway.controls.voice_controls();
+                        gateway
+                            .controls
+                            .request_voice_state(VoiceStateRequest::join(
+                                Some(guild),
+                                channel,
+                                controls.self_muted,
+                                controls.deafened,
+                            ));
+                    }
+                }
+            }
+            Message::LeaveVoice => {
+                if let Phase::Account { gateway, .. } = &mut self.phase
+                    && let Some(guild) = gateway.voice_guild.take()
+                {
+                    gateway
+                        .controls
+                        .request_voice_state(VoiceStateRequest::leave(Some(guild)));
+                }
+            }
+            Message::SetSelfMute(muted) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.set_self_muted(muted);
+                }
+            }
+            Message::SetDeafen(deafened) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.set_deafened(deafened);
+                }
+            }
+            // The slider updates the live gain while dragging and persists once on release.
+            Message::SetParticipantVolume(user, percent) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.set_volume_percent(user, percent);
+                }
+            }
+            Message::CommitParticipantVolume(user) => {
+                if let Phase::Account {
+                    session, gateway, ..
+                } = &self.phase
+                {
+                    let percent = gateway.controls.voice_controls().volume_percent(user);
+                    if voice_settings::save(session.user.id, user, percent).is_err() {
+                        self.notice = Some("Could not save the voice volume setting.".to_owned());
+                    }
+                }
+            }
+            Message::PresetParticipantVolume(user, percent) => {
+                if let Phase::Account {
+                    session, gateway, ..
+                } = &self.phase
+                    && gateway.controls.set_volume_percent(user, percent)
+                    && voice_settings::save(session.user.id, user, percent).is_err()
+                {
+                    self.notice = Some("Could not save the voice volume setting.".to_owned());
                 }
             }
             Message::SelectPrivateChannel(channel) => {
@@ -406,7 +482,11 @@ impl App {
                         Ok(()) => {
                             self.saved_accounts.retain(|id| *id != account);
                             self.reset_login();
-                            self.notice = Some("Logged out locally. The saved credential was removed and account state was cleared. Other Discord sessions were not revoked.".to_owned());
+                            self.notice = Some(if voice_settings::purge(account).is_ok() {
+                                "Logged out locally. The saved credential was removed and account state was cleared. Other Discord sessions were not revoked.".to_owned()
+                            } else {
+                                "Logged out locally. The saved credential was removed, but this account's saved voice volumes could not be removed. Other Discord sessions were not revoked.".to_owned()
+                            });
                         }
                         Err(error) => {
                             self.phase = Phase::DeleteFailed { account, error };
@@ -466,9 +546,6 @@ impl App {
             Message::Deleted,
         )
     }
-
-    /// Starts a fresh attempt (new key pair, new socket). Replacing the phase
-    /// drops any previous attempt, which aborts its worker.
     fn start_qr(&mut self) -> Task<Message> {
         self.clear_token();
         self.qr_attempts += 1;
@@ -486,6 +563,8 @@ impl App {
         self.gateway_sessions += 1;
         let id = self.gateway_sessions;
         let controls = gateway::NavigationBridge::new();
+        controls.set_account_id(session.user.id);
+        controls.set_volume_settings(voice_settings::load(session.user.id));
         let stream = gateway::status_stream(
             session.client.clone(),
             session.token(),
@@ -496,7 +575,7 @@ impl App {
         self.phase = Phase::Account {
             session,
             persistence,
-            gateway: GatewayPanel::new(id, worker, controls),
+            gateway: Box::new(GatewayPanel::new(id, worker, controls)),
         };
         task
     }
@@ -508,6 +587,39 @@ impl App {
             gateway,
         } = &self.phase
         {
+            let voice_audio = gateway.controls.voice_audio_state();
+            let voice_controls = gateway.controls.voice_controls();
+            let mut participants = column![text("Voice participants").size(16)].spacing(6);
+            for participant in &voice_controls.participants {
+                let user = participant.user_id;
+                let volume = voice_controls.volume_percent(user);
+                participants = participants.push(
+                    row![
+                        text(format!("User {}", user.0)).width(Length::Fixed(150.0)),
+                        text(if participant.speaking {
+                            "Speaking"
+                        } else {
+                            "Not speaking"
+                        })
+                        .width(Length::Fixed(120.0)),
+                        text(format!(
+                            "SSRC {}",
+                            participant
+                                .ssrc
+                                .map_or_else(|| "—".to_owned(), |ssrc| ssrc.to_string())
+                        ))
+                        .width(Length::Fixed(120.0)),
+                        slider(0.0..=200.0, volume as f32, move |value| {
+                            Message::SetParticipantVolume(user, value.round() as u16)
+                        })
+                        .on_release(Message::CommitParticipantVolume(user)),
+                        button("0%").on_press(Message::PresetParticipantVolume(user, 0)),
+                        button("200%").on_press(Message::PresetParticipantVolume(user, 200)),
+                        text(format!("{volume}%")),
+                    ]
+                    .spacing(8),
+                );
+            }
             return container(
                 column![
                     row![
@@ -526,6 +638,55 @@ impl App {
                     ]
                     .spacing(16),
                     text(gateway.status.describe()),
+                    row![
+                        text(match voice_audio {
+                            gateway::VoiceAudioState::Idle => "Voice: not connected",
+                            gateway::VoiceAudioState::Connecting => "Voice: connecting…",
+                            gateway::VoiceAudioState::Running => "Voice: connected",
+                            gateway::VoiceAudioState::EngineFailed => {
+                                "Voice audio failed to start; the voice connection was left."
+                            }
+                        }),
+                        button("Leave voice").on_press_maybe(
+                            gateway
+                                .voice_guild
+                                .filter(|_| voice_audio != gateway::VoiceAudioState::Idle)
+                                .map(|_| Message::LeaveVoice),
+                        ),
+                    ]
+                    .spacing(12),
+                    row![
+                        button(if voice_controls.self_muted {
+                            "Unmute"
+                        } else {
+                            "Mute"
+                        })
+                        .on_press_maybe(
+                            (voice_audio == gateway::VoiceAudioState::Running)
+                                .then_some(Message::SetSelfMute(!voice_controls.self_muted))
+                        ),
+                        button(if voice_controls.deafened {
+                            "Undeafen"
+                        } else {
+                            "Deafen"
+                        })
+                        .on_press_maybe(
+                            (voice_audio == gateway::VoiceAudioState::Running)
+                                .then_some(Message::SetDeafen(!voice_controls.deafened))
+                        ),
+                        text(if voice_controls.server_muted {
+                            "Server restriction: muted"
+                        } else {
+                            "Server restriction: not muted"
+                        }),
+                        text(if voice_controls.server_deafened {
+                            "Server restriction: deafened"
+                        } else {
+                            "Server restriction: not deafened"
+                        }),
+                    ]
+                    .spacing(12),
+                    scrollable(participants).height(Length::Fixed(160.0)),
                     navigation::view(
                         &gateway.navigation,
                         &gateway.timeline,
@@ -533,6 +694,7 @@ impl App {
                         gateway.interaction(),
                         &gateway.private.recipients,
                         gateway.private.notice.as_deref(),
+                        voice_audio,
                     ),
                 ]
                 .spacing(16)

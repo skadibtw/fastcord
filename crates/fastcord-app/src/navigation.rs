@@ -5,6 +5,7 @@ use iced::{Element, Length, alignment};
 
 use crate::Message;
 use crate::composer::{self, Composer};
+use crate::gateway::VoiceAudioState;
 use crate::timeline;
 use crate::virtual_list::{self, ROW_HEIGHT};
 
@@ -15,6 +16,7 @@ pub fn view<'a>(
     interaction: timeline::Interaction,
     recipients: &'a str,
     private_notice: Option<&'a str>,
+    voice_audio: VoiceAudioState,
 ) -> Element<'a, Message> {
     let guilds = snapshot.guilds.rows.iter().map(|guild| {
         let label = format!(
@@ -116,12 +118,20 @@ pub fn view<'a>(
             ChannelKind::Voice => {
                 detail = detail
                     .push(text(
-                        "Voice channel selected. Selecting a channel does not join a call.",
+                        "Voice channel selected. Selecting this channel joins the call.",
                     ))
                     .push(text(if permissions.speak {
                         "Connect and Speak permissions available."
                     } else {
                         "Connect permission available; you cannot speak in this channel."
+                    }))
+                    .push(text(match voice_audio {
+                        VoiceAudioState::Idle => "Not connected to voice.",
+                        VoiceAudioState::Connecting => "Connecting to voice…",
+                        VoiceAudioState::Running => "Connected to voice.",
+                        VoiceAudioState::EngineFailed => {
+                            "Audio could not start; the voice connection was left."
+                        }
                     }));
             }
             ChannelKind::Category => {}
@@ -243,6 +253,7 @@ mod tests {
             timeline::Interaction::default(),
             "80351110224678912",
             None,
+            VoiceAudioState::Idle,
         );
     }
 }

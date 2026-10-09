@@ -15,7 +15,6 @@ const FAR_SEQUENCE_THRESHOLD: u64 = 8;
 struct Queued {
     frame: RemoteFrame,
 }
-
 struct Speaker {
     ssrc: u32,
     decoder: VoiceDecoder,
@@ -32,6 +31,9 @@ struct Speaker {
     last_packet: Instant,
     pcm: Box<[f32]>,
     consecutive_plc: usize,
+    gain: f32,
+    target_gain: f32,
+    gain_ramp_samples: usize,
 }
 
 impl Speaker {
@@ -52,6 +54,9 @@ impl Speaker {
             last_packet: Instant::now(),
             pcm: vec![0.0; MAX_FRAME_SAMPLES * CHANNELS].into_boxed_slice(),
             consecutive_plc: 0,
+            gain: 1.0,
+            target_gain: 1.0,
+            gain_ramp_samples: 0,
         })
     }
 
@@ -229,8 +234,8 @@ impl LimiterEnvelope {
 /// Four-speaker bounded per-SSRC reorder/decode/mix stage, owned by the engine thread.
 pub(crate) struct JitterMixer {
     speakers: Vec<Speaker>,
+    gains: Vec<(u32, f32)>,
     limiter: LimiterEnvelope,
-    last_evicted_ssrc: Option<u32>,
     /// When the mixer last found nothing scheduled at all, to release the limiter by
     /// elapsed time while no one is speaking.
     idle_since: Option<Instant>,
@@ -240,10 +245,18 @@ impl JitterMixer {
     pub(crate) fn new() -> Result<Self, crate::CodecError> {
         Ok(Self {
             speakers: Vec::with_capacity(SPEAKERS),
+            gains: Vec::with_capacity(128),
             limiter: LimiterEnvelope::default(),
-            last_evicted_ssrc: None,
             idle_since: None,
         })
+    }
+    fn new_speaker(&self, ssrc: u32) -> Result<Speaker, crate::CodecError> {
+        let mut speaker = Speaker::new(ssrc)?;
+        if let Some((_, gain)) = self.gains.iter().find(|(id, _)| *id == ssrc) {
+            speaker.gain = *gain;
+            speaker.target_gain = *gain;
+        }
+        Ok(speaker)
     }
 
     pub(crate) fn push(&mut self, frame: RemoteFrame) {
@@ -255,7 +268,7 @@ impl JitterMixer {
         {
             Some(index) => index,
             None if self.speakers.len() < SPEAKERS => {
-                let Ok(speaker) = Speaker::new(frame.ssrc) else {
+                let Ok(speaker) = self.new_speaker(frame.ssrc) else {
                     return;
                 };
                 self.speakers.push(speaker);
@@ -263,15 +276,14 @@ impl JitterMixer {
             }
             None => {
                 // Evict least-recently-active speaker (oldest last_packet)
-                if let Some((evict_idx, evicted)) = self
+                if let Some((evict_idx, _)) = self
                     .speakers
                     .iter()
                     .enumerate()
                     .min_by_key(|(_, speaker)| speaker.last_packet)
                 {
-                    self.last_evicted_ssrc = Some(evicted.ssrc);
                     self.speakers.remove(evict_idx);
-                    let Ok(speaker) = Speaker::new(frame.ssrc) else {
+                    let Ok(speaker) = self.new_speaker(frame.ssrc) else {
                         return;
                     };
                     self.speakers.push(speaker);
@@ -283,13 +295,44 @@ impl JitterMixer {
         };
         self.speakers[index].insert(frame, now);
     }
-
-    /// Return the SSRC of the last evicted speaker, for observability/testing
-    #[allow(dead_code)] // Used in tests
-    pub(crate) fn last_evicted_ssrc(&self) -> Option<u32> {
-        self.last_evicted_ssrc
+    /// Sets the target gain for one SSRC, preserving it across speaker creation.
+    pub(crate) fn set_gain(&mut self, ssrc: u32, gain: f32) {
+        let gain = if gain.is_finite() {
+            gain.clamp(0.0, 2.0)
+        } else {
+            1.0
+        };
+        // Unity is the default for a new speaker, so only non-unity gains take a slot; when
+        // the store is full the oldest override makes room instead of the new one being lost.
+        let existing = self.gains.iter().position(|(id, _)| *id == ssrc);
+        match (existing, gain == 1.0) {
+            (Some(index), true) => {
+                self.gains.remove(index);
+            }
+            (Some(index), false) => self.gains[index].1 = gain,
+            (None, true) => {}
+            (None, false) => {
+                if self.gains.len() >= 128 {
+                    self.gains.remove(0);
+                }
+                self.gains.push((ssrc, gain));
+            }
+        }
+        if let Some(speaker) = self
+            .speakers
+            .iter_mut()
+            .find(|speaker| speaker.ssrc == ssrc)
+            && speaker.target_gain != gain
+        {
+            speaker.target_gain = gain;
+            speaker.gain_ramp_samples = 48_000 * 50 / 1_000;
+        }
     }
-
+    pub(crate) fn clear(&mut self) {
+        self.speakers.clear();
+        self.limiter = LimiterEnvelope::default();
+        self.idle_since = None;
+    }
     /// Produces one 20 ms stereo block when any speaker is due; zeroes `out` otherwise.
     pub(crate) fn mix(&mut self, out: &mut [f32; FRAME_SAMPLES * CHANNELS], now: Instant) -> bool {
         out.fill(0.0);
@@ -363,8 +406,20 @@ impl JitterMixer {
 
             if let Some(frames) = decoded {
                 let count = frames.min(FRAME_SAMPLES) * CHANNELS;
-                for (mix, sample) in out[..count].iter_mut().zip(&speaker.pcm[..count]) {
-                    *mix += *sample;
+                for (mix_frame, sample_frame) in out[..count]
+                    .as_chunks_mut::<CHANNELS>()
+                    .0
+                    .iter_mut()
+                    .zip(speaker.pcm[..count].as_chunks::<CHANNELS>().0)
+                {
+                    if speaker.gain_ramp_samples > 0 {
+                        speaker.gain +=
+                            (speaker.target_gain - speaker.gain) / speaker.gain_ramp_samples as f32;
+                        speaker.gain_ramp_samples -= 1;
+                    }
+                    for (mix, sample) in mix_frame.iter_mut().zip(sample_frame) {
+                        *mix += *sample * speaker.gain;
+                    }
                 }
                 active = true;
             }
@@ -463,6 +518,79 @@ mod tests {
 
     /// Test: reordered arrival keeps jitter bounded
     #[test]
+    fn remote_gain_is_isolated_to_its_ssrc() {
+        let mut mixer = JitterMixer::new().unwrap();
+        let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
+        mixer.set_gain(10, 0.0);
+        mixer.push(frame(&mut encoder, 10, 0));
+        mixer.push(frame(&mut encoder, 20, 0));
+        let mut out = [0.0; FRAME_SAMPLES * CHANNELS];
+        assert!(mixer.mix(&mut out, Instant::now() + Duration::from_millis(50)));
+        assert!(out.iter().any(|sample| sample.abs() > 0.01));
+        assert_eq!(
+            mixer
+                .speakers
+                .iter()
+                .find(|speaker| speaker.ssrc == 10)
+                .unwrap()
+                .gain,
+            0.0
+        );
+        assert_eq!(
+            mixer
+                .speakers
+                .iter()
+                .find(|speaker| speaker.ssrc == 20)
+                .unwrap()
+                .gain,
+            1.0
+        );
+        mixer.set_gain(20, 0.5);
+        assert_eq!(
+            mixer
+                .speakers
+                .iter()
+                .find(|speaker| speaker.ssrc == 20)
+                .unwrap()
+                .gain_ramp_samples,
+            2_400
+        );
+        mixer.set_gain(20, 0.5);
+        assert_eq!(
+            mixer
+                .speakers
+                .iter()
+                .find(|speaker| speaker.ssrc == 20)
+                .unwrap()
+                .gain_ramp_samples,
+            2_400,
+            "receiving more frames at the same gain must not restart the ramp"
+        );
+    }
+
+    #[test]
+    fn gain_store_keeps_new_overrides_and_forgets_unity() {
+        let mut mixer = JitterMixer::new().unwrap();
+        for ssrc in 0..1_000 {
+            mixer.set_gain(ssrc, 1.0);
+        }
+        assert!(mixer.gains.is_empty(), "unity gains must not take a slot");
+        for ssrc in 0..200 {
+            mixer.set_gain(ssrc, 0.0);
+        }
+        assert_eq!(mixer.gains.len(), 128);
+        // The newest override survives a full store, so that speaker is never recreated loud.
+        assert!(
+            mixer
+                .gains
+                .iter()
+                .any(|&(ssrc, gain)| ssrc == 199 && gain == 0.0)
+        );
+        mixer.set_gain(199, 1.0);
+        assert!(mixer.gains.iter().all(|&(ssrc, _)| ssrc != 199));
+        assert_eq!(mixer.gains.len(), 127);
+    }
+    #[test]
     fn jitter_estimator_keeps_target_bounded() {
         let mut mixer = JitterMixer::new().unwrap();
         let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
@@ -540,7 +668,7 @@ mod tests {
         assert!(mixer.limiter.gain > 0.99, "gain {}", mixer.limiter.gain);
     }
 
-    /// Test: fifth speaker evicts least-recently-active and evicted SSRC is observable
+    /// Test: fifth speaker evicts the least-recently-active speaker
     #[test]
     fn fifth_speaker_evicts_least_recently_active() {
         let mut mixer = JitterMixer::new().unwrap();
@@ -807,48 +935,5 @@ mod tests {
             limiter.process(&mut settle);
         }
         assert!(settle[N - 1] / 0.1 > 0.99, "gain never released");
-    }
-
-    /// Test: last_evicted_ssrc is observable
-    #[test]
-    fn fifth_speaker_evicted_ssrc_is_observable() {
-        let mut mixer = JitterMixer::new().unwrap();
-        let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
-
-        // Add 4 speakers
-        for ssrc in 1..=4 {
-            mixer.push(frame(&mut encoder, ssrc, 0));
-        }
-        assert_eq!(mixer.speakers.len(), 4);
-
-        // Initially, no eviction
-        assert_eq!(mixer.last_evicted_ssrc(), None);
-
-        let start = Instant::now();
-        mixer.mix(
-            &mut [0.0; FRAME_SAMPLES * CHANNELS],
-            start + Duration::from_millis(50),
-        );
-
-        // Add fifth speaker - should evict speaker 1 and track it
-        mixer.push(frame(&mut encoder, 5, 0));
-        assert_eq!(mixer.speakers.len(), 4);
-        assert_eq!(
-            mixer.last_evicted_ssrc(),
-            Some(1),
-            "Should observe evicted SSRC as 1"
-        );
-
-        // Speaker 1 should be gone
-        assert!(
-            !mixer.speakers.iter().any(|s| s.ssrc == 1),
-            "Speaker 1 should be evicted"
-        );
-
-        // Speaker 5 should be present
-        assert!(
-            mixer.speakers.iter().any(|s| s.ssrc == 5),
-            "Speaker 5 should be present"
-        );
     }
 }

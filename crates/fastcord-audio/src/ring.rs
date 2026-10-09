@@ -97,6 +97,23 @@ impl RingProducer {
         self.shared.limit.saturating_sub(self.shared.fill())
     }
 
+    /// Discards every unread sample. A concurrent consumer retries against the advanced
+    /// read position, just as it does when capture overwrites old samples.
+    pub(crate) fn clear(&mut self) {
+        let write = self.shared.write.load(Ordering::Acquire);
+        let mut read = self.shared.read.load(Ordering::Acquire);
+        while read != write {
+            match self.shared.read.compare_exchange_weak(
+                read,
+                write,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => read = current,
+            }
+        }
+    }
     /// Writes all `samples`, discarding the oldest unread samples when the
     /// ring is full. If more than `limit` samples are offered, only the newest
     /// `limit` are kept. Returns the number of samples discarded (old or new).

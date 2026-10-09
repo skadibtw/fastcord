@@ -92,6 +92,14 @@ impl RateConverter {
         self.inner.is_none()
     }
 
+    pub(crate) fn reset(&mut self) {
+        if let Some(converter) = &mut self.inner {
+            converter.resampler.reset();
+            converter.staged = 0;
+            converter.staging.fill(0.0);
+            converter.output.fill(0.0);
+        }
+    }
     /// Feeds interleaved `input` (whole frames) and hands every converted
     /// block to `sink`. Input that does not complete a chunk is retained for
     /// the next call.

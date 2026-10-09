@@ -27,7 +27,8 @@ mod alloc_counter;
 pub use codec::{CodecError, EncodedPacket, VoiceDecoder, VoiceEncoder};
 pub use device::{DeviceChoice, DeviceErrorKind, DeviceInfo, DeviceKey, Direction, list_devices};
 pub use engine::{
-    AudioEngine, DeviceFormat, EngineChannels, EngineConfig, EngineEvent, EngineStats,
+    AudioEngine, DeviceFormat, EngineChannels, EngineConfig, EngineControl, EngineEvent,
+    EngineStats,
 };
 pub use error::AudioError;
 pub use pipeline::{CapturedFrame, RemoteFrame};

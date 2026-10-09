@@ -6,7 +6,7 @@
 //! instrumentation can attribute heap use to callbacks.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use cpal::{FromSample, Sample};
 
@@ -62,11 +62,20 @@ impl StreamCounters {
 pub(crate) struct InputCallback {
     ring: RingProducer,
     counters: Arc<StreamCounters>,
+    enabled: Arc<AtomicBool>,
 }
 
 impl InputCallback {
-    pub(crate) fn new(ring: RingProducer, counters: Arc<StreamCounters>) -> Self {
-        Self { ring, counters }
+    pub(crate) fn new(
+        ring: RingProducer,
+        counters: Arc<StreamCounters>,
+        enabled: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            ring,
+            counters,
+            enabled,
+        }
     }
 
     pub(crate) fn process<T>(&mut self, data: &[T])
@@ -76,6 +85,9 @@ impl InputCallback {
     {
         let _scope = CallbackScope::enter();
         self.counters.callbacks.fetch_add(1, Ordering::Relaxed);
+        if !self.enabled.load(Ordering::Acquire) {
+            return;
+        }
         let whole = data.len() / self.ring.channels() * self.ring.channels();
         let samples = data[..whole].iter().map(|&s| f32::from_sample(s));
         let discarded = self.ring.push_overwrite(samples);
@@ -140,7 +152,11 @@ mod tests {
         let (producer, consumer) = sample_ring(channels, frames);
         let counters = Arc::new(StreamCounters::default());
         (
-            InputCallback::new(producer, Arc::clone(&counters)),
+            InputCallback::new(
+                producer,
+                Arc::clone(&counters),
+                Arc::new(AtomicBool::new(true)),
+            ),
             consumer,
             counters,
         )

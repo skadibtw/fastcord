@@ -9,7 +9,7 @@
 mod stream_audio;
 mod voice_audio;
 
-use voice_audio::VoiceAudioState;
+pub use voice_audio::VoiceAudioState;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -21,6 +21,43 @@ use std::time::Duration;
 use fastcord_discord::gateway::{
     ConnectionState, Dispatch, Gateway, GatewayEvent, ReconnectReason, StopReason,
 };
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VoiceParticipant {
+    pub user_id: Snowflake,
+    pub ssrc: Option<u32>,
+    pub speaking: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UserVolume {
+    pub user_id: Snowflake,
+    pub percent: u16,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VoiceControls {
+    pub self_muted: bool,
+    pub deafened: bool,
+    pub server_muted: bool,
+    pub server_deafened: bool,
+    pub participants: Vec<VoiceParticipant>,
+    pub volumes: Vec<UserVolume>,
+}
+impl VoiceControls {
+    pub fn capture_enabled(&self) -> bool {
+        !self.self_muted && !self.deafened && !self.server_muted
+    }
+
+    pub fn output_enabled(&self) -> bool {
+        !self.deafened && !self.server_deafened
+    }
+    pub fn volume_percent(&self, user_id: Snowflake) -> u16 {
+        self.volumes
+            .iter()
+            .find(|volume| volume.user_id == user_id)
+            .map_or(100, |volume| volume.percent)
+    }
+}
 use fastcord_discord::state::Store;
 use fastcord_discord::state::navigation::{Navigation, NavigationSnapshot};
 use fastcord_media::{Correlation, JoinCorrelator, StreamCorrelation, StreamCorrelator};
@@ -344,6 +381,8 @@ pub struct NavigationBridge {
     requests: watch::Sender<Request>,
     voice_requests: watch::Sender<Option<VoiceStateRequest>>,
     voice_audio: watch::Sender<VoiceAudioState>,
+    voice_controls: watch::Sender<VoiceControls>,
+    account_id: Arc<Mutex<Option<Snowflake>>>,
     latest: Arc<Mutex<Latest>>,
     commands: mpsc::Sender<Command>,
     command_receiver: Arc<Mutex<Option<mpsc::Receiver<Command>>>>,
@@ -355,11 +394,14 @@ impl NavigationBridge {
         let (requests, _) = watch::channel(Request::default());
         let (voice_requests, _) = watch::channel(None);
         let (voice_audio, _) = watch::channel(VoiceAudioState::Idle);
+        let (voice_controls, _) = watch::channel(VoiceControls::default());
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
         Self {
             requests,
             voice_requests,
             voice_audio,
+            voice_controls,
+            account_id: Arc::new(Mutex::new(None)),
             latest: Arc::default(),
             commands,
             command_receiver: Arc::new(Mutex::new(Some(receiver))),
@@ -367,24 +409,81 @@ impl NavigationBridge {
         }
     }
 
-    /// The audio side of the current call, for the voice controls (milestone 21).
-    #[expect(
-        dead_code,
-        reason = "shown by the voice controls added in milestone 21"
-    )]
+    /// Current audio state for the voice controls.
     pub fn voice_audio_state(&self) -> VoiceAudioState {
         *self.voice_audio.borrow()
     }
+    pub fn voice_controls(&self) -> VoiceControls {
+        self.voice_controls.borrow().clone()
+    }
+    pub fn set_account_id(&self, account_id: Snowflake) {
+        *self.account_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(account_id);
+    }
 
-    /// Requests a voice join, move, or leave. This is the application path
-    /// used by explicit voice controls (milestone 21); no audio connection
-    /// starts beforehand.
-    #[expect(
-        dead_code,
-        reason = "called by the voice controls added in milestone 21"
-    )]
-    pub fn request_voice_state(&self, request: VoiceStateRequest) {
+    pub fn set_self_muted(&self, self_muted: bool) {
+        self.voice_controls
+            .send_modify(|controls| controls.self_muted = self_muted);
+    }
+
+    pub fn set_deafened(&self, deafened: bool) {
+        self.voice_controls
+            .send_modify(|controls| controls.deafened = deafened);
+    }
+
+    pub fn set_volume_percent(&self, user_id: Snowflake, percent: u16) -> bool {
+        let percent = percent.min(200);
+        self.voice_controls.send_modify(|controls| {
+            if let Some(volume) = controls.volumes.iter_mut().find(|v| v.user_id == user_id) {
+                volume.percent = percent;
+            } else if controls.volumes.len() < 256 {
+                controls.volumes.push(UserVolume { user_id, percent });
+            } else {
+                controls.volumes.remove(0);
+                controls.volumes.push(UserVolume { user_id, percent });
+            }
+        });
+        true
+    }
+
+    pub fn set_volume_settings(&self, volumes: Vec<UserVolume>) {
+        let volumes: Vec<_> = volumes
+            .into_iter()
+            .take(256)
+            .map(|volume| UserVolume {
+                user_id: volume.user_id,
+                percent: volume.percent.min(200),
+            })
+            .collect();
+        self.voice_controls
+            .send_modify(|controls| controls.volumes = volumes);
+    }
+
+    /// Requests a voice join, move, or leave. No audio connection starts beforehand.
+    ///
+    /// Joining the channel this account is already joined to (or still joining) is a
+    /// no-op: the Gateway would not resend an identical opcode 4, so tearing the call
+    /// down locally would leave it dead while Discord still shows the user connected.
+    /// Returns whether the request was queued.
+    pub fn request_voice_state(&self, request: VoiceStateRequest) -> bool {
+        if let Some(channel) = request.channel_id
+            && matches!(
+                *self.voice_audio.borrow(),
+                VoiceAudioState::Connecting | VoiceAudioState::Running
+            )
+            && self.voice_requests.borrow().is_some_and(|current| {
+                current.guild_id == request.guild_id && current.channel_id == Some(channel)
+            })
+        {
+            return false;
+        }
+        self.voice_audio
+            .send_replace(if request.channel_id.is_some() {
+                VoiceAudioState::Connecting
+            } else {
+                VoiceAudioState::Idle
+            });
         self.voice_requests.send_replace(Some(request));
+        true
     }
     /// Starts a local Go Live stream intent through main-Gateway opcode 18.
     #[allow(dead_code)]
@@ -573,6 +672,13 @@ impl NavigationBridge {
         std::mem::take(&mut latest.private_notice_pending)
     }
 
+    /// Asks for a redraw because a voice watch changed. Coalesced like every other
+    /// notification: `false` when one is already waiting to be consumed.
+    fn notify_voice(&self) -> bool {
+        let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        !std::mem::replace(&mut latest.notified, true)
+    }
+
     /// Atomically takes the request, leaving the one-shot parts (the newest
     /// viewport and measured heights) consumed so they cannot be replayed
     /// over a later scroll correction.
@@ -677,6 +783,8 @@ type PrivateOpenFuture =
 enum WorkerInput {
     Request,
     VoiceRequest,
+    VoiceAudio,
+    VoiceControls,
     History(Completed),
     Command(Command),
     PrivateList(u64, Result<Vec<Channel>, String>),
@@ -691,7 +799,10 @@ struct Worker {
     bridge: NavigationBridge,
     requests: watch::Receiver<Request>,
     voice_requests: watch::Receiver<Option<VoiceStateRequest>>,
+    voice_audio: watch::Receiver<VoiceAudioState>,
+    voice_controls: watch::Receiver<VoiceControls>,
     commands: mpsc::Receiver<Command>,
+    voice_flags: (bool, bool),
     revision: u64,
     voice_correlator: Option<JoinCorrelator>,
     voice_task: Option<tokio::task::JoinHandle<()>>,
@@ -973,6 +1084,12 @@ impl Worker {
             changed = self.voice_requests.changed() => {
                 changed.ok().map(|()| WorkerInput::VoiceRequest)
             }
+            changed = self.voice_audio.changed() => {
+                changed.ok().map(|()| WorkerInput::VoiceAudio)
+            }
+            changed = self.voice_controls.changed() => {
+                changed.ok().map(|()| WorkerInput::VoiceControls)
+            }
             completed = self.tracker.history.next_completed() => {
                 Some(WorkerInput::History(completed))
             }
@@ -1098,6 +1215,51 @@ impl Worker {
         }
     }
 
+    /// An audio failure leaves the Gateway voice state too. Otherwise Discord keeps the
+    /// user in the channel, an identical re-join is never resent, and the UI could not
+    /// recover from the failed engine.
+    fn voice_audio_changed(&mut self) -> Option<VoiceStateRequest> {
+        if *self.voice_audio.borrow_and_update() != VoiceAudioState::EngineFailed {
+            return None;
+        }
+        let request = *self.voice_requests.borrow();
+        if let Some(request) = request
+            && request.channel_id.is_some()
+        {
+            let leave = VoiceStateRequest::leave(request.guild_id);
+            self.bridge.voice_requests.send_replace(Some(leave));
+            if let Some(correlator) = self.voice_correlator.as_mut() {
+                correlator.leave();
+            }
+            return Some(leave);
+        }
+        None
+    }
+
+    /// A local mute or deafen change is sent to Discord with the current voice state.
+    fn voice_controls_changed(&mut self, gateway: &Gateway) {
+        let flags = {
+            let controls = self.voice_controls.borrow_and_update();
+            (controls.self_muted, controls.deafened)
+        };
+        if flags == self.voice_flags {
+            return;
+        }
+        self.voice_flags = flags;
+        if matches!(
+            *self.voice_audio.borrow(),
+            VoiceAudioState::Connecting | VoiceAudioState::Running
+        ) && let Some(request) = *self.voice_requests.borrow()
+            && let Some(channel) = request.channel_id
+        {
+            gateway.voice_state().request(VoiceStateRequest::join(
+                request.guild_id,
+                channel,
+                flags.0,
+                flags.1,
+            ));
+        }
+    }
     fn request_voice_state(&mut self, gateway: &Gateway) -> bool {
         let Some(request) = *self.voice_requests.borrow_and_update() else {
             return false;
@@ -1106,11 +1268,15 @@ impl Worker {
             if let Some(correlator) = self.voice_correlator.as_mut() {
                 correlator.join(request.guild_id, channel);
             }
+            self.bridge
+                .voice_audio
+                .send_replace(VoiceAudioState::Connecting);
         } else {
             if let Some(correlator) = self.voice_correlator.as_mut() {
                 correlator.leave();
             }
         }
+        self.voice_flags = (request.self_mute, request.self_deaf);
         gateway.voice_state().request(request);
         true
     }
@@ -1132,6 +1298,18 @@ impl Worker {
                 }
             }
             Dispatch::VoiceStateUpdate(update) => {
+                if *self
+                    .bridge
+                    .account_id
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    == Some(update.state.user_id)
+                {
+                    self.bridge.voice_controls.send_modify(|controls| {
+                        controls.server_muted = update.state.mute;
+                        controls.server_deafened = update.state.deaf;
+                    });
+                }
                 if let Some(correlator) = self.voice_correlator.as_mut() {
                     let correlation = correlator.voice_state(&update.state);
                     return Some(correlation);
@@ -1277,13 +1455,17 @@ impl Worker {
                 // The previous call must have released its audio devices before this one
                 // opens them: `stop_voice` returns only after that task has ended.
                 self.stop_voice().await;
-                self.bridge.voice_audio.send_replace(VoiceAudioState::Idle);
+                self.bridge
+                    .voice_audio
+                    .send_replace(VoiceAudioState::Connecting);
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 self.voice_cancel_tx = Some(tx);
                 self.voice_task = Some(tokio::spawn(voice_audio::run(
                     credentials,
                     rx,
                     self.bridge.voice_audio.clone(),
+                    self.bridge.voice_controls.subscribe(),
+                    self.bridge.voice_controls.clone(),
                 )));
             }
             Correlation::Ended | Correlation::Reallocating => self.stop_voice().await,
@@ -1375,6 +1557,8 @@ pub fn status_stream(
 ) -> impl Stream<Item = ()> {
     let requests = bridge.requests.subscribe();
     let voice_requests = bridge.voice_requests.subscribe();
+    let voice_audio = bridge.voice_audio.subscribe();
+    let voice_controls = bridge.voice_controls.subscribe();
     let rest_client = rest.clone();
     // There is one worker per bridge; a second one would simply get no commands.
     let commands = bridge.take_commands().unwrap_or_else(|| mpsc::channel(1).1);
@@ -1389,7 +1573,10 @@ pub fn status_stream(
         bridge,
         requests,
         voice_requests,
+        voice_audio,
+        voice_controls,
         commands,
+        voice_flags: (false, false),
         revision: 0,
         voice_correlator: None,
         voice_task: None,
@@ -1413,6 +1600,7 @@ pub fn status_stream(
             }
         };
         loop {
+            let mut voice_changed = false;
             let (status, requested) = tokio::select! {
                 event = gateway.next_event() => {
                     let event = event?;
@@ -1433,6 +1621,18 @@ pub fn status_stream(
                     let input = input?;
                     match input {
                         WorkerInput::Request => (None, true),
+                        WorkerInput::VoiceAudio => {
+                            if let Some(leave) = worker.voice_audio_changed() {
+                                gateway.voice_state().request(leave);
+                            }
+                            voice_changed = true;
+                            (None, false)
+                        }
+                        WorkerInput::VoiceControls => {
+                            worker.voice_controls_changed(&gateway);
+                            voice_changed = true;
+                            (None, false)
+                        }
                         WorkerInput::VoiceRequest => {
                             worker.stop_voice().await;
                             if worker.request_voice_state(&gateway) {
@@ -1489,6 +1689,12 @@ pub fn status_stream(
                 && !worker.tracker.history.dirty()
                 && status.is_none()
             {
+                // Voice controls are read straight from the bridge's watches, so a
+                // voice-only change needs a (coalesced) redraw but no snapshot rebuild.
+                if voice_changed && worker.bridge.notify_voice() {
+                    worker.gateway = Some(gateway);
+                    return Some(((), worker));
+                }
                 continue;
             }
             worker.tracker.navigation_dirty = false;
@@ -1527,6 +1733,7 @@ pub struct GatewayPanel {
     pub navigation: Arc<NavigationSnapshot>,
     pub timeline: Arc<timeline::Snapshot>,
     pub controls: NavigationBridge,
+    pub voice_guild: Option<Snowflake>,
     /// The draft and composer state; local to the UI until the user sends.
     pub composer: Composer,
     /// The user's message (channel, message) whose deletion waits for confirmation.
@@ -1552,9 +1759,10 @@ impl GatewayPanel {
             navigation: Arc::default(),
             timeline: Arc::default(),
             controls,
-            confirm_delete: None,
             private: Box::default(),
+            voice_guild: None,
             composer: Composer::default(),
+            confirm_delete: None,
             _worker: worker.abort_on_drop(),
         }
     }
@@ -2108,6 +2316,9 @@ mod tests {
             tracker: Tracker::default(),
             requests: bridge.requests.subscribe(),
             voice_requests: bridge.voice_requests.subscribe(),
+            voice_audio: bridge.voice_audio.subscribe(),
+            voice_controls: bridge.voice_controls.subscribe(),
+            voice_flags: (false, false),
             commands: bridge.take_commands().unwrap(),
             revision: 0,
             voice_correlator: None,
@@ -2504,5 +2715,191 @@ mod tests {
         assert_eq!(describe_delay(Duration::ZERO), "a moment");
         assert_eq!(describe_delay(Duration::from_millis(750)), "1 second");
         assert_eq!(describe_delay(Duration::from_secs(32)), "32 seconds");
+    }
+    #[test]
+    fn mute_and_deafen_precedence_preserves_self_mute() {
+        let mut controls = VoiceControls::default();
+        assert!(controls.capture_enabled());
+        assert!(controls.output_enabled());
+        controls.deafened = true;
+        assert!(!controls.capture_enabled());
+        assert!(!controls.output_enabled());
+        controls.deafened = false;
+        assert!(controls.capture_enabled());
+        controls.self_muted = true;
+        assert!(!controls.capture_enabled());
+        assert!(controls.output_enabled());
+        controls.self_muted = false;
+        controls.server_muted = true;
+        assert!(!controls.capture_enabled());
+        assert!(controls.output_enabled());
+        controls.server_muted = false;
+        controls.server_deafened = true;
+        assert!(controls.capture_enabled());
+        assert!(!controls.output_enabled());
+    }
+    #[test]
+    fn volume_controls_are_bounded_and_mute_deafen_state_is_independent() {
+        let bridge = NavigationBridge::new();
+        bridge.set_self_muted(true);
+        bridge.set_deafened(true);
+        assert!(bridge.voice_controls().self_muted);
+        assert!(bridge.voice_controls().deafened);
+        bridge.set_deafened(false);
+        assert!(bridge.voice_controls().self_muted);
+        for user in 0..256 {
+            assert!(bridge.set_volume_percent(Snowflake(user), user as u16 % 201));
+        }
+        assert!(bridge.set_volume_percent(Snowflake(1_000), 200));
+        let controls = bridge.voice_controls();
+        assert_eq!(controls.volumes.len(), 256);
+        assert_eq!(controls.volume_percent(Snowflake(1_000)), 200);
+        assert_eq!(controls.volume_percent(Snowflake(0)), 100);
+    }
+
+    fn join(channel: u64) -> VoiceStateRequest {
+        VoiceStateRequest::join(Some(Snowflake(7)), Snowflake(channel), false, false)
+    }
+
+    #[test]
+    fn selecting_the_joined_voice_channel_again_keeps_the_session() {
+        let bridge = NavigationBridge::new();
+        let mut requests = bridge.voice_requests.subscribe();
+        assert!(bridge.request_voice_state(join(70)));
+        assert_eq!(bridge.voice_audio_state(), VoiceAudioState::Connecting);
+        requests.borrow_and_update();
+        assert!(!bridge.request_voice_state(join(70)));
+        assert_eq!(bridge.voice_audio_state(), VoiceAudioState::Connecting);
+        assert!(!requests.has_changed().unwrap());
+        bridge.voice_audio.send_replace(VoiceAudioState::Running);
+        requests.borrow_and_update();
+
+        // The Gateway would not resend an identical opcode 4, so the worker must not be
+        // told to tear the call down and wait for credentials that never come.
+        assert!(!bridge.request_voice_state(join(70)));
+        assert_eq!(bridge.voice_audio_state(), VoiceAudioState::Running);
+        assert!(!requests.has_changed().unwrap());
+
+        // A different channel is a real move.
+        bridge.request_voice_state(join(71));
+        assert_eq!(bridge.voice_audio_state(), VoiceAudioState::Connecting);
+        assert!(requests.has_changed().unwrap());
+
+        // A failed engine left the Gateway voice state, so the same channel joins again.
+        bridge
+            .voice_audio
+            .send_replace(VoiceAudioState::EngineFailed);
+        requests.borrow_and_update();
+        bridge.request_voice_state(join(71));
+        assert_eq!(bridge.voice_audio_state(), VoiceAudioState::Connecting);
+        assert!(requests.has_changed().unwrap());
+    }
+
+    #[test]
+    fn a_failed_engine_leaves_the_gateway_voice_state() {
+        let mut worker = worker();
+        worker.bridge.request_voice_state(join(70));
+        worker.voice_requests.borrow_and_update();
+        worker
+            .bridge
+            .voice_audio
+            .send_replace(VoiceAudioState::Running);
+        assert_eq!(worker.voice_audio_changed(), None);
+        assert_eq!(
+            worker.voice_requests.borrow().unwrap().channel_id,
+            Some(Snowflake(70))
+        );
+
+        worker
+            .bridge
+            .voice_audio
+            .send_replace(VoiceAudioState::EngineFailed);
+        assert_eq!(
+            worker.voice_audio_changed(),
+            Some(VoiceStateRequest::leave(Some(Snowflake(7))))
+        );
+        let request = worker.voice_requests.borrow().unwrap();
+        assert_eq!(request.guild_id, Some(Snowflake(7)));
+        assert_eq!(request.channel_id, None);
+        // The failure stays visible; only the Gateway voice state is left.
+        assert_eq!(
+            worker.bridge.voice_audio_state(),
+            VoiceAudioState::EngineFailed
+        );
+    }
+
+    fn participant(user: u64, speaking: bool) -> VoiceParticipant {
+        VoiceParticipant {
+            user_id: Snowflake(user),
+            ssrc: Some(user as u32),
+            speaking,
+        }
+    }
+
+    /// Races participant, server-restriction, and UI writes to the shared controls watch.
+    /// Each writer must retain the fields owned by the other two tasks.
+    fn race_with_publisher(bridge: &NavigationBridge, ui: impl FnOnce(&NavigationBridge) + Send) {
+        let start = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut speaking = false;
+                start.wait();
+                for _ in 0..200_000 {
+                    speaking = !speaking;
+                    let participants = HashMap::from([
+                        (Snowflake(1), participant(1, speaking)),
+                        (Snowflake(2), participant(2, !speaking)),
+                    ]);
+                    voice_audio::publish_participants(&bridge.voice_controls, &participants);
+                }
+            });
+            scope.spawn(|| {
+                start.wait();
+                for _ in 0..200_000 {
+                    bridge.voice_controls.send_modify(|controls| {
+                        controls.server_muted = true;
+                        controls.server_deafened = true;
+                    });
+                    let controls = bridge.voice_controls();
+                    assert!(controls.server_muted, "server mute was overwritten");
+                    assert!(controls.server_deafened, "server deafen was overwritten");
+                }
+            });
+            start.wait();
+            ui(bridge);
+        });
+    }
+
+    #[test]
+    fn a_speaking_publish_never_overwrites_a_concurrent_mute() {
+        let bridge = NavigationBridge::new();
+        race_with_publisher(&bridge, |bridge| {
+            for _ in 0..200_000 {
+                bridge.set_self_muted(true);
+                assert!(bridge.voice_controls().self_muted, "mute was overwritten");
+                bridge.set_self_muted(false);
+                bridge.set_deafened(true);
+                assert!(bridge.voice_controls().deafened, "deafen was overwritten");
+                bridge.set_deafened(false);
+            }
+        });
+    }
+
+    #[test]
+    fn a_participants_publish_never_overwrites_a_concurrent_volume_change() {
+        let bridge = NavigationBridge::new();
+        race_with_publisher(&bridge, |bridge| {
+            for round in 0..200_000u32 {
+                let percent = (round % 200) as u16;
+                bridge.set_volume_percent(Snowflake(2), percent);
+                let controls = bridge.voice_controls();
+                assert_eq!(
+                    controls.volume_percent(Snowflake(2)),
+                    percent,
+                    "volume was overwritten"
+                );
+            }
+        });
+        assert_eq!(bridge.voice_controls().participants.len(), 2);
     }
 }

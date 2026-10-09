@@ -23,7 +23,7 @@ mod tests;
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use fastcord_model::Snowflake;
@@ -162,6 +162,12 @@ pub struct ReceivedAudio {
     pub timestamp: u32,
     pub payload: Vec<u8>,
 }
+/// One item from a voice session's participant-event and audio streams.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VoiceMessage {
+    Event(VoiceEvent),
+    Audio(ReceivedAudio),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaSendError {
@@ -195,6 +201,7 @@ pub(crate) enum MediaCommand {
 #[derive(Clone)]
 pub struct MediaSender {
     queue: mpsc::Sender<MediaCommand>,
+    queued_audio: Arc<AtomicUsize>,
 }
 
 impl fmt::Debug for MediaSender {
@@ -210,7 +217,7 @@ impl MediaSender {
         if frame.is_empty() || frame.len() > MAX_OPUS_FRAME {
             return Err(MediaSendError::InvalidFrame);
         }
-        self.push(MediaCommand::Opus(frame))
+        self.push_audio(frame)
     }
 
     /// Ends a speech burst: five Opus silence frames, then speaking off.
@@ -218,6 +225,35 @@ impl MediaSender {
         self.push(MediaCommand::EndSpeech)
     }
 
+    fn push_audio(&self, frame: Vec<u8>) -> Result<(), MediaSendError> {
+        if self.queue.is_closed() {
+            return Err(MediaSendError::Closed);
+        }
+        let mut queued = self.queued_audio.load(Ordering::Acquire);
+        loop {
+            if queued >= MEDIA_QUEUE_FRAMES {
+                return Err(MediaSendError::Full);
+            }
+            match self.queued_audio.compare_exchange_weak(
+                queued,
+                queued + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => queued = current,
+            }
+        }
+        self.queue
+            .try_send(MediaCommand::Opus(frame))
+            .map_err(|error| {
+                self.queued_audio.fetch_sub(1, Ordering::AcqRel);
+                match error {
+                    mpsc::error::TrySendError::Full(_) => MediaSendError::Full,
+                    mpsc::error::TrySendError::Closed(_) => MediaSendError::Closed,
+                }
+            })
+    }
     fn push(&self, command: MediaCommand) -> Result<(), MediaSendError> {
         self.queue.try_send(command).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => MediaSendError::Full,
@@ -316,7 +352,8 @@ fn start<S: transport::Signaling, N: transport::Network>(
     let (status_tx, status) = watch::channel(VoiceStatus::Connecting);
     let (events_tx, events) = mpsc::channel(EVENT_QUEUE);
     let (audio_tx, audio) = mpsc::channel(AUDIO_QUEUE_PACKETS);
-    let (media_tx, media_rx) = mpsc::channel(MEDIA_QUEUE_FRAMES);
+    let queued_audio = Arc::new(AtomicUsize::new(0));
+    let (media_tx, media_rx) = mpsc::channel(MEDIA_QUEUE_FRAMES + 1);
     let (leave_tx, leave_rx) = oneshot::channel();
     let counters = Arc::new(Counters::default());
     let channels = driver::Channels {
@@ -324,6 +361,7 @@ fn start<S: transport::Signaling, N: transport::Network>(
         events: events_tx,
         audio: audio_tx,
         media: media_rx,
+        queued_audio: Arc::clone(&queued_audio),
         leave: leave_rx,
         counters: Arc::clone(&counters),
     };
@@ -339,7 +377,10 @@ fn start<S: transport::Signaling, N: transport::Network>(
         status,
         events,
         audio,
-        media: MediaSender { queue: media_tx },
+        media: MediaSender {
+            queue: media_tx,
+            queued_audio,
+        },
         counters,
         leave: Some(leave_tx),
         task,
@@ -376,6 +417,29 @@ impl VoiceSession {
         tokio::select! {
             event = events.recv() => event.is_some(),
             packet = audio.recv() => packet.is_some(),
+        }
+    }
+
+    /// Waits for the next event or audio packet without requiring simultaneous mutable borrows.
+    pub async fn next_message(&mut self) -> Option<VoiceMessage> {
+        loop {
+            let events_done = self.events.is_closed() && self.events.is_empty();
+            let audio_done = self.audio.is_closed() && self.audio.is_empty();
+            if events_done && audio_done {
+                return None;
+            }
+            tokio::select! {
+                event = self.events.recv(), if !events_done => {
+                    if let Some(event) = event {
+                        return Some(VoiceMessage::Event(event));
+                    }
+                }
+                audio = self.audio.recv(), if !audio_done => {
+                    if let Some(audio) = audio {
+                        return Some(VoiceMessage::Audio(audio));
+                    }
+                }
+            }
         }
     }
 

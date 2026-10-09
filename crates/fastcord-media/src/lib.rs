@@ -16,7 +16,7 @@ pub mod udp;
 pub use crypto::TransportMode;
 pub use gateway::{
     CloseReason, MediaSendError, MediaSender, ReceivedAudio, TransportStats, VoiceEvent,
-    VoiceSession, VoiceStatus, connect,
+    VoiceMessage, VoiceSession, VoiceStatus, connect,
 };
 pub use session::{Correlation, Generation, JoinCorrelator, VoiceCredentials};
 pub use stream::{StreamCorrelation, StreamCorrelator, StreamCredentials};
