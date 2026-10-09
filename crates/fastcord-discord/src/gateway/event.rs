@@ -79,6 +79,8 @@ pub enum StopReason {
     InvalidGatewayUrl,
     /// Locally planned guild subscriptions exceeded the outbound payload ceiling.
     SubscriptionTooLarge,
+    /// A Go Live signal exceeded the outbound payload safety ceiling.
+    StreamSignalTooLarge,
     /// Required normalized state could not fit the metadata safety ceiling.
     StateTooLarge,
 }
@@ -94,6 +96,7 @@ impl fmt::Display for StopReason {
             Self::IdentifyRejected => f.write_str("Discord repeatedly refused this connection without a reason. Check the account in the official client; fastcord stops instead of retrying."),
             Self::InvalidGatewayUrl => f.write_str("Discord returned a Gateway address that is not a Discord Gateway. fastcord refused to send the login token there."),
             Self::SubscriptionTooLarge => f.write_str("A guild subscription could not be encoded within Discord's 15 KiB Gateway payload limit. Automatic attempts have stopped."),
+            Self::StreamSignalTooLarge => f.write_str("A Go Live signal could not be encoded within Discord's 15 KiB Gateway payload limit. Automatic attempts have stopped."),
             Self::StateTooLarge => f.write_str("Required account state exceeds fastcord's 12 MiB metadata safety limit. The connection has stopped rather than silently dropping guild identity or permission data."),
         }
     }
@@ -393,6 +396,13 @@ pub enum Dispatch {
     /// The voice server for the account's voice connection; for the voice
     /// layer, not the reducer. A `None` endpoint means it is being reallocated.
     VoiceServerUpdate(Box<VoiceServerUpdate>),
+    /// The stream RTC server for the account's stream connection; for the
+    /// media layer, not the reducer. A `None` endpoint means it is being
+    /// reallocated.
+    StreamCreate(Box<fastcord_model::StreamCreate>),
+    StreamServerUpdate(Box<fastcord_model::StreamServerUpdate>),
+    StreamUpdate(Box<fastcord_model::StreamUpdate>),
+    StreamDelete(Box<fastcord_model::StreamDelete>),
 }
 
 impl Dispatch {
@@ -423,6 +433,10 @@ impl Dispatch {
             Self::GuildRoleDelete(_) => "GUILD_ROLE_DELETE",
             Self::VoiceStateUpdate(_) => "VOICE_STATE_UPDATE",
             Self::VoiceServerUpdate(_) => "VOICE_SERVER_UPDATE",
+            Self::StreamCreate(_) => "STREAM_CREATE",
+            Self::StreamServerUpdate(_) => "STREAM_SERVER_UPDATE",
+            Self::StreamUpdate(_) => "STREAM_UPDATE",
+            Self::StreamDelete(_) => "STREAM_DELETE",
         }
     }
 }

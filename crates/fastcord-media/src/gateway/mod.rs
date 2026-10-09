@@ -369,6 +369,15 @@ impl VoiceSession {
     pub async fn next_audio(&mut self) -> Option<ReceivedAudio> {
         self.audio.recv().await
     }
+    /// Discards the next event or audio packet. Stream watchers use this to
+    /// keep the shared transport queues bounded without opening audio devices.
+    pub async fn discard_next(&mut self) -> bool {
+        let (events, audio) = (&mut self.events, &mut self.audio);
+        tokio::select! {
+            event = events.recv() => event.is_some(),
+            packet = audio.recv() => packet.is_some(),
+        }
+    }
 
     pub fn media(&self) -> MediaSender {
         self.media.clone()

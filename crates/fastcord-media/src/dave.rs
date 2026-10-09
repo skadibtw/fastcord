@@ -57,6 +57,7 @@ pub(crate) struct DaveSession {
     engine: DaveEngine,
     user_id: u64,
     channel_id: u64,
+    group_id: u64,
     protocol_version: NonZeroU16,
     external_sender: Option<Vec<u8>>,
     announced_epoch: Option<u64>,
@@ -72,6 +73,7 @@ impl fmt::Debug for DaveSession {
             .field("protocol_version", &self.protocol_version)
             .field("user_id", &self.user_id)
             .field("channel_id", &self.channel_id)
+            .field("group_id", &self.group_id)
             .field("epoch", &self.epoch())
             .field("ready", &self.is_send_ready())
             .finish()
@@ -84,15 +86,25 @@ impl DaveSession {
         user_id: u64,
         channel_id: u64,
     ) -> Result<Self, DaveError> {
+        Self::new_with_group(protocol_version, user_id, channel_id, channel_id)
+    }
+
+    pub(crate) fn new_with_group(
+        protocol_version: u16,
+        user_id: u64,
+        channel_id: u64,
+        group_id: u64,
+    ) -> Result<Self, DaveError> {
         let protocol_version = NonZeroU16::new(protocol_version)
             .filter(|version| version.get() == DAVE_PROTOCOL_VERSION)
             .ok_or(DaveError::UnsupportedProtocolVersion)?;
-        let engine = DaveEngine::new(protocol_version, user_id, channel_id, None)
+        let engine = DaveEngine::new(protocol_version, user_id, group_id, None)
             .map_err(|_| DaveError::Engine)?;
         Ok(Self {
             engine,
             user_id,
             channel_id,
+            group_id,
             protocol_version,
             external_sender: None,
             announced_epoch: None,
@@ -165,7 +177,7 @@ impl DaveSession {
             self.cached_proposals.clear();
             self.announced_epoch = Some(epoch);
             self.engine
-                .reinit(self.protocol_version, self.user_id, self.channel_id, None)
+                .reinit(self.protocol_version, self.user_id, self.group_id, None)
                 .map_err(|_| DaveError::Engine)?;
             Ok(Some(self.create_key_package()?))
         } else {
@@ -273,7 +285,7 @@ impl DaveSession {
     pub(crate) fn recover(&mut self, transition_id: u16) -> Result<Vec<u8>, DaveError> {
         self.send_enabled = false;
         self.engine
-            .reinit(self.protocol_version, self.user_id, self.channel_id, None)
+            .reinit(self.protocol_version, self.user_id, self.group_id, None)
             .map_err(|_| DaveError::Engine)?;
         self.in_group = false;
         self.cached_proposals.clear();

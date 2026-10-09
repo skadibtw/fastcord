@@ -13,8 +13,8 @@
 use std::collections::HashMap;
 
 use fastcord_model::{
-    Channel, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, User, VoiceServerUpdate,
-    VoiceState,
+    Channel, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, StreamCreate,
+    StreamDelete, StreamServerUpdate, StreamUpdate, User, VoiceServerUpdate, VoiceState,
 };
 use serde::{Deserialize, Deserializer};
 
@@ -731,6 +731,12 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "VOICE_SERVER_UPDATE" => {
             json::<VoiceServerUpdate>(raw).map(|v| Dispatch::VoiceServerUpdate(Box::new(v)))
         }
+        "STREAM_CREATE" => json::<StreamCreate>(raw).map(|s| Dispatch::StreamCreate(Box::new(s))),
+        "STREAM_SERVER_UPDATE" => {
+            json::<StreamServerUpdate>(raw).map(|s| Dispatch::StreamServerUpdate(Box::new(s)))
+        }
+        "STREAM_UPDATE" => json::<StreamUpdate>(raw).map(|s| Dispatch::StreamUpdate(Box::new(s))),
+        "STREAM_DELETE" => json::<StreamDelete>(raw).map(|s| Dispatch::StreamDelete(Box::new(s))),
         _ => return Decoded::Unhandled,
     };
     event.map_or(Decoded::Malformed, Decoded::Event)
@@ -1371,5 +1377,60 @@ mod tests {
             decode_dispatch("VOICE_SERVER_UPDATE", r#"{"guild_id":"4","endpoint":null}"#),
             Decoded::Malformed
         ));
+    }
+
+    #[test]
+    fn stream_signal_events_decode_typed_and_redact_tokens() {
+        let stream_key = "guild:41:127:1";
+        let Decoded::Event(created) = decode_dispatch(
+            "STREAM_CREATE",
+            r#"{"stream_key":"guild:41:127:1","rtc_server_id":"300","rtc_channel_id":"400","region":"us-east","viewer_ids":["2"],"paused":false}"#,
+        ) else {
+            panic!("STREAM_CREATE did not decode");
+        };
+        let Dispatch::StreamCreate(stream_create) = &created else {
+            panic!("unexpected stream event");
+        };
+        assert_eq!(stream_create.stream_key, stream_key);
+        assert_eq!(stream_create.rtc_server_id, id(300));
+        assert_eq!(stream_create.rtc_channel_id, id(400));
+
+        let Decoded::Event(server) = decode_dispatch(
+            "STREAM_SERVER_UPDATE",
+            r#"{"token":"stream-secret","stream_key":"guild:41:127:1","guild_id":"41","endpoint":"rtc.example"}"#,
+        ) else {
+            panic!("STREAM_SERVER_UPDATE did not decode");
+        };
+        let Dispatch::StreamServerUpdate(server_update) = &server else {
+            panic!("unexpected stream event");
+        };
+        assert_eq!(server_update.token.expose_secret(), "stream-secret");
+        assert_eq!(server_update.endpoint.as_deref(), Some("rtc.example"));
+        assert!(!format!("{server:?} {server_update:?}").contains("stream-secret"));
+        let Decoded::Event(updated) =
+            decode_dispatch("STREAM_UPDATE", r#"{"stream_key":"guild:41:127:1"}"#)
+        else {
+            panic!("STREAM_UPDATE did not decode");
+        };
+        assert!(
+            matches!(&updated, Dispatch::StreamUpdate(update) if update.stream_key == stream_key)
+        );
+        let Decoded::Event(deleted) = decode_dispatch(
+            "STREAM_DELETE",
+            r#"{"stream_key":"guild:41:127:1","reason":"stream_ended"}"#,
+        ) else {
+            panic!("STREAM_DELETE did not decode");
+        };
+        assert!(matches!(&deleted, Dispatch::StreamDelete(delete)
+            if delete.stream_key == stream_key
+                && delete.reason == fastcord_model::StreamDeleteReason::StreamEnded));
+        for name in [
+            "STREAM_CREATE",
+            "STREAM_SERVER_UPDATE",
+            "STREAM_UPDATE",
+            "STREAM_DELETE",
+        ] {
+            assert!(matches!(decode_dispatch(name, "{}"), Decoded::Malformed));
+        }
     }
 }

@@ -126,6 +126,7 @@ mod tests {
             session_id: "test-session".into(),
             token: VoiceToken::new("test-token".into()),
             endpoint: "127.0.0.1:9".into(),
+            dave_group_id: None,
         }
     }
 

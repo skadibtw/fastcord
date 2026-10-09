@@ -964,9 +964,8 @@ fn snowflake(value: u64) -> fastcord_model::Snowflake {
 
 impl Server {
     /// Everything the client has sent that is already waiting, in order.
-    /// Heartbeats are acknowledged. Only opcodes this client is meant to use
-    /// are accepted (heartbeat, identify, voice state, resume, subscriptions):
-    /// in particular opcode 14 must never appear.
+    /// are accepted (heartbeat, identify, voice/stream signals, resume,
+    /// subscriptions): in particular opcode 14 must never appear.
     async fn service(&mut self) -> Vec<Value> {
         let mut frames = Vec::new();
         while let Some(Some(Ok(message))) = self.socket.next().now_or_never() {
@@ -975,7 +974,10 @@ impl Server {
             };
             let frame: Value = serde_json::from_str(text.as_str()).unwrap();
             let op = frame["op"].as_u64().unwrap();
-            assert!(matches!(op, 1 | 2 | 4 | 6 | 37), "unexpected opcode {op}");
+            assert!(
+                matches!(op, 1 | 2 | 4 | 6 | 18..=22 | 37),
+                "unexpected opcode {op}"
+            );
             if op == 1 {
                 self.ack().await;
             }
@@ -1413,10 +1415,76 @@ async fn only_documented_opcodes_are_ever_sent_across_a_whole_session() {
         settle(Duration::from_secs(1)).await;
         all.extend(server.service().await);
     }
-    // `service` rejects any opcode but heartbeat, identify, voice state,
-    // resume, and 37.
+    // `service` rejects any opcode but heartbeat, identify, voice/stream
+    // signals, resume, and subscriptions.
     assert!(all.iter().any(|frame| frame["op"] == 37));
     assert!(all.iter().all(|frame| frame["op"] != 14));
+}
+
+// ----- Go Live signals (main Gateway opcodes 18–22) -----
+
+#[tokio::test(start_paused = true)]
+async fn stream_signals_wait_for_ready_and_send_exact_opcode_bodies() {
+    let transport = FakeTransport::new();
+    let mut server = transport.accept().await;
+    let mut gateway = start(&transport, 0.5);
+    server.handshake().await;
+    let streams = gateway.streams();
+    streams
+        .create(fastcord_model::StreamCreateRequest::guild(
+            snowflake(FIRST_GUILD),
+            snowflake(VOICE_CHANNEL),
+        ))
+        .unwrap();
+    streams.watch("server-advertised-key").unwrap();
+    settle(Duration::from_secs(1)).await;
+    assert!(
+        server
+            .service()
+            .await
+            .iter()
+            .all(|frame| !(18..=22).contains(&frame["op"].as_u64().unwrap())),
+        "stream signals are gated until READY"
+    );
+    server.dispatch("READY", 1, READY).await;
+    skip_connection_states(&mut gateway).await;
+    next_dispatch(&mut gateway).await;
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    settle(Duration::from_secs(1)).await;
+    assert_eq!(
+        server.service().await,
+        [
+            json!({"op": 18, "d": {
+                "type": "guild",
+                "channel_id": VOICE_CHANNEL.to_string(),
+                "guild_id": FIRST_GUILD.to_string()
+            }}),
+            json!({"op": 20, "d": {"stream_key": "server-advertised-key"}})
+        ]
+    );
+
+    for (request, expected) in [
+        (
+            0,
+            json!({"op": 21, "d": {"stream_key": "server-advertised-key"}}),
+        ),
+        (
+            1,
+            json!({"op": 22, "d": {"stream_key": "server-advertised-key", "paused": true}}),
+        ),
+        (
+            2,
+            json!({"op": 19, "d": {"stream_key": "server-advertised-key"}}),
+        ),
+    ] {
+        match request {
+            0 => streams.ping("server-advertised-key").unwrap(),
+            1 => streams.pause_resume("server-advertised-key", true).unwrap(),
+            _ => streams.delete("server-advertised-key").unwrap(),
+        }
+        settle(Duration::from_secs(1)).await;
+        assert_eq!(server.service().await, [expected]);
+    }
 }
 
 // ----- voice state (opcode 4) -----

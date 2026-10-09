@@ -394,6 +394,7 @@ mod tests {
             session_id: "fixture-session".to_owned(),
             token: VoiceToken::new("fixture-voice-token".to_owned()),
             endpoint: "fixture.discord.media:443".to_owned(),
+            dave_group_id: None,
         }
     }
 

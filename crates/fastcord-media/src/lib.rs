@@ -10,6 +10,7 @@ pub mod rtcp;
 pub mod rtp;
 pub mod session;
 pub mod ssrc;
+pub mod stream;
 pub mod udp;
 
 pub use crypto::TransportMode;
@@ -18,3 +19,4 @@ pub use gateway::{
     VoiceSession, VoiceStatus, connect,
 };
 pub use session::{Correlation, Generation, JoinCorrelator, VoiceCredentials};
+pub use stream::{StreamCorrelation, StreamCorrelator, StreamCredentials};

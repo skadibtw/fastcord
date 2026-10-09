@@ -23,6 +23,7 @@ mod event;
 mod outbox;
 mod pacing;
 mod profile;
+mod stream;
 mod subscription;
 mod transport;
 mod url;
@@ -50,6 +51,7 @@ pub use event::{
 pub use profile::{
     BUNDLED_BUILD_NUMBER, BuildNumber, BuildSource, ClientProperties, HostOs, PROFILE_VERSION,
 };
+pub use stream::{StreamControl, StreamSignalQueueError};
 pub use subscription::{
     GuildSubscription, MAX_MEMBERS_PER_GUILD, MAX_RANGES, MemberRange, RANGE_BLOCK,
     SubscriptionTarget, Subscriptions,
@@ -66,6 +68,7 @@ pub struct Gateway {
     events: EventReceiver,
     subscriptions: Subscriptions,
     voice: VoiceStateControl,
+    stream: StreamControl,
     /// Dropping the sender is the shutdown signal.
     _shutdown: oneshot::Sender<()>,
 }
@@ -107,6 +110,11 @@ impl Gateway {
     pub fn voice_state(&self) -> VoiceStateControl {
         self.voice.clone()
     }
+
+    /// The handle for creating, watching, pausing, and ending streams.
+    pub fn streams(&self) -> StreamControl {
+        self.stream.clone()
+    }
 }
 
 /// Decodes a recorded payload the way the connection would, for reducer tests.
@@ -128,6 +136,7 @@ fn start_with<T: Transport, J: JitterSource>(
     let (outbox, events) = outbox::channel();
     let (subscriptions, wanted) = Subscriptions::new();
     let (voice, voice_wanted) = VoiceStateControl::new();
+    let (stream, stream_wanted) = StreamControl::new();
     let (shutdown, shutdown_signal) = oneshot::channel();
     tokio::spawn(connection::run(
         transport,
@@ -138,6 +147,7 @@ fn start_with<T: Transport, J: JitterSource>(
         connection::Wanted {
             subscriptions: wanted,
             voice: voice_wanted,
+            stream: stream_wanted,
         },
         shutdown_signal,
     ));
@@ -145,6 +155,7 @@ fn start_with<T: Transport, J: JitterSource>(
         events,
         subscriptions,
         voice,
+        stream,
         _shutdown: shutdown,
     }
 }

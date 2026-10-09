@@ -541,11 +541,19 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 }
                 let key = TransportKey::from_slice(&description.secret_key[..])
                     .map_err(|_| protocol())?;
-                let mut dave = DaveSession::new(
-                    description.dave_protocol_version,
-                    self.credentials.user_id.0,
-                    self.credentials.channel_id.0,
-                )
+                let mut dave = match self.credentials.dave_group_id {
+                    Some(group_id) => DaveSession::new_with_group(
+                        description.dave_protocol_version,
+                        self.credentials.user_id.0,
+                        self.credentials.channel_id.0,
+                        group_id,
+                    ),
+                    None => DaveSession::new(
+                        description.dave_protocol_version,
+                        self.credentials.user_id.0,
+                        self.credentials.channel_id.0,
+                    ),
+                }
                 .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
                 let key_package = dave
                     .create_key_package()

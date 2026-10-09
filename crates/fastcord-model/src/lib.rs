@@ -23,4 +23,8 @@ pub use permissions::{
 };
 pub use snowflake::{DISCORD_EPOCH_MS, ParseSnowflakeError, Snowflake};
 pub use user::User;
-pub use voice::{VoiceServerUpdate, VoiceState, VoiceStateRequest, VoiceToken};
+pub use voice::{
+    StreamCreate, StreamCreateRequest, StreamDelete, StreamDeleteReason, StreamKey,
+    StreamServerUpdate, StreamType, StreamUpdate, VoiceServerUpdate, VoiceState, VoiceStateRequest,
+    VoiceToken,
+};

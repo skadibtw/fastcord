@@ -25,6 +25,11 @@ pub(crate) mod op {
     pub(crate) const INVALID_SESSION: u8 = 9;
     pub(crate) const HELLO: u8 = 10;
     pub(crate) const HEARTBEAT_ACK: u8 = 11;
+    pub(crate) const STREAM_CREATE: u8 = 18;
+    pub(crate) const STREAM_DELETE: u8 = 19;
+    pub(crate) const STREAM_WATCH: u8 = 20;
+    pub(crate) const STREAM_PING: u8 = 21;
+    pub(crate) const STREAM_PAUSE_RESUME: u8 = 22;
 }
 
 /// Outbound payloads must stay under 15 KiB or the server closes with 4002.
@@ -150,6 +155,40 @@ pub(crate) fn voice_state_update(request: &VoiceStateRequest) -> String {
     // stays far below the outbound ceiling.
     frame(op::VOICE_STATE_UPDATE, request).expect("opcode 4 frame always serializes")
 }
+/// Builds main-Gateway Go Live signal frames (opcodes 18–22).
+pub(crate) fn stream_signal(
+    command: &super::stream::StreamCommand,
+) -> Result<String, OutboundError> {
+    #[derive(Serialize)]
+    struct StreamKeyPayload<'a> {
+        stream_key: &'a str,
+    }
+    #[derive(Serialize)]
+    struct PausePayload<'a> {
+        stream_key: &'a str,
+        paused: bool,
+    }
+
+    match command {
+        super::stream::StreamCommand::Create(request) => frame(op::STREAM_CREATE, request),
+        super::stream::StreamCommand::Delete(key) => {
+            frame(op::STREAM_DELETE, &StreamKeyPayload { stream_key: key })
+        }
+        super::stream::StreamCommand::Watch(key) => {
+            frame(op::STREAM_WATCH, &StreamKeyPayload { stream_key: key })
+        }
+        super::stream::StreamCommand::Ping(key) => {
+            frame(op::STREAM_PING, &StreamKeyPayload { stream_key: key })
+        }
+        super::stream::StreamCommand::PauseResume { stream_key, paused } => frame(
+            op::STREAM_PAUSE_RESUME,
+            &PausePayload {
+                stream_key,
+                paused: *paused,
+            },
+        ),
+    }
+}
 
 /// Every field of one guild's subscription, always explicit: an omitted field
 /// is never assumed to clear anything (SPEC §4.4, U2). `typing` is the flag the
@@ -205,6 +244,7 @@ pub(crate) fn guild_subscriptions_bulk(
 
 #[cfg(test)]
 mod tests {
+    use fastcord_model::StreamCreateRequest;
     use serde_json::{Value, json};
 
     use super::*;
@@ -267,6 +307,43 @@ mod tests {
             serde_json::to_value(VoiceStateRequest::leave(None)).unwrap()
         );
         assert_eq!(leave["d"]["channel_id"], Value::Null);
+    }
+
+    #[test]
+    fn stream_signal_opcodes_serialize_exact_bodies() {
+        use super::super::stream::StreamCommand;
+
+        let frames = [
+            (
+                StreamCommand::Create(StreamCreateRequest::guild(Snowflake(41), Snowflake(127))),
+                json!({"op": 18, "d": {"type": "guild", "channel_id": "127", "guild_id": "41"}}),
+            ),
+            (
+                StreamCommand::Delete("guild:41:127:1".into()),
+                json!({"op": 19, "d": {"stream_key": "guild:41:127:1"}}),
+            ),
+            (
+                StreamCommand::Watch("guild:41:127:1".into()),
+                json!({"op": 20, "d": {"stream_key": "guild:41:127:1"}}),
+            ),
+            (
+                StreamCommand::Ping("guild:41:127:1".into()),
+                json!({"op": 21, "d": {"stream_key": "guild:41:127:1"}}),
+            ),
+            (
+                StreamCommand::PauseResume {
+                    stream_key: "guild:41:127:1".into(),
+                    paused: true,
+                },
+                json!({"op": 22, "d": {"stream_key": "guild:41:127:1", "paused": true}}),
+            ),
+        ];
+        for (command, expected) in frames {
+            assert_eq!(
+                serde_json::from_str::<Value>(&stream_signal(&command).unwrap()).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

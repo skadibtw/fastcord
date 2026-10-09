@@ -69,6 +69,7 @@ fn credentials(endpoint: &str) -> VoiceCredentials {
         session_id: "fixture-session".to_owned(),
         token: VoiceToken::new("fixture-voice-token".to_owned()),
         endpoint: endpoint.to_owned(),
+        dave_group_id: None,
     }
 }
 
@@ -391,9 +392,18 @@ fn session_description(mode: &str) -> Value {
 /// HELLO, Identify, READY, IP discovery, and Select Protocol; returns the
 /// Select Protocol payload with the UDP side ready for Session Description.
 async fn negotiate(harness: &mut Harness, ws: &mut Ws, modes: &[&str]) -> (Udp, Value) {
+    negotiate_with_token(harness, ws, modes, "fixture-voice-token").await
+}
+
+async fn negotiate_with_token(
+    harness: &mut Harness,
+    ws: &mut Ws,
+    modes: &[&str],
+    token: &str,
+) -> (Udp, Value) {
     ws.hello(QUIET_HEARTBEAT_MS).await;
     let identify = ws.recv_op(0).await;
-    assert_eq!(identify["d"]["token"], "fixture-voice-token");
+    assert_eq!(identify["d"]["token"], token);
     ws.send(ready(modes)).await;
     let mut udp = harness.udp().await;
     let discovery = udp.recv().await;
@@ -432,8 +442,17 @@ struct TestDaveGroup {
 
 /// Installs a valid initial group through an external Add proposal and Welcome.
 async fn install_test_dave_group(harness: &Harness, ws: &mut Ws) -> TestDaveGroup {
-    const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256;
     let channel_id = credentials("fixture.discord.media:443").channel_id.0;
+    install_test_dave_group_for(harness, ws, channel_id, channel_id).await
+}
+
+async fn install_test_dave_group_for(
+    harness: &Harness,
+    ws: &mut Ws,
+    channel_id: u64,
+    group_id: u64,
+) -> TestDaveGroup {
+    const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256;
     let Message::Binary(client_key_package) = ws.0.next().await.unwrap().unwrap() else {
         panic!("expected DAVE key package")
     };
@@ -447,7 +466,7 @@ async fn install_test_dave_group(harness: &Harness, ws: &mut Ws) -> TestDaveGrou
         BasicCredential::new(b"voice-gateway".to_vec()).into(),
     );
     let external_sender_bytes = external_sender.tls_serialize_detached().unwrap();
-    let mut peer = DaveSession::new(1, ALICE.0, channel_id).unwrap();
+    let mut peer = DaveSession::new_with_group(1, ALICE.0, channel_id, group_id).unwrap();
     peer.set_external_sender(&external_sender_bytes).unwrap();
     let client_key_package = KeyPackageIn::tls_deserialize_exact_bytes(&client_key_package[1..])
         .unwrap()
@@ -455,7 +474,7 @@ async fn install_test_dave_group(harness: &Harness, ws: &mut Ws) -> TestDaveGrou
         .unwrap();
     let add = ExternalProposal::new_add::<OpenMlsRustCrypto>(
         client_key_package,
-        GroupId::from_slice(&channel_id.to_be_bytes()),
+        GroupId::from_slice(&group_id.to_be_bytes()),
         GroupEpoch::from(peer.epoch().unwrap()),
         &delivery_signer,
         SenderExtensionIndex::new(0),
@@ -1080,4 +1099,120 @@ fn credentials_and_sessions_never_print_secrets() {
     let credentials = credentials("fixture.discord.media:443");
     let text = format!("{credentials:?}");
     assert!(!text.contains("fixture-voice-token") && !text.contains("fixture-session"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn parent_voice_and_stream_establish_independent_udp_dave_sessions() {
+    let mut parent_correlator = crate::session::JoinCorrelator::new(ME);
+    let parent_generation = parent_correlator.join(Some(GUILD), Snowflake(127));
+    let mut streams = crate::stream::StreamCorrelator::new(ME, "main-session");
+    let stream_key = "guild:41:127:1";
+    let server = fastcord_model::StreamServerUpdate {
+        stream_key: stream_key.into(),
+        token: VoiceToken::new("stream-token".into()),
+        endpoint: Some("fixture.discord.media:443".into()),
+    };
+    assert!(matches!(
+        streams.server_update(&server),
+        crate::stream::StreamCorrelation::Waiting
+    ));
+    let create = fastcord_model::StreamCreate {
+        stream_key: stream_key.into(),
+        rtc_server_id: Snowflake(500),
+        rtc_channel_id: Snowflake(789),
+    };
+    let crate::stream::StreamCorrelation::Connect(stream_credentials) = streams.create(&create)
+    else {
+        panic!("documented stream events did not correlate");
+    };
+    assert_eq!(parent_correlator.generation(), parent_generation);
+
+    let (mut parent, parent_signaling) = Harness::start(options());
+    let mut parent_ws = parent_signaling.accept().await;
+    let (mut parent_udp, _) = negotiate(&mut parent, &mut parent_ws, &BOTH_MODES).await;
+    parent_ws
+        .send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let mut parent_dave = install_test_dave_group_for(&parent, &mut parent_ws, 127, 127).await;
+
+    let (mut stream, stream_signaling) =
+        Harness::start_with(stream_credentials.voice_credentials(), options());
+    let mut stream_ws = stream_signaling.accept().await;
+    stream_ws.hello(QUIET_HEARTBEAT_MS).await;
+    let stream_identify = stream_ws.recv_op(0).await;
+    assert_eq!(stream_identify["d"]["server_id"], "500");
+    assert_eq!(stream_identify["d"]["session_id"], "main-session");
+    assert_eq!(stream_identify["d"]["token"], "stream-token");
+    stream_ws.send(ready(&BOTH_MODES)).await;
+    let mut stream_udp = stream.udp().await;
+    let discovery = stream_udp.recv().await;
+    stream_udp.answer_discovery(&discovery);
+    stream_ws.recv_op(1).await;
+    stream_ws
+        .send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let mut stream_dave = install_test_dave_group_for(&stream, &mut stream_ws, 789, 499).await;
+    let mut resumed_stream_ws = stream_signaling.accept().await;
+    stream_ws.close(4015).await;
+    stream
+        .wait_status(|status| matches!(status, VoiceStatus::Resuming { .. }))
+        .await;
+    resumed_stream_ws.hello(QUIET_HEARTBEAT_MS).await;
+    let resume = resumed_stream_ws.recv_op(7).await;
+    assert_eq!(resume["d"]["server_id"], "500");
+    assert_eq!(resume["d"]["session_id"], "main-session");
+    assert_eq!(resume["d"]["token"], "stream-token");
+    resumed_stream_ws.send(json!({"op": 9, "d": null})).await;
+    stream
+        .wait_status(|status| matches!(status, VoiceStatus::Connected { .. }))
+        .await;
+    stream_ws = resumed_stream_ws;
+
+    assert!(matches!(
+        parent.session.status(),
+        VoiceStatus::Connected { .. }
+    ));
+    assert!(matches!(
+        stream.session.status(),
+        VoiceStatus::Connected { .. }
+    ));
+    assert_ne!(parent.session.generation(), stream.session.generation());
+
+    stream
+        .session
+        .media()
+        .send_opus(b"stream-frame".to_vec())
+        .unwrap();
+    assert_eq!(stream_ws.recv_op(5).await["d"]["speaking"], 1);
+    let stream_packet = stream_udp.recv().await;
+    let transport_key = TransportKey::from_slice(&KEY).unwrap();
+    let stream_cipher = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &transport_key);
+    let (_, stream_frame, stream_nonce) = open_rtp(&stream_cipher, &stream_packet);
+    assert_eq!(stream_nonce, 0);
+    assert_eq!(
+        stream_dave.peer.decrypt_opus(ME.0, &stream_frame).unwrap(),
+        b"stream-frame"
+    );
+
+    stream_ws.close(4014).await;
+    assert_eq!(stream.closed().await, CloseReason::Disconnected);
+    assert!(matches!(
+        parent.session.status(),
+        VoiceStatus::Connected { .. }
+    ));
+    parent
+        .session
+        .media()
+        .send_opus(b"parent-survives".to_vec())
+        .unwrap();
+    assert_eq!(parent_ws.recv_op(5).await["d"]["speaking"], 1);
+    let parent_packet = parent_udp.recv().await;
+    let parent_cipher = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &transport_key);
+    let (_, parent_frame, parent_nonce) = open_rtp(&parent_cipher, &parent_packet);
+    assert_eq!(parent_nonce, 0);
+    assert_eq!(
+        parent_dave.peer.decrypt_opus(ME.0, &parent_frame).unwrap(),
+        b"parent-survives"
+    );
+    parent.session.leave().await;
 }

@@ -6,11 +6,12 @@
 //! screen shows, and is dropped, with the connection and the state it owns,
 //! when the account screen is left (which closes the Gateway session cleanly).
 
+mod stream_audio;
 mod voice_audio;
 
 use voice_audio::VoiceAudioState;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -22,8 +23,10 @@ use fastcord_discord::gateway::{
 };
 use fastcord_discord::state::Store;
 use fastcord_discord::state::navigation::{Navigation, NavigationSnapshot};
-use fastcord_media::{Correlation, JoinCorrelator};
-use fastcord_model::{Channel, Snowflake, VoiceStateRequest};
+use fastcord_media::{Correlation, JoinCorrelator, StreamCorrelation, StreamCorrelator};
+use fastcord_model::{
+    Channel, Snowflake, StreamCreateRequest, StreamKey, StreamType, VoiceStateRequest,
+};
 use tokio::sync::{mpsc, watch};
 
 use crate::composer::Composer;
@@ -258,6 +261,33 @@ pub enum Command {
         message: Snowflake,
     },
     OpenPrivate(Vec<Snowflake>),
+    #[allow(dead_code)]
+    Stream(StreamIntent),
+}
+
+/// An explicit Go Live control action. Video capture and encoding are not
+/// started by these signaling intents.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub enum StreamIntent {
+    Create(StreamCreateRequest),
+    Watch(String),
+    Unwatch(String),
+    PauseResume { stream_key: String, paused: bool },
+    Ping(String),
+}
+
+fn send_or_retain_stream_intent(
+    pending: &mut Option<StreamIntent>,
+    intent: StreamIntent,
+    send: impl FnOnce(&StreamIntent) -> bool,
+) -> bool {
+    if send(&intent) {
+        true
+    } else {
+        *pending = Some(intent);
+        false
+    }
 }
 
 // Message text never reaches a log.
@@ -296,6 +326,7 @@ impl fmt::Debug for Command {
                 .field("message", message)
                 .finish(),
             Self::OpenPrivate(_) => f.write_str("OpenPrivate([selected recipients])"),
+            Self::Stream(intent) => f.debug_tuple("Stream").field(intent).finish(),
         }
     }
 }
@@ -354,6 +385,45 @@ impl NavigationBridge {
     )]
     pub fn request_voice_state(&self, request: VoiceStateRequest) {
         self.voice_requests.send_replace(Some(request));
+    }
+    /// Starts a local Go Live stream intent through main-Gateway opcode 18.
+    #[allow(dead_code)]
+    pub fn create_stream(&self, request: StreamCreateRequest) -> bool {
+        self.stream_intent(StreamIntent::Create(request))
+    }
+
+    /// Watches the named Go Live stream through opcode 20.
+    #[allow(dead_code)]
+    pub fn watch_stream(&self, stream_key: impl Into<String>) -> bool {
+        let stream_key = stream_key.into();
+        StreamKey::from_wire(&stream_key)
+            .is_some_and(|_| self.stream_intent(StreamIntent::Watch(stream_key)))
+    }
+
+    /// Stops watching (or ends an owned stream) through opcode 19.
+    #[allow(dead_code)]
+    pub fn unwatch_stream(&self, stream_key: impl Into<String>) -> bool {
+        let stream_key = stream_key.into();
+        StreamKey::from_wire(&stream_key)
+            .is_some_and(|_| self.stream_intent(StreamIntent::Unwatch(stream_key)))
+    }
+
+    #[allow(dead_code)]
+    pub fn pause_stream(&self, stream_key: impl Into<String>, paused: bool) -> bool {
+        let stream_key = stream_key.into();
+        StreamKey::from_wire(&stream_key)
+            .is_some_and(|_| self.stream_intent(StreamIntent::PauseResume { stream_key, paused }))
+    }
+
+    #[allow(dead_code)]
+    pub fn ping_stream(&self, stream_key: impl Into<String>) -> bool {
+        let stream_key = stream_key.into();
+        StreamKey::from_wire(&stream_key)
+            .is_some_and(|_| self.stream_intent(StreamIntent::Ping(stream_key)))
+    }
+
+    fn stream_intent(&self, intent: StreamIntent) -> bool {
+        self.commands.try_send(Command::Stream(intent)).is_ok()
     }
 
     /// The worker's end of the command queue; there is only one.
@@ -631,6 +701,130 @@ struct Worker {
     private_list_task: Option<PrivateListFuture>,
     private_open_task: Option<PrivateOpenFuture>,
     pending_private_opens: VecDeque<Vec<Snowflake>>,
+    stream_correlator: Option<StreamCorrelator>,
+    stream_tasks: HashMap<StreamKey, tokio::task::JoinHandle<()>>,
+    stream_intents: StreamIntentState,
+    pending_stream_signal: Option<StreamIntent>,
+}
+
+fn stream_request_matches_key(
+    request: &StreamCreateRequest,
+    key: &StreamKey,
+    owner_id: Snowflake,
+) -> bool {
+    match (request.stream_type, key) {
+        (
+            StreamType::Guild,
+            StreamKey::Guild {
+                guild_id,
+                channel_id,
+                owner_id: stream_owner,
+            },
+        ) => {
+            request.guild_id == Some(*guild_id)
+                && request.channel_id == *channel_id
+                && *stream_owner == owner_id
+        }
+        (
+            StreamType::Call,
+            StreamKey::Call {
+                channel_id,
+                owner_id: stream_owner,
+            },
+        ) => {
+            request.guild_id.is_none()
+                && request.channel_id == *channel_id
+                && *stream_owner == owner_id
+        }
+        _ => false,
+    }
+}
+
+fn stream_request_matches_location(request: &StreamCreateRequest, key: &StreamKey) -> bool {
+    match (request.stream_type, key) {
+        (
+            StreamType::Guild,
+            StreamKey::Guild {
+                guild_id,
+                channel_id,
+                ..
+            },
+        ) => request.guild_id == Some(*guild_id) && request.channel_id == *channel_id,
+        (StreamType::Call, StreamKey::Call { channel_id, .. }) => {
+            request.guild_id.is_none() && request.channel_id == *channel_id
+        }
+        _ => false,
+    }
+}
+
+fn stream_key_owner(key: &StreamKey) -> Snowflake {
+    match key {
+        StreamKey::Guild { owner_id, .. } | StreamKey::Call { owner_id, .. } => *owner_id,
+    }
+}
+
+#[derive(Default)]
+struct StreamIntentState {
+    user_id: Option<Snowflake>,
+    active: HashSet<StreamKey>,
+    creates: VecDeque<StreamCreateRequest>,
+    cancelled: HashSet<StreamKey>,
+}
+
+impl StreamIntentState {
+    fn ready(&mut self, user_id: Snowflake) {
+        self.user_id = Some(user_id);
+    }
+
+    fn record_create(&mut self, request: &StreamCreateRequest) {
+        let user_id = self.user_id;
+        self.cancelled.retain(|key| {
+            !stream_request_matches_location(request, key)
+                || user_id.is_some_and(|user_id| stream_key_owner(key) != user_id)
+        });
+        self.creates.push_back(request.clone());
+    }
+
+    fn watch(&mut self, key: StreamKey) {
+        self.cancelled.remove(&key);
+        self.active.insert(key);
+    }
+
+    fn retire(&mut self, key: &StreamKey) {
+        self.active.remove(key);
+        self.cancelled.insert(key.clone());
+        let user_id = self.user_id;
+        self.creates.retain(|request| {
+            !stream_request_matches_location(request, key)
+                || user_id.is_some_and(|user_id| stream_key_owner(key) != user_id)
+        });
+    }
+
+    fn is_active(&self, key: &StreamKey) -> bool {
+        self.active.contains(key)
+    }
+
+    fn admit(&mut self, key: &StreamKey) -> bool {
+        if self.cancelled.contains(key) {
+            return false;
+        }
+        if self.is_active(key) {
+            return true;
+        }
+        let Some(user_id) = self.user_id else {
+            return false;
+        };
+        let Some(index) = self
+            .creates
+            .iter()
+            .position(|request| stream_request_matches_key(request, key, user_id))
+        else {
+            return false;
+        };
+        self.creates.remove(index);
+        self.active.insert(key.clone());
+        true
+    }
 }
 
 impl Worker {
@@ -783,7 +977,8 @@ impl Worker {
                 Some(WorkerInput::History(completed))
             }
             Some(command) = self.commands.recv(),
-                if self.pending_private_opens.len() < COMMAND_QUEUE =>
+                if self.pending_private_opens.len() < COMMAND_QUEUE
+                    && self.pending_stream_signal.is_none() =>
             {
                 Some(WorkerInput::Command(command))
             }
@@ -810,6 +1005,37 @@ impl Worker {
 }
 
 impl Worker {
+    /// Applies one explicit Go Live control action.
+    fn stream_command(&mut self, gateway: &Gateway, intent: StreamIntent) {
+        match &intent {
+            StreamIntent::Create(_) => {}
+            StreamIntent::Watch(key) => {
+                if let Some(key) = StreamKey::from_wire(key) {
+                    self.stream_intents.watch(key);
+                } else {
+                    return;
+                }
+            }
+            StreamIntent::Unwatch(key) => {
+                if let Some(key_value) = StreamKey::from_wire(key) {
+                    self.stream_intents.retire(&key_value);
+                    if let Some(correlator) = self.stream_correlator.as_mut() {
+                        correlator.retire(key);
+                    }
+                    self.stop_stream_key(key);
+                } else {
+                    return;
+                }
+            }
+            StreamIntent::PauseResume { stream_key, .. } | StreamIntent::Ping(stream_key) => {
+                if StreamKey::from_wire(stream_key).is_none() {
+                    return;
+                }
+            }
+        }
+        self.queue_stream_intent(gateway, intent);
+    }
+
     /// Applies one explicit outbox or message action.
     fn command(&mut self, command: Command) {
         let history = &mut self.tracker.history;
@@ -839,6 +1065,36 @@ impl Worker {
                 history.dismiss_change(channel, message);
             }
             Command::OpenPrivate(_) => {}
+            Command::Stream(_) => unreachable!("stream commands are handled above"),
+        }
+    }
+
+    fn send_stream_intent(gateway: &Gateway, intent: &StreamIntent) -> bool {
+        let streams = gateway.streams();
+        match intent {
+            StreamIntent::Create(request) => streams.create(request.clone()).is_ok(),
+            StreamIntent::Watch(key) => streams.watch(key.clone()).is_ok(),
+            StreamIntent::Unwatch(key) => streams.delete(key.clone()).is_ok(),
+            StreamIntent::PauseResume { stream_key, paused } => {
+                streams.pause_resume(stream_key.clone(), *paused).is_ok()
+            }
+            StreamIntent::Ping(key) => streams.ping(key.clone()).is_ok(),
+        }
+    }
+    fn queue_stream_intent(&mut self, gateway: &Gateway, intent: StreamIntent) {
+        let sent = send_or_retain_stream_intent(
+            &mut self.pending_stream_signal,
+            intent.clone(),
+            |intent| Self::send_stream_intent(gateway, intent),
+        );
+        if sent {
+            self.record_stream_intent(&intent);
+        }
+    }
+
+    fn record_stream_intent(&mut self, intent: &StreamIntent) {
+        if let StreamIntent::Create(request) = intent {
+            self.stream_intents.record_create(request);
         }
     }
 
@@ -890,6 +1146,112 @@ impl Worker {
             _ => {}
         }
         None
+    }
+    fn stream_dispatch(&mut self, event: &GatewayEvent) -> Option<StreamCorrelation> {
+        let GatewayEvent::Dispatch { event, .. } = event else {
+            return None;
+        };
+        match event {
+            Dispatch::Ready(ready) => {
+                self.stop_all_streams();
+                self.stream_correlator = Some(StreamCorrelator::new(
+                    ready.user.id,
+                    ready.session_id.as_str(),
+                ));
+                self.stream_intents.ready(ready.user.id);
+            }
+            Dispatch::StreamCreate(created) => {
+                let Some(key) = StreamKey::from_wire(&created.stream_key) else {
+                    return Some(StreamCorrelation::Ignored);
+                };
+                if !self.admit_stream_key(&key) {
+                    return Some(StreamCorrelation::Ignored);
+                }
+                self.stop_stream_key(&key.to_wire());
+                return self.stream_correlator.as_mut().map(|c| c.create(created));
+            }
+            Dispatch::StreamServerUpdate(update) => {
+                let Some(key) = StreamKey::from_wire(&update.stream_key) else {
+                    return Some(StreamCorrelation::Ignored);
+                };
+                if !self.admit_stream_key(&key) {
+                    return Some(StreamCorrelation::Ignored);
+                }
+                return self
+                    .stream_correlator
+                    .as_mut()
+                    .map(|c| c.server_update(update));
+            }
+            Dispatch::StreamDelete(deleted) => {
+                let Some(key) = StreamKey::from_wire(&deleted.stream_key) else {
+                    return Some(StreamCorrelation::Ignored);
+                };
+                if !self.admit_stream_key(&key) {
+                    return Some(StreamCorrelation::Ignored);
+                }
+                self.stream_intents.retire(&key);
+                if let Some(correlator) = self.stream_correlator.as_mut() {
+                    let correlation = correlator.delete(&deleted.stream_key);
+                    if matches!(&correlation, StreamCorrelation::Ignored) {
+                        self.stop_stream_key(&deleted.stream_key);
+                    }
+                    return Some(correlation);
+                }
+                self.stop_stream_key(&deleted.stream_key);
+                return Some(StreamCorrelation::Ignored);
+            }
+            Dispatch::StreamUpdate(update)
+                if self.stream_correlator.as_ref().is_none_or(|c| {
+                    StreamKey::from_wire(&update.stream_key).is_none_or(|key| {
+                        !self.stream_intents.is_active(&key) || !c.is_active(&key)
+                    })
+                }) =>
+            {
+                return Some(StreamCorrelation::Ignored);
+            }
+            Dispatch::StreamUpdate(_) => {}
+            _ => {}
+        }
+        None
+    }
+
+    fn admit_stream_key(&mut self, key: &StreamKey) -> bool {
+        self.stream_intents.admit(key)
+    }
+
+    async fn handle_stream_correlation(&mut self, correlation: StreamCorrelation) {
+        match correlation {
+            StreamCorrelation::Connect(credentials) => {
+                let key = credentials.key.clone();
+                self.stop_stream_key(&key.to_wire());
+                self.stream_tasks
+                    .insert(key, tokio::spawn(stream_audio::run(credentials)));
+            }
+            StreamCorrelation::Reallocating { key, .. } | StreamCorrelation::Ended { key, .. } => {
+                self.stop_stream_key(&key.to_wire())
+            }
+            StreamCorrelation::Invalid { key: Some(key), .. } => {
+                self.stop_stream_key(&key.to_wire())
+            }
+            StreamCorrelation::Invalid { key: None, .. }
+            | StreamCorrelation::Ignored
+            | StreamCorrelation::Waiting => {}
+        }
+    }
+
+    fn stop_stream_key(&mut self, wire_key: &str) {
+        let Some(key) = StreamKey::from_wire(wire_key) else {
+            return;
+        };
+        if let Some(task) = self.stream_tasks.remove(&key) {
+            task.abort();
+        }
+    }
+
+    fn stop_all_streams(&mut self) {
+        for (_, task) in self.stream_tasks.drain() {
+            task.abort();
+        }
     }
 
     /// Ends the current call's audio: asks it to leave gracefully (speech ended, voice session
@@ -997,6 +1359,9 @@ impl Drop for Worker {
         if let Some(task) = self.voice_task.take() {
             task.abort();
         }
+        for (_, task) in self.stream_tasks.drain() {
+            task.abort();
+        }
     }
 }
 
@@ -1034,6 +1399,10 @@ pub fn status_stream(
         private_open_task: None,
         pending_private_opens: VecDeque::new(),
         private_list_loaded_generation: None,
+        stream_correlator: None,
+        stream_tasks: HashMap::new(),
+        stream_intents: StreamIntentState::default(),
+        pending_stream_signal: None,
     };
     stream::unfold(worker, |mut worker| async move {
         let mut gateway = match worker.gateway.take() {
@@ -1048,11 +1417,15 @@ pub fn status_stream(
                 event = gateway.next_event() => {
                     let event = event?;
                     let correlation = worker.voice_dispatch(&event);
+                    let stream_correlation = worker.stream_dispatch(&event);
                     let status = worker.apply_gateway_event(event, |worker| {
                         worker.start_private_list_fetch();
                     });
                     if let Some(correlation) = correlation {
                         worker.handle_correlation(correlation).await;
+                    }
+                    if let Some(correlation) = stream_correlation {
+                        worker.handle_stream_correlation(correlation).await;
                     }
                     (status, false)
                 }
@@ -1076,6 +1449,10 @@ pub fn status_stream(
                             worker.queue_private_open(recipients);
                             (None, false)
                         }
+                        WorkerInput::Command(Command::Stream(intent)) => {
+                            worker.stream_command(&gateway, intent);
+                            (None, false)
+                        }
                         WorkerInput::Command(command) => {
                             worker.command(command);
                             (None, false)
@@ -1090,6 +1467,21 @@ pub fn status_stream(
                             (status, false)
                         }
                     }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(10)),
+                    if worker.pending_stream_signal.is_some() =>
+                {
+                    if let Some(intent) = worker.pending_stream_signal.take() {
+                        let sent = send_or_retain_stream_intent(
+                            &mut worker.pending_stream_signal,
+                            intent.clone(),
+                            |intent| Worker::send_stream_intent(&gateway, intent),
+                        );
+                        if sent {
+                            worker.record_stream_intent(&intent);
+                        }
+                    }
+                    (None, false)
                 }
             };
             if !requested
@@ -1111,6 +1503,7 @@ pub fn status_stream(
             if terminal {
                 worker.start = None;
                 worker.stop_voice().await;
+                worker.stop_all_streams();
                 return notified.then_some(((), worker));
             }
             if notified {
@@ -1280,6 +1673,79 @@ mod bridge_tests {
         ));
         assert_eq!(request.guilds.start, 9_999);
         assert_eq!(request.channels, Window::default());
+    }
+
+    #[test]
+    fn explicit_stream_intents_reach_the_bounded_worker_queue_in_order() {
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let key = "guild:41:127:1";
+        assert!(bridge.create_stream(StreamCreateRequest::guild(Snowflake(41), Snowflake(127),)));
+        assert!(bridge.watch_stream(key));
+        assert!(bridge.pause_stream(key, true));
+        assert!(bridge.ping_stream(key));
+        assert!(bridge.unwatch_stream(key));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Stream(StreamIntent::Create(_)))
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Stream(StreamIntent::Watch(actual))) if actual == key
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Stream(StreamIntent::PauseResume { stream_key, paused }))
+                if stream_key == key && paused
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Stream(StreamIntent::Ping(actual))) if actual == key
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Stream(StreamIntent::Unwatch(actual))) if actual == key
+        ));
+        assert!(commands.try_recv().is_err());
+    }
+    #[test]
+    fn a_full_gateway_signal_queue_retains_the_accepted_app_intent_for_retry() {
+        let mut pending = None;
+        let intent = StreamIntent::Unwatch("guild:41:127:1".into());
+        assert!(!send_or_retain_stream_intent(&mut pending, intent, |_| {
+            false
+        },));
+        assert!(matches!(
+            pending.as_ref(),
+            Some(StreamIntent::Unwatch(key)) if key == "guild:41:127:1"
+        ));
+        let retry = pending.take().unwrap();
+        assert!(send_or_retain_stream_intent(&mut pending, retry, |_| true,));
+        assert!(pending.is_none());
+    }
+    #[test]
+    fn local_unwatch_cancels_all_pending_creates_and_gates_late_event_orders() {
+        let request = StreamCreateRequest::guild(Snowflake(41), Snowflake(127));
+        let key = StreamKey::from_wire("guild:41:127:1").unwrap();
+        let mut intents = StreamIntentState::default();
+        intents.ready(Snowflake(1));
+        intents.record_create(&request);
+        intents.record_create(&request);
+        intents.retire(&key);
+        assert!(intents.creates.is_empty());
+        // Each of these represents one side of the event pair arriving late.
+        assert!(!intents.admit(&key));
+        assert!(!intents.admit(&key));
+
+        let mut before_ready = StreamIntentState::default();
+        before_ready.record_create(&request);
+        before_ready.retire(&key);
+        before_ready.ready(Snowflake(1));
+        assert!(!before_ready.admit(&key));
+
+        // A later explicit create is the only owner intent that clears retirement.
+        intents.record_create(&request);
+        assert!(intents.admit(&key));
     }
 
     #[test]
@@ -1652,6 +2118,10 @@ mod tests {
             private_list_task: None,
             private_open_task: None,
             pending_private_opens: VecDeque::new(),
+            stream_correlator: None,
+            stream_tasks: HashMap::new(),
+            stream_intents: StreamIntentState::default(),
+            pending_stream_signal: None,
             bridge,
         }
     }

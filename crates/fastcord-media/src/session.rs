@@ -30,6 +30,8 @@ pub struct VoiceCredentials {
     pub token: VoiceToken,
     /// `host[:port]` without a scheme, as VOICE_SERVER_UPDATE sends it.
     pub endpoint: String,
+    /// Optional MLS group identity override (used by independent stream RTC).
+    pub dave_group_id: Option<u64>,
 }
 
 impl fmt::Debug for VoiceCredentials {
@@ -256,6 +258,7 @@ impl JoinCorrelator {
             session_id: session_id.clone(),
             token: token.clone(),
             endpoint: endpoint.clone(),
+            dave_group_id: None,
         };
         self.bump();
         Correlation::Connect(credentials)

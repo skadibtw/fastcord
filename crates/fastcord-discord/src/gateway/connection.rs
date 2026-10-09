@@ -26,12 +26,14 @@ use std::time::Duration;
 
 use fastcord_model::VoiceStateRequest;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use zeroize::Zeroizing;
+
+use super::url::GatewayUrl;
 
 use super::compression::{InflateError, Inflater};
 use super::decode::{Decoded, decode_dispatch, is_ready_family};
@@ -40,9 +42,9 @@ use super::event::{Dispatch, GatewayEvent};
 use super::outbox::Outbox;
 use super::pacing::{JitterSource, SEND_WINDOW, SendBudget, backoff_delay, invalid_session_delay};
 use super::profile::{ClientProperties, HostOs};
+use super::stream::StreamCommand;
 use super::subscription::{CONTROL_RESERVE, Subscriber, SubscriptionTarget};
 use super::transport::{DiscoverError, Transport};
-use super::url::GatewayUrl;
 use super::voice;
 use super::wire::{self, Envelope, Hello, op};
 use crate::UserToken;
@@ -131,15 +133,18 @@ struct Driver<T: Transport, J: JitterSource> {
     subscriber: Subscriber,
     session: Option<Session>,
     identify_rejections: u32,
-    voice: watch::Receiver<Option<VoiceStateRequest>>,
+    stream: mpsc::Receiver<StreamCommand>,
+    stream_pending: Option<StreamCommand>,
     /// The last opcode 4 this session accepted from us, across reconnects.
+    voice: watch::Receiver<Option<VoiceStateRequest>>,
     voice_sent: Option<VoiceStateRequest>,
 }
 
-/// What the consumer wants the session to hold, as the handles set it.
+/// What the consumer wants the session to hold, as the handles set them.
 pub(crate) struct Wanted {
     pub(crate) subscriptions: watch::Receiver<SubscriptionTarget>,
     pub(crate) voice: watch::Receiver<Option<VoiceStateRequest>>,
+    pub(crate) stream: mpsc::Receiver<StreamCommand>,
 }
 
 pub(crate) async fn run<T: Transport, J: JitterSource>(
@@ -154,6 +159,7 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
     let Wanted {
         subscriptions,
         voice,
+        stream,
     } = wanted;
     let interrupt = make_interrupt(Arc::clone(&transport), shutdown);
     let mut driver = Driver {
@@ -168,6 +174,8 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
         subscriber: Subscriber::new(),
         session: None,
         identify_rejections: 0,
+        stream,
+        stream_pending: None,
         voice,
         voice_sent: None,
     };
@@ -428,6 +436,38 @@ where
     *sent = Some(request);
     VoiceFlush::Done
 }
+enum StreamFlush {
+    Done,
+    RetryAt(Instant),
+    Network,
+    Outbound,
+}
+
+/// Stream signals are optional control traffic and leave a complete heartbeat
+/// send window available, just like opcode 4.
+async fn flush_stream<S>(
+    socket: &mut S,
+    command: &StreamCommand,
+    budget: &mut SendBudget,
+    interval: Duration,
+) -> StreamFlush
+where
+    S: futures_util::Sink<Message, Error = WsError> + Unpin,
+{
+    let now = Instant::now();
+    let reserve = heartbeat_reserve(interval);
+    if budget.remaining(now) <= reserve {
+        return StreamFlush::RetryAt(budget.free_at(now, reserve));
+    }
+    let Ok(payload) = wire::stream_signal(command) else {
+        return StreamFlush::Outbound;
+    };
+    budget.record(now);
+    if !send(socket, &payload).await {
+        return StreamFlush::Network;
+    }
+    StreamFlush::Done
+}
 
 async fn connection<T: Transport, J: JitterSource>(
     driver: &mut Driver<T, J>,
@@ -444,6 +484,8 @@ async fn connection<T: Transport, J: JitterSource>(
         subscriber,
         session,
         identify_rejections,
+        stream,
+        stream_pending,
         voice,
         voice_sent,
     } = driver;
@@ -459,10 +501,13 @@ async fn connection<T: Transport, J: JitterSource>(
     // Cleared once every handle is gone: no further changes can arrive.
     let mut watching = true;
     let mut voice_watching = true;
-    // Opcode 4 may be sent only after READY or RESUMED on this connection.
+    let mut stream_watching = true;
+    // Stream opcodes, like voice-state requests, are gated on READY/RESUMED.
     let mut voice_live = false;
-    // When to compare the wanted voice state with what the session holds.
+    let mut stream_live = false;
+    // The pending command belongs to the driver across socket replacements.
     let mut voice_due: Option<Instant> = None;
+    let mut stream_due: Option<Instant> = None;
     let mut budget = SendBudget::new();
     // HELLO deadline until HELLO arrives, then the next heartbeat.
     let mut timer = Instant::now() + HELLO_TIMEOUT;
@@ -509,6 +554,32 @@ async fn connection<T: Transport, J: JitterSource>(
                     VoiceFlush::Done => {}
                     VoiceFlush::RetryAt(at) => voice_due = Some(at),
                     VoiceFlush::Network => break Ok((ReconnectReason::Network, true)),
+                }
+            }
+            command = stream.recv(), if stream_live && stream_watching && stream_pending.is_none() => {
+                match command {
+                    Some(command) => {
+                        *stream_pending = Some(command);
+                        stream_due = Some(Instant::now());
+                    }
+                    None => stream_watching = false,
+                }
+            }
+            () = sleep_until(stream_due.unwrap_or(timer)), if stream_live && stream_due.is_some() => {
+                let result = flush_stream(
+                    &mut socket,
+                    stream_pending.as_ref().expect("due stream command is present"),
+                    &mut budget,
+                    conn.interval,
+                ).await;
+                match result {
+                    StreamFlush::Done => {
+                        *stream_pending = None;
+                        stream_due = None;
+                    }
+                    StreamFlush::RetryAt(at) => stream_due = Some(at),
+                    StreamFlush::Network => break Ok((ReconnectReason::Network, true)),
+                    StreamFlush::Outbound => break Err(Terminal::Stop(StopReason::StreamSignalTooLarge)),
                 }
             }
             changed = subscriptions.changed(), if watching => {
@@ -575,19 +646,21 @@ async fn connection<T: Transport, J: JitterSource>(
                     Action::Ready => {
                         let now = Instant::now();
                         subscriber.start(now);
-                        // A new session holds no voice state of ours: a wanted
-                        // join is sent again, a wanted leave is already true.
+                        // A new session holds no voice state of ours.
                         *voice_sent = None;
                         voice_live = true;
+                        stream_live = true;
                         voice_due = Some(now);
+                        stream_due = stream_pending.as_ref().map(|_| now);
                     }
                     Action::Resumed => {
                         let now = Instant::now();
                         subscriber.resume(now);
-                        // The session kept what was sent; only a change made
-                        // meanwhile goes out.
+                        // The resumed session kept its accepted state.
                         voice_live = true;
+                        stream_live = true;
                         voice_due = Some(now);
+                        stream_due = stream_pending.as_ref().map(|_| now);
                     }
                     Action::Hello(interval) => {
                         conn.interval = interval;
