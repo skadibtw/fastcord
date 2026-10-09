@@ -8,6 +8,7 @@
 //! messages are edited and deleted through [`RestClient::edit_message`] and
 //! [`RestClient::delete_message`] (see [`is_own_message`]).
 
+mod attachment;
 mod clock;
 mod edit;
 mod error;
@@ -24,6 +25,7 @@ mod send;
 pub mod state;
 mod ws;
 
+pub use attachment::RefreshedAttachmentUrl;
 pub use clock::{Clock, MonotonicClock};
 pub use edit::{EditedMessage, edit_response_update, is_own_message};
 pub use error::{NetworkFailure, RestError, RetryableFailure};

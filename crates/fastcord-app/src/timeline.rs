@@ -9,10 +9,11 @@
 //! reports it as [`Event`]s that carry the channel they were produced for, so a
 //! late event for a channel that is no longer open is easy to reject.
 //!
-//! Attachments are listed by filename and metadata only. Image fetching and
-//! thumbnails belong to the attachment-viewing milestone; rows will simply
-//! grow when they arrive, and the measured-height path keeps the reader's
-//! position when they do.
+//! Every attachment lists its name, size, and type with explicit Download and
+//! Open buttons. Decodable images add a "Load preview" button; the thumbnail
+//! that replaces it opens a larger in-app view when clicked. The row grows when
+//! the thumbnail arrives: the widget publishes the new measured height and the
+//! variable list keeps the reader's anchor row where it was.
 //!
 //! The user's own messages (the worker decides which those are) offer Edit and
 //! Delete while hovered; other people's messages offer neither. Deleting asks
@@ -27,14 +28,16 @@
 //! it is not retained, and the row jumped to stays tinted while it is near.
 //!
 //! [`VariableList`]: crate::variable_list::VariableList
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use fastcord_model::{Attachment, Message, Snowflake};
 use iced::alignment::{Horizontal, Vertical};
 use iced::font::{Font, Weight};
-use iced::widget::{button, column, container, hover, row, stack, text};
+use iced::widget::{button, column, container, hover, image, row, stack, text};
 use iced::{Element, Length, Padding};
 
+use crate::attachments::AttachmentKey;
 use crate::changes::{ChangeKind, ChangeState, RowChange};
 use crate::outbox::OutboxItem;
 use crate::variable_list::{self, Item, Measurement, Report, ScrollRequest, Viewport, Window};
@@ -144,6 +147,63 @@ pub struct Snapshot {
     pub deleted: Vec<Snowflake>,
 }
 
+/// A decoded preview: shared RGBA pixels (a clone shares the buffer) and the
+/// size they were decoded to.
+#[derive(Clone)]
+pub struct AttachmentPreview {
+    pub handle: image::Handle,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// UI-only state for one message attachment. `Loading` is bounded by the
+/// account panel's worker slots; completed thumbnails are shared RGBA buffers.
+#[derive(Clone)]
+pub enum AttachmentView {
+    Loading,
+    Ready(AttachmentPreview),
+    /// Why the image cannot be shown (a fixed, secret-free message).
+    Failed(&'static str),
+}
+impl std::fmt::Debug for AttachmentView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Loading => "Loading",
+            Self::Ready(_) => "Ready",
+            Self::Failed(_) => "Failed",
+        })
+    }
+}
+
+/// Display box, in logical pixels, of an inline attachment thumbnail. Previews
+/// are decoded to at most this size.
+pub const INLINE_PREVIEW: (u32, u32) = (360, 270);
+
+/// Image formats the build decodes; others show metadata with Download/Open.
+pub fn is_previewable_image(attachment: &Attachment) -> bool {
+    match attachment.content_type.as_deref() {
+        Some(content_type) => {
+            let mime = content_type.split(';').next().unwrap_or_default().trim();
+            [
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/webp",
+                "image/bmp",
+            ]
+            .iter()
+            .any(|known| mime.eq_ignore_ascii_case(known))
+        }
+        None => std::path::Path::new(&attachment.filename)
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|extension| {
+                ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+                    .iter()
+                    .any(|known| extension.eq_ignore_ascii_case(known))
+            }),
+    }
+}
 /// What the UI is doing with a row that the snapshot does not know about.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Interaction {
@@ -193,6 +253,30 @@ pub enum Event {
         message_id: Snowflake,
     },
     CancelDelete,
+    /// Fetch and show the attachment preview in this message.
+    LoadAttachment {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        attachment_id: Snowflake,
+    },
+    /// Open the larger in-app view of an attachment image (its thumbnail was clicked).
+    ViewAttachment {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        attachment_id: Snowflake,
+    },
+    /// Save the original attachment bytes using the native save dialog.
+    DownloadAttachment {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        attachment_id: Snowflake,
+    },
+    /// Open the original attachment with the operating system's file handler.
+    OpenAttachment {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        attachment_id: Snowflake,
+    },
     RetryChange {
         channel_id: Snowflake,
         message_id: Snowflake,
@@ -254,7 +338,20 @@ impl Controls {
     }
 }
 
-pub fn view(snapshot: &Snapshot, interaction: Interaction) -> Element<'_, Event> {
+/// What the view needs to show attachments: whose account owns the cache keys
+/// and the previews decoded so far.
+#[derive(Clone, Copy)]
+pub struct Attachments<'a> {
+    pub account: Snowflake,
+    pub views: &'a HashMap<AttachmentKey, AttachmentView>,
+}
+
+pub fn view<'a>(
+    snapshot: &'a Snapshot,
+    interaction: Interaction,
+    account: Snowflake,
+    attachment_views: &'a HashMap<AttachmentKey, AttachmentView>,
+) -> Element<'a, Event> {
     let Some(channel_id) = snapshot.channel_id else {
         return centered("Select a channel to read its messages.");
     };
@@ -271,6 +368,8 @@ pub fn view(snapshot: &Snapshot, interaction: Interaction) -> Element<'_, Event>
                 snapshot.can_send,
                 snapshot.highlight == Some(row.message.id)
                     || interaction.replying == Some(row.message.id),
+                account,
+                attachment_views,
             ),
         )
     });
@@ -418,13 +517,16 @@ fn row_button(label: &'static str, event: Event) -> button::Button<'static, Even
 
 /// Author, time, wrapped content, attachment lines, and the controls of the
 /// user's own messages. Plain text only: no embeds, markdown, or emoji assets yet.
-fn message_view(
-    row: &Row,
+fn message_view<'a>(
+    row: &'a Row,
     channel_id: Snowflake,
     interaction: Interaction,
     can_reply: bool,
     highlighted: bool,
-) -> Element<'_, Event> {
+    account: Snowflake,
+    attachment_views: &'a HashMap<AttachmentKey, AttachmentView>,
+) -> Element<'a, Event> {
+    let account_id = account;
     let message = &*row.message;
     let message_id = message.id;
     let state = row_state(row, interaction);
@@ -498,15 +600,16 @@ fn message_view(
         body = body.push(text(note).size(13).style(text::secondary));
     }
     for attachment in &message.attachments {
-        body = body.push(
-            text(describe_attachment(attachment))
-                .size(13)
-                .width(Length::Fill)
-                .wrapping(text::Wrapping::WordOrGlyph)
-                .style(text::secondary),
-        );
+        let key = AttachmentKey {
+            account: account_id,
+            channel: channel_id,
+            message: message_id,
+            attachment: attachment.id,
+        };
+        body = body.push(attachment_view(attachment, key, attachment_views.get(&key)));
     }
     let status = |line: &'static str| text(line).size(12).style(text::secondary);
+
     let retry = row_button(
         "Retry",
         Event::RetryChange {
@@ -614,6 +717,89 @@ fn message_view(
             left: 0.0,
         });
     hover(base, overlay)
+}
+fn attachment_view(
+    attachment: &Attachment,
+    key: AttachmentKey,
+    state: Option<&AttachmentView>,
+) -> Element<'static, Event> {
+    let ids = (key.channel, key.message, key.attachment);
+    let mut content = column![
+        text(describe_attachment(attachment))
+            .size(13)
+            .width(Length::Fill)
+            .wrapping(text::Wrapping::WordOrGlyph)
+            .style(text::secondary),
+    ]
+    .spacing(4);
+    match state {
+        Some(AttachmentView::Ready(preview)) => {
+            let thumbnail = image(preview.handle.clone())
+                .width(Length::Fixed(preview.width as f32))
+                .height(Length::Fixed(preview.height as f32));
+            content = content.push(button(thumbnail).padding(0).style(button::text).on_press(
+                Event::ViewAttachment {
+                    channel_id: ids.0,
+                    message_id: ids.1,
+                    attachment_id: ids.2,
+                },
+            ));
+        }
+        Some(AttachmentView::Loading) => {
+            content = content.push(
+                text("Loading image preview…")
+                    .size(12)
+                    .style(text::secondary),
+            );
+        }
+        Some(AttachmentView::Failed(reason)) => {
+            content = content.push(text(*reason).size(12).style(text::secondary));
+        }
+        None => {}
+    }
+    let mut actions = row![].spacing(4);
+    if is_previewable_image(attachment) {
+        let label = match state {
+            Some(AttachmentView::Loading) => None,
+            Some(AttachmentView::Ready(_)) => Some("View"),
+            Some(AttachmentView::Failed(_)) => Some("Retry preview"),
+            None => Some("Load preview"),
+        };
+        let event = match state {
+            Some(AttachmentView::Ready(_)) => Event::ViewAttachment {
+                channel_id: ids.0,
+                message_id: ids.1,
+                attachment_id: ids.2,
+            },
+            _ => Event::LoadAttachment {
+                channel_id: ids.0,
+                message_id: ids.1,
+                attachment_id: ids.2,
+            },
+        };
+        if let Some(label) = label {
+            actions = actions.push(row_button(label, event));
+        }
+    }
+    actions = actions
+        .push(row_button(
+            "Download",
+            Event::DownloadAttachment {
+                channel_id: ids.0,
+                message_id: ids.1,
+                attachment_id: ids.2,
+            },
+        ))
+        .push(row_button(
+            "Open",
+            Event::OpenAttachment {
+                channel_id: ids.0,
+                message_id: ids.1,
+                attachment_id: ids.2,
+            },
+        ));
+    content = content.push(actions);
+    container(content).width(Length::Fill).into()
 }
 
 /// What to show for a message without text or attachments.
@@ -741,8 +927,35 @@ mod tests {
         1 + tree.children.iter().map(nodes).sum::<usize>()
     }
 
+    fn no_views() -> &'static HashMap<AttachmentKey, AttachmentView> {
+        static EMPTY: std::sync::LazyLock<HashMap<AttachmentKey, AttachmentView>> =
+            std::sync::LazyLock::new(HashMap::new);
+        &EMPTY
+    }
+
+    fn attachment_key(message: u64) -> AttachmentKey {
+        AttachmentKey {
+            account: Snowflake(1),
+            channel: CHANNEL,
+            message: Snowflake(message),
+            attachment: Snowflake(9),
+        }
+    }
+
+    fn ready(width: u32, height: u32) -> AttachmentView {
+        AttachmentView::Ready(AttachmentPreview {
+            handle: image::Handle::from_rgba(
+                width,
+                height,
+                vec![0x80; width as usize * height as usize * 4],
+            ),
+            width,
+            height,
+        })
+    }
+
     fn built_nodes(snapshot: &Snapshot) -> usize {
-        let element = view(snapshot, Interaction::default());
+        let element = view(snapshot, Interaction::default(), Snowflake(1), no_views());
         nodes(&Tree::new(&element))
     }
 
@@ -937,7 +1150,11 @@ mod tests {
                 rows: rows.clone(),
                 ..Snapshot::default()
             };
-            let mut ui = Ui::new(width, 500.0, view(&snapshot, Interaction::default()));
+            let mut ui = Ui::new(
+                width,
+                500.0,
+                view(&snapshot, Interaction::default(), Snowflake(1), no_views()),
+            );
             let events = ui.redraw();
             ui.draw();
             let mut viewport = None;
@@ -1029,7 +1246,19 @@ mod tests {
     /// Everything a user can trigger by pointing at and clicking anywhere in
     /// the timeline, in first-found order, without layout reports.
     fn clickable(snapshot: &Snapshot, interaction: Interaction) -> Vec<Event> {
-        let mut ui = Ui::new(640.0, 400.0, view(snapshot, interaction));
+        clickable_with(snapshot, interaction, no_views())
+    }
+
+    fn clickable_with(
+        snapshot: &Snapshot,
+        interaction: Interaction,
+        views: &HashMap<AttachmentKey, AttachmentView>,
+    ) -> Vec<Event> {
+        let mut ui = Ui::new(
+            640.0,
+            400.0,
+            view(snapshot, interaction, Snowflake(1), views),
+        );
         ui.redraw();
         ui.draw();
         let mut found = Vec::new();
@@ -1045,6 +1274,173 @@ mod tests {
             }
         }
         found
+    }
+
+    #[test]
+    fn attachment_actions_are_clickable_in_the_timeline() {
+        let row = Row::new(message(42, "image"), 1);
+        let snapshot = Snapshot {
+            channel_id: Some(CHANNEL),
+            rows: vec![row],
+            window: Window {
+                range: 0..1,
+                height: 400.0,
+                at_bottom: true,
+                ..Window::default()
+            },
+            ..Snapshot::default()
+        };
+        let found = clickable(&snapshot, Interaction::default());
+        for event in [
+            Event::LoadAttachment {
+                channel_id: CHANNEL,
+                message_id: Snowflake(42),
+                attachment_id: Snowflake(9),
+            },
+            Event::DownloadAttachment {
+                channel_id: CHANNEL,
+                message_id: Snowflake(42),
+                attachment_id: Snowflake(9),
+            },
+            Event::OpenAttachment {
+                channel_id: CHANNEL,
+                message_id: Snowflake(42),
+                attachment_id: Snowflake(9),
+            },
+        ] {
+            assert!(found.contains(&event), "{event:?} in {found:?}");
+        }
+    }
+
+    fn one_row(message_id: u64) -> Snapshot {
+        Snapshot {
+            channel_id: Some(CHANNEL),
+            rows: vec![Row::new(message(message_id, "image"), 1)],
+            window: Window {
+                range: 0..1,
+                height: 400.0,
+                at_bottom: true,
+                ..Window::default()
+            },
+            ..Snapshot::default()
+        }
+    }
+
+    #[test]
+    fn a_loaded_thumbnail_opens_the_larger_view_and_keeps_download_and_open() {
+        let views = HashMap::from([(attachment_key(42), ready(120, 90))]);
+        let found = clickable_with(&one_row(42), Interaction::default(), &views);
+        let view_event = Event::ViewAttachment {
+            channel_id: CHANNEL,
+            message_id: Snowflake(42),
+            attachment_id: Snowflake(9),
+        };
+        assert!(found.contains(&view_event), "{found:?}");
+        // The thumbnail (and the View button) replaced Load preview.
+        assert!(!found.contains(&Event::LoadAttachment {
+            channel_id: CHANNEL,
+            message_id: Snowflake(42),
+            attachment_id: Snowflake(9),
+        }));
+        for event in [
+            Event::DownloadAttachment {
+                channel_id: CHANNEL,
+                message_id: Snowflake(42),
+                attachment_id: Snowflake(9),
+            },
+            Event::OpenAttachment {
+                channel_id: CHANNEL,
+                message_id: Snowflake(42),
+                attachment_id: Snowflake(9),
+            },
+        ] {
+            assert!(found.contains(&event), "{event:?} in {found:?}");
+        }
+    }
+
+    #[test]
+    fn only_decodable_images_offer_a_preview_other_files_keep_download_and_open() {
+        let mut item = message(1, "").attachments[0].clone();
+        assert!(is_previewable_image(&item));
+        // Video carries dimensions too, but there is no decoder for it here.
+        item.content_type = Some("video/mp4".to_owned());
+        item.filename = "clip.mp4".to_owned();
+        assert!(!is_previewable_image(&item));
+        item.content_type = Some("image/svg+xml".to_owned());
+        assert!(!is_previewable_image(&item));
+        item.content_type = Some("IMAGE/JPEG; charset=binary".to_owned());
+        assert!(is_previewable_image(&item));
+        item.content_type = None;
+        item.filename = "photo.JPG".to_owned();
+        assert!(is_previewable_image(&item));
+        item.filename = "notes.pdf".to_owned();
+        assert!(!is_previewable_image(&item));
+
+        let mut video = (*message(42, "")).clone();
+        video.attachments[0].content_type = Some("video/mp4".to_owned());
+        video.attachments[0].filename = "clip.mp4".to_owned();
+        let snapshot = Snapshot {
+            rows: vec![Row::new(Arc::new(video), 1)],
+            ..one_row(42)
+        };
+        let found = clickable(&snapshot, Interaction::default());
+        assert!(!found.iter().any(|event| matches!(
+            event,
+            Event::LoadAttachment { .. } | Event::ViewAttachment { .. }
+        )));
+        assert!(
+            found
+                .iter()
+                .any(|event| matches!(event, Event::DownloadAttachment { .. }))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|event| matches!(event, Event::OpenAttachment { .. }))
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_arriving_grows_the_row_and_its_new_height_is_measured() {
+        let snapshot = one_row(42);
+        let none = HashMap::new();
+        let loaded = HashMap::from([(attachment_key(42), ready(300, 220))]);
+        let mut ui = Ui::new(
+            640.0,
+            400.0,
+            view(&snapshot, Interaction::default(), Snowflake(1), &none),
+        );
+        let measured = |events: Vec<Event>| -> Vec<(u64, u64, f32)> {
+            events
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::Measured { measurement, .. } => {
+                        Some((measurement.id.0, measurement.revision, measurement.height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let before = measured(ui.redraw());
+        assert_eq!(before.len(), 1);
+        assert!(ui.redraw().is_empty(), "an idle row is silent");
+        // The same message and revision, now with a decoded image under it.
+        ui.show(view(
+            &snapshot,
+            Interaction::default(),
+            Snowflake(1),
+            &loaded,
+        ));
+        let after = measured(ui.redraw());
+        assert_eq!(after.len(), 1, "the changed height is published once");
+        assert_eq!((after[0].0, after[0].1), (before[0].0, before[0].1));
+        assert!(
+            after[0].2 >= before[0].2 + 220.0,
+            "{} -> {}",
+            before[0].2,
+            after[0].2
+        );
+        assert!(ui.redraw().is_empty());
     }
 
     fn names(event: &Event, id: u64) -> bool {
@@ -1220,7 +1616,19 @@ mod tests {
             },
             ..snapshot
         };
-        assert!(clickable(&snapshot, Interaction::default()).is_empty());
+        // Attachment buttons stay (they act on the file, not the message), but
+        // nothing that changes or answers the message is offered.
+        assert!(
+            clickable(&snapshot, Interaction::default())
+                .iter()
+                .all(|event| matches!(
+                    event,
+                    Event::LoadAttachment { .. }
+                        | Event::ViewAttachment { .. }
+                        | Event::DownloadAttachment { .. }
+                        | Event::OpenAttachment { .. }
+                ))
+        );
         // States for the rest.
         let mine = own(Row::new(message(2, "mine"), 1), None);
         assert_eq!(row_state(&mine, Interaction::default()), RowState::Actions);

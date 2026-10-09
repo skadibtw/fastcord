@@ -27,6 +27,60 @@ fn is_locale_tag(tag: &str) -> bool {
             (1..=8).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_alphanumeric())
         })
 }
+/// A native file handler could not be started. OS error details are kept out of
+/// user-visible messages because they can contain private paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileOpenError;
+
+impl fmt::Display for FileOpenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("The attachment could not be opened by the operating system.")
+    }
+}
+
+impl std::error::Error for FileOpenError {}
+
+/// Opens an already-downloaded local file with the OS default application.
+/// This deliberately never routes through a shell or accepts a remote URL, and
+/// refuses files that the OS would run as programs or scripts: an attachment is
+/// untrusted content, so such files can only be saved, never launched from here.
+pub fn open_local_file(path: &std::path::Path) -> Result<(), FileOpenError> {
+    if is_launchable_program(path) {
+        return Err(FileOpenError);
+    }
+    #[cfg(target_os = "windows")]
+    let (program, args) = ("explorer.exe", vec![path.as_os_str()]);
+    #[cfg(target_os = "macos")]
+    let (program, args) = ("open", vec![path.as_os_str()]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (program, args) = ("xdg-open", vec![path.as_os_str()]);
+    #[cfg(not(any(target_os = "windows", unix)))]
+    return Err(FileOpenError);
+
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| FileOpenError)
+}
+
+/// Extensions that run code (or install/mount something) when opened. The list
+/// is checked on every platform because a saved file can move between them.
+const PROGRAM_EXTENSIONS: &[&str] = &[
+    "app", "appimage", "bat", "bash", "cmd", "com", "command", "cpl", "csh", "desktop", "dll",
+    "dmg", "exe", "fish", "gadget", "hta", "inf", "jar", "jnlp", "js", "jse", "lnk", "msc", "msi",
+    "msp", "pif", "pkg", "ps1", "ps2", "psc1", "reg", "run", "scf", "scr", "sh", "url", "vb",
+    "vbe", "vbs", "ws", "wsc", "wsf", "wsh", "zsh",
+];
+
+fn is_launchable_program(path: &std::path::Path) -> bool {
+    let Some(extension) = path.extension().and_then(std::ffi::OsStr::to_str) else {
+        return false;
+    };
+    PROGRAM_EXTENSIONS
+        .iter()
+        .any(|program| extension.eq_ignore_ascii_case(program))
+}
 
 /// Deliberately categorical: native errors may contain secret data or attributes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +235,44 @@ impl NativeCredentialStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachments_that_would_run_as_programs_are_never_opened() {
+        for program in [
+            "setup.exe",
+            "RUN.BAT",
+            "x.Cmd",
+            "script.ps1",
+            "a.lnk",
+            "installer.msi",
+            "tool.sh",
+            "page.hta",
+            "evil.JS",
+        ] {
+            assert!(
+                is_launchable_program(std::path::Path::new(program)),
+                "{program}"
+            );
+            // Refused before any process is started, so no handler is invoked.
+            assert_eq!(
+                open_local_file(std::path::Path::new(program)),
+                Err(FileOpenError)
+            );
+        }
+        for document in [
+            "photo.png",
+            "clip.mp4",
+            "song.mp3",
+            "notes.txt",
+            "noextension",
+            "x.exe.png",
+        ] {
+            assert!(
+                !is_launchable_program(std::path::Path::new(document)),
+                "{document}"
+            );
+        }
+    }
 
     #[test]
     fn locale_tags_are_validated_before_being_reported() {

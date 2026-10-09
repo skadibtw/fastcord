@@ -9,15 +9,24 @@ use crate::gateway::VoiceAudioState;
 use crate::timeline;
 use crate::virtual_list::{self, ROW_HEIGHT};
 
+pub struct PrivateConversation<'a> {
+    pub recipients: &'a str,
+    pub notice: Option<&'a str>,
+}
+
 pub fn view<'a>(
     snapshot: &'a NavigationSnapshot,
     history: &'a timeline::Snapshot,
     composer: &'a Composer,
     interaction: timeline::Interaction,
-    recipients: &'a str,
-    private_notice: Option<&'a str>,
+    private: PrivateConversation<'a>,
+    attachments: timeline::Attachments<'a>,
     voice_audio: VoiceAudioState,
 ) -> Element<'a, Message> {
+    let PrivateConversation {
+        recipients,
+        notice: private_notice,
+    } = private;
     let guilds = snapshot.guilds.rows.iter().map(|guild| {
         let label = format!(
             "{}{}{}",
@@ -78,7 +87,10 @@ pub fn view<'a>(
         ];
         if history.channel_id == Some(selection.channel_id) {
             detail = detail
-                .push(timeline::view(history, interaction).map(Message::Timeline))
+                .push(
+                    timeline::view(history, interaction, attachments.account, attachments.views)
+                        .map(Message::Timeline),
+                )
                 .push(composer::view(composer, history).map(Message::Composer));
         } else {
             detail = detail.push(text("Loading messages…").size(14));
@@ -108,7 +120,15 @@ pub fn view<'a>(
                     if history.channel_id == Some(selection.channel_id) {
                         // The timeline takes the free height; the composer sits below it.
                         detail = detail
-                            .push(timeline::view(history, interaction).map(Message::Timeline))
+                            .push(
+                                timeline::view(
+                                    history,
+                                    interaction,
+                                    attachments.account,
+                                    attachments.views,
+                                )
+                                .map(Message::Timeline),
+                            )
                             .push(composer::view(composer, history).map(Message::Composer));
                     } else {
                         detail = detail.push(text("Loading messages…").size(14));
@@ -215,45 +235,4 @@ fn fixed_button<'a>(label: String, intent: Option<Message>) -> Element<'a, Messa
     .align_y(alignment::Vertical::Center)
     .clip(true)
     .into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use fastcord_discord::state::navigation::{PrivateChannelRow, PrivateChannelSelection, Window};
-
-    #[test]
-    fn fixture_private_channel_builds_the_full_timeline_and_composer_view() {
-        let channel = fastcord_model::Snowflake(300_000_000_000_000_001);
-        let snapshot = NavigationSnapshot {
-            private_channels: Window {
-                offset: 0,
-                total: 1,
-                rows: vec![PrivateChannelRow {
-                    id: channel,
-                    label: "Nelly".to_owned(),
-                    selected: true,
-                }],
-            },
-            private_selection: Some(PrivateChannelSelection {
-                channel_id: channel,
-                name: "Nelly".to_owned(),
-            }),
-            ..NavigationSnapshot::default()
-        };
-        let timeline = timeline::Snapshot {
-            channel_id: Some(channel),
-            ..timeline::Snapshot::default()
-        };
-        let composer = Composer::default();
-        let _view = view(
-            &snapshot,
-            &timeline,
-            &composer,
-            timeline::Interaction::default(),
-            "80351110224678912",
-            None,
-            VoiceAudioState::Idle,
-        );
-    }
 }

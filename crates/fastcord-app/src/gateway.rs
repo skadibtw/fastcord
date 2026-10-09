@@ -66,10 +66,12 @@ use fastcord_model::{
 };
 use tokio::sync::{mpsc, watch};
 
+use crate::attachments::AttachmentCache;
 use crate::composer::Composer;
 use crate::history::{Completed, History, Intent};
 use crate::outbox::{OpId, Reply, Slots};
 use crate::timeline;
+use crate::timeline::AttachmentView;
 use crate::variable_list::{Measurement, Viewport};
 use crate::virtual_list::Window;
 use fastcord_discord::{PrivateChannelError, RestClient, UserToken};
@@ -101,6 +103,11 @@ pub enum GatewayStatus {
     AuthenticationRequired,
     /// Terminal: reconnecting cannot help.
     Stopped(StopReason),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AttachmentAction {
+    Download,
+    Open,
 }
 
 impl GatewayStatus {
@@ -1740,6 +1747,20 @@ pub struct GatewayPanel {
     pub confirm_delete: Option<(Snowflake, Snowflake)>,
     pub private: Box<PrivateConversationUi>,
     _worker: Handle,
+    pub attachments: Option<AttachmentCache>,
+    /// Render state for the account's cached/downloaded attachment previews.
+    pub attachment_views: HashMap<crate::attachments::AttachmentKey, AttachmentView>,
+    /// Abortable native download/open workers, keyed by attachment and action.
+    pub attachment_action_workers:
+        HashMap<(crate::attachments::AttachmentKey, AttachmentAction), Handle>,
+    /// Ready thumbnails, at most four, oldest first; each is at most a 360x270
+    /// RGBA buffer (under 400 KiB) shared with the decoded-image cache.
+    pub attachment_ready_order: VecDeque<crate::attachments::AttachmentKey>,
+    /// Abortable workers for active preview loads; bounded to four per account.
+    pub attachment_workers: HashMap<crate::attachments::AttachmentKey, Handle>,
+    /// The larger view of one image, if open; dropping it cancels its decode.
+    pub attachment_viewer: Option<crate::attachment_ui::AttachmentViewer>,
+    pub attachment_notice: Option<&'static str>,
 }
 
 impl fmt::Debug for GatewayPanel {
@@ -1749,6 +1770,23 @@ impl fmt::Debug for GatewayPanel {
             .field("status", &self.status)
             .finish_non_exhaustive()
     }
+}
+
+/// Whether `key` names an attachment of a message among the open channel's
+/// built timeline rows. Work for anything else is cancelled.
+fn is_attachment_in(
+    timeline: &timeline::Snapshot,
+    key: &crate::attachments::AttachmentKey,
+) -> bool {
+    timeline.channel_id == Some(key.channel)
+        && timeline.rows.iter().any(|row| {
+            row.message.id == key.message
+                && row
+                    .message
+                    .attachments
+                    .iter()
+                    .any(|attachment| attachment.id == key.attachment)
+        })
 }
 
 impl GatewayPanel {
@@ -1764,7 +1802,18 @@ impl GatewayPanel {
             composer: Composer::default(),
             confirm_delete: None,
             _worker: worker.abort_on_drop(),
+            attachments: None,
+            attachment_views: HashMap::new(),
+            attachment_workers: HashMap::new(),
+            attachment_action_workers: HashMap::new(),
+            attachment_ready_order: VecDeque::new(),
+            attachment_viewer: None,
+            attachment_notice: None,
         }
+    }
+    pub fn with_attachment_cache(mut self, attachments: Option<AttachmentCache>) -> Self {
+        self.attachments = attachments;
+        self
     }
 
     /// Takes the worker's latest snapshots. Drafts and editing follow the open
@@ -1773,6 +1822,27 @@ impl GatewayPanel {
         let consumed = self.controls.consume();
         self.navigation = consumed.navigation;
         self.timeline = consumed.timeline;
+        let open_channel = self.timeline.channel_id;
+        let timeline = &self.timeline;
+        let still_loaded =
+            |key: &crate::attachments::AttachmentKey| is_attachment_in(timeline, key);
+        self.attachment_views.retain(|key, _| still_loaded(key));
+        self.attachment_workers.retain(|key, _| still_loaded(key));
+        self.attachment_action_workers
+            .retain(|(key, _), _| still_loaded(key));
+        let attachment_views = &self.attachment_views;
+        self.attachment_ready_order.retain(|key| {
+            still_loaded(key) && matches!(attachment_views.get(key), Some(AttachmentView::Ready(_)))
+        });
+        // The larger view is modal and stays while its row scrolls out of the
+        // built window, but never outlives its channel.
+        if self
+            .attachment_viewer
+            .as_ref()
+            .is_some_and(|viewer| Some(viewer.key.channel) != open_channel)
+        {
+            self.attachment_viewer = None;
+        }
         self.private.notice = consumed.private_notice;
         self.composer.select(self.timeline.channel_id);
         if self
@@ -1782,6 +1852,11 @@ impl GatewayPanel {
             self.confirm_delete = None;
         }
         consumed.status
+    }
+
+    /// Whether the attachment's message is still among the rows being built.
+    pub fn is_attachment_loaded(&self, key: &crate::attachments::AttachmentKey) -> bool {
+        is_attachment_in(&self.timeline, key)
     }
 
     /// What the timeline shows about rows the UI is working on.
@@ -2187,6 +2262,74 @@ mod bridge_tests {
         );
         panel.consume();
         assert_eq!(panel.confirm_delete, None);
+    }
+
+    #[test]
+    fn attachment_work_follows_the_built_rows_and_the_viewer_follows_its_channel() {
+        use crate::attachments::AttachmentKey;
+        use timeline::AttachmentView;
+        let bridge = NavigationBridge::new();
+        let mut panel = panel(&bridge);
+        let with_attachment = |channel: u64, message: u64| {
+            let message: fastcord_model::Message = serde_json::from_value(serde_json::json!({
+                "id": message.to_string(),
+                "channel_id": channel.to_string(),
+                "author": {"id": "42", "username": "alt"},
+                "content": "",
+                "timestamp": "2026-10-08T09:00:00.000000+00:00",
+                "attachments": [{
+                    "id": "9", "filename": "cat.png", "size": 10,
+                    "url": "https://cdn.example/cat.png"
+                }],
+            }))
+            .unwrap();
+            timeline::Snapshot {
+                channel_id: Some(Snowflake(channel)),
+                rows: vec![timeline::Row::new(Arc::new(message), 1)],
+                ..timeline::Snapshot::default()
+            }
+        };
+        let key = |channel: u64, message: u64| AttachmentKey {
+            account: Snowflake(42),
+            channel: Snowflake(channel),
+            message: Snowflake(message),
+            attachment: Snowflake(9),
+        };
+        let handle = || iced::Task::<()>::none().abortable().1.abort_on_drop();
+        let attachment = with_attachment(500, 7).rows[0].message.attachments[0].clone();
+
+        bridge.publish(NavigationSnapshot::default(), with_attachment(500, 7), None);
+        panel.consume();
+        for message in [7, 8] {
+            let key = key(500, message);
+            panel.attachment_views.insert(key, AttachmentView::Loading);
+            panel.attachment_workers.insert(key, handle());
+            panel
+                .attachment_action_workers
+                .insert((key, AttachmentAction::Open), handle());
+        }
+        panel.attachment_viewer = Some(crate::attachment_ui::AttachmentViewer::for_test(
+            key(500, 8),
+            attachment,
+        ));
+        // Message 8 is no longer among the built rows: its previews and workers
+        // are cancelled; the modal view stays while the channel is open.
+        bridge.publish(NavigationSnapshot::default(), with_attachment(500, 7), None);
+        panel.consume();
+        assert_eq!(panel.attachment_views.len(), 1);
+        assert!(panel.attachment_views.contains_key(&key(500, 7)));
+        assert_eq!(panel.attachment_workers.len(), 1);
+        assert_eq!(panel.attachment_action_workers.len(), 1);
+        assert!(panel.is_attachment_loaded(&key(500, 7)));
+        assert!(!panel.is_attachment_loaded(&key(500, 8)));
+        assert!(panel.attachment_viewer.is_some());
+        // Leaving the channel cancels everything, the viewer included.
+        bridge.publish(NavigationSnapshot::default(), with_attachment(501, 7), None);
+        panel.consume();
+        assert!(panel.attachment_views.is_empty());
+        assert!(panel.attachment_workers.is_empty());
+        assert!(panel.attachment_action_workers.is_empty());
+        assert!(panel.attachment_viewer.is_none());
     }
 
     #[test]

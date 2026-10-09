@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod attachment_ui;
+mod attachments;
 mod changes;
 mod composer;
 mod gateway;
@@ -14,20 +16,20 @@ mod variable_list;
 mod virtual_list;
 mod voice_settings;
 
+use crate::attachments::AttachmentKey;
 use std::sync::Arc;
 
 use fastcord_discord::{RemoteAuthEvent, UserToken};
 use fastcord_model::{Snowflake, VoiceStateRequest};
 use fastcord_platform::{NativeCredentialStore, StoreError};
+use gateway::{AttachmentAction, GatewayPanel, GatewayStatus};
 use iced::widget::{
     button, center, checkbox, column, container, qr_code, row, scrollable, slider, text, text_input,
 };
 use iced::{Color, Element, Length, Task};
-use zeroize::Zeroize;
-
-use gateway::{GatewayPanel, GatewayStatus};
 use login::{LoginError, LoginOutcome, Persistence, Session, StoreReady};
 use qr::{Applied, QrAttempt, QrStage};
+use zeroize::Zeroize;
 
 const MAX_PRIVATE_RECIPIENT_INPUT_BYTES: usize = 256;
 const MAX_PRIVATE_RECIPIENTS: usize = fastcord_discord::MAX_PRIVATE_RECIPIENTS;
@@ -49,6 +51,7 @@ struct App {
     saved_accounts: Vec<Snowflake>,
     qr_attempts: u64,
     gateway_sessions: u64,
+    attachment_purge_failed: bool,
 }
 
 #[derive(Debug)]
@@ -116,9 +119,22 @@ enum Message {
     PrivateRecipients(String),
     OpenPrivate,
     PrivateViewport(virtual_list::Window),
+    AttachmentLoaded(
+        u64,
+        AttachmentKey,
+        attachment_ui::Target,
+        Result<attachment_ui::LoadedPreview, &'static str>,
+    ),
+    AttachmentPurged(bool),
+    AttachmentActionFinished(
+        u64,
+        AttachmentKey,
+        AttachmentAction,
+        attachment_ui::ActionOutcome,
+    ),
+    CloseViewer,
     Composer(composer::Event),
 }
-
 impl App {
     fn boot() -> (Self, Task<Message>) {
         (
@@ -132,6 +148,7 @@ impl App {
                 saved_accounts: Vec::new(),
                 qr_attempts: 0,
                 gateway_sessions: 0,
+                attachment_purge_failed: false,
             },
             Task::perform(login::initialize_store(), Message::StoreReady),
         )
@@ -253,6 +270,11 @@ impl App {
                 if status == GatewayStatus::AuthenticationRequired {
                     // Discord rejected the token: stop all of this account's
                     // work and return to login.
+                    let cache = if let Phase::Account { gateway, .. } = &self.phase {
+                        gateway.attachments.clone()
+                    } else {
+                        None
+                    };
                     if let Phase::Account { session, .. } = &self.phase {
                         session.client.stop_authenticated_work();
                     }
@@ -260,8 +282,36 @@ impl App {
                     self.notice = Some(
                         "Discord no longer accepts this login (the token was revoked, expired, or reset). Log in again. A saved copy of the old token can be removed with Forget saved login.".to_owned(),
                     );
+                    return cache.map_or(Task::none(), |cache| {
+                        Task::perform(async move { cache.purge().await }, |result| {
+                            Message::AttachmentPurged(result.is_ok())
+                        })
+                    });
                 } else if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.status = status;
+                }
+            }
+            Message::AttachmentPurged(succeeded) => {
+                self.attachment_purge_failed = !succeeded;
+                if !succeeded && matches!(self.phase, Phase::Login) {
+                    self.notice =
+                        Some("The local attachment cache could not be fully cleared.".to_owned());
+                }
+            }
+            Message::AttachmentLoaded(generation, key, target, result) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == generation) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    attachment_ui::loaded(gateway, key, target, result);
+                }
+            }
+            Message::AttachmentActionFinished(generation, key, action, outcome) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == generation) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.attachment_action_workers.remove(&(key, action));
+                    attachment_ui::finished(gateway, outcome);
+                }
+            }
+            Message::CloseViewer => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.attachment_viewer = None;
                 }
             }
             Message::Navigation(id) => {
@@ -403,32 +453,94 @@ impl App {
                 }
             }
             Message::Timeline(event) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
-                    let controls = &gateway.controls;
+                if let Phase::Account {
+                    session, gateway, ..
+                } = &mut self.phase
+                {
                     match event {
+                        timeline::Event::LoadAttachment {
+                            channel_id,
+                            message_id,
+                            attachment_id,
+                        } => {
+                            return attachment_ui::load_preview(
+                                gateway,
+                                session,
+                                channel_id,
+                                message_id,
+                                attachment_id,
+                            );
+                        }
+                        timeline::Event::ViewAttachment {
+                            channel_id,
+                            message_id,
+                            attachment_id,
+                        } => {
+                            return attachment_ui::open_viewer(
+                                gateway,
+                                session,
+                                channel_id,
+                                message_id,
+                                attachment_id,
+                            );
+                        }
+                        timeline::Event::DownloadAttachment {
+                            channel_id,
+                            message_id,
+                            attachment_id,
+                        } => {
+                            return attachment_ui::start_action(
+                                gateway,
+                                session,
+                                channel_id,
+                                message_id,
+                                attachment_id,
+                                AttachmentAction::Download,
+                            );
+                        }
+                        timeline::Event::OpenAttachment {
+                            channel_id,
+                            message_id,
+                            attachment_id,
+                        } => {
+                            return attachment_ui::start_action(
+                                gateway,
+                                session,
+                                channel_id,
+                                message_id,
+                                attachment_id,
+                                AttachmentAction::Open,
+                            );
+                        }
                         timeline::Event::Viewport {
                             channel_id,
                             viewport,
-                        } => controls.timeline_viewport(channel_id, viewport),
+                        } => gateway.controls.timeline_viewport(channel_id, viewport),
                         timeline::Event::Measured {
                             channel_id,
                             measurement,
-                        } => controls.timeline_measured(channel_id, measurement),
+                        } => gateway.controls.timeline_measured(channel_id, measurement),
                         timeline::Event::JumpLatest { channel_id } => {
-                            controls.timeline_intent(history::Intent::Latest(channel_id));
+                            gateway
+                                .controls
+                                .timeline_intent(history::Intent::Latest(channel_id));
                         }
                         timeline::Event::JumpTo {
                             channel_id,
                             message_id,
-                        } => controls.timeline_intent(history::Intent::JumpTo {
+                        } => gateway.controls.timeline_intent(history::Intent::JumpTo {
                             channel: channel_id,
                             message: message_id,
                         }),
                         timeline::Event::LoadOlder { channel_id } => {
-                            controls.timeline_intent(history::Intent::Older(channel_id));
+                            gateway
+                                .controls
+                                .timeline_intent(history::Intent::Older(channel_id));
                         }
                         timeline::Event::Retry { channel_id } => {
-                            controls.timeline_intent(history::Intent::Retry(channel_id));
+                            gateway
+                                .controls
+                                .timeline_intent(history::Intent::Retry(channel_id));
                         }
                         action @ (timeline::Event::Edit { .. }
                         | timeline::Event::Reply { .. }
@@ -459,13 +571,24 @@ impl App {
                 }
             }
             Message::Logout => {
-                if let Phase::Account { session, .. } = &self.phase {
+                if let Phase::Account {
+                    session, gateway, ..
+                } = &self.phase
+                {
                     let account = session.user.id;
+                    let cache = gateway.attachments.clone();
                     session.client.stop_authenticated_work();
-                    // Always remove this account's credential, even when this
-                    // session was memory-only: discovery may have failed while
-                    // the store was locked and an older saved login may exist.
-                    return self.start_delete(account);
+                    // Dropping the account phase aborts attachment workers before purge starts.
+                    let delete = self.start_delete(account);
+                    return match cache {
+                        Some(cache) => Task::batch([
+                            delete,
+                            Task::perform(async move { cache.purge().await }, |result| {
+                                Message::AttachmentPurged(result.is_ok())
+                            }),
+                        ]),
+                        None => delete,
+                    };
                 }
             }
             Message::Forget(account) if matches!(self.phase, Phase::Login) => {
@@ -481,12 +604,15 @@ impl App {
                     match result {
                         Ok(()) => {
                             self.saved_accounts.retain(|id| *id != account);
+                            let purge_failed = self.attachment_purge_failed;
+                            self.attachment_purge_failed = false;
                             self.reset_login();
-                            self.notice = Some(if voice_settings::purge(account).is_ok() {
-                                "Logged out locally. The saved credential was removed and account state was cleared. Other Discord sessions were not revoked.".to_owned()
+                            let voice_purge_failed = voice_settings::purge(account).is_err();
+                            self.notice = Some(if purge_failed || voice_purge_failed {
+                                "Logged out locally. The saved credential was removed, but some local attachment cache or saved voice volumes could not be cleared. Other Discord sessions were not revoked."
                             } else {
-                                "Logged out locally. The saved credential was removed, but this account's saved voice volumes could not be removed. Other Discord sessions were not revoked.".to_owned()
-                            });
+                                "Logged out locally. The saved credential was removed and account state was cleared. Other Discord sessions were not revoked."
+                            }.to_owned());
                         }
                         Err(error) => {
                             self.phase = Phase::DeleteFailed { account, error };
@@ -572,10 +698,14 @@ impl App {
             controls.clone(),
         );
         let (task, worker) = Task::run(stream, move |()| Message::Navigation(id)).abortable();
+        let attachment_cache =
+            crate::attachments::AttachmentCache::default_root(session.user.id).ok();
         self.phase = Phase::Account {
             session,
             persistence,
-            gateway: Box::new(GatewayPanel::new(id, worker, controls)),
+            gateway: Box::new(
+                GatewayPanel::new(id, worker, controls).with_attachment_cache(attachment_cache),
+            ),
         };
         task
     }
@@ -620,7 +750,7 @@ impl App {
                     .spacing(8),
                 );
             }
-            return container(
+            let account = container(
                 column![
                     row![
                         text(format!(
@@ -687,13 +817,20 @@ impl App {
                     ]
                     .spacing(12),
                     scrollable(participants).height(Length::Fixed(160.0)),
+                    text(gateway.attachment_notice.unwrap_or("")).size(12),
                     navigation::view(
                         &gateway.navigation,
                         &gateway.timeline,
                         &gateway.composer,
                         gateway.interaction(),
-                        &gateway.private.recipients,
-                        gateway.private.notice.as_deref(),
+                        navigation::PrivateConversation {
+                            recipients: &gateway.private.recipients,
+                            notice: gateway.private.notice.as_deref(),
+                        },
+                        timeline::Attachments {
+                            account: session.user.id,
+                            views: &gateway.attachment_views,
+                        },
                         voice_audio,
                     ),
                 ]
@@ -701,8 +838,15 @@ impl App {
                 .height(Length::Fill),
             )
             .padding(20)
-            .height(Length::Fill)
-            .into();
+            .height(Length::Fill);
+            // The larger image view covers the account screen, which stays in
+            // the widget tree underneath so the timeline keeps its scroll state.
+            return match &gateway.attachment_viewer {
+                Some(viewer) => {
+                    iced::widget::stack![account, attachment_ui::viewer_view(viewer)].into()
+                }
+                None => account.into(),
+            };
         }
         let content: Element<'_, Message> = match &self.phase {
             Phase::Starting => text("Looking for a saved login in the native credential store…").into(),

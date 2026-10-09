@@ -1861,6 +1861,25 @@ mod tests {
     }
 
     #[test]
+    fn an_image_arriving_without_any_message_change_keeps_the_anchor_on_screen() {
+        // A thumbnail decodes long after its message arrived: the row's revision
+        // is unchanged, so only the widget's measured height tells the list.
+        for (offset, row_offset) in [(-1200.0, -1), (-1000.0, 0)] {
+            let mut sim = Sim::opened(1..=120);
+            sim.wheel(offset);
+            let anchor = sim.list.anchor.expect("anchor");
+            let before = sim.screen_y(anchor.id);
+            let grown = id((anchor.id.0 as i64 + row_offset) as u64);
+            sim.heights.insert(grown.0, 600.0);
+            sim.settle();
+            assert_near(sim.screen_y(anchor.id), before);
+            assert_near(sim.list.anchor.expect("anchor").in_row, anchor.in_row);
+            let at = sim.list.index[&grown];
+            assert_eq!(sim.list.slots[at].height, row_units(600.0));
+        }
+    }
+
+    #[test]
     fn the_anchor_row_growing_keeps_the_in_row_offset() {
         let mut sim = Sim::opened(1..=120);
         sim.wheel(-1000.0);

@@ -20,7 +20,6 @@ pub struct Session {
     pub client: RestClient,
     token: Arc<UserToken>,
 }
-
 impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Session")

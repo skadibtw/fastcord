@@ -19,8 +19,16 @@ fastcord-media.workspace = true
 fastcord-audio.workspace = true
 iced.workspace = true
 iced_renderer.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
 zeroize.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+image.workspace = true
+filetime.workspace = true
+sha2.workspace = true
+rfd.workspace = true
+parking_lot.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

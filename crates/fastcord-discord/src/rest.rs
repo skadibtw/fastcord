@@ -8,6 +8,7 @@ use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::attachment::{RefreshRequest, RefreshResponse, RefreshedAttachmentUrl};
 use crate::error::status_error;
 use crate::rate_limit::{RateLimiter, ResponseLimits};
 use crate::{Clock, MonotonicClock, NetworkFailure, RestError, RetryableFailure, Route, UserToken};
@@ -194,6 +195,22 @@ impl<C: Clock> RestClient<C> {
         self.execute(request).await?.json()
     }
 
+    /// Obtains fresh signed CDN URLs through Discord's authenticated
+    /// `POST /attachments/refresh-urls`. Callers keep their attachment identity
+    /// and replace only the URL they fetch.
+    pub async fn refresh_attachment_urls(
+        &self,
+        urls: &[String],
+    ) -> Result<Vec<RefreshedAttachmentUrl>, RestError> {
+        let body = RefreshRequest {
+            attachment_urls: urls,
+        };
+        let request =
+            RestRequest::new(attachment_refresh_route()?, Priority::UserRead).json(&body)?;
+        let response = self.execute(request).await?;
+        Ok(response.json::<RefreshResponse>()?.refreshed_urls)
+    }
+
     /// Only confirmed 429 rejections are rescheduled automatically. A network or
     /// 5xx error returns immediately, even for GET: caller policy owns retries,
     /// and an ambiguous POST must be reconciled rather than blindly repeated.
@@ -267,6 +284,9 @@ impl<C: Clock> RestClient<C> {
     }
 }
 
+fn attachment_refresh_route() -> Result<Route, RestError> {
+    Route::new(Method::POST, "/attachments/refresh-urls")
+}
 fn auth_headers(token: &UserToken) -> Result<HeaderMap, RestError> {
     if token.expose_secret().is_empty() {
         return Err(RestError::InvalidToken);
@@ -357,6 +377,14 @@ mod tests {
             auth_headers(&UserToken::new(String::new())),
             Err(RestError::InvalidToken)
         ));
+    }
+
+    #[test]
+    fn expired_attachment_urls_refresh_on_the_global_authenticated_route() {
+        let route = attachment_refresh_route().unwrap();
+        assert_eq!(route.key().normalized(), "/attachments/refresh-urls");
+        assert_eq!(route.key().method(), &Method::POST);
+        assert_eq!(route.key().major().channel_id(), None);
     }
 
     #[test]
