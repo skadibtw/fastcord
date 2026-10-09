@@ -38,9 +38,21 @@ pub(super) async fn run(
     controls: watch::Receiver<VoiceControls>,
     controls_tx: watch::Sender<VoiceControls>,
 ) {
-    run_with(credentials, cancel_rx, state, controls, controls_tx, || {
-        AudioEngine::start(EngineConfig::default())
-    })
+    let initial = controls.borrow().clone();
+    run_with(
+        credentials,
+        cancel_rx,
+        state,
+        controls,
+        controls_tx,
+        move || {
+            AudioEngine::start(EngineConfig {
+                input: Some(initial.input_device),
+                output: Some(initial.output_device),
+                ..EngineConfig::default()
+            })
+        },
+    )
     .await;
 }
 
@@ -61,6 +73,8 @@ struct EngineSync {
     output: Option<bool>,
     gains: HashMap<u32, f32>,
     retry: bool,
+    input_device: (fastcord_audio::DeviceChoice, u64),
+    output_device: (fastcord_audio::DeviceChoice, u64),
 }
 
 impl EngineSync {
@@ -71,6 +85,8 @@ impl EngineSync {
             output: None,
             gains: HashMap::new(),
             retry: false,
+            input_device: (fastcord_audio::DeviceChoice::SystemDefault, 0),
+            output_device: (fastcord_audio::DeviceChoice::SystemDefault, 0),
         }
     }
 
@@ -99,6 +115,35 @@ impl EngineSync {
                 self.output = Some(output);
             } else {
                 self.retry = true;
+            }
+        }
+        for (direction, desired, generation, sent) in [
+            (
+                fastcord_audio::Direction::Input,
+                &controls.input_device,
+                controls.input_generation,
+                &mut self.input_device,
+            ),
+            (
+                fastcord_audio::Direction::Output,
+                &controls.output_device,
+                controls.output_generation,
+                &mut self.output_device,
+            ),
+        ] {
+            if &sent.0 != desired || sent.1 != generation {
+                if self
+                    .controls
+                    .try_send(EngineControl::SelectDevice {
+                        direction,
+                        choice: desired.clone(),
+                    })
+                    .is_ok()
+                {
+                    *sent = (desired.clone(), generation);
+                } else {
+                    self.retry = true;
+                }
             }
         }
         for participant in &controls.participants {
@@ -154,7 +199,7 @@ async fn run_with(
     };
     state.send_replace(VoiceAudioState::Running);
     let mut captured = channels.captured;
-    let remote = channels.remote_audio;
+    let mut remote = channels.remote_audio;
     let mut sync = EngineSync::new(channels.controls);
     let mut events = channels.events;
     let mut status = session.watch_status();
@@ -200,7 +245,7 @@ async fn run_with(
                         let Ok(packet_bytes) = EncodedPacket::from_slice(&packet.payload) else {
                             continue;
                         };
-                        let Some(output) = remote.as_ref() else { break };
+                        let Some(output) = remote.as_ref() else { continue };
                         let _ = output.try_send(RemoteFrame {
                             ssrc: packet.ssrc,
                             sequence: packet.sequence,
@@ -247,14 +292,34 @@ async fn run_with(
                 retry_at = sync.retry_deadline();
             }
             event = events.recv() => {
-                if event.is_none()
-                    || matches!(event, Some(fastcord_audio::EngineEvent::StreamFailed {
-                        direction: fastcord_audio::Direction::Output,
-                        ..
-                    }))
-                {
-                    engine_failed = true;
-                    break;
+                match event {
+                    Some(fastcord_audio::EngineEvent::StreamFailed { direction, kind }) => {
+                        controls_tx.send_modify(|controls| match direction {
+                            fastcord_audio::Direction::Input => controls.input_error = Some(kind),
+                            fastcord_audio::Direction::Output => controls.output_error = Some(kind),
+                        });
+                        match direction {
+                            fastcord_audio::Direction::Input => {
+                                captured = None;
+                                let _ = media.end_speech();
+                            }
+                            fastcord_audio::Direction::Output => remote = None,
+                        }
+                    }
+                    Some(fastcord_audio::EngineEvent::StreamReady { direction, captured: new_capture, remote_audio, .. }) => {
+                        controls_tx.send_modify(|controls| match direction {
+                            fastcord_audio::Direction::Input => controls.input_error = None,
+                            fastcord_audio::Direction::Output => controls.output_error = None,
+                        });
+                        match direction {
+                            fastcord_audio::Direction::Input => {
+                                let _ = media.end_speech();
+                                captured = new_capture;
+                            }
+                            fastcord_audio::Direction::Output => remote = remote_audio,
+                        }
+                    }
+                    None => { engine_failed = true; break; }
                 }
             }
             changed = status.changed() => {
@@ -606,5 +671,50 @@ mod tests {
             sent.iter()
                 .any(|control| matches!(control, EngineControl::OutputEnabled(false)))
         );
+    }
+
+    #[test]
+    fn device_switches_are_independent_coalesced_and_retry_same_missing_choice() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut sync = EngineSync::new(tx);
+        let mut controls = VoiceControls::default();
+        sync.apply(&controls);
+        controls.input_device = fastcord_audio::DeviceChoice::Device(
+            fastcord_audio::DeviceKey::from_persisted("mic").unwrap(),
+        );
+        controls.output_device = fastcord_audio::DeviceChoice::Device(
+            fastcord_audio::DeviceKey::from_persisted("headset").unwrap(),
+        );
+        sync.apply(&controls);
+        assert!(sync.retry);
+        while rx.try_recv().is_ok() {}
+        sync.apply(&controls);
+        assert!(!sync.retry);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineControl::SelectDevice {
+                direction: fastcord_audio::Direction::Input,
+                ..
+            })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineControl::SelectDevice {
+                direction: fastcord_audio::Direction::Output,
+                ..
+            })
+        ));
+        sync.apply(&controls);
+        assert!(rx.try_recv().is_err());
+        controls.output_generation += 1;
+        sync.apply(&controls);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineControl::SelectDevice {
+                direction: fastcord_audio::Direction::Output,
+                ..
+            })
+        ));
+        assert!(rx.try_recv().is_err());
     }
 }

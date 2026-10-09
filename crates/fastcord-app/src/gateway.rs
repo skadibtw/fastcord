@@ -42,6 +42,12 @@ pub struct VoiceControls {
     pub server_deafened: bool,
     pub participants: Vec<VoiceParticipant>,
     pub volumes: Vec<UserVolume>,
+    pub input_device: fastcord_audio::DeviceChoice,
+    pub output_device: fastcord_audio::DeviceChoice,
+    pub input_generation: u64,
+    pub output_generation: u64,
+    pub input_error: Option<fastcord_audio::DeviceErrorKind>,
+    pub output_error: Option<fastcord_audio::DeviceErrorKind>,
 }
 impl VoiceControls {
     pub fn capture_enabled(&self) -> bool {
@@ -463,6 +469,30 @@ impl NavigationBridge {
             .collect();
         self.voice_controls
             .send_modify(|controls| controls.volumes = volumes);
+    }
+
+    pub fn set_audio_devices(&self, preferences: &crate::audio_devices::Preferences) {
+        self.voice_controls.send_modify(|controls| {
+            controls.input_device = preferences.input.choice.clone();
+            controls.output_device = preferences.output.choice.clone();
+        });
+    }
+
+    pub fn select_audio_device(
+        &self,
+        direction: fastcord_audio::Direction,
+        choice: fastcord_audio::DeviceChoice,
+    ) {
+        self.voice_controls.send_modify(|controls| match direction {
+            fastcord_audio::Direction::Input => {
+                controls.input_device = choice;
+                controls.input_generation = controls.input_generation.wrapping_add(1);
+            }
+            fastcord_audio::Direction::Output => {
+                controls.output_device = choice;
+                controls.output_generation = controls.output_generation.wrapping_add(1);
+            }
+        });
     }
 
     /// Requests a voice join, move, or leave. No audio connection starts beforehand.

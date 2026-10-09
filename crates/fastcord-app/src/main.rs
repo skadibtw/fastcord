@@ -2,6 +2,7 @@
 
 mod attachment_ui;
 mod attachments;
+mod audio_devices;
 mod changes;
 mod composer;
 mod gateway;
@@ -52,6 +53,9 @@ struct App {
     qr_attempts: u64,
     gateway_sessions: u64,
     attachment_purge_failed: bool,
+    audio_preferences: audio_devices::Preferences,
+    audio_settings: audio_devices::Settings,
+    audio_saving: Option<audio_devices::Preferences>,
 }
 
 #[derive(Debug)]
@@ -114,6 +118,13 @@ enum Message {
     SetParticipantVolume(Snowflake, u16),
     CommitParticipantVolume(Snowflake),
     PresetParticipantVolume(Snowflake, u16),
+    OpenAudioSettings,
+    CloseAudioSettings,
+    RefreshAudioDevices,
+    AudioDevicesListed(audio_devices::Inventory),
+    Initialized(audio_devices::Preferences, Result<StoreReady, StoreError>),
+    SelectAudioDevice(fastcord_audio::Direction, audio_devices::DeviceOption),
+    AudioPreferencesSaved(Result<(), &'static str>),
     Timeline(timeline::Event),
     SelectPrivateChannel(Snowflake),
     PrivateRecipients(String),
@@ -149,13 +160,71 @@ impl App {
                 qr_attempts: 0,
                 gateway_sessions: 0,
                 attachment_purge_failed: false,
+                audio_preferences: audio_devices::Preferences::default(),
+                audio_settings: audio_devices::Settings::default(),
+                audio_saving: None,
             },
-            Task::perform(login::initialize_store(), Message::StoreReady),
+            Task::perform(
+                async {
+                    let preferences = audio_devices::load().await;
+                    (preferences, login::initialize_store().await)
+                },
+                |(preferences, store)| Message::Initialized(preferences, store),
+            ),
         )
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Initialized(preferences, store) => {
+                self.audio_preferences = preferences;
+                return self.update(Message::StoreReady(store));
+            }
+            Message::OpenAudioSettings | Message::RefreshAudioDevices => {
+                self.audio_settings.open = true;
+                if !self.audio_settings.probing {
+                    self.audio_settings.probing = true;
+                    return Task::perform(audio_devices::enumerate(), Message::AudioDevicesListed);
+                }
+            }
+            Message::CloseAudioSettings => self.audio_settings.open = false,
+            Message::AudioDevicesListed(result) => {
+                self.audio_settings.probing = false;
+                match result.input {
+                    Ok(inputs) => {
+                        self.audio_settings.inputs = inputs;
+                        self.audio_settings.input_error = None;
+                    }
+                    Err(error) => self.audio_settings.input_error = Some(error),
+                }
+                match result.output {
+                    Ok(outputs) => {
+                        self.audio_settings.outputs = outputs;
+                        self.audio_settings.output_error = None;
+                    }
+                    Err(error) => self.audio_settings.output_error = Some(error),
+                }
+            }
+            Message::SelectAudioDevice(direction, option) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway
+                        .controls
+                        .select_audio_device(direction, option.choice.clone());
+                }
+                self.audio_preferences.select(direction, option);
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::AudioPreferencesSaved(result) => {
+                let saved = self.audio_saving.take();
+                if let Err(error) = result {
+                    self.notice = Some(error.to_owned());
+                }
+                if saved.as_ref() != Some(&self.audio_preferences) {
+                    return self.save_audio_preferences();
+                }
+            }
             Message::StartQr
                 if self.acknowledged && matches!(self.phase, Phase::Login | Phase::Qr(_)) =>
             {
@@ -682,6 +751,15 @@ impl App {
         task
     }
 
+    fn save_audio_preferences(&mut self) -> Task<Message> {
+        let preferences = self.audio_preferences.clone();
+        self.audio_saving = Some(preferences.clone());
+        Task::perform(
+            audio_devices::save(preferences),
+            Message::AudioPreferencesSaved,
+        )
+    }
+
     /// Shows the account and starts its Gateway connection. The connection
     /// belongs to the panel: leaving the account screen (logout, rejected
     /// token) drops it, which closes the Gateway session.
@@ -691,6 +769,7 @@ impl App {
         let controls = gateway::NavigationBridge::new();
         controls.set_account_id(session.user.id);
         controls.set_volume_settings(voice_settings::load(session.user.id));
+        controls.set_audio_devices(&self.audio_preferences);
         let stream = gateway::status_stream(
             session.client.clone(),
             session.token(),
@@ -711,6 +790,28 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if self.audio_settings.open {
+            let (input_error, output_error) = match &self.phase {
+                Phase::Account { gateway, .. } => {
+                    let controls = gateway.controls.voice_controls();
+                    (controls.input_error, controls.output_error)
+                }
+                _ => (None, None),
+            };
+            return center(
+                column![
+                    audio_devices::view(
+                        &self.audio_settings,
+                        &self.audio_preferences,
+                        input_error,
+                        output_error
+                    ),
+                    text(self.notice.as_deref().unwrap_or("")),
+                ]
+                .spacing(12),
+            )
+            .into();
+        }
         if let Phase::Account {
             session,
             persistence,
@@ -765,6 +866,7 @@ impl App {
                             "Memory-only login"
                         }),
                         button("Log out").on_press(Message::Logout),
+                        button("Audio devices").on_press(Message::OpenAudioSettings),
                     ]
                     .spacing(16),
                     text(gateway.status.describe()),
@@ -816,6 +918,8 @@ impl App {
                         }),
                     ]
                     .spacing(12),
+                    text(voice_controls.input_error.map_or_else(String::new, |error| format!("Microphone stopped: {error}. Open Audio devices to retry."))).size(12),
+                    text(voice_controls.output_error.map_or_else(String::new, |error| format!("Playback stopped: {error}. Explicit devices never fall back; open Audio devices to retry."))).size(12),
                     scrollable(participants).height(Length::Fixed(160.0)),
                     text(gateway.attachment_notice.unwrap_or("")).size(12),
                     navigation::view(
@@ -896,6 +1000,7 @@ impl App {
                 .on_submit_maybe(self.can_login().then_some(Message::Login))
                 .padding(12),
             button("Log in with token").on_press_maybe(self.can_login().then_some(Message::Login)),
+            button("Audio devices").on_press(Message::OpenAudioSettings),
         ].spacing(16).width(Length::Fill);
         if let Some(notice) = &self.notice {
             content = content.push(text(notice));
@@ -1036,6 +1141,78 @@ mod tests {
             persistence,
         ))));
         session
+    }
+
+    #[test]
+    fn settings_are_lazy_independent_and_preserve_pending_latest_save() {
+        let mut app = login_app();
+        assert!(!app.audio_settings.probing);
+        let _ = app.update(Message::OpenAudioSettings);
+        assert!(app.audio_settings.probing);
+        let _ = app.update(Message::AudioDevicesListed(audio_devices::Inventory {
+            input: Err("Input unavailable"),
+            output: Ok(Vec::new()),
+        }));
+        assert!(!app.audio_settings.probing);
+        assert_eq!(app.audio_settings.input_error, Some("Input unavailable"));
+        assert_eq!(app.audio_settings.output_error, None);
+        let option = |id: &str| audio_devices::DeviceOption {
+            choice: fastcord_audio::DeviceChoice::Device(
+                fastcord_audio::DeviceKey::from_persisted(id).unwrap(),
+            ),
+            label: "Headset".to_owned(),
+            unavailable: false,
+        };
+        let _ = app.update(Message::SelectAudioDevice(
+            fastcord_audio::Direction::Input,
+            option("mic"),
+        ));
+        let first = app.audio_saving.clone().unwrap();
+        let _ = app.update(Message::SelectAudioDevice(
+            fastcord_audio::Direction::Output,
+            option("headset"),
+        ));
+        assert_eq!(app.audio_saving, Some(first));
+        let _ = app.update(Message::AudioPreferencesSaved(Ok(())));
+        assert_eq!(app.audio_saving.as_ref(), Some(&app.audio_preferences));
+        let _ = app.update(Message::AudioPreferencesSaved(Ok(())));
+        assert!(app.audio_saving.is_none());
+        let _ = app.view();
+        let _ = app.update(Message::CloseAudioSettings);
+        assert!(!app.audio_settings.open);
+    }
+
+    #[test]
+    fn restored_device_ids_enter_the_call_controls_without_changing_mute_or_volumes() {
+        let mut app = login_app();
+        app.audio_preferences.input.choice = fastcord_audio::DeviceChoice::Device(
+            fastcord_audio::DeviceKey::from_persisted("saved-microphone").unwrap(),
+        );
+        app.audio_preferences.output.choice = fastcord_audio::DeviceChoice::Device(
+            fastcord_audio::DeviceKey::from_persisted("saved-headset").unwrap(),
+        );
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let Phase::Account { gateway, .. } = &app.phase else {
+            panic!("not logged in")
+        };
+        let restored = gateway.controls.voice_controls();
+        assert_eq!(restored.input_device, app.audio_preferences.input.choice);
+        assert_eq!(restored.output_device, app.audio_preferences.output.choice);
+        gateway.controls.set_self_muted(true);
+        gateway.controls.set_deafened(true);
+        gateway.controls.set_volume_percent(Snowflake(99), 175);
+        gateway.controls.select_audio_device(
+            fastcord_audio::Direction::Output,
+            fastcord_audio::DeviceChoice::SystemDefault,
+        );
+        let changed = gateway.controls.voice_controls();
+        assert!(changed.self_muted && changed.deafened);
+        assert_eq!(changed.volume_percent(Snowflake(99)), 175);
+        assert_eq!(changed.input_device, restored.input_device);
+        assert_eq!(
+            changed.output_device,
+            fastcord_audio::DeviceChoice::SystemDefault
+        );
     }
 
     #[test]

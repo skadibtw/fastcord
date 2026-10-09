@@ -15,6 +15,24 @@ cargo run -p fastcord-app          # debug
 cargo build --release -p fastcord-app
 ```
 
+## Audio devices
+
+Open **Audio devices** from the login or account screen to choose microphone
+input and playback output independently. **System default** follows the OS
+default during a call; an explicit device never falls back to another output
+(particularly speakers) when it disappears. A stopped direction is reported
+inline, while the healthy direction keeps running; select a device to retry.
+Use **Refresh devices** after plugging a device in.
+
+Choices are machine-local, non-secret settings in `fastcord/audio-devices.json`
+under the OS configuration directory (`%APPDATA%` on Windows). Stable backend
+IDs, not display names, restore the choices on restart; missing saved devices
+remain selected and marked unavailable. Discovery and supported-format probes
+run off the UI thread, only when settings or a call needs them. Switching devices
+in an active call preserves local mute/deafen and per-user playback volumes.
+Official-client call interoperability acceptance is still pending; see
+[docs/TESTING.md](docs/TESTING.md).
+
 ## Login
 
 The login screen explains the Terms of Service/account-ban risk and requires

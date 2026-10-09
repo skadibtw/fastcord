@@ -29,9 +29,8 @@ sha2.workspace = true
 rfd.workspace = true
 parking_lot.workspace = true
 bytes.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+
 
 [lints]
 workspace = true

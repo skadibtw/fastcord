@@ -32,8 +32,9 @@ pub struct DeviceKey(String);
 
 impl DeviceKey {
     /// Restores a key previously obtained from [`DeviceKey::as_str`].
-    pub fn from_persisted(key: impl Into<String>) -> Self {
-        Self(key.into())
+    pub fn from_persisted(key: impl Into<String>) -> Option<Self> {
+        let key = key.into();
+        (!key.is_empty() && key.len() <= 512).then_some(Self(key))
     }
 
     pub fn as_str(&self) -> &str {
@@ -42,9 +43,10 @@ impl DeviceKey {
 }
 
 /// Which device a stream should use.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum DeviceChoice {
     /// Whatever the OS currently designates as the default device.
+    #[default]
     SystemDefault,
     /// One specific device; if it is absent, opening fails.
     Device(DeviceKey),
@@ -88,7 +90,7 @@ impl DeviceErrorKind {
             K::DeviceBusy => Self::Busy,
             K::PermissionDenied => Self::PermissionDenied,
             K::HostUnavailable => Self::HostUnavailable,
-            K::StreamInvalidated => Self::Invalidated,
+            K::StreamInvalidated | K::DeviceChanged => Self::Invalidated,
             K::UnsupportedConfig | K::UnsupportedOperation => Self::Unsupported,
             _ => Self::Other,
         }
@@ -137,14 +139,20 @@ pub fn list_devices(direction: Direction) -> Result<Vec<DeviceInfo>, AudioError>
     }
     .map_err(|error| AudioError::backend(direction, &error))?;
     let mut list = Vec::new();
-    for device in devices {
+    for device in devices.take(64) {
         // A device that vanished mid-enumeration has no ID; skip it.
         let Ok(id) = device.id() else { continue };
-        let key = id.to_string();
+        let Some(key) = DeviceKey::from_persisted(id.to_string()) else {
+            continue;
+        };
+        let mut label = device_label(&device);
+        while label.len() > 256 {
+            label.pop();
+        }
         list.push(DeviceInfo {
             is_default: default_key.as_deref() == Some(key.as_str()),
-            label: device_label(&device),
-            key: DeviceKey(key),
+            label,
+            key,
         });
     }
     Ok(list)
@@ -281,6 +289,9 @@ pub(crate) fn plan_stream(
 pub(crate) trait Backend {
     /// Dropping a stream stops it and releases its callback thread.
     type Stream;
+
+    /// The current default endpoint identity; queried only during an active call.
+    fn default_key(&mut self, direction: Direction) -> Option<DeviceKey>;
 
     fn open_input(
         &mut self,
@@ -446,6 +457,12 @@ fn build_output(
 impl Backend for CpalBackend {
     type Stream = cpal::Stream;
 
+    fn default_key(&mut self, direction: Direction) -> Option<DeviceKey> {
+        default_device(&self.host, direction)
+            .and_then(|device| device.id().ok())
+            .and_then(|id| DeviceKey::from_persisted(id.to_string()))
+    }
+
     fn open_input(
         &mut self,
         choice: &DeviceChoice,
@@ -589,10 +606,13 @@ mod tests {
     #[test]
     fn a_saved_device_that_is_absent_is_an_error_not_the_default() {
         let host = cpal::default_host();
-        let malformed = DeviceChoice::Device(DeviceKey::from_persisted("not a device id"));
-        let absent = DeviceChoice::Device(DeviceKey::from_persisted(
-            cpal::DeviceId::new(host.id(), "fastcord-absent-device").to_string(),
-        ));
+        let malformed = DeviceChoice::Device(DeviceKey::from_persisted("not a device id").unwrap());
+        let absent = DeviceChoice::Device(
+            DeviceKey::from_persisted(
+                cpal::DeviceId::new(host.id(), "fastcord-absent-device").to_string(),
+            )
+            .unwrap(),
+        );
         for choice in [malformed, absent] {
             assert_eq!(
                 resolve(&host, Direction::Output, &choice).err(),

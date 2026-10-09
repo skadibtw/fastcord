@@ -31,12 +31,11 @@ pub(crate) struct StreamCounters {
 }
 
 impl StreamCounters {
-    /// Records a stream error reported by the backend. Rerouting to a new
-    /// default device and real-time scheduling refusals keep the stream
-    /// running; xruns are counted; anything else stops the stream.
+    /// Records a stream error without I/O or allocation. A backend reroute is
+    /// invalidation: the owner must close it, never accept implicit speakers.
     pub(crate) fn record_error(&self, kind: cpal::ErrorKind) {
         match kind {
-            cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {}
+            cpal::ErrorKind::RealtimeDenied => {}
             cpal::ErrorKind::Xrun => {
                 self.xruns.fetch_add(1, Ordering::Relaxed);
             }
@@ -55,6 +54,11 @@ impl StreamCounters {
             0 => None,
             code => Some(DeviceErrorKind::from_code(code - 1)),
         }
+    }
+
+    /// Called by the owner only after the previous stream and callbacks stop.
+    pub(crate) fn clear_fault(&self) {
+        self.fault.store(0, Ordering::Release);
     }
 }
 
@@ -283,7 +287,6 @@ mod tests {
     #[test]
     fn errors_are_classified_and_only_the_first_fault_is_kept() {
         let counters = StreamCounters::default();
-        counters.record_error(cpal::ErrorKind::DeviceChanged);
         counters.record_error(cpal::ErrorKind::RealtimeDenied);
         assert_eq!(counters.fault(), None);
         counters.record_error(cpal::ErrorKind::Xrun);
@@ -292,6 +295,9 @@ mod tests {
         counters.record_error(cpal::ErrorKind::DeviceNotAvailable);
         counters.record_error(cpal::ErrorKind::PermissionDenied);
         assert_eq!(counters.fault(), Some(DeviceErrorKind::Disconnected));
+        counters.clear_fault();
+        counters.record_error(cpal::ErrorKind::DeviceChanged);
+        assert_eq!(counters.fault(), Some(DeviceErrorKind::Invalidated));
     }
 
     /// The callback bodies, instantiated for every sample type, under the

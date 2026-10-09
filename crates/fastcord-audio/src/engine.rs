@@ -63,6 +63,23 @@ pub struct DeviceFormat {
     pub channels: u16,
 }
 
+fn store_format(slot: &std::sync::atomic::AtomicU64, format: Option<DeviceFormat>) {
+    slot.store(
+        format.map_or(0, |f| {
+            (u64::from(f.sample_rate) << 16) | u64::from(f.channels)
+        }),
+        Ordering::Release,
+    );
+}
+
+fn load_format(slot: &std::sync::atomic::AtomicU64) -> Option<DeviceFormat> {
+    let value = slot.load(Ordering::Acquire);
+    (value != 0).then_some(DeviceFormat {
+        sample_rate: (value >> 16) as u32,
+        channels: value as u16,
+    })
+}
+
 impl From<StreamFormat> for DeviceFormat {
     fn from(format: StreamFormat) -> Self {
         Self {
@@ -73,7 +90,7 @@ impl From<StreamFormat> for DeviceFormat {
 }
 
 /// Something the UI/media session must react to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum EngineEvent {
     /// The stream stopped and was closed. The engine does not switch to
     /// another device by itself.
@@ -81,10 +98,18 @@ pub enum EngineEvent {
         direction: Direction,
         kind: DeviceErrorKind,
     },
+    /// A replacement is running. Old endpoints are closed before these are published.
+    StreamReady {
+        direction: Direction,
+        format: DeviceFormat,
+        captured: Option<mpsc::Receiver<CapturedFrame>>,
+        playback: Option<mpsc::Sender<EncodedPacket>>,
+        remote_audio: Option<mpsc::Sender<RemoteFrame>>,
+    },
 }
 /// Runtime changes to an active call. Commands are bounded and serviced by the
 /// engine owner; audio callbacks never touch control state.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EngineControl {
     /// Stop processing microphone samples while retaining the input stream.
     CaptureEnabled(bool),
@@ -92,6 +117,11 @@ pub enum EngineControl {
     OutputEnabled(bool),
     /// Linear gain for one remote RTP SSRC. Values are clamped to 0–2.
     RemoteGain { ssrc: u32, gain: f32 },
+    /// Replace only this direction, on the owner thread. IDs are bounded to 512 bytes.
+    SelectDevice {
+        direction: Direction,
+        choice: DeviceChoice,
+    },
 }
 
 /// Channels connecting the engine to the media session.
@@ -134,8 +164,12 @@ struct Shared {
     output: Arc<StreamCounters>,
     capture_enabled: Arc<AtomicBool>,
     pipeline: PipelineCounters,
+    input_format: std::sync::atomic::AtomicU64,
+    output_format: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     owner_service: OwnerService,
+    #[cfg(test)]
+    probe_defaults: AtomicBool,
 }
 #[cfg(test)]
 struct OwnerService {
@@ -184,8 +218,6 @@ pub struct AudioEngine {
     stop: Option<std_mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
     shared: Arc<Shared>,
-    input: Option<DeviceFormat>,
-    output: Option<DeviceFormat>,
 }
 
 type Ready = Result<(Option<DeviceFormat>, Option<DeviceFormat>), AudioError>;
@@ -236,8 +268,8 @@ impl AudioEngine {
             })
             .map_err(|_| AudioError::EngineThread)?;
         let ready = ready_rx.recv();
-        let (input, output) = match ready {
-            Ok(Ok(formats)) => formats,
+        match ready {
+            Ok(Ok(_)) => {}
             Ok(Err(error)) => {
                 let _ = thread.join();
                 return Err(error);
@@ -251,8 +283,6 @@ impl AudioEngine {
             stop: Some(stop_tx),
             thread: Some(thread),
             shared,
-            input,
-            output,
         };
         let channels = EngineChannels {
             captured: has_input.then_some(captured_rx),
@@ -266,12 +296,12 @@ impl AudioEngine {
 
     /// Format of the open input stream.
     pub fn input_format(&self) -> Option<DeviceFormat> {
-        self.input
+        load_format(&self.shared.input_format)
     }
 
     /// Format of the open output stream.
     pub fn output_format(&self) -> Option<DeviceFormat> {
-        self.output
+        load_format(&self.shared.output_format)
     }
 
     pub fn stats(&self) -> EngineStats {
@@ -323,8 +353,8 @@ impl Drop for AudioEngine {
 impl std::fmt::Debug for AudioEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioEngine")
-            .field("input", &self.input)
-            .field("output", &self.output)
+            .field("input", &self.input_format())
+            .field("output", &self.output_format())
             .finish_non_exhaustive()
     }
 }
@@ -374,7 +404,7 @@ fn open_playback<B: Backend>(
 
 fn run_owner<B: Backend>(
     mut backend: B,
-    config: EngineConfig,
+    mut config: EngineConfig,
     shared: &Shared,
     mut io: OwnerIo,
     ready: std_mpsc::SyncSender<Ready>,
@@ -401,6 +431,14 @@ fn run_owner<B: Backend>(
         }
         Ok(formats)
     })();
+    if let Ok((input, output)) = &opened {
+        store_format(&shared.input_format, *input);
+        store_format(&shared.output_format, *output);
+    }
+    let mut defaults = [
+        backend.default_key(Direction::Input),
+        backend.default_key(Direction::Output),
+    ];
     let failed = opened.is_err();
     if ready.send(opened).is_err() || failed {
         // Streams opened before the failure are dropped (stopped) here.
@@ -410,8 +448,15 @@ fn run_owner<B: Backend>(
     // Dropping the engine handle disconnects the stop channel, ending the loop.
     let mut capture_enabled = true;
     let mut output_enabled = true;
+    let mut gains = std::collections::HashMap::<u32, f32>::new();
+    let mut probe_at = std::time::Instant::now() + Duration::from_secs(1);
+    // Two coalesced pending notifications bound backpressure even during rapid switching.
+    let mut pending: [Option<EngineEvent>; 2] = [None, None];
     while let Err(std_mpsc::RecvTimeoutError::Timeout) = io.stop.recv_timeout(TICK) {
-        while let Ok(control) = io.controls.try_recv() {
+        for _ in 0..32 {
+            let Ok(control) = io.controls.try_recv() else {
+                break;
+            };
             match control {
                 EngineControl::CaptureEnabled(enabled) => {
                     capture_enabled = enabled;
@@ -424,9 +469,63 @@ fn run_owner<B: Backend>(
                     }
                 }
                 EngineControl::RemoteGain { ssrc, gain } => {
+                    if gains.len() >= 256 && !gains.contains_key(&ssrc) {
+                        gains.clear();
+                    }
+                    gains.insert(ssrc, gain);
                     if let Some((_, pipeline)) = playback.as_mut() {
                         pipeline.set_gain(ssrc, gain);
                     }
+                }
+                EngineControl::SelectDevice { direction, choice } => {
+                    replace_device(
+                        &mut backend,
+                        direction,
+                        &choice,
+                        config.bitrate,
+                        shared,
+                        &mut capture,
+                        &mut playback,
+                        &mut io,
+                        output_enabled,
+                        &gains,
+                        &mut pending,
+                    );
+                    match direction {
+                        Direction::Input => config.input = Some(choice),
+                        Direction::Output => config.output = Some(choice),
+                    }
+                }
+            }
+        }
+        let probe = std::time::Instant::now() >= probe_at;
+        #[cfg(test)]
+        let probe = probe || shared.probe_defaults.swap(false, Ordering::AcqRel);
+        if probe {
+            probe_at = std::time::Instant::now() + Duration::from_secs(1);
+            for (index, direction, choice) in [
+                (0, Direction::Input, &config.input),
+                (1, Direction::Output, &config.output),
+            ] {
+                if choice.as_ref() != Some(&DeviceChoice::SystemDefault) {
+                    continue;
+                }
+                let current = backend.default_key(direction);
+                if current != defaults[index] {
+                    defaults[index] = current;
+                    replace_device(
+                        &mut backend,
+                        direction,
+                        &DeviceChoice::SystemDefault,
+                        config.bitrate,
+                        shared,
+                        &mut capture,
+                        &mut playback,
+                        &mut io,
+                        output_enabled,
+                        &gains,
+                        &mut pending,
+                    );
                 }
             }
         }
@@ -435,7 +534,8 @@ fn run_owner<B: Backend>(
         {
             capture = None;
             drop(io.captured.take());
-            let _ = io.events.try_send(EngineEvent::StreamFailed {
+            store_format(&shared.input_format, None);
+            pending[0] = Some(EngineEvent::StreamFailed {
                 direction: Direction::Input,
                 kind,
             });
@@ -447,7 +547,8 @@ fn run_owner<B: Backend>(
             drop(io.playback.take());
             drop(io.remote_audio.take());
             playback = None;
-            let _ = io.events.try_send(EngineEvent::StreamFailed {
+            store_format(&shared.output_format, None);
+            pending[1] = Some(EngineEvent::StreamFailed {
                 direction: Direction::Output,
                 kind,
             });
@@ -480,12 +581,27 @@ fn run_owner<B: Backend>(
                     pipeline.run(&shared.pipeline, &mut || playback_receiver.try_recv().ok());
                 }
             } else {
-                while io
-                    .remote_audio
-                    .as_mut()
-                    .is_some_and(|rx| rx.try_recv().is_ok())
-                {}
-                while io.playback.as_mut().is_some_and(|rx| rx.try_recv().is_ok()) {}
+                for _ in 0..PLAYBACK_QUEUE {
+                    if !io
+                        .remote_audio
+                        .as_mut()
+                        .is_some_and(|rx| rx.try_recv().is_ok())
+                    {
+                        break;
+                    }
+                }
+                for _ in 0..PLAYBACK_QUEUE {
+                    if !io.playback.as_mut().is_some_and(|rx| rx.try_recv().is_ok()) {
+                        break;
+                    }
+                }
+            }
+        }
+        for slot in &mut pending {
+            if let Some(event) = slot.take()
+                && let Err(mpsc::error::TrySendError::Full(event)) = io.events.try_send(event)
+            {
+                *slot = Some(event);
             }
         }
         #[cfg(test)]
@@ -495,6 +611,92 @@ fn run_owner<B: Backend>(
     // owner thread exits.
     drop(capture);
     drop(playback);
+}
+
+type CaptureStream<S> = Option<(S, CapturePipeline)>;
+type PlaybackStream<S> = Option<(S, PlaybackPipeline)>;
+
+#[allow(clippy::too_many_arguments)]
+fn replace_device<B: Backend>(
+    backend: &mut B,
+    direction: Direction,
+    choice: &DeviceChoice,
+    bitrate: u32,
+    shared: &Shared,
+    capture: &mut CaptureStream<B::Stream>,
+    playback: &mut PlaybackStream<B::Stream>,
+    io: &mut OwnerIo,
+    output_enabled: bool,
+    gains: &std::collections::HashMap<u32, f32>,
+    pending: &mut [Option<EngineEvent>; 2],
+) {
+    let result = match direction {
+        Direction::Input => {
+            // Close the old microphone and endpoint before starting any new callbacks.
+            *capture = None;
+            io.captured = None;
+            shared.input.clear_fault();
+            store_format(&shared.input_format, None);
+            open_capture(
+                backend,
+                choice,
+                &shared.input,
+                &shared.capture_enabled,
+                bitrate,
+            )
+            .map(|(stream, pipeline, format)| {
+                let (tx, rx) = mpsc::channel(CAPTURE_QUEUE);
+                io.captured = Some(tx);
+                *capture = Some((stream, pipeline));
+                store_format(&shared.input_format, Some(format.into()));
+                EngineEvent::StreamReady {
+                    direction,
+                    format: format.into(),
+                    captured: Some(rx),
+                    playback: None,
+                    remote_audio: None,
+                }
+            })
+        }
+        Direction::Output => {
+            *playback = None;
+            io.playback = None;
+            io.remote_audio = None;
+            shared.output.clear_fault();
+            store_format(&shared.output_format, None);
+            open_playback(backend, choice, &shared.output).map(|(stream, mut pipeline, format)| {
+                pipeline.set_enabled(output_enabled);
+                for (&ssrc, &gain) in gains {
+                    pipeline.set_gain(ssrc, gain);
+                }
+                let (tx, rx) = mpsc::channel(PLAYBACK_QUEUE);
+                let (remote_tx, remote_rx) = mpsc::channel(PLAYBACK_QUEUE);
+                io.playback = Some(rx);
+                io.remote_audio = Some(remote_rx);
+                *playback = Some((stream, pipeline));
+                store_format(&shared.output_format, Some(format.into()));
+                EngineEvent::StreamReady {
+                    direction,
+                    format: format.into(),
+                    captured: None,
+                    playback: Some(tx),
+                    remote_audio: Some(remote_tx),
+                }
+            })
+        }
+    };
+    let index = usize::from(direction == Direction::Output);
+    pending[index] = Some(result.unwrap_or_else(|error| EngineEvent::StreamFailed {
+        direction,
+        kind: match error {
+            AudioError::Device(_, kind) => kind,
+            AudioError::DeviceNotFound(_) | AudioError::NoDefaultDevice(_) => {
+                DeviceErrorKind::Disconnected
+            }
+            AudioError::Rate(_) => DeviceErrorKind::Unsupported,
+            _ => DeviceErrorKind::Other,
+        },
+    }));
 }
 
 #[cfg(test)]
@@ -522,6 +724,8 @@ mod tests {
         fail_input: Option<DeviceErrorKind>,
         fail_output: Option<DeviceErrorKind>,
         manual_callbacks: bool,
+        defaults: Arc<Mutex<[Option<DeviceKey>; 2]>>,
+        opened: Arc<Mutex<Vec<(Direction, DeviceChoice)>>>,
         driver: Arc<FakeDriver>,
     }
 
@@ -636,20 +840,37 @@ mod tests {
     impl Backend for FakeHost {
         type Stream = FakeStream;
 
+        fn default_key(&mut self, direction: Direction) -> Option<DeviceKey> {
+            self.defaults.lock()[usize::from(direction == Direction::Output)].clone()
+        }
+
         fn open_input(
             &mut self,
             choice: &DeviceChoice,
             counters: &Arc<StreamCounters>,
             make: &mut dyn FnMut(StreamFormat) -> InputCallback,
         ) -> Result<(FakeStream, StreamFormat), AudioError> {
-            check_choice(choice, Direction::Input)?;
+            assert_eq!(std::thread::current().name(), Some("fastcord-audio"));
+            self.opened.lock().push((Direction::Input, choice.clone()));
+            let choice = match choice {
+                DeviceChoice::SystemDefault => DeviceChoice::Device(
+                    self.default_key(Direction::Input)
+                        .ok_or(AudioError::NoDefaultDevice(Direction::Input))?,
+                ),
+                explicit => explicit.clone(),
+            };
+            check_choice(&choice, Direction::Input)?;
+            let rate = if matches!(&choice, DeviceChoice::Device(key) if key.as_str() == "44k") {
+                44_100
+            } else {
+                self.input_rate
+            };
             let format = StreamFormat {
-                rate: self.input_rate,
+                rate,
                 channels: 2,
-                period_frames: Some(self.input_rate / 100),
+                period_frames: Some(rate / 100),
             };
             let mut callback = make(format);
-            let rate = self.input_rate;
             let fail = self.fail_input;
             let counters = Arc::clone(counters);
             let mut phase = 0u64;
@@ -681,18 +902,32 @@ mod tests {
             counters: &Arc<StreamCounters>,
             make: &mut dyn FnMut(StreamFormat) -> OutputCallback,
         ) -> Result<(FakeStream, StreamFormat), AudioError> {
-            check_choice(choice, Direction::Output)?;
+            assert_eq!(std::thread::current().name(), Some("fastcord-audio"));
+            self.opened.lock().push((Direction::Output, choice.clone()));
+            let choice = match choice {
+                DeviceChoice::SystemDefault => DeviceChoice::Device(
+                    self.default_key(Direction::Output)
+                        .ok_or(AudioError::NoDefaultDevice(Direction::Output))?,
+                ),
+                explicit => explicit.clone(),
+            };
+            check_choice(&choice, Direction::Output)?;
+            let rate = if matches!(&choice, DeviceChoice::Device(key) if key.as_str() == "44k") {
+                44_100
+            } else {
+                self.output_rate
+            };
             let format = StreamFormat {
-                rate: self.output_rate,
+                rate,
                 channels: 2,
-                period_frames: Some(self.output_rate / 100),
+                period_frames: Some(rate / 100),
             };
             let mut callback = make(format);
             let played = Arc::clone(&self.played);
             let mut calls = 0;
             let fail = self.fail_output;
             let counters = Arc::clone(counters);
-            let mut buffer = vec![0.0f32; (self.output_rate / 100) as usize * 2];
+            let mut buffer = vec![0.0f32; (rate / 100) as usize * 2];
             let stream = self.spawn(Direction::Output, move || {
                 callback.process(&mut buffer);
                 played.lock().extend(buffer.iter().step_by(2));
@@ -709,6 +944,10 @@ mod tests {
 
     fn host(input_rate: u32, output_rate: u32) -> FakeHost {
         FakeHost {
+            defaults: Arc::new(Mutex::new([
+                DeviceKey::from_persisted("fake-input"),
+                DeviceKey::from_persisted("fake-output"),
+            ])),
             input_rate,
             output_rate,
             ..FakeHost::default()
@@ -723,6 +962,284 @@ mod tests {
         );
         assert!(probes.0.upgrade().is_none(), "input callback dropped");
         assert!(probes.1.upgrade().is_none(), "output callback dropped");
+    }
+
+    fn explicit(id: &str) -> DeviceChoice {
+        DeviceChoice::Device(DeviceKey::from_persisted(id).unwrap())
+    }
+
+    #[test]
+    fn switching_directions_closes_old_endpoints_preserves_controls_and_converts_formats() {
+        let mut fake = host(48_000, 48_000);
+        fake.manual_callbacks = true;
+        let backend = fake.clone();
+        let (engine, mut channels) =
+            AudioEngine::start_with(EngineConfig::default(), move || backend).unwrap();
+        let mut old_input = channels.captured.take().unwrap();
+        let old_output = channels.remote_audio.take().unwrap();
+        let owner = &engine.shared.owner_service;
+        channels
+            .controls
+            .blocking_send(EngineControl::CaptureEnabled(false))
+            .unwrap();
+        channels
+            .controls
+            .blocking_send(EngineControl::OutputEnabled(false))
+            .unwrap();
+        channels
+            .controls
+            .blocking_send(EngineControl::RemoteGain { ssrc: 9, gain: 0.0 })
+            .unwrap();
+        channels
+            .controls
+            .blocking_send(EngineControl::SelectDevice {
+                direction: Direction::Input,
+                choice: explicit("44k"),
+            })
+            .unwrap();
+        let Some(EngineEvent::StreamReady {
+            direction: Direction::Input,
+            format,
+            captured: Some(mut captured),
+            ..
+        }) = channels.events.blocking_recv()
+        else {
+            panic!("input not replaced")
+        };
+        assert_eq!(format.sample_rate, 44_100);
+        assert_eq!(engine.input_format(), Some(format));
+        assert!(matches!(
+            old_input.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert!(
+            !old_output.is_closed(),
+            "healthy output must not close for an input switch"
+        );
+        let before = engine.stats().frames_encoded;
+        for _ in 0..4 {
+            let generation = owner.generation();
+            fake.driver.step(Direction::Input);
+            owner.wait_after(generation);
+        }
+        assert_eq!(
+            engine.stats().frames_encoded,
+            before,
+            "mute survived replacement"
+        );
+        channels
+            .controls
+            .blocking_send(EngineControl::SelectDevice {
+                direction: Direction::Output,
+                choice: explicit("44k"),
+            })
+            .unwrap();
+        let Some(EngineEvent::StreamReady {
+            direction: Direction::Output,
+            format,
+            remote_audio: Some(remote),
+            ..
+        }) = channels.events.blocking_recv()
+        else {
+            panic!("output not replaced")
+        };
+        assert_eq!(format.sample_rate, 44_100);
+        assert!(old_output.is_closed());
+        assert_eq!(engine.output_format(), Some(format));
+        channels
+            .controls
+            .blocking_send(EngineControl::CaptureEnabled(true))
+            .unwrap();
+        let mut generation = owner.generation();
+        owner.wait_after(generation);
+        for _ in 0..8 {
+            fake.driver.step(Direction::Input);
+            generation = owner.wait_after(generation);
+        }
+        let frame = captured.try_recv().unwrap();
+        remote
+            .blocking_send(RemoteFrame {
+                ssrc: 9,
+                sequence: 1,
+                timestamp: 960,
+                packet: frame.packet.clone(),
+            })
+            .unwrap();
+        generation = owner.wait_after(generation);
+        fake.driver.step(Direction::Output);
+        owner.wait_after(generation);
+        assert!(
+            fake.played.lock().iter().all(|sample| *sample == 0.0),
+            "deafen survived replacement"
+        );
+        channels
+            .controls
+            .blocking_send(EngineControl::OutputEnabled(true))
+            .unwrap();
+        generation = owner.generation();
+        generation = owner.wait_after(generation);
+        for sequence in 2..18 {
+            remote
+                .blocking_send(RemoteFrame {
+                    ssrc: 9,
+                    sequence,
+                    timestamp: sequence as u32 * 960,
+                    packet: frame.packet.clone(),
+                })
+                .unwrap();
+            generation = owner.wait_after(generation);
+            fake.driver.step(Direction::Output);
+            generation = owner.wait_after(generation);
+        }
+        assert!(
+            fake.played
+                .lock()
+                .iter()
+                .all(|sample| sample.abs() < 0.00001),
+            "per-SSRC zero gain survived replacement"
+        );
+        drop(engine);
+        assert_eq!(fake.live_threads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn missing_and_unplugged_explicit_output_never_open_default_and_can_be_reselected() {
+        let mut fake = host(48_000, 48_000);
+        fake.manual_callbacks = true;
+        let backend = fake.clone();
+        let config = EngineConfig {
+            output: Some(explicit("private-headset")),
+            ..EngineConfig::default()
+        };
+        let (engine, mut channels) = AudioEngine::start_with(config, move || backend).unwrap();
+        let old_output = channels.remote_audio.take().unwrap();
+        engine
+            .shared
+            .output
+            .record_error(cpal::ErrorKind::DeviceNotAvailable);
+        assert!(matches!(
+            channels.events.blocking_recv(),
+            Some(EngineEvent::StreamFailed {
+                direction: Direction::Output,
+                kind: DeviceErrorKind::Disconnected
+            })
+        ));
+        assert!(old_output.is_closed());
+        assert_eq!(fake.live_threads.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.output_format(), None);
+        channels
+            .controls
+            .blocking_send(EngineControl::SelectDevice {
+                direction: Direction::Output,
+                choice: explicit("missing"),
+            })
+            .unwrap();
+        assert!(matches!(
+            channels.events.blocking_recv(),
+            Some(EngineEvent::StreamFailed {
+                direction: Direction::Output,
+                kind: DeviceErrorKind::Disconnected
+            })
+        ));
+        assert!(
+            !fake
+                .opened
+                .lock()
+                .iter()
+                .any(|(direction, choice)| *direction == Direction::Output
+                    && *choice == DeviceChoice::SystemDefault)
+        );
+        channels
+            .controls
+            .blocking_send(EngineControl::SelectDevice {
+                direction: Direction::Output,
+                choice: explicit("private-headset"),
+            })
+            .unwrap();
+        assert!(matches!(
+            channels.events.blocking_recv(),
+            Some(EngineEvent::StreamReady {
+                direction: Direction::Output,
+                ..
+            })
+        ));
+        assert_eq!(fake.live_threads.load(Ordering::SeqCst), 2);
+        assert_eq!(engine.output_format().unwrap().sample_rate, 48_000);
+        drop(engine);
+    }
+
+    #[test]
+    fn only_chosen_system_default_follows_endpoint_changes() {
+        let mut fake = host(48_000, 48_000);
+        fake.manual_callbacks = true;
+        let backend = fake.clone();
+        let config = EngineConfig {
+            output: Some(explicit("private-headset")),
+            ..EngineConfig::default()
+        };
+        let (engine, mut channels) = AudioEngine::start_with(config, move || backend).unwrap();
+        *fake.defaults.lock() = [
+            DeviceKey::from_persisted("44k"),
+            DeviceKey::from_persisted("new-speakers"),
+        ];
+        engine.shared.probe_defaults.store(true, Ordering::Release);
+        assert!(matches!(
+            channels.events.blocking_recv(),
+            Some(EngineEvent::StreamReady {
+                direction: Direction::Input,
+                format: DeviceFormat {
+                    sample_rate: 44_100,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert_eq!(
+            fake.opened
+                .lock()
+                .iter()
+                .filter(|(direction, _)| *direction == Direction::Output)
+                .count(),
+            1
+        );
+        channels
+            .controls
+            .blocking_send(EngineControl::SelectDevice {
+                direction: Direction::Output,
+                choice: DeviceChoice::SystemDefault,
+            })
+            .unwrap();
+        assert!(matches!(
+            channels.events.blocking_recv(),
+            Some(EngineEvent::StreamReady {
+                direction: Direction::Output,
+                ..
+            })
+        ));
+        fake.defaults.lock()[1] = None;
+        engine.shared.probe_defaults.store(true, Ordering::Release);
+        assert!(matches!(
+            channels.events.blocking_recv(),
+            Some(EngineEvent::StreamFailed {
+                direction: Direction::Output,
+                ..
+            })
+        ));
+        assert_eq!(fake.live_threads.load(Ordering::SeqCst), 1);
+        fake.defaults.lock()[1] = DeviceKey::from_persisted("44k");
+        engine.shared.probe_defaults.store(true, Ordering::Release);
+        assert!(matches!(
+            channels.events.blocking_recv(),
+            Some(EngineEvent::StreamReady {
+                direction: Direction::Output,
+                format: DeviceFormat {
+                    sample_rate: 44_100,
+                    ..
+                },
+                ..
+            })
+        ));
+        drop(engine);
     }
 
     /// Microphone → Opus → playback through the real engine thread, callbacks,
@@ -929,7 +1446,9 @@ mod tests {
         let fake = host(48_000, 48_000);
         let backend = fake.clone();
         let config = EngineConfig {
-            output: Some(DeviceChoice::Device(DeviceKey::from_persisted("missing"))),
+            output: Some(DeviceChoice::Device(
+                DeviceKey::from_persisted("missing").unwrap(),
+            )),
             ..EngineConfig::default()
         };
         let error = AudioEngine::start_with(config, move || backend).unwrap_err();
@@ -964,13 +1483,13 @@ mod tests {
             assert!(Instant::now() < deadline, "no failure event");
             std::thread::sleep(Duration::from_millis(5));
         };
-        assert_eq!(
+        assert!(matches!(
             event,
             EngineEvent::StreamFailed {
                 direction: Direction::Input,
                 kind: DeviceErrorKind::Disconnected
             }
-        );
+        ));
         let mut captured = channels.captured.take().unwrap();
         let capture_deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1015,13 +1534,13 @@ mod tests {
             assert!(Instant::now() < deadline, "no failure event");
             std::thread::sleep(Duration::from_millis(5));
         };
-        assert_eq!(
+        assert!(matches!(
             event,
             EngineEvent::StreamFailed {
                 direction: Direction::Output,
                 kind: DeviceErrorKind::Disconnected
             }
-        );
+        ));
         let playback = channels.playback.take().unwrap();
         assert!(playback.is_closed());
         assert!(matches!(
@@ -1058,6 +1577,113 @@ mod tests {
         assert_eq!(fake.live_threads.load(Ordering::SeqCst), 1);
         drop(engine);
         assert_eq!(fake.live_threads.load(Ordering::SeqCst), 0);
+    }
+
+    /// Real WASAPI/CoreAudio/ALSA switching on the running owner, without Discord.
+    #[test]
+    #[ignore = "needs real audio devices"]
+    fn live_switches_available_devices_without_fallback() {
+        let heap_before = crate::alloc_counter::callback_heap_ops();
+        let inputs = crate::list_devices(Direction::Input).unwrap();
+        let outputs = crate::list_devices(Direction::Output).unwrap();
+        println!("available inputs: {inputs:?}; outputs: {outputs:?}");
+        let (engine, mut channels) = AudioEngine::start(EngineConfig::default()).unwrap();
+        let controls = channels.controls.clone();
+        for (direction, devices) in [(Direction::Input, &inputs), (Direction::Output, &outputs)] {
+            for device in devices {
+                controls
+                    .blocking_send(EngineControl::SelectDevice {
+                        direction,
+                        choice: DeviceChoice::Device(device.key.clone()),
+                    })
+                    .unwrap();
+                let event = channels.events.blocking_recv().unwrap();
+                let EngineEvent::StreamReady {
+                    format,
+                    captured,
+                    playback,
+                    remote_audio,
+                    ..
+                } = event
+                else {
+                    panic!("device did not open: {event:?}")
+                };
+                println!("switched {direction:?}: {} {format:?}", device.label);
+                match direction {
+                    Direction::Input => channels.captured = captured,
+                    Direction::Output => {
+                        channels.playback = playback;
+                        channels.remote_audio = remote_audio;
+                    }
+                }
+                let before = engine.stats();
+                std::thread::sleep(Duration::from_millis(200));
+                let after = engine.stats();
+                assert!(
+                    after.input_callbacks > before.input_callbacks
+                        && after.output_callbacks > before.output_callbacks,
+                    "both directions must keep running"
+                );
+                if let Some(rx) = channels.captured.as_mut()
+                    && let Some(tx) = channels.playback.as_ref()
+                {
+                    while let Ok(frame) = rx.try_recv() {
+                        let _ = tx.try_send(frame.packet);
+                    }
+                }
+            }
+        }
+        for direction in [Direction::Input, Direction::Output] {
+            controls
+                .blocking_send(EngineControl::SelectDevice {
+                    direction,
+                    choice: DeviceChoice::SystemDefault,
+                })
+                .unwrap();
+            assert!(matches!(
+                channels.events.blocking_recv(),
+                Some(EngineEvent::StreamReady { .. })
+            ));
+        }
+        controls
+            .blocking_send(EngineControl::SelectDevice {
+                direction: Direction::Output,
+                choice: explicit("wasapi:fastcord-absent-device"),
+            })
+            .unwrap();
+        assert!(matches!(
+            channels.events.blocking_recv(),
+            Some(EngineEvent::StreamFailed {
+                direction: Direction::Output,
+                kind: DeviceErrorKind::Disconnected
+            })
+        ));
+        assert_eq!(engine.output_format(), None);
+        let before = engine.stats().output_callbacks;
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            engine.stats().output_callbacks,
+            before,
+            "no speaker fallback"
+        );
+        controls
+            .blocking_send(EngineControl::SelectDevice {
+                direction: Direction::Output,
+                choice: DeviceChoice::Device(outputs[0].key.clone()),
+            })
+            .unwrap();
+        assert!(matches!(
+            channels.events.blocking_recv(),
+            Some(EngineEvent::StreamReady { .. })
+        ));
+        let stats = engine.stats();
+        let probes = engine.callback_probes();
+        drop(engine);
+        assert!(probes.0.upgrade().is_none() && probes.1.upgrade().is_none());
+        assert_eq!(crate::alloc_counter::callback_heap_ops(), heap_before);
+        println!(
+            "owner switching stats: {stats:?}; zero callback heap operations; streams released"
+        );
     }
 
     /// Real devices: default microphone → Opus → default output, with the
