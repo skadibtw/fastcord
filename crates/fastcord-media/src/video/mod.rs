@@ -1,0 +1,377 @@
+//! Native video over the voice transport (SPEC §8.3, milestone 25).
+//!
+//! Video travels as RTP on the same UDP socket and under the same transport
+//! AEAD as audio, one encoded frame at a time: the codec's frame is sealed with
+//! DAVE first, then packetized; on receipt the packets are repaired and
+//! reassembled into the complete sealed frame before DAVE opens it. Nothing
+//! here decodes or renders pixels. This milestone carries H.264; the payload
+//! types, RTX payload types, and which direction a codec is offered for are
+//! decided by the caller's [`VideoOptions`], never inferred from browser SDP.
+//!
+//! - [`h264`]: RFC 6184 packetization (single NAL unit, FU-A) and
+//!   depacketization (also STAP-A).
+//! - [`send`]: the pacer, the retransmission ring, the congestion controller,
+//!   and the per-connection sender state.
+//! - [`receive`]: per-SSRC reordering, NACK scheduling, frame completion
+//!   deadlines, and reception statistics for receiver reports.
+
+pub(crate) mod h264;
+pub(crate) mod receive;
+pub(crate) mod send;
+#[cfg(test)]
+mod vectors;
+
+use std::fmt;
+use std::time::Duration;
+
+use fastcord_model::Snowflake;
+
+use crate::rtp::OPUS_PAYLOAD_TYPE;
+
+/// Target size of one UDP datagram, RTP header, extensions, AEAD tag, and
+/// nonce suffix included (SPEC §8.3).
+pub const MAX_DATAGRAM_BYTES: usize = 1200;
+/// The largest encoded frame, sealed or not, in either direction.
+pub const MAX_FRAME_BYTES: usize = 2 << 20;
+/// RTP packets one frame may occupy.
+pub(crate) const MAX_PACKETS: usize = 2048;
+/// RTP header (12), extension preamble (4), the longest extension block fastcord
+/// writes (24), AEAD tag (16), nonce suffix (4), and the RTX original sequence
+/// number (2): what a payload shares a datagram with.
+pub const MAX_PAYLOAD_BYTES: usize = MAX_DATAGRAM_BYTES - 12 - 4 - 24 - 16 - 4 - 2;
+
+/// The codecs fastcord can packetize and depacketize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VideoCodec {
+    H264,
+}
+
+impl VideoCodec {
+    /// The name in Select Protocol and Session Description.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::H264 => "H264",
+        }
+    }
+
+    pub fn from_wire(name: &str) -> Option<Self> {
+        name.eq_ignore_ascii_case("H264").then_some(Self::H264)
+    }
+}
+
+/// One codec offered in Select Protocol, with the direction fastcord can
+/// actually run it. The server picks one send codec per client that every
+/// other client can decode; a codec offered `decode` only is never sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodecOffer {
+    pub codec: VideoCodec,
+    /// Dynamic RTP payload type of the media (97–127, never Opus's 120).
+    pub payload_type: u8,
+    /// Dynamic RTP payload type of its RFC 4588 retransmissions.
+    pub rtx_payload_type: u8,
+    pub encode: bool,
+    pub decode: bool,
+}
+
+impl CodecOffer {
+    /// H.264 with the payload types of Discord's documented example offer.
+    pub const fn h264(encode: bool, decode: bool) -> Self {
+        Self {
+            codec: VideoCodec::H264,
+            payload_type: 103,
+            rtx_payload_type: 104,
+            encode,
+            decode,
+        }
+    }
+
+    fn validate(self) -> Result<(), VideoError> {
+        // 96 is reserved for probe packets; RTCP types (192–223) must stay
+        // clear of a payload type with its marker bit (RFC 5761).
+        let dynamic = |payload_type: u8| {
+            (97..=127).contains(&payload_type) && payload_type != OPUS_PAYLOAD_TYPE
+        };
+        if !dynamic(self.payload_type)
+            || !dynamic(self.rtx_payload_type)
+            || self.payload_type == self.rtx_payload_type
+            || !(self.encode || self.decode)
+        {
+            return Err(VideoError::Negotiation);
+        }
+        Ok(())
+    }
+}
+
+/// The single screen layer an owner sends (SPEC §8.2), announced in Identify
+/// and the Video opcode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SendOptions {
+    /// The initial and the highest bitrate, bits per second; congestion control
+    /// goes below it and returns up to it.
+    pub bitrate: u32,
+    pub width: u16,
+    pub height: u16,
+    pub framerate: u8,
+}
+
+impl SendOptions {
+    /// The SPEC §8.2 baseline: 1280×720 at 30 fps starting at 2.5 Mbit/s.
+    pub const SCREEN_720P30: Self = Self {
+        bitrate: 2_500_000,
+        width: 1280,
+        height: 720,
+        framerate: 30,
+    };
+
+    fn validate(self) -> Result<(), VideoError> {
+        if !(64_000..=10_000_000).contains(&self.bitrate)
+            || !(16..=4096).contains(&self.width)
+            || !(16..=4096).contains(&self.height)
+            || !(1..=60).contains(&self.framerate)
+        {
+            return Err(VideoError::Negotiation);
+        }
+        Ok(())
+    }
+}
+
+/// What a connection offers for video. Without options a connection is
+/// audio-only, exactly as before milestone 25.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoOptions {
+    pub codecs: Vec<CodecOffer>,
+    /// Owners send one screen layer; watchers offer decode only and no layer.
+    pub send: Option<SendOptions>,
+}
+
+impl VideoOptions {
+    /// A stream viewer: H.264 decode, nothing sent.
+    pub fn watch() -> Self {
+        Self {
+            codecs: vec![CodecOffer::h264(false, true)],
+            send: None,
+        }
+    }
+
+    /// A stream owner: H.264 encode and decode with one screen layer.
+    pub fn share(send: SendOptions) -> Self {
+        Self {
+            codecs: vec![CodecOffer::h264(true, true)],
+            send: Some(send),
+        }
+    }
+
+    /// Whether the offer is internally consistent: unique codecs and payload
+    /// types, and an H.264 encoder when a layer is to be sent.
+    pub fn validate(&self) -> Result<(), VideoError> {
+        if self.codecs.is_empty() || self.codecs.len() > 4 {
+            return Err(VideoError::Negotiation);
+        }
+        for (index, offer) in self.codecs.iter().copied().enumerate() {
+            offer.validate()?;
+            let numbers = [offer.payload_type, offer.rtx_payload_type];
+            if self.codecs[..index].iter().any(|other| {
+                other.codec == offer.codec
+                    || numbers.contains(&other.payload_type)
+                    || numbers.contains(&other.rtx_payload_type)
+            }) {
+                return Err(VideoError::Negotiation);
+            }
+        }
+        if let Some(send) = self.send {
+            send.validate()?;
+            if self.send_offer(VideoCodec::H264).is_none() {
+                return Err(VideoError::Negotiation);
+            }
+        }
+        Ok(())
+    }
+
+    /// The offer an incoming payload type belongs to, and whether it names the
+    /// RTX stream. Only decodable codecs match; any other payload type is
+    /// unnegotiated media.
+    pub(crate) fn receive_offer(&self, payload_type: u8) -> Option<(CodecOffer, bool)> {
+        self.codecs
+            .iter()
+            .copied()
+            .filter(|offer| offer.decode)
+            .find_map(|offer| {
+                if payload_type == offer.payload_type {
+                    Some((offer, false))
+                } else if payload_type == offer.rtx_payload_type {
+                    Some((offer, true))
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// The offer to send with when the server selected `codec`.
+    pub(crate) fn send_offer(&self, codec: VideoCodec) -> Option<CodecOffer> {
+        self.codecs
+            .iter()
+            .copied()
+            .find(|offer| offer.codec == codec && offer.encode)
+    }
+}
+
+/// One encoded frame handed to the sender: an Annex B H.264 access unit that
+/// has not been through DAVE. `timestamp` is the source frame's presentation
+/// time on any monotonic clock; only differences matter.
+#[derive(Clone, PartialEq, Eq)]
+pub struct VideoFrame {
+    pub data: Vec<u8>,
+    pub timestamp: Duration,
+}
+
+impl fmt::Debug for VideoFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VideoFrame")
+            .field("bytes", &self.data.len())
+            .field("timestamp", &self.timestamp)
+            .finish()
+    }
+}
+
+/// One complete, DAVE-opened frame from a known sender, in decode order. The
+/// first frame after any loss is a keyframe: frames that could not be
+/// reassembled or opened are never followed by deltas that depend on them.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReceivedVideo {
+    pub user_id: Snowflake,
+    pub ssrc: u32,
+    pub codec: VideoCodec,
+    /// The 90 kHz RTP timestamp shared by every packet of the frame.
+    pub timestamp: u32,
+    /// The frame holds an IDR picture, so a decoder can start from it.
+    pub keyframe: bool,
+    /// Annex B with `00 00 00 01` start codes.
+    pub data: Vec<u8>,
+}
+
+impl fmt::Debug for ReceivedVideo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReceivedVideo")
+            .field("user_id", &self.user_id)
+            .field("ssrc", &self.ssrc)
+            .field("timestamp", &self.timestamp)
+            .field("keyframe", &self.keyframe)
+            .field("bytes", &self.data.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoError {
+    /// Unsupported or inconsistent video negotiation.
+    Negotiation,
+    Malformed,
+    TooLarge,
+    Incomplete,
+    /// The pacer's 100 ms queue cannot take the frame.
+    QueueFull,
+}
+
+impl fmt::Display for VideoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Negotiation => "unsupported or inconsistent video negotiation",
+            Self::Malformed => "malformed codec RTP payload",
+            Self::TooLarge => "video frame exceeds its byte bound",
+            Self::Incomplete => "incomplete video frame",
+            Self::QueueFull => "video pacing queue reached its 100 ms bound",
+        })
+    }
+}
+
+impl std::error::Error for VideoError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_and_share_offers_are_valid_and_directional() {
+        let watch = VideoOptions::watch();
+        watch.validate().unwrap();
+        assert!(watch.send_offer(VideoCodec::H264).is_none());
+        let share = VideoOptions::share(SendOptions::SCREEN_720P30);
+        share.validate().unwrap();
+        assert_eq!(
+            share.send_offer(VideoCodec::H264),
+            Some(CodecOffer::h264(true, true))
+        );
+        // The offered payload types, and only those, name incoming media.
+        let (offer, rtx) = share.receive_offer(103).unwrap();
+        assert!(!rtx && offer.codec == VideoCodec::H264);
+        assert!(share.receive_offer(104).unwrap().1);
+        for other in [96, 101, 105, 120] {
+            assert!(share.receive_offer(other).is_none(), "{other}");
+        }
+    }
+
+    #[test]
+    fn inconsistent_offers_are_refused() {
+        let good = CodecOffer::h264(true, true);
+        let bad = |change: fn(&mut CodecOffer)| {
+            let mut offer = good;
+            change(&mut offer);
+            VideoOptions {
+                codecs: vec![offer],
+                send: None,
+            }
+            .validate()
+        };
+        assert_eq!(bad(|o| o.payload_type = 96), Err(VideoError::Negotiation));
+        assert_eq!(bad(|o| o.payload_type = 120), Err(VideoError::Negotiation));
+        assert_eq!(
+            bad(|o| o.rtx_payload_type = 128),
+            Err(VideoError::Negotiation)
+        );
+        assert_eq!(
+            bad(|o| o.rtx_payload_type = 103),
+            Err(VideoError::Negotiation)
+        );
+        assert_eq!(
+            bad(|o| {
+                o.encode = false;
+                o.decode = false;
+            }),
+            Err(VideoError::Negotiation)
+        );
+        let empty = VideoOptions {
+            codecs: Vec::new(),
+            send: None,
+        };
+        assert_eq!(empty.validate(), Err(VideoError::Negotiation));
+        // Sending needs an encoder.
+        let mut no_encoder = VideoOptions::watch();
+        no_encoder.send = Some(SendOptions::SCREEN_720P30);
+        assert_eq!(no_encoder.validate(), Err(VideoError::Negotiation));
+        // Duplicate codecs or payload types.
+        let mut duplicate = VideoOptions::watch();
+        duplicate.codecs.push(CodecOffer::h264(false, true));
+        assert_eq!(duplicate.validate(), Err(VideoError::Negotiation));
+        let mut absurd = VideoOptions::share(SendOptions::SCREEN_720P30);
+        absurd.send.as_mut().unwrap().bitrate = 10;
+        assert_eq!(absurd.validate(), Err(VideoError::Negotiation));
+    }
+
+    #[test]
+    fn the_codec_name_round_trips_and_debug_output_hides_pixels() {
+        assert_eq!(VideoCodec::from_wire("H264"), Some(VideoCodec::H264));
+        assert_eq!(VideoCodec::from_wire("h264"), Some(VideoCodec::H264));
+        assert_eq!(VideoCodec::from_wire("H265"), None);
+        assert_eq!(VideoCodec::H264.wire_name(), "H264");
+        let frame = ReceivedVideo {
+            user_id: Snowflake(7),
+            ssrc: 9,
+            codec: VideoCodec::H264,
+            timestamp: 3000,
+            keyframe: true,
+            data: vec![0xAB; 1000],
+        };
+        let text = format!("{frame:?}");
+        assert!(text.contains("bytes: 1000") && !text.to_lowercase().contains("ab, ab"));
+    }
+}

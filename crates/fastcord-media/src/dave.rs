@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU16;
 
-use davey::{CommitWelcome, DaveSession as DaveEngine, MediaType, ProposalsOperationType};
+use davey::{Codec, CommitWelcome, DaveSession as DaveEngine, MediaType, ProposalsOperationType};
 use tls_codec::Serialize;
 
 const DAVE_PROTOCOL_VERSION: u16 = 1;
@@ -354,6 +354,50 @@ impl DaveSession {
         Ok(frame)
     }
 
+    /// Seals one complete H.264 access unit (Annex B) for the call. DAVE runs
+    /// on the whole frame, before RTP packetization (SPEC §6.4): the result
+    /// keeps every NAL header readable, separates NAL units with long start
+    /// codes, and has no start-code sequence inside its ciphertext, so the
+    /// packetizer can split it at start codes alone. A frame DAVE cannot seal
+    /// is an error, never passed on in the clear.
+    pub(crate) fn encrypt_h264<'a>(&mut self, frame: &'a [u8]) -> Result<Cow<'a, [u8]>, DaveError> {
+        if !self.is_send_ready() {
+            return Err(DaveError::NotReady);
+        }
+        let encrypted = self
+            .engine
+            .encrypt(MediaType::VIDEO, Codec::H264, frame)
+            .map_err(|_| DaveError::Engine)?;
+        if matches!(encrypted, Cow::Borrowed(_)) || encrypted.len() <= frame.len() {
+            return Err(DaveError::PlaintextBypass);
+        }
+        Ok(encrypted)
+    }
+
+    /// Opens one reassembled H.264 frame from `user_id`. Anything DAVE does
+    /// not authenticate under that sender's keys is an error.
+    pub(crate) fn decrypt_h264(
+        &mut self,
+        user_id: u64,
+        frame: &[u8],
+    ) -> Result<Vec<u8>, DaveError> {
+        if !self.is_receive_ready() {
+            return Err(DaveError::NotReady);
+        }
+        let plain = self
+            .engine
+            .decrypt(user_id, MediaType::VIDEO, frame)
+            .map_err(|_| DaveError::Engine)?;
+        if plain == frame {
+            return Err(DaveError::PlaintextBypass);
+        }
+        // davey reports a frame it could not reconstruct as zero bytes.
+        if plain.is_empty() {
+            return Err(DaveError::Engine);
+        }
+        Ok(plain)
+    }
+
     fn group_is_ready(&self) -> bool {
         self.engine.is_ready() && self.in_group
     }
@@ -564,6 +608,86 @@ mod tests {
         );
     }
 
+    const H264_FIXTURE: &[u8] = include_bytes!("../../../fixtures/video/ipcm-128x96.h264");
+
+    /// The fixture's access units: SPS+PPS+IDR (three NAL units), a P slice,
+    /// and a lone IDR.
+    fn access_units() -> [(&'static [u8], usize); 3] {
+        [
+            (&H264_FIXTURE[..18_556], 3),
+            (&H264_FIXTURE[18_556..37_092], 1),
+            (&H264_FIXTURE[37_092..], 1),
+        ]
+    }
+
+    /// Splits `sealed` into RTP payloads of at most `max_payload` bytes and
+    /// joins them again.
+    fn through_rtp(sealed: &[u8], max_payload: usize) -> Vec<u8> {
+        let parts = crate::video::h264::packetize(sealed, max_payload).unwrap();
+        let payloads: Vec<Vec<u8>> = parts
+            .iter()
+            .map(|part| {
+                let mut payload = Vec::new();
+                part.write(sealed, &mut payload);
+                payload
+            })
+            .collect();
+        let borrowed: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+        let mut joined = Vec::new();
+        crate::video::h264::depacketize(&borrowed, &mut joined).unwrap();
+        joined
+    }
+
+    /// Real fixture frames sealed by one member and opened by another, with the
+    /// RTP split and join between them (the DAVE frame boundary).
+    fn round_trip_video(sender: &mut DaveSession, receiver: &mut DaveSession, sender_id: u64) {
+        for (frame, units) in access_units() {
+            let sealed = sender.encrypt_h264(frame).unwrap().into_owned();
+            assert_ne!(sealed, frame);
+            assert!(sealed.len() > frame.len());
+            // Only start codes delimit units, encrypted or not.
+            assert_eq!(crate::video::h264::nal_units(&sealed).unwrap().len(), units);
+            for max_payload in [1138, 400] {
+                assert_eq!(through_rtp(&sealed, max_payload), sealed);
+            }
+            assert_eq!(receiver.decrypt_h264(sender_id, &sealed).unwrap(), frame);
+        }
+    }
+
+    /// Many pseudo-random frames, whose ciphertext and zero runs exercise the
+    /// start-code search against DAVE's "no start code in ciphertext" rule.
+    fn seal_stress(sender: &mut DaveSession, receiver: &mut DaveSession, sender_id: u64) {
+        let mut state = 0x9E37_79B9_u32;
+        let mut next = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8
+        };
+        for round in 0..300 {
+            let mut frame = Vec::new();
+            for nal in 0..1 + round % 4 {
+                frame.extend_from_slice(&[0, 0, 0, 1]);
+                frame.push([0x65, 0x41, 0x67, 0x61][nal % 4]);
+                let mut previous = 1;
+                for _ in 0..20 + usize::from(next()) * (1 + round % 12) {
+                    let mut byte = next();
+                    // Valid H.264 never has two zero bytes in a row inside a NAL.
+                    if byte == 0 && previous == 0 {
+                        byte = 0x55;
+                    }
+                    previous = byte;
+                    frame.push(byte);
+                }
+            }
+            let sealed = sender.encrypt_h264(&frame).unwrap().into_owned();
+            assert_eq!(through_rtp(&sealed, 1138), sealed, "round {round}");
+            assert_eq!(
+                receiver.decrypt_h264(sender_id, &sealed).unwrap(),
+                frame,
+                "round {round}"
+            );
+        }
+    }
+
     #[test]
     fn actual_mls_welcome_rekey_membership_churn_and_opus_round_trip() {
         let channel_id = 2_u64;
@@ -600,6 +724,9 @@ mod tests {
         activate(&mut bob, 1);
         round_trip(&mut alice, &mut bob, alice_id);
         round_trip(&mut bob, &mut alice, bob_id);
+        round_trip_video(&mut alice, &mut bob, alice_id);
+        round_trip_video(&mut bob, &mut alice, bob_id);
+        seal_stress(&mut alice, &mut bob, alice_id);
 
         let expected_users = [alice_id, bob_id, carol_id];
         let add_carol = add_proposal(&alice, key_package(&mut carol, &provider), &delivery_signer);
@@ -641,6 +768,7 @@ mod tests {
         activate(&mut bob, 3);
         activate(&mut carol, 3);
         round_trip(&mut alice, &mut carol, alice_id);
+        round_trip_video(&mut alice, &mut carol, alice_id);
         let retained_epoch = alice.epoch().unwrap();
         assert_ne!(retained_epoch, 1);
         assert!(alice.prepare_epoch(retained_epoch).unwrap().is_none());
@@ -675,6 +803,12 @@ mod tests {
         assert!(!bob.is_receive_ready());
         assert!(!bob.is_send_ready());
         round_trip(&mut alice, &mut carol, alice_id);
+        round_trip_video(&mut alice, &mut carol, alice_id);
+        // The departed member holds no keys: video is refused like audio.
+        assert_eq!(
+            bob.decrypt_h264(alice_id, &[0, 0, 0, 1, 0x65, 1, 2, 3]),
+            Err(DaveError::NotReady)
+        );
     }
 
     #[test]
@@ -801,5 +935,19 @@ mod tests {
                 DaveError::NotReady
             );
         }
+    }
+
+    #[test]
+    fn video_transform_is_gated_and_never_passes_plaintext_through() {
+        let mut session = DaveSession::new(DAVE_PROTOCOL_VERSION, 1, 2).unwrap();
+        let frame = [0, 0, 0, 1, 0x65, 1, 2, 3];
+        assert_eq!(
+            session.encrypt_h264(&frame).unwrap_err(),
+            DaveError::NotReady
+        );
+        assert_eq!(
+            session.decrypt_h264(7, &frame).unwrap_err(),
+            DaveError::NotReady
+        );
     }
 }

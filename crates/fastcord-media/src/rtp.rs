@@ -370,6 +370,58 @@ impl SequenceTracker {
     }
 }
 
+/// The RTP clock of video: 90 kHz for every codec Discord carries.
+pub const VIDEO_CLOCK_HZ: u32 = 90_000;
+
+/// The one-byte header extension IDs of Discord's native UDP transport
+/// (docs.discord.food, "Native RTP Header Extensions"). They are negotiated
+/// out of band by Discord's clients, not through Select Protocol, so they are
+/// fixed numbers here; nothing in the voice Gateway confirms them.
+pub mod ext {
+    pub const AUDIO_LEVEL: u8 = 1;
+    pub const TOFFSET: u8 = 2;
+    pub const ABS_SEND_TIME: u8 = 3;
+    pub const VIDEO_ORIENTATION: u8 = 4;
+    pub const TRANSPORT_WIDE_CC: u8 = 5;
+    pub const PLAYOUT_DELAY: u8 = 6;
+    pub const VIDEO_CONTENT_TYPE: u8 = 7;
+    pub const VIDEO_TIMING: u8 = 8;
+    pub const SPEAKER: u8 = 9;
+    pub const MID: u8 = 10;
+    pub const RTP_STREAM_ID: u8 = 11;
+    pub const REPAIRED_RTP_STREAM_ID: u8 = 12;
+}
+
+/// Appends RFC 8285 one-byte-profile `elements` to `out`, padded with zero
+/// bytes to a whole number of 32-bit words, and returns the preamble the RTP
+/// header must carry. The extension block is part of the encrypted body in
+/// rtpsize modes; only the returned preamble belongs in the clear header.
+///
+/// IDs are 1–14 and each element carries 1–16 bytes; anything else is a
+/// programming error and refused.
+pub fn write_extension_block(
+    elements: &[(u8, &[u8])],
+    out: &mut Vec<u8>,
+) -> Result<ExtensionPreamble, RtpError> {
+    let start = out.len();
+    for &(id, data) in elements {
+        if !(1..=14).contains(&id) || data.is_empty() || data.len() > 16 {
+            out.truncate(start);
+            return Err(RtpError::ExtensionElement);
+        }
+        out.push(id << 4 | (data.len() - 1) as u8);
+        out.extend_from_slice(data);
+    }
+    while !(out.len() - start).is_multiple_of(4) {
+        out.push(0);
+    }
+    let words = (out.len() - start) / 4;
+    Ok(ExtensionPreamble {
+        profile: ONE_BYTE_PROFILE,
+        words: u16::try_from(words).map_err(|_| RtpError::ExtensionOverrun)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

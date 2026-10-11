@@ -10,6 +10,8 @@
 //! - Heartbeats follow v8: a nonce `t` plus `seq_ack`, the last sequence seen
 //!   on any numbered JSON message or binary message.
 
+mod video;
+
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -31,11 +33,13 @@ use super::wire::{self, op};
 use super::{CloseReason, Counters, MediaCommand, ReceivedAudio, VoiceEvent, VoiceStatus};
 use crate::crypto::{CryptoError, RTCP_CLEAR_LEN, TransportCipher, TransportKey, TransportMode};
 use crate::dave::DaveSession;
-use crate::rtcp::{self, Compound, RtcpPacket, SenderInfo};
+use crate::rtcp::{self, Compound, ReportBlocks, RtcpPacket, SenderInfo};
 use crate::rtp::{OPUS_FRAME_TICKS, OPUS_PAYLOAD_TYPE, RtpHeader, RtpSender, SequenceTracker};
 use crate::session::VoiceCredentials;
 use crate::ssrc::{PendingSsrc, SsrcMap, StreamKind, VideoStream};
 use crate::udp::{self, Datagram, MAX_DATAGRAM};
+use crate::video::{ReceivedVideo, VideoFrame, VideoOptions};
+use video::VideoState;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// READY after Identify, RESUMED after Resume, Session Description after
@@ -67,6 +71,11 @@ pub(crate) struct Options {
     pub(crate) rtp_start: Option<(u16, u32)>,
     /// First heartbeat nonce.
     pub(crate) nonce_seed: u64,
+    /// What this connection offers for video; `None` is audio-only.
+    pub(crate) video: Option<VideoOptions>,
+    /// First video RTP sequence, timestamp, and RTX sequence; random when
+    /// `None`.
+    pub(crate) video_rtp_start: Option<(u16, u32, u16)>,
 }
 
 impl Options {
@@ -78,7 +87,14 @@ impl Options {
             nonce_seed: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_millis() as u64),
+            video: None,
+            video_rtp_start: None,
         }
+    }
+
+    pub(crate) fn with_video(mut self, video: VideoOptions) -> Self {
+        self.video = Some(video);
+        self
     }
 }
 
@@ -90,6 +106,10 @@ pub(crate) struct Channels {
     pub(crate) queued_audio: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) leave: oneshot::Receiver<()>,
     pub(crate) counters: Arc<Counters>,
+    pub(crate) video_out: mpsc::Sender<ReceivedVideo>,
+    pub(crate) video_in: mpsc::Receiver<VideoFrame>,
+    /// Whether a viewer wants the remote video (see `MediaSender`).
+    pub(crate) wanted: watch::Receiver<bool>,
 }
 
 struct Udp<L> {
@@ -192,6 +212,12 @@ struct Driver<S, N: Network> {
     plain: Vec<u8>,
     clear: Vec<u8>,
     sealed: Vec<u8>,
+    /// Reused buffers for video: an RTP body being sealed, an RTCP compound.
+    body: Vec<u8>,
+    rtcp: Vec<u8>,
+    video: Option<VideoState>,
+    /// The wanted-video channel's sender is gone (never while the session lives).
+    wants_closed: bool,
 }
 
 pub(crate) async fn run<S: Signaling, N: Network>(
@@ -202,6 +228,11 @@ pub(crate) async fn run<S: Signaling, N: Network>(
     channels: Channels,
 ) {
     let heartbeat_nonce = options.nonce_seed;
+    let wanted = *channels.wanted.borrow();
+    let video = options
+        .video
+        .clone()
+        .map(|video| VideoState::new(video, wanted));
     let local_user_id = credentials.user_id.0;
     let mut driver = Driver {
         signaling,
@@ -222,6 +253,10 @@ pub(crate) async fn run<S: Signaling, N: Network>(
         plain: Vec::with_capacity(MAX_DATAGRAM),
         clear: Vec::with_capacity(64),
         sealed: Vec::with_capacity(MAX_DATAGRAM),
+        body: Vec::with_capacity(MAX_DATAGRAM),
+        rtcp: Vec::with_capacity(256),
+        video,
+        wants_closed: false,
     };
     let reason = driver.drive().await;
     // Sockets and keys go before anyone hears that the connection is closed.
@@ -261,6 +296,12 @@ async fn recv_udp<L: UdpLink>(
         Some(udp) => udp.link.recv_from(buffer).await,
         None => std::future::pending().await,
     }
+}
+
+/// Resolves with whether the viewer's wanted-video flag changed; `false` once
+/// its sender is gone.
+async fn wants_changed(wanted: &mut watch::Receiver<bool>) -> bool {
+    wanted.changed().await.is_ok()
 }
 
 fn ntp_now() -> u64 {
@@ -328,6 +369,12 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         self.sequences.clear();
         self.pending.clear();
         self.seq_ack = None;
+        let wanted = *self.ch.wanted.borrow();
+        self.video = self
+            .options
+            .video
+            .clone()
+            .map(|video| VideoState::new(video, wanted));
     }
 
     fn set_status(&self, status: VoiceStatus) {
@@ -371,10 +418,25 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         };
         let mut buffer = vec![0; MAX_DATAGRAM];
         loop {
-            let wake = conn.next_wake(self.pending.next_expiry());
             let media_open = conn.phase == Phase::Connected
                 && self.media.is_some()
                 && self.dave.as_ref().is_some_and(DaveSession::is_send_ready);
+            let transport_up =
+                conn.phase == Phase::Connected && self.media.is_some() && self.udp.is_some();
+            self.video_gate(media_open);
+            let wake = [
+                conn.next_wake(self.pending.next_expiry()),
+                if transport_up {
+                    self.video_wake()
+                } else {
+                    None
+                },
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            let video_open = media_open && self.video_can_send();
+            let wants_open = self.video.is_some() && !self.wants_closed;
             let result = tokio::select! {
                 _ = &mut self.ch.leave => {
                     let close = Message::Close(Some(CloseFrame {
@@ -403,6 +465,18 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     // Every sender is gone: nothing more to send, keep receiving.
                     None => Ok(()),
                 },
+                frame = self.ch.video_in.recv(), if video_open => match frame {
+                    Some(frame) => self.on_video_frame(&conn, &mut socket, frame).await,
+                    None => Ok(()),
+                },
+                changed = wants_changed(&mut self.ch.wanted), if wants_open => {
+                    if changed {
+                        self.on_wanted_changed(&conn, &mut socket).await
+                    } else {
+                        self.wants_closed = true;
+                        Ok(())
+                    }
+                }
                 () = sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
                     self.on_timers(&mut conn, &mut socket).await
                 }
@@ -490,7 +564,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     self.send_text(conn, socket, &payload).await?;
                     conn.phase = Phase::Resuming;
                 } else {
-                    let payload = wire::identify(&self.credentials);
+                    let payload = wire::identify(&self.credentials, self.options.video.as_ref());
                     self.send_text(conn, socket, &payload).await?;
                     conn.phase = Phase::Identifying;
                     self.set_status(VoiceStatus::Identifying);
@@ -522,6 +596,9 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     ssrc: ready.ssrc,
                     mode,
                 });
+                if let Some(video) = self.video.as_mut() {
+                    video.set_layer(ready.layer());
+                }
 
                 conn.phase = Phase::Discovering { attempts: 1 };
                 conn.deadline = Some(now + DISCOVERY_RETRY);
@@ -588,6 +665,8 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 self.set_status(VoiceStatus::Rekeying {
                     transition_id: None,
                 });
+                self.video_session_ready(conn, socket, description.video_codec.as_deref())
+                    .await?;
             }
             op::RESUMED if conn.phase == Phase::Resuming => {
                 let Some(dave) = self.dave.as_mut() else {
@@ -605,6 +684,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 conn.deadline = None;
                 conn.report_at = Some(now + REPORT_INTERVAL);
                 self.set_status(self.connected_status());
+                self.video_resumed(conn, socket).await?;
             }
             op::HEARTBEAT_ACK => {
                 if let Some(ack) = decode::<wire::HeartbeatAck>(envelope.d)
@@ -646,6 +726,17 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     self.ssrcs.video(video.user_id, video.audio_ssrc, &streams);
                     self.mappings_changed();
                     self.release_pending(video.audio_ssrc);
+                    self.on_remote_video(conn, socket, &video).await?;
+                }
+            }
+            op::SESSION_UPDATE => {
+                if let Some(update) = decode::<wire::SessionUpdate>(envelope.d) {
+                    self.on_session_update(update.video_codec.as_deref());
+                }
+            }
+            op::MEDIA_SINK_WANTS => {
+                if let Some(wants) = decode::<HashMap<String, serde_json::Value>>(envelope.d) {
+                    self.on_sink_wants(conn, socket, &wants).await?;
                 }
             }
             op::CLIENTS_CONNECT => {
@@ -671,6 +762,8 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 self.ssrcs.remove_user(disconnect.user_id);
                 self.mappings_changed();
                 self.event(VoiceEvent::ClientDisconnected(disconnect.user_id));
+                self.video_user_gone(conn, socket, disconnect.user_id)
+                    .await?;
             }
             op::DAVE_PREPARE_TRANSITION => {
                 let prepare: wire::DavePrepareTransition =
@@ -852,6 +945,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let ssrcs = &self.ssrcs;
         self.sequences
             .retain(|ssrc, _| ssrcs.owner(*ssrc).is_some());
+        self.video_mappings_changed();
     }
 
     fn release_pending(&mut self, ssrc: u32) {
@@ -935,7 +1029,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     Counters::add(&counters.rejected_malformed, 1);
                     return Ok(());
                 };
-                let select = wire::select_protocol(external, udp.mode);
+                let select = wire::select_protocol(external, udp.mode, self.options.video.as_ref());
                 self.send_text(conn, socket, &select).await?;
                 conn.phase = Phase::Negotiating;
                 conn.deadline = Some(Instant::now() + HANDSHAKE_TIMEOUT);
@@ -946,7 +1040,11 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     && expected == sequence
                 {
                     conn.ping = None;
-                    self.event(VoiceEvent::UdpLatency(Instant::now() - sent));
+                    let latency = Instant::now() - sent;
+                    if let Some(video) = self.video.as_mut() {
+                        video.note_rtt(latency);
+                    }
+                    self.event(VoiceEvent::UdpLatency(latency));
                 }
             }
             Datagram::Rtp => self.on_rtp(packet),
@@ -957,21 +1055,33 @@ impl<S: Signaling, N: Network> Driver<S, N> {
     }
 
     fn on_rtp(&mut self, packet: &[u8]) {
-        let counters = &self.ch.counters;
-        let Some(media) = &self.media else {
+        if self.media.is_none() {
             // No key yet: nothing can be verified.
-            Counters::add(&counters.rejected_malformed, 1);
+            Counters::add(&self.ch.counters.rejected_malformed, 1);
             return;
-        };
+        }
         let Ok(header) = RtpHeader::parse(packet) else {
-            Counters::add(&counters.rejected_malformed, 1);
+            Counters::add(&self.ch.counters.rejected_malformed, 1);
             return;
         };
         if header.payload_type != OPUS_PAYLOAD_TYPE {
-            // Only Opus was offered in Select Protocol.
-            Counters::add(&counters.rejected_malformed, 1);
+            if self
+                .video
+                .as_ref()
+                .is_some_and(|video| video.is_video_payload(header.payload_type))
+            {
+                self.on_video_rtp(packet, header);
+            } else if self.video.is_none() || header.payload_type != video::PROBE_PAYLOAD_TYPE {
+                // Only Opus and the negotiated video codecs were offered in
+                // Select Protocol; payload type 96 is the server's probing.
+                Counters::add(&self.ch.counters.rejected_malformed, 1);
+            }
             return;
         }
+        let counters = &self.ch.counters;
+        let Some(media) = &self.media else {
+            return;
+        };
         match media
             .cipher
             .open(packet, header.clear_len(), &mut self.plain)
@@ -1015,7 +1125,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
 
     fn on_rtcp(&mut self, packet: &[u8]) {
         let counters = &self.ch.counters;
-        let (Some(media), Some(udp)) = (&self.media, &self.udp) else {
+        let (Some(media), Some(_)) = (&self.media, &self.udp) else {
             Counters::add(&counters.rejected_malformed, 1);
             return;
         };
@@ -1034,25 +1144,43 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 return;
             }
         }
-        self.clear.clear();
-        self.clear.extend_from_slice(&packet[..RTCP_CLEAR_LEN]);
-        self.clear.extend_from_slice(&self.plain);
-        for item in Compound::new(&self.clear) {
-            let blocks = match item {
-                Ok(RtcpPacket::ReceiverReport(report)) => report.reports,
-                Ok(RtcpPacket::SenderReport(report)) => report.reports,
-                Ok(_) => continue,
+        let mut clear = std::mem::take(&mut self.clear);
+        clear.clear();
+        clear.extend_from_slice(&packet[..RTCP_CLEAR_LEN]);
+        clear.extend_from_slice(&self.plain);
+        for item in Compound::new(&clear) {
+            match item {
+                Ok(RtcpPacket::ReceiverReport(report)) => self.on_report_blocks(report.reports),
+                Ok(RtcpPacket::SenderReport(report)) => {
+                    self.on_remote_sender_report(report.ssrc, report.info);
+                    self.on_report_blocks(report.reports);
+                }
+                Ok(RtcpPacket::Feedback(feedback)) => self.on_video_feedback(&feedback),
+                Ok(_) => {}
                 Err(_) => {
-                    Counters::add(&counters.rejected_malformed, 1);
+                    Counters::add(&self.ch.counters.rejected_malformed, 1);
                     break;
                 }
-            };
-            for block in blocks.iter().filter(|block| block.ssrc == udp.ssrc) {
+            }
+        }
+        self.clear = clear;
+    }
+
+    /// Reception reports: those about our audio SSRC are surfaced as events,
+    /// those about our video layer steer its congestion control.
+    fn on_report_blocks(&mut self, blocks: ReportBlocks<'_>) {
+        let Some(audio_ssrc) = self.udp.as_ref().map(|udp| udp.ssrc) else {
+            return;
+        };
+        for block in blocks.iter() {
+            if block.ssrc == audio_ssrc {
                 self.event(VoiceEvent::ReceptionReport {
                     fraction_lost: block.fraction_lost,
                     cumulative_lost: block.cumulative_lost,
                     jitter: block.jitter,
                 });
+            } else {
+                self.on_video_report(&block);
             }
         }
     }
@@ -1196,6 +1324,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         if conn.report_at.is_some_and(|at| at <= now) {
             conn.report_at = Some(now + REPORT_INTERVAL);
             self.send_sender_report().await?;
+            self.send_video_sender_reports(now).await?;
         }
         if conn.silence_at.is_some_and(|at| at <= now) {
             self.send_rtp(&OPUS_SILENCE).await?;
@@ -1220,6 +1349,9 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         }
         let expired = self.pending.expire(now);
         Counters::add(&self.ch.counters.dropped_unknown_ssrc, expired as u64);
+        if conn.phase == Phase::Connected {
+            self.on_video_timers(now).await?;
+        }
         Ok(())
     }
 }

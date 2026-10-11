@@ -47,11 +47,25 @@ pub struct VideoStream {
 #[derive(Debug, Default)]
 pub struct SsrcMap {
     owners: HashMap<u32, SsrcOwner>,
+    /// RTX SSRC -> the primary video SSRC it repairs, as announced together.
+    pairs: HashMap<u32, u32>,
 }
 
 impl SsrcMap {
     pub fn owner(&self, ssrc: u32) -> Option<SsrcOwner> {
         self.owners.get(&ssrc).copied()
+    }
+
+    /// The primary video SSRC an RTX SSRC repairs, while both are still
+    /// mapped to one user.
+    pub fn primary_of(&self, rtx_ssrc: u32) -> Option<u32> {
+        let primary = *self.pairs.get(&rtx_ssrc)?;
+        let rtx = self.owners.get(&rtx_ssrc)?;
+        let video = self.owners.get(&primary)?;
+        (rtx.kind == StreamKind::Retransmission
+            && video.kind == StreamKind::Video
+            && rtx.user_id == video.user_id)
+            .then_some(primary)
     }
 
     pub fn len(&self) -> usize {
@@ -86,15 +100,25 @@ impl SsrcMap {
                 .chain(stream.rtx_ssrc.map(|rtx| (rtx, StreamKind::Retransmission)))
         });
         self.replace(user_id, kinds, audio.into_iter().chain(video));
+        self.pairs.retain(|rtx, _| self.owners.contains_key(rtx));
+        for stream in streams {
+            if let Some(rtx) = stream.rtx_ssrc.filter(|rtx| *rtx != 0)
+                && self.owners.contains_key(&rtx)
+            {
+                self.pairs.insert(rtx, stream.ssrc);
+            }
+        }
     }
 
     /// Client Disconnect: every SSRC of the user is discarded.
     pub fn remove_user(&mut self, user_id: Snowflake) {
         self.owners.retain(|_, owner| owner.user_id != user_id);
+        self.pairs.retain(|rtx, _| self.owners.contains_key(rtx));
     }
 
     pub fn clear(&mut self) {
         self.owners.clear();
+        self.pairs.clear();
     }
 
     /// Drops the user's mappings of `kinds`, then maps `entries` to the user.
@@ -300,6 +324,35 @@ mod tests {
         map.remove_user(ALICE);
         assert_eq!(map.owner(100), None);
         assert_eq!(map.owner(300), owner(BOB, StreamKind::Audio));
+    }
+
+    #[test]
+    fn rtx_streams_resolve_to_their_primary_until_either_goes_away() {
+        let mut map = SsrcMap::default();
+        let stream = |ssrc, rtx_ssrc| VideoStream { ssrc, rtx_ssrc };
+        map.video(ALICE, 100, &[stream(200, Some(201)), stream(202, None)]);
+        assert_eq!(map.primary_of(201), Some(200));
+        // Primary, unpaired, audio, and unknown SSRCs have no primary.
+        for ssrc in [200, 202, 100, 999] {
+            assert_eq!(map.primary_of(ssrc), None, "{ssrc}");
+        }
+        // A new announcement replaces the pairs.
+        map.video(ALICE, 100, &[stream(300, Some(301))]);
+        assert_eq!(map.primary_of(201), None);
+        assert_eq!(map.primary_of(301), Some(300));
+        // Another user cannot claim the RTX SSRC for a primary of its own.
+        map.video(BOB, 0, &[stream(400, Some(301))]);
+        assert_eq!(map.owner(301).unwrap().user_id, BOB);
+        assert_eq!(map.primary_of(301), Some(400));
+        // Clearing the video, a disconnect, and clear() all drop the pairs.
+        map.video(BOB, 0, &[]);
+        assert_eq!(map.primary_of(301), None);
+        map.video(ALICE, 100, &[stream(500, Some(501))]);
+        map.remove_user(ALICE);
+        assert_eq!(map.primary_of(501), None);
+        map.video(ALICE, 0, &[stream(600, Some(601))]);
+        map.clear();
+        assert_eq!(map.primary_of(601), None);
     }
 
     #[test]

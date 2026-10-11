@@ -7,7 +7,10 @@
 //! Outgoing media is accepted into a small bounded queue at any time but only
 //! leaves, encrypted and after a Speaking announcement, once the transport
 //! key exists; nothing unencrypted is ever sent. Received audio is decrypted,
-//! parsed, and attributed to a user through SSRC mappings.
+//! parsed, and attributed to a user through SSRC mappings. A connection created
+//! with [`connect_with_video`] also negotiates, receives, and sends H.264 video
+//! (see [`crate::video`]): frames cross DAVE whole, before packetization when
+//! sending and after reassembly when receiving.
 //!
 //! Leaving is [`VoiceSession::leave`] (or dropping the session): the socket
 //! closes, and the sockets, keys, and task go away. The main Gateway's
@@ -32,6 +35,9 @@ use tokio::task::JoinHandle;
 
 use crate::crypto::{TransportMode, aes_accelerated};
 use crate::session::{Generation, VoiceCredentials};
+use crate::video::{
+    MAX_FRAME_BYTES, ReceivedVideo, VideoCodec, VideoError, VideoFrame, VideoOptions,
+};
 pub use wire::speaking;
 
 /// Encoded frames waiting for the transport key: 100 ms of 20 ms Opus. More is
@@ -42,6 +48,10 @@ pub const MAX_OPUS_FRAME: usize = 1275;
 /// Received audio packets waiting for the consumer, each at most
 /// [`MAX_OPUS_FRAME`] bytes of payload; newer packets are dropped when full.
 pub const AUDIO_QUEUE_PACKETS: usize = 64;
+/// Whole video frames waiting in either direction. A frame is at most
+/// [`MAX_FRAME_BYTES`], so each queue holds at most 6 MiB; what does not fit is
+/// dropped, and the stream restarts at its next keyframe.
+pub const VIDEO_QUEUE_FRAMES: usize = 3;
 const EVENT_QUEUE: usize = 64;
 /// How long [`VoiceSession::leave`] waits for the close handshake.
 const LEAVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -150,6 +160,28 @@ pub enum VoiceEvent {
         /// In 48 kHz RTP timestamp units.
         jitter: u32,
     },
+    /// Video negotiation finished for a connection that offered to send: the
+    /// codec the server chose for it, or `None` when it chose one fastcord
+    /// cannot send or assigned no layer (nothing will be sent).
+    VideoNegotiated {
+        codec: Option<VideoCodec>,
+    },
+    /// A participant's video as the server announced it: the primary SSRC of
+    /// its best active stream, `0` once it stopped.
+    VideoSource {
+        user_id: Snowflake,
+        ssrc: u32,
+        active: bool,
+    },
+    /// The encoder must make the next frame a keyframe: a receiver or the
+    /// server asked for one, or a frame did not leave.
+    KeyframeRequested,
+    /// The bitrate the encoder should now aim for, in bits per second,
+    /// after congestion feedback or a server or receiver limit.
+    VideoBitrate(u32),
+    /// The server wants our video off (`false`) or on again (`true`). While
+    /// off, frames are discarded and the encoder may pause.
+    VideoActive(bool),
 }
 
 /// One decrypted Opus packet from a known participant.
@@ -167,6 +199,8 @@ pub struct ReceivedAudio {
 pub enum VoiceMessage {
     Event(VoiceEvent),
     Audio(ReceivedAudio),
+    /// One complete, DAVE-opened video frame.
+    Video(ReceivedVideo),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,7 +208,8 @@ pub enum MediaSendError {
     /// The queue is full (the key is not ready yet, or the sender outpaces
     /// the network): the frame was dropped.
     Full,
-    /// Empty or larger than one Opus packet.
+    /// Empty or larger than one Opus packet (audio), or empty or over the
+    /// 2 MiB frame bound (video).
     InvalidFrame,
     /// The connection is closed.
     Closed,
@@ -184,7 +219,7 @@ impl fmt::Display for MediaSendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Full => "voice media queue is full",
-            Self::InvalidFrame => "not a valid Opus frame",
+            Self::InvalidFrame => "not a valid audio or video frame",
             Self::Closed => "voice connection is closed",
         })
     }
@@ -202,6 +237,8 @@ pub(crate) enum MediaCommand {
 pub struct MediaSender {
     queue: mpsc::Sender<MediaCommand>,
     queued_audio: Arc<AtomicUsize>,
+    video: mpsc::Sender<VideoFrame>,
+    wanted: Arc<watch::Sender<bool>>,
 }
 
 impl fmt::Debug for MediaSender {
@@ -223,6 +260,29 @@ impl MediaSender {
     /// Ends a speech burst: five Opus silence frames, then speaking off.
     pub fn end_speech(&self) -> Result<(), MediaSendError> {
         self.push(MediaCommand::EndSpeech)
+    }
+
+    /// Queues one encoded H.264 frame (Annex B, one access unit, not yet
+    /// sealed by DAVE). The connection seals, packetizes, and paces it; frames
+    /// wait only while DAVE keys are not ready, at most [`VIDEO_QUEUE_FRAMES`],
+    /// and `Full` means the frame was dropped. After any dropped frame the
+    /// stream must resume at a keyframe, which the connection requests with
+    /// [`VoiceEvent::KeyframeRequested`].
+    pub fn send_video(&self, frame: VideoFrame) -> Result<(), MediaSendError> {
+        if frame.data.is_empty() || frame.data.len() > MAX_FRAME_BYTES {
+            return Err(MediaSendError::InvalidFrame);
+        }
+        self.video.try_send(frame).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => MediaSendError::Full,
+            mpsc::error::TrySendError::Closed(_) => MediaSendError::Closed,
+        })
+    }
+
+    /// Whether this viewer wants the remote video at all. A watch connection
+    /// starts wanting it; turn it off while the stream is hidden or minimized
+    /// (the server then stops forwarding it) and on again to resume.
+    pub fn set_video_wanted(&self, wanted: bool) {
+        self.wanted.send_replace(wanted);
     }
 
     fn push_audio(&self, frame: Vec<u8>) -> Result<(), MediaSendError> {
@@ -277,6 +337,26 @@ pub struct TransportStats {
     pub dropped_unknown_ssrc: u64,
     /// Received audio the consumer did not take in time.
     pub dropped_queue_full: u64,
+    /// Video RTP packets (media and retransmissions) accepted from the server.
+    pub video_packets_received: u64,
+    /// Complete frames opened by DAVE and handed to the consumer.
+    pub video_frames_received: u64,
+    /// Frames given up on: lost past the deadline, refused by DAVE, waiting for
+    /// a keyframe, or not taken by the consumer in time.
+    pub video_frames_dropped: u64,
+    /// Video RTP packets sent, retransmissions not included.
+    pub video_packets_sent: u64,
+    /// Frames accepted for sending.
+    pub video_frames_sent: u64,
+    /// Frames that did not leave: paused, not a keyframe after a gap, pacer
+    /// full, or refused by DAVE.
+    pub video_frames_refused: u64,
+    /// RTX packets sent in answer to NACKs.
+    pub retransmissions_sent: u64,
+    /// Sequence numbers requested with NACKs.
+    pub nack_sequences_sent: u64,
+    /// Picture Loss Indications sent.
+    pub keyframe_requests_sent: u64,
 }
 
 #[derive(Default)]
@@ -288,6 +368,15 @@ pub(crate) struct Counters {
     pub(crate) rejected_source: AtomicU64,
     pub(crate) dropped_unknown_ssrc: AtomicU64,
     pub(crate) dropped_queue_full: AtomicU64,
+    pub(crate) video_packets_received: AtomicU64,
+    pub(crate) video_frames_received: AtomicU64,
+    pub(crate) video_frames_dropped: AtomicU64,
+    pub(crate) video_packets_sent: AtomicU64,
+    pub(crate) video_frames_sent: AtomicU64,
+    pub(crate) video_frames_refused: AtomicU64,
+    pub(crate) retransmissions_sent: AtomicU64,
+    pub(crate) nack_sequences_sent: AtomicU64,
+    pub(crate) keyframe_requests_sent: AtomicU64,
 }
 
 impl Counters {
@@ -305,6 +394,15 @@ impl Counters {
             rejected_source: get(&self.rejected_source),
             dropped_unknown_ssrc: get(&self.dropped_unknown_ssrc),
             dropped_queue_full: get(&self.dropped_queue_full),
+            video_packets_received: get(&self.video_packets_received),
+            video_frames_received: get(&self.video_frames_received),
+            video_frames_dropped: get(&self.video_frames_dropped),
+            video_packets_sent: get(&self.video_packets_sent),
+            video_frames_sent: get(&self.video_frames_sent),
+            video_frames_refused: get(&self.video_frames_refused),
+            retransmissions_sent: get(&self.retransmissions_sent),
+            nack_sequences_sent: get(&self.nack_sequences_sent),
+            keyframe_requests_sent: get(&self.keyframe_requests_sent),
         }
     }
 }
@@ -316,6 +414,7 @@ pub struct VoiceSession {
     status: watch::Receiver<VoiceStatus>,
     events: mpsc::Receiver<VoiceEvent>,
     audio: mpsc::Receiver<ReceivedAudio>,
+    video: mpsc::Receiver<ReceivedVideo>,
     media: MediaSender,
     counters: Arc<Counters>,
     leave: Option<oneshot::Sender<()>>,
@@ -331,7 +430,7 @@ impl fmt::Debug for VoiceSession {
     }
 }
 
-/// Starts a voice connection on the current Tokio runtime.
+/// Starts an audio-only voice connection on the current Tokio runtime.
 pub fn connect(credentials: VoiceCredentials) -> VoiceSession {
     let options = driver::Options::live(aes_accelerated());
     start(
@@ -340,6 +439,23 @@ pub fn connect(credentials: VoiceCredentials) -> VoiceSession {
         credentials,
         options,
     )
+}
+
+/// Starts a connection that also offers video (SPEC §8.3): a stream viewer
+/// ([`VideoOptions::watch`]) or owner ([`VideoOptions::share`]). Fails before
+/// anything is sent if the offer is inconsistent.
+pub fn connect_with_video(
+    credentials: VoiceCredentials,
+    video: VideoOptions,
+) -> Result<VoiceSession, VideoError> {
+    video.validate()?;
+    let options = driver::Options::live(aes_accelerated()).with_video(video);
+    Ok(start(
+        transport::LiveSignaling,
+        transport::LiveNetwork,
+        credentials,
+        options,
+    ))
 }
 
 fn start<S: transport::Signaling, N: transport::Network>(
@@ -352,6 +468,16 @@ fn start<S: transport::Signaling, N: transport::Network>(
     let (status_tx, status) = watch::channel(VoiceStatus::Connecting);
     let (events_tx, events) = mpsc::channel(EVENT_QUEUE);
     let (audio_tx, audio) = mpsc::channel(AUDIO_QUEUE_PACKETS);
+    let (video_out_tx, video) = mpsc::channel(VIDEO_QUEUE_FRAMES);
+    let (video_in_tx, video_in_rx) = mpsc::channel(VIDEO_QUEUE_FRAMES);
+    // A viewer connection exists because the user chose to watch: it wants the
+    // stream from the start.
+    let (wanted_tx, wanted_rx) = watch::channel(
+        options
+            .video
+            .as_ref()
+            .is_some_and(|video| video.send.is_none()),
+    );
     let queued_audio = Arc::new(AtomicUsize::new(0));
     let (media_tx, media_rx) = mpsc::channel(MEDIA_QUEUE_FRAMES + 1);
     let (leave_tx, leave_rx) = oneshot::channel();
@@ -364,6 +490,9 @@ fn start<S: transport::Signaling, N: transport::Network>(
         queued_audio: Arc::clone(&queued_audio),
         leave: leave_rx,
         counters: Arc::clone(&counters),
+        video_out: video_out_tx,
+        video_in: video_in_rx,
+        wanted: wanted_rx,
     };
     let task = tokio::spawn(driver::run(
         signaling,
@@ -377,9 +506,12 @@ fn start<S: transport::Signaling, N: transport::Network>(
         status,
         events,
         audio,
+        video,
         media: MediaSender {
             queue: media_tx,
             queued_audio,
+            video: video_in_tx,
+            wanted: Arc::new(wanted_tx),
         },
         counters,
         leave: Some(leave_tx),
@@ -410,22 +542,26 @@ impl VoiceSession {
     pub async fn next_audio(&mut self) -> Option<ReceivedAudio> {
         self.audio.recv().await
     }
-    /// Discards the next event or audio packet. Stream watchers use this to
-    /// keep the shared transport queues bounded without opening audio devices.
+
+    /// The next received video frame; `None` once the connection ended.
+    pub async fn next_video(&mut self) -> Option<ReceivedVideo> {
+        self.video.recv().await
+    }
+    /// Discards the next event, audio packet, or video frame. Stream watchers
+    /// that do not render use this to keep the shared transport queues bounded
+    /// without opening audio devices.
     pub async fn discard_next(&mut self) -> bool {
-        let (events, audio) = (&mut self.events, &mut self.audio);
-        tokio::select! {
-            event = events.recv() => event.is_some(),
-            packet = audio.recv() => packet.is_some(),
-        }
+        self.next_message().await.is_some()
     }
 
-    /// Waits for the next event or audio packet without requiring simultaneous mutable borrows.
+    /// Waits for the next event, audio packet, or video frame without requiring
+    /// simultaneous mutable borrows.
     pub async fn next_message(&mut self) -> Option<VoiceMessage> {
         loop {
             let events_done = self.events.is_closed() && self.events.is_empty();
             let audio_done = self.audio.is_closed() && self.audio.is_empty();
-            if events_done && audio_done {
+            let video_done = self.video.is_closed() && self.video.is_empty();
+            if events_done && audio_done && video_done {
                 return None;
             }
             tokio::select! {
@@ -437,6 +573,11 @@ impl VoiceSession {
                 audio = self.audio.recv(), if !audio_done => {
                     if let Some(audio) = audio {
                         return Some(VoiceMessage::Audio(audio));
+                    }
+                }
+                video = self.video.recv(), if !video_done => {
+                    if let Some(video) = video {
+                        return Some(VoiceMessage::Video(video));
                     }
                 }
             }

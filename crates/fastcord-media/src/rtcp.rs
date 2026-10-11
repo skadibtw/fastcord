@@ -10,6 +10,7 @@
 //! never a panic or an out-of-bounds read.
 
 use std::fmt;
+use std::time::Duration;
 
 use crate::rtp::VERSION;
 
@@ -24,6 +25,14 @@ pub const PAYLOAD_FEEDBACK: u8 = 206;
 pub const GENERIC_NACK: u8 = 1;
 /// PSFB format 1 (RFC 4585 §6.3.1).
 pub const PICTURE_LOSS: u8 = 1;
+/// PSFB format 4, Full Intra Request (RFC 5104 §4.3.1).
+pub const FULL_INTRA_REQUEST: u8 = 4;
+/// PSFB format 15, application-layer feedback: REMB when its FCI starts with
+/// [`REMB_ID`] (draft-alvestrand-rmcat-remb).
+pub const APPLICATION_FEEDBACK: u8 = 15;
+pub const REMB_ID: [u8; 4] = *b"REMB";
+/// Reception report blocks one Receiver Report can carry (a 5-bit count).
+pub const MAX_REPORT_BLOCKS: usize = 31;
 
 const REPORT_BLOCK_LEN: usize = 24;
 const SENDER_INFO_LEN: usize = 20;
@@ -284,7 +293,7 @@ pub struct Feedback<'a> {
     pub fci: &'a [u8],
 }
 
-impl Feedback<'_> {
+impl<'a> Feedback<'a> {
     /// Sequence numbers a Generic NACK asks for (packet ID plus the 16-bit
     /// bitmask of following losses); nothing for other feedback or a trailing
     /// partial entry.
@@ -309,6 +318,75 @@ impl Feedback<'_> {
     pub fn is_picture_loss(&self) -> bool {
         self.kind == FeedbackKind::PayloadSpecific && self.format == PICTURE_LOSS
     }
+
+    /// A Full Intra Request (RFC 5104): the same demand as a picture loss
+    /// for an encoder that only has a keyframe to give.
+    pub fn is_full_intra_request(&self) -> bool {
+        self.kind == FeedbackKind::PayloadSpecific && self.format == FULL_INTRA_REQUEST
+    }
+
+    /// A receiver's estimated maximum bitrate (REMB), when this is one.
+    pub fn remb(&self) -> Option<Remb<'a>> {
+        if self.kind != FeedbackKind::PayloadSpecific || self.format != APPLICATION_FEEDBACK {
+            return None;
+        }
+        let fci = self.fci;
+        if fci.get(..4)? != REMB_ID {
+            return None;
+        }
+        let count = usize::from(*fci.get(4)?);
+        let exponent = u32::from(*fci.get(5)? >> 2);
+        let mantissa = u64::from(*fci.get(5)? & 0x03) << 16
+            | u64::from(*fci.get(6)?) << 8
+            | u64::from(*fci.get(7)?);
+        let ssrcs = fci.get(8..8 + count * 4)?;
+        let bitrate = (u128::from(mantissa) << exponent).min(u128::from(u64::MAX)) as u64;
+        Some(Remb { bitrate, ssrcs })
+    }
+}
+
+/// A parsed REMB message: the bitrate in bits per second and the SSRCs it
+/// limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Remb<'a> {
+    pub bitrate: u64,
+    ssrcs: &'a [u8],
+}
+
+impl Remb<'_> {
+    pub fn ssrcs(&self) -> impl Iterator<Item = u32> + '_ {
+        self.ssrcs
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|ssrc| u32::from_be_bytes(*ssrc))
+    }
+
+    /// Whether the estimate limits `ssrc`; a REMB naming no SSRC limits all.
+    pub fn applies_to(&self, ssrc: u32) -> bool {
+        self.ssrcs.is_empty() || self.ssrcs().any(|named| named == ssrc)
+    }
+}
+
+/// The middle 32 bits of a 64-bit NTP timestamp: the 16.16 fixed-point
+/// seconds receivers echo as "last sender report" (RFC 3550 §4).
+pub const fn ntp_middle(ntp: u64) -> u32 {
+    (ntp >> 16) as u32
+}
+
+/// The round trip a reception report block measures (RFC 3550 §6.4.1):
+/// `arrival - last SR - delay since last SR`, with `arrival` the middle 32
+/// bits of the NTP time the report reached us. `None` when the receiver has
+/// not yet seen a Sender Report or the clocks make the result negative or
+/// implausible (over ten seconds).
+pub fn round_trip(arrival: u32, block: &ReportBlock) -> Option<Duration> {
+    if block.last_sender_report == 0 {
+        return None;
+    }
+    let ticks = arrival
+        .wrapping_sub(block.last_sender_report)
+        .wrapping_sub(block.delay_since_last_sender_report);
+    (ticks <= 10 * 65_536).then(|| Duration::from_nanos(u64::from(ticks) * 1_000_000_000 / 65_536))
 }
 
 /// Writes a Sender Report without report blocks (fastcord reports reception
@@ -324,6 +402,105 @@ pub fn write_sender_report(ssrc: u32, info: SenderInfo, out: &mut Vec<u8>) {
     out.extend_from_slice(&info.rtp_timestamp.to_be_bytes());
     out.extend_from_slice(&info.packet_count.to_be_bytes());
     out.extend_from_slice(&info.octet_count.to_be_bytes());
+}
+
+/// Appends a Receiver Report (RFC 3550 §6.4.2) with at most
+/// [`MAX_REPORT_BLOCKS`] blocks to `out`. Compound packets are built by
+/// appending: a Receiver Report first, then feedback.
+pub fn append_receiver_report(ssrc: u32, blocks: &[ReportBlock], out: &mut Vec<u8>) {
+    let blocks = &blocks[..blocks.len().min(MAX_REPORT_BLOCKS)];
+    let words = 1 + blocks.len() * REPORT_BLOCK_LEN / 4;
+    out.push(VERSION << 6 | blocks.len() as u8);
+    out.push(RECEIVER_REPORT);
+    out.extend_from_slice(&(words as u16).to_be_bytes());
+    out.extend_from_slice(&ssrc.to_be_bytes());
+    for block in blocks {
+        out.extend_from_slice(&block.ssrc.to_be_bytes());
+        out.push(block.fraction_lost);
+        // 24-bit two's complement.
+        let lost = block.cumulative_lost.clamp(-0x80_0000, 0x7F_FFFF);
+        out.extend_from_slice(&lost.to_be_bytes()[1..]);
+        out.extend_from_slice(&block.highest_sequence.to_be_bytes());
+        out.extend_from_slice(&block.jitter.to_be_bytes());
+        out.extend_from_slice(&block.last_sender_report.to_be_bytes());
+        out.extend_from_slice(&block.delay_since_last_sender_report.to_be_bytes());
+    }
+}
+
+/// Appends a Generic NACK (RFC 4585 §6.2.1) for `sequences`, in the order
+/// given (a receiver lists them in sequence order; wrap-around is fine), to
+/// `out`. Neighbours within 16 of an entry's packet ID share its bitmask.
+/// Nothing is written for an empty list: a NACK needs at least one entry.
+pub fn append_generic_nack(
+    sender_ssrc: u32,
+    media_ssrc: u32,
+    sequences: &[u16],
+    out: &mut Vec<u8>,
+) {
+    if sequences.is_empty() {
+        return;
+    }
+    let start = out.len();
+    out.push(VERSION << 6 | GENERIC_NACK);
+    out.push(TRANSPORT_FEEDBACK);
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&sender_ssrc.to_be_bytes());
+    out.extend_from_slice(&media_ssrc.to_be_bytes());
+    let mut pending: Option<(u16, u16)> = None;
+    for &sequence in sequences {
+        if let Some((pid, mask)) = &mut pending {
+            let distance = sequence.wrapping_sub(*pid);
+            if distance == 0 {
+                continue;
+            }
+            if distance <= 16 {
+                *mask |= 1 << (distance - 1);
+                continue;
+            }
+        }
+        if let Some((pid, mask)) = pending.replace((sequence, 0)) {
+            out.extend_from_slice(&pid.to_be_bytes());
+            out.extend_from_slice(&mask.to_be_bytes());
+        }
+    }
+    if let Some((pid, mask)) = pending {
+        out.extend_from_slice(&pid.to_be_bytes());
+        out.extend_from_slice(&mask.to_be_bytes());
+    }
+    let words = (out.len() - start) / 4 - 1;
+    out[start + 2..start + 4].copy_from_slice(&(words as u16).to_be_bytes());
+}
+
+/// Appends a Picture Loss Indication (RFC 4585 §6.3.1) to `out`.
+pub fn append_picture_loss(sender_ssrc: u32, media_ssrc: u32, out: &mut Vec<u8>) {
+    out.extend_from_slice(&[VERSION << 6 | PICTURE_LOSS, PAYLOAD_FEEDBACK, 0, 2]);
+    out.extend_from_slice(&sender_ssrc.to_be_bytes());
+    out.extend_from_slice(&media_ssrc.to_be_bytes());
+}
+
+/// Appends a REMB message (draft-alvestrand-rmcat-remb) limiting `ssrcs` to
+/// `bitrate` bits per second. Only tests build one: fastcord reads the
+/// server's estimate but does not estimate bandwidth for it.
+#[cfg(test)]
+pub fn append_remb(sender_ssrc: u32, bitrate: u64, ssrcs: &[u32], out: &mut Vec<u8>) {
+    let words = 4 + ssrcs.len();
+    out.extend_from_slice(&[VERSION << 6 | APPLICATION_FEEDBACK, PAYLOAD_FEEDBACK]);
+    out.extend_from_slice(&(words as u16).to_be_bytes());
+    out.extend_from_slice(&sender_ssrc.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&REMB_ID);
+    out.push(ssrcs.len() as u8);
+    // The smallest exponent that fits the mantissa in 18 bits.
+    let mut exponent = 0u8;
+    while bitrate >> exponent > 0x3_FFFF {
+        exponent += 1;
+    }
+    let mantissa = (bitrate >> exponent) as u32;
+    out.push(exponent << 2 | (mantissa >> 16) as u8);
+    out.extend_from_slice(&(mantissa as u16).to_be_bytes());
+    for ssrc in ssrcs {
+        out.extend_from_slice(&ssrc.to_be_bytes());
+    }
 }
 
 #[cfg(test)]

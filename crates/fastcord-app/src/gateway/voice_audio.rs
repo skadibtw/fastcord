@@ -291,6 +291,10 @@ async fn run_with(
                         apply_voice_event(event, &mut participants, &mut release_at);
                         publish_participants(&controls_tx, &participants);
                     }
+                    // The parent voice connection never offers video, so none arrives;
+                    // stream sessions (their own connections) carry video, never the
+                    // audio engine's capture path.
+                    Some(VoiceMessage::Video(_)) => {}
                     None => break,
                 }
             }
@@ -453,7 +457,15 @@ fn apply_voice_event(
                 }
             }
         }
-        VoiceEvent::UdpLatency(_) | VoiceEvent::ReceptionReport { .. } => {}
+        // Video negotiation and encoder feedback belong to stream sessions; this
+        // parent call offers no video.
+        VoiceEvent::UdpLatency(_)
+        | VoiceEvent::ReceptionReport { .. }
+        | VoiceEvent::VideoNegotiated { .. }
+        | VoiceEvent::VideoSource { .. }
+        | VoiceEvent::KeyframeRequested
+        | VoiceEvent::VideoBitrate(_)
+        | VoiceEvent::VideoActive(_) => {}
     }
 }
 

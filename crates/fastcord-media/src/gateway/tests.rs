@@ -21,6 +21,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 
+mod video;
+
 use super::driver::Options;
 use super::transport::{ConnectError, Network, Signaling, UdpLink, websocket_config};
 use super::*;
@@ -79,6 +81,8 @@ fn options() -> Options {
         first_nonce: 0,
         rtp_start: Some((100, 1_000)),
         nonce_seed: 7_000,
+        video: None,
+        video_rtp_start: None,
     }
 }
 
@@ -102,7 +106,7 @@ impl FakeSignaling {
                 .await;
         let server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
         self.0.lock().sockets.push_back(client);
-        Ws(server)
+        Ws(server, Vec::new())
     }
 
     fn urls(&self) -> Vec<String> {
@@ -230,7 +234,9 @@ impl Udp {
     }
 }
 
-struct Ws(ServerSocket);
+/// The server's end of the voice WebSocket, plus the video opcodes (12 and 15)
+/// that arrived while a test waited for something else.
+struct Ws(ServerSocket, Vec<Value>);
 
 impl Ws {
     async fn send(&mut self, value: Value) {
@@ -257,12 +263,17 @@ impl Ws {
         .expect("the client sent nothing")
     }
 
-    /// The next message with opcode `op`; heartbeats on the way are ACKed.
+    /// The next message with opcode `op`; heartbeats on the way are ACKed and
+    /// video opcodes the test is not waiting for are kept in `self.1`.
     async fn recv_op(&mut self, op: u64) -> Value {
         loop {
             let message = self.recv_raw().await;
             if message["op"] == op {
                 return message;
+            }
+            if matches!(message["op"].as_u64(), Some(12 | 15)) {
+                self.1.push(message);
+                continue;
             }
             assert_eq!(message["op"], 3, "unexpected {message}");
             self.send(json!({"op": 6, "d": {"t": message["d"]["t"]}}))
