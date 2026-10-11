@@ -68,7 +68,7 @@ use fastcord_discord::state::Store;
 use fastcord_discord::state::navigation::{Navigation, NavigationSnapshot};
 use fastcord_media::{Correlation, JoinCorrelator, StreamCorrelation, StreamCorrelator};
 use fastcord_model::{
-    Channel, Snowflake, StreamCreateRequest, StreamKey, StreamType, VoiceStateRequest,
+    Channel, Emoji, Snowflake, StreamCreateRequest, StreamKey, StreamType, VoiceStateRequest,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -227,7 +227,11 @@ impl Tracker {
                         event: Dispatch::MessageCreate(_)
                             | Dispatch::MessageUpdate(_)
                             | Dispatch::MessageDelete(_)
-                            | Dispatch::MessageDeleteBulk(_),
+                            | Dispatch::MessageDeleteBulk(_)
+                            | Dispatch::MessageReactionAdd(_)
+                            | Dispatch::MessageReactionRemove(_)
+                            | Dispatch::MessageReactionRemoveAll(_)
+                            | Dispatch::MessageReactionRemoveEmoji(_),
                         ..
                     }
                 );
@@ -314,6 +318,26 @@ pub enum Command {
         channel: Snowflake,
         message: Snowflake,
     },
+    /// A reaction chip was clicked: add the user's reaction or take it back.
+    ToggleReaction {
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: Emoji,
+    },
+    /// An emoji was picked for a message: add the user's reaction unless it
+    /// already is theirs.
+    AddReaction {
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: Emoji,
+    },
+    /// Show who reacted with an emoji (the user asked).
+    ReactionUsers {
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: Emoji,
+    },
+    CloseReactionUsers,
     OpenPrivate(Vec<Snowflake>),
     #[allow(dead_code)]
     Stream(StreamIntent),
@@ -379,6 +403,28 @@ impl fmt::Debug for Command {
                 .field("channel", channel)
                 .field("message", message)
                 .finish(),
+            Self::ToggleReaction {
+                channel, message, ..
+            } => f
+                .debug_struct("ToggleReaction")
+                .field("channel", channel)
+                .field("message", message)
+                .finish_non_exhaustive(),
+            Self::AddReaction {
+                channel, message, ..
+            } => f
+                .debug_struct("AddReaction")
+                .field("channel", channel)
+                .field("message", message)
+                .finish_non_exhaustive(),
+            Self::ReactionUsers {
+                channel, message, ..
+            } => f
+                .debug_struct("ReactionUsers")
+                .field("channel", channel)
+                .field("message", message)
+                .finish_non_exhaustive(),
+            Self::CloseReactionUsers => f.write_str("CloseReactionUsers"),
             Self::OpenPrivate(_) => f.write_str("OpenPrivate([selected recipients])"),
             Self::Stream(intent) => f.debug_tuple("Stream").field(intent).finish(),
         }
@@ -639,6 +685,43 @@ impl NavigationBridge {
         self.commands
             .try_send(Command::DismissChange { channel, message })
             .is_ok()
+    }
+
+    /// Queues a click on a reaction chip. Returns whether it was accepted.
+    pub fn toggle_reaction(&self, channel: Snowflake, message: Snowflake, emoji: Emoji) -> bool {
+        self.commands
+            .try_send(Command::ToggleReaction {
+                channel,
+                message,
+                emoji,
+            })
+            .is_ok()
+    }
+
+    /// Queues the user's pick of an emoji to react to a message with.
+    pub fn add_reaction(&self, channel: Snowflake, message: Snowflake, emoji: Emoji) -> bool {
+        self.commands
+            .try_send(Command::AddReaction {
+                channel,
+                message,
+                emoji,
+            })
+            .is_ok()
+    }
+
+    /// Queues the user's request to see who reacted with an emoji.
+    pub fn reaction_users(&self, channel: Snowflake, message: Snowflake, emoji: Emoji) -> bool {
+        self.commands
+            .try_send(Command::ReactionUsers {
+                channel,
+                message,
+                emoji,
+            })
+            .is_ok()
+    }
+
+    pub fn close_reaction_users(&self) -> bool {
+        self.commands.try_send(Command::CloseReactionUsers).is_ok()
     }
 
     fn publish(
@@ -1238,6 +1321,22 @@ impl Worker {
             Command::DismissChange { channel, message } => {
                 history.dismiss_change(channel, message);
             }
+            Command::ToggleReaction {
+                channel,
+                message,
+                emoji,
+            } => history.toggle_reaction(&self.rest, channel, message, emoji),
+            Command::AddReaction {
+                channel,
+                message,
+                emoji,
+            } => history.add_reaction(&self.rest, channel, message, emoji),
+            Command::ReactionUsers {
+                channel,
+                message,
+                emoji,
+            } => history.reaction_users(&self.rest, channel, message, emoji),
+            Command::CloseReactionUsers => history.close_reaction_users(),
             Command::OpenPrivate(_) => {}
             Command::Stream(_) => unreachable!("stream commands are handled above"),
         }
@@ -1871,6 +1970,24 @@ fn occurrence_in(
                             == Some(occurrence.asset)
                     })
         }
+        emoji::Origin::Reaction {
+            channel,
+            message,
+            revision,
+            chip,
+        } => {
+            timeline.channel_id == Some(channel)
+                && timeline
+                    .rows
+                    .iter()
+                    .find(|row| row.message.id == message && row.revision == revision)
+                    .is_some_and(|row| {
+                        timeline::chips(row)
+                            .nth(usize::from(chip))
+                            .and_then(|chip| emoji::reaction_asset(chip.emoji))
+                            == Some(occurrence.asset)
+                    })
+        }
         emoji::Origin::Picker { revision } => {
             picker.request.open
                 && revision == picker.request.revision
@@ -2040,6 +2157,29 @@ impl GatewayPanel {
                 channel_id,
                 message_id,
             } => self.controls.dismiss_change(channel_id, message_id),
+            Event::ToggleReaction {
+                channel_id,
+                message_id,
+                emoji,
+            } if open == Some(channel_id) => {
+                self.controls.toggle_reaction(channel_id, message_id, emoji)
+            }
+            Event::InspectReaction {
+                channel_id,
+                message_id,
+                emoji,
+            } if open == Some(channel_id) => {
+                self.controls.reaction_users(channel_id, message_id, emoji)
+            }
+            Event::CloseReactionUsers => self.controls.close_reaction_users(),
+            Event::React {
+                channel_id,
+                message_id,
+            } if open == Some(channel_id) && self.timeline.can_react => {
+                self.confirm_delete = None;
+                self.emoji_picker.open_for_reaction(channel_id, message_id);
+                true
+            }
             _ => true,
         };
         if !queued {
@@ -2328,6 +2468,197 @@ mod bridge_tests {
         }
         assert!(!bridge.edit_message(c, m, "more".to_owned()));
         assert!(!bridge.delete_message(c, m));
+    }
+
+    #[test]
+    fn reaction_commands_queue_in_order_and_a_full_queue_refuses_them() {
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let (c, m) = (Snowflake(500), Snowflake(7));
+        let thumbs = Emoji {
+            id: None,
+            name: Some("\u{1f44d}".to_owned()),
+            animated: false,
+        };
+        assert!(bridge.toggle_reaction(c, m, thumbs.clone()));
+        assert!(bridge.add_reaction(c, m, thumbs.clone()));
+        assert!(bridge.reaction_users(c, m, thumbs.clone()));
+        assert!(bridge.close_reaction_users());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ToggleReaction { channel, message, emoji })
+                if (channel, message, &emoji) == (c, m, &thumbs)
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::AddReaction { emoji, .. }) if emoji == thumbs
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ReactionUsers { emoji, .. }) if emoji == thumbs
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::CloseReactionUsers)
+        ));
+        let shown = format!(
+            "{:?} {:?}",
+            Command::ToggleReaction {
+                channel: c,
+                message: m,
+                emoji: thumbs.clone()
+            },
+            Command::CloseReactionUsers
+        );
+        assert!(shown.contains("ToggleReaction") && shown.contains("CloseReactionUsers"));
+        // A full queue refuses rather than buffering without bound.
+        for _ in 0..COMMAND_QUEUE {
+            assert!(bridge.toggle_reaction(c, m, thumbs.clone()));
+        }
+        assert!(!bridge.toggle_reaction(c, m, thumbs.clone()));
+        assert!(!bridge.add_reaction(c, m, thumbs.clone()));
+        assert!(!bridge.reaction_users(c, m, thumbs));
+        assert!(!bridge.close_reaction_users());
+    }
+
+    #[test]
+    fn reaction_actions_act_on_the_open_channel_and_react_needs_the_permission() {
+        use timeline::Event;
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut panel = panel(&bridge);
+        let thumbs = Emoji {
+            id: None,
+            name: Some("\u{1f44d}".to_owned()),
+            animated: false,
+        };
+        let (channel_id, message_id) = (Snowflake(500), Snowflake(7));
+        // The picker opens for a message only where the worker said the user may react.
+        panel.message_action(Event::React {
+            channel_id,
+            message_id,
+        });
+        assert!(!panel.emoji_picker.request.open);
+        panel.timeline = Arc::new(timeline::Snapshot {
+            can_react: true,
+            ..(*panel.timeline).clone()
+        });
+        panel.message_action(Event::React {
+            channel_id: Snowflake(501),
+            message_id,
+        });
+        assert!(!panel.emoji_picker.request.open, "another channel");
+        panel.confirm_delete = Some((channel_id, message_id));
+        panel.message_action(Event::React {
+            channel_id,
+            message_id,
+        });
+        assert!(panel.emoji_picker.request.open);
+        assert_eq!(panel.emoji_picker.reaction(), Some(message_id));
+        assert_eq!(panel.confirm_delete, None);
+        assert!(commands.try_recv().is_err(), "choosing is not reacting");
+
+        // Chip clicks and requests for the open channel are queued; others are not.
+        panel.message_action(Event::ToggleReaction {
+            channel_id,
+            message_id,
+            emoji: thumbs.clone(),
+        });
+        panel.message_action(Event::InspectReaction {
+            channel_id,
+            message_id,
+            emoji: thumbs.clone(),
+        });
+        panel.message_action(Event::CloseReactionUsers);
+        panel.message_action(Event::ToggleReaction {
+            channel_id: Snowflake(501),
+            message_id,
+            emoji: thumbs.clone(),
+        });
+        panel.message_action(Event::InspectReaction {
+            channel_id: Snowflake(501),
+            message_id,
+            emoji: thumbs,
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ToggleReaction { .. })
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ReactionUsers { .. })
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::CloseReactionUsers)
+        ));
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn chip_emoji_are_wanted_only_while_their_row_and_chip_still_show_them() {
+        let bridge = NavigationBridge::new();
+        let mut panel = panel(&bridge);
+        let wave = Emoji {
+            id: Some(Snowflake(9)),
+            name: Some("wave".to_owned()),
+            animated: true,
+        };
+        let mut message = (*panel.timeline.rows[0].message).clone();
+        message.reactions = vec![fastcord_model::Reaction {
+            count: 2,
+            me: false,
+            emoji: wave.clone(),
+        }];
+        panel.timeline = Arc::new(timeline::Snapshot {
+            rows: vec![timeline::Row::new(Arc::new(message), 3)],
+            ..(*panel.timeline).clone()
+        });
+        let asset = emoji::Asset::Custom {
+            id: Snowflake(9),
+            animated: true,
+        };
+        let occurrence = |channel: u64, revision: u64, chip: u8, asset| emoji::Occurrence {
+            origin: emoji::Origin::Reaction {
+                channel: Snowflake(channel),
+                message: Snowflake(7),
+                revision,
+                chip,
+            },
+            asset,
+        };
+        let wanted = |panel: &GatewayPanel, occurrence| {
+            occurrence_in(
+                &panel.timeline,
+                &panel.emoji_picker,
+                &panel.emoji_snapshot,
+                &occurrence,
+            )
+        };
+        assert!(wanted(&panel, occurrence(500, 3, 0, asset)));
+        assert!(!wanted(&panel, occurrence(501, 3, 0, asset)), "channel");
+        assert!(!wanted(&panel, occurrence(500, 2, 0, asset)), "revision");
+        assert!(
+            !wanted(&panel, occurrence(500, 3, 1, asset)),
+            "no such chip"
+        );
+        let other = emoji::Asset::Custom {
+            id: Snowflake(10),
+            animated: true,
+        };
+        assert!(!wanted(&panel, occurrence(500, 3, 0, other)), "other emoji");
+        // An unanswered request adds a chip after Discord's, and it is wanted too.
+        let mut pending = (*panel.timeline).clone();
+        pending.rows[0].reactions = vec![crate::reactions::Pending {
+            emoji: Emoji {
+                id: Some(Snowflake(10)),
+                name: Some("new".to_owned()),
+                animated: true,
+            },
+            action: crate::reactions::Action::Add,
+        }];
+        panel.timeline = Arc::new(pending);
+        assert!(wanted(&panel, occurrence(500, 3, 1, other)));
     }
 
     fn panel(bridge: &NavigationBridge) -> GatewayPanel {

@@ -112,6 +112,10 @@ fn normalized_ready_exposes_available_guilds_and_accessible_text_voice_only() {
     );
     assert!(selection.permissions.connect && selection.permissions.speak);
     assert!(selection.permissions.read_history && selection.permissions.send_messages);
+    assert!(
+        selection.permissions.add_reactions,
+        "the everyone role of the fixture may react"
+    );
 
     let target = navigation.subscription_target(&store);
     assert_eq!(target.selected_guild(), Some(id(FIRST)));
@@ -549,6 +553,14 @@ fn incomplete_own_member_roles_and_owner_fail_closed_unless_owner_is_verified() 
         "verified owner bypasses overwrites"
     );
     assert!(
+        navigation
+            .selection(&store)
+            .unwrap()
+            .permissions
+            .add_reactions,
+        "the verified owner may react wherever overwrites deny it"
+    );
+    assert!(
         navigation.select_channel(&store, id(3003)),
         "verified owner has CONNECT"
     );
@@ -885,6 +897,16 @@ fn timeout_expiry_is_rfc3339_and_evaluated_with_an_injected_instant() {
 #[test]
 fn timeout_permissions_use_injected_clock_without_polling_or_expired_restrictions() {
     let (mut store, _) = setup(NAV_READY);
+    // @everyone may react, so the timeout is the only thing that can take it.
+    apply(
+        &mut store,
+        "GUILD_ROLE_UPDATE",
+        &json!({
+            "guild_id": "100",
+            "role": {"id": "100", "name": "@everyone", "permissions": (68_608_u64 | 64).to_string()}
+        })
+        .to_string(),
+    );
     let now = OffsetDateTime::parse("2026-10-07T12:00:00Z", &Rfc3339).unwrap();
     for (until, blocked) in [
         ("2026-10-07T12:00:01Z", true),
@@ -907,6 +929,8 @@ fn timeout_permissions_use_injected_clock_without_polling_or_expired_restriction
         assert_eq!(voice.connect, !blocked);
         assert_eq!(voice.speak, !blocked);
         assert_eq!(text.send_messages, !blocked);
+        assert_eq!(text.add_reactions, !blocked);
+        assert_eq!(voice.add_reactions, !blocked);
     }
 }
 #[test]
@@ -936,4 +960,85 @@ fn private_conversations_are_listed_by_latest_activity_and_open_only_known_ids()
     );
     navigation.reconcile(&store);
     assert!(navigation.private_selection(&store).is_none());
+}
+
+#[test]
+fn add_reactions_follows_the_role_and_overwrite_rules() {
+    let (mut store, mut navigation) = setup(NAV_READY);
+    let grant = |store: &mut Store, role: u64, permissions: u64| {
+        apply(
+            store,
+            "GUILD_ROLE_UPDATE",
+            &json!({
+                "guild_id": "100",
+                "role": {"id": role.to_string(), "name": "role", "permissions": permissions.to_string()}
+            })
+            .to_string(),
+        );
+    };
+    let may_react = |navigation: &Navigation, store: &Store| {
+        navigation
+            .selection(store)
+            .unwrap()
+            .permissions
+            .add_reactions
+    };
+    assert!(navigation.select_channel(&store, id(1000)));
+    // The fixture's @everyone (view, send, read history) cannot react.
+    let summary = navigation.selection(&store).unwrap().permissions;
+    assert!(summary.view_channel && summary.read_history && summary.send_messages);
+    assert!(!summary.add_reactions);
+
+    // A role the member holds grants it, and losing the permission loses it.
+    grant(&mut store, 102, 64);
+    assert!(may_react(&navigation, &store));
+    grant(&mut store, 102, 0);
+    assert!(!may_react(&navigation, &store));
+    // @everyone grants it to everyone.
+    grant(&mut store, 100, 68_608 | 64);
+    assert!(may_react(&navigation, &store));
+
+    // A member overwrite that denies it wins over the role, and only it.
+    let mut channel = store
+        .guild(id(100))
+        .unwrap()
+        .channel(id(1000))
+        .unwrap()
+        .clone();
+    channel.permission_overwrites.push(PermissionOverwrite {
+        id: id(1),
+        kind: fastcord_model::OverwriteKind::Member,
+        allow: Permissions::NONE,
+        deny: Permissions::ADD_REACTIONS,
+    });
+    update_channel(&mut store, channel.clone());
+    let summary = navigation.selection(&store).unwrap().permissions;
+    assert!(!summary.add_reactions);
+    assert!(summary.view_channel && summary.read_history && summary.send_messages);
+
+    // An allow overwrite grants it where no role does.
+    grant(&mut store, 100, 68_608);
+    channel.permission_overwrites = vec![PermissionOverwrite {
+        id: id(1),
+        kind: fastcord_model::OverwriteKind::Member,
+        allow: Permissions::ADD_REACTIONS,
+        deny: Permissions::NONE,
+    }];
+    update_channel(&mut store, channel.clone());
+    assert!(may_react(&navigation, &store));
+    // Without it, nobody else's overwrite matters.
+    channel.permission_overwrites = vec![PermissionOverwrite {
+        id: id(2),
+        kind: fastcord_model::OverwriteKind::Member,
+        allow: Permissions::ADD_REACTIONS,
+        deny: Permissions::NONE,
+    }];
+    update_channel(&mut store, channel);
+    assert!(!may_react(&navigation, &store));
+
+    // The rows of the channel list carry the same summary.
+    let rows = rows(&navigation, &store);
+    let row = rows.iter().find(|row| row.id == id(1000)).unwrap();
+    assert!(!row.permissions.add_reactions);
+    assert!(row.permissions.view_channel);
 }

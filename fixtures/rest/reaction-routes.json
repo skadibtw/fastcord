@@ -1,0 +1,17 @@
+[
+  {"operation": "add", "emoji": "U+1F44D thumbs up", "method": "PUT", "path": "/channels/500/messages/1290000000000000010/reactions/%F0%9F%91%8D/@me"},
+  {"operation": "remove_own", "emoji": "U+1F44D thumbs up", "method": "DELETE", "path": "/channels/500/messages/1290000000000000010/reactions/%F0%9F%91%8D/0/@me"},
+  {"operation": "users", "emoji": "U+1F44D thumbs up", "method": "GET", "path": "/channels/500/messages/1290000000000000010/reactions/%F0%9F%91%8D?limit=25&type=0"},
+
+  {"operation": "add", "emoji": "U+2764 U+FE0F red heart with variation selector", "method": "PUT", "path": "/channels/500/messages/1290000000000000010/reactions/%E2%9D%A4%EF%B8%8F/@me"},
+  {"operation": "remove_own", "emoji": "U+2764 U+FE0F red heart with variation selector", "method": "DELETE", "path": "/channels/500/messages/1290000000000000010/reactions/%E2%9D%A4%EF%B8%8F/0/@me"},
+  {"operation": "users", "emoji": "U+2764 U+FE0F red heart with variation selector", "method": "GET", "path": "/channels/500/messages/1290000000000000010/reactions/%E2%9D%A4%EF%B8%8F?limit=25&type=0"},
+
+  {"operation": "add", "emoji": "U+1F469 U+1F3FD U+200D U+1F4BB woman technologist, medium skin tone (ZWJ sequence)", "method": "PUT", "path": "/channels/500/messages/1290000000000000010/reactions/%F0%9F%91%A9%F0%9F%8F%BD%E2%80%8D%F0%9F%92%BB/@me"},
+  {"operation": "remove_own", "emoji": "U+1F469 U+1F3FD U+200D U+1F4BB woman technologist, medium skin tone (ZWJ sequence)", "method": "DELETE", "path": "/channels/500/messages/1290000000000000010/reactions/%F0%9F%91%A9%F0%9F%8F%BD%E2%80%8D%F0%9F%92%BB/0/@me"},
+  {"operation": "users", "emoji": "U+1F469 U+1F3FD U+200D U+1F4BB woman technologist, medium skin tone (ZWJ sequence)", "method": "GET", "path": "/channels/500/messages/1290000000000000010/reactions/%F0%9F%91%A9%F0%9F%8F%BD%E2%80%8D%F0%9F%92%BB?limit=25&type=0"},
+
+  {"operation": "add", "emoji": "custom wave:777", "method": "PUT", "path": "/channels/500/messages/1290000000000000010/reactions/wave%3A777/@me"},
+  {"operation": "remove_own", "emoji": "custom wave:777", "method": "DELETE", "path": "/channels/500/messages/1290000000000000010/reactions/wave%3A777/0/@me"},
+  {"operation": "users", "emoji": "custom wave:777", "method": "GET", "path": "/channels/500/messages/1290000000000000010/reactions/wave%3A777?limit=25&type=0"}
+]

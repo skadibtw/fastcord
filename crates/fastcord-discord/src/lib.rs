@@ -6,7 +6,9 @@
 //! reads from is [`message_store`], and messages are created, never re-posted
 //! by the transport, through [`RestClient::create_message`]. The account's own
 //! messages are edited and deleted through [`RestClient::edit_message`] and
-//! [`RestClient::delete_message`] (see [`is_own_message`]).
+//! [`RestClient::delete_message`] (see [`is_own_message`]); reactions are added,
+//! taken back, and listed through [`RestClient::add_reaction`],
+//! [`RestClient::remove_own_reaction`], and [`RestClient::reaction_users`].
 
 mod attachment;
 mod clock;
@@ -17,6 +19,7 @@ pub mod history;
 pub mod message_store;
 mod private_channel;
 mod rate_limit;
+mod reaction;
 mod remote_auth;
 mod rest;
 mod route;
@@ -31,6 +34,7 @@ pub use edit::{EditedMessage, edit_response_update, is_own_message};
 pub use error::{NetworkFailure, RestError, RetryableFailure};
 pub use gateway::{ConnectionState, Gateway, GatewayEvent};
 pub use private_channel::{MAX_PRIVATE_RECIPIENTS, PrivateChannelError};
+pub use reaction::{ReactionEmoji, ReactionEmojiError, ReactionUser};
 pub use remote_auth::{QrLink, RemoteAuth, RemoteAuthError, RemoteAuthEvent, RemoteUser};
 pub use reqwest::{Method, StatusCode};
 pub use rest::{Priority, RestClient, RestRequest, RestResponse};

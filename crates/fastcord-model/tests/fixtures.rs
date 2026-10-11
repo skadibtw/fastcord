@@ -1,8 +1,8 @@
 //! Fixture-driven tests for wire decoding and permission computation.
 
 use fastcord_model::{
-    Channel, GuildScope, MemberScope, Message, MessageUpdate, Permissions, REPLY_PREVIEW_CHARS,
-    Referenced, Role, Snowflake, channel_permissions,
+    Channel, Emoji, GuildScope, MemberScope, Message, MessageUpdate, Permissions,
+    REPLY_PREVIEW_CHARS, ReactionChange, Referenced, Role, Snowflake, channel_permissions,
 };
 use serde::Deserialize;
 
@@ -93,6 +93,56 @@ fn message_create_decodes_and_ignores_unknown_fields() {
         msg.message_reference.unwrap().message_id,
         Some(Snowflake(1_289_999_999_999_999_999))
     );
+}
+
+fn add(emoji: &Emoji, by_me: bool) -> ReactionChange<'_> {
+    ReactionChange::Add {
+        emoji,
+        by_me,
+        burst: false,
+    }
+}
+
+fn remove(emoji: &Emoji, by_me: bool) -> ReactionChange<'_> {
+    ReactionChange::Remove {
+        emoji,
+        by_me,
+        burst: false,
+    }
+}
+
+#[test]
+fn reaction_changes_apply_to_the_recorded_aggregate() {
+    let mut msg: Message = serde_json::from_str(&fixture("message_create.json")).unwrap();
+    // The recording: two thumbs-up, one of them the account's own.
+    let thumbs = msg.reactions[0].emoji.clone();
+    // The Gateway's echo of the reaction the message already shows changes nothing.
+    assert!(!msg.alters_reactions(add(&thumbs, true)));
+    assert!(!msg.apply_reaction(add(&thumbs, true)));
+    assert!(msg.apply_reaction(add(&thumbs, false)));
+    assert_eq!((msg.reactions[0].count, msg.reactions[0].me), (3, true));
+    assert!(msg.apply_reaction(remove(&thumbs, true)));
+    assert_eq!((msg.reactions[0].count, msg.reactions[0].me), (2, false));
+    assert!(!msg.apply_reaction(remove(&thumbs, true)));
+
+    // A custom emoji is found by ID alone, whatever name or flags the event carries.
+    let wave: Emoji =
+        serde_json::from_str(r#"{"id":"777","name":"wave","animated":true}"#).unwrap();
+    let renamed: Emoji = serde_json::from_str(r#"{"id":"777","name":"renamed"}"#).unwrap();
+    assert!(msg.apply_reaction(add(&wave, true)));
+    assert!(msg.apply_reaction(add(&renamed, false)));
+    assert_eq!(msg.reactions.len(), 2);
+    assert_eq!((msg.reactions[1].count, msg.reactions[1].me), (2, true));
+    assert_eq!(msg.reactions[1].emoji, wave, "the first-seen emoji is kept");
+
+    assert!(msg.apply_reaction(ReactionChange::RemoveEmoji(&renamed)));
+    assert_eq!(msg.reactions.len(), 1);
+    assert!(msg.apply_reaction(ReactionChange::RemoveAll));
+    assert!(msg.reactions.is_empty());
+    // Only the reactions moved.
+    let recorded: Message = serde_json::from_str(&fixture("message_create.json")).unwrap();
+    msg.reactions = recorded.reactions.clone();
+    assert_eq!(msg, recorded);
 }
 
 #[test]

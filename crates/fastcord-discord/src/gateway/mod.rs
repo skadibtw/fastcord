@@ -45,8 +45,9 @@ pub use event::{
     ChannelUnread, ConnectionState, Dispatch, GatewayEvent, GroupId, GuildCreate, GuildDelete,
     GuildEmojisUpdate, GuildMemberEvent, GuildMemberRemove, GuildRoleDelete, GuildRoleEvent,
     GuildUpdate, ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate, MessageDelete,
-    MessageDeleteBulk, PassiveUpdate, Ready, ReadySupplemental, ReconnectReason, SessionId,
-    StopReason, SupplementalGuild, VoiceStateUpdate,
+    MessageDeleteBulk, MessageReaction, MessageReactionRemoveAll, MessageReactionRemoveEmoji,
+    PassiveUpdate, Ready, ReadySupplemental, ReconnectReason, SessionId, StopReason,
+    SupplementalGuild, VoiceStateUpdate,
 };
 pub use profile::{
     BUNDLED_BUILD_NUMBER, BuildNumber, BuildSource, ClientProperties, HostOs, PROFILE_VERSION,

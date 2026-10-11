@@ -11,23 +11,24 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use fastcord_discord::gateway::{Dispatch, MessageDelete};
+use fastcord_discord::gateway::{Dispatch, MessageDelete, MessageReaction};
 use fastcord_discord::history::HistoryCursor;
 use fastcord_discord::message_store::{
     MAX_MESSAGE_BYTES, MessageStore, PageMerge, PageToken, message_bytes,
 };
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot};
 use fastcord_discord::{
-    ComposeError, EditedMessage, MentionPolicy, NonceGenerator, RestClient, RestError, SendError,
-    edit_response_update, is_own_message,
+    ComposeError, EditedMessage, MentionPolicy, NonceGenerator, ReactionEmoji, ReactionUser,
+    RestClient, RestError, SendError, edit_response_update, is_own_message,
 };
-use fastcord_model::{Message, Referenced, Snowflake};
+use fastcord_model::{Emoji, Message, Referenced, Snowflake};
 use iced::futures::StreamExt;
 use iced::futures::stream::FuturesUnordered;
 
 use crate::changes::{self, ChangeKind, ChangeRequest, Changes};
 use crate::outbox::{Finished, MAX_REPLY_AUTHOR_CHARS, OpId, Outbox, Reply, Slots};
-use crate::timeline::{ReplyLine, ReplyState, Row, Snapshot};
+use crate::reactions::{self, Action, Reactions};
+use crate::timeline::{ReactionUsers, ReplyLine, ReplyState, Row, Snapshot, UsersState};
 use crate::variable_list::{Item, Measurement, VariableList, Viewport};
 
 /// Message bodies one snapshot may hold. Together with the latest slot and the
@@ -49,12 +50,17 @@ const DELETED_WHILE_EDITING: &str = "That message was deleted before your edit w
 const UNSHOWN_FAILURE: &str = "A change to a message that is no longer shown failed.";
 const DELETED_JUMP: &str = "That message was deleted and cannot be opened.";
 const UNAVAILABLE_JUMP: &str = "That message is unavailable and cannot be opened.";
+const NO_REACTIONS: &str = "You cannot add reactions in this channel.";
+const BAD_EMOJI: &str = "That emoji cannot be used as a reaction.";
 
 type PageFuture = Pin<Box<dyn Future<Output = Result<Vec<Message>, RestError>> + Send>>;
 type ReferenceFuture =
     Pin<Box<dyn Future<Output = (Snowflake, Result<Option<Message>, RestError>)> + Send>>;
 type SendFuture = Pin<Box<dyn Future<Output = (OpId, Result<Box<Message>, SendError>)> + Send>>;
 type ChangeFuture = Pin<Box<dyn Future<Output = ChangeDone> + Send>>;
+type ReactionFuture = Pin<Box<dyn Future<Output = ReactionDone> + Send>>;
+type UsersFuture =
+    Pin<Box<dyn Future<Output = (u64, Result<Vec<ReactionUser>, RestError>)> + Send>>;
 
 enum ReferenceState {
     Preview { author: String, content: String },
@@ -85,13 +91,35 @@ pub enum ChangeResult {
     Deleted(Result<(), RestError>),
 }
 
+/// Discord's answer to a reaction request of the user.
+pub struct ReactionDone {
+    pub channel: Snowflake,
+    pub message: Snowflake,
+    pub emoji: Emoji,
+    pub action: Action,
+    pub result: Result<(), RestError>,
+}
+
+/// The "who reacted" list the user asked for, as the worker keeps it.
+struct Inspection {
+    /// Identifies the request that answers it; a replaced list's late answer
+    /// finds a different serial and is dropped.
+    serial: u64,
+    channel: Snowflake,
+    message: Snowflake,
+    emoji: Emoji,
+    state: UsersState,
+}
+
 /// A finished request of the worker: a history page, a reply preview, a send,
-/// or a change.
+/// a change, a reaction, or the list of who reacted.
 pub enum Completed {
     Page(Result<Vec<Message>, RestError>),
     Reference(Snowflake, Box<Result<Option<Message>, RestError>>),
     Send(OpId, Result<Box<Message>, SendError>),
     Change(ChangeDone),
+    Reaction(ReactionDone),
+    ReactionUsers(u64, Result<Vec<ReactionUser>, RestError>),
 }
 
 /// An explicit user action from the timeline.
@@ -166,6 +194,16 @@ pub struct History {
     /// Why the last edit or delete command could not be carried out, or the
     /// outcome of one that has no row to show it on.
     notice: Option<&'static str>,
+    /// The open channel when the user may add reactions to it.
+    reactable: Option<Snowflake>,
+    /// Reactions of the user that Discord has not answered yet.
+    reactions: Reactions,
+    reaction_requests: FuturesUnordered<ReactionFuture>,
+    /// The "who reacted" list the user asked for, and the one request
+    /// loading it.
+    inspection: Option<Inspection>,
+    users_pending: Option<UsersFuture>,
+    inspections: u64,
 }
 
 impl History {
@@ -193,6 +231,8 @@ impl History {
         self.reference_pending = None;
         self.references.clear();
         self.highlight = None;
+        self.inspection = None;
+        self.users_pending = None;
         self.store.clear();
         self.list = VariableList::default();
         self.channel = None;
@@ -258,6 +298,7 @@ impl History {
             Dispatch::Ready(ready) => {
                 self.user = Some(ready.user.id);
                 self.reset();
+                self.store.set_user(ready.user.id);
                 return;
             }
             Dispatch::MessageCreate(message) => {
@@ -473,6 +514,244 @@ impl History {
         }
     }
 
+    /// The user's click on a reaction chip: take their reaction back when it
+    /// is theirs, add it otherwise.
+    pub fn toggle_reaction(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: Emoji,
+    ) {
+        self.react(rest, channel, message, emoji, true);
+    }
+
+    /// The user's pick of an emoji in the picker: add their reaction unless
+    /// it already is theirs (nothing to ask Discord then).
+    pub fn add_reaction(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: Emoji,
+    ) {
+        self.react(rest, channel, message, emoji, false);
+    }
+
+    /// Checks the request against the store (never against what a possibly
+    /// stale UI showed) and makes it once. A new reaction needs the
+    /// permission to add reactions; joining one that others already made needs
+    /// only the history the user is reading, and taking one's own back needs
+    /// nothing. The server stays authoritative.
+    fn react(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: Emoji,
+        toggle: bool,
+    ) {
+        self.dirty = true;
+        self.notice = None;
+        if self.channel != Some(channel) {
+            self.notice = Some(NOT_OPEN);
+            return;
+        }
+        let Some(held) = self.store.get(channel, message) else {
+            self.notice = Some(NOT_LOADED);
+            return;
+        };
+        let existing = held
+            .reactions
+            .iter()
+            .find(|reaction| reaction.emoji.same_reaction(&emoji));
+        let action = if existing.is_some_and(|reaction| reaction.me) {
+            if !toggle {
+                return;
+            }
+            Action::Remove
+        } else {
+            Action::Add
+        };
+        if action == Action::Add && existing.is_none() && self.reactable != Some(channel) {
+            self.notice = Some(NO_REACTIONS);
+            return;
+        }
+        let Ok(target) = ReactionEmoji::new(&emoji) else {
+            self.notice = Some(BAD_EMOJI);
+            return;
+        };
+        if let Err(notice) = self.reactions.begin(channel, message, &emoji, action) {
+            self.notice = Some(notice);
+            return;
+        }
+        let rest = rest.clone();
+        self.reaction_requests.push(Box::pin(async move {
+            let result = match action {
+                Action::Add => rest.add_reaction(channel, message, &target).await,
+                Action::Remove => rest.remove_own_reaction(channel, message, &target).await,
+            };
+            ReactionDone {
+                channel,
+                message,
+                emoji,
+                action,
+                result,
+            }
+        }));
+    }
+
+    /// Applies Discord's answer to a reaction request. Returns whether Discord
+    /// rejected the login. A success goes into the store through the same path
+    /// as the Gateway's report of the user's own reaction, which makes
+    /// whichever arrives second a no-op; a failure changes nothing and is said
+    /// once. A removal of a reaction that is already gone is what it asked for.
+    fn finish_reaction(&mut self, done: ReactionDone) -> bool {
+        let ReactionDone {
+            channel,
+            message,
+            emoji,
+            action,
+            result,
+        } = done;
+        self.dirty = true;
+        self.reactions.finish(channel, message, &emoji);
+        match result {
+            Ok(()) => self.apply_own_reaction(channel, message, emoji, action == Action::Add),
+            Err(RestError::ResourceGone) if action == Action::Remove => {
+                self.apply_own_reaction(channel, message, emoji, false);
+            }
+            Err(error) => {
+                self.notice = Some(reactions::failure(action, error));
+                return error == RestError::AuthenticationRequired;
+            }
+        }
+        false
+    }
+
+    fn apply_own_reaction(
+        &mut self,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: Emoji,
+        added: bool,
+    ) {
+        let Some(user) = self.user else {
+            return;
+        };
+        let event = Box::new(MessageReaction {
+            channel_id: channel,
+            message_id: message,
+            guild_id: None,
+            user_id: user,
+            emoji,
+            burst: false,
+        });
+        self.apply_store(&if added {
+            Dispatch::MessageReactionAdd(event)
+        } else {
+            Dispatch::MessageReactionRemove(event)
+        });
+    }
+
+    /// The user's explicit request to see who reacted with an emoji. Nothing
+    /// is listed unless it is asked for; one list is kept at a time.
+    pub fn reaction_users(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: Emoji,
+    ) {
+        self.dirty = true;
+        self.notice = None;
+        if self.channel != Some(channel) {
+            self.notice = Some(NOT_OPEN);
+            return;
+        }
+        if self.store.get(channel, message).is_none() {
+            self.notice = Some(NOT_LOADED);
+            return;
+        }
+        let Ok(target) = ReactionEmoji::new(&emoji) else {
+            self.notice = Some(BAD_EMOJI);
+            return;
+        };
+        self.inspections = self.inspections.wrapping_add(1);
+        let serial = self.inspections;
+        self.inspection = Some(Inspection {
+            serial,
+            channel,
+            message,
+            emoji,
+            state: UsersState::Loading,
+        });
+        let rest = rest.clone();
+        // One more than is shown says whether Discord has more.
+        let limit = u8::try_from(reactions::MAX_USERS + 1).unwrap_or(u8::MAX);
+        self.users_pending = Some(Box::pin(async move {
+            (
+                serial,
+                rest.reaction_users(channel, message, &target, limit).await,
+            )
+        }));
+    }
+
+    /// The user closed the list of who reacted; its request is dropped.
+    pub fn close_reaction_users(&mut self) {
+        if self.inspection.take().is_some() {
+            self.dirty = true;
+        }
+        self.users_pending = None;
+    }
+
+    /// Applies the list of who reacted. Returns whether Discord rejected the
+    /// login. An answer for a list the user replaced or closed is dropped.
+    fn finish_reaction_users(
+        &mut self,
+        serial: u64,
+        result: Result<Vec<ReactionUser>, RestError>,
+    ) -> bool {
+        self.users_pending = None;
+        let Some(inspection) = self
+            .inspection
+            .as_mut()
+            .filter(|inspection| inspection.serial == serial)
+        else {
+            return false;
+        };
+        self.dirty = true;
+        match result {
+            Ok(mut users) => {
+                let more = users.len() > reactions::MAX_USERS;
+                users.truncate(reactions::MAX_USERS);
+                inspection.state = UsersState::Loaded {
+                    names: users.into_iter().map(|user| user.name).collect(),
+                    more,
+                };
+                false
+            }
+            Err(error) => {
+                inspection.state = UsersState::Failed(reactions::users_failure(error));
+                error == RestError::AuthenticationRequired
+            }
+        }
+    }
+
+    /// A list of who reacted belongs to a row; without the row it goes.
+    fn prune_inspection(&mut self) {
+        let store = &self.store;
+        if self.inspection.as_ref().is_some_and(|inspection| {
+            store
+                .revision(inspection.channel, inspection.message)
+                .is_none()
+        }) {
+            self.inspection = None;
+            self.users_pending = None;
+            self.dirty = true;
+        }
+    }
+
     /// Makes the request once; its answer comes back through [`Completed`].
     fn start_change(
         &mut self,
@@ -626,6 +905,7 @@ impl History {
         self.list.set_live(live);
         self.focus();
         self.prune_changes();
+        self.prune_inspection();
     }
 
     /// `None` is the live edge: the newest rows are the ones to keep.
@@ -736,6 +1016,16 @@ impl History {
         self.sendable = guild_selection
             .filter(|selection| {
                 Some(selection.channel_id) == selected && selection.permissions.send_messages
+            })
+            .map(|selection| selection.channel_id)
+            .or_else(|| {
+                private_selection
+                    .filter(|selection| Some(selection.channel_id) == selected)
+                    .map(|selection| selection.channel_id)
+            });
+        self.reactable = guild_selection
+            .filter(|selection| {
+                Some(selection.channel_id) == selected && selection.permissions.add_reactions
             })
             .map(|selection| selection.channel_id)
             .or_else(|| {
@@ -865,7 +1155,8 @@ impl History {
         }
     }
 
-    /// Resolves when an in-flight page, reply preview, send, or change does.
+    /// Resolves when an in-flight page, reply preview, send, change, reaction
+    /// request, or list of who reacted does.
     pub async fn next_completed(&mut self) -> Completed {
         let page = async {
             match &mut self.pending {
@@ -891,11 +1182,25 @@ impl History {
                 None => std::future::pending().await,
             }
         };
+        let reaction = async {
+            match self.reaction_requests.next().await {
+                Some(done) => done,
+                None => std::future::pending().await,
+            }
+        };
+        let users = async {
+            match &mut self.users_pending {
+                Some(future) => future.await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             page = page => Completed::Page(page),
             (target, result) = reference => Completed::Reference(target, Box::new(result)),
             (id, result) = send => Completed::Send(id, result),
             done = change => Completed::Change(done),
+            done = reaction => Completed::Reaction(done),
+            (serial, result) = users => Completed::ReactionUsers(serial, result),
         }
     }
 
@@ -906,6 +1211,8 @@ impl History {
             Completed::Reference(target, result) => self.finish_reference(target, *result),
             Completed::Send(id, result) => self.finish_send(rest, id, result),
             Completed::Change(done) => self.finish_change(done),
+            Completed::Reaction(done) => self.finish_reaction(done),
+            Completed::ReactionUsers(serial, result) => self.finish_reaction_users(serial, result),
         }
     }
 
@@ -1138,12 +1445,14 @@ impl History {
                 let own = self.user.is_some_and(|user| is_own_message(&message, user));
                 let change = self.changes.of(channel, message.id);
                 let reply = self.reply_line(channel, &message);
+                let reactions = self.reactions.of(channel, message.id);
                 Row {
                     message,
                     revision,
                     own,
                     change,
                     reply,
+                    reactions,
                 }
             })
             .collect();
@@ -1167,6 +1476,12 @@ impl History {
             highlight: self.highlight,
             deleted,
             notice: self.notice,
+            can_react: self.reactable == Some(channel),
+            reaction_users: self.inspection.as_ref().map(|inspection| ReactionUsers {
+                message: inspection.message,
+                emoji: inspection.emoji.clone(),
+                state: inspection.state.clone(),
+            }),
         }
     }
 }
@@ -1177,7 +1492,7 @@ mod tests {
     use fastcord_discord::message_store::{MAX_MESSAGES_PER_CHANNEL, MESSAGE_BUDGET};
     use fastcord_discord::state::navigation::{ChannelSelection, PermissionSummary};
     use fastcord_discord::{NetworkFailure, RetryableFailure, StatusCode, UserToken};
-    use fastcord_model::{Attachment, MessageReference, MessageUpdate, User};
+    use fastcord_model::{Attachment, MessageReference, MessageUpdate, Reaction, User};
 
     use super::*;
     use crate::changes::{ChangeState, RowChange};
@@ -2321,5 +2636,591 @@ mod tests {
         history.refresh(&rest, &NavigationSnapshot::default(), &Request::default());
         assert_eq!(history.snapshot().channel_id, None);
         assert!(!history.snapshot().can_send);
+    }
+
+    fn emoji(name: &str) -> Emoji {
+        Emoji {
+            id: None,
+            name: Some(name.to_owned()),
+            animated: false,
+        }
+    }
+
+    fn custom_emoji(id: u64, name: &str) -> Emoji {
+        Emoji {
+            id: Some(Snowflake(id)),
+            name: Some(name.to_owned()),
+            animated: false,
+        }
+    }
+
+    fn tally(emoji: Emoji, count: u32, me: bool) -> Reaction {
+        Reaction { count, me, emoji }
+    }
+
+    const THUMBS: &str = "\u{1f44d}";
+    const PARTY: &str = "\u{1f389}";
+
+    fn navigation_reacting(add_reactions: bool) -> NavigationSnapshot {
+        let mut navigation = navigation(true);
+        navigation
+            .selection
+            .as_mut()
+            .unwrap()
+            .permissions
+            .add_reactions = add_reactions;
+        navigation
+    }
+
+    /// An open channel where the account `SELF` may react, holding somebody
+    /// else's message that has 👍 from two others and `wave` from the user.
+    fn reacting_history() -> (History, Snowflake) {
+        let mut history = sending_history();
+        history.store.set_user(SELF);
+        let mut message = message_with(NEWEST + 1, "react to this".to_owned());
+        message.reactions = vec![
+            tally(emoji(THUMBS), 2, false),
+            tally(custom_emoji(9, "wave"), 1, true),
+        ];
+        history.apply(&Dispatch::MessageCreate(Box::new(message)));
+        history.refresh(&rest(), &navigation_reacting(true), &Request::default());
+        (history, Snowflake(NEWEST + 1))
+    }
+
+    fn reaction_row(history: &mut History, id: Snowflake) -> Row {
+        history.refresh(&rest(), &navigation_reacting(true), &Request::default());
+        history
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.message.id == id)
+            .unwrap()
+    }
+
+    fn chip_of(row: &Row, name: &str) -> Option<(u32, bool, bool)> {
+        crate::timeline::chips(row)
+            .find(|chip| chip.emoji.name.as_deref() == Some(name))
+            .map(|chip| (chip.count, chip.me, chip.pending))
+    }
+
+    fn reacted(history: &History, id: Snowflake) -> Vec<(String, u32, bool)> {
+        held(history, id)
+            .reactions
+            .iter()
+            .map(|reaction| {
+                (
+                    reaction.emoji.name.clone().unwrap_or_default(),
+                    reaction.count,
+                    reaction.me,
+                )
+            })
+            .collect()
+    }
+
+    fn reaction_answered(
+        id: Snowflake,
+        emoji: Emoji,
+        action: Action,
+        result: Result<(), RestError>,
+    ) -> Completed {
+        Completed::Reaction(ReactionDone {
+            channel: CHANNEL,
+            message: id,
+            emoji,
+            action,
+            result,
+        })
+    }
+
+    fn take_reactions(history: &mut History) -> usize {
+        std::mem::take(&mut history.reaction_requests).len()
+    }
+
+    fn gateway_reaction(
+        id: Snowflake,
+        user: Snowflake,
+        emoji: Emoji,
+        added: bool,
+        burst: bool,
+    ) -> Dispatch {
+        let event = Box::new(MessageReaction {
+            channel_id: CHANNEL,
+            message_id: id,
+            guild_id: None,
+            user_id: user,
+            emoji,
+            burst,
+        });
+        if added {
+            Dispatch::MessageReactionAdd(event)
+        } else {
+            Dispatch::MessageReactionRemove(event)
+        }
+    }
+
+    #[test]
+    fn a_chip_click_asks_once_overlays_the_row_and_the_answer_updates_the_store() {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        let before = history.store.revision(CHANNEL, id).unwrap();
+
+        // Add: the row shows it at once, disabled; the store keeps Discord's copy.
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        assert_eq!(history.reaction_requests.len(), 1);
+        assert_eq!(
+            history.reactions.of(CHANNEL, id),
+            [reactions::Pending {
+                emoji: emoji(THUMBS),
+                action: Action::Add
+            }]
+        );
+        let row = reaction_row(&mut history, id);
+        assert_eq!(chip_of(&row, THUMBS), Some((3, true, true)));
+        assert_eq!(reacted(&history, id)[0], (THUMBS.to_owned(), 2, false));
+        assert_eq!(history.store.revision(CHANNEL, id), Some(before));
+
+        // Discord's answer goes into the store and clears the overlay.
+        assert!(!history.complete(
+            &rest,
+            reaction_answered(id, emoji(THUMBS), Action::Add, Ok(()))
+        ));
+        assert_eq!(history.reactions.len(), 0);
+        assert_eq!(reacted(&history, id)[0], (THUMBS.to_owned(), 3, true));
+        let row = reaction_row(&mut history, id);
+        assert!(row.reactions.is_empty());
+        assert_eq!(chip_of(&row, THUMBS), Some((3, true, false)));
+
+        // The Gateway's echo of the same reaction changes nothing at all.
+        let after = history.store.revision(CHANNEL, id).unwrap();
+        assert!(after > before);
+        history.apply(&gateway_reaction(id, SELF, emoji(THUMBS), true, false));
+        assert_eq!(history.store.revision(CHANNEL, id), Some(after));
+        assert!(!history.dirty(), "an echo is not a change");
+        assert_eq!(history.store.tracked_bytes(), history.store.recount());
+
+        // Remove: clicking one's own reaction takes it back.
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        assert_eq!(history.reactions.of(CHANNEL, id)[0].action, Action::Remove);
+        let row = reaction_row(&mut history, id);
+        assert_eq!(chip_of(&row, THUMBS), Some((2, false, true)));
+        assert!(!history.complete(
+            &rest,
+            reaction_answered(id, emoji(THUMBS), Action::Remove, Ok(()))
+        ));
+        assert_eq!(reacted(&history, id)[0], (THUMBS.to_owned(), 2, false));
+        let settled = history.store.revision(CHANNEL, id).unwrap();
+        history.apply(&gateway_reaction(id, SELF, emoji(THUMBS), false, false));
+        assert_eq!(history.store.revision(CHANNEL, id), Some(settled));
+        assert_eq!(take_reactions(&mut history), 2, "one request per click");
+    }
+
+    #[test]
+    fn the_gateway_first_or_the_answer_first_shows_the_reaction_once() {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(PARTY));
+        // The Gateway's report arrives before Discord's answer to the request.
+        history.apply(&gateway_reaction(id, SELF, emoji(PARTY), true, false));
+        assert_eq!(reacted(&history, id)[2], (PARTY.to_owned(), 1, true));
+        let row = reaction_row(&mut history, id);
+        assert_eq!(
+            chip_of(&row, PARTY),
+            Some((1, true, true)),
+            "still disabled"
+        );
+        let revision = history.store.revision(CHANNEL, id);
+        assert!(!history.complete(
+            &rest,
+            reaction_answered(id, emoji(PARTY), Action::Add, Ok(()))
+        ));
+        assert_eq!(history.store.revision(CHANNEL, id), revision);
+        assert_eq!(reacted(&history, id)[2], (PARTY.to_owned(), 1, true));
+        assert_eq!(history.reactions.len(), 0);
+    }
+
+    #[test]
+    fn a_failed_request_changes_nothing_is_said_once_and_is_never_repeated() {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        let before = reacted(&history, id);
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        assert_eq!(take_reactions(&mut history), 1);
+        assert!(!history.complete(
+            &rest,
+            reaction_answered(
+                id,
+                emoji(THUMBS),
+                Action::Add,
+                Err(RestError::PermissionDenied)
+            )
+        ));
+        assert_eq!(
+            history.snapshot().notice,
+            Some(reactions::failure(Action::Add, RestError::PermissionDenied))
+        );
+        assert_eq!(reacted(&history, id), before);
+        assert_eq!(history.reactions.len(), 0);
+        assert_eq!(take_reactions(&mut history), 0, "nothing was repeated");
+        let row = reaction_row(&mut history, id);
+        assert!(row.reactions.is_empty());
+
+        // An unconfirmed answer says the request may have been applied; the
+        // chip stays at Discord's count until the Gateway says otherwise.
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        let unconfirmed = RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout));
+        assert!(!history.complete(
+            &rest,
+            reaction_answered(id, emoji(THUMBS), Action::Add, Err(unconfirmed))
+        ));
+        assert!(
+            history
+                .snapshot()
+                .notice
+                .is_some_and(|notice| notice.contains("may have been applied"))
+        );
+        assert_eq!(reacted(&history, id), before);
+        // A refused login is reported to the caller, which stops the account.
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        assert!(history.complete(
+            &rest,
+            reaction_answered(
+                id,
+                emoji(THUMBS),
+                Action::Add,
+                Err(RestError::AuthenticationRequired)
+            )
+        ));
+    }
+
+    #[test]
+    fn removing_a_reaction_that_is_already_gone_is_what_the_user_asked_for() {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        history.toggle_reaction(&rest, CHANNEL, id, custom_emoji(9, "wave"));
+        assert_eq!(history.reactions.of(CHANNEL, id)[0].action, Action::Remove);
+        assert!(!history.complete(
+            &rest,
+            reaction_answered(
+                id,
+                custom_emoji(9, "wave"),
+                Action::Remove,
+                Err(RestError::ResourceGone)
+            )
+        ));
+        assert_eq!(history.snapshot().notice, None);
+        // The last reaction left: the chip is gone.
+        assert_eq!(reacted(&history, id), [(THUMBS.to_owned(), 2, false)]);
+        // Adding to a message that is gone is an error, though.
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        assert!(!history.complete(
+            &rest,
+            reaction_answered(id, emoji(THUMBS), Action::Add, Err(RestError::ResourceGone))
+        ));
+        assert_eq!(
+            history.snapshot().notice,
+            Some(reactions::failure(Action::Add, RestError::ResourceGone))
+        );
+    }
+
+    #[test]
+    fn only_one_request_per_reaction_is_in_flight_and_the_ledger_is_bounded() {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        assert_eq!(history.snapshot().notice, Some(reactions::BUSY));
+        assert_eq!(
+            take_reactions(&mut history),
+            1,
+            "the second click asked nothing"
+        );
+        // A renamed custom emoji is the same reaction.
+        history.toggle_reaction(&rest, CHANNEL, id, custom_emoji(9, "renamed"));
+        history.toggle_reaction(&rest, CHANNEL, id, custom_emoji(9, "wave"));
+        assert_eq!(history.snapshot().notice, Some(reactions::BUSY));
+        take_reactions(&mut history);
+
+        // Sixteen different emoji fill the ledger; the seventeenth is refused.
+        let mut history = sending_history();
+        history.store.set_user(SELF);
+        let message = Box::new(message_with(NEWEST + 1, "popular".to_owned()));
+        history.apply(&Dispatch::MessageCreate(message));
+        let id = Snowflake(NEWEST + 1);
+        history.refresh(&rest, &navigation_reacting(true), &Request::default());
+        for n in 0..reactions::MAX_PENDING as u32 {
+            let name = char::from_u32(0x1f600 + n).unwrap().to_string();
+            history.toggle_reaction(&rest, CHANNEL, id, emoji(&name));
+        }
+        assert_eq!(history.reactions.len(), reactions::MAX_PENDING);
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(PARTY));
+        assert_eq!(history.snapshot().notice, Some(reactions::FULL));
+        assert_eq!(history.reactions.len(), reactions::MAX_PENDING);
+        assert_eq!(take_reactions(&mut history), reactions::MAX_PENDING);
+    }
+
+    #[test]
+    fn a_new_emoji_needs_the_permission_but_joining_an_existing_reaction_does_not() {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        history.refresh(&rest, &navigation_reacting(false), &Request::default());
+        assert!(!history.snapshot().can_react);
+        // Nobody reacted with 🎉 yet: adding it needs ADD_REACTIONS.
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(PARTY));
+        assert_eq!(history.snapshot().notice, Some(NO_REACTIONS));
+        history.add_reaction(&rest, CHANNEL, id, emoji(PARTY));
+        assert_eq!(history.snapshot().notice, Some(NO_REACTIONS));
+        assert_eq!(take_reactions(&mut history), 0);
+        // 👍 already has reactions; adding to it needs only the history, and
+        // taking one's own back needs nothing.
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        history.toggle_reaction(&rest, CHANNEL, id, custom_emoji(9, "wave"));
+        assert_eq!(history.snapshot().notice, None);
+        assert_eq!(take_reactions(&mut history), 2);
+        history.refresh(&rest, &navigation_reacting(true), &Request::default());
+        assert!(history.snapshot().can_react);
+    }
+
+    #[test]
+    fn picking_an_emoji_that_is_already_the_users_asks_nothing() {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        history.add_reaction(&rest, CHANNEL, id, custom_emoji(9, "wave"));
+        assert_eq!(take_reactions(&mut history), 0);
+        assert_eq!(history.snapshot().notice, None);
+        // A pick adds; it never takes a reaction back.
+        history.add_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        assert_eq!(history.reactions.of(CHANNEL, id)[0].action, Action::Add);
+        assert_eq!(take_reactions(&mut history), 1);
+    }
+
+    #[test]
+    fn requests_are_checked_against_the_store_not_against_the_ui() {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        history.toggle_reaction(&rest, Snowflake(1), id, emoji(THUMBS));
+        assert_eq!(history.snapshot().notice, Some(NOT_OPEN));
+        history.toggle_reaction(&rest, CHANNEL, Snowflake(1), emoji(THUMBS));
+        assert_eq!(history.snapshot().notice, Some(NOT_LOADED));
+        // An emoji that cannot be named in a request is refused locally.
+        let nameless = Emoji {
+            id: Some(Snowflake(77)),
+            name: None,
+            animated: false,
+        };
+        history.toggle_reaction(&rest, CHANNEL, id, nameless.clone());
+        assert_eq!(history.snapshot().notice, Some(BAD_EMOJI));
+        history.reaction_users(&rest, CHANNEL, id, nameless);
+        assert_eq!(history.snapshot().notice, Some(BAD_EMOJI));
+        assert_eq!(take_reactions(&mut history), 0);
+        assert!(history.users_pending.is_none());
+    }
+
+    #[test]
+    fn gateway_reactions_keep_held_rows_current_and_leave_everything_else_alone() {
+        let (mut history, id) = reacting_history();
+        history.snapshot();
+        let other = Snowflake(7);
+        history.apply(&gateway_reaction(id, other, emoji(THUMBS), true, false));
+        history.apply(&gateway_reaction(id, other, emoji(PARTY), true, false));
+        assert!(history.dirty());
+        assert_eq!(
+            reacted(&history, id),
+            [
+                (THUMBS.to_owned(), 3, false),
+                ("wave".to_owned(), 1, true),
+                (PARTY.to_owned(), 1, false)
+            ]
+        );
+        // A super reaction counts but is not the user's normal reaction.
+        history.apply(&gateway_reaction(id, SELF, emoji(THUMBS), true, true));
+        assert_eq!(reacted(&history, id)[0], (THUMBS.to_owned(), 4, false));
+        history.apply(&gateway_reaction(id, other, emoji(PARTY), false, false));
+        history.apply(&Dispatch::MessageReactionRemoveEmoji(Box::new(
+            fastcord_discord::gateway::MessageReactionRemoveEmoji {
+                channel_id: CHANNEL,
+                message_id: id,
+                guild_id: None,
+                emoji: emoji(THUMBS),
+            },
+        )));
+        assert_eq!(reacted(&history, id), [("wave".to_owned(), 1, true)]);
+        history.snapshot();
+
+        // Messages that are not held, and other channels, cost nothing.
+        let bytes = history.store.tracked_bytes();
+        for n in 0..1_000 {
+            let missing = Snowflake(n);
+            history.apply(&gateway_reaction(missing, other, emoji(PARTY), true, false));
+            let mut elsewhere = gateway_reaction(id, other, emoji(PARTY), true, false);
+            if let Dispatch::MessageReactionAdd(event) = &mut elsewhere {
+                event.channel_id = Snowflake(1);
+            }
+            history.apply(&elsewhere);
+        }
+        assert_eq!(history.store.tracked_bytes(), bytes);
+        assert!(!history.dirty(), "nothing displayed changed");
+
+        history.apply(&Dispatch::MessageReactionRemoveAll(
+            fastcord_discord::gateway::MessageReactionRemoveAll {
+                channel_id: CHANNEL,
+                message_id: id,
+                guild_id: None,
+            },
+        ));
+        assert!(reacted(&history, id).is_empty());
+        assert!(history.dirty());
+        assert_eq!(history.store.tracked_bytes(), history.store.recount());
+        let row = reaction_row(&mut history, id);
+        assert_eq!(crate::timeline::chips(&row).count(), 0);
+    }
+
+    #[test]
+    fn ready_names_the_account_whose_reactions_are_the_users_own() {
+        let mut history = History::new(Slots::default());
+        history.apply(&Dispatch::Ready(Box::new(
+            fastcord_discord::gateway::Ready {
+                session_id: fastcord_discord::gateway::SessionId::new("fixture-session".to_owned()),
+                user: User {
+                    id: SELF,
+                    username: "alt".to_owned(),
+                    global_name: None,
+                    avatar: None,
+                    bot: false,
+                },
+                users: Vec::new(),
+                guilds: Vec::new(),
+                unavailable_guilds: Vec::new(),
+                private_channels: Vec::new(),
+            },
+        )));
+        open_latest(&mut history);
+        let id = Snowflake(NEWEST + 1);
+        history.apply(&Dispatch::MessageCreate(Box::new(message(id.0))));
+        history.apply(&gateway_reaction(
+            id,
+            Snowflake(7),
+            emoji(THUMBS),
+            true,
+            false,
+        ));
+        history.apply(&gateway_reaction(id, SELF, emoji(PARTY), true, false));
+        assert_eq!(
+            reacted(&history, id),
+            [(THUMBS.to_owned(), 1, false), (PARTY.to_owned(), 1, true)]
+        );
+        // A new session forgets the previous one's messages, not who the user is.
+        history.apply(&Dispatch::MessageReactionRemove(Box::new(
+            MessageReaction {
+                channel_id: CHANNEL,
+                message_id: id,
+                guild_id: None,
+                user_id: SELF,
+                emoji: emoji(PARTY),
+                burst: false,
+            },
+        )));
+        assert_eq!(reacted(&history, id), [(THUMBS.to_owned(), 1, false)]);
+    }
+
+    fn people(n: usize) -> Vec<ReactionUser> {
+        (0..n)
+            .map(|n| ReactionUser {
+                id: Snowflake(1_000 + n as u64),
+                name: format!("person {n}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn who_reacted_is_loaded_only_when_asked_and_stays_bounded() {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        let snapshot = history.snapshot();
+        assert!(snapshot.reaction_users.is_none() && history.users_pending.is_none());
+
+        history.reaction_users(&rest, CHANNEL, id, emoji(THUMBS));
+        assert!(history.users_pending.is_some());
+        let shown = history.snapshot().reaction_users.unwrap();
+        assert_eq!((shown.message, &shown.emoji), (id, &emoji(THUMBS)));
+        assert_eq!(shown.state, UsersState::Loading);
+        let serial = history.inspection.as_ref().unwrap().serial;
+
+        // More than are shown: the first 25 and a note that there are others.
+        assert!(!history.complete(
+            &rest,
+            Completed::ReactionUsers(serial, Ok(people(reactions::MAX_USERS + 1)))
+        ));
+        assert!(history.users_pending.is_none());
+        let UsersState::Loaded { names, more } = history.snapshot().reaction_users.unwrap().state
+        else {
+            panic!("loaded");
+        };
+        assert_eq!((names.len(), more), (reactions::MAX_USERS, true));
+        assert_eq!(names[0], "person 0");
+
+        // Asking about another emoji replaces the list; the replaced one's
+        // late answer is dropped.
+        history.reaction_users(&rest, CHANNEL, id, custom_emoji(9, "wave"));
+        let newer = history.inspection.as_ref().unwrap().serial;
+        assert_ne!(newer, serial);
+        history.complete(&rest, Completed::ReactionUsers(serial, Ok(people(2))));
+        assert_eq!(
+            history.snapshot().reaction_users.unwrap().state,
+            UsersState::Loading
+        );
+        history.complete(&rest, Completed::ReactionUsers(newer, Ok(people(2))));
+        assert_eq!(
+            history.snapshot().reaction_users.unwrap().state,
+            UsersState::Loaded {
+                names: vec!["person 0".to_owned(), "person 1".to_owned()],
+                more: false
+            }
+        );
+
+        // A failure is a fixed sentence; closing drops list and request.
+        history.reaction_users(&rest, CHANNEL, id, emoji(THUMBS));
+        let failed = history.inspection.as_ref().unwrap().serial;
+        assert!(history.complete(
+            &rest,
+            Completed::ReactionUsers(failed, Err(RestError::AuthenticationRequired))
+        ));
+        assert!(matches!(
+            history.snapshot().reaction_users.unwrap().state,
+            UsersState::Failed(_)
+        ));
+        history.reaction_users(&rest, CHANNEL, id, emoji(THUMBS));
+        history.close_reaction_users();
+        assert!(history.snapshot().reaction_users.is_none());
+        assert!(history.users_pending.is_none());
+
+        // A list belongs to its row: without the message it goes.
+        history.reaction_users(&rest, CHANNEL, id, emoji(THUMBS));
+        history.apply(&Dispatch::MessageDelete(MessageDelete {
+            id,
+            channel_id: CHANNEL,
+            guild_id: None,
+        }));
+        history.refresh(&rest, &navigation_reacting(true), &Request::default());
+        assert!(history.snapshot().reaction_users.is_none());
+        assert!(history.users_pending.is_none());
+    }
+
+    #[test]
+    fn a_new_session_or_channel_drops_the_list_but_not_requests_in_flight() {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        history.toggle_reaction(&rest, CHANNEL, id, emoji(THUMBS));
+        history.reaction_users(&rest, CHANNEL, id, emoji(THUMBS));
+        history.refresh(&rest, &NavigationSnapshot::default(), &Request::default());
+        assert!(history.inspection.is_none() && history.users_pending.is_none());
+        // The request is still answered; its answer meets an empty store.
+        assert_eq!(history.reaction_requests.len(), 1);
+        assert!(!history.complete(
+            &rest,
+            reaction_answered(id, emoji(THUMBS), Action::Add, Ok(()))
+        ));
+        assert_eq!(history.reactions.len(), 0);
+        assert_eq!(history.store.messages_held(), 0);
+        assert_eq!(history.store.tracked_bytes(), history.store.recount());
     }
 }

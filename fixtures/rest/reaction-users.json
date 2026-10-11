@@ -1,0 +1,30 @@
+[
+  {
+    "id": "2",
+    "username": "alt_fixture",
+    "global_name": "Alt Account",
+    "avatar": null,
+    "discriminator": "0",
+    "public_flags": 0,
+    "avatar_decoration_data": null,
+    "primary_guild": null
+  },
+  {
+    "id": "3",
+    "username": "other_fixture",
+    "global_name": null,
+    "avatar": "fixtureavatarhash00000000000000000",
+    "discriminator": "0",
+    "public_flags": 64,
+    "banner_color": null
+  },
+  {
+    "id": "1290000000000000444",
+    "username": "third_fixture",
+    "global_name": "Zo\u00eb Fixture",
+    "avatar": null,
+    "discriminator": "0",
+    "bot": true,
+    "public_flags": 0
+  }
+]

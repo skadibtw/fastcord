@@ -128,6 +128,19 @@ asks for confirmation in the message itself. A change that Discord did not
 confirm stays on the message with Retry and Dismiss; fastcord never retries by
 itself. Edits and deletions made in another client appear here as well.
 
+## Reactions
+
+Reactions appear as chips under a message: the emoji and how many people used
+it, highlighted when you did. Click a chip to add your reaction or take it
+back; point at a message and press **React** (or the **+** after its chips) to
+choose another emoji in the picker. Right-click a chip to see who reacted, which
+is loaded only then (the first 25 names). A reaction you just asked for looks
+selected but stays disabled until Discord confirms it. If Discord refuses it,
+the reason appears above the message box and fastcord does not try again by
+itself. Only normal reactions are offered. Reactions added, removed, or cleared
+in other clients appear here too; fastcord keeps counts and your own reaction,
+never the full list of who reacted.
+
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).

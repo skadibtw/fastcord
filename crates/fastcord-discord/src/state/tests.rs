@@ -692,6 +692,41 @@ fn guild_message_markers_advance_and_message_deletes_change_nothing_here() {
     check(&store);
 }
 
+#[test]
+fn reaction_events_never_change_navigation_metadata_or_the_ledger() {
+    let mut store = ready_store();
+    let before = store.bytes();
+    for (name, raw) in [
+        (
+            "MESSAGE_REACTION_ADD",
+            include_str!("../../../../fixtures/gateway/message_reaction_add.json"),
+        ),
+        (
+            "MESSAGE_REACTION_ADD",
+            include_str!("../../../../fixtures/gateway/message_reaction_add_custom.json"),
+        ),
+        (
+            "MESSAGE_REACTION_ADD",
+            include_str!("../../../../fixtures/gateway/message_reaction_add_burst.json"),
+        ),
+        (
+            "MESSAGE_REACTION_REMOVE",
+            include_str!("../../../../fixtures/gateway/message_reaction_remove.json"),
+        ),
+        (
+            "MESSAGE_REACTION_REMOVE_ALL",
+            include_str!("../../../../fixtures/gateway/message_reaction_remove_all.json"),
+        ),
+        (
+            "MESSAGE_REACTION_REMOVE_EMOJI",
+            include_str!("../../../../fixtures/gateway/message_reaction_remove_emoji.json"),
+        ),
+    ] {
+        assert!(apply(&mut store, name, raw).is_empty(), "{name}");
+    }
+    assert_eq!(store.bytes(), before);
+}
+
 // ----- retention -----
 
 fn big_guild(guild: u64, channels: u64) -> Guild {

@@ -34,6 +34,16 @@
 //! (an update to a message that was not cached) makes the response
 //! [`PageMerge::Stale`] instead of guessing; a stale response changes nothing
 //! and the caller asks again.
+//!
+//! # Reactions
+//! Reactions are kept as aggregates (a count and the account's own state per
+//! emoji, never the reacting users) and follow the rules of an update. A
+//! retained message changes copy-on-write, and only when the event changes what
+//! it shows: the Gateway's echo of a reaction a REST answer already applied is
+//! a no-op. The journaled copy of a message created while a request is in
+//! flight takes the change; for any other message the event is only noted for
+//! the request in flight. An event for a message that is not retained
+//! allocates nothing and never creates a run.
 
 #[cfg(test)]
 mod tests;
@@ -46,7 +56,8 @@ use std::slice;
 use std::sync::Arc;
 
 use fastcord_model::{
-    Attachment, Message, MessageUpdate, Reaction, Referenced, ReplyPreview, Snowflake, User,
+    Attachment, Message, MessageUpdate, Reaction, ReactionChange, Referenced, ReplyPreview,
+    Snowflake, User,
 };
 
 use crate::gateway::Dispatch;
@@ -320,6 +331,32 @@ impl Pending {
             self.touched_overflow = true;
         } else {
             self.touched.push(id);
+        }
+    }
+
+    /// Applies a reaction change to the journaled copy `created[at]` of a
+    /// message created while this request is in flight, so the response cannot
+    /// bring back an older copy without it. `elsewhere` is what the other
+    /// requests have journaled. A copy that would outgrow
+    /// [`MAX_MESSAGE_BYTES`] or the journal is dropped and the creates marked
+    /// incomplete instead, as for a create that does not fit.
+    fn change_created(&mut self, at: usize, change: ReactionChange<'_>, elsewhere: usize) {
+        let created = &mut self.created[at];
+        if !created.message.alters_reactions(change) {
+            return;
+        }
+        let before = created.bytes;
+        let message = Arc::make_mut(&mut created.message);
+        message.apply_reaction(change);
+        let after = message_bytes(message);
+        let journaled = elsewhere + self.created_bytes - before + after;
+        if after > MAX_MESSAGE_BYTES || journaled > JOURNAL_CREATE_BUDGET {
+            self.created_bytes -= before;
+            self.created.remove(at);
+            self.created_incomplete = true;
+        } else {
+            created.bytes = after;
+            self.created_bytes = self.created_bytes - before + after;
         }
     }
 
@@ -644,11 +681,22 @@ pub struct MessageStore {
     revision: u64,
     serial: u64,
     tick: u64,
+    /// The account whose own reactions set [`Reaction::me`].
+    user: Option<Snowflake>,
 }
 
 impl MessageStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Names the account whose reactions set [`Reaction::me`]: a reaction event
+    /// by this user is the account's own. Until it is called every reaction
+    /// counts as someone else's. [`clear`](Self::clear) keeps it, since it drops
+    /// messages, not the identity of who is reading them; a different account
+    /// calls this again.
+    pub fn set_user(&mut self, user: Snowflake) {
+        self.user = Some(user);
     }
 
     // ----- reads -----
@@ -1084,7 +1132,16 @@ impl MessageStore {
     ///   a message that is not held cannot be updated, and a request in flight
     ///   learns of it;
     /// * delete and bulk delete: remove held messages, and suppress them in any
-    ///   response still in flight. No tombstone outlives that request.
+    ///   response still in flight. No tombstone outlives that request;
+    /// * reaction add, remove, remove emoji, and remove all: change the
+    ///   aggregate of a held message, but only when that alters it (a repeated
+    ///   event, or the echo of the account's own reaction, is no change and
+    ///   keeps the revision and the shared handle). A message that is not held
+    ///   gets nothing: not a run, not any state. A request in flight is
+    ///   updated instead: the journaled copy of a message created meanwhile
+    ///   takes the change, any other message is noted like an update to one
+    ///   that is not cached. Reactions by the user named with
+    ///   [`set_user`](Self::set_user) are the account's own.
     pub fn apply_dispatch(&mut self, event: &Dispatch) -> StoreChange {
         match event {
             Dispatch::MessageCreate(message) => self.gateway_create(message),
@@ -1095,6 +1152,34 @@ impl MessageStore {
             Dispatch::MessageDeleteBulk(deleted) => {
                 self.gateway_delete(deleted.channel_id, &deleted.ids)
             }
+            Dispatch::MessageReactionAdd(reaction) => self.gateway_reaction(
+                reaction.channel_id,
+                reaction.message_id,
+                ReactionChange::Add {
+                    emoji: &reaction.emoji,
+                    by_me: self.user == Some(reaction.user_id),
+                    burst: reaction.burst,
+                },
+            ),
+            Dispatch::MessageReactionRemove(reaction) => self.gateway_reaction(
+                reaction.channel_id,
+                reaction.message_id,
+                ReactionChange::Remove {
+                    emoji: &reaction.emoji,
+                    by_me: self.user == Some(reaction.user_id),
+                    burst: reaction.burst,
+                },
+            ),
+            Dispatch::MessageReactionRemoveEmoji(removed) => self.gateway_reaction(
+                removed.channel_id,
+                removed.message_id,
+                ReactionChange::RemoveEmoji(&removed.emoji),
+            ),
+            Dispatch::MessageReactionRemoveAll(removed) => self.gateway_reaction(
+                removed.channel_id,
+                removed.message_id,
+                ReactionChange::RemoveAll,
+            ),
             _ => StoreChange::default(),
         }
     }
@@ -1157,60 +1242,133 @@ impl MessageStore {
         change
     }
 
-    fn gateway_update(&mut self, update: &MessageUpdate) -> StoreChange {
-        let channel = update.channel_id;
-        let mut change = StoreChange {
+    /// The cache index and position of a retained message.
+    fn held(&self, channel: Snowflake, id: Snowflake) -> Option<(usize, usize)> {
+        let ci = self.index(channel)?;
+        let at = self.channels[ci].position(id).ok()?;
+        Some((ci, at))
+    }
+
+    /// Drops a retained message that no longer fits [`MAX_MESSAGE_BYTES`]
+    /// (never truncated), and has any request in flight suppress its older copy.
+    fn reject_held(&mut self, ci: usize, at: usize) -> StoreChange {
+        let channel = self.channels[ci].id;
+        let id = self.channels[ci].messages[at].id;
+        self.channels[ci].remove_at(at);
+        self.note_deleted(channel, id);
+        StoreChange {
             channel: Some(channel),
-            ..StoreChange::default()
-        };
-        let held = self.index(channel).and_then(|ci| {
-            self.channels[ci]
-                .position(update.id)
-                .ok()
-                .map(|at| (ci, at))
-        });
-        let Some((ci, at)) = held else {
-            // Nothing is held to merge into; a response in flight may carry the
-            // copy from before this update.
-            if update.has_fields() {
-                self.note_touched(channel, update.id);
-            }
-            return change;
-        };
-        if !update.alters(&self.channels[ci].messages[at].message) {
-            return change;
+            changed: true,
+            rejected: 1,
         }
+    }
+
+    /// Changes the retained message at `channels[ci].messages[at]` in place
+    /// through `edit` and settles its ledgers: a new revision and byte count,
+    /// or removal when it no longer fits [`MAX_MESSAGE_BYTES`].
+    fn edit_held(&mut self, ci: usize, at: usize, edit: impl FnOnce(&mut Message)) -> StoreChange {
         let cache = &mut self.channels[ci];
-        if update_heap(update) > MAX_MESSAGE_BYTES {
-            cache.remove_at(at);
-            self.note_deleted(channel, update.id);
-            change.changed = true;
-            change.rejected = 1;
-            return change;
-        }
+        let channel = cache.id;
+        let slot = &mut cache.messages[at];
+        let before = slot.bytes;
         // Copy-on-write: a consumer still holding the previous handle keeps it.
-        let (before, after) = {
-            let slot = &mut cache.messages[at];
-            let before = slot.bytes;
-            let message = Arc::make_mut(&mut slot.message);
-            message.apply(update.clone());
-            (before, message_bytes(message))
-        };
+        let message = Arc::make_mut(&mut slot.message);
+        edit(message);
+        let after = message_bytes(message);
         if after > MAX_MESSAGE_BYTES {
-            cache.remove_at(at);
-            self.note_deleted(channel, update.id);
-            change.changed = true;
-            change.rejected = 1;
-            return change;
+            return self.reject_held(ci, at);
         }
         self.revision += 1;
         let slot = &mut cache.messages[at];
         slot.bytes = after;
         slot.revision = self.revision;
         cache.slot_bytes = cache.slot_bytes - before + after;
-        change.changed = true;
         self.enforce_budget();
-        change
+        StoreChange {
+            channel: Some(channel),
+            changed: true,
+            rejected: 0,
+        }
+    }
+
+    fn gateway_update(&mut self, update: &MessageUpdate) -> StoreChange {
+        let channel = update.channel_id;
+        let unchanged = StoreChange {
+            channel: Some(channel),
+            ..StoreChange::default()
+        };
+        let Some((ci, at)) = self.held(channel, update.id) else {
+            // Nothing is held to merge into; a response in flight may carry the
+            // copy from before this update.
+            if update.has_fields() {
+                self.note_touched(channel, update.id);
+            }
+            return unchanged;
+        };
+        if !update.alters(&self.channels[ci].messages[at].message) {
+            return unchanged;
+        }
+        if update_heap(update) > MAX_MESSAGE_BYTES {
+            return self.reject_held(ci, at);
+        }
+        self.edit_held(ci, at, |message| message.apply(update.clone()))
+    }
+
+    fn gateway_reaction(
+        &mut self,
+        channel: Snowflake,
+        id: Snowflake,
+        change: ReactionChange<'_>,
+    ) -> StoreChange {
+        let unchanged = StoreChange {
+            channel: Some(channel),
+            ..StoreChange::default()
+        };
+        let Some((ci, at)) = self.held(channel, id) else {
+            self.reaction_unheld(channel, id, change);
+            return unchanged;
+        };
+        if !self.channels[ci].messages[at]
+            .message
+            .alters_reactions(change)
+        {
+            return unchanged;
+        }
+        self.edit_held(ci, at, |message| {
+            message.apply_reaction(change);
+        })
+    }
+
+    /// A reaction event for a message that is not retained. Nothing is
+    /// allocated or kept for the message, but a request in flight for the
+    /// channel may carry an older copy of it: the copy created while the
+    /// request is in flight takes the change, and any other message is noted
+    /// like an update to an uncached one. Without such a request nothing at
+    /// all happens.
+    fn reaction_unheld(&mut self, channel: Snowflake, id: Snowflake, change: ReactionChange<'_>) {
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|pending| pending.token.channel == channel)
+        else {
+            return;
+        };
+        let Some(at) = self.pending[index]
+            .created
+            .iter()
+            .position(|created| created.message.id == id)
+        else {
+            self.pending[index].note_touched(id);
+            return;
+        };
+        let elsewhere = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|&(other, _)| other != index)
+            .map(|(_, pending)| pending.created_bytes)
+            .sum();
+        self.pending[index].change_created(at, change, elsewhere);
     }
 
     fn gateway_delete(&mut self, channel: Snowflake, ids: &[Snowflake]) -> StoreChange {
@@ -1319,7 +1477,8 @@ impl MessageStore {
     }
 
     /// Drops everything and releases the allocations: logout, a new session's
-    /// `READY`. Tokens issued before are stale. Revisions are never reused.
+    /// `READY`. Tokens issued before are stale. Revisions are never reused. The
+    /// account named by [`set_user`](Self::set_user) stays.
     pub fn clear(&mut self) {
         self.channels = Vec::new();
         self.pending = Vec::new();

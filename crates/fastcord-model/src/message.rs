@@ -12,6 +12,14 @@ pub const REPLY_KIND: u8 = 19;
 /// for the one line a reply shows above itself, never the whole body.
 pub const REPLY_PREVIEW_CHARS: usize = 200;
 
+/// Most distinct reaction emoji one message keeps. Discord allows 20 normal and
+/// 5 burst emoji per message; the headroom covers their union.
+pub const MAX_REACTIONS: usize = 32;
+
+/// Longest reaction emoji `name` in bytes accepted from an event or put in a
+/// request path: far above any Unicode sequence or custom emoji name.
+pub const MAX_REACTION_EMOJI_NAME_BYTES: usize = 64;
+
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub id: Snowflake,
@@ -51,12 +59,73 @@ pub struct Emoji {
     pub animated: bool,
 }
 
+impl Emoji {
+    /// Whether both name the same reaction target. A custom emoji is identified
+    /// by its ID alone, so a rename (or the missing name of a deleted emoji)
+    /// never splits a reaction; a Unicode emoji (no ID) by its exact, non-empty
+    /// name. An emoji with neither is no reaction's target, not even its own.
+    pub fn same_reaction(&self, other: &Emoji) -> bool {
+        match (self.id, other.id) {
+            (Some(ours), Some(theirs)) => ours == theirs,
+            (None, None) => match (&self.name, &other.name) {
+                (Some(ours), Some(theirs)) => !ours.is_empty() && ours == theirs,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+}
+
+/// One emoji's reactions on a message, kept as an aggregate: how many users
+/// reacted with it and whether the current user's own reaction is among them.
+/// The reacting users themselves are never stored (SPEC §9).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Reaction {
+    /// Every reaction with this emoji, normal and burst together.
     pub count: u32,
+    /// The current user reacted normally with this emoji. A burst reaction
+    /// never sets it.
     #[serde(default)]
     pub me: bool,
     pub emoji: Emoji,
+}
+
+/// One change to a message's reaction aggregate, as the Gateway reports it. It
+/// borrows the emoji, so applying an event allocates nothing.
+///
+/// `by_me` is whether the reacting user is the current account and `burst`
+/// whether the reaction is a burst (super) reaction. Both kinds count toward
+/// [`Reaction::count`]; only the account's own normal reaction sets
+/// [`Reaction::me`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReactionChange<'a> {
+    /// A user reacted.
+    Add {
+        emoji: &'a Emoji,
+        by_me: bool,
+        burst: bool,
+    },
+    /// A user took a reaction back.
+    Remove {
+        emoji: &'a Emoji,
+        by_me: bool,
+        burst: bool,
+    },
+    /// Every reaction with this emoji was removed.
+    RemoveEmoji(&'a Emoji),
+    /// Every reaction was removed.
+    RemoveAll,
+}
+
+/// What a [`ReactionChange`] does to a message's reactions, decided without
+/// changing anything, so that [`Message::alters_reactions`] and
+/// [`Message::apply_reaction`] cannot disagree.
+enum ReactionEdit<'a> {
+    Keep,
+    Push { emoji: &'a Emoji, me: bool },
+    Update { at: usize, count: u32, me: bool },
+    Remove { at: usize },
+    Clear,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -283,6 +352,111 @@ impl Message {
             .then_some(reference.message_id)
             .flatten()
     }
+
+    /// Whether [`apply_reaction`](Self::apply_reaction) would change this
+    /// message. Pure, so a caller can skip the copy-on-write for an event that
+    /// repeats what the message already shows: the Gateway's echo of a reaction
+    /// a REST answer applied first, and the other way around.
+    pub fn alters_reactions(&self, change: ReactionChange<'_>) -> bool {
+        !matches!(self.reaction_edit(change), ReactionEdit::Keep)
+    }
+
+    /// Applies one change to the reaction aggregate and reports whether the
+    /// message changed. Entries are found with [`Emoji::same_reaction`] and
+    /// keep their first-seen order.
+    ///
+    /// * Add: the account's own normal reaction sets `me` and counts once;
+    ///   repeating it changes nothing. A burst reaction, or one by anyone else,
+    ///   only counts. A new emoji gets an entry unless [`MAX_REACTIONS`] are
+    ///   already held.
+    /// * Remove: the account's own normal reaction clears `me` and lowers the
+    ///   count (nothing happens when `me` is not set); any other removal only
+    ///   lowers the count. An entry whose count reaches zero is dropped, and an
+    ///   emoji that has no entry changes nothing.
+    /// * Removing an emoji drops its entry; removing all drops every entry.
+    ///
+    /// Counts saturate. A structural change compacts the stored vector, since
+    /// the message store accounts for allocations by capacity.
+    pub fn apply_reaction(&mut self, change: ReactionChange<'_>) -> bool {
+        match self.reaction_edit(change) {
+            ReactionEdit::Keep => return false,
+            ReactionEdit::Update { at, count, me } => {
+                let reaction = &mut self.reactions[at];
+                reaction.count = count;
+                reaction.me = me;
+                return true;
+            }
+            ReactionEdit::Push { emoji, me } => self.reactions.push(Reaction {
+                count: 1,
+                me,
+                emoji: emoji.clone(),
+            }),
+            ReactionEdit::Remove { at } => {
+                self.reactions.remove(at);
+            }
+            ReactionEdit::Clear => self.reactions.clear(),
+        }
+        self.reactions.shrink_to_fit();
+        true
+    }
+
+    fn reaction_edit<'a>(&self, change: ReactionChange<'a>) -> ReactionEdit<'a> {
+        let find = |emoji: &Emoji| {
+            self.reactions
+                .iter()
+                .position(|held| held.emoji.same_reaction(emoji))
+        };
+        match change {
+            ReactionChange::Add {
+                emoji,
+                by_me,
+                burst,
+            } => {
+                let own = by_me && !burst;
+                let Some(at) = find(emoji) else {
+                    return if self.reactions.len() < MAX_REACTIONS {
+                        ReactionEdit::Push { emoji, me: own }
+                    } else {
+                        ReactionEdit::Keep
+                    };
+                };
+                let held = &self.reactions[at];
+                let (count, me) = (held.count.saturating_add(1), held.me || own);
+                if (own && held.me) || (count, me) == (held.count, held.me) {
+                    ReactionEdit::Keep
+                } else {
+                    ReactionEdit::Update { at, count, me }
+                }
+            }
+            ReactionChange::Remove {
+                emoji,
+                by_me,
+                burst,
+            } => {
+                let own = by_me && !burst;
+                let Some(at) = find(emoji) else {
+                    return ReactionEdit::Keep;
+                };
+                let held = &self.reactions[at];
+                if own && !held.me {
+                    return ReactionEdit::Keep;
+                }
+                match held.count.saturating_sub(1) {
+                    0 => ReactionEdit::Remove { at },
+                    count => ReactionEdit::Update {
+                        at,
+                        count,
+                        me: held.me && !own,
+                    },
+                }
+            }
+            ReactionChange::RemoveEmoji(emoji) => {
+                find(emoji).map_or(ReactionEdit::Keep, |at| ReactionEdit::Remove { at })
+            }
+            ReactionChange::RemoveAll if self.reactions.is_empty() => ReactionEdit::Keep,
+            ReactionChange::RemoveAll => ReactionEdit::Clear,
+        }
+    }
 }
 
 // Bodies and signed attachment URLs never reach a default logging path.
@@ -301,5 +475,471 @@ impl fmt::Debug for MessageUpdate {
             .field("id", &self.id)
             .field("channel_id", &self.channel_id)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unicode(name: &str) -> Emoji {
+        Emoji {
+            id: None,
+            name: Some(name.to_owned()),
+            animated: false,
+        }
+    }
+
+    fn custom(id: u64, name: Option<&str>) -> Emoji {
+        Emoji {
+            id: Some(Snowflake(id)),
+            name: name.map(str::to_owned),
+            animated: false,
+        }
+    }
+
+    fn reacted(reactions: &[(&Emoji, u32, bool)]) -> Message {
+        Message {
+            id: Snowflake(1),
+            channel_id: Snowflake(2),
+            guild_id: None,
+            author: User {
+                id: Snowflake(3),
+                username: "author".to_owned(),
+                global_name: None,
+                avatar: None,
+                bot: false,
+            },
+            content: "text".to_owned(),
+            timestamp: "2026-10-07T12:00:00.000000+00:00".to_owned(),
+            edited_timestamp: None,
+            kind: 0,
+            flags: 0,
+            pinned: false,
+            attachments: Vec::new(),
+            reactions: reactions
+                .iter()
+                .map(|&(emoji, count, me)| Reaction {
+                    count,
+                    me,
+                    emoji: emoji.clone(),
+                })
+                .collect(),
+            message_reference: None,
+            referenced_message: Referenced::Unknown,
+            nonce: None,
+        }
+    }
+
+    /// `(who, count, me)` per entry, in order; `who` is `#id` for a custom
+    /// emoji and the name for a Unicode one.
+    fn shown(message: &Message) -> Vec<(String, u32, bool)> {
+        message
+            .reactions
+            .iter()
+            .map(|reaction| {
+                let who = match (reaction.emoji.id, &reaction.emoji.name) {
+                    (Some(id), _) => format!("#{id}"),
+                    (None, name) => name.clone().unwrap_or_default(),
+                };
+                (who, reaction.count, reaction.me)
+            })
+            .collect()
+    }
+
+    fn expected(entries: &[(&str, u32, bool)]) -> Vec<(String, u32, bool)> {
+        entries
+            .iter()
+            .map(|&(who, count, me)| (who.to_owned(), count, me))
+            .collect()
+    }
+
+    fn add(emoji: &Emoji, by_me: bool) -> ReactionChange<'_> {
+        ReactionChange::Add {
+            emoji,
+            by_me,
+            burst: false,
+        }
+    }
+
+    fn burst_add(emoji: &Emoji, by_me: bool) -> ReactionChange<'_> {
+        ReactionChange::Add {
+            emoji,
+            by_me,
+            burst: true,
+        }
+    }
+
+    fn remove(emoji: &Emoji, by_me: bool) -> ReactionChange<'_> {
+        ReactionChange::Remove {
+            emoji,
+            by_me,
+            burst: false,
+        }
+    }
+
+    fn burst_remove(emoji: &Emoji, by_me: bool) -> ReactionChange<'_> {
+        ReactionChange::Remove {
+            emoji,
+            by_me,
+            burst: true,
+        }
+    }
+
+    const UP: &str = "\u{1f44d}";
+    const DOWN: &str = "\u{1f44e}";
+
+    #[test]
+    fn unicode_emoji_are_the_same_reaction_by_exact_non_empty_name() {
+        let up = unicode(UP);
+        let animated = Emoji {
+            animated: true,
+            ..up.clone()
+        };
+        assert!(up.same_reaction(&up.clone()));
+        assert!(
+            up.same_reaction(&animated),
+            "the animated flag is no identity"
+        );
+        assert!(!up.same_reaction(&unicode(DOWN)));
+        // A variation selector or a skin tone is a different emoji.
+        assert!(!unicode("\u{2764}").same_reaction(&unicode("\u{2764}\u{fe0f}")));
+        assert!(!up.same_reaction(&unicode("\u{1f44d}\u{1f3fd}")));
+        assert!(!unicode("a").same_reaction(&unicode("A")));
+        // Without a name there is no identity, not even equal to itself.
+        for nameless in [
+            unicode(""),
+            Emoji {
+                id: None,
+                name: None,
+                animated: false,
+            },
+        ] {
+            assert!(!nameless.same_reaction(&nameless.clone()));
+            assert!(!nameless.same_reaction(&up));
+            assert!(!up.same_reaction(&nameless));
+        }
+    }
+
+    #[test]
+    fn custom_emoji_are_the_same_reaction_by_id_alone() {
+        let wave = custom(777, Some("wave"));
+        assert!(
+            wave.same_reaction(&custom(777, Some("renamed"))),
+            "a rename does not split a reaction"
+        );
+        assert!(
+            wave.same_reaction(&custom(777, None)),
+            "nor does the missing name of a deleted emoji"
+        );
+        assert!(custom(777, None).same_reaction(&custom(777, None)));
+        assert!(wave.same_reaction(&Emoji {
+            animated: true,
+            ..wave.clone()
+        }));
+        assert!(
+            !wave.same_reaction(&custom(778, Some("wave"))),
+            "another emoji that happens to share the name"
+        );
+    }
+
+    #[test]
+    fn unicode_and_custom_emoji_never_share_a_reaction() {
+        assert!(!unicode("wave").same_reaction(&custom(777, Some("wave"))));
+        assert!(!custom(777, Some("wave")).same_reaction(&unicode("wave")));
+        assert!(!custom(777, None).same_reaction(&unicode("")));
+
+        let mut message = reacted(&[]);
+        assert!(message.apply_reaction(add(&unicode("wave"), false)));
+        assert!(message.apply_reaction(add(&custom(777, Some("wave")), false)));
+        assert_eq!(
+            shown(&message),
+            expected(&[("wave", 1, false), ("#777", 1, false)])
+        );
+    }
+
+    #[test]
+    fn adding_gives_each_emoji_an_entry_and_counts_every_reaction() {
+        let (up, down) = (unicode(UP), unicode(DOWN));
+        let mut message = reacted(&[]);
+        assert!(message.alters_reactions(add(&up, false)));
+        assert!(message.apply_reaction(add(&up, false)));
+        assert_eq!(shown(&message), expected(&[(UP, 1, false)]));
+        // Another user with the same emoji only counts.
+        assert!(message.apply_reaction(add(&up, false)));
+        assert_eq!(shown(&message), expected(&[(UP, 2, false)]));
+        // The account itself counts and is marked.
+        assert!(message.apply_reaction(add(&up, true)));
+        assert_eq!(shown(&message), expected(&[(UP, 3, true)]));
+        // A new emoji by the account starts marked, after the first-seen one.
+        assert!(message.apply_reaction(add(&down, true)));
+        assert_eq!(shown(&message), expected(&[(UP, 3, true), (DOWN, 1, true)]));
+        // Someone else's reaction never clears or sets the account's.
+        assert!(message.apply_reaction(add(&down, false)));
+        assert_eq!(shown(&message), expected(&[(UP, 3, true), (DOWN, 2, true)]));
+    }
+
+    #[test]
+    fn the_accounts_own_reaction_applies_once_whichever_of_rest_and_gateway_comes_first() {
+        let up = unicode(UP);
+        let mut message = reacted(&[(&up, 1, false)]);
+        // Added: the REST answer and the Gateway echo are the same change.
+        assert!(message.alters_reactions(add(&up, true)));
+        assert!(message.apply_reaction(add(&up, true)));
+        let once = message.clone();
+        assert!(!message.alters_reactions(add(&up, true)));
+        assert!(!message.apply_reaction(add(&up, true)));
+        assert_eq!(message, once);
+        assert_eq!(shown(&message), expected(&[(UP, 2, true)]));
+        // Removed: likewise, and the other user's reaction stays.
+        assert!(message.alters_reactions(remove(&up, true)));
+        assert!(message.apply_reaction(remove(&up, true)));
+        let once = message.clone();
+        assert!(!message.alters_reactions(remove(&up, true)));
+        assert!(!message.apply_reaction(remove(&up, true)));
+        assert_eq!(message, once);
+        assert_eq!(shown(&message), expected(&[(UP, 1, false)]));
+        // Nothing held at all: nothing to take back.
+        let mut empty = reacted(&[]);
+        assert!(!empty.apply_reaction(remove(&up, true)));
+        assert!(empty.reactions.is_empty());
+    }
+
+    #[test]
+    fn burst_reactions_count_but_never_touch_the_accounts_own_state() {
+        let up = unicode(UP);
+        let mut message = reacted(&[]);
+        // The account's first reaction is a burst: counted, not marked.
+        assert!(message.apply_reaction(burst_add(&up, true)));
+        assert_eq!(shown(&message), expected(&[(UP, 1, false)]));
+        // A burst is not idempotent: each one counts.
+        assert!(message.apply_reaction(burst_add(&up, true)));
+        assert_eq!(shown(&message), expected(&[(UP, 2, false)]));
+        assert!(message.apply_reaction(add(&up, true)));
+        assert_eq!(shown(&message), expected(&[(UP, 3, true)]));
+        assert!(message.apply_reaction(burst_add(&up, true)));
+        assert!(message.apply_reaction(burst_add(&up, false)));
+        assert_eq!(shown(&message), expected(&[(UP, 5, true)]));
+        // Taking a burst back lowers the count and leaves the normal reaction.
+        assert!(message.apply_reaction(burst_remove(&up, true)));
+        assert_eq!(shown(&message), expected(&[(UP, 4, true)]));
+        let mut unmarked = reacted(&[(&up, 2, false)]);
+        assert!(unmarked.apply_reaction(burst_remove(&up, true)));
+        assert_eq!(shown(&unmarked), expected(&[(UP, 1, false)]));
+        assert!(unmarked.apply_reaction(burst_remove(&up, false)));
+        assert!(unmarked.reactions.is_empty());
+    }
+
+    #[test]
+    fn removing_lowers_the_count_and_drops_an_entry_that_reaches_zero_keeping_the_order() {
+        let (a, b) = (unicode("a"), unicode("b"));
+        let wave = custom(7, Some("wave"));
+        let mut message = reacted(&[(&a, 1, false), (&b, 2, true), (&wave, 1, false)]);
+        // An emoji with no entry changes nothing.
+        assert!(!message.alters_reactions(remove(&unicode("zzz"), false)));
+        assert!(!message.apply_reaction(remove(&unicode("zzz"), false)));
+        // Someone else's removal leaves the account's own state alone.
+        assert!(message.apply_reaction(remove(&b, false)));
+        assert_eq!(
+            shown(&message),
+            expected(&[("a", 1, false), ("b", 1, true), ("#7", 1, false)])
+        );
+        // The last reaction goes with the entry, wherever it is in the list.
+        assert!(message.apply_reaction(remove(&b, true)));
+        assert_eq!(
+            shown(&message),
+            expected(&[("a", 1, false), ("#7", 1, false)])
+        );
+        // A renamed custom emoji is still found by its ID.
+        assert!(message.apply_reaction(remove(&custom(7, Some("renamed")), false)));
+        assert_eq!(shown(&message), expected(&[("a", 1, false)]));
+        assert!(message.apply_reaction(remove(&a, false)));
+        assert!(message.reactions.is_empty());
+
+        // The account's own removal clears `me` and counts down.
+        let mut message = reacted(&[(&a, 3, true)]);
+        assert!(message.apply_reaction(remove(&a, true)));
+        assert_eq!(shown(&message), expected(&[("a", 2, false)]));
+    }
+
+    #[test]
+    fn an_entry_stored_with_a_zero_count_goes_with_the_next_removal() {
+        // Discord should never report one; a removal cleans it up instead of
+        // underflowing.
+        let a = unicode("a");
+        let mut message = reacted(&[(&a, 0, false)]);
+        assert!(message.apply_reaction(remove(&a, false)));
+        assert!(message.reactions.is_empty());
+    }
+
+    #[test]
+    fn removing_an_emoji_or_everything_ignores_counts_and_self_state() {
+        let a = unicode("a");
+        let wave = custom(7, Some("wave"));
+        let mut message = reacted(&[(&a, 5, true), (&wave, 2, false)]);
+        assert!(!message.alters_reactions(ReactionChange::RemoveEmoji(&unicode("zzz"))));
+        assert!(!message.apply_reaction(ReactionChange::RemoveEmoji(&unicode("zzz"))));
+        assert!(message.apply_reaction(ReactionChange::RemoveEmoji(&custom(7, None))));
+        assert_eq!(shown(&message), expected(&[("a", 5, true)]));
+        assert!(message.alters_reactions(ReactionChange::RemoveAll));
+        assert!(message.apply_reaction(ReactionChange::RemoveAll));
+        assert!(message.reactions.is_empty());
+        assert_eq!(
+            message.reactions.capacity(),
+            0,
+            "the allocation is released too"
+        );
+        assert!(!message.alters_reactions(ReactionChange::RemoveAll));
+        assert!(!message.apply_reaction(ReactionChange::RemoveAll));
+    }
+
+    #[test]
+    fn a_message_never_keeps_more_than_the_maximum_number_of_distinct_emoji() {
+        let emoji: Vec<Emoji> = (0..MAX_REACTIONS + 5)
+            .map(|n| unicode(&format!("e{n}")))
+            .collect();
+        let mut message = reacted(&[]);
+        for (n, emoji) in emoji.iter().enumerate() {
+            let kept = n < MAX_REACTIONS;
+            assert_eq!(
+                message.alters_reactions(add(emoji, n % 2 == 0)),
+                kept,
+                "{n}"
+            );
+            assert_eq!(message.apply_reaction(add(emoji, n % 2 == 0)), kept, "{n}");
+        }
+        assert_eq!(message.reactions.len(), MAX_REACTIONS);
+        assert_eq!(
+            message
+                .reactions
+                .iter()
+                .map(|reaction| &reaction.emoji)
+                .collect::<Vec<_>>(),
+            emoji[..MAX_REACTIONS].iter().collect::<Vec<_>>(),
+            "the first-seen emoji are the ones kept, in order"
+        );
+
+        // A full message still counts what it holds...
+        assert!(message.apply_reaction(add(&emoji[3], false)));
+        assert_eq!(message.reactions[3].count, 2);
+        assert!(!message.alters_reactions(add(&emoji[MAX_REACTIONS], false)));
+        // ...and takes a new emoji again once an entry goes, at the end.
+        assert!(message.apply_reaction(ReactionChange::RemoveEmoji(&emoji[0])));
+        assert!(message.apply_reaction(add(&emoji[MAX_REACTIONS], false)));
+        assert_eq!(message.reactions.len(), MAX_REACTIONS);
+        assert_eq!(
+            message.reactions.last().map(|reaction| &reaction.emoji),
+            Some(&emoji[MAX_REACTIONS])
+        );
+        assert_eq!(message.reactions[0].emoji, emoji[1]);
+    }
+
+    #[test]
+    fn counts_saturate_instead_of_wrapping() {
+        let up = unicode(UP);
+        let mut message = reacted(&[(&up, u32::MAX, false)]);
+        // Nothing can be counted past the maximum, so there is no change at all.
+        for change in [add(&up, false), burst_add(&up, false), burst_add(&up, true)] {
+            assert!(!message.alters_reactions(change), "{change:?}");
+            assert!(!message.apply_reaction(change), "{change:?}");
+        }
+        assert_eq!(shown(&message), expected(&[(UP, u32::MAX, false)]));
+        // The account's own state still changes, whatever the count does.
+        assert!(message.alters_reactions(add(&up, true)));
+        assert!(message.apply_reaction(add(&up, true)));
+        assert_eq!(shown(&message), expected(&[(UP, u32::MAX, true)]));
+        assert!(message.apply_reaction(remove(&up, true)));
+        assert_eq!(shown(&message), expected(&[(UP, u32::MAX - 1, false)]));
+    }
+
+    #[test]
+    fn alters_reactions_agrees_with_apply_reaction_for_every_change() {
+        let (up, down) = (unicode(UP), unicode(DOWN));
+        let wave = custom(7, Some("wave"));
+        let renamed = custom(7, Some("renamed"));
+        let nameless = unicode("");
+        let full: Vec<Emoji> = (0..MAX_REACTIONS)
+            .map(|n| unicode(&format!("e{n}")))
+            .collect();
+        let full_entries: Vec<(&Emoji, u32, bool)> =
+            full.iter().map(|emoji| (emoji, 1, false)).collect();
+        let bases = [
+            reacted(&[]),
+            reacted(&[(&up, 1, true)]),
+            reacted(&[(&up, 2, false), (&wave, 1, true)]),
+            reacted(&[(&up, u32::MAX, true), (&wave, u32::MAX, false)]),
+            reacted(&[(&up, 0, false)]),
+            reacted(&full_entries),
+        ];
+        let mut changes = vec![ReactionChange::RemoveAll];
+        for emoji in [&up, &down, &wave, &renamed, &nameless, &full[0]] {
+            changes.push(ReactionChange::RemoveEmoji(emoji));
+            for (by_me, burst) in [(false, false), (false, true), (true, false), (true, true)] {
+                changes.push(ReactionChange::Add {
+                    emoji,
+                    by_me,
+                    burst,
+                });
+                changes.push(ReactionChange::Remove {
+                    emoji,
+                    by_me,
+                    burst,
+                });
+            }
+        }
+        let (mut changing, mut keeping) = (0, 0);
+        for base in &bases {
+            for &change in &changes {
+                let alters = base.alters_reactions(change);
+                let mut applied = base.clone();
+                assert_eq!(
+                    applied.apply_reaction(change),
+                    alters,
+                    "{change:?} on {:?}",
+                    shown(base)
+                );
+                assert_eq!(applied != *base, alters, "{change:?} on {:?}", shown(base));
+                assert!(applied.reactions.len() <= MAX_REACTIONS.max(base.reactions.len()));
+                if alters {
+                    changing += 1;
+                } else {
+                    keeping += 1;
+                }
+            }
+        }
+        assert!(changing > 50 && keeping > 50, "{changing} and {keeping}");
+    }
+
+    #[test]
+    fn structural_changes_compact_the_stored_reactions() {
+        let emoji: Vec<Emoji> = (0..9).map(|n| unicode(&format!("e{n}"))).collect();
+        let mut message = reacted(&[]);
+        let compact = |message: &Message| message.reactions.capacity() == message.reactions.len();
+        for emoji in &emoji {
+            assert!(message.apply_reaction(add(emoji, false)));
+            assert!(compact(&message), "after adding {emoji:?}");
+        }
+        assert!(message.apply_reaction(ReactionChange::RemoveEmoji(&emoji[4])));
+        assert!(compact(&message));
+        assert!(message.apply_reaction(remove(&emoji[0], false)));
+        assert_eq!(message.reactions.len(), 7);
+        assert!(compact(&message));
+        // Changing a count in place does not reallocate.
+        let allocation = message.reactions.as_ptr();
+        assert!(message.apply_reaction(add(&emoji[1], false)));
+        assert_eq!(message.reactions.as_ptr(), allocation);
+        assert!(message.apply_reaction(ReactionChange::RemoveAll));
+        assert_eq!(message.reactions.capacity(), 0);
+    }
+
+    #[test]
+    fn reaction_changes_touch_nothing_but_the_reactions() {
+        let up = unicode(UP);
+        let before = reacted(&[]);
+        let mut after = before.clone();
+        assert!(after.apply_reaction(add(&up, true)));
+        assert_ne!(after, before);
+        after.reactions.clear();
+        assert_eq!(after, before);
     }
 }

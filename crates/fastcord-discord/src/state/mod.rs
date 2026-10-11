@@ -708,9 +708,15 @@ impl Store {
                     }
                 }
             },
+            // Message bodies, reactions included, are the message store's;
+            // none of these changes navigation metadata.
             Dispatch::MessageUpdate(_)
             | Dispatch::MessageDelete(_)
-            | Dispatch::MessageDeleteBulk(_) => {}
+            | Dispatch::MessageDeleteBulk(_)
+            | Dispatch::MessageReactionAdd(_)
+            | Dispatch::MessageReactionRemove(_)
+            | Dispatch::MessageReactionRemoveAll(_)
+            | Dispatch::MessageReactionRemoveEmoji(_) => {}
             Dispatch::GuildCreate(created) => self.guild_create(*created, &mut changes),
             Dispatch::GuildUpdate(updated) => self.guild_update(*updated, &mut changes),
             Dispatch::GuildEmojisUpdate(update) => {

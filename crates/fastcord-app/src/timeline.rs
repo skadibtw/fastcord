@@ -27,20 +27,30 @@
 //! clicking that line jumps to the original, which the worker loads first when
 //! it is not retained, and the row jumped to stays tinted while it is near.
 //!
+//! Reactions are drawn as chips under the message: one per emoji with Discord's
+//! count, highlighted when the user reacted. Clicking a chip adds the user's
+//! reaction or takes it back; right-clicking it asks to see who reacted, which
+//! is loaded only then. Where the user may react, hovering also offers React,
+//! which opens the emoji picker for that message. A request the user made is
+//! drawn as if Discord had accepted it and is disabled until Discord answers.
+//!
 //! [`VariableList`]: crate::variable_list::VariableList
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fastcord_model::{Attachment, Message, Snowflake};
+use fastcord_model::{Attachment, Emoji, Message, Snowflake};
 use iced::alignment::{Horizontal, Vertical};
 use iced::font::{Font, Weight};
-use iced::widget::{button, column, container, hover, image, row, stack, text};
+use iced::widget::{
+    button, column, container, hover, image, mouse_area, row, stack, text, tooltip,
+};
 use iced::{Element, Length, Padding};
 
 use crate::attachments::AttachmentKey;
 use crate::changes::{ChangeKind, ChangeState, RowChange};
 use crate::emoji::{self, Occurrence, Origin};
 use crate::outbox::OutboxItem;
+use crate::reactions::{Action, Pending};
 use crate::variable_list::{self, Item, Measurement, Report, ScrollRequest, Viewport, Window};
 
 /// Closer to the first retained message than this, the view offers to load older ones.
@@ -64,6 +74,8 @@ pub struct Row {
     pub change: Option<RowChange>,
     /// What it replies to, for a reply.
     pub reply: Option<ReplyLine>,
+    /// The user's reaction requests Discord has not answered yet.
+    pub reactions: Vec<Pending>,
 }
 
 #[cfg(test)]
@@ -75,6 +87,7 @@ impl Row {
             own: false,
             change: None,
             reply: None,
+            reactions: Vec::new(),
         }
     }
 }
@@ -124,6 +137,99 @@ impl std::fmt::Debug for ReplyState {
     }
 }
 
+/// Who reacted with one emoji of one message, shown under its row. It is
+/// loaded only because the user asked to see it (SPEC §9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReactionUsers {
+    pub message: Snowflake,
+    pub emoji: Emoji,
+    pub state: UsersState,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum UsersState {
+    Loading,
+    /// The first display names Discord listed (at most
+    /// [`MAX_USERS`](crate::reactions::MAX_USERS)) and whether it has more.
+    Loaded {
+        names: Vec<String>,
+        more: bool,
+    },
+    /// Why they could not be loaded (a fixed, secret-free sentence).
+    Failed(&'static str),
+}
+
+// Display names never reach a log.
+impl std::fmt::Debug for UsersState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Loading => "Loading",
+            Self::Loaded { .. } => "Loaded",
+            Self::Failed(_) => "Failed",
+        })
+    }
+}
+
+/// One reaction chip of a row: Discord's count and whether the user reacted,
+/// with the user's unanswered request applied on top (drawn as if Discord had
+/// accepted it, and disabled until it answers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chip<'a> {
+    pub emoji: &'a Emoji,
+    pub count: u32,
+    pub me: bool,
+    pub pending: bool,
+}
+
+/// The chips of a row, in Discord's order, then reactions the user is adding
+/// that Discord has not reported yet. A chip whose last reaction the user is
+/// taking back disappears.
+pub fn chips(row: &Row) -> impl Iterator<Item = Chip<'_>> {
+    let stored = row.message.reactions.iter().filter_map(move |reaction| {
+        let chip = |count, me, pending| Chip {
+            emoji: &reaction.emoji,
+            count,
+            me,
+            pending,
+        };
+        let request = row
+            .reactions
+            .iter()
+            .find(|request| request.emoji.same_reaction(&reaction.emoji))
+            .map(|request| request.action);
+        match request {
+            None => Some(chip(reaction.count, reaction.me, false)),
+            Some(Action::Add) => Some(chip(
+                reaction.count.saturating_add(u32::from(!reaction.me)),
+                true,
+                true,
+            )),
+            Some(Action::Remove) => {
+                let count = reaction.count.saturating_sub(u32::from(reaction.me));
+                (count > 0).then(|| chip(count, false, true))
+            }
+        }
+    });
+    let added = row
+        .reactions
+        .iter()
+        .filter(move |request| {
+            request.action == Action::Add
+                && !row
+                    .message
+                    .reactions
+                    .iter()
+                    .any(|reaction| reaction.emoji.same_reaction(&request.emoji))
+        })
+        .map(|request| Chip {
+            emoji: &request.emoji,
+            count: 1,
+            me: true,
+            pending: true,
+        });
+    stored.chain(added)
+}
+
 /// Everything the timeline view needs, and nothing else. `rows` are exactly
 /// the messages of `window.range` (or a prefix-trimmed version of it whose
 /// spacers were recomputed with `VariableList::window_for_range`).
@@ -157,6 +263,10 @@ pub struct Snapshot {
     /// [`MAX_REFERENCES`](crate::history::MAX_REFERENCES)), so the composer
     /// can tell that the message being replied to is gone.
     pub deleted: Vec<Snowflake>,
+    /// The user may react here (validated by the worker): rows offer React.
+    pub can_react: bool,
+    /// Who reacted with one emoji, loaded only because the user asked.
+    pub reaction_users: Option<ReactionUsers>,
 }
 
 /// A decoded preview: shared RGBA pixels (a clone shares the buffer) and the
@@ -228,7 +338,7 @@ pub struct Interaction {
 }
 
 /// What the timeline asks of the worker. Each event names its channel.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// An inline asset entered or left the actual clipped viewport.
     EmojiVisibility(Occurrence, bool),
@@ -314,6 +424,25 @@ pub enum Event {
         channel_id: Snowflake,
         message_id: Snowflake,
     },
+    /// A reaction chip was clicked: add the user's reaction with this emoji, or
+    /// take it back when it is already theirs. The worker decides which.
+    ToggleReaction {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        emoji: Emoji,
+    },
+    /// A reaction chip was right-clicked: show who reacted with it.
+    InspectReaction {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        emoji: Emoji,
+    },
+    CloseReactionUsers,
+    /// Choose an emoji to react to a message with (opens the emoji picker).
+    React {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -393,7 +522,7 @@ pub fn view<'a>(
                 row,
                 channel_id,
                 interaction,
-                snapshot.can_send,
+                snapshot,
                 snapshot.highlight == Some(row.message.id)
                     || interaction.replying == Some(row.message.id),
                 assets,
@@ -542,13 +671,173 @@ fn row_button(label: &'static str, event: Event) -> button::Button<'static, Even
         .style(button::secondary)
 }
 
+/// Size of the emoji image on a reaction chip.
+const CHIP_ICON: f32 = 18.0;
+
+fn hint(line: &'static str) -> Element<'static, Event> {
+    container(text(line).size(12))
+        .padding(6)
+        .style(container::rounded_box)
+        .into()
+}
+
+/// One chip. Clicking toggles the user's reaction; right-clicking asks who
+/// reacted. Its emoji image is drawn once decoded and visible, text before.
+fn chip_view<'a>(
+    chip: Chip<'a>,
+    index: usize,
+    channel_id: Snowflake,
+    row: &Row,
+    assets: Attachments<'a>,
+) -> Element<'a, Event> {
+    let message_id = row.message.id;
+    let fallback = chip.emoji.name.as_deref().unwrap_or("emoji");
+    let icon: Element<'a, Event> = match emoji::reaction_asset(chip.emoji) {
+        Some(asset) => emoji::sensed(
+            emoji::asset_view(asset, fallback, assets.emojis, CHIP_ICON),
+            Occurrence {
+                origin: Origin::Reaction {
+                    channel: channel_id,
+                    message: message_id,
+                    revision: row.revision,
+                    chip: u8::try_from(index).unwrap_or(u8::MAX),
+                },
+                asset,
+            },
+            Event::EmojiVisibility,
+        ),
+        None => text(fallback).size(15).into(),
+    };
+    let label = row![icon, text(chip.count.to_string()).size(13)]
+        .spacing(4)
+        .align_y(Vertical::Center);
+    let toggle = Event::ToggleReaction {
+        channel_id,
+        message_id,
+        emoji: chip.emoji.clone(),
+    };
+    let inspect = Event::InspectReaction {
+        channel_id,
+        message_id,
+        emoji: chip.emoji.clone(),
+    };
+    let chip_button = button(label)
+        .padding([2, 6])
+        .on_press_maybe((!chip.pending).then_some(toggle))
+        .style(if chip.me {
+            button::primary
+        } else {
+            button::secondary
+        });
+    mouse_area(tooltip(
+        chip_button,
+        hint("Click to add or remove your reaction. Right-click to see who reacted."),
+        tooltip::Position::Top,
+    ))
+    .on_right_press(inspect)
+    .into()
+}
+
+/// The row's chips, wrapped, followed by a button that opens the picker where
+/// the user may react. `None` for a message nobody reacted to.
+fn reactions_line<'a>(
+    row: &'a Row,
+    channel_id: Snowflake,
+    can_react: bool,
+    assets: Attachments<'a>,
+) -> Option<Element<'a, Event>> {
+    let mut items: Vec<Element<'a, Event>> = chips(row)
+        .enumerate()
+        .map(|(index, chip)| chip_view(chip, index, channel_id, row, assets))
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    if can_react {
+        items.push(
+            tooltip(
+                button(text("+").size(13))
+                    .padding([2, 8])
+                    .on_press(Event::React {
+                        channel_id,
+                        message_id: row.message.id,
+                    })
+                    .style(button::secondary),
+                hint("Add reaction"),
+                tooltip::Position::Top,
+            )
+            .into(),
+        );
+    }
+    Some(
+        iced::widget::Row::with_children(items)
+            .spacing(4)
+            .wrap()
+            .vertical_spacing(4)
+            .into(),
+    )
+}
+
+/// What the emoji is called in the sentence that lists who reacted with it.
+fn describe_emoji(emoji: &Emoji) -> String {
+    match (emoji.id, emoji.name.as_deref()) {
+        (Some(_), Some(name)) => format!(":{name}:"),
+        (Some(_), None) => "a deleted emoji".to_owned(),
+        (None, Some(name)) => name.to_owned(),
+        (None, None) => "an unknown emoji".to_owned(),
+    }
+}
+
+/// The names of those who reacted with one emoji, under the row asked about.
+fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
+    let detail: Element<'_, Event> = match &users.state {
+        UsersState::Loading => text("Loading who reacted…")
+            .size(12)
+            .style(text::secondary)
+            .into(),
+        UsersState::Failed(reason) => text(*reason).size(12).style(text::danger).into(),
+        UsersState::Loaded { names, more } => {
+            let mut line = if names.is_empty() {
+                "No one is listed.".to_owned()
+            } else {
+                names.join(", ")
+            };
+            if *more {
+                line.push_str(" and others");
+            }
+            text(line)
+                .size(12)
+                .width(Length::Fill)
+                .wrapping(text::Wrapping::WordOrGlyph)
+                .into()
+        }
+    };
+    container(
+        column![
+            row![
+                text(format!("Reacted with {}", describe_emoji(&users.emoji)))
+                    .font(BOLD)
+                    .size(12),
+                row_button("Close", Event::CloseReactionUsers),
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center),
+            detail,
+        ]
+        .spacing(2),
+    )
+    .padding(6)
+    .style(container::rounded_box)
+    .into()
+}
+
 /// Author, time, grapheme-aware wrapped text/emoji runs, attachment lines, and
 /// the controls of the user's own messages. Original message text is unchanged.
 fn message_view<'a>(
     row: &'a Row,
     channel_id: Snowflake,
     interaction: Interaction,
-    can_reply: bool,
+    snapshot: &'a Snapshot,
     highlighted: bool,
     assets: Attachments<'a>,
 ) -> Element<'a, Event> {
@@ -633,6 +922,16 @@ fn message_view<'a>(
         };
         body = body.push(attachment_view(attachment, key, assets.views.get(&key)));
     }
+    if let Some(line) = reactions_line(row, channel_id, snapshot.can_react, assets) {
+        body = body.push(line);
+    }
+    if let Some(users) = snapshot
+        .reaction_users
+        .as_ref()
+        .filter(|users| users.message == message_id)
+    {
+        body = body.push(users_panel(users));
+    }
     let status = |line: &'static str| text(line).size(12).style(text::secondary);
 
     let retry = row_button(
@@ -683,7 +982,7 @@ fn message_view<'a>(
             let actions = if delete {
                 row![retry, dismiss]
             } else {
-                row![retry, row_button("Edit", edit), dismiss]
+                row![retry, row_button("Edit", edit.clone()), dismiss]
             };
             body.push(
                 text(reason)
@@ -701,19 +1000,16 @@ fn message_view<'a>(
         bottom: 6.0,
         left: 12.0,
     });
-    let can_reply = can_reply && interaction.editing.is_none();
+    let can_reply = snapshot.can_send && interaction.editing.is_none();
     let show_own_actions = matches!(state, RowState::Actions | RowState::Failed { .. });
-    let show_reply = can_reply
-        && matches!(
-            state,
-            RowState::Plain | RowState::Actions | RowState::Failed { .. }
-        );
-    let show_copy = !content.is_empty()
-        && matches!(
-            state,
-            RowState::Plain | RowState::Actions | RowState::Failed { .. }
-        );
-    if !show_own_actions && !show_reply && !show_copy {
+    let idle = matches!(
+        state,
+        RowState::Plain | RowState::Actions | RowState::Failed { .. }
+    );
+    let show_reply = can_reply && idle;
+    let show_copy = !content.is_empty() && idle;
+    let show_react = snapshot.can_react && idle;
+    if !show_own_actions && !show_reply && !show_copy && !show_react {
         return base.into();
     }
     // Hover controls are layered over the top right so the measured row height
@@ -732,6 +1028,15 @@ fn message_view<'a>(
         actions = actions.push(row_button(
             "Reply",
             Event::Reply {
+                channel_id,
+                message_id,
+            },
+        ));
+    }
+    if show_react {
+        actions = actions.push(row_button(
+            "React",
+            Event::React {
                 channel_id,
                 message_id,
             },
@@ -917,6 +1222,8 @@ fn format_timestamp(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use fastcord_model::Reaction;
+
     use super::*;
     use crate::variable_list::harness::Ui;
     use iced_renderer::core::widget::Tree;
@@ -1744,5 +2051,431 @@ mod tests {
             snapshot.rows[0].message.content,
             "😀 <:sample:12345> <a:party:45678>"
         );
+    }
+
+    const THUMBS: &str = "\u{1f44d}";
+    const PARTY: &str = "\u{1f389}";
+
+    fn unicode(name: &str) -> Emoji {
+        Emoji {
+            id: None,
+            name: Some(name.to_owned()),
+            animated: false,
+        }
+    }
+
+    fn custom(id: u64, name: &str, animated: bool) -> Emoji {
+        Emoji {
+            id: Some(Snowflake(id)),
+            name: Some(name.to_owned()),
+            animated,
+        }
+    }
+
+    /// Message `n` with these (emoji, count, mine) reactions.
+    fn reacted(n: u64, reactions: &[(Emoji, u32, bool)]) -> Arc<Message> {
+        let mut message = (*message(n, "reactions")).clone();
+        message.attachments.clear();
+        message.reactions = reactions
+            .iter()
+            .map(|(emoji, count, me)| Reaction {
+                count: *count,
+                me: *me,
+                emoji: emoji.clone(),
+            })
+            .collect();
+        Arc::new(message)
+    }
+
+    fn request(emoji: Emoji, action: Action) -> Pending {
+        Pending { emoji, action }
+    }
+
+    fn reaction_snapshot(row: Row, can_react: bool) -> Snapshot {
+        Snapshot {
+            rows: vec![row],
+            can_react,
+            ..one_row(42)
+        }
+    }
+
+    fn found_with(
+        snapshot: &Snapshot,
+        press: impl Fn(&mut Ui<'_, Event>, f32, f32) -> Vec<Event>,
+    ) -> Vec<Event> {
+        let mut ui = Ui::new(
+            640.0,
+            400.0,
+            view(snapshot, Interaction::default(), assets(no_views())),
+        );
+        ui.redraw();
+        ui.draw();
+        let mut found = Vec::new();
+        for y in (0..400).step_by(4) {
+            for x in (0..640).step_by(4) {
+                for event in press(&mut ui, x as f32, y as f32) {
+                    if !matches!(
+                        event,
+                        Event::Viewport { .. }
+                            | Event::Measured { .. }
+                            | Event::EmojiVisibility(..)
+                    ) && !found.contains(&event)
+                    {
+                        found.push(event);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    fn right_clickable(snapshot: &Snapshot) -> Vec<Event> {
+        found_with(snapshot, |ui, x, y| ui.right_click(x, y))
+    }
+
+    fn toggle(emoji: Emoji) -> Event {
+        Event::ToggleReaction {
+            channel_id: CHANNEL,
+            message_id: Snowflake(42),
+            emoji,
+        }
+    }
+
+    fn inspect(emoji: Emoji) -> Event {
+        Event::InspectReaction {
+            channel_id: CHANNEL,
+            message_id: Snowflake(42),
+            emoji,
+        }
+    }
+
+    fn shown(row: &Row) -> Vec<(String, u32, bool, bool)> {
+        chips(row)
+            .map(|chip| {
+                (
+                    chip.emoji.name.clone().unwrap_or_default(),
+                    chip.count,
+                    chip.me,
+                    chip.pending,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chips_show_discords_counts_with_unanswered_requests_applied_on_top() {
+        let wave = custom(9, "wave", true);
+        let stored = [
+            (unicode(THUMBS), 2, true),
+            (wave.clone(), 1, false),
+            (unicode("\u{2764}\u{fe0f}"), 1, true),
+        ];
+        let row = Row::new(reacted(42, &stored), 1);
+        let plain = shown(&row);
+        assert_eq!(
+            plain,
+            [
+                (THUMBS.to_owned(), 2, true, false),
+                ("wave".to_owned(), 1, false, false),
+                ("\u{2764}\u{fe0f}".to_owned(), 1, true, false)
+            ]
+        );
+        let row = Row {
+            reactions: vec![
+                // Joining a reaction counts the user; one already theirs does not count twice.
+                request(wave.clone(), Action::Add),
+                request(unicode(THUMBS), Action::Add),
+                // Taking back the only reaction of a chip removes the chip.
+                request(unicode("\u{2764}\u{fe0f}"), Action::Remove),
+                // A reaction nobody made yet appears, counted once.
+                request(unicode(PARTY), Action::Add),
+                // Taking back something that is not the user's changes no count.
+                request(custom(10, "gone", false), Action::Remove),
+            ],
+            ..Row::new(reacted(42, &stored), 1)
+        };
+        assert_eq!(
+            shown(&row),
+            [
+                (THUMBS.to_owned(), 2, true, true),
+                ("wave".to_owned(), 2, true, true),
+                (PARTY.to_owned(), 1, true, true)
+            ]
+        );
+        // Taking back one of several reactions leaves the rest.
+        let row = Row {
+            reactions: vec![request(unicode(THUMBS), Action::Remove)],
+            ..Row::new(reacted(42, &stored), 1)
+        };
+        assert_eq!(shown(&row)[0], (THUMBS.to_owned(), 1, false, true));
+        // A renamed custom emoji is still the same chip.
+        let row = Row {
+            reactions: vec![request(custom(9, "renamed", true), Action::Add)],
+            ..Row::new(reacted(42, &stored), 1)
+        };
+        assert_eq!(shown(&row)[1], ("wave".to_owned(), 2, true, true));
+        assert_eq!(shown(&row).len(), 3);
+    }
+
+    #[test]
+    fn chips_toggle_on_a_click_and_ask_who_reacted_on_a_right_click() {
+        let wave = custom(9, "wave", false);
+        let row = Row::new(
+            reacted(42, &[(unicode(THUMBS), 3, true), (wave.clone(), 1, false)]),
+            1,
+        );
+        let snapshot = reaction_snapshot(row, true);
+        let found = clickable(&snapshot, Interaction::default());
+        for emoji in [unicode(THUMBS), wave.clone()] {
+            assert!(found.contains(&toggle(emoji.clone())), "{found:?}");
+            assert!(
+                !found.contains(&inspect(emoji)),
+                "a left click only toggles"
+            );
+        }
+        let found = right_clickable(&snapshot);
+        for emoji in [unicode(THUMBS), wave.clone()] {
+            assert!(found.contains(&inspect(emoji.clone())), "{found:?}");
+            assert!(!found.contains(&toggle(emoji)), "a right click only asks");
+        }
+
+        // An unanswered request disables its chip; asking who reacted stays possible.
+        let pending = Row {
+            reactions: vec![request(wave.clone(), Action::Add)],
+            ..snapshot.rows[0].clone()
+        };
+        let snapshot = reaction_snapshot(pending, true);
+        let found = clickable(&snapshot, Interaction::default());
+        assert!(found.contains(&toggle(unicode(THUMBS))));
+        assert!(!found.contains(&toggle(wave.clone())), "{found:?}");
+        assert!(right_clickable(&snapshot).contains(&inspect(wave)));
+    }
+
+    #[test]
+    fn react_is_offered_where_the_user_may_react_and_nowhere_else() {
+        let react = Event::React {
+            channel_id: CHANNEL,
+            message_id: Snowflake(42),
+        };
+        // With chips: the hover button and the chip row's + button.
+        let row = Row::new(reacted(42, &[(unicode(THUMBS), 1, false)]), 1);
+        let allowed = clickable(
+            &reaction_snapshot(row.clone(), true),
+            Interaction::default(),
+        );
+        assert!(allowed.contains(&react), "{allowed:?}");
+        let denied = clickable(&reaction_snapshot(row, false), Interaction::default());
+        assert!(!denied.contains(&react), "{denied:?}");
+        assert!(
+            denied.contains(&toggle(unicode(THUMBS))),
+            "chips still work"
+        );
+        // A message nobody reacted to offers React on hover alone.
+        let bare = Row::new(reacted(42, &[]), 1);
+        assert!(
+            clickable(
+                &reaction_snapshot(bare.clone(), true),
+                Interaction::default()
+            )
+            .contains(&react)
+        );
+        assert!(
+            !clickable(&reaction_snapshot(bare, false), Interaction::default()).contains(&react)
+        );
+        // Not while a change to the message is being saved or confirmed.
+        let saving = own(
+            Row::new(reacted(42, &[]), 1),
+            Some(RowChange {
+                kind: ChangeKind::Delete,
+                state: ChangeState::Saving,
+            }),
+        );
+        assert!(
+            !clickable(&reaction_snapshot(saving, true), Interaction::default()).contains(&react)
+        );
+    }
+
+    #[test]
+    fn chip_widgets_are_per_chip_and_bounded_by_the_most_a_message_keeps() {
+        let nodes = |count: u32| {
+            let reactions: Vec<_> = (0..count)
+                .map(|n| {
+                    (
+                        unicode(char::from_u32(0x1f600 + n).unwrap().to_string().as_str()),
+                        n + 1,
+                        false,
+                    )
+                })
+                .collect();
+            built_nodes(&reaction_snapshot(
+                Row::new(reacted(42, &reactions), 1),
+                false,
+            ))
+        };
+        let (none, one, two, three) = (nodes(0), nodes(1), nodes(2), nodes(3));
+        assert!(one > none);
+        assert_eq!(three - two, two - one, "every chip costs the same");
+        let most = nodes(fastcord_model::MAX_REACTIONS as u32);
+        assert_eq!(
+            most - one,
+            (two - one) * (fastcord_model::MAX_REACTIONS - 1),
+            "a message's chips are bounded by what it keeps"
+        );
+        // The tree follows chips, not messages elsewhere in the history.
+        assert_eq!(
+            built_nodes(&snapshot(10, 100)),
+            built_nodes(&snapshot(10, 500))
+        );
+    }
+
+    #[test]
+    fn who_reacted_appears_only_under_its_message_and_can_be_closed() {
+        let row = Row::new(reacted(42, &[(unicode(THUMBS), 2, false)]), 1);
+        let mut snapshot = reaction_snapshot(row, true);
+        assert!(!clickable(&snapshot, Interaction::default()).contains(&Event::CloseReactionUsers));
+        let users = |state| {
+            Some(ReactionUsers {
+                message: Snowflake(42),
+                emoji: unicode(THUMBS),
+                state,
+            })
+        };
+        for state in [
+            UsersState::Loading,
+            UsersState::Failed("Who reacted could not be loaded."),
+            UsersState::Loaded {
+                names: vec!["Alice".to_owned(), "Bob".to_owned()],
+                more: true,
+            },
+            UsersState::Loaded {
+                names: Vec::new(),
+                more: false,
+            },
+        ] {
+            snapshot.reaction_users = users(state);
+            assert!(
+                clickable(&snapshot, Interaction::default()).contains(&Event::CloseReactionUsers)
+            );
+        }
+        // A list asked about another message is not drawn on this one.
+        snapshot.reaction_users = Some(ReactionUsers {
+            message: Snowflake(43),
+            ..snapshot.reaction_users.clone().unwrap()
+        });
+        assert!(!clickable(&snapshot, Interaction::default()).contains(&Event::CloseReactionUsers));
+        // Names never reach a log.
+        let printed = format!(
+            "{:?}",
+            ReactionUsers {
+                message: Snowflake(42),
+                emoji: unicode(THUMBS),
+                state: UsersState::Loaded {
+                    names: vec!["Alice Private".to_owned()],
+                    more: false
+                }
+            }
+        );
+        assert!(!printed.contains("Alice"), "{printed}");
+        assert_eq!(
+            describe_emoji(&custom(9, "wave", false)),
+            ":wave:",
+            "custom emoji are named like the user types them"
+        );
+        assert_eq!(describe_emoji(&unicode(THUMBS)), THUMBS);
+    }
+
+    #[test]
+    fn a_request_changing_the_chips_grows_the_row_and_the_new_height_is_measured() {
+        let measured = |events: Vec<Event>| -> Vec<(u64, u64, f32)> {
+            events
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::Measured { measurement, .. } => {
+                        Some((measurement.id.0, measurement.revision, measurement.height))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let bare = reaction_snapshot(Row::new(reacted(42, &[]), 1), false);
+        // The same message and revision, with the user's request overlaid.
+        let asked = reaction_snapshot(
+            Row {
+                reactions: vec![request(unicode(THUMBS), Action::Add)],
+                ..Row::new(reacted(42, &[]), 1)
+            },
+            false,
+        );
+        let mut ui = Ui::new(
+            640.0,
+            400.0,
+            view(&bare, Interaction::default(), assets(no_views())),
+        );
+        let before = measured(ui.redraw());
+        assert_eq!(before.len(), 1);
+        ui.show(view(&asked, Interaction::default(), assets(no_views())));
+        let after = measured(ui.redraw());
+        assert_eq!(after.len(), 1, "the changed height is published once");
+        assert_eq!((after[0].0, after[0].1), (before[0].0, before[0].1));
+        assert!(
+            after[0].2 > before[0].2,
+            "{} -> {}",
+            before[0].2,
+            after[0].2
+        );
+        assert!(ui.redraw().is_empty());
+    }
+
+    #[test]
+    fn chip_emoji_report_their_visibility_as_reaction_occurrences() {
+        let row = Row::new(
+            reacted(
+                42,
+                &[
+                    (unicode(THUMBS), 1, false),
+                    (custom(12345, "party", true), 2, true),
+                    // Text the bundled index does not know stays text.
+                    (unicode("\u{e000}"), 1, false),
+                ],
+            ),
+            7,
+        );
+        let snapshot = reaction_snapshot(row, false);
+        let mut ui = Ui::new(
+            640.0,
+            400.0,
+            view(&snapshot, Interaction::default(), assets(no_views())),
+        );
+        let shown: Vec<_> = ui
+            .redraw()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::EmojiVisibility(occurrence, true) => Some(occurrence),
+                _ => None,
+            })
+            .collect();
+        let assets: Vec<_> = shown.iter().map(|occurrence| occurrence.asset).collect();
+        assert_eq!(
+            assets,
+            [
+                emoji::reaction_asset(&unicode(THUMBS)).unwrap(),
+                emoji::Asset::Custom {
+                    id: Snowflake(12345),
+                    animated: true
+                }
+            ]
+        );
+        for (chip, occurrence) in shown.iter().enumerate() {
+            assert_eq!(
+                occurrence.origin,
+                Origin::Reaction {
+                    channel: CHANNEL,
+                    message: Snowflake(42),
+                    revision: 7,
+                    chip: chip as u8
+                }
+            );
+        }
+        assert_eq!(emoji::reaction_asset(&unicode("\u{e000}")), None);
     }
 }

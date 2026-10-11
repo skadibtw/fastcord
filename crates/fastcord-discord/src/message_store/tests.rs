@@ -4,8 +4,13 @@
 use std::ops::RangeInclusive;
 use std::sync::LazyLock;
 
+use fastcord_model::{Emoji, MAX_REACTIONS};
+
 use super::*;
-use crate::gateway::{MessageDelete, MessageDeleteBulk};
+use crate::gateway::{
+    MessageDelete, MessageDeleteBulk, MessageReaction, MessageReactionRemoveAll,
+    MessageReactionRemoveEmoji, decode_fixture,
+};
 use crate::history::parse_page;
 
 const CHANNEL: Snowflake = Snowflake(500);
@@ -18,6 +23,25 @@ const MESSAGE_UPDATE_PARTIAL: &str =
     include_str!("../../../../fixtures/model/message_update_partial.json");
 const MESSAGE_DELETE_BULK: &str =
     include_str!("../../../../fixtures/gateway/message_delete_bulk.json");
+const REACTION_ADD: &str = include_str!("../../../../fixtures/gateway/message_reaction_add.json");
+const REACTION_ADD_CUSTOM: &str =
+    include_str!("../../../../fixtures/gateway/message_reaction_add_custom.json");
+const REACTION_ADD_BURST: &str =
+    include_str!("../../../../fixtures/gateway/message_reaction_add_burst.json");
+const REACTION_REMOVE: &str =
+    include_str!("../../../../fixtures/gateway/message_reaction_remove.json");
+const REACTION_REMOVE_ALL: &str =
+    include_str!("../../../../fixtures/gateway/message_reaction_remove_all.json");
+const REACTION_REMOVE_EMOJI: &str =
+    include_str!("../../../../fixtures/gateway/message_reaction_remove_emoji.json");
+/// The message every recorded reaction event addresses.
+const REACTED: u64 = 1_290_000_000_000_000_010;
+
+/// The account the store under test belongs to, and anyone else.
+const ME: Snowflake = Snowflake(2);
+const THEM: Snowflake = Snowflake(3);
+const UP: &str = "\u{1f44d}";
+const DOWN: &str = "\u{1f44e}";
 
 fn id(n: u64) -> Snowflake {
     Snowflake(n)
@@ -197,6 +221,118 @@ fn bulk(channel: Snowflake, ids: impl IntoIterator<Item = u64>) -> Dispatch {
         channel_id: channel,
         guild_id: None,
     })
+}
+
+fn unicode(name: &str) -> Emoji {
+    Emoji {
+        id: None,
+        name: Some(name.to_owned()),
+        animated: false,
+    }
+}
+
+fn custom(emoji: u64, name: &str) -> Emoji {
+    Emoji {
+        id: Some(id(emoji)),
+        name: Some(name.to_owned()),
+        animated: true,
+    }
+}
+
+fn reaction(
+    channel: Snowflake,
+    n: u64,
+    user: Snowflake,
+    emoji: &Emoji,
+    burst: bool,
+) -> Box<MessageReaction> {
+    Box::new(MessageReaction {
+        channel_id: channel,
+        message_id: id(n),
+        guild_id: None,
+        user_id: user,
+        emoji: emoji.clone(),
+        burst,
+    })
+}
+
+fn react(channel: Snowflake, n: u64, user: Snowflake, emoji: &Emoji) -> Dispatch {
+    Dispatch::MessageReactionAdd(reaction(channel, n, user, emoji, false))
+}
+
+fn burst_react(channel: Snowflake, n: u64, user: Snowflake, emoji: &Emoji) -> Dispatch {
+    Dispatch::MessageReactionAdd(reaction(channel, n, user, emoji, true))
+}
+
+fn unreact(channel: Snowflake, n: u64, user: Snowflake, emoji: &Emoji) -> Dispatch {
+    Dispatch::MessageReactionRemove(reaction(channel, n, user, emoji, false))
+}
+
+fn burst_unreact(channel: Snowflake, n: u64, user: Snowflake, emoji: &Emoji) -> Dispatch {
+    Dispatch::MessageReactionRemove(reaction(channel, n, user, emoji, true))
+}
+
+fn remove_emoji(channel: Snowflake, n: u64, emoji: &Emoji) -> Dispatch {
+    Dispatch::MessageReactionRemoveEmoji(Box::new(MessageReactionRemoveEmoji {
+        channel_id: channel,
+        message_id: id(n),
+        guild_id: None,
+        emoji: emoji.clone(),
+    }))
+}
+
+fn remove_all(channel: Snowflake, n: u64) -> Dispatch {
+    Dispatch::MessageReactionRemoveAll(MessageReactionRemoveAll {
+        channel_id: channel,
+        message_id: id(n),
+        guild_id: None,
+    })
+}
+
+/// What an event that changed nothing reports.
+fn unchanged(channel: Snowflake) -> StoreChange {
+    StoreChange {
+        channel: Some(channel),
+        changed: false,
+        rejected: 0,
+    }
+}
+
+/// What an event that changed a retained message reports.
+fn changed(channel: Snowflake) -> StoreChange {
+    StoreChange {
+        channel: Some(channel),
+        changed: true,
+        rejected: 0,
+    }
+}
+
+/// `(count, me)` of each reaction of a retained message, in order.
+fn counts(store: &MessageStore, n: u64) -> Vec<(u32, bool)> {
+    store
+        .get(CHANNEL, id(n))
+        .unwrap()
+        .reactions
+        .iter()
+        .map(|reaction| (reaction.count, reaction.me))
+        .collect()
+}
+
+/// A deterministic stream of pseudo-random numbers for the flood tests.
+fn random(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *state >> 33
+}
+
+/// Who reacts in a flood: the account one time in five, someone else otherwise.
+fn reactor(state: &mut u64) -> Snowflake {
+    if random(state).is_multiple_of(5) {
+        ME
+    } else {
+        THEM
+    }
 }
 
 #[derive(Default)]
@@ -1254,4 +1390,722 @@ fn store_and_token_debug_output_never_contains_message_content() {
     assert!(!shown.contains("generated message"));
     assert!(!shown.contains("SIGNED") && !shown.contains("cat.png"));
     assert!(!shown.contains("alt_fixture") && !shown.contains("Fixture Author"));
+}
+
+#[test]
+fn reactions_change_a_held_message_and_bump_its_revision_only_when_something_changed() {
+    let (up, down) = (unicode(UP), unicode(DOWN));
+    let mut store = MessageStore::new();
+    store.set_user(ME);
+    load(&mut store, HistoryCursor::Latest, 1..=5);
+    let untouched: Vec<_> = store
+        .items(CHANNEL)
+        .filter(|&(message, _)| message != id(3))
+        .collect();
+    let before = store.revision(CHANNEL, id(3)).unwrap();
+
+    // Someone else reacts: counted, not the account's own.
+    assert_eq!(
+        store.apply_dispatch(&react(CHANNEL, 3, THEM, &up)),
+        changed(CHANNEL)
+    );
+    assert_eq!(counts(&store, 3), [(1, false)]);
+    let counted = store.revision(CHANNEL, id(3)).unwrap();
+    assert!(counted > before);
+    assert_eq!(
+        store
+            .items(CHANNEL)
+            .filter(|&(message, _)| message != id(3))
+            .collect::<Vec<_>>(),
+        untouched,
+        "no other message moved"
+    );
+    check(&store);
+
+    // The account reacts.
+    assert_eq!(
+        store.apply_dispatch(&react(CHANNEL, 3, ME, &up)),
+        changed(CHANNEL)
+    );
+    assert_eq!(counts(&store, 3), [(2, true)]);
+    let own = store.revision(CHANNEL, id(3)).unwrap();
+    assert!(own > counted);
+
+    // The Gateway's echo of what a REST answer already applied, or a replay,
+    // changes nothing: the same revision and no copy-on-write.
+    let held = store.get(CHANNEL, id(3)).unwrap();
+    assert_eq!(
+        store.apply_dispatch(&react(CHANNEL, 3, ME, &up)),
+        unchanged(CHANNEL)
+    );
+    assert_eq!(store.revision(CHANNEL, id(3)), Some(own));
+    assert!(Arc::ptr_eq(&held, &store.get(CHANNEL, id(3)).unwrap()));
+
+    // Copy-on-write: a consumer still holding the handle keeps what it had.
+    assert!(
+        store
+            .apply_dispatch(&react(CHANNEL, 3, THEM, &down))
+            .changed
+    );
+    assert_eq!(held.reactions.len(), 1);
+    assert_eq!((held.reactions[0].count, held.reactions[0].me), (2, true));
+    assert_eq!(counts(&store, 3), [(2, true), (1, false)]);
+    assert!(!Arc::ptr_eq(&held, &store.get(CHANNEL, id(3)).unwrap()));
+    check(&store);
+
+    // Taking the account's reaction back, and then the echo of that.
+    assert_eq!(
+        store.apply_dispatch(&unreact(CHANNEL, 3, ME, &up)),
+        changed(CHANNEL)
+    );
+    assert_eq!(counts(&store, 3), [(1, false), (1, false)]);
+    let withdrawn = store.revision(CHANNEL, id(3)).unwrap();
+    assert_eq!(
+        store.apply_dispatch(&unreact(CHANNEL, 3, ME, &up)),
+        unchanged(CHANNEL)
+    );
+    assert_eq!(store.revision(CHANNEL, id(3)), Some(withdrawn));
+
+    // An entry goes with its last reaction; an emoji nobody used is nothing.
+    assert!(
+        store
+            .apply_dispatch(&unreact(CHANNEL, 3, THEM, &up))
+            .changed
+    );
+    assert_eq!(store.get(CHANNEL, id(3)).unwrap().reactions[0].emoji, down);
+    assert_eq!(counts(&store, 3), [(1, false)]);
+    let nobody = unicode("nobody");
+    for event in [
+        unreact(CHANNEL, 3, THEM, &nobody),
+        remove_emoji(CHANNEL, 3, &nobody),
+        unreact(CHANNEL, 3, THEM, &up),
+    ] {
+        assert_eq!(
+            store.apply_dispatch(&event),
+            unchanged(CHANNEL),
+            "{event:?}"
+        );
+    }
+    assert_eq!(
+        store.apply_dispatch(&remove_emoji(CHANNEL, 3, &down)),
+        changed(CHANNEL)
+    );
+    assert!(store.get(CHANNEL, id(3)).unwrap().reactions.is_empty());
+    assert_eq!(
+        store.apply_dispatch(&remove_all(CHANNEL, 3)),
+        unchanged(CHANNEL),
+        "nothing to remove"
+    );
+
+    // Remove-all drops every entry and releases the allocation.
+    for emoji in [&up, &down, &custom(777, "wave")] {
+        assert!(
+            store
+                .apply_dispatch(&react(CHANNEL, 3, THEM, emoji))
+                .changed
+        );
+    }
+    assert_eq!(counts(&store, 3).len(), 3);
+    assert_eq!(
+        store.apply_dispatch(&remove_all(CHANNEL, 3)),
+        changed(CHANNEL)
+    );
+    assert_eq!(
+        store.get(CHANNEL, id(3)).unwrap().reactions.capacity(),
+        0,
+        "the allocation is released too"
+    );
+    check(&store);
+}
+
+#[test]
+fn burst_reactions_count_but_never_mark_the_account() {
+    let up = unicode(UP);
+    let mut store = MessageStore::new();
+    store.set_user(ME);
+    load(&mut store, HistoryCursor::Latest, 1..=3);
+    assert!(
+        store
+            .apply_dispatch(&burst_react(CHANNEL, 2, ME, &up))
+            .changed
+    );
+    assert_eq!(counts(&store, 2), [(1, false)]);
+    // A burst is not idempotent: it counts every time.
+    assert!(
+        store
+            .apply_dispatch(&burst_react(CHANNEL, 2, ME, &up))
+            .changed
+    );
+    assert_eq!(counts(&store, 2), [(2, false)]);
+    assert!(store.apply_dispatch(&react(CHANNEL, 2, ME, &up)).changed);
+    assert_eq!(counts(&store, 2), [(3, true)]);
+    // Taking a burst back lowers the count and leaves the normal reaction.
+    assert!(
+        store
+            .apply_dispatch(&burst_unreact(CHANNEL, 2, ME, &up))
+            .changed
+    );
+    assert_eq!(counts(&store, 2), [(2, true)]);
+    check(&store);
+}
+
+#[test]
+fn only_the_user_named_with_set_user_reacts_as_the_account() {
+    let up = unicode(UP);
+    let mut store = MessageStore::new();
+    load(&mut store, HistoryCursor::Latest, 1..=3);
+    // Nobody is named yet: every reaction is someone else's.
+    assert!(store.apply_dispatch(&react(CHANNEL, 2, ME, &up)).changed);
+    assert_eq!(counts(&store, 2), [(1, false)]);
+    assert!(store.apply_dispatch(&unreact(CHANNEL, 2, ME, &up)).changed);
+    assert!(store.get(CHANNEL, id(2)).unwrap().reactions.is_empty());
+
+    // Once named, that user's reaction is the account's own.
+    store.set_user(ME);
+    assert!(store.apply_dispatch(&react(CHANNEL, 2, THEM, &up)).changed);
+    assert!(store.apply_dispatch(&react(CHANNEL, 2, ME, &up)).changed);
+    assert_eq!(counts(&store, 2), [(2, true)]);
+
+    // Clearing drops messages, not who is reading them.
+    store.clear();
+    load(&mut store, HistoryCursor::Latest, 1..=3);
+    assert!(store.apply_dispatch(&react(CHANNEL, 3, ME, &up)).changed);
+    assert_eq!(counts(&store, 3), [(1, true)]);
+
+    // Another account takes over: only its own reaction is "me" now.
+    store.set_user(THEM);
+    store.clear();
+    load(&mut store, HistoryCursor::Latest, 1..=3);
+    assert!(store.apply_dispatch(&react(CHANNEL, 3, ME, &up)).changed);
+    assert_eq!(counts(&store, 3), [(1, false)]);
+    assert!(store.apply_dispatch(&react(CHANNEL, 3, THEM, &up)).changed);
+    assert_eq!(counts(&store, 3), [(2, true)]);
+    check(&store);
+}
+
+#[test]
+fn reactions_for_messages_that_are_not_held_change_nothing_and_keep_no_state() {
+    let up = unicode(UP);
+    let mut store = MessageStore::new();
+    load(&mut store, HistoryCursor::Latest, 1..=5);
+    let steady = |store: &MessageStore| {
+        (
+            store.tracked_bytes(),
+            store.messages_held(),
+            store.channels_held(),
+            store.pending_pages(),
+        )
+    };
+    let before = steady(&store);
+    // Messages outside the run, and channels the store never held.
+    for (channel, n) in [(CHANNEL, 6), (CHANNEL, 1_000_000), (CHANNEL, 0), (OTHER, 1)] {
+        for event in [
+            react(channel, n, THEM, &up),
+            react(channel, n, ME, &up),
+            unreact(channel, n, THEM, &up),
+            remove_emoji(channel, n, &up),
+            remove_all(channel, n),
+        ] {
+            assert_eq!(
+                store.apply_dispatch(&event),
+                unchanged(channel),
+                "{event:?}"
+            );
+        }
+    }
+    assert_eq!(steady(&store), before);
+    assert!(
+        store.window(OTHER).is_none(),
+        "no run is created for a channel the store never held"
+    );
+    check(&store);
+
+    // A request in flight for another channel never hears of them.
+    let token = store.begin_page(OTHER, HistoryCursor::Latest);
+    store.apply_dispatch(&react(CHANNEL, 77, THEM, &up));
+    let bytes = store.tracked_bytes();
+    store.apply_dispatch(&react(CHANNEL, 78, THEM, &up));
+    assert_eq!(store.tracked_bytes(), bytes);
+    assert!(store.pending[0].touched.is_empty());
+    let merge = store.merge_page(token, through_rest(OTHER, HistoryCursor::Latest, &[]));
+    assert_eq!(applied(merge), (0, 0, 0));
+}
+
+#[test]
+fn a_reaction_for_an_uncached_message_makes_a_page_that_carries_it_stale() {
+    let up = unicode(UP);
+    for event in [
+        react(CHANNEL, 7, THEM, &up),
+        unreact(CHANNEL, 7, ME, &up),
+        remove_emoji(CHANNEL, 7, &up),
+        remove_all(CHANNEL, 7),
+    ] {
+        let mut store = MessageStore::new();
+        let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+        assert_eq!(store.apply_dispatch(&event), unchanged(CHANNEL));
+        check(&store);
+        assert_eq!((store.channels_held(), store.messages_held()), (0, 0));
+        let stale = store.merge_page(
+            token,
+            through_rest(CHANNEL, HistoryCursor::Latest, &page(1..=10)),
+        );
+        assert_eq!(stale, PageMerge::Stale, "{event:?}");
+        assert_eq!((store.channels_held(), store.messages_held()), (0, 0));
+        assert_eq!(store.pending_pages(), 0);
+        check(&store);
+        // Asking again after the event succeeds with current state.
+        assert_eq!(
+            applied(load(&mut store, HistoryCursor::Latest, 1..=10)),
+            (10, 10, 0)
+        );
+
+        // A page the event does not concern is not tainted.
+        let mut other = MessageStore::new();
+        let token = other.begin_page(CHANNEL, HistoryCursor::Latest);
+        other.apply_dispatch(&event);
+        let merge = other.merge_page(
+            token,
+            through_rest(CHANNEL, HistoryCursor::Latest, &page(8..=20)),
+        );
+        assert_eq!(applied(merge), (13, 13, 0), "{event:?}");
+        check(&other);
+    }
+}
+
+#[test]
+fn a_gateway_reaction_during_a_page_request_beats_the_older_rest_copy() {
+    let up = unicode(UP);
+    let mut store = MessageStore::new();
+    store.set_user(ME);
+    load(&mut store, HistoryCursor::Latest, 1..=10);
+    let before: Vec<_> = store.items(CHANNEL).collect();
+
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    store.apply_dispatch(&react(CHANNEL, 5, THEM, &up));
+    // The snapshot predates that reaction, and carries one the Gateway has not
+    // delivered yet.
+    let mut snapshot = page(1..=10);
+    snapshot
+        .iter_mut()
+        .find(|message| message.id == id(6))
+        .unwrap()
+        .reactions = vec![Reaction {
+        count: 2,
+        me: true,
+        emoji: up.clone(),
+    }];
+    let merge = store.merge_page(
+        token,
+        through_rest(CHANNEL, HistoryCursor::Latest, &snapshot),
+    );
+    assert_eq!(applied(merge), (10, 10, 0));
+    assert_eq!(counts(&store, 5), [(1, false)], "the Gateway's state wins");
+    assert_eq!(counts(&store, 6), [(2, true)], "the snapshot's otherwise");
+
+    // Only the two changed messages have new revisions.
+    let after: Vec<_> = store.items(CHANNEL).collect();
+    for ((message, old), (_, new)) in before.iter().zip(&after) {
+        assert_eq!(old != new, message.0 == 5 || message.0 == 6, "{message:?}");
+    }
+    check(&store);
+}
+
+#[test]
+fn a_reaction_on_a_message_created_during_a_latest_request_lands_on_its_journaled_copy() {
+    let (up, wave) = (unicode(UP), custom(777, "wave"));
+    let mut store = MessageStore::new();
+    store.set_user(ME);
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    assert!(
+        !store.apply_dispatch(&create(CHANNEL, 12)).changed,
+        "journaled, not held"
+    );
+    let journaled = store.tracked_bytes();
+
+    for event in [
+        react(CHANNEL, 12, THEM, &up),
+        react(CHANNEL, 12, ME, &up),
+        react(CHANNEL, 12, THEM, &wave),
+        react(CHANNEL, 12, THEM, &wave),
+    ] {
+        // The consumer sees nothing: the copy is not held yet.
+        assert_eq!(store.apply_dispatch(&event), unchanged(CHANNEL));
+        check(&store);
+    }
+    assert!(
+        store.tracked_bytes() > journaled,
+        "the journaled copy grew, and the ledger knows"
+    );
+    let pending = &store.pending[0];
+    assert!(!pending.created_incomplete);
+    assert_eq!(pending.created.len(), 1);
+    assert_eq!(
+        pending.created_bytes,
+        message_bytes(&pending.created[0].message)
+    );
+    assert_eq!(pending.created[0].bytes, pending.created_bytes);
+    assert!(
+        pending.touched.is_empty(),
+        "nothing is left for the response to trip over"
+    );
+
+    // The echo of what the copy already shows changes nothing at all.
+    let bytes = store.tracked_bytes();
+    assert_eq!(
+        store.apply_dispatch(&react(CHANNEL, 12, ME, &up)),
+        unchanged(CHANNEL)
+    );
+    assert_eq!(store.tracked_bytes(), bytes);
+
+    // Taking a reaction back and removing an emoji reach the copy as well.
+    store.apply_dispatch(&unreact(CHANNEL, 12, ME, &up));
+    store.apply_dispatch(&remove_emoji(CHANNEL, 12, &wave));
+    check(&store);
+
+    // The response predates the message: the journaled copy, reactions
+    // included, is what the run gets.
+    let merge = store.merge_page(
+        token,
+        through_rest(CHANNEL, HistoryCursor::Latest, &page(8..=11)),
+    );
+    assert_eq!(applied(merge), (4, 5, 0));
+    assert_eq!(ids_of(&store, CHANNEL), [8, 9, 10, 11, 12]);
+    assert_eq!(counts(&store, 12), [(1, false)]);
+    assert_eq!(store.pending_pages(), 0);
+    check(&store);
+}
+
+#[test]
+fn a_journaled_copy_that_would_outgrow_the_cap_or_the_journal_is_dropped_and_the_page_goes_stale() {
+    let (up, down) = (unicode(UP), unicode(DOWN));
+    let base = {
+        let mut empty = message(1);
+        empty.content = String::new();
+        message_bytes(&empty)
+    };
+    let sized = |n: u64, bytes: usize| {
+        let mut built = message(n);
+        built.content = "x".repeat(bytes - base);
+        assert_eq!(message_bytes(&built), bytes);
+        Dispatch::MessageCreate(Box::new(built))
+    };
+
+    // A message already at the cap cannot take one more reaction.
+    let mut store = MessageStore::new();
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    store.apply_dispatch(&sized(12, MAX_MESSAGE_BYTES));
+    assert_eq!(store.pending[0].created.len(), 1);
+    check(&store);
+    assert_eq!(
+        store.apply_dispatch(&react(CHANNEL, 12, THEM, &up)),
+        unchanged(CHANNEL)
+    );
+    let pending = &store.pending[0];
+    assert!(pending.created.is_empty() && pending.created_bytes == 0);
+    assert!(pending.created_incomplete);
+    check(&store);
+    let merge = store.merge_page(
+        token,
+        through_rest(CHANNEL, HistoryCursor::Latest, &page(8..=11)),
+    );
+    assert_eq!(merge, PageMerge::Stale, "the copy was lost, so ask again");
+    assert_eq!(store.messages_held(), 0);
+    check(&store);
+
+    // The journal's byte budget is exact: a reaction that makes it full to the
+    // byte fits, the next one does not.
+    let growth = {
+        // Cloned, so that capacities equal lengths as they do in the journal.
+        let probe = Message::clone(&message(13));
+        let mut grown = probe.clone();
+        grown.apply_reaction(ReactionChange::Add {
+            emoji: &up,
+            by_me: false,
+            burst: false,
+        });
+        message_bytes(&grown) - message_bytes(&probe)
+    };
+    let (first, second) = (480 * 1024, JOURNAL_CREATE_BUDGET - 480 * 1024 - growth);
+    let mut store = MessageStore::new();
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    store.apply_dispatch(&sized(12, first));
+    store.apply_dispatch(&sized(13, second));
+    assert_eq!(store.pending[0].created.len(), 2);
+    assert_eq!(store.pending[0].created_bytes, first + second);
+
+    store.apply_dispatch(&react(CHANNEL, 13, THEM, &up));
+    let pending = &store.pending[0];
+    assert_eq!(pending.created.len(), 2);
+    assert!(!pending.created_incomplete);
+    assert_eq!(pending.created_bytes, JOURNAL_CREATE_BUDGET);
+    check(&store);
+
+    store.apply_dispatch(&react(CHANNEL, 13, THEM, &down));
+    let pending = &store.pending[0];
+    assert!(pending.created_incomplete);
+    assert_eq!(pending.created.len(), 1);
+    assert_eq!(pending.created_bytes, first);
+    check(&store);
+    assert!(store.journal_bytes() <= JOURNAL_BUDGET);
+    let merge = store.merge_page(
+        token,
+        through_rest(CHANNEL, HistoryCursor::Latest, &page(8..=11)),
+    );
+    assert_eq!(merge, PageMerge::Stale);
+}
+
+#[test]
+fn a_held_message_a_reaction_pushes_over_the_cap_is_removed_like_an_oversized_update() {
+    let up = unicode(UP);
+    let base = {
+        let mut empty = message(1);
+        empty.content = String::new();
+        message_bytes(&empty)
+    };
+    let mut store = MessageStore::new();
+    load(&mut store, HistoryCursor::Latest, 1..=5);
+    let mut at_limit = message(8);
+    at_limit.content = "y".repeat(MAX_MESSAGE_BYTES - base);
+    assert_eq!(message_bytes(&at_limit), MAX_MESSAGE_BYTES);
+    assert!(
+        store
+            .apply_dispatch(&Dispatch::MessageCreate(Box::new(at_limit)))
+            .changed
+    );
+    assert!(store.get(CHANNEL, id(8)).is_some());
+
+    // A request that began before the reaction must not bring the old copy back.
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    let change = store.apply_dispatch(&react(CHANNEL, 8, THEM, &up));
+    assert_eq!(
+        change,
+        StoreChange {
+            channel: Some(CHANNEL),
+            changed: true,
+            rejected: 1
+        }
+    );
+    assert!(store.get(CHANNEL, id(8)).is_none());
+    check(&store);
+    let merge = store.merge_page(
+        token,
+        through_rest(CHANNEL, HistoryCursor::Latest, &page(1..=10)),
+    );
+    assert_eq!(applied(merge), (10, 9, 0));
+    assert_eq!(ids_of(&store, CHANNEL), [1, 2, 3, 4, 5, 6, 7, 9, 10]);
+    check(&store);
+}
+
+#[test]
+fn more_distinct_uncached_messages_than_the_journal_holds_make_the_page_stale_instead_of_growing_it()
+ {
+    let up = unicode(UP);
+    // Exactly as many as the journal records is still fine for a page that
+    // carries none of them...
+    let mut store = MessageStore::new();
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    for n in 0..JOURNAL_MAX_IDS as u64 {
+        store.apply_dispatch(&react(CHANNEL, 10_000 + n, THEM, &up));
+        assert!(store.journal_bytes() <= JOURNAL_BUDGET);
+    }
+    assert_eq!(store.pending[0].touched.len(), JOURNAL_MAX_IDS);
+    // ...and repeating them records nothing more.
+    let bytes = store.tracked_bytes();
+    for n in 0..JOURNAL_MAX_IDS as u64 {
+        store.apply_dispatch(&unreact(CHANNEL, 10_000 + n, ME, &up));
+    }
+    assert_eq!(store.tracked_bytes(), bytes);
+    check(&store);
+    let merge = store.merge_page(
+        token,
+        through_rest(CHANNEL, HistoryCursor::Latest, &page(1..=10)),
+    );
+    assert_eq!(applied(merge), (10, 10, 0));
+
+    // One more distinct message and the journal gives up: the response is stale.
+    let mut store = MessageStore::new();
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    for n in 0..=JOURNAL_MAX_IDS as u64 {
+        store.apply_dispatch(&remove_all(CHANNEL, 10_000 + n));
+        assert!(store.journal_bytes() <= JOURNAL_BUDGET);
+    }
+    assert!(store.pending[0].touched_overflow);
+    assert_eq!(store.pending[0].touched.len(), JOURNAL_MAX_IDS);
+    check(&store);
+    let merge = store.merge_page(
+        token,
+        through_rest(CHANNEL, HistoryCursor::Latest, &page(1..=10)),
+    );
+    assert_eq!(merge, PageMerge::Stale, "even a page that carries none");
+    assert_eq!(store.messages_held(), 0);
+}
+
+#[test]
+fn a_flood_of_reactions_for_uncached_messages_cannot_grow_the_store() {
+    let emoji: Vec<Emoji> = (0..50).map(|n| unicode(&format!("emoji-{n}"))).collect();
+    let mut store = MessageStore::new();
+    store.set_user(ME);
+    load(&mut store, HistoryCursor::Latest, 1..=50);
+    let steady = (
+        store.tracked_bytes(),
+        store.messages_held(),
+        store.channels_held(),
+    );
+    let flood = |store: &mut MessageStore| {
+        for step in 0..100_000u64 {
+            // Ten thousand distinct messages, none of them held.
+            let n = 10_000 + step % 10_000;
+            let emoji = &emoji[(step % 50) as usize];
+            let user = if step % 7 == 0 { ME } else { THEM };
+            let event = match step % 4 {
+                0 => react(CHANNEL, n, user, emoji),
+                1 => unreact(CHANNEL, n, user, emoji),
+                2 => remove_emoji(CHANNEL, n, emoji),
+                _ => remove_all(CHANNEL, n),
+            };
+            assert!(!store.apply_dispatch(&event).changed);
+        }
+    };
+
+    // Nothing is waiting for them: nothing happens at all.
+    flood(&mut store);
+    assert_eq!(
+        (
+            store.tracked_bytes(),
+            store.messages_held(),
+            store.channels_held()
+        ),
+        steady
+    );
+    check(&store);
+
+    // A request in flight records at most what its journal holds.
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    flood(&mut store);
+    assert!(store.tracked_bytes() <= steady.0 + JOURNAL_BUDGET);
+    assert!(store.journal_bytes() <= JOURNAL_BUDGET);
+    assert_eq!(store.pending[0].touched.len(), JOURNAL_MAX_IDS);
+    assert_eq!((store.messages_held(), store.channels_held()), (50, 1));
+    check(&store);
+    let merge = store.merge_page(
+        token,
+        through_rest(CHANNEL, HistoryCursor::Latest, &page(1..=10)),
+    );
+    assert_eq!(merge, PageMerge::Stale);
+    assert_eq!((store.messages_held(), store.channels_held()), (50, 1));
+    check(&store);
+}
+
+#[test]
+fn a_flood_of_reactions_against_held_messages_stays_bounded_and_the_ledger_exact() {
+    let emoji: Vec<Emoji> = (0..2_000).map(|n| unicode(&format!("emoji-{n}"))).collect();
+    let mut store = MessageStore::new();
+    store.set_user(ME);
+    load(&mut store, HistoryCursor::Latest, 1..=50);
+    let mut state = 1;
+    for step in 0..100_000u64 {
+        let n = 1 + random(&mut state) % 50;
+        let emoji = &emoji[(random(&mut state) % 2_000) as usize];
+        let user = reactor(&mut state);
+        let event = match random(&mut state) % 20 {
+            0 => unreact(CHANNEL, n, user, emoji),
+            1 => remove_emoji(CHANNEL, n, emoji),
+            2 if step % 5_000 == 2 => remove_all(CHANNEL, n),
+            _ => react(CHANNEL, n, user, emoji),
+        };
+        store.apply_dispatch(&event);
+        if step % 1_000 == 0 {
+            check(&store);
+        }
+    }
+    check(&store);
+    let mut full = 0;
+    for message in store.messages(CHANNEL) {
+        assert!(message.reactions.len() <= MAX_REACTIONS);
+        assert!(message_bytes(message) <= MAX_MESSAGE_BYTES);
+        full += usize::from(message.reactions.len() == MAX_REACTIONS);
+    }
+    assert!(full > 0, "the flood did reach the cap");
+    assert_eq!(store.messages_held(), 50);
+}
+
+#[test]
+fn a_flood_of_reactions_against_journaled_copies_stays_bounded_and_the_ledger_exact() {
+    let emoji: Vec<Emoji> = (0..200).map(|n| unicode(&format!("emoji-{n}"))).collect();
+    let mut store = MessageStore::new();
+    store.set_user(ME);
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    for n in 0..JOURNAL_MAX_CREATES as u64 {
+        store.apply_dispatch(&create(CHANNEL, 100 + n));
+    }
+    assert_eq!(store.pending[0].created.len(), JOURNAL_MAX_CREATES);
+    let mut state = 7;
+    for step in 0..20_000u64 {
+        let n = 100 + random(&mut state) % JOURNAL_MAX_CREATES as u64;
+        let emoji = &emoji[(random(&mut state) % 200) as usize];
+        let user = reactor(&mut state);
+        let event = match random(&mut state) % 10 {
+            0 => unreact(CHANNEL, n, user, emoji),
+            1 => remove_emoji(CHANNEL, n, emoji),
+            _ => react(CHANNEL, n, user, emoji),
+        };
+        assert!(!store.apply_dispatch(&event).changed);
+        if step % 500 == 0 {
+            check(&store);
+            assert!(store.journal_bytes() <= JOURNAL_BUDGET);
+        }
+    }
+    check(&store);
+    let pending = &store.pending[0];
+    assert!(!pending.created_incomplete);
+    assert!(pending.touched.is_empty());
+
+    let merge = store.merge_page(
+        token,
+        through_rest(CHANNEL, HistoryCursor::Latest, &page(1..=10)),
+    );
+    assert_eq!(applied(merge), (10, 10 + JOURNAL_MAX_CREATES, 0));
+    let mut full = 0;
+    for message in store.messages(CHANNEL) {
+        assert!(message.reactions.len() <= MAX_REACTIONS);
+        full += usize::from(message.reactions.len() == MAX_REACTIONS);
+    }
+    assert!(full > 0, "the flood did reach the cap");
+    check(&store);
+}
+
+#[test]
+fn the_recorded_reaction_events_apply_through_the_store() {
+    let mut store = MessageStore::new();
+    store.set_user(ME);
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    store.merge_page(token, vec![message_in(CHANNEL, REACTED)]);
+    let mut apply = |name: &str, raw: &str| {
+        let change = store.apply_dispatch(&decode_fixture(name, raw));
+        assert_eq!(change, changed(CHANNEL), "{name}");
+        counts(&store, REACTED)
+    };
+    // A thumbs-up from another user, then the account's own animated emoji.
+    assert_eq!(apply("MESSAGE_REACTION_ADD", REACTION_ADD), [(1, false)]);
+    assert_eq!(
+        apply("MESSAGE_REACTION_ADD", REACTION_ADD_CUSTOM),
+        [(1, false), (1, true)]
+    );
+    // A burst heart counts but is nobody's own.
+    assert_eq!(
+        apply("MESSAGE_REACTION_ADD", REACTION_ADD_BURST),
+        [(1, false), (1, true), (1, false)]
+    );
+    // The thumbs-up is taken back; its entry goes with it.
+    assert_eq!(
+        apply("MESSAGE_REACTION_REMOVE", REACTION_REMOVE),
+        [(1, true), (1, false)]
+    );
+    // The custom emoji is removed for everyone, then everything.
+    assert_eq!(
+        apply("MESSAGE_REACTION_REMOVE_EMOJI", REACTION_REMOVE_EMOJI),
+        [(1, false)]
+    );
+    assert!(apply("MESSAGE_REACTION_REMOVE_ALL", REACTION_REMOVE_ALL).is_empty());
+    check(&store);
 }

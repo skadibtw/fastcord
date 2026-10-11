@@ -13,8 +13,9 @@
 use std::collections::HashMap;
 
 use fastcord_model::{
-    Channel, Guild, GuildEmoji, GuildMember, Message, MessageUpdate, Role, Snowflake, StreamCreate,
-    StreamDelete, StreamServerUpdate, StreamUpdate, User, VoiceServerUpdate, VoiceState,
+    Channel, Emoji, Guild, GuildEmoji, GuildMember, MAX_REACTION_EMOJI_NAME_BYTES, Message,
+    MessageUpdate, Role, Snowflake, StreamCreate, StreamDelete, StreamServerUpdate, StreamUpdate,
+    User, VoiceServerUpdate, VoiceState,
 };
 use serde::{Deserialize, Deserializer};
 
@@ -22,8 +23,8 @@ use super::event::{
     ChannelRecipientAdd, ChannelRecipientRemove, ChannelUnread, Dispatch, GroupId, GuildCreate,
     GuildDelete, GuildMemberEvent, GuildMemberRemove, GuildRoleDelete, GuildRoleEvent, GuildUpdate,
     ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate, MessageDelete,
-    MessageDeleteBulk, PassiveUpdate, Ready, ReadySupplemental, SessionId, SupplementalGuild,
-    VoiceStateUpdate,
+    MessageDeleteBulk, MessageReaction, MessageReactionRemoveAll, MessageReactionRemoveEmoji,
+    PassiveUpdate, Ready, ReadySupplemental, SessionId, SupplementalGuild, VoiceStateUpdate,
 };
 
 /// A known payload that did not decode into its typed form.
@@ -240,6 +241,44 @@ struct GuildMemberRemoveWire {
 struct ChannelRecipientRemoveWire {
     channel_id: Snowflake,
     user: WireUser,
+}
+
+/// The partial emoji of a reaction event.
+#[derive(Deserialize)]
+struct ReactionEmojiWire {
+    #[serde(default)]
+    id: Option<Snowflake>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    animated: Option<bool>,
+}
+
+/// MESSAGE_REACTION_ADD and MESSAGE_REACTION_REMOVE. The reacting `member`,
+/// `message_author_id`, `burst_colors`, and everything else are skipped as read.
+#[derive(Deserialize)]
+struct ReactionWire {
+    user_id: Snowflake,
+    channel_id: Snowflake,
+    message_id: Snowflake,
+    #[serde(default)]
+    guild_id: Option<Snowflake>,
+    emoji: ReactionEmojiWire,
+    /// The reaction type: `0` (or absent) is a normal reaction, anything else
+    /// a burst reaction.
+    #[serde(default, rename = "type")]
+    kind: Option<i64>,
+    #[serde(default)]
+    burst: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ReactionEmojiRemovedWire {
+    channel_id: Snowflake,
+    message_id: Snowflake,
+    #[serde(default)]
+    guild_id: Option<Snowflake>,
+    emoji: ReactionEmojiWire,
 }
 
 #[derive(Deserialize)]
@@ -662,6 +701,49 @@ fn decode_member_list(raw: &str) -> Result<MemberListUpdate, Malformed> {
     })
 }
 
+/// A reaction emoji must identify a reaction (a custom emoji by a nonzero ID, a
+/// Unicode emoji by its name) and carry a name short enough for the request
+/// path it may be put in. Anything else cannot be applied or answered, so the
+/// event is skipped as malformed rather than guessed at.
+fn reaction_emoji(wire: ReactionEmojiWire) -> Result<Emoji, Malformed> {
+    let identified = wire.id.is_some_and(|id| id.0 != 0)
+        || wire.name.as_deref().is_some_and(|name| !name.is_empty());
+    let fits = wire
+        .name
+        .as_ref()
+        .is_none_or(|name| name.len() <= MAX_REACTION_EMOJI_NAME_BYTES);
+    if !identified || !fits {
+        return Err(Malformed);
+    }
+    Ok(Emoji {
+        id: wire.id,
+        name: wire.name,
+        animated: wire.animated.unwrap_or(false),
+    })
+}
+
+fn decode_reaction(raw: &str) -> Result<MessageReaction, Malformed> {
+    let wire: ReactionWire = json(raw)?;
+    Ok(MessageReaction {
+        channel_id: wire.channel_id,
+        message_id: wire.message_id,
+        guild_id: wire.guild_id,
+        user_id: wire.user_id,
+        emoji: reaction_emoji(wire.emoji)?,
+        burst: wire.kind.is_some_and(|kind| kind != 0) || wire.burst == Some(true),
+    })
+}
+
+fn decode_reaction_emoji_removed(raw: &str) -> Result<MessageReactionRemoveEmoji, Malformed> {
+    let wire: ReactionEmojiRemovedWire = json(raw)?;
+    Ok(MessageReactionRemoveEmoji {
+        channel_id: wire.channel_id,
+        message_id: wire.message_id,
+        guild_id: wire.guild_id,
+        emoji: reaction_emoji(wire.emoji)?,
+    })
+}
+
 /// The outcome of decoding one dispatch payload.
 pub(crate) enum Decoded {
     Ready(Box<DecodedReady>),
@@ -692,6 +774,17 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         }
         "MESSAGE_DELETE" => json::<MessageDelete>(raw).map(Dispatch::MessageDelete),
         "MESSAGE_DELETE_BULK" => json::<MessageDeleteBulk>(raw).map(Dispatch::MessageDeleteBulk),
+        "MESSAGE_REACTION_ADD" => {
+            decode_reaction(raw).map(|r| Dispatch::MessageReactionAdd(Box::new(r)))
+        }
+        "MESSAGE_REACTION_REMOVE" => {
+            decode_reaction(raw).map(|r| Dispatch::MessageReactionRemove(Box::new(r)))
+        }
+        "MESSAGE_REACTION_REMOVE_ALL" => {
+            json::<MessageReactionRemoveAll>(raw).map(Dispatch::MessageReactionRemoveAll)
+        }
+        "MESSAGE_REACTION_REMOVE_EMOJI" => decode_reaction_emoji_removed(raw)
+            .map(|r| Dispatch::MessageReactionRemoveEmoji(Box::new(r))),
         "GUILD_CREATE" => decode_guild_create(raw).map(|g| Dispatch::GuildCreate(Box::new(g))),
         "GUILD_UPDATE" => decode_guild_update(raw).map(|g| Dispatch::GuildUpdate(Box::new(g))),
         "GUILD_EMOJIS_UPDATE" => json::<super::GuildEmojisUpdate>(raw)
@@ -1054,6 +1147,352 @@ mod tests {
             decode_dispatch("MESSAGE_DELETE_BULK", r#"{"channel_id":"500","ids":null}"#),
             Decoded::Malformed
         ));
+    }
+
+    const REACTION_ADD: &str =
+        include_str!("../../../../fixtures/gateway/message_reaction_add.json");
+    const REACTION_ADD_CUSTOM: &str =
+        include_str!("../../../../fixtures/gateway/message_reaction_add_custom.json");
+    const REACTION_ADD_BURST: &str =
+        include_str!("../../../../fixtures/gateway/message_reaction_add_burst.json");
+    const REACTION_REMOVE: &str =
+        include_str!("../../../../fixtures/gateway/message_reaction_remove.json");
+    const REACTION_REMOVE_ALL: &str =
+        include_str!("../../../../fixtures/gateway/message_reaction_remove_all.json");
+    const REACTION_REMOVE_EMOJI: &str =
+        include_str!("../../../../fixtures/gateway/message_reaction_remove_emoji.json");
+    const REACTED: u64 = 1_290_000_000_000_000_010;
+
+    fn reaction_event(name: &str, raw: &str) -> Dispatch {
+        let Decoded::Event(event) = decode_dispatch(name, raw) else {
+            panic!("{name} did not decode");
+        };
+        assert_eq!(event.name(), name);
+        event
+    }
+
+    fn unicode_emoji(name: &str) -> Emoji {
+        Emoji {
+            id: None,
+            name: Some(name.to_owned()),
+            animated: false,
+        }
+    }
+
+    #[test]
+    fn reaction_events_decode_their_fixtures_and_skip_what_they_do_not_use() {
+        // A Unicode reaction by another user; the reacting `member` and
+        // `message_author_id` are not kept.
+        let Dispatch::MessageReactionAdd(added) =
+            reaction_event("MESSAGE_REACTION_ADD", REACTION_ADD)
+        else {
+            panic!("not a reaction add");
+        };
+        assert_eq!(
+            *added,
+            MessageReaction {
+                channel_id: id(500),
+                message_id: id(REACTED),
+                guild_id: Some(id(100)),
+                user_id: id(3),
+                emoji: unicode_emoji("\u{1f44d}"),
+                burst: false,
+            }
+        );
+
+        // An animated custom emoji, explicitly a normal reaction.
+        let Dispatch::MessageReactionAdd(custom) =
+            reaction_event("MESSAGE_REACTION_ADD", REACTION_ADD_CUSTOM)
+        else {
+            panic!("not a reaction add");
+        };
+        assert_eq!(custom.user_id, id(2));
+        assert_eq!(
+            custom.emoji,
+            Emoji {
+                id: Some(id(777)),
+                name: Some("wave".to_owned()),
+                animated: true
+            }
+        );
+        assert!(!custom.burst);
+
+        // A burst reaction (type 1, `burst_colors` skipped), variation selector kept.
+        let Dispatch::MessageReactionAdd(burst) =
+            reaction_event("MESSAGE_REACTION_ADD", REACTION_ADD_BURST)
+        else {
+            panic!("not a reaction add");
+        };
+        assert!(burst.burst);
+        assert_eq!(burst.emoji, unicode_emoji("\u{2764}\u{fe0f}"));
+
+        let Dispatch::MessageReactionRemove(removed) =
+            reaction_event("MESSAGE_REACTION_REMOVE", REACTION_REMOVE)
+        else {
+            panic!("not a reaction removal");
+        };
+        assert_eq!(
+            *removed,
+            MessageReaction {
+                channel_id: id(500),
+                message_id: id(REACTED),
+                guild_id: Some(id(100)),
+                user_id: id(3),
+                emoji: unicode_emoji("\u{1f44d}"),
+                burst: false,
+            }
+        );
+
+        let Dispatch::MessageReactionRemoveAll(cleared) =
+            reaction_event("MESSAGE_REACTION_REMOVE_ALL", REACTION_REMOVE_ALL)
+        else {
+            panic!("not a remove-all");
+        };
+        assert_eq!(
+            cleared,
+            MessageReactionRemoveAll {
+                channel_id: id(500),
+                message_id: id(REACTED),
+                guild_id: Some(id(100)),
+            }
+        );
+
+        // An absent `animated` is false.
+        let Dispatch::MessageReactionRemoveEmoji(emptied) =
+            reaction_event("MESSAGE_REACTION_REMOVE_EMOJI", REACTION_REMOVE_EMOJI)
+        else {
+            panic!("not a remove-emoji");
+        };
+        assert_eq!(
+            *emptied,
+            MessageReactionRemoveEmoji {
+                channel_id: id(500),
+                message_id: id(REACTED),
+                guild_id: Some(id(100)),
+                emoji: Emoji {
+                    id: Some(id(777)),
+                    name: Some("wave".to_owned()),
+                    animated: false
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn a_reaction_is_a_burst_by_its_type_or_its_burst_flag() {
+        for (extra, burst) in [
+            ("", false),
+            (r#","type":0"#, false),
+            (r#","type":0,"burst":false"#, false),
+            (r#","type":null,"burst":null"#, false),
+            (r#","burst":false"#, false),
+            (r#","type":1"#, true),
+            (r#","type":1,"burst":false"#, true),
+            (r#","burst":true"#, true),
+            (r#","type":0,"burst":true"#, true),
+        ] {
+            let raw = format!(
+                r#"{{"user_id":"3","channel_id":"500","message_id":"9","emoji":{{"name":"x"}}{extra}}}"#
+            );
+            for name in ["MESSAGE_REACTION_ADD", "MESSAGE_REACTION_REMOVE"] {
+                let (Dispatch::MessageReactionAdd(reaction)
+                | Dispatch::MessageReactionRemove(reaction)) = reaction_event(name, &raw)
+                else {
+                    panic!("{name} is not a reaction");
+                };
+                assert_eq!(reaction.burst, burst, "{name}{extra}");
+            }
+        }
+    }
+
+    #[test]
+    fn reaction_payloads_tolerate_null_and_absent_optional_fields_and_unknown_ones() {
+        // A DM has no guild: absent and null both mean none.
+        for guild in ["", r#","guild_id":null"#] {
+            let raw = format!(
+                r#"{{"user_id":"3","channel_id":"500","message_id":"9","emoji":{{"name":"x"}}{guild}}}"#
+            );
+            let Dispatch::MessageReactionAdd(reaction) =
+                reaction_event("MESSAGE_REACTION_ADD", &raw)
+            else {
+                panic!("not a reaction add");
+            };
+            assert_eq!(reaction.guild_id, None, "{guild}");
+        }
+        // A deleted custom emoji has no name; null `animated` is false.
+        let raw = r#"{"user_id":"3","channel_id":"500","message_id":"9","emoji":{"id":"777","name":null,"animated":null}}"#;
+        let Dispatch::MessageReactionAdd(reaction) = reaction_event("MESSAGE_REACTION_ADD", raw)
+        else {
+            panic!("not a reaction add");
+        };
+        assert_eq!(
+            reaction.emoji,
+            Emoji {
+                id: Some(id(777)),
+                name: None,
+                animated: false
+            }
+        );
+        // An explicit null ID beside a name is a Unicode emoji.
+        let raw = r#"{"channel_id":"500","message_id":"9","emoji":{"id":null,"name":"x","animated":false}}"#;
+        let Dispatch::MessageReactionRemoveEmoji(emptied) =
+            reaction_event("MESSAGE_REACTION_REMOVE_EMOJI", raw)
+        else {
+            panic!("not a remove-emoji");
+        };
+        assert_eq!(
+            (emptied.guild_id, emptied.emoji),
+            (None, unicode_emoji("x"))
+        );
+        // Fields this client does not use, however nested, are skipped.
+        let noisy = r##"{"user_id":"3","channel_id":"500","message_id":"9","emoji":{"name":"x","extra":{"deep":[1,2,{"a":null}]}},"member":{"user":{"id":"3","username":"u"},"roles":["1","2"]},"message_author_id":"4","burst_colors":["#fff"],"future":[[[]]]}"##;
+        assert!(matches!(
+            reaction_event("MESSAGE_REACTION_ADD", noisy),
+            Dispatch::MessageReactionAdd(_)
+        ));
+        let raw = r#"{"channel_id":"500","message_id":"9","reactions_removed":["x"]}"#;
+        assert!(matches!(
+            reaction_event("MESSAGE_REACTION_REMOVE_ALL", raw),
+            Dispatch::MessageReactionRemoveAll(_)
+        ));
+    }
+
+    #[test]
+    fn a_reaction_emoji_that_cannot_identify_a_reaction_makes_the_event_malformed() {
+        let long = "x".repeat(MAX_REACTION_EMOJI_NAME_BYTES + 1);
+        let accents = "\u{e9}".repeat(MAX_REACTION_EMOJI_NAME_BYTES / 2 + 1);
+        let bad = [
+            "{}".to_owned(),
+            "null".to_owned(),
+            r#"{"id":null,"name":null}"#.to_owned(),
+            r#"{"id":null,"name":""}"#.to_owned(),
+            r#"{"id":"0"}"#.to_owned(),
+            r#"{"id":"0","name":""}"#.to_owned(),
+            r#"{"id":"0","name":null}"#.to_owned(),
+            // The limit is in bytes, whatever the characters.
+            format!(r#"{{"name":"{long}"}}"#),
+            format!(r#"{{"id":"777","name":"{long}"}}"#),
+            format!(r#"{{"name":"{accents}"}}"#),
+            r#"{"id":"not a number","name":"x"}"#.to_owned(),
+            r#"{"name":5}"#.to_owned(),
+        ];
+        for emoji in &bad {
+            let reaction =
+                format!(r#"{{"user_id":"3","channel_id":"500","message_id":"9","emoji":{emoji}}}"#);
+            for name in ["MESSAGE_REACTION_ADD", "MESSAGE_REACTION_REMOVE"] {
+                assert!(
+                    matches!(decode_dispatch(name, &reaction), Decoded::Malformed),
+                    "{name} {emoji:.40}"
+                );
+            }
+            let emptied = format!(r#"{{"channel_id":"500","message_id":"9","emoji":{emoji}}}"#);
+            assert!(
+                matches!(
+                    decode_dispatch("MESSAGE_REACTION_REMOVE_EMOJI", &emptied),
+                    Decoded::Malformed
+                ),
+                "{emoji:.40}"
+            );
+        }
+
+        // The limit itself is fine, and so is any emoji that has some identity.
+        let at_limit = "x".repeat(MAX_REACTION_EMOJI_NAME_BYTES);
+        let accents_at_limit = "\u{e9}".repeat(MAX_REACTION_EMOJI_NAME_BYTES / 2);
+        for emoji in [
+            format!(r#"{{"name":"{at_limit}"}}"#),
+            format!(r#"{{"name":"{accents_at_limit}"}}"#),
+            r#"{"id":"777"}"#.to_owned(),
+            r#"{"id":"0","name":"x"}"#.to_owned(),
+            r#"{"name":"x"}"#.to_owned(),
+        ] {
+            let reaction =
+                format!(r#"{{"user_id":"3","channel_id":"500","message_id":"9","emoji":{emoji}}}"#);
+            assert!(
+                matches!(
+                    decode_dispatch("MESSAGE_REACTION_ADD", &reaction),
+                    Decoded::Event(Dispatch::MessageReactionAdd(_))
+                ),
+                "{emoji:.40}"
+            );
+        }
+
+        // Everything else the payload must carry.
+        for raw in [
+            r#"{"channel_id":"500","message_id":"9","emoji":{"name":"x"}}"#,
+            r#"{"user_id":"3","message_id":"9","emoji":{"name":"x"}}"#,
+            r#"{"user_id":"3","channel_id":"500","emoji":{"name":"x"}}"#,
+            r#"{"user_id":"3","channel_id":"500","message_id":"9"}"#,
+            r#"{"user_id":"3","channel_id":"500","message_id":"9","emoji":null}"#,
+            r#"{"user_id":"x","channel_id":"500","message_id":"9","emoji":{"name":"x"}}"#,
+            r#"{"user_id":"3","channel_id":"500","message_id":"9","emoji":{"name":"x"},"type":"1"}"#,
+            "[]",
+            "",
+        ] {
+            for name in ["MESSAGE_REACTION_ADD", "MESSAGE_REACTION_REMOVE"] {
+                assert!(
+                    matches!(decode_dispatch(name, raw), Decoded::Malformed),
+                    "{name} {raw}"
+                );
+            }
+        }
+        for raw in [
+            "{}",
+            r#"{"channel_id":"500"}"#,
+            r#"{"message_id":"9"}"#,
+            r#"{"channel_id":"x","message_id":"9"}"#,
+            r#"{"channel_id":"500","message_id":"9""#,
+        ] {
+            assert!(
+                matches!(
+                    decode_dispatch("MESSAGE_REACTION_REMOVE_ALL", raw),
+                    Decoded::Malformed
+                ),
+                "{raw}"
+            );
+        }
+        for raw in [
+            "{}",
+            r#"{"channel_id":"500","message_id":"9"}"#,
+            r#"{"message_id":"9","emoji":{"name":"x"}}"#,
+            r#"{"channel_id":"500","emoji":{"name":"x"}}"#,
+        ] {
+            assert!(
+                matches!(
+                    decode_dispatch("MESSAGE_REACTION_REMOVE_EMOJI", raw),
+                    Decoded::Malformed
+                ),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn debounced_reaction_events_stay_unhandled_because_their_capability_is_not_enabled() {
+        let raw = r#"{"channel_id":"500","message_id":"9","guild_id":"100","reactions":[{"users":["3","4"],"emoji":{"name":"x"}}]}"#;
+        assert!(matches!(
+            decode_dispatch("MESSAGE_REACTION_ADD_MANY", raw),
+            Decoded::Unhandled
+        ));
+        assert!(
+            crate::gateway::SELECTED_CAPABILITIES
+                .iter()
+                .all(|capability| !capability.name().contains("DEBOUNCE"))
+        );
+    }
+
+    #[test]
+    fn reaction_event_debug_output_names_the_event_only() {
+        for (name, raw) in [
+            ("MESSAGE_REACTION_ADD", REACTION_ADD),
+            ("MESSAGE_REACTION_ADD", REACTION_ADD_CUSTOM),
+            ("MESSAGE_REACTION_ADD", REACTION_ADD_BURST),
+            ("MESSAGE_REACTION_REMOVE", REACTION_REMOVE),
+            ("MESSAGE_REACTION_REMOVE_ALL", REACTION_REMOVE_ALL),
+            ("MESSAGE_REACTION_REMOVE_EMOJI", REACTION_REMOVE_EMOJI),
+        ] {
+            let shown = format!("{:?}", reaction_event(name, raw));
+            assert_eq!(shown, format!("Dispatch::{name}"));
+        }
     }
 
     #[test]

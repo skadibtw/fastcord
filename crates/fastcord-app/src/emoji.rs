@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use fastcord_model::Snowflake;
+use fastcord_model::{Emoji, Snowflake};
 use iced::task::Handle;
 use iced::widget::{column, image, row, sensor, text};
 use iced::{Element, Length, Task};
@@ -133,9 +133,29 @@ pub enum Origin {
         revision: u64,
         run: u16,
     },
+    /// The `chip`th reaction chip of a message's row.
+    Reaction {
+        channel: Snowflake,
+        message: Snowflake,
+        revision: u64,
+        chip: u8,
+    },
     Picker {
         revision: u64,
     },
+}
+
+/// The image a reaction's emoji is drawn from: a custom emoji by its ID, a
+/// Unicode emoji by the bundled index. Unicode text the index does not know
+/// (a sequence newer than the bundle) has none and is drawn as text.
+pub fn reaction_asset(emoji: &Emoji) -> Option<Asset> {
+    match emoji.id {
+        Some(id) => Some(Asset::Custom {
+            id,
+            animated: emoji.animated,
+        }),
+        None => emoji.name.as_deref().and_then(unicode).map(Asset::Unicode),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -1254,6 +1254,7 @@ mod tests {
             own,
             change,
             reply: None,
+            reactions: Vec::new(),
         }
     }
 

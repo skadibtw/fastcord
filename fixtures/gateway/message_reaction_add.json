@@ -1,0 +1,19 @@
+{
+  "user_id": "3",
+  "channel_id": "500",
+  "message_id": "1290000000000000010",
+  "message_author_id": "2",
+  "guild_id": "100",
+  "member": {
+    "user": {"id": "3", "username": "other_fixture", "global_name": null, "avatar": null, "discriminator": "0"},
+    "roles": [],
+    "nick": null,
+    "joined_at": "2021-01-01T00:00:00.000000+00:00",
+    "deaf": false,
+    "mute": false,
+    "flags": 0
+  },
+  "emoji": {"id": null, "name": "\ud83d\udc4d"},
+  "type": 0,
+  "burst": false
+}

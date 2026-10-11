@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use fastcord_discord::state::Store;
 use fastcord_discord::state::navigation::NavigationSnapshot;
-use fastcord_model::{GuildEmoji, Snowflake};
+use fastcord_model::{Emoji, GuildEmoji, Snowflake};
 use iced::widget::{button, column, container, pick_list, row, text, text_input};
 use iced::{Element, Length};
 
@@ -85,6 +85,24 @@ impl Choice {
         }
     }
 
+    /// The emoji as a reaction to a message names it.
+    pub fn reaction_emoji(&self) -> Emoji {
+        match self {
+            Self::Unicode(id) => Emoji {
+                id: None,
+                name: Some(emoji::entries()[usize::from(*id)].text.to_owned()),
+                animated: false,
+            },
+            Self::Custom {
+                id, animated, name, ..
+            } => Emoji {
+                id: Some(*id),
+                name: Some(name.to_string()),
+                animated: *animated,
+            },
+        }
+    }
+
     fn name(&self) -> &str {
         match self {
             Self::Unicode(id) => emoji::entries()[usize::from(*id)].name,
@@ -144,6 +162,9 @@ impl Default for Request {
 #[derive(Default)]
 pub struct Picker {
     pub request: Request,
+    /// The message the picker was opened to react to; the pick is then a
+    /// reaction rather than text for the composer.
+    reaction: Option<Snowflake>,
 }
 
 #[derive(Clone, Debug)]
@@ -159,10 +180,25 @@ pub enum Event {
 
 impl Picker {
     pub fn close(&mut self) {
+        self.reaction = None;
         if self.request.open {
             self.request.open = false;
             self.request.revision = self.request.revision.wrapping_add(1);
         }
+    }
+
+    /// Opens the picker to choose a reaction to `message` of `channel`.
+    pub fn open_for_reaction(&mut self, channel: Snowflake, message: Snowflake) {
+        self.reaction = Some(message);
+        self.request.open = true;
+        self.request.channel = Some(channel);
+        self.request.window = Window::viewport(0.0, 288.0);
+        self.request.revision = self.request.revision.wrapping_add(1);
+    }
+
+    /// The message a pick reacts to, when the picker was opened for one.
+    pub fn reaction(&self) -> Option<Snowflake> {
+        self.reaction
     }
 
     pub fn update(
@@ -173,6 +209,8 @@ impl Picker {
     ) -> Option<Choice> {
         match event {
             Event::Toggle => {
+                // The composer's button: a pick is text, never a reaction.
+                self.reaction = None;
                 self.request.open = !self.request.open;
                 self.request.channel = channel;
                 self.request.window = Window::viewport(0.0, 288.0);
@@ -461,14 +499,18 @@ pub fn view<'a>(
         container(content).height(ROW_HEIGHT).clip(true).into()
     });
     let body = column![
-        row![text("Emoji").size(20), button("Close").on_press(Message::EmojiPicker(Event::Close))].spacing(12),
+        row![text(if picker.reaction.is_some() { "React with emoji" } else { "Emoji" }).size(20), button("Close").on_press(Message::EmojiPicker(Event::Close))].spacing(12),
         text_input("Search names, aliases or emoji", &picker.request.query)
             .id("emoji-search").on_input(|query| Message::EmojiPicker(Event::Search(query))),
         pick_list(categories, Some(picker.request.category), |category| Message::EmojiPicker(Event::Category(category))),
         container(virtual_list::view("emoji-list", snapshot.offset, snapshot.total, cells,
             |window| Message::EmojiPicker(Event::Window(window)))).max_height(288),
         text(if snapshot.total == 0 && current { "No available emoji match this search." } else { "" }).size(12),
-        text("Animated and external emoji may require Nitro. Account entitlements are not assumed; Discord rejections appear beside unsent messages.").size(11),
+        text(if picker.reaction.is_some() {
+            "Animated and external emoji may require Nitro. Account entitlements are not assumed; a reaction Discord rejects is reported above the message box."
+        } else {
+            "Animated and external emoji may require Nitro. Account entitlements are not assumed; Discord rejections appear beside unsent messages."
+        }).size(11),
         iced::widget::tooltip(
             text("Twemoji 17.0.3 · Unicode 16.0 · Attribution (hover)").size(10),
             container(text(include_str!("../../../assets/emoji/NOTICE.txt")).size(10)).width(420).padding(8),
@@ -608,7 +650,10 @@ mod tests {
             "<a:external:601>"
         );
         let (_, navigation, _) = fixture();
-        let mut picker = Picker { request };
+        let mut picker = Picker {
+            request,
+            reaction: None,
+        };
         picker.inserted(Choice::Custom {
             guild: Snowflake(200),
             id: Snowflake(601),
@@ -673,7 +718,10 @@ mod tests {
     #[test]
     fn recent_order_query_bytes_and_stale_selections_are_bounded() {
         let (store, navigation, request) = fixture();
-        let mut picker = Picker { request };
+        let mut picker = Picker {
+            request,
+            reaction: None,
+        };
         let page = snapshot(&picker.request, &store, &navigation);
         let selected = page.cells[0].choice.clone();
         assert_eq!(
@@ -726,7 +774,10 @@ mod tests {
     fn picker_widgets_track_cells_not_the_total_catalog_and_are_clickable() {
         let (store, navigation, mut request) = fixture();
         request.query = "grinning face".into();
-        let picker = Picker { request };
+        let picker = Picker {
+            request,
+            reaction: None,
+        };
         let page = snapshot(&picker.request, &store, &navigation);
         let empty = HashMap::new();
         let widgets = |total: usize| {
@@ -753,5 +804,86 @@ mod tests {
             }
         }
         assert!(selected, "actual picker buttons emit insertion intents");
+    }
+
+    #[test]
+    fn a_picker_opened_for_a_message_picks_a_reaction_not_composer_text() {
+        let (store, navigation, request) = fixture();
+        let mut picker = Picker {
+            request: Request {
+                open: false,
+                ..request
+            },
+            reaction: None,
+        };
+        picker.open_for_reaction(Snowflake(500), Snowflake(42));
+        assert!(picker.request.open);
+        assert_eq!(picker.reaction(), Some(Snowflake(42)));
+        let page = snapshot(&picker.request, &store, &navigation);
+        assert_eq!(page.revision, picker.request.revision);
+        let choice = page.cells[0].choice.clone();
+        // Only a pick from the current page of the open channel counts.
+        assert_eq!(
+            picker.update(Event::Select(choice.clone()), Some(Snowflake(501)), &page),
+            None
+        );
+        assert_eq!(
+            picker.update(Event::Select(choice.clone()), Some(Snowflake(500)), &page),
+            Some(choice.clone())
+        );
+        assert_eq!(
+            picker.reaction(),
+            Some(Snowflake(42)),
+            "the caller reads the message before the pick closes the picker"
+        );
+        picker.inserted(choice);
+        assert!(!picker.request.open);
+        assert_eq!(picker.reaction(), None);
+
+        // The composer's button toggles a text picker; it also closes a reaction one.
+        picker.open_for_reaction(Snowflake(500), Snowflake(42));
+        picker.update(Event::Toggle, Some(Snowflake(500)), &page);
+        assert!(!picker.request.open && picker.reaction().is_none());
+        picker.update(Event::Toggle, Some(Snowflake(500)), &page);
+        assert!(picker.request.open && picker.reaction().is_none());
+        // Closing, as when the channel changes, forgets the message too.
+        picker.open_for_reaction(Snowflake(500), Snowflake(43));
+        picker.close();
+        assert!(!picker.request.open && picker.reaction().is_none());
+    }
+
+    #[test]
+    fn choices_name_the_emoji_a_reaction_is_made_with() {
+        let thumbs = emoji::unicode("\u{1f44d}").unwrap();
+        assert_eq!(
+            Choice::Unicode(thumbs).reaction_emoji(),
+            Emoji {
+                id: None,
+                name: Some("\u{1f44d}".to_owned()),
+                animated: false
+            }
+        );
+        let party = Choice::Custom {
+            guild: Snowflake(100),
+            id: Snowflake(502),
+            animated: true,
+            name: Arc::from("party"),
+        };
+        assert_eq!(
+            party.reaction_emoji(),
+            Emoji {
+                id: Some(Snowflake(502)),
+                name: Some("party".to_owned()),
+                animated: true
+            }
+        );
+        // Every bundled emoji can be named in a reaction request.
+        for id in 0..emoji::entries().len() {
+            let emoji = Choice::Unicode(id as u16).reaction_emoji();
+            assert!(
+                fastcord_discord::ReactionEmoji::new(&emoji).is_ok(),
+                "{id}: {emoji:?}"
+            );
+        }
     }
 }

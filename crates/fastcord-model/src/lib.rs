@@ -14,8 +14,9 @@ mod wire;
 pub use channel::{Channel, ChannelKind};
 pub use guild::{Guild, GuildEmoji, GuildMember, Role};
 pub use message::{
-    Attachment, Emoji, Message, MessageReference, MessageUpdate, REPLY_KIND, REPLY_PREVIEW_CHARS,
-    Reaction, Referenced, ReplyPreview,
+    Attachment, Emoji, MAX_REACTION_EMOJI_NAME_BYTES, MAX_REACTIONS, Message, MessageReference,
+    MessageUpdate, REPLY_KIND, REPLY_PREVIEW_CHARS, Reaction, ReactionChange, Referenced,
+    ReplyPreview,
 };
 pub use permissions::{
     GuildScope, MemberScope, OverwriteKind, PermissionOverwrite, Permissions, channel_permissions,

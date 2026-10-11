@@ -13,6 +13,7 @@ mod login;
 mod navigation;
 mod outbox;
 mod qr;
+mod reactions;
 mod render;
 mod timeline;
 mod variable_list;
@@ -622,9 +623,27 @@ impl App {
                         event,
                         gateway.timeline.channel_id,
                         &gateway.emoji_snapshot,
-                    ) && gateway.composer.insert_emoji(&choice.source())
-                    {
-                        gateway.emoji_picker.inserted(choice);
+                    ) {
+                        let accepted =
+                            match (gateway.emoji_picker.reaction(), gateway.timeline.channel_id) {
+                                // Opened for a message: the pick reacts to it.
+                                (Some(message), Some(channel)) => {
+                                    let queued = gateway.controls.add_reaction(
+                                        channel,
+                                        message,
+                                        choice.reaction_emoji(),
+                                    );
+                                    if !queued {
+                                        gateway.composer.refused();
+                                    }
+                                    queued
+                                }
+                                // Otherwise it is text for the composer.
+                                _ => gateway.composer.insert_emoji(&choice.source()),
+                            };
+                        if accepted {
+                            gateway.emoji_picker.inserted(choice);
+                        }
                     }
                     if reset_scroll && gateway.emoji_picker.request.open {
                         return Task::batch([
@@ -749,7 +768,11 @@ impl App {
                         | timeline::Event::ConfirmDelete { .. }
                         | timeline::Event::CancelDelete
                         | timeline::Event::RetryChange { .. }
-                        | timeline::Event::DismissChange { .. }) => {
+                        | timeline::Event::DismissChange { .. }
+                        | timeline::Event::ToggleReaction { .. }
+                        | timeline::Event::InspectReaction { .. }
+                        | timeline::Event::CloseReactionUsers
+                        | timeline::Event::React { .. }) => {
                             if gateway.message_action(action) {
                                 return iced::widget::operation::focus(composer::EDITOR_ID);
                             }
@@ -1810,5 +1833,84 @@ mod tests {
             panic!("account");
         };
         assert!(gateway.emoji.views.is_empty());
+    }
+
+    #[test]
+    fn a_picker_opened_for_a_message_reacts_to_it_and_the_composers_button_inserts_text() {
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let channel = Snowflake(500);
+        let thumbs = emoji_picker::Choice::Unicode(emoji::unicode("\u{1f44d}").unwrap());
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        // The account's own worker is not running in tests, so its command queue
+        // is gone; a panel with a bridge whose receiver the test holds replaces it.
+        let bridge = gateway::NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let (_, worker) = iced::Task::<()>::none().abortable();
+        **gateway = GatewayPanel::new(gateway.id, worker, bridge);
+        gateway.timeline = Arc::new(timeline::Snapshot {
+            channel_id: Some(channel),
+            can_send: true,
+            can_react: true,
+            ..timeline::Snapshot::default()
+        });
+        gateway.composer.select(Some(channel));
+        let page = |gateway: &GatewayPanel| {
+            Arc::new(emoji_picker::Snapshot {
+                revision: gateway.emoji_picker.request.revision,
+                channel: Some(channel),
+                offset: 0,
+                total: 1,
+                cells: vec![emoji_picker::Cell {
+                    choice: thumbs.clone(),
+                    guild_name: None,
+                    variants: None,
+                }],
+            })
+        };
+
+        // React on a message, then pick: a reaction request, not editor text.
+        let _ = app.update(Message::Timeline(timeline::Event::React {
+            channel_id: channel,
+            message_id: Snowflake(42),
+        }));
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        assert!(gateway.emoji_picker.request.open);
+        gateway.emoji_snapshot = page(gateway);
+        let _ = app.update(Message::EmojiPicker(emoji_picker::Event::Select(
+            thumbs.clone(),
+        )));
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        assert!(!gateway.emoji_picker.request.open);
+        assert!(gateway.composer.submission(true, 0).is_none(), "no text");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(gateway::Command::AddReaction { channel: c, message, emoji })
+                if (c, message) == (channel, Snowflake(42))
+                    && emoji == thumbs.reaction_emoji()
+        ));
+        assert!(commands.try_recv().is_err());
+        assert_eq!(gateway.emoji_picker.request.recent[0], thumbs);
+
+        // The composer's button still inserts text.
+        let _ = app.update(Message::EmojiPicker(emoji_picker::Event::Toggle));
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        assert!(gateway.emoji_picker.request.open);
+        assert_eq!(gateway.emoji_picker.reaction(), None);
+        gateway.emoji_snapshot = page(gateway);
+        let _ = app.update(Message::EmojiPicker(emoji_picker::Event::Select(thumbs)));
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        assert!(gateway.composer.submission(true, 0).is_some(), "text");
+        assert!(commands.try_recv().is_err(), "nothing was reacted to");
     }
 }

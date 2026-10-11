@@ -4,8 +4,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fastcord_model::{
-    Channel, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, User, VoiceServerUpdate,
-    VoiceState,
+    Channel, Emoji, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, User,
+    VoiceServerUpdate, VoiceState,
 };
 
 /// The Gateway session ID. Not a credential on its own (resuming also needs the
@@ -178,6 +178,39 @@ pub struct MessageDelete {
 pub struct MessageDeleteBulk {
     pub ids: Vec<Snowflake>,
     pub channel_id: Snowflake,
+    pub guild_id: Option<Snowflake>,
+}
+
+/// MESSAGE_REACTION_ADD or MESSAGE_REACTION_REMOVE: one user's reaction to a
+/// message. Only what the reaction aggregate needs is kept; the decoder has
+/// already checked that the emoji can identify a reaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageReaction {
+    pub channel_id: Snowflake,
+    pub message_id: Snowflake,
+    pub guild_id: Option<Snowflake>,
+    /// Who reacted, or took the reaction back.
+    pub user_id: Snowflake,
+    pub emoji: Emoji,
+    /// A burst (super) reaction rather than a normal one.
+    pub burst: bool,
+}
+
+/// MESSAGE_REACTION_REMOVE_EMOJI: every reaction with this emoji was removed
+/// from a message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageReactionRemoveEmoji {
+    pub channel_id: Snowflake,
+    pub message_id: Snowflake,
+    pub guild_id: Option<Snowflake>,
+    pub emoji: Emoji,
+}
+
+/// MESSAGE_REACTION_REMOVE_ALL: every reaction was removed from a message.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct MessageReactionRemoveAll {
+    pub channel_id: Snowflake,
+    pub message_id: Snowflake,
     pub guild_id: Option<Snowflake>,
 }
 
@@ -382,6 +415,12 @@ pub enum Dispatch {
     MessageUpdate(Box<MessageUpdate>),
     MessageDelete(MessageDelete),
     MessageDeleteBulk(MessageDeleteBulk),
+    /// A user reacted to a message.
+    MessageReactionAdd(Box<MessageReaction>),
+    /// A user took a reaction back.
+    MessageReactionRemove(Box<MessageReaction>),
+    MessageReactionRemoveAll(MessageReactionRemoveAll),
+    MessageReactionRemoveEmoji(Box<MessageReactionRemoveEmoji>),
     GuildCreate(Box<GuildCreate>),
     GuildUpdate(Box<GuildUpdate>),
     GuildEmojisUpdate(Box<GuildEmojisUpdate>),
@@ -422,6 +461,10 @@ impl Dispatch {
             Self::MessageUpdate(_) => "MESSAGE_UPDATE",
             Self::MessageDelete(_) => "MESSAGE_DELETE",
             Self::MessageDeleteBulk(_) => "MESSAGE_DELETE_BULK",
+            Self::MessageReactionAdd(_) => "MESSAGE_REACTION_ADD",
+            Self::MessageReactionRemove(_) => "MESSAGE_REACTION_REMOVE",
+            Self::MessageReactionRemoveAll(_) => "MESSAGE_REACTION_REMOVE_ALL",
+            Self::MessageReactionRemoveEmoji(_) => "MESSAGE_REACTION_REMOVE_EMOJI",
             Self::GuildCreate(_) => "GUILD_CREATE",
             Self::GuildUpdate(_) => "GUILD_UPDATE",
             Self::GuildEmojisUpdate(_) => "GUILD_EMOJIS_UPDATE",

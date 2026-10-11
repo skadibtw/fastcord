@@ -1475,13 +1475,22 @@ pub(crate) mod harness {
         /// The pointer moves to `(x, y)` and clicks there, as a user does;
         /// returns whatever the widgets published on the way.
         pub fn click(&mut self, x: f32, y: f32) -> Vec<Message> {
+            self.press(x, y, mouse::Button::Left)
+        }
+
+        /// Like [`click`](Self::click), with the secondary button.
+        pub fn right_click(&mut self, x: f32, y: f32) -> Vec<Message> {
+            self.press(x, y, mouse::Button::Right)
+        }
+
+        fn press(&mut self, x: f32, y: f32, button: mouse::Button) -> Vec<Message> {
             let position = core::Point::new(x, y);
             let cursor = mouse::Cursor::Available(position);
             let mut messages = Vec::new();
             for event in [
                 mouse::Event::CursorMoved { position },
-                mouse::Event::ButtonPressed(mouse::Button::Left),
-                mouse::Event::ButtonReleased(mouse::Button::Left),
+                mouse::Event::ButtonPressed(button),
+                mouse::Event::ButtonReleased(button),
             ] {
                 let mut shell = core::Shell::new(&mut messages);
                 self.element.as_widget_mut().update(

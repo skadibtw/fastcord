@@ -239,6 +239,49 @@ Evidence: Discord's public Guild and Gateway documentation (guild `emojis`, `GUI
 - Images are fetched with the credential-free CDN client of milestone 14 from `https://cdn.discordapp.com/emojis/{id}.{png|gif}?size=32&quality=lossless` (`gif` only for `animated` emoji): no `Authorization`, cookies, or default headers. The URL is public and unsigned, so a 403/404 is never answered with `POST /attachments/refresh-urls`; the emoji keeps its text token. Files are limited to 2 MiB, 120 frames, and 512 KiB of decoded RGBA, are cached with the attachment disk cache under a reserved zero-channel identity, and are decoded off the UI thread only while visible. GIF frame delays of 10 ms or less are shown as 100 ms (browser behavior).
 - Unicode emoji use the bundled, attributed Twemoji 17.0.3 PNGs (`assets/emoji/`); nothing is requested for them.
 
+## Reactions (milestone 16)
+
+Implemented by `fastcord-model::Message` (the aggregate and its changes), `fastcord-discord::gateway` (the four reaction events), `fastcord-discord::message_store` (where they apply), `fastcord-discord::reaction` (the requests), `fastcord-app::reactions`/`history` (the user's requests and the who-reacted list), and the timeline chips. Evidence: Discord Userdoccers (S5: the Reaction object, Create Reaction, Delete Own Reaction, List Reactions, and the Gateway "Message Reaction ..." events). `fixtures/gateway/message_reaction_*.json` and `fixtures/rest/reaction-routes.json` / `reaction-users.json` are shaped after those pages with fabricated IDs. No live capture exists yet (docs/TESTING.md).
+
+### What is kept
+A message holds one aggregate per emoji, `{count, me, emoji}`, and never the reacting users. `count` is Discord's total (normal and burst reactions together); `me` is only the account's own **normal** reaction, so a super reaction made elsewhere counts but never highlights a chip. A custom emoji is identified by its ID alone (a rename, or the null name of a deleted emoji, does not split a reaction), a Unicode emoji by its exact name. At most 32 distinct emoji are kept per message (Discord allows 20 normal and 5 burst), names are at most 64 bytes, and the aggregate is charged to the existing 16 MiB message budget by capacity like every other body field. Reactions in a REST page or `MESSAGE_CREATE` arrive as the message's `reactions`; a `MESSAGE_UPDATE` carries none and never changes them.
+
+### Gateway events
+`MESSAGE_REACTION_ADD` and `MESSAGE_REACTION_REMOVE`: `{user_id, channel_id, message_id, guild_id?, emoji: {id?, name?, animated?}, type?, burst?}`, everything else (`member`, `message_author_id`, `burst_colors`, ...) skipped as it is read. A reaction is a burst reaction when `type` is present and not `0`, or `burst` is true. `MESSAGE_REACTION_REMOVE_ALL`: `{channel_id, message_id, guild_id?}`. `MESSAGE_REACTION_REMOVE_EMOJI`: the same plus `emoji`. An emoji is accepted only when it has a nonzero `id` or a non-empty `name` of at most 64 bytes; otherwise the event is undecodable and skipped (its sequence still counts). `MESSAGE_REACTION_ADD_MANY` needs the `DEBOUNCE_MESSAGE_REACTIONS` capability, which is deliberately not enabled (§Capabilities), so it never arrives; it would be consumed as an unknown event. The navigation reducer ignores all four.
+
+| Event | Effect on a held message |
+|---|---|
+| add, own normal | `me = true`, `count + 1`; **a repeat changes nothing** (the REST answer and this echo each become a no-op after the other) |
+| add, burst or another user | `count + 1`; a new emoji gets an entry unless 32 are held |
+| remove, own normal | needs `me` (otherwise nothing), clears it, `count - 1` |
+| remove, burst or another user | `count - 1` |
+| remove, count reaches 0 | the entry is dropped (order of the rest kept) |
+| remove emoji / remove all | the entry / every entry is dropped |
+
+"Own" means `user_id` equals the READY user, which the history coordinator hands to the store at every READY (`MessageStore::set_user`; until then every event counts as another user's).
+
+### Where an event applies
+Retained messages only, copy-on-write and only when the event changes what is shown: an event that repeats the held state keeps the revision and the shared handle, so no row re-measures. A body that would exceed 512 KiB after the change is removed like an oversized update. A message that is **not** held allocates nothing: no entry, no run for its channel, no tombstone. The only thing a request in flight can need is not to be wrong: with a history page pending for that channel, a message created meanwhile (the live-edge journal) takes the change on its journaled copy, and any other message is noted exactly like an update to an uncached one, so a page that lists it is `Stale` and asked for again rather than trusted (the journal holds at most 512 such IDs; one more makes every page stale instead of growing). Without a pending page the event does nothing at all. Tests flood 100,000 events across 10,000 uncached messages, and against held messages with 2,000 distinct emoji, and require the byte ledger to equal a recount and to stay within budget.
+
+### Requests
+Each request is made once (only a 429 is rescheduled by the shared scheduler), on the channel's major parameter. The emoji is one percent-encoded path segment: every byte except ASCII letters, digits, and `-._~` becomes uppercase `%XX`; a Unicode emoji is its UTF-8 bytes, a custom emoji `name:id` (`wave%3A777`). The animated flag is not part of the path.
+
+| Action | Request |
+|---|---|
+| Add the account's reaction | `PUT /channels/{channel}/messages/{message}/reactions/{emoji}/@me`, no query, no body, user-write priority |
+| Take it back | `DELETE /channels/{channel}/messages/{message}/reactions/{emoji}/0/@me`: the **user client's typed route** (`0` is a normal reaction), no body, user-write priority; no fallback to the untyped bot route |
+| Who reacted (only when the user asks) | `GET /channels/{channel}/messages/{message}/reactions/{emoji}?limit=26&type=0`, user-read priority; the first 25 names are shown and a 26th means "and others" |
+
+`fixtures/rest/reaction-routes.json` is the compatibility pin: the exact method and path for each action with a Unicode emoji (👍), a variation-selector emoji (❤️), a ZWJ/skin-tone sequence (👩🏽‍💻) and a custom emoji, asserted against the routes the code builds (the list is pinned with `limit=25`; the app asks for 26). Rate-limit keys: `PUT` is `/channels/{channel_id}/messages/{id}/reactions/{emoji}/@me`; the typed delete's `0` normalizes to `{id}`, giving `.../reactions/{emoji}/{id}/@me`; the list is `.../reactions/{emoji}`. A user object in the list is reduced to its ID and display name (global name, else username, at most 64 characters).
+
+### The user's request and its answer
+Clicking a chip asks for the opposite of the *stored* state (take the reaction back when `me`, add it otherwise); picking an emoji in the picker only adds, and does nothing when the reaction already is the user's. The worker checks the request against its store, never against what a stale UI showed: the channel must be the open one, the message retained, and the emoji nameable in a path. Adding a reaction nobody made yet needs `ADD_REACTIONS` (`PermissionSummary.add_reactions`, which a timeout removes); joining a reaction others made and taking one's own back are not gated locally. The server stays authoritative either way.
+
+At most one request per (message, emoji) is in flight and at most 16 exist (a click on a busy reaction, or a full ledger, says so and asks nothing), so an add and a remove of one reaction can never race to Discord. An unanswered request is only an overlay: its chip is drawn as if Discord had accepted it and is disabled; the store changes when Discord answers. A 2xx answer goes into the store through the same path as the Gateway's report of the account's own reaction, so whichever arrives second is a no-op in either order. A 404 for a removal means the reaction is already gone and counts as removed. Every other failure changes nothing, is shown once as a fixed secret-free sentence above the message box (permission refused, message or emoji gone, rejected, "could not reach Discord", "did not confirm; it may have been applied"), and is never retried by the program; a 401 stops the account as everywhere else. Requests in flight survive a channel change; their answers meet an empty store.
+
+### Not established (verify live, see docs/TESTING.md)
+That Discord accepts the bare `PUT` (no `location`/`type` query like the web client sends) and the typed delete from this client profile; the real answer for removing a reaction that is already gone (404 is assumed); the error codes Discord uses for a blocked reactor, the 20-emoji limit, and an unavailable custom emoji; whether `type=0` is accepted on the list route; the burst/normal count arithmetic against the official client's chips; moderators' remove-emoji/remove-all events.
+
 ## Voice session and transport (milestone 17)
 
 Implemented in `fastcord-media` (depends on `fastcord-model` only). Evidence: payload shapes and codes follow Discord's voice documentation and the community voice-connection/opcode tables (docs.discord.food); nothing below was captured from a live session yet (see the pending checks in `docs/TESTING.md`). Transport vectors in `fixtures/voice/transport-vectors.json` were generated with pycryptodome, independently of the RustCrypto crates under test.

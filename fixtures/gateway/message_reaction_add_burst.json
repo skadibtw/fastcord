@@ -1,0 +1,11 @@
+{
+  "user_id": "3",
+  "channel_id": "500",
+  "message_id": "1290000000000000010",
+  "message_author_id": "2",
+  "guild_id": "100",
+  "emoji": {"id": null, "name": "\u2764\ufe0f"},
+  "type": 1,
+  "burst": true,
+  "burst_colors": ["#f0ca59", "#4c704f", "#e07f45"]
+}
