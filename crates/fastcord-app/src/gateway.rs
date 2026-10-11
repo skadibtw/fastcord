@@ -48,6 +48,10 @@ pub struct VoiceControls {
     pub output_generation: u64,
     pub input_error: Option<fastcord_audio::DeviceErrorKind>,
     pub output_error: Option<fastcord_audio::DeviceErrorKind>,
+    pub noise_suppression: fastcord_audio::NoiseSuppression,
+    pub noise_generation: u64,
+    /// The running engine's actual state; `None` outside a call.
+    pub noise_status: Option<fastcord_audio::NoiseSuppressionStatus>,
 }
 impl VoiceControls {
     pub fn capture_enabled(&self) -> bool {
@@ -525,6 +529,7 @@ impl NavigationBridge {
         self.voice_controls.send_modify(|controls| {
             controls.input_device = preferences.input.choice.clone();
             controls.output_device = preferences.output.choice.clone();
+            controls.noise_suppression = preferences.noise_suppression;
         });
     }
 
@@ -542,6 +547,13 @@ impl NavigationBridge {
                 controls.output_device = choice;
                 controls.output_generation = controls.output_generation.wrapping_add(1);
             }
+        });
+    }
+
+    pub fn select_noise_suppression(&self, mode: fastcord_audio::NoiseSuppression) {
+        self.voice_controls.send_modify(|controls| {
+            controls.noise_suppression = mode;
+            controls.noise_generation = controls.noise_generation.wrapping_add(1);
         });
     }
 
@@ -3396,6 +3408,37 @@ mod tests {
         assert_eq!(controls.volumes.len(), 256);
         assert_eq!(controls.volume_percent(Snowflake(1_000)), 200);
         assert_eq!(controls.volume_percent(Snowflake(0)), 100);
+    }
+
+    #[test]
+    fn noise_preferences_and_reselection_preserve_other_voice_controls() {
+        let bridge = NavigationBridge::new();
+        assert_eq!(
+            bridge.voice_controls().noise_suppression,
+            fastcord_audio::NoiseSuppression::Light
+        );
+        let preferences = crate::audio_devices::Preferences {
+            noise_suppression: fastcord_audio::NoiseSuppression::HighQuality,
+            ..crate::audio_devices::Preferences::default()
+        };
+        bridge.set_audio_devices(&preferences);
+        bridge.set_self_muted(true);
+        bridge.voice_controls.send_modify(|controls| {
+            controls.noise_status = Some(fastcord_audio::NoiseSuppressionStatus {
+                error: Some(fastcord_audio::DenoiseError::ModelLoad),
+                ..fastcord_audio::NoiseSuppressionStatus::default()
+            });
+        });
+        let before = bridge.voice_controls();
+        assert_eq!(before.noise_suppression, preferences.noise_suppression);
+        bridge.select_noise_suppression(preferences.noise_suppression);
+        let after = bridge.voice_controls();
+        assert_eq!(after.noise_suppression, before.noise_suppression);
+        assert_eq!(after.noise_generation, before.noise_generation + 1);
+        assert_eq!(after.noise_status, before.noise_status);
+        assert_eq!(after.input_device, before.input_device);
+        assert_eq!(after.output_device, before.output_device);
+        assert!(after.self_muted);
     }
 
     fn join(channel: u64) -> VoiceStateRequest {

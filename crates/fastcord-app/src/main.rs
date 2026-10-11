@@ -129,6 +129,7 @@ enum Message {
     AudioDevicesListed(audio_devices::Inventory),
     Initialized(audio_devices::Preferences, Result<StoreReady, StoreError>),
     SelectAudioDevice(fastcord_audio::Direction, audio_devices::DeviceOption),
+    NoiseSuppressionChanged(fastcord_audio::NoiseSuppression),
     AudioPreferencesSaved(Result<(), &'static str>),
     Timeline(timeline::Event),
     SelectPrivateChannel(Snowflake),
@@ -273,6 +274,15 @@ impl App {
                         .select_audio_device(direction, option.choice.clone());
                 }
                 self.audio_preferences.select(direction, option);
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::NoiseSuppressionChanged(mode) => {
+                self.audio_preferences.noise_suppression = mode;
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.select_noise_suppression(mode);
+                }
                 if self.audio_saving.is_none() {
                     return self.save_audio_preferences();
                 }
@@ -946,25 +956,32 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         if self.audio_settings.open {
-            let (input_error, output_error) = match &self.phase {
+            let (input_error, output_error, noise_status) = match &self.phase {
                 Phase::Account { gateway, .. } => {
                     let controls = gateway.controls.voice_controls();
-                    (controls.input_error, controls.output_error)
+                    (
+                        controls.input_error,
+                        controls.output_error,
+                        controls.noise_status,
+                    )
                 }
-                _ => (None, None),
+                _ => (None, None, None),
             };
-            return center(
+            // The dialog is taller than the default window: scroll instead of hiding Close.
+            return center(scrollable(
                 column![
                     audio_devices::view(
                         &self.audio_settings,
                         &self.audio_preferences,
                         input_error,
-                        output_error
+                        output_error,
+                        noise_status,
                     ),
                     text(self.notice.as_deref().unwrap_or("")),
                 ]
-                .spacing(12),
-            )
+                .spacing(12)
+                .padding(12),
+            ))
             .into();
         }
         if let Phase::Account {
@@ -1350,6 +1367,43 @@ mod tests {
         let _ = app.view();
         let _ = app.update(Message::CloseAudioSettings);
         assert!(!app.audio_settings.open);
+    }
+
+    #[test]
+    fn noise_preferences_are_coalesced_restored_and_reselected_on_the_controls() {
+        use fastcord_audio::NoiseSuppression::{HighQuality, Light, Off};
+        let mut app = login_app();
+        let _ = app.update(Message::NoiseSuppressionChanged(Off));
+        assert_eq!(app.audio_preferences.noise_suppression, Off);
+        assert_eq!(app.audio_saving.as_ref().unwrap().noise_suppression, Off);
+        let _ = app.update(Message::NoiseSuppressionChanged(HighQuality));
+        assert_eq!(app.audio_saving.as_ref().unwrap().noise_suppression, Off);
+        let _ = app.update(Message::AudioPreferencesSaved(Ok(())));
+        assert_eq!(
+            app.audio_saving.as_ref().unwrap().noise_suppression,
+            HighQuality
+        );
+        let _ = app.update(Message::AudioPreferencesSaved(Ok(())));
+        assert!(app.audio_saving.is_none());
+
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let Phase::Account { gateway, .. } = &app.phase else {
+            panic!("not logged in");
+        };
+        let restored = gateway.controls.voice_controls();
+        assert_eq!(restored.noise_suppression, HighQuality);
+        let _ = app.update(Message::NoiseSuppressionChanged(Light));
+        let _ = app.update(Message::NoiseSuppressionChanged(Light));
+        let Phase::Account { gateway, .. } = &app.phase else {
+            panic!("not logged in");
+        };
+        let changed = gateway.controls.voice_controls();
+        assert_eq!(changed.noise_suppression, Light);
+        assert_eq!(
+            changed.noise_generation,
+            restored.noise_generation.wrapping_add(2)
+        );
+        assert_eq!(app.audio_preferences.noise_suppression, Light);
     }
 
     #[test]

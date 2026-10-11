@@ -4,6 +4,8 @@
 //! - [`AudioEngine`]: an owner thread per call that opens the device streams,
 //!   converts between device formats/rates and 48 kHz, and runs Opus.
 //! - [`codec`]: Opus encode/decode with FEC and concealment.
+//! - [`denoise`]: microphone-only noise suppression (Off, Light, High quality) behind one
+//!   [`Denoiser`] trait.
 //! - [`audit`]: the callback marker used by allocation instrumentation.
 //!
 //! Device callbacks only convert samples and move them through preallocated
@@ -13,6 +15,7 @@ pub mod audit;
 mod callback;
 mod channels;
 pub mod codec;
+pub mod denoise;
 pub mod device;
 mod engine;
 mod error;
@@ -25,6 +28,7 @@ mod ring;
 mod alloc_counter;
 
 pub use codec::{CodecError, EncodedPacket, VoiceDecoder, VoiceEncoder};
+pub use denoise::{DenoiseError, Denoiser, NoiseSuppression, NoiseSuppressionStatus};
 pub use device::{DeviceChoice, DeviceErrorKind, DeviceInfo, DeviceKey, Direction, list_devices};
 pub use engine::{
     AudioEngine, DeviceFormat, EngineChannels, EngineConfig, EngineControl, EngineEvent,

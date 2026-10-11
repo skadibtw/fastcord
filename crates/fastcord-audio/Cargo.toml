@@ -9,12 +9,17 @@ repository.workspace = true
 
 [dependencies]
 cpal.workspace = true
+deep_filter.workspace = true
+ndarray.workspace = true
+nnnoiseless.workspace = true
 opus2.workspace = true
 rubato.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 parking_lot.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 fastcord-media.workspace = true
 [lints]

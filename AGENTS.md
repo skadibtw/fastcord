@@ -11,7 +11,7 @@ Cargo workspace under `crates/`. Dependency direction is strict and acyclic (SPE
 ```
 model  <-  discord
 model  <-  media              (voice WS, UDP/RTP, AEAD, DAVE; no cpal/iced)
-model, media, platform <- audio   (cpal, Opus, nnnoiseless, jitter, mixing)
+model, media, platform <- audio   (cpal, Opus, nnnoiseless, DeepFilterNet, jitter, mixing)
 model, media, platform <- video   (capture, codecs, packetization)
 all    <-  app                (binary `fastcord`, iced UI, orchestration)
 ```
@@ -30,9 +30,9 @@ all    <-  app                (binary `fastcord`, iced UI, orchestration)
 | `crates/fastcord-media` | Voice join correlation (`session`), v8 voice Gateway + UDP task (`gateway`), rtpsize AES-GCM/XChaCha20 AEAD (`crypto`), RTP/RTCP parsing, IP discovery/ping/demux and SSRC-to-user mapping; depends on `model` only |
 | `crates/fastcord-platform` | Native credential storage; one target-selected keyring backend; `open_local_file` (OS default handler, never for programs/scripts) |
 | `crates/fastcord-app` | iced application; binary name `fastcord`; history coordinator with send, edit/delete, and reaction reconciliation (`history`), unconfirmed-send outbox (`outbox`), unfinished edits/deletions of own messages (`changes`), unanswered reaction requests (`reactions`), message composer with edit mode (`composer`), variable-height virtual list (`variable_list`), message timeline with own-message actions and reaction chips (`timeline`), credential-free CDN fetch plus byte-bounded disk/decoded attachment caches (`attachments`), attachment preview/larger-view/download/open orchestration (`attachment_ui`), source-preserving visible emoji runs and bounded animation handles (`emoji`, `emoji_index`), and worker-paged search/recent/variant/custom emoji picker, also used to choose a reaction (`emoji_picker`) |
-| `crates/fastcord-audio` | Audio engine: cpal device enumeration/selection by stable ID, owner thread per call, lock-free preallocated SPSC rings, format/rate conversion (rubato), Opus encode/decode with FEC/PLC (`opus2`, bundled libopus), callback allocation audit marker (`audit`) |
+| `crates/fastcord-audio` | Audio engine: cpal device enumeration/selection by stable ID, owner thread per call, lock-free preallocated SPSC rings, format/rate conversion (rubato), microphone noise suppression behind one `Denoiser` trait (`denoise`: Off, Light = `nnnoiseless` inline on the owner, High quality = DeepFilterNet 3 built, run and dropped on one dedicated thread over bounded 480-sample channels; engine switches never leave a gap), Opus encode/decode with FEC/PLC (`opus2`, bundled libopus), callback allocation audit marker (`audit`) |
 | `assets/emoji/` | Versioned, compressed Twemoji PNG bundle, Unicode-index source attribution, and separate MIT / CC-BY-4.0 licenses; decode only visible assets |
-| `docs/` | `SPEC.md` (design + milestones), `PROTOCOL.md` (what is actually sent/expected on the wire), `TESTING.md`, `RELEASE.md` |
+| `docs/` | `SPEC.md` (design + milestones), `PROTOCOL.md` (what is actually sent/expected on the wire), `TESTING.md`, `RELEASE.md`, `THIRD_PARTY_NOTICES.md` (shipped in every archive by `scripts/package.sh`) |
 | `scripts/package.sh` | Per-target release packaging used by CI |
 | `packaging/macos/Info.plist` | `.app` bundle template (`@VERSION@` substituted) |
 | `.github/workflows/` | `ci.yml` (fmt/clippy/test, 3 OS), `release.yml` (tag → GitHub Release) |
@@ -65,7 +65,7 @@ On the maintainer's Windows box, agent shells may not have `cargo` on `PATH`; ca
 
 ## Runtime/Tooling Preferences
 - Rust via rustup; Windows needs VS Build Tools with the C++ workload (MSVC linker).
-- GUI: iced with wgpu (tiny-skia fallback). Audio: `cpal`, `opus2` (bundled libopus, needs CMake), `rubato`. Planned: `nnnoiseless`, `davey` (DAVE). Video: OS-native codecs (Media Foundation / VideoToolbox / VA-API) + `dav1d`; **no FFmpeg** (`docs/adr/`).
+- GUI: iced with wgpu (tiny-skia fallback). Audio: `cpal`, `opus2` (bundled libopus, needs CMake), `rubato`, `nnnoiseless` (Light noise suppression), DeepFilterNet via the `deep_filter` crate pinned to a git revision (High quality; tract runtime and bundled model, so the first fetch needs `git` and network). Planned: `davey` (DAVE). Video: OS-native codecs (Media Foundation / VideoToolbox / VA-API) + `dav1d`; **no FFmpeg** (`docs/adr/`).
 - GitHub Actions are pinned by commit SHA; keep it that way when adding steps.
 
 ## Workflow
@@ -75,6 +75,6 @@ On the maintainer's Windows box, agent shells may not have `cargo` on `PATH`; ca
 - Release: bump `[workspace.package].version`, tag `vX.Y.Z`, push the tag (see `docs/RELEASE.md`).
 
 ## Testing & QA
-- Unit tests live next to code (`#[cfg(test)] mod tests`). Tests are deterministic and offline: protocol/REST fixtures in `fixtures/`, injected clocks for rate limits, crypto/media test vectors.
+- Unit tests live next to code (`#[cfg(test)] mod tests`). Tests are deterministic and offline: protocol/REST fixtures in `fixtures/`, injected clocks for rate limits, crypto/media test vectors. Noise-suppression quality is checked on synthesized WAV fixtures in `fixtures/audio/` (generator, manifest and regeneration command in `denoise/quality.rs`; no third-party audio).
 - No live-credential tests in CI. Hardware-dependent checks (audio devices, capture, GPU codecs) are manual and recorded per milestone.
 - Each milestone's acceptance criteria in SPEC §16 must be exercised before committing; UI changes need a real launch of `fastcord`.

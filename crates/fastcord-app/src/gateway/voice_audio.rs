@@ -1,7 +1,7 @@
 use super::{VoiceControls, VoiceParticipant};
 use fastcord_audio::{
     AudioEngine, AudioError, EncodedPacket, EngineChannels, EngineConfig, EngineControl,
-    RemoteFrame,
+    NoiseSuppression, NoiseSuppressionStatus, RemoteFrame,
 };
 use fastcord_media::{VoiceCredentials, VoiceEvent, VoiceMessage, VoiceStatus, connect};
 use std::collections::HashMap;
@@ -39,6 +39,7 @@ pub(super) async fn run(
     controls_tx: watch::Sender<VoiceControls>,
 ) {
     let initial = controls.borrow().clone();
+    let capture_enabled = initial.capture_enabled();
     run_with(
         credentials,
         cancel_rx,
@@ -49,6 +50,8 @@ pub(super) async fn run(
             AudioEngine::start(EngineConfig {
                 input: Some(initial.input_device),
                 output: Some(initial.output_device),
+                noise_suppression: initial.noise_suppression,
+                capture_enabled,
                 ..EngineConfig::default()
             })
         },
@@ -75,6 +78,7 @@ struct EngineSync {
     retry: bool,
     input_device: (fastcord_audio::DeviceChoice, u64),
     output_device: (fastcord_audio::DeviceChoice, u64),
+    noise_suppression: (NoiseSuppression, u64),
 }
 
 impl EngineSync {
@@ -87,6 +91,7 @@ impl EngineSync {
             retry: false,
             input_device: (fastcord_audio::DeviceChoice::SystemDefault, 0),
             output_device: (fastcord_audio::DeviceChoice::SystemDefault, 0),
+            noise_suppression: (NoiseSuppression::Light, 0),
         }
     }
 
@@ -146,6 +151,18 @@ impl EngineSync {
                 }
             }
         }
+        let desired_noise = (controls.noise_suppression, controls.noise_generation);
+        if self.noise_suppression != desired_noise {
+            if self
+                .controls
+                .try_send(EngineControl::NoiseSuppression(desired_noise.0))
+                .is_ok()
+            {
+                self.noise_suppression = desired_noise;
+            } else {
+                self.retry = true;
+            }
+        }
         for participant in &controls.participants {
             if let Some(ssrc) = participant.ssrc {
                 self.gain(ssrc, controls.volume_percent(participant.user_id));
@@ -177,6 +194,22 @@ impl EngineSync {
     }
 }
 
+/// Publishes the running engine's noise-suppression state for the settings dialog and
+/// withdraws it when the engine stops, however the call ends.
+struct NoiseStatus<'a>(&'a watch::Sender<VoiceControls>);
+
+impl NoiseStatus<'_> {
+    fn publish(&self, status: NoiseSuppressionStatus) {
+        self.0
+            .send_modify(|controls| controls.noise_status = Some(status));
+    }
+}
+
+impl Drop for NoiseStatus<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|controls| controls.noise_status = None);
+    }
+}
 async fn run_with(
     credentials: VoiceCredentials,
     mut cancel_rx: oneshot::Receiver<()>,
@@ -198,6 +231,7 @@ async fn run_with(
         }
     };
     state.send_replace(VoiceAudioState::Running);
+    let noise_status = NoiseStatus(&controls_tx);
     let mut captured = channels.captured;
     let mut remote = channels.remote_audio;
     let mut sync = EngineSync::new(channels.controls);
@@ -319,6 +353,9 @@ async fn run_with(
                             fastcord_audio::Direction::Output => remote = remote_audio,
                         }
                     }
+                    Some(fastcord_audio::EngineEvent::NoiseSuppressionChanged(noise)) => {
+                        noise_status.publish(noise);
+                    }
                     None => { engine_failed = true; break; }
                 }
             }
@@ -334,6 +371,7 @@ async fn run_with(
 
     // Release the audio devices before the next call can open them, then say goodbye.
     drop(engine);
+    drop(noise_status);
     let _ = media.end_speech();
     session.leave().await;
     // A failed engine stays visible (the worker then leaves the Gateway voice state too).
@@ -487,6 +525,22 @@ mod tests {
         .await
         .expect("a failed engine start must end the task promptly");
         assert_eq!(*observer.borrow(), VoiceAudioState::EngineFailed);
+    }
+
+    #[test]
+    fn the_noise_status_is_withdrawn_when_the_engine_stops() {
+        let (controls_tx, controls) = watch::channel(VoiceControls::default());
+        assert_eq!(controls.borrow().noise_status, None);
+        let status = NoiseSuppressionStatus {
+            active: NoiseSuppression::HighQuality,
+            ..NoiseSuppressionStatus::default()
+        };
+        {
+            let published = NoiseStatus(&controls_tx);
+            published.publish(status);
+            assert_eq!(controls.borrow().noise_status, Some(status));
+        }
+        assert_eq!(controls.borrow().noise_status, None);
     }
     #[test]
     fn speaking_identity_survives_ssrc_replacement_and_has_release_delay() {
@@ -716,5 +770,32 @@ mod tests {
             })
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn noise_change_retries_a_full_queue_and_same_selection_retry() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut sync = EngineSync::new(tx);
+        let mut controls = VoiceControls::default();
+        sync.apply(&controls);
+        controls.noise_suppression = NoiseSuppression::HighQuality;
+        controls.noise_generation = 1;
+        sync.apply(&controls);
+        assert!(sync.retry);
+        while rx.try_recv().is_ok() {}
+        sync.apply(&controls);
+        assert!(!sync.retry);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            EngineControl::NoiseSuppression(NoiseSuppression::HighQuality)
+        );
+        sync.apply(&controls);
+        assert!(rx.try_recv().is_err());
+        controls.noise_generation += 1;
+        sync.apply(&controls);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            EngineControl::NoiseSuppression(NoiseSuppression::HighQuality)
+        );
     }
 }

@@ -11,7 +11,7 @@ stage="$(mktemp -d)/${name}"
 bin_dir="target/${target}/release"
 
 mkdir -p "$stage" "$out"
-cp LICENSE README.md CHANGELOG.md "$stage/"
+cp LICENSE README.md CHANGELOG.md docs/THIRD_PARTY_NOTICES.md "$stage/"
 mkdir -p "$stage/assets/emoji"
 cp assets/emoji/NOTICE.txt assets/emoji/TWEMOJI-LICENSE-GRAPHICS.txt \
   assets/emoji/TWEMOJI-LICENSE.txt assets/emoji/EMOJI-DATA-LICENSE.txt \

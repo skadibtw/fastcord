@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! capture ring (device rate, device channels)
-//!   -> downmix to mono -> resample to 48 kHz -> 960-sample frames -> Opus
+//!   -> downmix to mono -> resample to 48 kHz -> 480-sample denoise -> 960-sample frames -> Opus
 //! Opus packets -> decode 48 kHz stereo -> resample to device rate
 //!   -> device channel layout -> playback ring (~40 ms target, 100 ms cap)
 //! ```
@@ -16,6 +16,7 @@ use crate::codec::{
     CHANNELS, EncodedPacket, FRAME_SAMPLES, MAX_FRAME_SAMPLES, SAMPLE_RATE, VoiceDecoder,
     VoiceEncoder,
 };
+use crate::denoise::{BLOCK_SAMPLES, MicrophoneDenoiser};
 use crate::device::StreamFormat;
 use crate::error::AudioError;
 use crate::jitter::JitterMixer;
@@ -52,6 +53,8 @@ pub struct RemoteFrame {
 pub(crate) struct PipelineCounters {
     pub(crate) frames_encoded: AtomicU64,
     pub(crate) encode_errors: AtomicU64,
+    /// Blocks given to a non-Off denoiser, including mode-switch priming and warm-up.
+    pub(crate) denoise_blocks: AtomicU64,
     /// Encoded frames dropped because the consumer was not keeping up.
     pub(crate) frames_dropped: AtomicU64,
     pub(crate) packets_decoded: AtomicU64,
@@ -63,15 +66,65 @@ pub(crate) fn frames_for(rate: u32, ms: u32) -> usize {
     (u64::from(rate) * u64::from(ms) / 1_000).max(1) as usize
 }
 
+const _: () = assert!(FRAME_SAMPLES.is_multiple_of(BLOCK_SAMPLES));
+
+/// Gathers denoised blocks into 20 ms frames and encodes them.
+struct FrameEncoder {
+    frame: Box<[f32; FRAME_SAMPLES]>,
+    filled: usize,
+    encoder: VoiceEncoder,
+    sequence: u64,
+}
+
+impl FrameEncoder {
+    fn accept(
+        &mut self,
+        block: &[f32; BLOCK_SAMPLES],
+        counters: &PipelineCounters,
+        emit: &mut impl FnMut(CapturedFrame),
+    ) {
+        for (out, &sample) in self.frame[self.filled..self.filled + BLOCK_SAMPLES]
+            .iter_mut()
+            .zip(block)
+        {
+            *out = if sample.is_finite() {
+                sample.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+        self.filled += BLOCK_SAMPLES;
+        if self.filled < FRAME_SAMPLES {
+            return;
+        }
+        self.filled = 0;
+        let mut packet = EncodedPacket::empty();
+        match self.encoder.encode_mono(&self.frame, &mut packet) {
+            Ok(()) => {
+                counters.frames_encoded.fetch_add(1, Ordering::Relaxed);
+                emit(CapturedFrame {
+                    packet,
+                    sequence: self.sequence,
+                });
+            }
+            Err(_) => {
+                counters.encode_errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        // Keep the capture clock even when a codec frame fails.
+        self.sequence += 1;
+    }
+}
+
 pub(crate) struct CapturePipeline {
     ring: RingConsumer,
     device: Box<[f32]>,
     mono: Box<[f32]>,
     converter: RateConverter,
-    frame: Box<[f32; FRAME_SAMPLES]>,
-    filled: usize,
-    encoder: VoiceEncoder,
-    sequence: u64,
+    /// Resampled microphone samples gathered into one denoise block.
+    block: [f32; BLOCK_SAMPLES],
+    block_filled: usize,
+    frames: FrameEncoder,
 }
 
 impl CapturePipeline {
@@ -85,10 +138,14 @@ impl CapturePipeline {
             device: vec![0.0; block * format.channels].into_boxed_slice(),
             mono: vec![0.0; block].into_boxed_slice(),
             converter: RateConverter::new(format.rate, SAMPLE_RATE, 1, block)?,
-            frame: Box::new([0.0; FRAME_SAMPLES]),
-            filled: 0,
-            encoder: VoiceEncoder::new(bitrate)?,
-            sequence: 0,
+            block: [0.0; BLOCK_SAMPLES],
+            block_filled: 0,
+            frames: FrameEncoder {
+                frame: Box::new([0.0; FRAME_SAMPLES]),
+                filled: 0,
+                encoder: VoiceEncoder::new(bitrate)?,
+                sequence: 0,
+            },
             ring,
         })
     }
@@ -96,14 +153,18 @@ impl CapturePipeline {
     /// Discards device samples without downmixing, resampling, encoding, or inference.
     pub(crate) fn discard(&mut self) {
         while self.ring.pop(&mut self.device) != 0 {}
-        self.filled = 0;
+        self.block.fill(0.0);
+        self.block_filled = 0;
+        self.frames.frame.fill(0.0);
+        self.frames.filled = 0;
         self.converter.reset();
-        self.frame.fill(0.0);
     }
+
     /// Drains the capture ring, emitting every completed frame.
     pub(crate) fn run(
         &mut self,
         counters: &PipelineCounters,
+        denoiser: &mut MicrophoneDenoiser,
         emit: &mut impl FnMut(CapturedFrame),
     ) {
         let Self {
@@ -111,45 +172,37 @@ impl CapturePipeline {
             device,
             mono,
             converter,
-            frame,
-            filled,
-            encoder,
-            sequence,
+            block,
+            block_filled,
+            frames,
         } = self;
+        let mut processed = [0.0; BLOCK_SAMPLES];
         loop {
             let samples = ring.pop(device);
             if samples == 0 {
                 break;
             }
-            let frames = downmix_to_mono(&device[..samples], ring.channels(), mono);
-            converter.process(&mono[..frames], &mut |mut block: &[f32]| {
-                while !block.is_empty() {
-                    let take = (FRAME_SAMPLES - *filled).min(block.len());
-                    frame[*filled..*filled + take].copy_from_slice(&block[..take]);
-                    *filled += take;
-                    block = &block[take..];
-                    if *filled < FRAME_SAMPLES {
-                        break;
+            let count = downmix_to_mono(&device[..samples], ring.channels(), mono);
+            converter.process(&mono[..count], &mut |mut chunk: &[f32]| {
+                while !chunk.is_empty() {
+                    let take = (BLOCK_SAMPLES - *block_filled).min(chunk.len());
+                    block[*block_filled..*block_filled + take].copy_from_slice(&chunk[..take]);
+                    *block_filled += take;
+                    chunk = &chunk[take..];
+                    if *block_filled < BLOCK_SAMPLES {
+                        continue;
                     }
-                    *filled = 0;
-                    let mut packet = EncodedPacket::empty();
-                    match encoder.encode_mono(frame, &mut packet) {
-                        Ok(()) => {
-                            counters.frames_encoded.fetch_add(1, Ordering::Relaxed);
-                            emit(CapturedFrame {
-                                packet,
-                                sequence: *sequence,
-                            });
-                        }
-                        Err(_) => {
-                            counters.encode_errors.fetch_add(1, Ordering::Relaxed);
-                        }
+                    *block_filled = 0;
+                    denoiser.push(block);
+                    while denoiser.pop(&mut processed) {
+                        frames.accept(&processed, counters, emit);
                     }
-                    // Sequence advances even for a failed frame so timing
-                    // stays aligned with the capture clock.
-                    *sequence += 1;
                 }
             });
+        }
+        // A worker thread answers after the block that it processed was pushed.
+        while denoiser.pop(&mut processed) {
+            frames.accept(&processed, counters, emit);
         }
     }
 }
@@ -279,8 +332,13 @@ impl PlaybackPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NoiseSuppression;
     use crate::resample::tests::{sine, tone_level};
     use crate::ring::sample_ring;
+
+    fn denoiser(mode: NoiseSuppression) -> MicrophoneDenoiser {
+        MicrophoneDenoiser::new(mode, crate::denoise::high_quality_factory())
+    }
 
     fn format(rate: u32, channels: usize) -> StreamFormat {
         StreamFormat {
@@ -301,15 +359,34 @@ mod tests {
         let pipeline = PlaybackPipeline::new(format(rate, channels), producer).unwrap();
         (consumer, pipeline)
     }
+
     #[test]
-    fn muted_capture_discards_samples_without_encoding() {
+    fn muted_capture_discards_samples_without_encoding_or_inference() {
         let (mut ring, mut pipeline) = capture(48_000, 1);
         // Several 20 ms frames' worth, so removing `discard()` makes `run` emit and panic.
         ring.push_overwrite(std::iter::repeat_n(0.5, 4_800));
         pipeline.discard();
         let counters = PipelineCounters::default();
-        pipeline.run(&counters, &mut |_| panic!("muted capture emitted a frame"));
+        let mut denoiser = denoiser(NoiseSuppression::Light);
+        pipeline.run(&counters, &mut denoiser, &mut |_| {
+            panic!("muted capture emitted a frame")
+        });
+        assert_eq!(denoiser.inference_blocks(), 0);
         assert_eq!(counters.frames_encoded.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn light_runs_once_per_block_and_off_runs_no_inference() {
+        for (mode, blocks) in [(NoiseSuppression::Light, 10), (NoiseSuppression::Off, 0)] {
+            let (mut ring, mut pipeline) = capture(48_000, 1);
+            ring.push_overwrite(std::iter::repeat_n(0.1, 4_800));
+            let counters = PipelineCounters::default();
+            let mut denoiser = denoiser(mode);
+            let mut frames = 0;
+            pipeline.run(&counters, &mut denoiser, &mut |_| frames += 1);
+            assert_eq!(frames, 5, "{mode:?}: 100 ms is five 20 ms frames");
+            assert_eq!(denoiser.inference_blocks(), blocks, "{mode:?}");
+        }
     }
 
     #[test]
@@ -329,12 +406,13 @@ mod tests {
         let (mut ring, mut pipeline) = capture(rate, channels);
         let counters = PipelineCounters::default();
         let mut frames = Vec::new();
+        let mut denoiser = denoiser(NoiseSuppression::Off);
         for block in signal.chunks(frames_for(rate, 10)) {
             let interleaved = block.iter().flat_map(|&s| std::iter::repeat_n(s, channels));
             let n = block.len() * channels;
             ring.push_overwrite(interleaved.collect::<Vec<_>>().into_iter());
             assert!(n <= ring.limit());
-            pipeline.run(&counters, &mut |frame| frames.push(frame));
+            pipeline.run(&counters, &mut denoiser, &mut |frame| frames.push(frame));
         }
         assert_eq!(
             counters.frames_encoded.load(Ordering::Relaxed),
@@ -394,7 +472,8 @@ mod tests {
         }
         let counters = PipelineCounters::default();
         let mut frames = 0;
-        pipeline.run(&counters, &mut |_| frames += 1);
+        let mut denoiser = denoiser(NoiseSuppression::Off);
+        pipeline.run(&counters, &mut denoiser, &mut |_| frames += 1);
         assert_eq!(frames, 5, "100 ms = five 20 ms frames");
     }
 
@@ -505,11 +584,12 @@ mod tests {
         let mut device = vec![0.0f32; 441 * 2];
         let mut queue = packets.into_iter();
         let mut emitted = 0;
+        let mut denoiser = denoiser(NoiseSuppression::Off);
         // Warm up, then measure the same work inside a callback scope so the
         // counting allocator attributes any heap use.
         let mut step = |emitted: &mut usize| {
             capture_ring.push_overwrite(block.iter().copied());
-            capture.run(&counters, &mut |_| *emitted += 1);
+            capture.run(&counters, &mut denoiser, &mut |_| *emitted += 1);
             playback.run(&counters, &mut || queue.next());
             playback_ring.pop(&mut device);
         };

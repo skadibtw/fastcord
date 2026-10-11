@@ -17,6 +17,9 @@ use crate::callback::{InputCallback, OutputCallback, StreamCounters};
 use tokio::sync::mpsc;
 
 use crate::codec::{DEFAULT_BITRATE, EncodedPacket};
+use crate::denoise::{
+    Factory, MicrophoneDenoiser, NoiseSuppression, NoiseSuppressionStatus, high_quality_factory,
+};
 use crate::device::{Backend, CpalBackend, DeviceChoice, DeviceErrorKind, Direction, StreamFormat};
 use crate::error::AudioError;
 use crate::pipeline::{
@@ -44,6 +47,11 @@ pub struct EngineConfig {
     pub output: Option<DeviceChoice>,
     /// Opus bitrate in bits/s.
     pub bitrate: u32,
+    /// Microphone-only suppression at call start. High quality is built on its own thread:
+    /// the call starts with Light and switches when the model is ready.
+    pub noise_suppression: NoiseSuppression,
+    /// Initial mute/deafen gate, applied before the first input callback.
+    pub capture_enabled: bool,
 }
 
 impl Default for EngineConfig {
@@ -52,6 +60,8 @@ impl Default for EngineConfig {
             input: Some(DeviceChoice::SystemDefault),
             output: Some(DeviceChoice::SystemDefault),
             bitrate: DEFAULT_BITRATE,
+            noise_suppression: NoiseSuppression::Light,
+            capture_enabled: true,
         }
     }
 }
@@ -106,6 +116,8 @@ pub enum EngineEvent {
         playback: Option<mpsc::Sender<EncodedPacket>>,
         remote_audio: Option<mpsc::Sender<RemoteFrame>>,
     },
+    /// Actual processing mode, initialization state, latency and bounded failure notice.
+    NoiseSuppressionChanged(NoiseSuppressionStatus),
 }
 /// Runtime changes to an active call. Commands are bounded and serviced by the
 /// engine owner; audio callbacks never touch control state.
@@ -117,6 +129,8 @@ pub enum EngineControl {
     OutputEnabled(bool),
     /// Linear gain for one remote RTP SSRC. Values are clamped to 0–2.
     RemoteGain { ssrc: u32, gain: f32 },
+    /// Select a microphone denoiser without reopening either device.
+    NoiseSuppression(NoiseSuppression),
     /// Replace only this direction, on the owner thread. IDs are bounded to 512 bytes.
     SelectDevice {
         direction: Direction,
@@ -154,6 +168,8 @@ pub struct EngineStats {
     /// Encoded frames dropped because the consumer did not keep up.
     pub frames_dropped: u64,
     pub encode_errors: u64,
+    /// Blocks given to a non-Off denoiser; unchanged while muted or Off.
+    pub denoise_blocks: u64,
     pub packets_decoded: u64,
     pub decode_errors: u64,
 }
@@ -238,6 +254,20 @@ impl AudioEngine {
         B: Backend,
         F: FnOnce() -> B + Send + 'static,
     {
+        Self::start_with_denoise(config, make_backend, high_quality_factory())
+    }
+
+    /// As [`AudioEngine::start_with`], with the High quality engine built by `high_quality`
+    /// on the denoise worker thread.
+    pub(crate) fn start_with_denoise<B, F>(
+        config: EngineConfig,
+        make_backend: F,
+        high_quality: Factory,
+    ) -> Result<(Self, EngineChannels), AudioError>
+    where
+        B: Backend,
+        F: FnOnce() -> B + Send + 'static,
+    {
         if config.input.is_none() && config.output.is_none() {
             return Err(AudioError::NothingToRun);
         }
@@ -249,7 +279,9 @@ impl AudioEngine {
         let (stop_tx, stop_rx) = std_mpsc::channel();
         let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Ready>(1);
         let shared = Arc::new(Shared::default());
-        shared.capture_enabled.store(true, Ordering::Release);
+        shared
+            .capture_enabled
+            .store(config.capture_enabled, Ordering::Release);
         let has_input = config.input.is_some();
         let has_output = config.output.is_some();
         let thread_shared = Arc::clone(&shared);
@@ -264,7 +296,14 @@ impl AudioEngine {
                     controls: controls_rx,
                     events: events_tx,
                 };
-                run_owner(make_backend(), config, &thread_shared, io, ready_tx);
+                run_owner(
+                    make_backend(),
+                    config,
+                    &thread_shared,
+                    io,
+                    ready_tx,
+                    high_quality,
+                );
             })
             .map_err(|_| AudioError::EngineThread)?;
         let ready = ready_rx.recv();
@@ -319,6 +358,7 @@ impl AudioEngine {
             frames_encoded: load(&pipeline.frames_encoded),
             frames_dropped: load(&pipeline.frames_dropped),
             encode_errors: load(&pipeline.encode_errors),
+            denoise_blocks: load(&pipeline.denoise_blocks),
             packets_decoded: load(&pipeline.packets_decoded),
             decode_errors: load(&pipeline.decode_errors),
         }
@@ -408,6 +448,7 @@ fn run_owner<B: Backend>(
     shared: &Shared,
     mut io: OwnerIo,
     ready: std_mpsc::SyncSender<Ready>,
+    high_quality: Factory,
 ) {
     let mut capture = None;
     let mut playback = None;
@@ -446,12 +487,16 @@ fn run_owner<B: Backend>(
     }
 
     // Dropping the engine handle disconnects the stop channel, ending the loop.
-    let mut capture_enabled = true;
+    let mut capture_enabled = config.capture_enabled;
+    let mut denoiser = config
+        .input
+        .as_ref()
+        .map(|_| MicrophoneDenoiser::new(config.noise_suppression, high_quality.clone()));
     let mut output_enabled = true;
     let mut gains = std::collections::HashMap::<u32, f32>::new();
     let mut probe_at = std::time::Instant::now() + Duration::from_secs(1);
-    // Two coalesced pending notifications bound backpressure even during rapid switching.
-    let mut pending: [Option<EngineEvent>; 2] = [None, None];
+    // Coalesced input/output/suppression notifications bound control backpressure.
+    let mut pending: [Option<EngineEvent>; 3] = [None, None, None];
     while let Err(std_mpsc::RecvTimeoutError::Timeout) = io.stop.recv_timeout(TICK) {
         for _ in 0..32 {
             let Ok(control) = io.controls.try_recv() else {
@@ -459,6 +504,12 @@ fn run_owner<B: Backend>(
             };
             match control {
                 EngineControl::CaptureEnabled(enabled) => {
+                    if capture_enabled
+                        && !enabled
+                        && let Some(denoiser) = &mut denoiser
+                    {
+                        denoiser.reset();
+                    }
                     capture_enabled = enabled;
                     shared.capture_enabled.store(enabled, Ordering::Release);
                 }
@@ -477,7 +528,23 @@ fn run_owner<B: Backend>(
                         pipeline.set_gain(ssrc, gain);
                     }
                 }
+                EngineControl::NoiseSuppression(mode) => {
+                    config.noise_suppression = mode;
+                    if let Some(denoiser) = &mut denoiser {
+                        denoiser.select(mode);
+                    }
+                }
                 EngineControl::SelectDevice { direction, choice } => {
+                    if direction == Direction::Input {
+                        if let Some(denoiser) = &mut denoiser {
+                            denoiser.reset();
+                        } else {
+                            denoiser = Some(MicrophoneDenoiser::new(
+                                config.noise_suppression,
+                                high_quality.clone(),
+                            ));
+                        }
+                    }
                     replace_device(
                         &mut backend,
                         direction,
@@ -513,6 +580,11 @@ fn run_owner<B: Backend>(
                 let current = backend.default_key(direction);
                 if current != defaults[index] {
                     defaults[index] = current;
+                    if direction == Direction::Input
+                        && let Some(denoiser) = &mut denoiser
+                    {
+                        denoiser.reset();
+                    }
                     replace_device(
                         &mut backend,
                         direction,
@@ -553,10 +625,14 @@ fn run_owner<B: Backend>(
                 kind,
             });
         }
+        if let Some(denoiser) = &mut denoiser {
+            denoiser.poll();
+        }
         if let Some((_, pipeline)) = capture.as_mut() {
             if capture_enabled {
-                if let Some(captured) = io.captured.as_ref() {
-                    pipeline.run(&shared.pipeline, &mut |frame| {
+                if let (Some(captured), Some(denoiser)) = (io.captured.as_ref(), denoiser.as_mut())
+                {
+                    pipeline.run(&shared.pipeline, denoiser, &mut |frame| {
                         if captured.try_send(frame).is_err() {
                             shared
                                 .pipeline
@@ -567,6 +643,15 @@ fn run_owner<B: Backend>(
                 }
             } else {
                 pipeline.discard();
+            }
+        }
+        if let Some(denoiser) = &mut denoiser {
+            shared
+                .pipeline
+                .denoise_blocks
+                .store(denoiser.inference_blocks(), Ordering::Relaxed);
+            if let Some(status) = denoiser.take_status() {
+                pending[2] = Some(EngineEvent::NoiseSuppressionChanged(status));
             }
         }
         if let Some((_, pipeline)) = playback.as_mut() {
@@ -628,7 +713,7 @@ fn replace_device<B: Backend>(
     io: &mut OwnerIo,
     output_enabled: bool,
     gains: &std::collections::HashMap<u32, f32>,
-    pending: &mut [Option<EngineEvent>; 2],
+    pending: &mut [Option<EngineEvent>; 3],
 ) {
     let result = match direction {
         Direction::Input => {
@@ -968,6 +1053,13 @@ mod tests {
         DeviceChoice::Device(DeviceKey::from_persisted(id).unwrap())
     }
 
+    fn expect_initial_noise_suppression(events: &mut mpsc::Receiver<EngineEvent>) {
+        let Some(EngineEvent::NoiseSuppressionChanged(status)) = events.blocking_recv() else {
+            panic!("initial noise suppression status missing");
+        };
+        assert_eq!(status, NoiseSuppressionStatus::default());
+    }
+
     #[test]
     fn switching_directions_closes_old_endpoints_preserves_controls_and_converts_formats() {
         let mut fake = host(48_000, 48_000);
@@ -975,6 +1067,7 @@ mod tests {
         let backend = fake.clone();
         let (engine, mut channels) =
             AudioEngine::start_with(EngineConfig::default(), move || backend).unwrap();
+        expect_initial_noise_suppression(&mut channels.events);
         let mut old_input = channels.captured.take().unwrap();
         let old_output = channels.remote_audio.take().unwrap();
         let owner = &engine.shared.owner_service;
@@ -1112,6 +1205,7 @@ mod tests {
             ..EngineConfig::default()
         };
         let (engine, mut channels) = AudioEngine::start_with(config, move || backend).unwrap();
+        expect_initial_noise_suppression(&mut channels.events);
         let old_output = channels.remote_audio.take().unwrap();
         engine
             .shared
@@ -1178,6 +1272,7 @@ mod tests {
             ..EngineConfig::default()
         };
         let (engine, mut channels) = AudioEngine::start_with(config, move || backend).unwrap();
+        expect_initial_noise_suppression(&mut channels.events);
         *fake.defaults.lock() = [
             DeviceKey::from_persisted("44k"),
             DeviceKey::from_persisted("new-speakers"),
@@ -1250,8 +1345,12 @@ mod tests {
         fake.manual_callbacks = true;
         let heap_before = crate::alloc_counter::callback_heap_ops();
         let backend = fake.clone();
-        let (engine, channels) =
-            AudioEngine::start_with(EngineConfig::default(), move || backend).unwrap();
+        // A codec/device round-trip checks a pure tone, not speech enhancement.
+        let config = EngineConfig {
+            noise_suppression: NoiseSuppression::Off,
+            ..EngineConfig::default()
+        };
+        let (engine, channels) = AudioEngine::start_with(config, move || backend).unwrap();
         assert_eq!(
             engine.input_format(),
             Some(DeviceFormat {
@@ -1336,6 +1435,7 @@ mod tests {
             generation = owner.wait_after(generation);
         }
         assert_eq!(engine.stats().frames_encoded, 0);
+        assert_eq!(engine.stats().denoise_blocks, 0);
         assert!(captured.try_recv().is_err());
 
         controls
@@ -1356,6 +1456,226 @@ mod tests {
         assert_torn_down(&fake, probes);
         let _ = generation;
     }
+
+    fn next_noise_status(events: &mut mpsc::Receiver<EngineEvent>) -> NoiseSuppressionStatus {
+        loop {
+            match events.blocking_recv() {
+                Some(EngineEvent::NoiseSuppressionChanged(status)) => return status,
+                Some(_) => {}
+                None => panic!("engine events closed"),
+            }
+        }
+    }
+
+    /// Steps both fake devices once and returns the encoded frames that became available.
+    fn step_call(
+        fake: &FakeHost,
+        owner: &OwnerService,
+        generation: &mut u64,
+        captured: &mut mpsc::Receiver<CapturedFrame>,
+    ) -> Vec<u64> {
+        fake.driver.step(Direction::Input);
+        *generation = owner.wait_after(*generation);
+        fake.driver.step(Direction::Output);
+        std::iter::from_fn(|| captured.try_recv().ok())
+            .map(|frame| frame.sequence)
+            .collect()
+    }
+
+    #[test]
+    fn selecting_high_quality_mid_call_never_stalls_the_owner_and_leaves_no_gap() {
+        use crate::denoise::fake::{Probe, Spec, factory, wait_until};
+        let mut fake = host(48_000, 48_000);
+        fake.manual_callbacks = true;
+        let backend = fake.clone();
+        let probe = Arc::new(Probe::default());
+        let spec = Spec::default().gated();
+        let gate = Arc::clone(&spec.gate);
+        let config = EngineConfig {
+            noise_suppression: NoiseSuppression::Off,
+            ..EngineConfig::default()
+        };
+        let (engine, mut channels) =
+            AudioEngine::start_with_denoise(config, move || backend, factory(spec, &probe))
+                .unwrap();
+        assert_eq!(
+            next_noise_status(&mut channels.events).active,
+            NoiseSuppression::Off
+        );
+        let mut captured = channels.captured.take().unwrap();
+        let playback = channels.playback.take().unwrap();
+        let owner = &engine.shared.owner_service;
+        let mut generation = owner.generation();
+        let mut sequences = Vec::new();
+
+        // The model's build is shut behind a gate, so it cannot finish. The owner must
+        // keep capturing and playing while it is "building".
+        channels
+            .controls
+            .blocking_send(EngineControl::NoiseSuppression(
+                NoiseSuppression::HighQuality,
+            ))
+            .unwrap();
+        let loading = next_noise_status(&mut channels.events);
+        assert!(loading.loading, "{loading:?}");
+        assert_eq!(loading.active, NoiseSuppression::Off);
+        let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
+        for _ in 0..10 {
+            let mut packet = EncodedPacket::empty();
+            encoder
+                .encode_mono(&[0.1; FRAME_SAMPLES], &mut packet)
+                .unwrap();
+            playback.blocking_send(packet).unwrap();
+        }
+        for _ in 0..40 {
+            sequences.extend(step_call(&fake, owner, &mut generation, &mut captured));
+        }
+        assert_eq!(sequences, (0..20).collect::<Vec<u64>>(), "capture stalled");
+        assert_eq!(engine.stats().packets_decoded, 10, "playback stalled");
+        assert_eq!(engine.stats().denoise_blocks, 0, "Off ran inference");
+
+        // Open the gate: the worker is built, primed and takes over, still without a gap.
+        gate.store(true, Ordering::Release);
+        let mut hand_over = None;
+        for _ in 0..400 {
+            sequences.extend(step_call(&fake, owner, &mut generation, &mut captured));
+            while let Ok(event) = channels.events.try_recv() {
+                if let EngineEvent::NoiseSuppressionChanged(status) = event
+                    && status.active == NoiseSuppression::HighQuality
+                {
+                    hand_over = Some(status);
+                }
+            }
+            if hand_over.is_some() {
+                break;
+            }
+        }
+        let hand_over = hand_over.expect("High quality never took over");
+        assert!(!hand_over.loading);
+        assert_eq!(hand_over.latency_samples, 3 * crate::denoise::BLOCK_SAMPLES);
+        for _ in 0..40 {
+            sequences.extend(step_call(&fake, owner, &mut generation, &mut captured));
+        }
+        // Frames came one per two blocks all along: nothing was dropped or reordered, and
+        // the stream never fell silent while the tone played.
+        assert!(
+            sequences.windows(2).all(|w| w[1] == w[0] + 1),
+            "{sequences:?}"
+        );
+        assert_eq!(engine.stats().frames_dropped, 0);
+        assert!(engine.stats().denoise_blocks > 0);
+
+        // Switching away drops the runtime on the worker thread; audio keeps flowing.
+        channels
+            .controls
+            .blocking_send(EngineControl::NoiseSuppression(NoiseSuppression::Light))
+            .unwrap();
+        let before = sequences.len();
+        for _ in 0..40 {
+            sequences.extend(step_call(&fake, owner, &mut generation, &mut captured));
+        }
+        assert!(
+            sequences.len() > before + 15,
+            "capture stalled after switching away"
+        );
+        assert!(
+            sequences.windows(2).all(|w| w[1] == w[0] + 1),
+            "{sequences:?}"
+        );
+        wait_until(|| probe.live.load(Ordering::SeqCst) == 0);
+        assert_eq!(probe.dropped_on_worker.load(Ordering::SeqCst), 1);
+
+        drop(captured);
+        drop(playback);
+        let probes = engine.callback_probes();
+        drop(engine);
+        assert_torn_down(&fake, probes);
+    }
+
+    #[test]
+    fn muting_with_high_quality_active_runs_no_inference_and_leaves_the_runtime_idle() {
+        use crate::denoise::fake::{Probe, Spec, factory};
+        let mut fake = host(48_000, 48_000);
+        fake.manual_callbacks = true;
+        let backend = fake.clone();
+        let probe = Arc::new(Probe::default());
+        let config = EngineConfig {
+            noise_suppression: NoiseSuppression::HighQuality,
+            ..EngineConfig::default()
+        };
+        let (engine, mut channels) = AudioEngine::start_with_denoise(
+            config,
+            move || backend,
+            factory(Spec::default(), &probe),
+        )
+        .unwrap();
+        let mut captured = channels.captured.take().unwrap();
+        let owner = &engine.shared.owner_service;
+        let mut generation = owner.generation();
+        let mut sequences = Vec::new();
+        for _ in 0..400 {
+            sequences.extend(step_call(&fake, owner, &mut generation, &mut captured));
+            if next_noise_active(&mut channels.events) == Some(NoiseSuppression::HighQuality) {
+                break;
+            }
+        }
+        assert_eq!(probe.live.load(Ordering::SeqCst), 1, "no engine was built");
+        channels
+            .controls
+            .blocking_send(EngineControl::CaptureEnabled(false))
+            .unwrap();
+        generation = owner.wait_after(generation);
+        let (encoded, inferred) = (engine.stats().frames_encoded, engine.stats().denoise_blocks);
+        for _ in 0..20 {
+            sequences.extend(step_call(&fake, owner, &mut generation, &mut captured));
+        }
+        assert_eq!(
+            engine.stats().frames_encoded,
+            encoded,
+            "muted audio was encoded"
+        );
+        assert_eq!(
+            engine.stats().denoise_blocks,
+            inferred,
+            "muted audio was denoised"
+        );
+
+        channels
+            .controls
+            .blocking_send(EngineControl::CaptureEnabled(true))
+            .unwrap();
+        generation = owner.wait_after(generation);
+        for _ in 0..40 {
+            sequences.extend(step_call(&fake, owner, &mut generation, &mut captured));
+        }
+        assert!(
+            engine.stats().frames_encoded > encoded,
+            "capture did not resume"
+        );
+        assert!(
+            engine.stats().denoise_blocks > inferred,
+            "inference did not resume"
+        );
+        assert_eq!(
+            probe.live.load(Ordering::SeqCst),
+            1,
+            "the runtime stayed loaded"
+        );
+        drop(captured);
+        let probes = engine.callback_probes();
+        drop(engine);
+        assert_torn_down(&fake, probes);
+    }
+
+    fn next_noise_active(events: &mut mpsc::Receiver<EngineEvent>) -> Option<NoiseSuppression> {
+        let mut active = None;
+        while let Ok(event) = events.try_recv() {
+            if let EngineEvent::NoiseSuppressionChanged(status) = event {
+                active = Some(status.active);
+            }
+        }
+        active
+    }
     #[test]
     fn encrypted_multi_peer_rtp_reorders_recovers_loss_and_reaches_output() {
         let mut fake = host(48_000, 48_000);
@@ -1365,6 +1685,7 @@ mod tests {
             input: None,
             output: Some(DeviceChoice::SystemDefault),
             bitrate: DEFAULT_BITRATE,
+            ..EngineConfig::default()
         };
         let (engine, channels) = AudioEngine::start_with(config, move || backend).unwrap();
         let remote = channels.remote_audio.unwrap();
@@ -1463,6 +1784,7 @@ mod tests {
             input: None,
             output: None,
             bitrate: DEFAULT_BITRATE,
+            ..EngineConfig::default()
         };
         let error = AudioEngine::start_with(config, || host(48_000, 48_000)).unwrap_err();
         assert_eq!(error, AudioError::NothingToRun);
@@ -1475,6 +1797,7 @@ mod tests {
         let backend = fake.clone();
         let (engine, mut channels) =
             AudioEngine::start_with(EngineConfig::default(), move || backend).unwrap();
+        expect_initial_noise_suppression(&mut channels.events);
         let deadline = Instant::now() + Duration::from_secs(5);
         let event = loop {
             if let Ok(event) = channels.events.try_recv() {
@@ -1526,6 +1849,7 @@ mod tests {
         let backend = fake.clone();
         let (engine, mut channels) =
             AudioEngine::start_with(EngineConfig::default(), move || backend).unwrap();
+        expect_initial_noise_suppression(&mut channels.events);
         let deadline = Instant::now() + Duration::from_secs(5);
         let event = loop {
             if let Ok(event) = channels.events.try_recv() {
@@ -1588,6 +1912,7 @@ mod tests {
         let outputs = crate::list_devices(Direction::Output).unwrap();
         println!("available inputs: {inputs:?}; outputs: {outputs:?}");
         let (engine, mut channels) = AudioEngine::start(EngineConfig::default()).unwrap();
+        expect_initial_noise_suppression(&mut channels.events);
         let controls = channels.controls.clone();
         for (direction, devices) in [(Direction::Input, &inputs), (Direction::Output, &outputs)] {
             for device in devices {
@@ -1803,6 +2128,82 @@ mod tests {
         settle();
         assert!(engine.stats().packets_decoded > decoded);
         println!("{:#?}", engine.stats());
+    }
+
+    /// Real microphone: High quality builds on its own thread while capture keeps running,
+    /// takes over, and switching back to Light releases it; no capture overrun, dropped
+    /// frame or callback heap operation happens along the way.
+    #[test]
+    #[ignore = "needs a real microphone; records and discards a few seconds"]
+    fn live_high_quality_takes_over_on_the_real_microphone() {
+        /// Consumes frames and collects status events for `millis`.
+        fn pump(
+            captured: &mut mpsc::Receiver<CapturedFrame>,
+            events: &mut mpsc::Receiver<EngineEvent>,
+            statuses: &mut Vec<NoiseSuppressionStatus>,
+            millis: u64,
+        ) {
+            let end = Instant::now() + Duration::from_millis(millis);
+            while Instant::now() < end {
+                while captured.try_recv().is_ok() {}
+                while let Ok(event) = events.try_recv() {
+                    if let EngineEvent::NoiseSuppressionChanged(status) = event {
+                        statuses.push(status);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let heap_before = crate::alloc_counter::callback_heap_ops();
+        let config = EngineConfig {
+            output: None,
+            ..EngineConfig::default()
+        };
+        let (engine, mut channels) = AudioEngine::start(config).unwrap();
+        let mut captured = channels.captured.take().unwrap();
+        let mut statuses = Vec::new();
+        pump(&mut captured, &mut channels.events, &mut statuses, 500);
+        let frames_before = engine.stats().frames_encoded;
+        channels
+            .controls
+            .blocking_send(EngineControl::NoiseSuppression(
+                NoiseSuppression::HighQuality,
+            ))
+            .unwrap();
+        let started = Instant::now();
+        while !statuses
+            .iter()
+            .any(|s| s.active == NoiseSuppression::HighQuality)
+        {
+            assert!(started.elapsed() < Duration::from_secs(10), "{statuses:?}");
+            pump(&mut captured, &mut channels.events, &mut statuses, 50);
+        }
+        println!("High quality took over after {:?}", started.elapsed());
+        let took_over = engine.stats();
+        assert!(took_over.frames_encoded > frames_before, "capture stalled");
+        pump(&mut captured, &mut channels.events, &mut statuses, 2_000);
+        let busy = engine.stats();
+        assert!(busy.denoise_blocks > took_over.denoise_blocks);
+        assert!(busy.frames_encoded >= took_over.frames_encoded + 90);
+        channels
+            .controls
+            .blocking_send(EngineControl::NoiseSuppression(NoiseSuppression::Light))
+            .unwrap();
+        pump(&mut captured, &mut channels.events, &mut statuses, 1_000);
+        let last = statuses.last().expect("status events");
+        assert_eq!(last.active, NoiseSuppression::Light, "{statuses:?}");
+        assert_eq!(last.error, None);
+        let stats = engine.stats();
+        println!("{stats:#?}\n{statuses:#?}");
+        assert_eq!(stats.input_overrun_samples, 0);
+        assert_eq!(stats.frames_dropped, 0);
+        drop(captured);
+        drop(engine);
+        assert_eq!(
+            crate::alloc_counter::callback_heap_ops(),
+            heap_before,
+            "a device callback touched the heap"
+        );
     }
 
     /// Real output device: an Opus-encoded 440 Hz tone played through the

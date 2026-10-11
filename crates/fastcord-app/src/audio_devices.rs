@@ -4,7 +4,10 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use fastcord_audio::{DeviceChoice, DeviceInfo, DeviceKey, Direction, list_devices};
+use fastcord_audio::{
+    DeviceChoice, DeviceInfo, DeviceKey, Direction, NoiseSuppression, NoiseSuppressionStatus,
+    list_devices,
+};
 use iced::widget::{button, column, container, pick_list, row, text};
 use iced::{Element, Length};
 use serde_json::{Value, json};
@@ -21,6 +24,7 @@ pub struct Selection {
 pub struct Preferences {
     pub input: Selection,
     pub output: Selection,
+    pub noise_suppression: NoiseSuppression,
 }
 
 impl Preferences {
@@ -115,11 +119,29 @@ fn options(devices: &[DeviceInfo], saved: &Selection) -> (Vec<DeviceOption>, Dev
     (rows, selected)
 }
 
+/// What the dialog says about noise suppression: the running engine's state while a call
+/// has an engine, otherwise the saved preference and when it applies.
+fn noise_summary(preference: NoiseSuppression, status: Option<NoiseSuppressionStatus>) -> String {
+    match status {
+        None => format!("Selected: {preference}. Applied when you join a call."),
+        Some(status) if status.loading => format!(
+            "Loading High quality… {} stays active until it is ready.",
+            status.active
+        ),
+        Some(status) => format!(
+            "Active during this call: {} — {:.0} ms algorithmic delay.",
+            status.active,
+            status.latency_samples as f32 / 48.0
+        ),
+    }
+}
+
 pub fn view<'a>(
     settings: &'a Settings,
     prefs: &Preferences,
     input_error: Option<fastcord_audio::DeviceErrorKind>,
     output_error: Option<fastcord_audio::DeviceErrorKind>,
+    noise_status: Option<NoiseSuppressionStatus>,
 ) -> Element<'a, crate::Message> {
     let (inputs, input) = options(&settings.inputs, &prefs.input);
     let (outputs, output) = options(&settings.outputs, &prefs.output);
@@ -134,6 +156,12 @@ pub fn view<'a>(
         pick_list(outputs, Some(output), |option| crate::Message::SelectAudioDevice(Direction::Output, option)).width(Length::Fill),
         text(output_error.map_or_else(String::new, |error| format!("Output stopped: {error}. Select a device to retry."))),
         text(settings.output_error.unwrap_or("")),
+        text("Microphone noise suppression"),
+        pick_list(NoiseSuppression::ALL, Some(prefs.noise_suppression), crate::Message::NoiseSuppressionChanged).width(Length::Fill),
+        text(noise_summary(prefs.noise_suppression, noise_status)),
+        text(noise_status.and_then(|status| status.error).map_or_else(String::new, |error| error.to_string())),
+        text("Light (RNNoise) is the default and uses little CPU. High quality (DeepFilterNet 3) removes keyboard and background voices better, but adds about 30 ms of delay and uses more CPU and memory; it loads only while selected and is released when you switch away. Microphone only; never applied to shared or system audio."),
+        text("Noise suppression is not echo cancellation. Use a headset to avoid speaker echo."),
         text(if settings.probing { "Looking for audio devices…" } else { "System default follows the OS only when selected. Refresh lists after plugging a device in." }),
         row![button("Refresh devices").on_press_maybe((!settings.probing).then_some(crate::Message::RefreshAudioDevices)), button("Close").on_press(crate::Message::CloseAudioSettings)].spacing(12),
     ].spacing(12)).padding(24).width(Length::Fixed(650.0)).style(container::rounded_box).into()
@@ -176,6 +204,12 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
     Some(Preferences {
         input: selection(value.get("input")?)?,
         output: selection(value.get("output")?)?,
+        // Older device-only settings retain the required Light default.
+        noise_suppression: match value.get("noise_suppression") {
+            None => NoiseSuppression::Light,
+            Some(Value::String(mode)) => NoiseSuppression::from_persisted(mode)?,
+            _ => return None,
+        },
     })
 }
 
@@ -191,7 +225,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted()}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -238,7 +272,7 @@ pub async fn save(prefs: Preferences) -> Result<(), &'static str> {
     })
     .await
     .map_err(|_| "Audio settings worker failed.")?
-    .map_err(|_| "Could not save audio device choices. Check the local settings directory.")
+    .map_err(|_| "Could not save audio device/noise choices. Check the local settings directory.")
 }
 
 #[cfg(test)]
@@ -265,6 +299,7 @@ mod tests {
         let prefs = Preferences {
             input: explicit("wasapi:microphone", "Duplicate name"),
             output: explicit("wasapi:headset", "Duplicate name"),
+            noise_suppression: NoiseSuppression::HighQuality,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);
@@ -311,5 +346,52 @@ mod tests {
             decode(&encode(&Preferences::default()).unwrap()),
             Some(Preferences::default())
         );
+    }
+    #[test]
+    fn noise_modes_persist_and_device_only_settings_default_to_light() {
+        for mode in NoiseSuppression::ALL {
+            let prefs = Preferences {
+                noise_suppression: mode,
+                ..Preferences::default()
+            };
+            assert_eq!(decode(&encode(&prefs).unwrap()), Some(prefs));
+        }
+        let legacy = br#"{"input":{"id":null,"label":""},"output":{"id":null,"label":""}}"#;
+        assert_eq!(
+            decode(legacy).unwrap().noise_suppression,
+            NoiseSuppression::Light
+        );
+        let invalid = br#"{"input":{"id":null,"label":""},"output":{"id":null,"label":""},"noise_suppression":"krisp"}"#;
+        assert!(decode(invalid).is_none());
+    }
+
+    #[test]
+    fn the_dialog_names_the_running_engine_only_while_a_call_has_one() {
+        use NoiseSuppression::{HighQuality, Light, Off};
+        // Without an engine the dialog reports the saved choice, never a running mode.
+        for preference in [Off, Light, HighQuality] {
+            let text = noise_summary(preference, None);
+            assert!(text.contains(&preference.to_string()), "{text}");
+            assert!(!text.contains("Active during this call"), "{text}");
+        }
+        let running = NoiseSuppressionStatus {
+            requested: HighQuality,
+            active: HighQuality,
+            loading: false,
+            latency_samples: 1_440,
+            error: None,
+        };
+        let text = noise_summary(Off, Some(running));
+        assert!(text.contains("Active during this call"), "{text}");
+        assert!(text.contains(&HighQuality.to_string()), "{text}");
+        assert!(text.contains("30 ms"), "{text}");
+        let warming = NoiseSuppressionStatus {
+            active: Light,
+            loading: true,
+            ..running
+        };
+        let text = noise_summary(HighQuality, Some(warming));
+        assert!(text.contains("Loading High quality"), "{text}");
+        assert!(text.contains(&Light.to_string()), "{text}");
     }
 }

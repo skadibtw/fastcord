@@ -1,0 +1,43 @@
+{
+  "format": {
+    "sample_rate": 48000,
+    "channels": 1,
+    "bits_per_sample": 16,
+    "duration_s": 3.0
+  },
+  "license": "Synthesized by crates/fastcord-audio/src/denoise/synth.rs: no third-party recordings, samples or datasets; same license as the repository.",
+  "regenerate": "cargo test -p fastcord-audio --locked regenerate_noise_fixtures -- --ignored --nocapture",
+  "files": {
+    "speech-clean.wav": {
+      "sha256": "0db5a8486d5e1d8507c42efa591356d25332b4355ac751dba91e8814d74e0be6",
+      "description": "Clean reference talker (Klatt-style synthetic voice), two phrases, silent elsewhere.",
+      "generator": {
+        "talker": { "seed": 1, "f0_hz": 125.0, "rms_dbfs": -24.0 }
+      },
+      "speech_intervals_s": [[0.45, 1.20], [1.75, 2.40]]
+    },
+    "noisy-speech.wav": {
+      "sha256": "b7b1941ad92d64acb4d7ddf33ca067cfaaba23f0778038ec823276b029861a58",
+      "description": "speech-clean.wav plus steady pink noise at 5 dB SNR (speech-active samples) for the Light engine.",
+      "generator": {
+        "noise": "pink",
+        "noise_seed": 7,
+        "snr_db": 5.0
+      }
+    },
+    "keyboard-voice.wav": {
+      "sha256": "bf90c3f66fbad0bcbbf422146792132e7f9b5dceb9bbc507003ff2df037b8d9b",
+      "description": "speech-clean.wav plus keyboard clicks, a distant reverberant background talker and room tone; the interference RNNoise passes through.",
+      "generator": {
+        "keyboard": { "seed": 5, "keys_per_s": 6.0, "peak": 0.3 },
+        "background_voice": {
+          "seed": 99,
+          "f0_hz": 205.0,
+          "formant_shift": 1.15,
+          "rms_dbfs": -36.0
+        },
+        "room_tone": { "seed": 11, "rms_dbfs": -40.0 }
+      }
+    }
+  }
+}

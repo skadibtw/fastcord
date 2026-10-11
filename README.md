@@ -33,6 +33,30 @@ in an active call preserves local mute/deafen and per-user playback volumes.
 Official-client call interoperability acceptance is still pending; see
 [docs/TESTING.md](docs/TESTING.md).
 
+## Noise suppression
+
+The same dialog chooses how your microphone is cleaned up before it is sent. It
+applies to the microphone only (never to shared or system audio), is saved with
+the device choices, and changes a running call without reopening any device.
+
+- **Off** sends the microphone as captured.
+- **Light** (default) is RNNoise through the `nnnoiseless` crate: 0.3 % of one
+  core and 10 ms of delay on the reference PC. It reduces steady noise such as
+  fans and hiss but lets keyboard clicks and background voices through.
+- **High quality** is DeepFilterNet 3: it also suppresses keyboard noise and
+  background voices, at 30 ms of delay, 4-5 % of one core and about 13 MB of
+  memory while selected. It is built on its own thread when you select it, so
+  the call keeps running with Light until it is ready (about 0.15 s), and
+  switching away releases its memory.
+
+During a call the dialog shows what is actually running; otherwise it shows your
+saved choice. If High quality cannot be built or cannot keep up with real time
+(debug builds are much slower), the call continues with Light and the dialog
+says why. A muted microphone runs no noise suppression. Noise suppression is
+not echo cancellation: use a headset. Measurements and pending live checks are
+in [docs/TESTING.md](docs/TESTING.md); the engines' licenses are in
+[docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md).
+
 ## Login
 
 The login screen explains the Terms of Service/account-ban risk and requires
