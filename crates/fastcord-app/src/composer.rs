@@ -224,6 +224,26 @@ impl Composer {
         }
     }
 
+    /// Picker insertion is a normal editor paste: it replaces the selection at
+    /// the current cursor, keeps source tokens intact, and is one undo step.
+    pub fn insert_emoji(&mut self, source: &str) -> bool {
+        let selected = self
+            .content
+            .selection()
+            .map_or(0, |text| text.chars().count());
+        if self.channel.is_none()
+            || self.chars.saturating_sub(selected) + source.chars().count() > MAX_EDITOR_CHARS
+        {
+            self.notice = Some("The message editor is full.");
+            return false;
+        }
+        self.content
+            .perform(Action::Edit(Edit::Paste(Arc::new(source.to_owned()))));
+        self.notice = None;
+        self.recount();
+        true
+    }
+
     pub fn set_everyone(&mut self, allowed: bool) {
         self.everyone = allowed;
     }
@@ -1405,5 +1425,36 @@ mod tests {
         );
         assert_eq!(composer.editing(), None);
         assert_eq!(composer.content.text(), "draft for A\n\nunsent");
+    }
+
+    #[test]
+    fn picker_inserts_at_cursor_and_replaces_selection_without_changing_source() {
+        let mut composer = composer_in(A);
+        paste(&mut composer, "ab\ncd");
+        composer.perform(Action::Move(Motion::DocumentStart));
+        composer.perform(Action::Move(Motion::Right));
+        let sequence = "👩🏽‍💻👍🏻🇺🇦";
+        assert!(composer.insert_emoji(sequence));
+        assert_eq!(composer.content.text(), format!("a{sequence}b\ncd"));
+        composer.perform(Action::SelectAll);
+        assert!(composer.insert_emoji("<:sample:12345> <a:party:45678>"));
+        assert_eq!(
+            composer.submission(true, 0).unwrap().content,
+            "<:sample:12345> <a:party:45678>"
+        );
+        composer.select(Some(B));
+        composer.select(Some(A));
+        assert_eq!(composer.content.text(), "<:sample:12345> <a:party:45678>");
+    }
+
+    #[test]
+    fn a_full_editor_allows_selection_replacement_but_never_grows_for_a_picker() {
+        let mut composer = composer_in(A);
+        paste(&mut composer, &"x".repeat(MAX_EDITOR_CHARS));
+        assert!(!composer.insert_emoji("😀"));
+        assert_eq!(composer.chars, MAX_EDITOR_CHARS);
+        composer.perform(Action::SelectAll);
+        assert!(composer.insert_emoji("👍🏿"));
+        assert_eq!(composer.content.text(), "👍🏿");
     }
 }

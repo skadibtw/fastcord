@@ -39,6 +39,7 @@ use iced::{Element, Length, Padding};
 
 use crate::attachments::AttachmentKey;
 use crate::changes::{ChangeKind, ChangeState, RowChange};
+use crate::emoji::{self, Occurrence, Origin};
 use crate::outbox::OutboxItem;
 use crate::variable_list::{self, Item, Measurement, Report, ScrollRequest, Viewport, Window};
 
@@ -75,6 +76,17 @@ impl Row {
             change: None,
             reply: None,
         }
+    }
+}
+
+/// Source text shown in a row, including an optimistic edit being saved.
+pub fn content(row: &Row) -> &str {
+    match &row.change {
+        Some(RowChange {
+            kind: ChangeKind::Edit(text),
+            state: ChangeState::Saving,
+        }) => text,
+        _ => &row.message.content,
     }
 }
 
@@ -218,6 +230,13 @@ pub struct Interaction {
 /// What the timeline asks of the worker. Each event names its channel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Event {
+    /// An inline asset entered or left the actual clipped viewport.
+    EmojiVisibility(Occurrence, bool),
+    /// Copy original text/tokens, never rendered asset names or pixels.
+    CopyText {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
     /// The widget's latest view of the viewport (coalesce to the newest).
     Viewport {
         channel_id: Snowflake,
@@ -338,19 +357,28 @@ impl Controls {
     }
 }
 
-/// What the view needs to show attachments: whose account owns the cache keys
-/// and the previews decoded so far.
+/// Original source for an explicit copy action on a still-loaded message.
+pub fn copy_text(snapshot: &Snapshot, channel: Snowflake, message: Snowflake) -> Option<&str> {
+    (snapshot.channel_id == Some(channel)).then_some(())?;
+    snapshot
+        .rows
+        .iter()
+        .find(|row| row.message.id == message)
+        .map(content)
+}
+
+/// What the timeline needs to show account-owned attachment and emoji assets.
 #[derive(Clone, Copy)]
 pub struct Attachments<'a> {
     pub account: Snowflake,
     pub views: &'a HashMap<AttachmentKey, AttachmentView>,
+    pub emojis: &'a HashMap<emoji::Asset, emoji::View>,
 }
 
 pub fn view<'a>(
     snapshot: &'a Snapshot,
     interaction: Interaction,
-    account: Snowflake,
-    attachment_views: &'a HashMap<AttachmentKey, AttachmentView>,
+    assets: Attachments<'a>,
 ) -> Element<'a, Event> {
     let Some(channel_id) = snapshot.channel_id else {
         return centered("Select a channel to read its messages.");
@@ -368,8 +396,7 @@ pub fn view<'a>(
                 snapshot.can_send,
                 snapshot.highlight == Some(row.message.id)
                     || interaction.replying == Some(row.message.id),
-                account,
-                attachment_views,
+                assets,
             ),
         )
     });
@@ -515,18 +542,17 @@ fn row_button(label: &'static str, event: Event) -> button::Button<'static, Even
         .style(button::secondary)
 }
 
-/// Author, time, wrapped content, attachment lines, and the controls of the
-/// user's own messages. Plain text only: no embeds, markdown, or emoji assets yet.
+/// Author, time, grapheme-aware wrapped text/emoji runs, attachment lines, and
+/// the controls of the user's own messages. Original message text is unchanged.
 fn message_view<'a>(
     row: &'a Row,
     channel_id: Snowflake,
     interaction: Interaction,
     can_reply: bool,
     highlighted: bool,
-    account: Snowflake,
-    attachment_views: &'a HashMap<AttachmentKey, AttachmentView>,
+    assets: Attachments<'a>,
 ) -> Element<'a, Event> {
-    let account_id = account;
+    let account_id = assets.account;
     let message = &*row.message;
     let message_id = message.id;
     let state = row_state(row, interaction);
@@ -553,13 +579,7 @@ fn message_view<'a>(
         header = header.push(text("(edited)").size(12).style(text::secondary));
     }
     // An edit being saved shows its new text right away.
-    let content = match &row.change {
-        Some(RowChange {
-            kind: ChangeKind::Edit(text),
-            state: ChangeState::Saving,
-        }) => text,
-        _ => message.content.as_str(),
-    };
+    let content = content(row);
     let mut body = column![].spacing(2);
     if let Some(reply) = &row.reply {
         let label = match &reply.state {
@@ -590,12 +610,17 @@ fn message_view<'a>(
     }
     body = body.push(header);
     if !content.is_empty() {
-        body = body.push(
-            text(content)
-                .size(14)
-                .width(Length::Fill)
-                .wrapping(text::Wrapping::WordOrGlyph),
-        );
+        body = body.push(emoji::inline(
+            content,
+            assets.emojis,
+            |run| Origin::Timeline {
+                channel: channel_id,
+                message: message_id,
+                revision: row.revision,
+                run,
+            },
+            Event::EmojiVisibility,
+        ));
     } else if let Some(note) = placeholder(message) {
         body = body.push(text(note).size(13).style(text::secondary));
     }
@@ -606,7 +631,7 @@ fn message_view<'a>(
             message: message_id,
             attachment: attachment.id,
         };
-        body = body.push(attachment_view(attachment, key, attachment_views.get(&key)));
+        body = body.push(attachment_view(attachment, key, assets.views.get(&key)));
     }
     let status = |line: &'static str| text(line).size(12).style(text::secondary);
 
@@ -683,7 +708,12 @@ fn message_view<'a>(
             state,
             RowState::Plain | RowState::Actions | RowState::Failed { .. }
         );
-    if !show_own_actions && !show_reply {
+    let show_copy = !content.is_empty()
+        && matches!(
+            state,
+            RowState::Plain | RowState::Actions | RowState::Failed { .. }
+        );
+    if !show_own_actions && !show_reply && !show_copy {
         return base.into();
     }
     // Hover controls are layered over the top right so the measured row height
@@ -702,6 +732,15 @@ fn message_view<'a>(
         actions = actions.push(row_button(
             "Reply",
             Event::Reply {
+                channel_id,
+                message_id,
+            },
+        ));
+    }
+    if show_copy {
+        actions = actions.push(row_button(
+            "Copy text",
+            Event::CopyText {
                 channel_id,
                 message_id,
             },
@@ -933,6 +972,16 @@ mod tests {
         &EMPTY
     }
 
+    fn assets(views: &HashMap<AttachmentKey, AttachmentView>) -> Attachments<'_> {
+        static EMOJI: std::sync::LazyLock<HashMap<emoji::Asset, emoji::View>> =
+            std::sync::LazyLock::new(HashMap::new);
+        Attachments {
+            account: Snowflake(1),
+            views,
+            emojis: &EMOJI,
+        }
+    }
+
     fn attachment_key(message: u64) -> AttachmentKey {
         AttachmentKey {
             account: Snowflake(1),
@@ -955,7 +1004,7 @@ mod tests {
     }
 
     fn built_nodes(snapshot: &Snapshot) -> usize {
-        let element = view(snapshot, Interaction::default(), Snowflake(1), no_views());
+        let element = view(snapshot, Interaction::default(), assets(no_views()));
         nodes(&Tree::new(&element))
     }
 
@@ -1153,7 +1202,7 @@ mod tests {
             let mut ui = Ui::new(
                 width,
                 500.0,
-                view(&snapshot, Interaction::default(), Snowflake(1), no_views()),
+                view(&snapshot, Interaction::default(), assets(no_views())),
             );
             let events = ui.redraw();
             ui.draw();
@@ -1254,11 +1303,7 @@ mod tests {
         interaction: Interaction,
         views: &HashMap<AttachmentKey, AttachmentView>,
     ) -> Vec<Event> {
-        let mut ui = Ui::new(
-            640.0,
-            400.0,
-            view(snapshot, interaction, Snowflake(1), views),
-        );
+        let mut ui = Ui::new(640.0, 400.0, view(snapshot, interaction, assets(views)));
         ui.redraw();
         ui.draw();
         let mut found = Vec::new();
@@ -1408,7 +1453,7 @@ mod tests {
         let mut ui = Ui::new(
             640.0,
             400.0,
-            view(&snapshot, Interaction::default(), Snowflake(1), &none),
+            view(&snapshot, Interaction::default(), assets(&none)),
         );
         let measured = |events: Vec<Event>| -> Vec<(u64, u64, f32)> {
             events
@@ -1425,12 +1470,7 @@ mod tests {
         assert_eq!(before.len(), 1);
         assert!(ui.redraw().is_empty(), "an idle row is silent");
         // The same message and revision, now with a decoded image under it.
-        ui.show(view(
-            &snapshot,
-            Interaction::default(),
-            Snowflake(1),
-            &loaded,
-        ));
+        ui.show(view(&snapshot, Interaction::default(), assets(&loaded)));
         let after = measured(ui.redraw());
         assert_eq!(after.len(), 1, "the changed height is published once");
         assert_eq!((after[0].0, after[0].1), (before[0].0, before[0].1));
@@ -1441,6 +1481,22 @@ mod tests {
             after[0].2
         );
         assert!(ui.redraw().is_empty());
+    }
+
+    #[test]
+    fn copying_inline_assets_returns_exact_original_source_only_for_a_loaded_channel() {
+        let source = "👩🏽‍💻 👍🏻 🇺🇦 <:sample:12345> <a:party:45678>";
+        let mut snapshot = one_row(42);
+        snapshot.rows[0].message = message(42, source);
+        assert_eq!(copy_text(&snapshot, CHANNEL, Snowflake(42)), Some(source));
+        assert_eq!(copy_text(&snapshot, Snowflake(501), Snowflake(42)), None);
+        assert_eq!(copy_text(&snapshot, CHANNEL, Snowflake(99)), None);
+        assert!(
+            clickable(&snapshot, Interaction::default()).contains(&Event::CopyText {
+                channel_id: CHANNEL,
+                message_id: Snowflake(42),
+            })
+        );
     }
 
     fn names(event: &Event, id: u64) -> bool {
@@ -1643,5 +1699,50 @@ mod tests {
             }
         );
         assert_eq!(row_state(&lost, ui), RowState::Confirming);
+    }
+
+    #[test]
+    fn emoji_sensors_ignore_overscan_and_report_hiding_after_scroll() {
+        let mut snapshot = one_row(42);
+        snapshot.rows[0].message = message(42, "😀 <:sample:12345> <a:party:45678>");
+        snapshot.window.top = 400.0;
+        snapshot.window.bottom = 400.0;
+        snapshot.window.height = 80.0;
+        snapshot.window.pinned = false;
+        snapshot.window.at_bottom = false;
+        let mut ui = Ui::new(
+            640.0,
+            80.0,
+            view(&snapshot, Interaction::default(), assets(no_views())),
+        );
+        let visibility = |events: Vec<Event>| {
+            events
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::EmojiVisibility(occurrence, visible) => Some((occurrence, visible)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            visibility(ui.redraw()).is_empty(),
+            "built does not mean visible"
+        );
+        ui.scroll_to(400.0);
+        let shown = visibility(ui.redraw());
+        assert_eq!(shown.len(), 3);
+        assert!(shown.iter().all(|(_, visible)| *visible));
+        ui.scroll_to(0.0);
+        let hidden = visibility(ui.redraw());
+        assert_eq!(hidden.len(), 3);
+        assert!(hidden.iter().all(|(_, visible)| !visible));
+        assert!(
+            visibility(ui.redraw()).is_empty(),
+            "idle sensors do not poll"
+        );
+        assert_eq!(
+            snapshot.rows[0].message.content,
+            "😀 <:sample:12345> <a:party:45678>"
+        );
     }
 }

@@ -38,8 +38,8 @@ use std::fmt;
 use std::mem::size_of;
 
 use fastcord_model::{
-    Channel, Guild, GuildMember, OverwriteKind, PermissionOverwrite, Role, Snowflake, User,
-    VoiceState,
+    Channel, Guild, GuildEmoji, GuildMember, OverwriteKind, PermissionOverwrite, Role, Snowflake,
+    User, VoiceState,
 };
 
 pub use member_list::{MAX_ROWS, MemberList};
@@ -163,6 +163,7 @@ pub struct GuildEntry {
     member_count: u32,
     roles: Vec<Role>,
     channels: Vec<Channel>,
+    emojis: Vec<GuildEmoji>,
     members: HashMap<Snowflake, MemberSlot>,
     voice: HashMap<Snowflake, VoiceState>,
     lists: Vec<MemberList>,
@@ -182,6 +183,7 @@ impl GuildEntry {
             member_count: guild.member_count,
             roles: sorted_roles(guild.roles),
             channels: sorted_channels(guild.channels),
+            emojis: sorted_emojis(guild.emojis),
             members: HashMap::new(),
             voice: HashMap::new(),
             lists: Vec::new(),
@@ -219,6 +221,20 @@ impl GuildEntry {
 
     pub fn roles(&self) -> &[Role] {
         &self.roles
+    }
+
+    pub fn emojis(&self) -> &[GuildEmoji] {
+        &self.emojis
+    }
+
+    pub fn emoji_usable(&self, emoji: &GuildEmoji, user: Snowflake) -> bool {
+        emoji.available
+            && (emoji.roles.is_empty()
+                || emoji.roles.contains(&self.id)
+                || self.owner_id == Some(user)
+                || self.member(user).is_some_and(|member| {
+                    member.roles_known && emoji.roles.iter().any(|role| member.roles.contains(role))
+                }))
     }
 
     pub fn channels(&self) -> impl Iterator<Item = &Channel> {
@@ -260,6 +276,7 @@ impl GuildEntry {
             + text(&self.icon)
             + (self.roles.capacity() - self.roles.len()) * size_of::<Role>()
             + (self.channels.capacity() - self.channels.len()) * size_of::<Channel>()
+            + (self.emojis.capacity() - self.emojis.len()) * size_of::<GuildEmoji>()
             + map_overhead(&self.members)
             + map_overhead(&self.voice)
             + (self.lists.capacity() - self.lists.len()) * size_of::<MemberList>()
@@ -278,6 +295,7 @@ impl GuildEntry {
         self.base_bytes()
             + self.roles.iter().map(role_bytes).sum::<usize>()
             + self.channels.iter().map(channel_bytes).sum::<usize>()
+            + self.emojis.iter().map(emoji_bytes).sum::<usize>()
             + self
                 .members
                 .values()
@@ -289,7 +307,8 @@ impl GuildEntry {
 
     fn recompute_meta(&mut self) {
         self.meta_bytes = self.roles.iter().map(role_bytes).sum::<usize>()
-            + self.channels.iter().map(channel_bytes).sum::<usize>();
+            + self.channels.iter().map(channel_bytes).sum::<usize>()
+            + self.emojis.iter().map(emoji_bytes).sum::<usize>();
     }
 
     fn put_member(&mut self, member: GuildMember, tick: u64) {
@@ -694,6 +713,18 @@ impl Store {
             | Dispatch::MessageDeleteBulk(_) => {}
             Dispatch::GuildCreate(created) => self.guild_create(*created, &mut changes),
             Dispatch::GuildUpdate(updated) => self.guild_update(*updated, &mut changes),
+            Dispatch::GuildEmojisUpdate(update) => {
+                let guild_id = update.guild_id;
+                if self
+                    .with_guild(guild_id, |guild| {
+                        guild.emojis = sorted_emojis(update.emojis);
+                        guild.recompute_meta();
+                    })
+                    .is_some()
+                {
+                    changes.guilds.insert(guild_id);
+                }
+            }
             Dispatch::GuildDelete(deleted) => {
                 self.remove_guild(deleted.id);
                 if deleted.unavailable {
@@ -930,6 +961,7 @@ impl Store {
             entry.owner_id = guild.owner_id;
             entry.member_count = guild.member_count;
             entry.roles = sorted_roles(guild.roles);
+            entry.emojis = sorted_emojis(guild.emojis);
             let mut channels = sorted_channels(guild.channels);
             for channel in &mut channels {
                 if let Some(old) = entry.channel(channel.id) {
@@ -1429,4 +1461,21 @@ impl Store {
         self.users_bytes -= freed;
         self.users.shrink_to_fit();
     }
+}
+
+fn emoji_bytes(emoji: &GuildEmoji) -> usize {
+    size_of::<GuildEmoji>() + text(&emoji.name) + emoji.roles.capacity() * size_of::<Snowflake>()
+}
+
+fn sorted_emojis(mut emojis: Vec<GuildEmoji>) -> Vec<GuildEmoji> {
+    emojis.sort_unstable_by_key(|emoji| emoji.id);
+    emojis.dedup_by_key(|emoji| emoji.id);
+    emojis.shrink_to_fit();
+    for emoji in &mut emojis {
+        if let Some(name) = &mut emoji.name {
+            name.shrink_to_fit();
+        }
+        emoji.roles.shrink_to_fit();
+    }
+    emojis
 }

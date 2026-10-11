@@ -700,6 +700,7 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
         name: format!("Guild number {guild}"),
         icon: Some("0123456789abcdef0123456789abcdef".to_owned()),
         owner_id: Some(id(1)),
+        emojis: Vec::new(),
         roles: (0..12)
             .map(|n| Role {
                 id: id(if n == 0 { guild } else { guild * 100 + n }),
@@ -1356,5 +1357,82 @@ fn channel_snapshots_keep_latest_duplicate_identity_in_compact_sorted_storage() 
     store.apply(event(Dispatch::ChannelDelete(Box::new(new))));
     assert_eq!(store.guild(id(1)).unwrap().channels.len(), 3);
     assert!(store.guild(id(1)).unwrap().channel(id(9_999)).is_none());
+    check(&store);
+}
+
+#[test]
+fn guild_emoji_gateway_updates_replace_metadata_with_exact_byte_accounting() {
+    let mut store = ready_store();
+    let before = store.bytes();
+    // READY already contains wave:777; replacement followed by removal also
+    // releases that original emoji's slot and owned allocations.
+    let original = &store.guild(id(FIRST)).unwrap().emojis;
+    assert_eq!(original[0].id, id(777));
+    let without_emojis = before
+        - original.iter().map(emoji_bytes).sum::<usize>()
+        - (original.capacity() - original.len()) * size_of::<GuildEmoji>();
+    let update = serde_json::json!({
+        "guild_id": FIRST.to_string(),
+        "emojis": [
+            {"id": "503", "name": "party", "animated": true, "roles": [], "available": true},
+            {"id": "501", "name": "locked", "roles": [FIRST.to_string()], "available": true},
+            {"id": "502", "name": "gone", "roles": [], "available": false}
+        ]
+    })
+    .to_string();
+    let changes = apply(&mut store, "GUILD_EMOJIS_UPDATE", &update);
+    assert!(changes.guilds.contains(&id(FIRST)));
+    let guild = store.guild(id(FIRST)).unwrap();
+    assert_eq!(
+        guild
+            .emojis()
+            .iter()
+            .map(|emoji| emoji.id.0)
+            .collect::<Vec<_>>(),
+        [501, 502, 503]
+    );
+    assert!(guild.emojis()[2].animated);
+    assert!(guild.emoji_usable(&guild.emojis()[2], id(ME)));
+    assert!(!guild.emoji_usable(&guild.emojis()[1], id(ME)));
+    assert!(store.bytes() > before);
+    apply(
+        &mut store,
+        "GUILD_EMOJIS_UPDATE",
+        &format!(r#"{{"guild_id":"{FIRST}","emojis":[]}}"#),
+    );
+    assert!(store.guild(id(FIRST)).unwrap().emojis().is_empty());
+    assert_eq!(store.bytes(), without_emojis);
+    let unknown = apply(
+        &mut store,
+        "GUILD_EMOJIS_UPDATE",
+        r#"{"guild_id":"9999","emojis":[{"id":"1","name":"unknown"}]}"#,
+    );
+    assert!(unknown.is_empty());
+    assert!(store.guild(id(9999)).is_none());
+    assert_eq!(store.bytes(), without_emojis);
+}
+
+#[test]
+fn oversized_required_emoji_metadata_trips_the_existing_store_safety_limit() {
+    let mut store = Store::with_budget(32 * 1024);
+    store.apply(fixture("READY", READY));
+    assert!(!store.limit_exceeded());
+    let emojis = (1..=1_000)
+        .map(|n| GuildEmoji {
+            id: id(n),
+            name: Some("x".repeat(32)),
+            animated: false,
+            roles: vec![id(1); 8],
+            available: true,
+        })
+        .collect();
+    store.apply(event(Dispatch::GuildEmojisUpdate(Box::new(
+        crate::gateway::GuildEmojisUpdate {
+            guild_id: id(FIRST),
+            emojis,
+        },
+    ))));
+    assert!(store.limit_exceeded());
+    assert!(store.bytes() <= 32 * 1024);
     check(&store);
 }

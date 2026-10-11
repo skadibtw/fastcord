@@ -181,6 +181,12 @@ pub struct MessageDeleteBulk {
     pub guild_id: Option<Snowflake>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct GuildEmojisUpdate {
+    pub guild_id: Snowflake,
+    pub emojis: Vec<fastcord_model::GuildEmoji>,
+}
+
 /// GUILD_CREATE: a joined or newly available guild, or one that is now known
 /// only by ID because of an outage.
 #[derive(Clone, PartialEq, Eq)]
@@ -378,6 +384,7 @@ pub enum Dispatch {
     MessageDeleteBulk(MessageDeleteBulk),
     GuildCreate(Box<GuildCreate>),
     GuildUpdate(Box<GuildUpdate>),
+    GuildEmojisUpdate(Box<GuildEmojisUpdate>),
     GuildDelete(GuildDelete),
     ChannelCreate(Box<Channel>),
     ChannelUpdate(Box<Channel>),
@@ -417,6 +424,7 @@ impl Dispatch {
             Self::MessageDeleteBulk(_) => "MESSAGE_DELETE_BULK",
             Self::GuildCreate(_) => "GUILD_CREATE",
             Self::GuildUpdate(_) => "GUILD_UPDATE",
+            Self::GuildEmojisUpdate(_) => "GUILD_EMOJIS_UPDATE",
             Self::GuildDelete(_) => "GUILD_DELETE",
             Self::ChannelCreate(_) => "CHANNEL_CREATE",
             Self::ChannelUpdate(_) => "CHANNEL_UPDATE",

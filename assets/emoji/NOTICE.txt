@@ -1,0 +1,13 @@
+Twemoji graphics by Twitter, Inc. and other contributors (jdecked/twemoji).
+Twemoji version 17.0.3, source commit b6b55fe (release archive root).
+Graphics licensed CC-BY-4.0: https://creativecommons.org/licenses/by/4.0/
+Source: https://github.com/jdecked/twemoji/tree/v17.0.3
+Graphics unchanged, 72x72 PNG files concatenated into twemoji-17.0.3.bin.
+Twemoji code is MIT licensed; no Twemoji JavaScript is used.
+Unicode emoji 16.0 index derived from iamcal/emoji-data v16.0.0, MIT.
+Source commit: 2771d0b1b3af25c069086e68e38f901c3dda8bdf
+Source: https://github.com/iamcal/emoji-data/tree/v16.0.0
+Index names, aliases, categories and variants are retained; vendor sheet metadata is removed.
+Upstream emoji.json SHA256: 1d602e65be88772bf8cc368ce16b855d719eeddbafe128d471b80203f494d29f
+Twemoji release archive SHA256: b07d2bdfffabc3918ac5f9a87d08b22164e70530522459153b59364b25422eb8
+PNG bundle SHA256: a0047d686f4b7e2469ccd543cdbddf6b23cdda19a3caf3d81c5438399026cd13

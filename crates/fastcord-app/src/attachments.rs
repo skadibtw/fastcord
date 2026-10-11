@@ -120,6 +120,28 @@ impl std::fmt::Debug for DecodedImage {
     }
 }
 
+/// Small emoji frames only. A single animation is at most 512 KiB of RGBA;
+/// callers also bound all visible frame handles and cancel off-screen work.
+#[derive(Clone, Debug)]
+pub struct DecodedAnimation {
+    pub frames: Vec<DecodedImage>,
+    pub delays: Vec<Duration>,
+}
+
+const MAX_EMOJI_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_EMOJI_FRAMES: usize = 120;
+const MAX_EMOJI_RGBA: usize = 512 * 1024;
+const EMOJI_SIDE: u32 = 32;
+
+struct PublicEmoji;
+impl UrlRefresh for PublicEmoji {
+    async fn refresh(&self, _url: String) -> Result<String, AttachmentError> {
+        // An emoji URL is public and unsigned. Deleted/unavailable emoji keep
+        // their text fallback; never request attachment refresh or send a token.
+        Err(AttachmentError::Http(404))
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttachmentError {
     InvalidUrl,
@@ -518,6 +540,78 @@ impl AttachmentCache {
         self.decoded.lock().insert(cache_key, image.clone());
         Ok(image)
     }
+
+    pub async fn custom_emoji(
+        &self,
+        id: Snowflake,
+        animated: bool,
+    ) -> Result<bytes::Bytes, AttachmentError> {
+        let extension = if animated { "gif" } else { "png" };
+        // Discord channel IDs are nonzero; the reserved zero-channel identity
+        // cannot collide with an account's private attachment cache entry.
+        let key = AttachmentKey {
+            account: self.account,
+            channel: Snowflake(0),
+            message: Snowflake(u64::from(animated)),
+            attachment: id,
+        };
+        let path = self
+            .fetch_file(
+                &PublicEmoji,
+                key,
+                &format!("emoji.{extension}"),
+                &format!(
+                    "https://cdn.discordapp.com/emojis/{id}.{extension}?size=32&quality=lossless"
+                ),
+                MAX_EMOJI_FILE_BYTES,
+            )
+            .await?;
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|_| AttachmentError::CacheUnavailable)?;
+        if bytes.len() as u64 > MAX_EMOJI_FILE_BYTES {
+            return Err(AttachmentError::TooLarge);
+        }
+        self.ensure_active()?;
+        Ok(bytes.into())
+    }
+
+    /// Shares the attachment decoder semaphore: no second independent pool.
+    /// PNGs are embedded compressed bytes; animated custom assets are bounded
+    /// cached GIFs, decoded one frame at a time off the UI thread.
+    pub async fn decode_emoji(
+        &self,
+        data: bytes::Bytes,
+    ) -> Result<DecodedAnimation, AttachmentError> {
+        self.ensure_active()?;
+        if data.len() as u64 > MAX_EMOJI_FILE_BYTES {
+            return Err(AttachmentError::TooLarge);
+        }
+        let permit = self
+            .decode_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AttachmentError::WorkerStopped)?;
+        let active = self.active.clone();
+        #[cfg(test)]
+        let gate = self.decode_gate.clone();
+        let animation = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            #[cfg(test)]
+            if let Some(gate) = gate
+                && gate.entered.fetch_add(1, Ordering::SeqCst) < DECODE_SLOTS
+            {
+                gate.started.wait();
+                gate.release.wait();
+            }
+            decode_small_animation(data, &active)
+        })
+        .await
+        .map_err(|_| AttachmentError::WorkerStopped)??;
+        self.ensure_active()?;
+        Ok(animation)
+    }
 }
 
 fn prepare_root(root: &Path, prepared: &AtomicBool) -> Result<(), AttachmentError> {
@@ -645,6 +739,91 @@ fn decode_error(error: ImageError) -> AttachmentError {
         ImageError::Unsupported(_) => AttachmentError::UnsupportedImage,
         _ => AttachmentError::InvalidImage,
     }
+}
+
+fn emoji_limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(256);
+    limits.max_image_height = Some(256);
+    limits.max_alloc = Some(8 * 1024 * 1024);
+    limits
+}
+
+fn small_frame(frame: image::RgbaImage) -> DecodedImage {
+    let scale = (EMOJI_SIDE as f32 / frame.width() as f32)
+        .min(EMOJI_SIDE as f32 / frame.height() as f32)
+        .min(1.0);
+    let width = ((frame.width() as f32 * scale).round() as u32).max(1);
+    let height = ((frame.height() as f32 * scale).round() as u32).max(1);
+    let rgba = if (width, height) == frame.dimensions() {
+        frame
+    } else {
+        image::imageops::resize(&frame, width, height, FilterType::Triangle)
+    };
+    DecodedImage {
+        width,
+        height,
+        rgba: rgba.into_raw().into(),
+    }
+}
+
+fn decode_small_animation(
+    data: bytes::Bytes,
+    active: &AtomicBool,
+) -> Result<DecodedAnimation, AttachmentError> {
+    use image::AnimationDecoder;
+    if !active.load(Ordering::Acquire) {
+        return Err(AttachmentError::WorkerStopped);
+    }
+    let format = image::guess_format(&data).map_err(decode_error)?;
+    if format != image::ImageFormat::Gif {
+        let mut reader = image::ImageReader::with_format(std::io::Cursor::new(data), format);
+        reader.limits(emoji_limits());
+        let image = reader.decode().map_err(decode_error)?.into_rgba8();
+        return Ok(DecodedAnimation {
+            frames: vec![small_frame(image)],
+            delays: vec![Duration::from_secs(1)],
+        });
+    }
+    let mut decoder =
+        image::codecs::gif::GifDecoder::new(std::io::Cursor::new(data)).map_err(decode_error)?;
+    decoder.set_limits(emoji_limits()).map_err(decode_error)?;
+    let (width, height) = decoder.dimensions();
+    if width == 0 || height == 0 || width > 256 || height > 256 {
+        return Err(AttachmentError::TooLarge);
+    }
+    let mut frames = Vec::new();
+    let mut delays = Vec::new();
+    let mut bytes = 0;
+    for frame in decoder.into_frames() {
+        if !active.load(Ordering::Acquire) {
+            return Err(AttachmentError::WorkerStopped);
+        }
+        if frames.len() == MAX_EMOJI_FRAMES {
+            return Err(AttachmentError::TooLarge);
+        }
+        let frame = frame.map_err(decode_error)?;
+        let (numerator, denominator) = frame.delay().numer_denom_ms();
+        let delay =
+            Duration::from_micros(u64::from(numerator) * 1000 / u64::from(denominator.max(1)));
+        // Browser semantics: GIF delays of 10 ms or less are treated as 100 ms.
+        let delay = if delay <= Duration::from_millis(10) {
+            Duration::from_millis(100)
+        } else {
+            delay.min(Duration::from_secs(10))
+        };
+        let frame = small_frame(frame.into_buffer());
+        bytes += frame.rgba.len();
+        if bytes > MAX_EMOJI_RGBA {
+            return Err(AttachmentError::TooLarge);
+        }
+        frames.push(frame);
+        delays.push(delay);
+    }
+    if frames.is_empty() {
+        return Err(AttachmentError::InvalidImage);
+    }
+    Ok(DecodedAnimation { frames, delays })
 }
 
 #[derive(Default)]
@@ -1823,5 +2002,114 @@ mod tests {
         assert_eq!(safe_extension("no-extension"), "bin");
         assert_eq!(safe_extension("unsafe.exe;arg"), "bin");
         assert_eq!(safe_extension("a.averyveryverylongextension"), "bin");
+    }
+
+    fn gif(frames: usize) -> bytes::Bytes {
+        let mut data = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut data);
+            encoder
+                .set_repeat(image::codecs::gif::Repeat::Infinite)
+                .unwrap();
+            for frame in 0..frames {
+                let color = if frame % 2 == 0 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 255, 0, 255]
+                };
+                encoder
+                    .encode_frame(image::Frame::from_parts(
+                        image::RgbaImage::from_pixel(32, 32, image::Rgba(color)),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(if frame % 2 == 0 { 0 } else { 70 }, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        data.into()
+    }
+
+    #[tokio::test]
+    async fn emoji_png_and_gif_decoding_preserves_frames_delays_and_bounds() {
+        let root = scratch("emoji-decode");
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let png = cache.decode_emoji(png(96, 24).into()).await.unwrap();
+        assert_eq!((png.frames[0].width, png.frames[0].height), (32, 8));
+        assert_eq!(png.frames.len(), 1);
+        let animation = cache.decode_emoji(gif(2)).await.unwrap();
+        assert_eq!(
+            animation.delays,
+            [Duration::from_millis(100), Duration::from_millis(70)]
+        );
+        assert_eq!(animation.frames.len(), 2);
+        assert_eq!(&animation.frames[0].rgba[..4], [255, 0, 0, 255]);
+        assert_eq!(&animation.frames[1].rgba[..4], [0, 255, 0, 255]);
+        let shared = animation.clone();
+        assert_eq!(
+            shared.frames[0].rgba.as_ptr(),
+            animation.frames[0].rgba.as_ptr()
+        );
+        assert!(matches!(
+            cache.decode_emoji(gif(MAX_EMOJI_FRAMES + 1)).await,
+            Err(AttachmentError::TooLarge)
+        ));
+        assert!(matches!(
+            cache.decode_emoji(png_header_only(257, 32).into()).await,
+            Err(AttachmentError::TooLarge)
+        ));
+        assert!(matches!(
+            cache
+                .decode_emoji(vec![0; MAX_EMOJI_FILE_BYTES as usize + 1].into())
+                .await,
+            Err(AttachmentError::TooLarge)
+        ));
+        assert!(
+            cache
+                .decode_emoji(bytes::Bytes::from_static(b"not an image"))
+                .await
+                .is_err()
+        );
+        cache.purge().await.unwrap();
+        assert!(matches!(
+            cache.decode_emoji(gif(2)).await,
+            Err(AttachmentError::WorkerStopped)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cancelled_emoji_decodes_keep_the_shared_decode_slots_until_the_workers_finish() {
+        let root = scratch("emoji-abort");
+        let mut cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let gate = Arc::new(DecodeGate {
+            entered: AtomicUsize::new(0),
+            started: std::sync::Barrier::new(DECODE_SLOTS + 1),
+            release: std::sync::Barrier::new(DECODE_SLOTS + 1),
+        });
+        cache.decode_gate = Some(gate.clone());
+        let spawn = || {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.decode_emoji(gif(2)).await })
+        };
+        let first = spawn();
+        let second = spawn();
+        let started = gate.clone();
+        tokio::task::spawn_blocking(move || started.started.wait())
+            .await
+            .unwrap();
+        first.abort();
+        second.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert!(second.await.unwrap_err().is_cancelled());
+        assert_eq!(cache.decode_slots.available_permits(), 0);
+        let third = spawn();
+        let release = gate.clone();
+        tokio::task::spawn_blocking(move || release.release.wait())
+            .await
+            .unwrap();
+        assert_eq!(third.await.unwrap().unwrap().frames.len(), 2);
+        cache.purge().await.unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 }

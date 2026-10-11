@@ -12,6 +12,10 @@ bin_dir="target/${target}/release"
 
 mkdir -p "$stage" "$out"
 cp LICENSE README.md CHANGELOG.md "$stage/"
+mkdir -p "$stage/assets/emoji"
+cp assets/emoji/NOTICE.txt assets/emoji/TWEMOJI-LICENSE-GRAPHICS.txt \
+  assets/emoji/TWEMOJI-LICENSE.txt assets/emoji/EMOJI-DATA-LICENSE.txt \
+  "$stage/assets/emoji/"
 
 case "$target" in
   *-windows-msvc)

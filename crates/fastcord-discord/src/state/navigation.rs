@@ -78,6 +78,7 @@ pub struct PermissionSummary {
     pub view_channel: bool,
     pub read_history: bool,
     pub send_messages: bool,
+    pub use_external_emojis: bool,
     pub connect: bool,
     pub speak: bool,
 }
@@ -88,6 +89,7 @@ impl From<Permissions> for PermissionSummary {
             view_channel: permissions.contains(Permissions::VIEW_CHANNEL),
             read_history: permissions.contains(Permissions::READ_MESSAGE_HISTORY),
             send_messages: permissions.contains(Permissions::SEND_MESSAGES),
+            use_external_emojis: permissions.contains(Permissions::USE_EXTERNAL_EMOJIS),
             connect: permissions.contains(Permissions::CONNECT),
             speak: permissions.contains(Permissions::SPEAK),
         }

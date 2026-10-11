@@ -175,14 +175,16 @@ pub enum Finished {
 fn reason(error: SendError, reply: bool) -> &'static str {
     match error {
         SendError::NotSent(error) => match error {
-            RestError::PermissionDenied => "Discord did not allow you to send messages here.",
+            RestError::PermissionDenied => {
+                "Discord did not allow this message or emoji here. Check channel permissions and animated/external emoji entitlement."
+            }
             RestError::ResourceGone => "This channel is no longer available.",
             RestError::AuthenticationRequired => "Discord no longer accepts this login.",
             RestError::Http(status) if status.as_u16() == 400 && reply => {
                 "Discord rejected the reply; the message it answers may be deleted, unavailable, not replyable, or the text may be too long."
             }
             RestError::Http(status) if status.as_u16() == 400 => {
-                "Discord rejected the message; it may be too long or empty."
+                "Discord rejected the message; it may be too long or empty, or a custom emoji may be unavailable or not permitted for this account."
             }
             RestError::Http(_) => "Discord rejected the message.",
             RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
@@ -478,6 +480,30 @@ mod tests {
         // An answer for an operation that is not in flight changes nothing.
         assert_eq!(f.outbox.finish(refused, Ok(())), Finished::Unknown);
         assert_eq!(f.outbox.len(), 2);
+    }
+
+    #[test]
+    fn custom_emoji_rejections_remain_visible_with_source_and_without_reposting() {
+        for error in [
+            RestError::PermissionDenied,
+            RestError::Http(StatusCode::BAD_REQUEST),
+        ] {
+            let mut f = Fixture::new();
+            let source = "👩🏽‍💻 <:server:12345> <a:external:45678>";
+            let id = f.send(A, source);
+            assert_eq!(f.outbox.take_ready().len(), 1);
+            assert_eq!(
+                f.outbox.finish(id, Err(SendError::NotSent(error))),
+                Finished::Kept
+            );
+            let item = f.outbox.items().remove(0);
+            assert_eq!(item.content.as_ref(), source);
+            let OutboxState::Failed(message) = item.state else {
+                panic!("a definite rejection must be shown as failed");
+            };
+            assert!(message.contains("emoji"));
+            assert!(f.outbox.take_ready().is_empty());
+        }
     }
 
     #[test]

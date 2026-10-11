@@ -80,6 +80,7 @@ use crate::timeline;
 use crate::timeline::AttachmentView;
 use crate::variable_list::{Measurement, Viewport};
 use crate::virtual_list::Window;
+use crate::{emoji, emoji_picker};
 use fastcord_discord::{PrivateChannelError, RestClient, UserToken};
 use iced::futures::{Stream, stream};
 use iced::task::Handle;
@@ -259,12 +260,14 @@ struct Request {
     channels: Window,
     private_channels: Window,
     timeline: crate::history::Request,
+    emoji: emoji_picker::Request,
 }
 
 #[derive(Default)]
 struct Latest {
     snapshot: Arc<NavigationSnapshot>,
     timeline: Arc<timeline::Snapshot>,
+    emoji: Arc<emoji_picker::Snapshot>,
     status: Option<GatewayStatus>,
     private_notice: Option<String>,
     notified: bool,
@@ -275,6 +278,7 @@ struct Latest {
 pub struct Consumed {
     pub navigation: Arc<NavigationSnapshot>,
     pub timeline: Arc<timeline::Snapshot>,
+    pub emoji: Arc<emoji_picker::Snapshot>,
     pub status: Option<GatewayStatus>,
     pub private_notice: Option<String>,
 }
@@ -641,6 +645,7 @@ impl NavigationBridge {
         &self,
         snapshot: NavigationSnapshot,
         timeline: timeline::Snapshot,
+        emoji: emoji_picker::Snapshot,
         status: Option<GatewayStatus>,
     ) -> bool {
         let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
@@ -649,7 +654,8 @@ impl NavigationBridge {
             .is_some_and(|status| latest.status.as_ref() != Some(status));
         let snapshot_changed = *latest.snapshot != snapshot;
         let timeline_changed = *latest.timeline != timeline;
-        if !status_changed && !snapshot_changed && !timeline_changed {
+        let emoji_changed = *latest.emoji != emoji;
+        if !status_changed && !snapshot_changed && !timeline_changed && !emoji_changed {
             return false;
         }
         if snapshot_changed {
@@ -657,6 +663,9 @@ impl NavigationBridge {
         }
         if timeline_changed {
             latest.timeline = Arc::new(timeline);
+        }
+        if emoji_changed {
+            latest.emoji = Arc::new(emoji);
         }
         if let Some(status) = status {
             latest.status = Some(status);
@@ -675,6 +684,7 @@ impl NavigationBridge {
         Consumed {
             navigation: Arc::clone(&latest.snapshot),
             timeline: Arc::clone(&latest.timeline),
+            emoji: Arc::clone(&latest.emoji),
             status: latest.status.clone(),
             private_notice: latest.private_notice.clone(),
         }
@@ -767,6 +777,16 @@ impl NavigationBridge {
                 return false;
             }
             request.private_channels = window;
+            true
+        });
+    }
+
+    pub fn emoji_request(&self, emoji: &emoji_picker::Request) {
+        self.requests.send_if_modified(|request| {
+            if request.emoji == *emoji {
+                return false;
+            }
+            request.emoji = emoji.clone();
             true
         });
     }
@@ -1568,7 +1588,8 @@ impl Worker {
             .history
             .refresh(&self.rest, &navigation, &request.timeline);
         let timeline = self.tracker.history.snapshot();
-        self.bridge.publish(navigation, timeline, status)
+        let emoji = emoji_picker::snapshot(&request.emoji, &self.tracker.store, &navigation);
+        self.bridge.publish(navigation, timeline, emoji, status)
     }
 }
 
@@ -1776,6 +1797,9 @@ pub struct GatewayPanel {
     /// The user's message (channel, message) whose deletion waits for confirmation.
     pub confirm_delete: Option<(Snowflake, Snowflake)>,
     pub private: Box<PrivateConversationUi>,
+    pub emoji: emoji::State,
+    pub emoji_picker: emoji_picker::Picker,
+    pub emoji_snapshot: Arc<emoji_picker::Snapshot>,
     _worker: Handle,
     pub attachments: Option<AttachmentCache>,
     /// Render state for the account's cached/downloaded attachment previews.
@@ -1819,6 +1843,46 @@ fn is_attachment_in(
         })
 }
 
+fn occurrence_in(
+    timeline: &timeline::Snapshot,
+    picker: &emoji_picker::Picker,
+    page: &emoji_picker::Snapshot,
+    occurrence: &emoji::Occurrence,
+) -> bool {
+    match occurrence.origin {
+        emoji::Origin::Timeline {
+            channel,
+            message,
+            revision,
+            run,
+        } => {
+            timeline.channel_id == Some(channel)
+                && timeline
+                    .rows
+                    .iter()
+                    .find(|row| row.message.id == message && row.revision == revision)
+                    .is_some_and(|row| {
+                        emoji::runs(timeline::content(row))
+                            .filter_map(|run| match run {
+                                emoji::Run::Emoji { asset, .. } => Some(asset),
+                                _ => None,
+                            })
+                            .nth(usize::from(run))
+                            == Some(occurrence.asset)
+                    })
+        }
+        emoji::Origin::Picker { revision } => {
+            picker.request.open
+                && revision == picker.request.revision
+                && revision == page.revision
+                && page
+                    .cells
+                    .iter()
+                    .any(|cell| cell.choice.asset() == occurrence.asset)
+        }
+    }
+}
+
 impl GatewayPanel {
     pub fn new(id: u64, worker: Handle, controls: NavigationBridge) -> Self {
         Self {
@@ -1828,6 +1892,9 @@ impl GatewayPanel {
             timeline: Arc::default(),
             controls,
             private: Box::default(),
+            emoji: emoji::State::default(),
+            emoji_picker: emoji_picker::Picker::default(),
+            emoji_snapshot: Arc::default(),
             voice_guild: None,
             composer: Composer::default(),
             confirm_delete: None,
@@ -1852,6 +1919,15 @@ impl GatewayPanel {
         let consumed = self.controls.consume();
         self.navigation = consumed.navigation;
         self.timeline = consumed.timeline;
+        self.emoji_snapshot = consumed.emoji;
+        if self.emoji_picker.request.channel != self.timeline.channel_id {
+            self.emoji_picker.close();
+        }
+        let timeline = &self.timeline;
+        let picker = &self.emoji_picker;
+        let page = &self.emoji_snapshot;
+        self.emoji
+            .retain(|occurrence| occurrence_in(timeline, picker, page, occurrence));
         let open_channel = self.timeline.channel_id;
         let timeline = &self.timeline;
         let still_loaded =
@@ -1882,6 +1958,19 @@ impl GatewayPanel {
             self.confirm_delete = None;
         }
         consumed.status
+    }
+
+    pub fn emoji_visibility(&mut self, occurrence: emoji::Occurrence, visible: bool) {
+        if !visible
+            || occurrence_in(
+                &self.timeline,
+                &self.emoji_picker,
+                &self.emoji_snapshot,
+                &occurrence,
+            )
+        {
+            self.emoji.visibility(occurrence, visible);
+        }
     }
 
     /// Whether the attachment's message is still among the rows being built.
@@ -2067,17 +2156,33 @@ mod bridge_tests {
         let mut snapshot = NavigationSnapshot::default();
         snapshot.guilds.total = 1;
         let timeline = timeline::Snapshot::default;
-        assert!(bridge.publish(snapshot.clone(), timeline(), None));
+        assert!(bridge.publish(
+            snapshot.clone(),
+            timeline(),
+            emoji_picker::Snapshot::default(),
+            None
+        ));
         for total in 2..10_000 {
             snapshot.guilds.total = total;
-            assert!(!bridge.publish(snapshot.clone(), timeline(), None));
+            assert!(!bridge.publish(
+                snapshot.clone(),
+                timeline(),
+                emoji_picker::Snapshot::default(),
+                None
+            ));
         }
         assert_eq!(bridge.consume().navigation.guilds.total, 9_999);
-        assert!(!bridge.publish(snapshot.clone(), timeline(), None));
+        assert!(!bridge.publish(
+            snapshot.clone(),
+            timeline(),
+            emoji_picker::Snapshot::default(),
+            None
+        ));
         snapshot.guilds.total = 10_000;
         assert!(bridge.publish(
             snapshot,
             timeline(),
+            emoji_picker::Snapshot::default(),
             Some(GatewayStatus::AuthenticationRequired)
         ));
         let consumed = bridge.consume();
@@ -2093,15 +2198,30 @@ mod bridge_tests {
             loading: true,
             ..timeline::Snapshot::default()
         };
-        assert!(bridge.publish(navigation.clone(), snapshot.clone(), None));
+        assert!(bridge.publish(
+            navigation.clone(),
+            snapshot.clone(),
+            emoji_picker::Snapshot::default(),
+            None
+        ));
         snapshot.loading = false;
         snapshot.has_older = true;
-        assert!(!bridge.publish(navigation.clone(), snapshot, None));
+        assert!(!bridge.publish(
+            navigation.clone(),
+            snapshot,
+            emoji_picker::Snapshot::default(),
+            None
+        ));
         let consumed = bridge.consume();
         assert!(!consumed.timeline.loading);
         assert!(consumed.timeline.has_older);
         // Nothing changed: no notification, even though the slot was read.
-        assert!(!bridge.publish(navigation, consumed.timeline.as_ref().clone(), None));
+        assert!(!bridge.publish(
+            navigation,
+            consumed.timeline.as_ref().clone(),
+            emoji_picker::Snapshot::default(),
+            None
+        ));
     }
 
     #[test]
@@ -2288,6 +2408,7 @@ mod bridge_tests {
         bridge.publish(
             NavigationSnapshot::default(),
             timeline::Snapshot::default(),
+            emoji_picker::Snapshot::default(),
             None,
         );
         panel.consume();
@@ -2328,7 +2449,12 @@ mod bridge_tests {
         let handle = || iced::Task::<()>::none().abortable().1.abort_on_drop();
         let attachment = with_attachment(500, 7).rows[0].message.attachments[0].clone();
 
-        bridge.publish(NavigationSnapshot::default(), with_attachment(500, 7), None);
+        bridge.publish(
+            NavigationSnapshot::default(),
+            with_attachment(500, 7),
+            emoji_picker::Snapshot::default(),
+            None,
+        );
         panel.consume();
         for message in [7, 8] {
             let key = key(500, message);
@@ -2344,7 +2470,12 @@ mod bridge_tests {
         ));
         // Message 8 is no longer among the built rows: its previews and workers
         // are cancelled; the modal view stays while the channel is open.
-        bridge.publish(NavigationSnapshot::default(), with_attachment(500, 7), None);
+        bridge.publish(
+            NavigationSnapshot::default(),
+            with_attachment(500, 7),
+            emoji_picker::Snapshot::default(),
+            None,
+        );
         panel.consume();
         assert_eq!(panel.attachment_views.len(), 1);
         assert!(panel.attachment_views.contains_key(&key(500, 7)));
@@ -2354,7 +2485,12 @@ mod bridge_tests {
         assert!(!panel.is_attachment_loaded(&key(500, 8)));
         assert!(panel.attachment_viewer.is_some());
         // Leaving the channel cancels everything, the viewer included.
-        bridge.publish(NavigationSnapshot::default(), with_attachment(501, 7), None);
+        bridge.publish(
+            NavigationSnapshot::default(),
+            with_attachment(501, 7),
+            emoji_picker::Snapshot::default(),
+            None,
+        );
         panel.consume();
         assert!(panel.attachment_views.is_empty());
         assert!(panel.attachment_workers.is_empty());
@@ -2451,6 +2587,7 @@ mod tests {
             owner_id: None,
             roles: Vec::new(),
             channels: Vec::new(),
+            emojis: Vec::new(),
             members: Vec::new(),
             member_count: 0,
         };

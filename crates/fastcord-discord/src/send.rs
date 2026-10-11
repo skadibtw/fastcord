@@ -658,4 +658,15 @@ mod tests {
             Err(SendError::NotSent(RestError::AuthenticationRequired))
         );
     }
+
+    #[test]
+    fn unicode_sequences_and_custom_tokens_round_trip_through_the_real_post_body() {
+        let source = "👩🏽‍💻 👍🏻 🇺🇦 ❤️ <:sample:12345> <a:party:45678>";
+        let message = OutgoingMessage::new(source, nonce(15), MentionPolicy::default()).unwrap();
+        let body = serde_json::to_value(message.body()).unwrap();
+        assert_eq!(body["content"], source);
+        let encoded = serde_json::to_string(&body).unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded["content"], source);
+    }
 }

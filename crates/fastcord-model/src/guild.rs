@@ -23,6 +23,24 @@ pub struct GuildMember {
     pub communication_disabled_until: Option<String>,
 }
 
+/// Guild-owned custom emoji metadata. `available=false` and explicit role
+/// restrictions are meaningful; missing account entitlements are not assumed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GuildEmoji {
+    pub id: Snowflake,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub animated: bool,
+    #[serde(default)]
+    pub roles: Vec<Snowflake>,
+    #[serde(default = "emoji_available")]
+    pub available: bool,
+}
+
+fn emoji_available() -> bool {
+    true
+}
+
 /// A normalized, available guild as delivered by the Gateway.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Guild {
@@ -33,6 +51,7 @@ pub struct Guild {
     pub roles: Vec<Role>,
     /// Channels always carry their `guild_id`.
     pub channels: Vec<Channel>,
+    pub emojis: Vec<GuildEmoji>,
     /// Initial members: just the current user's own member until
     /// READY_SUPPLEMENTAL (or lazy member requests) provides more.
     pub members: Vec<GuildMember>,

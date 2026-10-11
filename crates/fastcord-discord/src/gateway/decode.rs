@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use fastcord_model::{
-    Channel, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, StreamCreate,
+    Channel, Guild, GuildEmoji, GuildMember, Message, MessageUpdate, Role, Snowflake, StreamCreate,
     StreamDelete, StreamServerUpdate, StreamUpdate, User, VoiceServerUpdate, VoiceState,
 };
 use serde::{Deserialize, Deserializer};
@@ -111,6 +111,8 @@ struct GuildWire {
     roles: Vec<Role>,
     #[serde(default, deserialize_with = "null_default")]
     channels: Vec<Channel>,
+    #[serde(default, deserialize_with = "null_default")]
+    emojis: Vec<GuildEmoji>,
     #[serde(default, deserialize_with = "null_default")]
     members: Vec<MemberWire>,
     #[serde(default)]
@@ -429,6 +431,7 @@ impl Normalizer {
                 .or(properties.as_ref().and_then(|p| p.owner_id)),
             roles: wire.roles,
             channels,
+            emojis: wire.emojis,
             members,
             member_count: wire.member_count,
         }))
@@ -691,6 +694,8 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "MESSAGE_DELETE_BULK" => json::<MessageDeleteBulk>(raw).map(Dispatch::MessageDeleteBulk),
         "GUILD_CREATE" => decode_guild_create(raw).map(|g| Dispatch::GuildCreate(Box::new(g))),
         "GUILD_UPDATE" => decode_guild_update(raw).map(|g| Dispatch::GuildUpdate(Box::new(g))),
+        "GUILD_EMOJIS_UPDATE" => json::<super::GuildEmojisUpdate>(raw)
+            .map(|event| Dispatch::GuildEmojisUpdate(Box::new(event))),
         "GUILD_DELETE" => json::<GuildDeleteWire>(raw).map(|g| {
             Dispatch::GuildDelete(GuildDelete {
                 id: g.id,

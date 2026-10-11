@@ -5,6 +5,8 @@ mod attachments;
 mod audio_devices;
 mod changes;
 mod composer;
+mod emoji;
+mod emoji_picker;
 mod gateway;
 mod history;
 mod login;
@@ -38,6 +40,7 @@ const MAX_PRIVATE_RECIPIENTS: usize = fastcord_discord::MAX_PRIVATE_RECIPIENTS;
 fn main() -> iced::Result {
     render::application(App::boot, App::update, App::view)
         .title("fastcord")
+        .subscription(App::subscription)
         .window_size((1080, 640))
         .run()
 }
@@ -56,6 +59,7 @@ struct App {
     audio_preferences: audio_devices::Preferences,
     audio_settings: audio_devices::Settings,
     audio_saving: Option<audio_devices::Preferences>,
+    window_active: bool,
 }
 
 #[derive(Debug)]
@@ -145,6 +149,16 @@ enum Message {
     ),
     CloseViewer,
     Composer(composer::Event),
+    EmojiPicker(emoji_picker::Event),
+    EmojiVisibility(emoji::Occurrence, bool),
+    EmojiLoaded(
+        u64,
+        emoji::Asset,
+        u64,
+        Result<attachments::DecodedAnimation, &'static str>,
+    ),
+    EmojiTick(std::time::Instant),
+    WindowActive(bool),
 }
 impl App {
     fn boot() -> (Self, Task<Message>) {
@@ -163,6 +177,7 @@ impl App {
                 audio_preferences: audio_devices::Preferences::default(),
                 audio_settings: audio_devices::Settings::default(),
                 audio_saving: None,
+                window_active: true,
             },
             Task::perform(
                 async {
@@ -175,10 +190,55 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let resynchronize = !matches!(message, Message::EmojiTick(_) | Message::EmojiLoaded(..));
+        let task = self.handle(message);
+        if resynchronize {
+            Task::batch([task, self.synchronize_emoji()])
+        } else {
+            task
+        }
+    }
+
+    fn synchronize_emoji(&mut self) -> Task<Message> {
+        let Phase::Account { gateway, .. } = &mut self.phase else {
+            return Task::none();
+        };
+        gateway
+            .controls
+            .emoji_request(&gateway.emoji_picker.request);
+        gateway.emoji.synchronize(
+            self.window_active && !self.audio_settings.open && gateway.attachment_viewer.is_none(),
+            gateway.emoji_picker.request.open,
+            gateway.id,
+            gateway.attachments.as_ref(),
+        )
+    }
+
+    fn subscription(&self) -> iced::Subscription<Message> {
+        let activity = iced::event::listen_with(|event, _, _| match event {
+            iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowActive(true)),
+            iced::Event::Window(iced::window::Event::Unfocused | iced::window::Event::Closed) => {
+                Some(Message::WindowActive(false))
+            }
+            _ => None,
+        });
+        iced::Subscription::batch([activity, self.animation_subscription()])
+    }
+
+    /// The 20 ms animation timer exists only while a visible, active emoji animates.
+    fn animation_subscription(&self) -> iced::Subscription<Message> {
+        if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.emoji.animating()) {
+            iced::time::every(std::time::Duration::from_millis(20)).map(Message::EmojiTick)
+        } else {
+            iced::Subscription::none()
+        }
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Initialized(preferences, store) => {
                 self.audio_preferences = preferences;
-                return self.update(Message::StoreReady(store));
+                return self.handle(Message::StoreReady(store));
             }
             Message::OpenAudioSettings | Message::RefreshAudioDevices => {
                 self.audio_settings.open = true;
@@ -392,7 +452,7 @@ impl App {
                     None
                 };
                 if let Some(status) = status {
-                    return self.update(Message::Gateway(id, status));
+                    return self.handle(Message::Gateway(id, status));
                 }
             }
             Message::SelectGuild(guild) => {
@@ -521,12 +581,84 @@ impl App {
                     gateway.controls.private_viewport(window);
                 }
             }
+            Message::WindowActive(active) => self.window_active = active,
+            Message::EmojiTick(now) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.emoji.tick(now);
+                }
+            }
+            Message::EmojiLoaded(generation, asset, ticket, result) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == generation) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    return gateway.emoji.loaded(
+                        generation,
+                        asset,
+                        ticket,
+                        result,
+                        gateway.attachments.as_ref(),
+                    );
+                }
+            }
+            Message::EmojiVisibility(occurrence, visible) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.emoji_visibility(occurrence, visible);
+                }
+            }
+            Message::EmojiPicker(event) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    let reset_scroll = matches!(
+                        event,
+                        emoji_picker::Event::Toggle
+                            | emoji_picker::Event::Search(_)
+                            | emoji_picker::Event::Category(_)
+                            | emoji_picker::Event::Variants(_)
+                    );
+                    if matches!(event, emoji_picker::Event::Toggle)
+                        && !gateway.timeline.can_send
+                        && gateway.composer.editing().is_none()
+                    {
+                        return Task::none();
+                    }
+                    if let Some(choice) = gateway.emoji_picker.update(
+                        event,
+                        gateway.timeline.channel_id,
+                        &gateway.emoji_snapshot,
+                    ) && gateway.composer.insert_emoji(&choice.source())
+                    {
+                        gateway.emoji_picker.inserted(choice);
+                    }
+                    if reset_scroll && gateway.emoji_picker.request.open {
+                        return Task::batch([
+                            iced::widget::operation::scroll_to(
+                                "emoji-list",
+                                iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+                            ),
+                            iced::widget::operation::focus("emoji-search"),
+                        ]);
+                    }
+                    if !gateway.emoji_picker.request.open {
+                        return iced::widget::operation::focus(composer::EDITOR_ID);
+                    }
+                }
+            }
             Message::Timeline(event) => {
                 if let Phase::Account {
                     session, gateway, ..
                 } = &mut self.phase
                 {
                     match event {
+                        timeline::Event::CopyText {
+                            channel_id,
+                            message_id,
+                        } => {
+                            if let Some(source) =
+                                timeline::copy_text(&gateway.timeline, channel_id, message_id)
+                            {
+                                return iced::clipboard::write(source.to_owned());
+                            }
+                        }
+                        timeline::Event::EmojiVisibility(occurrence, visible) => {
+                            gateway.emoji_visibility(occurrence, visible);
+                        }
                         timeline::Event::LoadAttachment {
                             channel_id,
                             message_id,
@@ -934,6 +1066,7 @@ impl App {
                         timeline::Attachments {
                             account: session.user.id,
                             views: &gateway.attachment_views,
+                            emojis: &gateway.emoji.views,
                         },
                         voice_audio,
                     ),
@@ -949,6 +1082,20 @@ impl App {
                 Some(viewer) => {
                     iced::widget::stack![account, attachment_ui::viewer_view(viewer)].into()
                 }
+                None if gateway.emoji_picker.request.open => iced::widget::stack![
+                    account,
+                    container(emoji_picker::view(
+                        &gateway.emoji_picker,
+                        &gateway.emoji_snapshot,
+                        &gateway.emoji.views
+                    ))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .align_y(iced::alignment::Vertical::Bottom)
+                    .padding(20),
+                ]
+                .into(),
                 None => account.into(),
             };
         }
@@ -1601,5 +1748,67 @@ mod tests {
             parse_private_recipients(&"x".repeat(MAX_PRIVATE_RECIPIENT_INPUT_BYTES + 1), account)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn animation_subscription_exists_only_for_visible_active_animated_assets() {
+        let mut app = login_app();
+        assert_eq!(app.animation_subscription().units(), 0, "idle: no timer");
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        let asset = emoji::Asset::Custom {
+            id: Snowflake(12345),
+            animated: true,
+        };
+        gateway.emoji.visibility(
+            emoji::Occurrence {
+                asset,
+                origin: emoji::Origin::Timeline {
+                    channel: Snowflake(500),
+                    message: Snowflake(42),
+                    revision: 1,
+                    run: 0,
+                },
+            },
+            true,
+        );
+        let _ = gateway.emoji.synchronize(true, false, gateway.id, None);
+        assert_eq!(
+            app.animation_subscription().units(),
+            0,
+            "visible but not yet decoded: nothing to animate"
+        );
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        let frame = attachments::DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: bytes::Bytes::from_static(&[255, 0, 0, 255]),
+        };
+        gateway.emoji.views.insert(
+            asset,
+            emoji::View::from_decoded(attachments::DecodedAnimation {
+                frames: vec![frame.clone(), frame],
+                delays: vec![std::time::Duration::from_millis(20); 2],
+            }),
+        );
+        assert_ne!(
+            app.animation_subscription().units(),
+            0,
+            "a visible active animation has a timer"
+        );
+        let _ = app.update(Message::WindowActive(false));
+        assert_eq!(
+            app.animation_subscription().units(),
+            0,
+            "unfocused/minimized windows cancel animation"
+        );
+        let Phase::Account { gateway, .. } = &app.phase else {
+            panic!("account");
+        };
+        assert!(gateway.emoji.views.is_empty());
     }
 }

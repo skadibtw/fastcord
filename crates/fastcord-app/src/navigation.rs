@@ -87,10 +87,7 @@ pub fn view<'a>(
         ];
         if history.channel_id == Some(selection.channel_id) {
             detail = detail
-                .push(
-                    timeline::view(history, interaction, attachments.account, attachments.views)
-                        .map(Message::Timeline),
-                )
+                .push(timeline::view(history, interaction, attachments).map(Message::Timeline))
                 .push(composer::view(composer, history).map(Message::Composer));
         } else {
             detail = detail.push(text("Loading messages…").size(14));
@@ -121,13 +118,8 @@ pub fn view<'a>(
                         // The timeline takes the free height; the composer sits below it.
                         detail = detail
                             .push(
-                                timeline::view(
-                                    history,
-                                    interaction,
-                                    attachments.account,
-                                    attachments.views,
-                                )
-                                .map(Message::Timeline),
+                                timeline::view(history, interaction, attachments)
+                                    .map(Message::Timeline),
                             )
                             .push(composer::view(composer, history).map(Message::Composer));
                     } else {
@@ -158,6 +150,12 @@ pub fn view<'a>(
         }
     } else {
         detail = detail.push(text("Select an accessible text or voice channel. Server updates preserve your selection by ID; permission loss closes it."));
+    }
+    if history.can_send || composer.editing().is_some() {
+        detail = detail.push(
+            button(text("Emoji").size(13))
+                .on_press(Message::EmojiPicker(crate::emoji_picker::Event::Toggle)),
+        );
     }
     row![
         column![

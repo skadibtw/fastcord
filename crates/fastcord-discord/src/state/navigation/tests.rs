@@ -740,6 +740,7 @@ fn large_ready() -> Ready {
                     name: name.clone(),
                     icon: None,
                     owner_id: Some(id(2)),
+                    emojis: Vec::new(),
                     roles: vec![Role {
                         id: guild_id,
                         name: "@everyone".to_owned(),
