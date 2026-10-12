@@ -52,10 +52,10 @@ crates/
   fastcord-media/src/       # voice WS, UDP, RTP/RTCP, transport AEAD, DAVE adapter
   fastcord-audio/src/       # cpal, resampling, Opus, denoise, jitter, mixing
   fastcord-video/src/       # capture orchestration, codecs, packetization, frame pools
+  fastcord-video/native/    # pinned dav1d source archive + provenance; built by build.rs
   fastcord-platform/src/    # credential store, OS capture/audio, native handles
   fastcord-app/src/         # binary, iced UI, orchestration, settings, image cache
 assets/emoji/              # versioned index and attributed assets
-native/                    # pinned native dependency build recipes/manifests
 packaging/                 # platform launchers, icons, Info.plist, bundle layouts
 scripts/                   # maintained CI/package/performance entry points
 fixtures/                  # sanitized protocol/media test vectors
@@ -524,9 +524,10 @@ fastcord-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
 fastcord-vX.Y.Z-aarch64-apple-darwin.tar.gz
 fastcord-vX.Y.Z-x86_64-apple-darwin.tar.gz
 fastcord-vX.Y.Z-source.tar.gz
-fastcord-vX.Y.Z-native-sources.tar.gz
 SHA256SUMS
 ```
+
+The publish job creates `fastcord-vX.Y.Z-source.tar.gz` with `git archive` of the checked-out commit, so it contains the pinned dav1d source archive and its provenance file in `crates/fastcord-video/native/`. libopus source is in neither archive: it is the `libopus_sys` 0.3.3 crate source pinned in `Cargo.lock` (used through `opus2` 0.4.0), which Cargo fetches from crates.io and builds with CMake. Its BSD-3-Clause notice is in `THIRD_PARTY_NOTICES.md`, which is included in the source archive and in every binary archive.
 
 Windows ZIP contains the executable, required DLLs/runtime files, notices, and default assets. macOS archive contains a proper `.app` with Info.plist, framework/library paths, and permission descriptions. Linux archive contains the binary, selected redistributable libraries/assets, and a launcher only when needed for relative library paths.
 
