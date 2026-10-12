@@ -45,12 +45,16 @@ impl std::error::Error for FileOpenError {}
 
 /// Opens an already-downloaded local file with the OS default application.
 /// This deliberately never routes through a shell or accepts a remote URL, and
-/// refuses files that the OS would run as programs or scripts: an attachment is
-/// untrusted content, so such files can only be saved, never launched from here.
+/// opens only passive media/document types (`is_passive_file`): an attachment
+/// is untrusted content, and a denylist cannot keep up with everything an OS
+/// will run, install or mount, so every other type can only be saved, never
+/// launched from here. On Windows the file is first marked as downloaded from
+/// the Internet zone (`mark_downloaded`); if that fails the file is not opened.
 pub fn open_local_file(path: &std::path::Path) -> Result<(), FileOpenError> {
-    if is_launchable_program(path) {
+    if !is_passive_file(path) {
         return Err(FileOpenError);
     }
+    mark_downloaded(path).map_err(|_| FileOpenError)?;
     #[cfg(target_os = "windows")]
     let (program, args) = ("explorer.exe", vec![path.as_os_str()]);
     #[cfg(target_os = "macos")]
@@ -67,22 +71,73 @@ pub fn open_local_file(path: &std::path::Path) -> Result<(), FileOpenError> {
         .map_err(|_| FileOpenError)
 }
 
-/// Extensions that run code (or install/mount something) when opened. The list
-/// is checked on every platform because a saved file can move between them.
-const PROGRAM_EXTENSIONS: &[&str] = &[
-    "app", "appimage", "bat", "bash", "cmd", "com", "command", "cpl", "csh", "desktop", "dll",
-    "dmg", "exe", "fish", "gadget", "hta", "inf", "jar", "jnlp", "js", "jse", "lnk", "msc", "msi",
-    "msp", "pif", "pkg", "ps1", "ps2", "psc1", "reg", "run", "scf", "scr", "sh", "url", "vb",
-    "vbe", "vbs", "ws", "wsc", "wsf", "wsh", "zsh",
+/// The only extensions `open_local_file` hands to the OS: the image, audio and
+/// video types the app names for content types, plus PDF and plain text. The
+/// match is on the final extension only, ASCII case-insensitively, so `a.pdf.exe`
+/// and `a.exe.` are refused and anything unknown (archives, disk images,
+/// installers, scripts) is Download-only.
+const PASSIVE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "mp3", "ogg", "wav", "m4a", "mp4", "webm", "pdf",
+    "txt",
 ];
 
-fn is_launchable_program(path: &std::path::Path) -> bool {
+/// Whether the file name has a passive type that may be opened with the OS
+/// default application.
+pub fn is_passive_file(path: &std::path::Path) -> bool {
     let Some(extension) = path.extension().and_then(std::ffi::OsStr::to_str) else {
         return false;
     };
-    PROGRAM_EXTENSIONS
+    PASSIVE_EXTENSIONS
         .iter()
-        .any(|program| extension.eq_ignore_ascii_case(program))
+        .any(|passive| extension.eq_ignore_ascii_case(passive))
+}
+
+/// The contents of a Windows `Zone.Identifier` stream for a file from the
+/// Internet zone (zone 3), which is what makes SmartScreen and Office
+/// Protected View treat the file as untrusted.
+#[cfg(any(target_os = "windows", test))]
+const ZONE_IDENTIFIER: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+
+/// The Mark-of-the-Web could not be written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkError;
+
+impl fmt::Display for MarkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("The downloaded file could not be marked as coming from the Internet.")
+    }
+}
+
+impl std::error::Error for MarkError {}
+
+/// Marks an existing file as downloaded from the Internet (Windows
+/// `Zone.Identifier` alternate data stream with `ZoneId=3`). It fails when the
+/// file does not exist or its volume has no alternate streams (FAT, exFAT,
+/// network shares); callers decide whether that is fatal. A no-op elsewhere.
+pub fn mark_downloaded(path: &std::path::Path) -> Result<(), MarkError> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Write;
+        // Creating the stream of a missing file would create the file itself.
+        std::fs::metadata(path)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .ok_or(MarkError)?;
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(stream)
+            .and_then(|mut file| file.write_all(ZONE_IDENTIFIER))
+            .map_err(|_| MarkError)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 /// Deliberately categorical: native errors may contain secret data or attributes.
@@ -240,8 +295,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn attachments_that_would_run_as_programs_are_never_opened() {
-        for program in [
+    fn only_passive_media_and_documents_are_opened_everything_else_is_refused() {
+        for refused in [
             "setup.exe",
             "RUN.BAT",
             "x.Cmd",
@@ -251,30 +306,102 @@ mod tests {
             "tool.sh",
             "page.hta",
             "evil.JS",
+            // Not in the old denylist.
+            "disk.iso",
+            "disk.img",
+            "disk.vhdx",
+            "help.chm",
+            "script.py",
+            "pkg.msix",
+            "Thing.workflow",
+            "Thing.terminal",
+            "archive.zip",
+            "unknown.bin",
+            "noextension",
+            // Only the final extension counts.
+            "a.pdf.exe",
+            "photo.png.scr",
+            "a.exe.",
+            "a.exe ",
+            ".png",
         ] {
-            assert!(
-                is_launchable_program(std::path::Path::new(program)),
-                "{program}"
-            );
+            assert!(!is_passive_file(std::path::Path::new(refused)), "{refused}");
             // Refused before any process is started, so no handler is invoked.
             assert_eq!(
-                open_local_file(std::path::Path::new(program)),
+                open_local_file(std::path::Path::new(refused)),
                 Err(FileOpenError)
             );
         }
-        for document in [
+        for passive in [
             "photo.png",
-            "clip.mp4",
+            "photo.JPG",
+            "photo.Jpeg",
+            "anim.gif",
+            "pic.webp",
+            "pic.bmp",
             "song.mp3",
+            "song.ogg",
+            "song.wav",
+            "song.m4a",
+            "clip.mp4",
+            "clip.WEBM",
+            "doc.pdf",
             "notes.txt",
-            "noextension",
-            "x.exe.png",
+            "a.exe.png",
+            "a.zip.pdf",
         ] {
-            assert!(
-                !is_launchable_program(std::path::Path::new(document)),
-                "{document}"
-            );
+            assert!(is_passive_file(std::path::Path::new(passive)), "{passive}");
         }
+    }
+
+    fn scratch_file(name: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("fastcord-platform-{}-{name}", std::process::id()));
+        std::fs::write(&path, b"data").unwrap();
+        path
+    }
+
+    #[test]
+    fn marking_a_missing_file_fails_without_creating_it() {
+        let missing = std::env::temp_dir().join(format!(
+            "fastcord-platform-{}-never-created.png",
+            std::process::id()
+        ));
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(mark_downloaded(&missing), Err(MarkError));
+            assert!(!missing.exists());
+            assert_eq!(open_local_file(&missing), Err(FileOpenError));
+            assert!(!missing.exists());
+        }
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(mark_downloaded(&missing), Ok(()));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn marking_writes_the_internet_zone_stream_and_overwrites_a_stale_one() {
+        let path = scratch_file("marked.png");
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        std::fs::write(
+            &stream,
+            b"[ZoneTransfer]\r\nZoneId=0\r\nHostUrl=about:internet\r\n",
+        )
+        .unwrap();
+        assert_eq!(mark_downloaded(&path), Ok(()));
+        assert_eq!(std::fs::read(&stream).unwrap(), ZONE_IDENTIFIER);
+        assert_eq!(std::fs::read(&path).unwrap(), b"data");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn marking_is_a_no_op_outside_windows() {
+        let path = scratch_file("unmarked.png");
+        assert_eq!(mark_downloaded(&path), Ok(()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"data");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

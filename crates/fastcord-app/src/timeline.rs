@@ -1125,16 +1125,17 @@ fn attachment_view(
             actions = actions.push(row_button(label, event));
         }
     }
-    actions = actions
-        .push(row_button(
-            "Download",
-            Event::DownloadAttachment {
-                channel_id: ids.0,
-                message_id: ids.1,
-                attachment_id: ids.2,
-            },
-        ))
-        .push(row_button(
+    actions = actions.push(row_button(
+        "Download",
+        Event::DownloadAttachment {
+            channel_id: ids.0,
+            message_id: ids.1,
+            attachment_id: ids.2,
+        },
+    ));
+    // Only passive types are openable; everything else is Download-only.
+    if crate::attachment_ui::can_open(attachment) {
+        actions = actions.push(row_button(
             "Open",
             Event::OpenAttachment {
                 channel_id: ids.0,
@@ -1142,6 +1143,7 @@ fn attachment_view(
                 attachment_id: ids.2,
             },
         ));
+    }
     content = content.push(actions);
     container(content).width(Length::Fill).into()
 }
@@ -1747,6 +1749,28 @@ mod tests {
         );
         assert!(
             found
+                .iter()
+                .any(|event| matches!(event, Event::OpenAttachment { .. }))
+        );
+    }
+
+    #[test]
+    fn a_blocked_file_type_offers_download_but_no_open() {
+        let mut file = (*message(42, "")).clone();
+        file.attachments[0].content_type = Some("application/pdf".to_owned());
+        file.attachments[0].filename = "report.pdf.exe".to_owned();
+        let snapshot = Snapshot {
+            rows: vec![Row::new(Arc::new(file), 1)],
+            ..one_row(42)
+        };
+        let found = clickable(&snapshot, Interaction::default());
+        assert!(
+            found
+                .iter()
+                .any(|event| matches!(event, Event::DownloadAttachment { .. }))
+        );
+        assert!(
+            !found
                 .iter()
                 .any(|event| matches!(event, Event::OpenAttachment { .. }))
         );

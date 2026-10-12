@@ -376,6 +376,17 @@ pub fn start_action(
     task
 }
 
+const NOT_OPENABLE: &str =
+    "Only images, audio, video, PDF and text files can be opened from here. Use Download.";
+
+/// Whether Open is offered for an attachment: only the passive types
+/// `fastcord_platform::is_passive_file` allows, judged on the same sanitized
+/// name the cached file gets. Everything else is Download-only.
+pub fn can_open(item: &Attachment) -> bool {
+    let filename = safe_attachment_filename(&item.filename, item.content_type.as_deref());
+    fastcord_platform::is_passive_file(std::path::Path::new(&filename))
+}
+
 async fn run_action(
     cache: AttachmentCache,
     refresh: RestRefresh,
@@ -398,12 +409,22 @@ async fn run_action(
                 Err(error) => return ActionOutcome::Failed(action_failure(&error)),
             };
             let destination = destination.path().to_owned();
-            match tokio::task::spawn_blocking(move || std::fs::copy(source, destination)).await {
-                Ok(Ok(_)) => ActionOutcome::Saved,
+            let saved = tokio::task::spawn_blocking(move || {
+                std::fs::copy(&source, &destination)?;
+                // Best effort: a volume without alternate streams (FAT, exFAT) still gets the file.
+                let _ = fastcord_platform::mark_downloaded(&destination);
+                Ok::<(), std::io::Error>(())
+            })
+            .await;
+            match saved {
+                Ok(Ok(())) => ActionOutcome::Saved,
                 _ => ActionOutcome::Failed("The file could not be saved there."),
             }
         }
         AttachmentAction::Open => {
+            if !can_open(&item) {
+                return ActionOutcome::Failed(NOT_OPENABLE);
+            }
             let path = match cache.local_file(&refresh, key, &filename, &item.url).await {
                 Ok(path) => path,
                 Err(error) => return ActionOutcome::Failed(action_failure(&error)),
@@ -412,9 +433,7 @@ async fn run_action(
                 .await
             {
                 Ok(Ok(())) => ActionOutcome::Opened,
-                _ => ActionOutcome::Failed(
-                    "This file could not be opened (programs and scripts are never launched from here). Use Download.",
-                ),
+                _ => ActionOutcome::Failed(NOT_OPENABLE),
             }
         }
     }
@@ -439,7 +458,7 @@ pub fn viewer_view(viewer: &AttachmentViewer) -> Element<'_, Message> {
             viewer.key.attachment,
         ))
     };
-    let header = row![
+    let mut header = row![
         text(&viewer.attachment.filename)
             .size(16)
             .width(Length::Fill),
@@ -450,16 +469,18 @@ pub fn viewer_view(viewer: &AttachmentViewer) -> Element<'_, Message> {
                 attachment_id,
             }
         })),
-        button("Open").on_press(event(|channel_id, message_id, attachment_id| {
-            timeline::Event::OpenAttachment {
+    ]
+    .spacing(8);
+    if can_open(&viewer.attachment) {
+        header = header.push(button("Open").on_press(event(
+            |channel_id, message_id, attachment_id| timeline::Event::OpenAttachment {
                 channel_id,
                 message_id,
                 attachment_id,
-            }
-        })),
-        button("Close").on_press(Message::CloseViewer),
-    ]
-    .spacing(8);
+            },
+        )));
+    }
+    header = header.push(button("Close").on_press(Message::CloseViewer));
     let body: Element<'_, Message> = match &viewer.state {
         AttachmentView::Ready(preview) => image(preview.handle.clone())
             .content_fit(ContentFit::Contain)
@@ -567,5 +588,52 @@ mod tests {
         assert_eq!(gateway.attachment_notice, None);
         finished(&mut gateway, ActionOutcome::Saved);
         assert_eq!(gateway.attachment_notice, Some("Attachment saved."));
+    }
+
+    fn attachment(filename: &str, content_type: Option<&str>) -> Attachment {
+        Attachment {
+            id: Snowflake(1),
+            filename: filename.to_owned(),
+            size: 1,
+            url: "https://cdn.example/a".to_owned(),
+            proxy_url: None,
+            content_type: content_type.map(str::to_owned),
+            width: None,
+            height: None,
+        }
+    }
+
+    #[test]
+    fn open_is_offered_only_for_passive_types_judged_on_the_final_extension() {
+        for (name, content_type) in [
+            ("photo.PNG", None),
+            ("clip.Mp4", Some("video/mp4")),
+            ("song.mp3", None),
+            ("doc.PDF", None),
+            ("notes.txt", None),
+            ("a.exe.pdf", None),
+            // No extension: the content type supplies one.
+            ("clip", Some("video/mp4")),
+            ("../../dir\\evil/photo.jpg", None),
+        ] {
+            assert!(can_open(&attachment(name, content_type)), "{name}");
+        }
+        for (name, content_type) in [
+            ("a.pdf.exe", Some("application/pdf")),
+            ("a.PDF.Exe", None),
+            ("setup.msi", None),
+            ("disk.iso", Some("application/x-iso9660-image")),
+            ("script.py", Some("text/plain")),
+            ("help.chm", None),
+            ("archive.zip", Some("application/zip")),
+            ("a.png.", None),
+            ("a.exe ", None),
+            ("a.pdf:x.exe", None),
+            ("noextension", None),
+            ("noextension", Some("application/x-msdownload")),
+            ("", None),
+        ] {
+            assert!(!can_open(&attachment(name, content_type)), "{name}");
+        }
     }
 }
