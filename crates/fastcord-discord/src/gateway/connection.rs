@@ -41,7 +41,7 @@ use super::event::{ConnectionState, ReconnectReason, StopReason};
 use super::event::{Dispatch, GatewayEvent};
 use super::outbox::Outbox;
 use super::pacing::{JitterSource, SEND_WINDOW, SendBudget, backoff_delay, invalid_session_delay};
-use super::profile::{ClientProperties, HostOs};
+use super::profile::ClientProperties;
 use super::stream::StreamCommand;
 use super::subscription::{CONTROL_RESERVE, Subscriber, SubscriptionTarget};
 use super::transport::{DiscoverError, Transport};
@@ -150,7 +150,7 @@ pub(crate) struct Wanted {
 pub(crate) async fn run<T: Transport, J: JitterSource>(
     transport: Arc<T>,
     token: Arc<UserToken>,
-    locale: String,
+    properties: ClientProperties,
     jitter: J,
     outbox: Outbox,
     wanted: Wanted,
@@ -165,8 +165,7 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
     let mut driver = Driver {
         transport,
         token,
-        // Replaced by `drive` once the build number is resolved.
-        properties: ClientProperties::web(HostOs::current(), &locale, 0),
+        properties,
         jitter,
         interrupt,
         outbox,
@@ -179,7 +178,7 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
         voice,
         voice_sent: None,
     };
-    let terminal = match drive(&mut driver, &locale).await {
+    let terminal = match drive(&mut driver).await {
         Err(terminal) => terminal,
         Ok(never) => match never {},
     };
@@ -199,11 +198,8 @@ async fn finish(mut outbox: Outbox, terminal: Terminal) {
 
 async fn drive<T: Transport, J: JitterSource>(
     driver: &mut Driver<T, J>,
-    locale: &str,
 ) -> Result<Infallible, Terminal> {
-    // The profile is fixed here, once, and reused by every Identify.
-    let build = interruptible(&mut driver.interrupt, driver.transport.build_number()).await?;
-    driver.properties = ClientProperties::web(HostOs::current(), locale, build.value);
+    // The profile is fixed at Gateway start and passed in; reused by every Identify.
     let mut failures = 0u32;
     let mut base_url: Option<GatewayUrl> = None;
     loop {

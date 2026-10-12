@@ -1488,6 +1488,7 @@ impl History {
 
 #[cfg(test)]
 mod tests {
+    use fastcord_discord::gateway::{ClientProperties, HostOs};
     use fastcord_discord::gateway::{MessageDelete, MessageDeleteBulk};
     use fastcord_discord::message_store::{MAX_MESSAGES_PER_CHANNEL, MESSAGE_BUDGET};
     use fastcord_discord::state::navigation::{ChannelSelection, PermissionSummary};
@@ -1504,7 +1505,12 @@ mod tests {
     const NEWEST: u64 = 10_000;
 
     fn rest() -> RestClient {
-        RestClient::new(UserToken::new("offline-fixture-credential".to_owned())).unwrap()
+        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        RestClient::new(
+            UserToken::new("offline-fixture-credential".to_owned()),
+            properties,
+        )
+        .unwrap()
     }
 
     fn message_with(n: u64, content: String) -> Message {

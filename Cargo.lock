@@ -1820,6 +1820,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "uuid",
  "webpki-roots",
  "zeroize",
 ]

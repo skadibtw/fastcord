@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fastcord_discord::gateway::{
-    ConnectionState, Dispatch, Gateway, GatewayEvent, ReconnectReason, StopReason,
+    ClientProperties, ConnectionState, Dispatch, Gateway, GatewayEvent, ReconnectReason, StopReason,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VoiceParticipant {
@@ -986,7 +986,7 @@ enum WorkerInput {
 }
 
 struct Worker {
-    start: Option<(RestClient, Arc<UserToken>, String)>,
+    start: Option<(RestClient, Arc<UserToken>, ClientProperties)>,
     rest: RestClient,
     gateway: Option<Gateway>,
     tracker: Tracker,
@@ -1859,7 +1859,7 @@ impl Drop for Worker {
 pub fn status_stream(
     rest: RestClient,
     token: Arc<UserToken>,
-    locale: String,
+    properties: ClientProperties,
     bridge: NavigationBridge,
 ) -> impl Stream<Item = ()> {
     let requests = bridge.requests.subscribe();
@@ -1870,7 +1870,7 @@ pub fn status_stream(
     // There is one worker per bridge; a second one would simply get no commands.
     let commands = bridge.take_commands().unwrap_or_else(|| mpsc::channel(1).1);
     let worker = Worker {
-        start: Some((rest, token, locale)),
+        start: Some((rest, token, properties)),
         rest: rest_client,
         gateway: None,
         tracker: Tracker {
@@ -1902,8 +1902,8 @@ pub fn status_stream(
         let mut gateway = match worker.gateway.take() {
             Some(gateway) => gateway,
             None => {
-                let (rest, token, locale) = worker.start.take()?;
-                Gateway::start(rest, token, locale)
+                let (rest, token, properties) = worker.start.take()?;
+                Gateway::start(rest, token, properties)
             }
         };
         loop {
@@ -3136,10 +3136,15 @@ mod tests {
             })),
         }
     }
+    use fastcord_discord::gateway::{ClientProperties, HostOs};
     fn worker() -> Worker {
         let bridge = NavigationBridge::new();
-        let rest =
-            RestClient::new(UserToken::new("offline-fixture-credential".to_owned())).unwrap();
+        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let rest = RestClient::new(
+            UserToken::new("offline-fixture-credential".to_owned()),
+            properties,
+        )
+        .unwrap();
         Worker {
             start: None,
             rest: rest.clone(),

@@ -327,6 +327,7 @@ impl<C: Clock> RestClient<C> {
 mod tests {
     use super::*;
     use crate::UserToken;
+    use crate::gateway::{ClientProperties, HostOs};
 
     const ROUTES: &str = include_str!("../../../fixtures/rest/reaction-routes.json");
     const USERS: &str = include_str!("../../../fixtures/rest/reaction-users.json");
@@ -795,7 +796,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_stopped_account_never_adds_removes_or_lists_reactions() {
-        let client = RestClient::new(UserToken::new("offline-test-credential".to_owned())).unwrap();
+        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let client = RestClient::new(
+            UserToken::new("offline-test-credential".to_owned()),
+            properties,
+        )
+        .unwrap();
         client.stop_authenticated_work();
         let up = emoji(&unicode("\u{1f44d}"));
         assert_eq!(

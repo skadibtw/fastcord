@@ -255,10 +255,17 @@ mod tests {
 
     #[test]
     fn identify_matches_the_recorded_sanitized_payload() {
-        let properties = ClientProperties::web(HostOs::Windows, "en-US", 631_730);
+        let properties =
+            ClientProperties::web(HostOs::Windows, "en-US", 631_730).with_launch_identity();
         let text = identify("REDACTED-TOKEN", &properties).unwrap();
-        let sent: Value = serde_json::from_str(&text).unwrap();
+        let mut sent: Value = serde_json::from_str(&text).unwrap();
         let recorded: Value = serde_json::from_str(IDENTIFY_FIXTURE).unwrap();
+        // The launch identity is fresh per launch, so the recording has it
+        // redacted: restore the placeholders before comparing.
+        for field in ["client_launch_id", "launch_signature"] {
+            assert!(sent["d"]["properties"][field].is_string(), "{field}");
+            sent["d"]["properties"][field] = recorded["d"]["properties"][field].clone();
+        }
         assert_eq!(sent, recorded);
         // Opcode 2, no bot intents, no payload compression, empty version cache.
         assert_eq!(sent["op"], 2);

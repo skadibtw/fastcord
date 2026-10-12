@@ -97,9 +97,10 @@ Local logout does not revoke every Discord session.
 After login the account screen connects to Discord's Gateway (v10, zlib-stream
 compression) and shows its state: connected (with server and direct-message
 counts), reconnecting, a rejected login (back to the login screen), or stopped
-with the reason. It identifies as the Discord web client (Chrome profile, current
-build number fetched from discord.com, bundled fallback); the exact payload is
-documented in [docs/PROTOCOL.md](docs/PROTOCOL.md). Dropped connections resume
+with the reason. It presents the Discord web client's identity (Chrome profile,
+per-launch identity, current build number fetched from discord.com, bundled
+fallback), and the same profile is what its API requests carry; the exact
+payload is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md). Dropped connections resume
 the session with bounded, jittered backoff. If Discord demands an action or a
 challenge on the account, fastcord stops and says so; it never completes or
 bypasses one. Logging out closes the Gateway session, so the account goes

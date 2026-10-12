@@ -4,9 +4,9 @@
 //! built once per Gateway start and reused unchanged for every Identify across
 //! reconnects: nothing here is randomized per connection.
 
-use std::time::{Duration, SystemTime};
-
 use serde::Serialize;
+use std::time::{Duration, SystemTime};
+use uuid::Uuid;
 
 /// Bump whenever the properties below change shape or meaning.
 pub const PROFILE_VERSION: u32 = 1;
@@ -64,7 +64,7 @@ impl BuildNumber {
 /// Fetches the current build number from discord.com's web client, falling
 /// back to the bundled value on any failure (offline, page drift, redirect).
 /// The request is unauthenticated and carries no account data.
-pub(crate) async fn resolve_build_number() -> BuildNumber {
+pub async fn resolve_build_number() -> BuildNumber {
     match fetch_build_number().await {
         Some(value) => BuildNumber::fetched(value),
         None => BuildNumber::bundled(),
@@ -170,9 +170,14 @@ pub struct ClientProperties {
     pub release_channel: &'static str,
     pub client_build_number: u32,
     pub client_event_source: Option<&'static str>,
+    pub client_launch_id: String,
+    pub launch_signature: String,
+    pub client_app_state: Option<&'static str>,
 }
 
 impl ClientProperties {
+    /// The profile itself: everything Identify sends that is fixed for the run.
+    /// Pure, so equal inputs give an equal profile.
     pub fn web(host: HostOs, locale: &str, client_build_number: u32) -> Self {
         let (os, os_version, platform) = host.web_identity();
         Self {
@@ -194,7 +199,19 @@ impl ClientProperties {
             release_channel: "stable",
             client_build_number,
             client_event_source: None,
+            client_launch_id: String::new(),
+            launch_signature: String::new(),
+            client_app_state: Some("focused"),
         }
+    }
+
+    /// Stamps the one-off launch identity the web client generates when the app
+    /// starts: a launch id and its signature. Generated once per launch, never
+    /// per Identify and never per reconnect.
+    pub fn with_launch_identity(mut self) -> Self {
+        self.client_launch_id = Uuid::new_v4().to_string();
+        self.launch_signature = Uuid::new_v4().to_string();
+        self
     }
 }
 
@@ -256,6 +273,21 @@ mod tests {
             ClientProperties::web(HostOs::Windows, "ru-RU", 631_730),
             windows
         );
+        // The launch identity is the one exception: fresh per launch, then
+        // fixed for every Identify that follows.
+        assert_eq!(windows.client_launch_id, "");
+        assert_eq!(windows.launch_signature, "");
+        assert_eq!(windows.client_app_state, Some("focused"));
+        let launched =
+            ClientProperties::web(HostOs::Windows, "ru-RU", 631_730).with_launch_identity();
+        assert_eq!(launched.client_launch_id.len(), 36);
+        assert_eq!(launched.launch_signature.len(), 36);
+        assert_ne!(launched.launch_signature, launched.client_launch_id);
+        assert_ne!(launched, windows);
+        // Two launches differ, but only in the identity.
+        let other = ClientProperties::web(HostOs::Windows, "ru-RU", 631_730).with_launch_identity();
+        assert_ne!(other.client_launch_id, launched.client_launch_id);
+        assert_eq!(other.browser_user_agent, launched.browser_user_agent);
         assert_eq!(
             HostOs::current(),
             if cfg!(windows) {

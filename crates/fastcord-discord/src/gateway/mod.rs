@@ -51,6 +51,7 @@ pub use event::{
 };
 pub use profile::{
     BUNDLED_BUILD_NUMBER, BuildNumber, BuildSource, ClientProperties, HostOs, PROFILE_VERSION,
+    resolve_build_number,
 };
 pub use stream::{StreamControl, StreamSignalQueueError};
 pub use subscription::{
@@ -84,12 +85,13 @@ impl Gateway {
     /// Starts the connection task. Must be called inside a Tokio runtime, and
     /// only because of an explicit user action (login or restore). `rest` is the
     /// account's client, used for discovery and shared for authentication stop;
-    /// `locale` is the system locale reported in the client profile.
-    pub fn start(rest: RestClient, token: Arc<UserToken>, locale: impl Into<String>) -> Self {
+    /// `properties` is the profile Identify sends, already carrying the system
+    /// locale and the resolved `client_build_number`.
+    pub fn start(rest: RestClient, token: Arc<UserToken>, properties: ClientProperties) -> Self {
         start_with(
             Arc::new(LiveTransport::new(rest)),
             token,
-            locale.into(),
+            properties,
             OsJitter,
         )
     }
@@ -131,7 +133,7 @@ pub(crate) fn decode_fixture(name: &str, raw: &str) -> Dispatch {
 fn start_with<T: Transport, J: JitterSource>(
     transport: Arc<T>,
     token: Arc<UserToken>,
-    locale: String,
+    properties: ClientProperties,
     jitter: J,
 ) -> Gateway {
     let (outbox, events) = outbox::channel();
@@ -142,7 +144,7 @@ fn start_with<T: Transport, J: JitterSource>(
     tokio::spawn(connection::run(
         transport,
         token,
-        locale,
+        properties,
         jitter,
         outbox,
         connection::Wanted {

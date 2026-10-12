@@ -15,13 +15,14 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use crate::gateway::{BUNDLED_BUILD_NUMBER, ClientProperties, HostOs};
 use futures_util::{Sink, Stream};
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 use super::pacing::OsJitter;
-use super::profile::resolve_build_number;
+
 use super::transport::{DiscoverError, GatewayInfo, LiveTransport, Transport, connect_tls};
 use super::url::GatewayUrl;
 use super::*;
@@ -34,10 +35,6 @@ struct Unauthenticated;
 
 impl Transport for Unauthenticated {
     type Socket = TlsSocket;
-
-    async fn build_number(&self) -> BuildNumber {
-        resolve_build_number().await
-    }
 
     async fn discover(&self) -> Result<String, DiscoverError> {
         let response = reqwest::get("https://discord.com/api/v10/gateway")
@@ -112,10 +109,6 @@ struct Severable {
 impl Transport for Severable {
     type Socket = Cuttable;
 
-    async fn build_number(&self) -> BuildNumber {
-        self.inner.build_number().await
-    }
-
     async fn discover(&self) -> Result<String, DiscoverError> {
         self.inner.discover().await
     }
@@ -156,7 +149,7 @@ async fn live_real_gateway_negotiates_zlib_stream_and_rejects_a_bogus_token() {
     let mut gateway = start_with(
         Arc::new(Unauthenticated),
         token,
-        "en-US".to_owned(),
+        ClientProperties::web(HostOs::current(), "en-US", BUNDLED_BUILD_NUMBER),
         OsJitter,
     );
     let mut states = Vec::new();
@@ -187,7 +180,8 @@ async fn live_real_gateway_negotiates_zlib_stream_and_rejects_a_bogus_token() {
 #[ignore = "needs FASTCORD_LIVE_TOKEN (alt account) in the environment; contacts Discord"]
 async fn live_account_identifies_and_resumes_after_a_forced_reconnect() {
     let token = std::env::var("FASTCORD_LIVE_TOKEN").expect("set FASTCORD_LIVE_TOKEN for this run");
-    let rest = RestClient::new(UserToken::new(token.clone())).unwrap();
+    let properties = ClientProperties::web(HostOs::current(), "en-US", BUNDLED_BUILD_NUMBER);
+    let rest = RestClient::new(UserToken::new(token.clone()), properties.clone()).unwrap();
     let (cut, _) = watch::channel(0u64);
     let transport = Arc::new(Severable {
         inner: LiveTransport::new(rest),
@@ -196,7 +190,7 @@ async fn live_account_identifies_and_resumes_after_a_forced_reconnect() {
     let mut gateway = start_with(
         transport,
         Arc::new(UserToken::new(token)),
-        "en-US".to_owned(),
+        properties,
         OsJitter,
     );
     let limit = Duration::from_secs(90);

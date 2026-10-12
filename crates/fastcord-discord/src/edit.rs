@@ -192,6 +192,7 @@ impl<C: Clock> RestClient<C> {
 mod tests {
     use super::*;
     use crate::UserToken;
+    use crate::gateway::{ClientProperties, HostOs};
 
     const REQUEST: &str = include_str!("../../../fixtures/rest/message-edit-request.json");
     const RESPONSE: &str = include_str!("../../../fixtures/rest/message-edit-response.json");
@@ -336,7 +337,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_stopped_account_never_edits_or_deletes() {
-        let client = RestClient::new(UserToken::new("offline-test-credential".to_owned())).unwrap();
+        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let client = RestClient::new(
+            UserToken::new("offline-test-credential".to_owned()),
+            properties,
+        )
+        .unwrap();
         client.stop_authenticated_work();
         let edit = EditedMessage::new("text", false).unwrap();
         assert_eq!(

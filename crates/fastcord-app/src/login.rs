@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use fastcord_discord::gateway::{ClientProperties, HostOs};
 use fastcord_discord::{Priority, RestClient, RestError, UserToken};
 use fastcord_model::{Snowflake, User};
 use fastcord_platform::{NativeCredentialStore, StoreError};
@@ -18,6 +19,7 @@ pub enum Persistence {
 pub struct Session {
     pub user: User,
     pub client: RestClient,
+    pub properties: ClientProperties,
     token: Arc<UserToken>,
 }
 impl fmt::Debug for Session {
@@ -105,8 +107,18 @@ pub async fn validate(
     if token.expose_secret().is_empty() || token.expose_secret().len() > MAX_TOKEN_BYTES {
         return Err(LoginError::InvalidInput);
     }
-    let client = RestClient::new(UserToken::new(token.expose_secret().to_owned()))
-        .map_err(LoginError::Rest)?;
+    let build = fastcord_discord::gateway::resolve_build_number().await;
+    let properties = ClientProperties::web(
+        HostOs::current(),
+        &fastcord_platform::system_locale(),
+        build.value,
+    )
+    .with_launch_identity();
+    let client = RestClient::new(
+        UserToken::new(token.expose_secret().to_owned()),
+        properties.clone(),
+    )
+    .map_err(LoginError::Rest)?;
     let user: User = client
         .get("/users/@me", Priority::UserRead)
         .await
@@ -115,6 +127,7 @@ pub async fn validate(
     Ok(Arc::new(Session {
         user,
         client,
+        properties,
         token,
     }))
 }
@@ -192,10 +205,16 @@ pub async fn delete_saved(
 #[cfg(test)]
 pub(crate) fn fixture_session() -> Arc<Session> {
     let token = Arc::new(UserToken::new("dummy-offline-secret".to_owned()));
+    let properties = ClientProperties::web(HostOs::Linux, "en-US", 1).with_launch_identity();
     Arc::new(Session {
         user: serde_json::from_str(include_str!("../../../fixtures/rest/current-user.json"))
             .unwrap(),
-        client: RestClient::new(UserToken::new("dummy-offline-secret".to_owned())).unwrap(),
+        client: RestClient::new(
+            UserToken::new("dummy-offline-secret".to_owned()),
+            properties.clone(),
+        )
+        .unwrap(),
+        properties,
         token,
     })
 }

@@ -1,5 +1,5 @@
 //! What the connection driver needs from the outside world: discovery, a
-//! WebSocket, the build number, and the account's authentication-stop signal.
+//! WebSocket, and the account's authentication-stop signal.
 //! The production implementation uses the account's REST client and a rustls
 //! WebSocket; tests substitute an in-process server.
 
@@ -11,7 +11,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 use super::compression::MAX_EVENT_BYTES;
-use super::profile::{BuildNumber, resolve_build_number};
+
 use super::url::GatewayUrl;
 use crate::ws::{self, ConnectError, TlsSocket};
 use crate::{Priority, RestClient, RestError};
@@ -33,9 +33,6 @@ pub(crate) trait Transport: Send + Sync + 'static {
         + Unpin
         + Send
         + 'static;
-
-    /// The `client_build_number` for this run's profile.
-    fn build_number(&self) -> impl Future<Output = BuildNumber> + Send;
 
     /// `GET /gateway`: the base WebSocket URL.
     fn discover(&self) -> impl Future<Output = Result<String, DiscoverError>> + Send;
@@ -80,10 +77,6 @@ impl LiveTransport {
 
 impl Transport for LiveTransport {
     type Socket = TlsSocket;
-
-    async fn build_number(&self) -> BuildNumber {
-        resolve_build_number().await
-    }
 
     async fn discover(&self) -> Result<String, DiscoverError> {
         match self

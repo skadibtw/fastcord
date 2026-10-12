@@ -1037,7 +1037,7 @@ impl App {
         let stream = gateway::status_stream(
             session.client.clone(),
             session.token(),
-            fastcord_platform::system_locale(),
+            session.properties.clone(),
             controls.clone(),
         );
         let (task, worker) = Task::run(stream, move |()| Message::Navigation(id)).abortable();

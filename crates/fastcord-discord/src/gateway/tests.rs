@@ -24,6 +24,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 
 use super::compression::{MAX_EVENT_BYTES, test_support::ServerCompressor};
 use super::pacing::{JitterSource, SEND_LIMIT, backoff_delay};
+use super::profile::{ClientProperties, HostOs};
 use super::subscription::{COALESCE, CONTROL_RESERVE};
 use super::transport::{DiscoverError, Transport, websocket_config};
 use super::url::GatewayUrl;
@@ -99,10 +100,6 @@ impl FakeTransport {
 
 impl Transport for FakeTransport {
     type Socket = ServerSocket;
-
-    async fn build_number(&self) -> BuildNumber {
-        BuildNumber::fetched(FETCHED_BUILD)
-    }
 
     async fn discover(&self) -> Result<String, DiscoverError> {
         self.discovered.fetch_add(1, Ordering::SeqCst);
@@ -236,7 +233,7 @@ fn start(transport: &Arc<FakeTransport>, jitter: f64) -> Gateway {
     start_with(
         Arc::clone(transport),
         Arc::new(UserToken::new("test-token".to_owned())),
-        "en-US".to_owned(),
+        ClientProperties::web(HostOs::Linux, "en-US", FETCHED_BUILD),
         Fixed(jitter),
     )
 }

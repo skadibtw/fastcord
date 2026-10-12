@@ -179,6 +179,7 @@ impl<'de> Deserialize<'de> for HistoryPage {
 mod tests {
     use super::*;
     use crate::UserToken;
+    use crate::gateway::{ClientProperties, HostOs};
 
     const PAGE: &str = include_str!("../../../fixtures/rest/channel-messages.json");
 
@@ -404,8 +405,12 @@ mod tests {
 
     #[tokio::test]
     async fn stopped_history_client_uses_the_account_stop_without_touching_the_network() {
-        let client =
-            RestClient::new(UserToken::new("offline-history-credential".to_owned())).unwrap();
+        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let client = RestClient::new(
+            UserToken::new("offline-history-credential".to_owned()),
+            properties,
+        )
+        .unwrap();
         client.stop_authenticated_work();
         for cursor in [
             HistoryCursor::Latest,

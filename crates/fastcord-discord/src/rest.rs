@@ -1,3 +1,4 @@
+use base64::Engine;
 use std::fmt;
 use std::io::{self, Write};
 use std::time::Duration;
@@ -10,6 +11,7 @@ use serde::de::DeserializeOwned;
 
 use crate::attachment::{RefreshRequest, RefreshResponse, RefreshedAttachmentUrl};
 use crate::error::status_error;
+use crate::gateway::ClientProperties;
 use crate::rate_limit::{RateLimiter, ResponseLimits};
 use crate::{Clock, MonotonicClock, NetworkFailure, RestError, RetryableFailure, Route, UserToken};
 
@@ -150,14 +152,18 @@ impl<C> Clone for RestClient<C> {
 }
 
 impl RestClient {
-    pub fn new(token: UserToken) -> Result<Self, RestError> {
-        Self::with_clock(token, MonotonicClock::default())
+    pub fn new(token: UserToken, properties: ClientProperties) -> Result<Self, RestError> {
+        Self::with_clock(token, MonotonicClock::default(), properties)
     }
 }
 
 impl<C: Clock> RestClient<C> {
-    pub fn with_clock(token: UserToken, clock: C) -> Result<Self, RestError> {
-        let headers = auth_headers(&token)?;
+    pub fn with_clock(
+        token: UserToken,
+        clock: C,
+        properties: ClientProperties,
+    ) -> Result<Self, RestError> {
+        let headers = auth_headers(&token, &properties)?;
         // The token wrapper is zeroized here; HTTP internals necessarily own
         // their header copy. No default Debug path exposes that sensitive header.
         let http = reqwest::Client::builder()
@@ -287,7 +293,7 @@ impl<C: Clock> RestClient<C> {
 fn attachment_refresh_route() -> Result<Route, RestError> {
     Route::new(Method::POST, "/attachments/refresh-urls")
 }
-fn auth_headers(token: &UserToken) -> Result<HeaderMap, RestError> {
+fn auth_headers(token: &UserToken, properties: &ClientProperties) -> Result<HeaderMap, RestError> {
     if token.expose_secret().is_empty() {
         return Err(RestError::InvalidToken);
     }
@@ -297,6 +303,27 @@ fn auth_headers(token: &UserToken) -> Result<HeaderMap, RestError> {
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, authorization);
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+
+    // Serialize client properties for x-super-properties header
+    let properties_json = serde_json::to_string(properties).map_err(|_| RestError::InvalidToken)?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&properties_json);
+    headers.insert(
+        "x-super-properties",
+        HeaderValue::from_str(&encoded).map_err(|_| RestError::InvalidToken)?,
+    );
+
+    headers.insert("x-discord-locale", HeaderValue::from_static("en-US"));
+    headers.insert(
+        "user-agent",
+        HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+        ),
+    );
+    headers.insert(
+        "x-fingerprint",
+        HeaderValue::from_static("1559116650832339032.2xwTQ4DcyLTfBV0bgPCx75HgxTw"),
+    );
+
     Ok(headers)
 }
 
@@ -358,11 +385,13 @@ async fn read_body(mut response: reqwest::Response, budget: usize) -> Result<Byt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::HostOs;
 
     #[test]
     fn authorization_is_raw_and_sensitive() {
+        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
         let token = UserToken::new("offline-test-credential".to_owned());
-        let headers = auth_headers(&token).unwrap();
+        let headers = auth_headers(&token, &properties).unwrap();
         assert_eq!(
             headers[AUTHORIZATION].as_bytes(),
             b"offline-test-credential"
@@ -370,11 +399,11 @@ mod tests {
         assert!(headers[AUTHORIZATION].is_sensitive());
         assert!(!format!("{headers:?}").contains("offline-test-credential"));
         assert!(matches!(
-            auth_headers(&UserToken::new("bad\r\nheader".to_owned())),
+            auth_headers(&UserToken::new("bad\r\nheader".to_owned()), &properties),
             Err(RestError::InvalidToken)
         ));
         assert!(matches!(
-            auth_headers(&UserToken::new(String::new())),
+            auth_headers(&UserToken::new(String::new()), &properties),
             Err(RestError::InvalidToken)
         ));
     }
@@ -413,7 +442,12 @@ mod tests {
 
     #[tokio::test]
     async fn stopped_client_and_clones_never_dispatch_even_a_post() {
-        let client = RestClient::new(UserToken::new("offline-test-credential".to_owned())).unwrap();
+        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let client = RestClient::new(
+            UserToken::new("offline-test-credential".to_owned()),
+            properties,
+        )
+        .unwrap();
         let clone = client.clone();
         client.stop_authenticated_work();
         let request = RestRequest::new(
@@ -431,7 +465,12 @@ mod tests {
     async fn observing_401_cancels_queued_requests_before_dispatch() {
         use std::task::{Context, Poll, Waker};
 
-        let client = RestClient::new(UserToken::new("offline-test-credential".to_owned())).unwrap();
+        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let client = RestClient::new(
+            UserToken::new("offline-test-credential".to_owned()),
+            properties,
+        )
+        .unwrap();
         let route = Route::new(Method::GET, "/users/@me").unwrap();
         let active = client
             .limiter

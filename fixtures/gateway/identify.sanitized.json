@@ -18,7 +18,10 @@
       "referring_domain_current": "",
       "release_channel": "stable",
       "client_build_number": 631730,
-      "client_event_source": null
+      "client_event_source": null,
+      "client_launch_id": "REDACTED-LAUNCH-ID",
+      "launch_signature": "REDACTED-LAUNCH-SIG",
+      "client_app_state": "focused"
     },
     "presence": {
       "status": "unknown",
