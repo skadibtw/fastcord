@@ -10,7 +10,7 @@ Line numbers refer to `a51a272`.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `RUSTFLAGS=-D warnings`, as in CI) | pass |
-| `cargo test --workspace --all-targets --locked` | pending (the run was still compiling when this was committed) |
+| `cargo test --workspace --all-targets --locked` | pass: 944 passed, 0 failed, 14 ignored (8 test binaries) |
 
 GitHub CI on the same commit (run 38216355490): `fmt` and `check (ubuntu-24.04)` pass. **`check (macos-15)` and `macos-intel-codec` fail** (finding B1). `check (windows-2025)` passes clippy and tests.
 
