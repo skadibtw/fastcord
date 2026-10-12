@@ -41,6 +41,8 @@
 
 ### Fixed
 - REST identity headers now derive the user-agent and locale from the same `ClientProperties` used by Gateway Identify and `x-super-properties`, instead of hardcoding Windows/en-US. The stable-per-build fingerprint has one definition in the versioned profile module; headers remain prebuilt once per REST client. Offline fixtures cover Windows, macOS, Linux, and a non-en-US locale, and malformed identity headers fail with secret-safe configuration errors (Fixes #50).
+- The bundled dav1d build enables `_DARWIN_C_SOURCE` on macOS so Darwin's BSD typedefs remain visible with strict C11/POSIX settings, fixing Apple Silicon and Intel codec compilation (Fixes #41).
+- Linux release builds install `libasound2-dev` before compiling, matching CI's minimal ALSA-header setup for cpal and preserving SHA-pinned actions (Fixes #42).
 
 ## 0.1.0-alpha.1 — 2026-10-07
 

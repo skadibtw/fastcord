@@ -138,6 +138,10 @@ fn native_compiler(source: &Path, out: &Path, target_os: &str) -> cc::Build {
         build.std("c11").flag("-pthread");
         if target_os == "linux" {
             build.define("_GNU_SOURCE", None);
+        } else if target_os == "macos" {
+            // Darwin's sysctl headers need BSD typedefs hidden by strict C11
+            // and _POSIX_C_SOURCE; enable the same extensions as upstream.
+            build.define("_DARWIN_C_SOURCE", None);
         }
     }
     build
