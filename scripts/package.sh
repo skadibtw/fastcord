@@ -11,7 +11,12 @@ stage="$(mktemp -d)/${name}"
 bin_dir="target/${target}/release"
 
 mkdir -p "$stage" "$out"
-cp LICENSE README.md CHANGELOG.md docs/THIRD_PARTY_NOTICES.md "$stage/"
+cp LICENSE README.md CHANGELOG.md docs/THIRD_PARTY_NOTICES.md docs/THIRD_PARTY_CRATES.md "$stage/"
+# Every archive statically links libopus: refuse to package without its BSD-3-Clause notice.
+grep -q "Copyright 2001-2023 Xiph.Org, Skype Limited" "$stage/THIRD_PARTY_NOTICES.md" || {
+  echo "THIRD_PARTY_NOTICES.md lacks the libopus notice" >&2
+  exit 1
+}
 mkdir -p "$stage/assets/emoji"
 cp assets/emoji/NOTICE.txt assets/emoji/TWEMOJI-LICENSE-GRAPHICS.txt \
   assets/emoji/TWEMOJI-LICENSE.txt assets/emoji/EMOJI-DATA-LICENSE.txt \
