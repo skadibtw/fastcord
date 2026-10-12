@@ -22,9 +22,9 @@ Only one account is active at a time. A user session has one parent voice connec
 
 ### 2.2 Evidence status
 
-The repository inspection found only `LICENSE`, whose opening identifies the GNU GPL version 3. There is no existing application architecture to preserve. Every path in this specification other than `LICENSE` describes a proposed implementation.
+At drafting, the repository inspection found only `LICENSE`, whose opening identifies the GNU GPL version 3. There was no existing application architecture to preserve, and every path in this specification other than `LICENSE` described a proposed implementation. That is historical design evidence; current implementation and verification status lives in `docs/TESTING.md` (per-milestone offline and manual results, and pending live and hardware gates), `docs/PROTOCOL.md` (wire behavior actually implemented), and `CHANGELOG.md`.
 
-Protocol facts cited from official Discord documentation are stronger evidence than user-client behavior documented by Discord Userdoccers or observed in `discord.py-self`. Community-documented behavior is explicitly a compatibility dependency, not a public API guarantee. Design budgets and acceptance thresholds below are requirements, not measured results. No implementation benchmark or live-account interoperability check has been performed for this specification.
+Protocol facts cited from official Discord documentation are stronger evidence than user-client behavior documented by Discord Userdoccers or observed in `discord.py-self`. Community-documented behavior is explicitly a compatibility dependency, not a public API guarantee. Design budgets and acceptance thresholds below are requirements, not measured results. At drafting, no implementation benchmark or live-account interoperability check had been performed for this specification. Results recorded since then, and the live or hardware checks still pending, are in `docs/TESTING.md`; the budgets and thresholds remain requirements whatever those results show.
 
 ### 2.3 Non-negotiable invariants
 
@@ -582,7 +582,7 @@ A compatibility unknown is not permission to ship a stub. The relevant milestone
 
 ## 16. Ordered milestones — exactly one commit per item
 
-Each item is one coherent feature commit containing its implementation, deterministic tests, and the relevant README/protocol/testing/changelog update. Later acceptance does not retroactively excuse an earlier broken feature. Platform/media test fixtures are sanitized; live tests use the accepted alt account and a cooperating test participant. An implementer performs the checks below; none have been run for this specification.
+Each item is one coherent feature commit containing its implementation, deterministic tests, and the relevant README/protocol/testing/changelog update. Later acceptance does not retroactively excuse an earlier broken feature. Platform/media test fixtures are sanitized; live tests use the accepted alt account and a cooperating test participant. At drafting, none of the checks below had been run for this specification; an implementer performs them. Their results, and the live and hardware checks still pending for each milestone, are recorded in `docs/TESTING.md`.
 
 Live-test platforms (see `docs/TESTING.md`): **Windows** — the maintainer's PC, run by the agent; **Linux** — a Hyper-V VM on the same PC (Wayland + PipeWire), run by the agent, with no GPU passthrough, so VA-API paths stay unverified until tested on real hardware; **macOS** — the maintainer's own Mac, run manually by the maintainer from a CI-built package. A macOS milestone is complete only after the maintainer reports its acceptance checks passing.
 
@@ -652,7 +652,7 @@ Live-test platforms (see `docs/TESTING.md`): **Windows** — the maintainer's PC
 
 ## 17. Sources and rationale evidence
 
-Implementation does not exist yet; `LICENSE:1–35` is the only repository codebase-adjacent evidence read. Proposed files above are the intended homes for the decisions, tests, and documentation. The following sources establish protocol/library/platform facts, not fastcord performance or implementation success.
+At drafting, no implementation existed yet; `LICENSE:1–35` was the only repository codebase-adjacent evidence read. The files listed above were the intended homes for the decisions, tests, and documentation at that time; current implementation status is recorded in `docs/TESTING.md`, `docs/PROTOCOL.md`, and `CHANGELOG.md`. The following sources establish protocol/library/platform facts, not fastcord performance or implementation success.
 
 - **S1 — User Gateway lifecycle, capabilities, intents, compression, rate limits:** https://docs.discord.food/gateway/using-gateway
 - **S2 — User Gateway opcode table (14 deprecated; 37 bulk subscriptions):** https://docs.discord.food/gateway/opcodes-and-close-codes
