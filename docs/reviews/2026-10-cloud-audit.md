@@ -91,7 +91,33 @@ These were checked and found consistent with SPEC, AGENTS.md and PROTOCOL.md:
 - **Bounded queues and idle behavior:** every Tokio `mpsc` channel in non-test code is bounded. The only UI timer is the 20 ms emoji animation tick, present only while a visible animated emoji is active (with a test asserting no timer at idle).
 - **Dependency direction:** `model <- discord`, `model <- media`, `media <- audio`, `video` (no internal dependencies) and `app` match SPEC §3 and AGENTS.md, with no cycles.
 
-## 4. Not covered
+## 4. Observable third-party signals (informational)
+
+This section lists what Discord can observe that differs from its official clients. It is a **risk assessment, not a to-do list**. SPEC §2.3 and §15 and ADR 0005 allow one stable, truthful web profile and rule out any evasion mechanism. None of the items below is a finding to "fix" by imitating the official client more closely.
+
+| # | Surface | What differs | Signal strength |
+|---|---|---|---|
+| 1 | Identify | The profile is already web-shaped (ADR 0005), which removes the crudest signal. The absent per-launch UUIDs are a weak indicator. The fixed `capabilities` value `16435` (`fixtures/gateway/identify.sanitized.json:5`, `docs/PROTOCOL.md:37`) stands out more: real clients vary, and a constant is recognizable. | medium |
+| 2 | REST headers and TLS | REST sends only `Authorization` and `Accept` (`crates/fastcord-discord/src/rest.rs:290-301`), without the browser context the web client sends. The TLS ClientHello from rustls/ring differs from Chrome's BoringSSL, and JA3/JA4 fingerprinting is mature and trivial to apply. This is the strongest network-level signal. The project deliberately chose a native Rust stack (rustls, small binary), so this is an accepted property, not something to change. | high |
+| 3 | WebSocket | The `Origin` is the documented web origin (`gateway/transport.rs:19-20`); nothing else in the handshake is distinctive. | low |
+| 4 | Behavior and subscriptions | A narrow opcode-37 pattern, no presence or activities, no science/experiments traffic. A session that subscribes to almost nothing and never touches several surfaces looks atypical. | medium |
+| 5 | Sends | The nonce scheme is correct behavior, not an anomaly. The fixed request-body shape is slightly narrow but carries little signal. | low |
+| 6 | Voice | The web profile connects voice over native UDP; the real web client can only use WebRTC (open risk U1b, SPEC §4.3, ADR 0005). This is an architectural difference, not a configuration one, and it is visible on the voice connection itself without any fingerprinting. | high (dominant technical signal) |
+| 7 | CDN | Fetches carry no cookies or authorization, which is exactly what a legitimate client does. | very low |
+| 8 | Account heuristics | New IP/ASN, none of the official client's background traffic, and a strictly human-only activity pattern. | high (the most realistic risk) |
+
+**Overall:** the risk is very unevenly distributed. Items 6 and 8 outweigh all the others combined. More importantly, even a perfect answer on all eight surfaces would not make an account safe. Discord decides on server-side behavior and account history, which the project can neither see nor control.
+
+The only legitimate levers are the ones SPEC already prescribes:
+- an alt account with the risk accepted up front;
+- ordinary manual use, with no automation, bulk actions or selfbot behavior;
+- stopping on any challenge or `required_action`.
+
+They do **not** include synthetic "background" traffic, header or TLS imitation, or network masking. Those are exactly the evasion mechanisms §15 rules out.
+
+The actionable step is the pending live gate: run the U1 (READY without a challenge) and U1b (UDP voice under the web profile) checks in `docs/TESTING.md` on the alt account. If either is challenged or flagged, ADR 0005 is revisited or the risk is accepted; it is not worked around.
+
+## 5. Not covered
 
 - Windows-only code (`media_foundation/*`, about 80 `unsafe` sites) and macOS-only code (`videotoolbox.rs`/`.c`) were read only superficially, because they cannot be built on Linux. They deserve a dedicated review on their own platforms.
 - No live Discord check was run, by design.
