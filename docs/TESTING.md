@@ -3,15 +3,11 @@
 ## Automated (CI, every push)
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Windows, Linux, and macOS. Tests are deterministic and offline: protocol fixtures in `fixtures/`, injected clocks, crypto/media vectors. No live credentials in CI.
 
-### macOS VideoToolbox codecs (M31)
+### macOS VideoToolbox codecs (M31, CI)
 - The normal macOS CI test suite runs `videotoolbox::tests::software_encoder_and_decoder_round_trip_and_restart`, covering real VideoToolbox software H.264 encode/decode and dropping/reopening the sessions. `macos-intel-codec` cross-compiles `fastcord-video` for `x86_64-apple-darwin`; this is a compile check, not an Intel runtime claim.
-- On a Mac with H.264 hardware encode and decode, run `cargo test -p fastcord-video --locked -- videotoolbox::tests::hardware_encode_decode_720p30 --ignored --nocapture`. It asserts hardware is actually selected and round-trips 720p30.
-- **Pending maintainer acceptance:** run that 720p30 hardware test on Apple Silicon and Intel, and repeatedly stop/start the stream while checking that IOSurface-backed frame pools are released and recreated. No Mac runtime result is claimed until the maintainer reports it.
 
-### Windows Media Foundation codecs (M27)
-- `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --all-targets --locked`: passed. The workspace includes fastcord-video's offline H.264 SPS-bound regression, exact software decoding, software encoder/decoder round trips, backend-selection policy, and automatic backend reporting.
-- `cargo test -p fastcord-video --locked -- --ignored --nocapture`: passed on AMD Radeon RX 9070 XT. The real Media Foundation hardware decoder reproduced the I_PCM fixture bit-exactly; the hardware H.264 encoder round-tripped the fixture and 75-frame pattern through the hardware decoder and again through the software decoder.
-- Pending hardware fallback live case: no stream provoking `MF_E_UNSUPPORTED_D3D_TYPE` on this GPU was available, so the runtime stream-specific hardware-to-software retry was not exercised on a real unsupported profile/resolution. Other pending live checks for macOS/Linux codec backends are outside M27's Windows implementation.
+### Windows Media Foundation codecs (M27, CI)
+- The workspace `cargo test --workspace --all-targets --locked` run includes fastcord-video's offline H.264 SPS-bound regression, exact software decoding, software encoder/decoder round trips, backend-selection policy, and automatic backend reporting. Ignored (`--ignored`) hardware checks are not part of this run and are recorded under Live / manual.
 
 ### Windows screen share (M29)
 - `cargo test -p fastcord-platform -p fastcord-video -p fastcord-app --locked` covers it offline. Platform: output sizing (never upscaled, even, 16 px floor), the CPU BGRA→NV12 converter (BT.709 limited-range primaries, neutral grays, box averaging, strides/crops, odd and non-integer ratios), the shareable-window filter and title cleanup, stale-handle and error mapping (`E_ACCESSDENIED` → permission denied, closed item → source closed), the size-settle governor (a drag never settles; returning cancels), the owner thread (stop, error, panic containment, hung-thread abandonment), and a stale window handle ending a real session as `SourceClosed`. Video pipeline against fake encoders/transport: nothing encoded before sink + negotiated H.264, IDR first, strictly increasing relative timestamps, keyframe-on-request once, keepalive/keyframe repeat requests, bitrate clamping and in-place versus reopen-at-IDR, resize reopen, refused/oversized units forcing at most one keyframe per 300 ms, closed transport, hardware→software fallback (never when Hardware was demanded) and the third-failure end, open failure, pause/resume, sink replacement, exactly-once end. App: the owner state machine (capture first, one stream creation, no delete for a stream never created), event routing (`VideoNegotiated`/`KeyframeRequested`/`VideoBitrate`/`VideoActive`), sink outcomes, STREAM_DELETE reasons, owner keys, ordered bridge commands with window titles kept out of `Debug`, and the voice-channel target.
@@ -58,10 +54,17 @@
 | macOS | Maintainer's Mac | Maintainer, from a CI-built package | Agent prepares a checklist per milestone; milestone completes when the maintainer reports pass |
 
 ### Windows Media Foundation codecs (M27)
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --all-targets --locked`: passed. The workspace tests include the offline checks listed under the CI-run M27 section above.
+- `cargo test -p fastcord-video --locked -- --ignored --nocapture`: passed on AMD Radeon RX 9070 XT. The real Media Foundation hardware decoder reproduced the I_PCM fixture bit-exactly; the hardware H.264 encoder round-tripped the fixture and 75-frame pattern through the hardware decoder and again through the software decoder.
 - `cargo test -p fastcord-video --all-targets --locked -- --include-ignored --nocapture`: 33 passed, 0 failed. This includes exact decode of `fixtures/video/ipcm-128x96.h264`, fixture decode/re-encode/decode on explicit software and hardware paths, and the 75-frame encoder/decoder round trips.
 - Observed hardware path: encoder `AMDh264Encoder` on AMD Radeon RX 9070 XT; decoder `Microsoft H264 Video Decoder MFT` with D3D11VA on the same adapter. Hardware decode was copied to NV12 through a reusable CPU-readable D3D11 staging texture.
 - Observed software path: encoder `H264 Encoder MFT`; decoder `Microsoft H264 Video Decoder MFT`. Automatic selection chose hardware for both encoder and decoder on this machine. The implementation adds no FFmpeg dependency.
+- Pending hardware fallback live case: no stream provoking `MF_E_UNSUPPORTED_D3D_TYPE` on this GPU was available, so the runtime stream-specific hardware-to-software retry was not exercised on a real unsupported profile/resolution. Other pending live checks for macOS/Linux codec backends are outside M27's Windows implementation.
 - **Pending live check:** no authorized alt-account session was available, so official-client Go Live interoperability was not exercised; that live check remains for the screen-share milestone (M29).
+
+### macOS VideoToolbox codecs (M31)
+- On a Mac with H.264 hardware encode and decode, run `cargo test -p fastcord-video --locked -- videotoolbox::tests::hardware_encode_decode_720p30 --ignored --nocapture`. It asserts hardware is actually selected and round-trips 720p30.
+- **Pending maintainer acceptance:** run that 720p30 hardware test on Apple Silicon and Intel, and repeatedly stop/start the stream while checking that IOSurface-backed frame pools are released and recreated. No Mac runtime result is claimed until the maintainer reports it.
 
 ### Interop partner for voice and Go Live
 - **fastcord** runs as the **alt account** (already logged in on discord.com in the maintainer's browser; obtain login via QR/token from that session).
