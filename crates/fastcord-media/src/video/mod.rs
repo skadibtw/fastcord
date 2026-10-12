@@ -1,25 +1,31 @@
-//! Native video over the voice transport (SPEC §8.3, milestone 25).
+//! Native video over the voice transport (SPEC §8.3, milestones 25–26).
 //!
 //! Video travels as RTP on the same UDP socket and under the same transport
 //! AEAD as audio, one encoded frame at a time: the codec's frame is sealed with
 //! DAVE first, then packetized; on receipt the packets are repaired and
 //! reassembled into the complete sealed frame before DAVE opens it. Nothing
-//! here decodes or renders pixels. This milestone carries H.264; the payload
-//! types, RTX payload types, and which direction a codec is offered for are
-//! decided by the caller's [`VideoOptions`], never inferred from browser SDP.
+//! here decodes or renders pixels. H.264 sends and receives; AV1 receives only.
+//! Payload types, RTX payload types, and the directions offered for a codec
+//! come from the caller's [`VideoOptions`], never from browser SDP.
 //!
 //! - [`h264`]: RFC 6184 packetization (single NAL unit, FU-A) and
 //!   depacketization (also STAP-A).
+//! - [`av1`]: AV1 aggregation and OBU fragment reassembly.
 //! - [`send`]: the pacer, the retransmission ring, the congestion controller,
 //!   and the per-connection sender state.
 //! - [`receive`]: per-SSRC reordering, NACK scheduling, frame completion
 //!   deadlines, and reception statistics for receiver reports.
 
+pub mod av1;
+#[cfg(test)]
+pub(crate) mod av1_support;
 pub(crate) mod h264;
 pub(crate) mod receive;
 pub(crate) mod send;
 #[cfg(test)]
 mod vectors;
+#[cfg(test)]
+mod vectors_av1;
 
 use std::fmt;
 use std::time::Duration;
@@ -40,10 +46,11 @@ pub(crate) const MAX_PACKETS: usize = 2048;
 /// number (2): what a payload shares a datagram with.
 pub const MAX_PAYLOAD_BYTES: usize = MAX_DATAGRAM_BYTES - 12 - 4 - 24 - 16 - 4 - 2;
 
-/// The codecs fastcord can packetize and depacketize.
+/// The codecs fastcord can carry, advertised separately by direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VideoCodec {
     H264,
+    Av1,
 }
 
 impl VideoCodec {
@@ -51,11 +58,18 @@ impl VideoCodec {
     pub const fn wire_name(self) -> &'static str {
         match self {
             Self::H264 => "H264",
+            Self::Av1 => "AV1",
         }
     }
 
     pub fn from_wire(name: &str) -> Option<Self> {
-        name.eq_ignore_ascii_case("H264").then_some(Self::H264)
+        if name.eq_ignore_ascii_case("H264") {
+            Some(Self::H264)
+        } else if name.eq_ignore_ascii_case("AV1") {
+            Some(Self::Av1)
+        } else {
+            None
+        }
     }
 }
 
@@ -85,6 +99,17 @@ impl CodecOffer {
         }
     }
 
+    /// AV1 with Discord's documented offer numbers; receive only.
+    pub const fn av1() -> Self {
+        Self {
+            codec: VideoCodec::Av1,
+            payload_type: 101,
+            rtx_payload_type: 102,
+            encode: false,
+            decode: true,
+        }
+    }
+
     fn validate(self) -> Result<(), VideoError> {
         // 96 is reserved for probe packets; RTCP types (192–223) must stay
         // clear of a payload type with its marker bit (RFC 5761).
@@ -95,6 +120,7 @@ impl CodecOffer {
             || !dynamic(self.rtx_payload_type)
             || self.payload_type == self.rtx_payload_type
             || !(self.encode || self.decode)
+            || (self.codec == VideoCodec::Av1 && self.encode)
         {
             return Err(VideoError::Negotiation);
         }
@@ -145,18 +171,18 @@ pub struct VideoOptions {
 }
 
 impl VideoOptions {
-    /// A stream viewer: H.264 decode, nothing sent.
+    /// A stream viewer: H.264 and AV1 decode, nothing sent.
     pub fn watch() -> Self {
         Self {
-            codecs: vec![CodecOffer::h264(false, true)],
+            codecs: vec![CodecOffer::h264(false, true), CodecOffer::av1()],
             send: None,
         }
     }
 
-    /// A stream owner: H.264 encode and decode with one screen layer.
+    /// A stream owner: H.264 encode/decode and AV1 decode, one screen layer.
     pub fn share(send: SendOptions) -> Self {
         Self {
-            codecs: vec![CodecOffer::h264(true, true)],
+            codecs: vec![CodecOffer::h264(true, true), CodecOffer::av1()],
             send: Some(send),
         }
     }
@@ -243,9 +269,9 @@ pub struct ReceivedVideo {
     pub codec: VideoCodec,
     /// The 90 kHz RTP timestamp shared by every packet of the frame.
     pub timestamp: u32,
-    /// The frame holds an IDR picture, so a decoder can start from it.
+    /// An IDR picture (H.264) or coded-sequence start (AV1).
     pub keyframe: bool,
-    /// Annex B with `00 00 00 01` start codes.
+    /// H.264 Annex B (long start codes) or AV1 low-overhead OBUs (size fields).
     pub data: Vec<u8>,
 }
 
@@ -305,7 +331,10 @@ mod tests {
         let (offer, rtx) = share.receive_offer(103).unwrap();
         assert!(!rtx && offer.codec == VideoCodec::H264);
         assert!(share.receive_offer(104).unwrap().1);
-        for other in [96, 101, 105, 120] {
+        assert_eq!(share.receive_offer(101), Some((CodecOffer::av1(), false)));
+        assert_eq!(share.receive_offer(102), Some((CodecOffer::av1(), true)));
+        assert!(share.send_offer(VideoCodec::Av1).is_none());
+        for other in [96, 105, 120] {
             assert!(share.receive_offer(other).is_none(), "{other}");
         }
     }
@@ -348,6 +377,9 @@ mod tests {
         let mut no_encoder = VideoOptions::watch();
         no_encoder.send = Some(SendOptions::SCREEN_720P30);
         assert_eq!(no_encoder.validate(), Err(VideoError::Negotiation));
+        let mut av1_encoder = VideoOptions::watch();
+        av1_encoder.codecs[1].encode = true;
+        assert_eq!(av1_encoder.validate(), Err(VideoError::Negotiation));
         // Duplicate codecs or payload types.
         let mut duplicate = VideoOptions::watch();
         duplicate.codecs.push(CodecOffer::h264(false, true));
@@ -363,6 +395,8 @@ mod tests {
         assert_eq!(VideoCodec::from_wire("h264"), Some(VideoCodec::H264));
         assert_eq!(VideoCodec::from_wire("H265"), None);
         assert_eq!(VideoCodec::H264.wire_name(), "H264");
+        assert_eq!(VideoCodec::from_wire("av1"), Some(VideoCodec::Av1));
+        assert_eq!(VideoCodec::Av1.wire_name(), "AV1");
         let frame = ReceivedVideo {
             user_id: Snowflake(7),
             ssrc: 9,

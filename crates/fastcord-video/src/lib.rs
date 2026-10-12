@@ -1,14 +1,15 @@
-//! fastcord video: OS-native codecs behind one platform-neutral codec trait
-//! (SPEC §8.2, §8.5; ADR 0001).
+//! fastcord video: OS-native H.264 and portable dav1d AV1 decoding behind one
+//! platform-neutral codec trait (SPEC §8.2, §8.5; ADR 0001).
 //!
-//! [`VideoEncoder`] and [`VideoDecoder`] exchange NV12 images ([`Nv12`]) and
-//! H.264 Annex B access units. Backends are selected at runtime: hardware
-//! first, then software in automatic mode, and the backend actually in use is
-//! always reported ([`Backend`], [`Selected::rejected`]). FFmpeg is not used.
-//!
-//! Windows uses Media Foundation ([`media_foundation`]); macOS uses VideoToolbox
-//! ([`videotoolbox`]) with IOSurface-backed pixel buffers.
+//! [`VideoEncoder`] and [`VideoDecoder`] exchange borrowed NV12 images
+//! ([`Nv12`]). H.264 uses Annex B access units; [`av1::Decoder`] receives sized
+//! low-overhead OBU temporal units and never encodes AV1. Native H.264 backends
+//! are selected at runtime (hardware first in automatic mode); the actual
+//! backend is always reported ([`Backend`], [`Selected::rejected`]). FFmpeg is
+//! not used. Windows uses Media Foundation ([`media_foundation`]); macOS uses
+//! VideoToolbox ([`videotoolbox`]) with IOSurface-backed pixel buffers.
 
+pub mod av1;
 pub mod codec;
 pub mod frame;
 pub mod h264;

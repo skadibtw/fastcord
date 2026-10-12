@@ -1214,6 +1214,12 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 }
                 Ok(())
             }
+            MediaCommand::VideoKeyframe(ssrc) => {
+                if let Some(video) = self.video.as_mut() {
+                    video.want_remote_keyframe(ssrc, Instant::now());
+                }
+                Ok(())
+            }
         }
     }
 

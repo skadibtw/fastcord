@@ -1,4 +1,4 @@
-//! Video on one voice connection (SPEC §8.3, milestone 25).
+//! Video on one voice connection (SPEC §8.3, milestones 25–26).
 //!
 //! - **Receiving.** Each announced remote video SSRC gets a [`Receiver`]: its
 //!   RTP (and RTX repairs, unwrapped back onto the primary SSRC) go through a
@@ -36,10 +36,10 @@ use crate::gateway::{CloseReason, Counters, VoiceEvent};
 use crate::rtcp::{self, Feedback, FeedbackKind, ReportBlock, SenderInfo};
 use crate::rtp::{self, RtpHeader, ext};
 use crate::ssrc::{PENDING_WINDOW, PendingSsrc, StreamKind};
-use crate::video::h264;
 use crate::video::receive::{Assembled, ReceiveBuffer, ReceptionStats};
 use crate::video::send::{Packet, VideoSender};
 use crate::video::{ReceivedVideo, VideoCodec, VideoError, VideoFrame, VideoOptions};
+use crate::video::{av1, h264};
 
 /// Remote video SSRCs followed at once. A stream connection has one owner with
 /// one layer; more than this is a server misbehaving, not a feature.
@@ -88,6 +88,7 @@ struct RemoteStream {
 /// One remote video stream being received.
 struct Receiver {
     user_id: Snowflake,
+    codec: VideoCodec,
     buffer: ReceiveBuffer,
     stats: ReceptionStats,
     /// Frames are dropped until a keyframe arrives: either nothing was decoded
@@ -99,9 +100,10 @@ struct Receiver {
 }
 
 impl Receiver {
-    fn new(user_id: Snowflake, now: Instant) -> Self {
+    fn new(user_id: Snowflake, codec: VideoCodec, now: Instant) -> Self {
         Self {
             user_id,
+            codec,
             buffer: ReceiveBuffer::new(),
             stats: ReceptionStats::new(now),
             awaiting_keyframe: true,
@@ -191,6 +193,12 @@ impl VideoState {
 
     pub(super) fn note_rtt(&mut self, rtt: Duration) {
         self.rtt = rtt;
+    }
+
+    pub(super) fn want_remote_keyframe(&mut self, ssrc: u32, now: Instant) {
+        if let Some(receiver) = self.receivers.get_mut(&ssrc) {
+            receiver.want_keyframe(now);
+        }
     }
 
     /// NACK retry spacing: one round trip plus a little, within 30–100 ms.
@@ -606,7 +614,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let Some(video) = self.video.as_mut() else {
             return;
         };
-        let Some((_, rtx)) = video.options.receive_offer(header.payload_type) else {
+        let Some((offer, rtx)) = video.options.receive_offer(header.payload_type) else {
             Counters::add(&counters.rejected_malformed, 1);
             return;
         };
@@ -634,11 +642,9 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 return;
             }
         };
-        if video
-            .receivers
-            .get(&primary)
-            .is_some_and(|receiver| receiver.user_id != owner.user_id)
-        {
+        if video.receivers.get(&primary).is_some_and(|receiver| {
+            receiver.user_id != owner.user_id || receiver.codec != offer.codec
+        }) {
             video.receivers.remove(&primary);
         }
         if !video.receivers.contains_key(&primary) {
@@ -648,7 +654,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             }
             video
                 .receivers
-                .insert(primary, Receiver::new(owner.user_id, now));
+                .insert(primary, Receiver::new(owner.user_id, offer.codec, now));
             video
                 .next_report
                 .get_or_insert(now + RECEIVER_REPORT_INTERVAL);
@@ -707,14 +713,20 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         };
         let payloads: Vec<&[u8]> = assembled.payloads.iter().map(Vec::as_slice).collect();
         let mut sealed = Vec::new();
-        if h264::depacketize(&payloads, &mut sealed).is_err() {
+        let depacketized = match receiver.codec {
+            VideoCodec::H264 => {
+                h264::depacketize(&payloads, &mut sealed).map(|()| h264::is_keyframe(&sealed))
+            }
+            VideoCodec::Av1 => av1::depacketize(&payloads, av1::Framing::Dave, &mut sealed),
+        };
+        let Ok(mut keyframe) = depacketized else {
             Counters::add(&counters.video_frames_dropped, 1);
             receiver.want_keyframe(now);
             return;
-        }
-        // A delta frame after a gap is of no use to a decoder, and DAVE keeps
-        // NAL headers readable, so the check needs no key.
-        if receiver.awaiting_keyframe && !h264::is_keyframe(&sealed) {
+        };
+        // AV1's frame-header payload is encrypted: N, unlike those bits,
+        // describes the coded-sequence boundary at the RTP layer.
+        if receiver.awaiting_keyframe && !keyframe {
             Counters::add(&counters.video_frames_dropped, 1);
             receiver.want_keyframe(now);
             return;
@@ -723,18 +735,30 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             .dave
             .as_mut()
             .ok_or(DaveError::NotReady)
-            .and_then(|dave| dave.decrypt_h264(receiver.user_id.0, &sealed));
-        let Ok(plain) = opened else {
+            .and_then(|dave| dave.decrypt_video(receiver.user_id.0, &sealed));
+        let Ok(mut plain) = opened else {
             Counters::add(&counters.rejected_authentication, 1);
             Counters::add(&counters.video_frames_dropped, 1);
             receiver.want_keyframe(now);
             return;
         };
-        let keyframe = h264::is_keyframe(&plain);
+        match receiver.codec {
+            VideoCodec::H264 => keyframe = h264::is_keyframe(&plain),
+            VideoCodec::Av1 => {
+                // Reuse the sealed allocation; sizes are restored only after
+                // authentication, never rewritten inside DAVE's AAD.
+                if av1::normalize(&plain, &mut sealed).is_err() {
+                    Counters::add(&counters.video_frames_dropped, 1);
+                    receiver.want_keyframe(now);
+                    return;
+                }
+                plain = sealed;
+            }
+        }
         let frame = ReceivedVideo {
             user_id: receiver.user_id,
             ssrc: primary,
-            codec: VideoCodec::H264,
+            codec: receiver.codec,
             timestamp: assembled.timestamp,
             keyframe,
             data: plain,
@@ -870,7 +894,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let Some(dave) = self.dave.as_mut() else {
             return Err(End::Close(CloseReason::DaveUnavailable));
         };
-        let sealed = match dave.encrypt_h264(&frame.data) {
+        let sealed = match dave.encrypt_video(crate::video::VideoCodec::H264, &frame.data) {
             Ok(sealed) => sealed.into_owned(),
             // Never put plain media on the wire.
             Err(DaveError::PlaintextBypass) => {

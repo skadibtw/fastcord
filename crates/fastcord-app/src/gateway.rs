@@ -7,6 +7,7 @@
 //! when the account screen is left (which closes the Gateway session cleanly).
 
 mod stream_audio;
+mod stream_video;
 mod voice_audio;
 
 pub use voice_audio::VoiceAudioState;

@@ -1,3 +1,7 @@
 * text=auto eol=lf
 *.png binary
 *.ico binary
+*.ivf binary
+*.nv12 binary
+*.obu binary
+*.tar.gz binary

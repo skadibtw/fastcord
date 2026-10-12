@@ -1763,6 +1763,7 @@ dependencies = [
  "fastcord-media",
  "fastcord-model",
  "fastcord-platform",
+ "fastcord-video",
  "filetime",
  "futures-util",
  "iced",
@@ -1872,6 +1873,10 @@ name = "fastcord-video"
 version = "0.1.0-alpha.1"
 dependencies = [
  "cc",
+ "flate2",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
  "windows 0.62.2",
  "windows-core 0.62.2",
 ]

@@ -24,9 +24,15 @@ windows = { workspace = true, features = [
     "Win32_System_Variant",
 ] }
 
-[build-dependencies]
-cc = "1"
+[dev-dependencies]
+serde_json.workspace = true
+sha2.workspace = true
 
+[build-dependencies]
+cc.workspace = true
+flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
 
 [lints]
 workspace = true

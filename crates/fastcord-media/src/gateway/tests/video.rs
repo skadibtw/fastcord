@@ -1,7 +1,10 @@
-//! Video through the real driver (SPEC §8.3, milestone 25): an in-process voice
+//! Video through the real driver (SPEC §8.3, milestones 25–26): an in-process voice
 //! server plays the SFU and, for a viewer, an official client's DAVE-sealed
 //! H.264 stream; for an owner it opens, checks, and answers what the driver
-//! sends. Real MLS/DAVE sessions, both directions, paused time.
+//! sends. Real MLS/DAVE sessions, both directions, paused time. The AV1 receive
+//! tests (`av1`) reuse this rig.
+
+mod av1;
 
 use std::time::Duration;
 
@@ -278,7 +281,11 @@ impl Viewer {
         let sealed = if plain {
             frame.to_vec()
         } else {
-            self.dave.peer.encrypt_h264(frame).unwrap().into_owned()
+            self.dave
+                .peer
+                .encrypt_video(crate::video::VideoCodec::H264, frame)
+                .unwrap()
+                .into_owned()
         };
         self.forward_sealed(&sealed)
     }
@@ -830,7 +837,10 @@ async fn an_owner_negotiates_seals_packetizes_and_paces_a_screen_layer() {
     let refs: Vec<&Opened> = packets.iter().collect();
     let sealed = join(&refs);
     assert_ne!(sealed, keyframe);
-    assert_eq!(rig.dave.peer.decrypt_h264(ME.0, &sealed).unwrap(), keyframe);
+    assert_eq!(
+        rig.dave.peer.decrypt_video(ME.0, &sealed).unwrap(),
+        keyframe
+    );
     let window = &keyframe[9_000..9_064];
     assert!(
         sealed
@@ -851,7 +861,7 @@ async fn an_owner_negotiates_seals_packetizes_and_paces_a_screen_layer() {
     );
     let refs: Vec<&Opened> = next.iter().collect();
     assert_eq!(
-        rig.dave.peer.decrypt_h264(ME.0, &join(&refs)).unwrap(),
+        rig.dave.peer.decrypt_video(ME.0, &join(&refs)).unwrap(),
         delta
     );
 }
@@ -1204,7 +1214,7 @@ async fn video_waits_for_dave_keys_and_never_leaves_in_the_clear() {
     let mut dave = dave;
     let refs: Vec<&Opened> = packets.iter().collect();
     assert_eq!(
-        dave.peer.decrypt_h264(ME.0, &join(&refs)).unwrap(),
+        dave.peer.decrypt_video(ME.0, &join(&refs)).unwrap(),
         keyframe
     );
     assert_eq!(packets[0].nonce, 0);

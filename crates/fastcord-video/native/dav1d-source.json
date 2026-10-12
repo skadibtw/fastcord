@@ -1,0 +1,18 @@
+{
+  "name": "dav1d",
+  "version": "1.5.4",
+  "license": "BSD-2-Clause",
+  "upstream": "https://code.videolan.org/videolan/dav1d",
+  "mirror": "https://github.com/videolan/dav1d",
+  "commit": "54706fc6bc0cdecab7e9593974a4039cc038fca7",
+  "archive": "dav1d-1.5.4.tar.gz",
+  "archive_url": "https://codeload.github.com/videolan/dav1d/tar.gz/54706fc6bc0cdecab7e9593974a4039cc038fca7",
+  "archive_sha256": "9edb11a2108b375cc58370354e705feebc93430bb780130363815c1e1ac0c250",
+  "archive_root": "dav1d-54706fc6bc0cdecab7e9593974a4039cc038fca7",
+  "recipe": "../build.rs",
+  "recipe_basis": "Upstream src/meson.build base C sources and BITDEPTH=8/16 templates, plus src/win32/thread.c on Windows. Source is unmodified. HAVE_ASM=0 is the portable baseline, so MSVC needs neither NASM nor Meson/Ninja. Native code is optimized even in Rust debug builds.",
+  "linkage": "Static; no dav1d shared library or DLL is needed in release archives.",
+  "build_prerequisites": "Cargo and the target C compiler (Windows: Visual Studio C++ Build Tools/MSVC; Linux: GCC or Clang and pthread; macOS: Xcode Command Line Tools). No network access is used by the native build.",
+  "rust_binding_decision": "rust-av/dav1d-sys 0.8.3's internal build clones dav1d 1.5.0 during build and invokes git, Meson, Ninja and pkg-config; it does not supply reproducibly bundled source for the normal MSVC build. A narrow C shim keeps native layouts and custom bounded allocation callbacks out of Rust.",
+  "license_file": "COPYING inside the archive; reproduced in docs/THIRD_PARTY_NOTICES.md"
+}

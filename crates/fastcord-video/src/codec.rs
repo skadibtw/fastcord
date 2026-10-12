@@ -195,14 +195,15 @@ pub trait VideoEncoder {
     fn flush(&mut self, out: &mut Vec<EncodedFrame>) -> Result<(), CodecError>;
 }
 
-/// An H.264 decoder. Codec objects belong to the thread that opened them.
+/// A receive decoder. Codec objects belong to the thread that opened them.
 pub trait VideoDecoder {
     /// The backend in use. A hardware decoder that the driver turns down for a
     /// particular stream reports the software path it fell back to.
     fn backend(&self) -> &Backend;
 
-    /// Decodes one complete Annex B access unit and passes each picture that
-    /// is ready to `out`.
+    /// Decodes one complete codec-specific unit and passes every ready picture
+    /// to `out`: Annex B access units for H.264; low-overhead OBU temporal units
+    /// (every OBU has a LEB128 size field) for AV1.
     fn decode(
         &mut self,
         access_unit: &[u8],
@@ -234,7 +235,7 @@ pub enum CodecError {
         expected: (u32, u32),
         actual: (u32, u32),
     },
-    /// The input is not a well-formed H.264 access unit.
+    /// The input is not a well-formed unit for the selected codec.
     InvalidBitstream(&'static str),
     /// The native codec stopped answering (for example a hung GPU driver).
     /// The codec should be dropped and reopened.
@@ -249,14 +250,14 @@ impl fmt::Display for CodecError {
                 write!(f, "{operation} failed (0x{:08X})", *code as u32)
             }
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
-            Self::InvalidConfig(what) => write!(f, "invalid encoder settings: {what}"),
+            Self::InvalidConfig(what) => write!(f, "invalid codec settings: {what}"),
             Self::InvalidFrame(error) => write!(f, "invalid frame: {error}"),
             Self::FrameSize { expected, actual } => write!(
                 f,
                 "frame is {}x{}, the encoder expects {}x{}",
                 actual.0, actual.1, expected.0, expected.1
             ),
-            Self::InvalidBitstream(what) => write!(f, "invalid H.264 data: {what}"),
+            Self::InvalidBitstream(what) => write!(f, "invalid codec data: {what}"),
             Self::Stalled(what) => f.write_str(what),
         }
     }

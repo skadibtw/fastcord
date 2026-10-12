@@ -783,7 +783,9 @@ mod tests {
             json!([
                 {"name": "opus", "type": "audio", "priority": 1000, "payload_type": 120},
                 {"name": "H264", "type": "video", "priority": 1000, "payload_type": 103,
-                 "rtx_payload_type": 104, "encode": false, "decode": true}
+                 "rtx_payload_type": 104, "encode": false, "decode": true},
+                {"name": "AV1", "type": "video", "priority": 2000, "payload_type": 101,
+                 "rtx_payload_type": 102, "encode": false, "decode": true}
             ])
         );
 
@@ -806,6 +808,8 @@ mod tests {
         ));
         assert_eq!(select["d"]["codecs"][1]["encode"], true);
         assert_eq!(select["d"]["codecs"][1]["decode"], true);
+        assert_eq!(select["d"]["codecs"][2]["encode"], false);
+        assert_eq!(select["d"]["codecs"][2]["decode"], true);
     }
 
     #[test]

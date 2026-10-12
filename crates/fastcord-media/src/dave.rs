@@ -13,6 +13,8 @@ use std::num::NonZeroU16;
 use davey::{Codec, CommitWelcome, DaveSession as DaveEngine, MediaType, ProposalsOperationType};
 use tls_codec::Serialize;
 
+use crate::video::VideoCodec;
+
 const DAVE_PROTOCOL_VERSION: u16 = 1;
 const OPUS_SILENCE: &[u8] = &[0xF8, 0xFF, 0xFE];
 
@@ -354,19 +356,24 @@ impl DaveSession {
         Ok(frame)
     }
 
-    /// Seals one complete H.264 access unit (Annex B) for the call. DAVE runs
-    /// on the whole frame, before RTP packetization (SPEC §6.4): the result
-    /// keeps every NAL header readable, separates NAL units with long start
-    /// codes, and has no start-code sequence inside its ciphertext, so the
-    /// packetizer can split it at start codes alone. A frame DAVE cannot seal
-    /// is an error, never passed on in the clear.
-    pub(crate) fn encrypt_h264<'a>(&mut self, frame: &'a [u8]) -> Result<Cow<'a, [u8]>, DaveError> {
+    /// Seals one complete codec frame before RTP packetization. H.264 keeps
+    /// its NAL headers readable; AV1 keeps OBU/extension headers and non-final
+    /// OBU sizes readable, removing the final size for the DAVE trailer.
+    pub(crate) fn encrypt_video<'a>(
+        &mut self,
+        codec: VideoCodec,
+        frame: &'a [u8],
+    ) -> Result<Cow<'a, [u8]>, DaveError> {
         if !self.is_send_ready() {
             return Err(DaveError::NotReady);
         }
+        let codec = match codec {
+            VideoCodec::H264 => Codec::H264,
+            VideoCodec::Av1 => Codec::AV1,
+        };
         let encrypted = self
             .engine
-            .encrypt(MediaType::VIDEO, Codec::H264, frame)
+            .encrypt(MediaType::VIDEO, codec, frame)
             .map_err(|_| DaveError::Engine)?;
         if matches!(encrypted, Cow::Borrowed(_)) || encrypted.len() <= frame.len() {
             return Err(DaveError::PlaintextBypass);
@@ -374,9 +381,9 @@ impl DaveSession {
         Ok(encrypted)
     }
 
-    /// Opens one reassembled H.264 frame from `user_id`. Anything DAVE does
-    /// not authenticate under that sender's keys is an error.
-    pub(crate) fn decrypt_h264(
+    /// Opens one reassembled video frame from `user_id`. Decryption uses its
+    /// authenticated clear ranges, not unauthenticated codec payload bits.
+    pub(crate) fn decrypt_video(
         &mut self,
         user_id: u64,
         frame: &[u8],
@@ -642,7 +649,10 @@ mod tests {
     /// RTP split and join between them (the DAVE frame boundary).
     fn round_trip_video(sender: &mut DaveSession, receiver: &mut DaveSession, sender_id: u64) {
         for (frame, units) in access_units() {
-            let sealed = sender.encrypt_h264(frame).unwrap().into_owned();
+            let sealed = sender
+                .encrypt_video(crate::video::VideoCodec::H264, frame)
+                .unwrap()
+                .into_owned();
             assert_ne!(sealed, frame);
             assert!(sealed.len() > frame.len());
             // Only start codes delimit units, encrypted or not.
@@ -650,7 +660,7 @@ mod tests {
             for max_payload in [1138, 400] {
                 assert_eq!(through_rtp(&sealed, max_payload), sealed);
             }
-            assert_eq!(receiver.decrypt_h264(sender_id, &sealed).unwrap(), frame);
+            assert_eq!(receiver.decrypt_video(sender_id, &sealed).unwrap(), frame);
         }
     }
 
@@ -678,13 +688,60 @@ mod tests {
                     frame.push(byte);
                 }
             }
-            let sealed = sender.encrypt_h264(&frame).unwrap().into_owned();
+            let sealed = sender
+                .encrypt_video(crate::video::VideoCodec::H264, &frame)
+                .unwrap()
+                .into_owned();
             assert_eq!(through_rtp(&sealed, 1138), sealed, "round {round}");
             assert_eq!(
-                receiver.decrypt_h264(sender_id, &sealed).unwrap(),
+                receiver.decrypt_video(sender_id, &sealed).unwrap(),
                 frame,
                 "round {round}"
             );
+        }
+    }
+
+    /// Real AV1 temporal units (the libaom fixture) sealed by one member and
+    /// opened by another, with the RTP split and join between them. The sealed
+    /// frame keeps OBU headers and non-final sizes readable and ends in an
+    /// unsized OBU; sizes are restored only after authentication.
+    fn round_trip_av1(sender: &mut DaveSession, receiver: &mut DaveSession, sender_id: u64) {
+        use crate::video::av1::{self, Framing};
+        use crate::video::av1_support::{fixture_units, packetize, without_delimiter};
+        for (index, unit) in fixture_units().into_iter().enumerate() {
+            let plain = without_delimiter(unit);
+            let sealed = sender
+                .encrypt_video(VideoCodec::Av1, unit)
+                .unwrap()
+                .into_owned();
+            assert!(sealed.len() > plain.len(), "unit {index}");
+            // The first OBU keeps its header byte readable: the sequence
+            // header of the keyframe unit with its size, or the one frame OBU
+            // of an inter unit, which is also the last and so loses its size.
+            if index == 0 {
+                assert_eq!(&sealed[..2], &plain[..2], "unit {index}");
+            } else {
+                assert_eq!(sealed[0], plain[0] & !2, "unit {index}");
+            }
+            for max_payload in [1138, 400, 61] {
+                let parts = packetize(&sealed, max_payload, index == 0);
+                let payloads: Vec<&[u8]> =
+                    parts.iter().map(|part| part.payload.as_slice()).collect();
+                let mut joined = Vec::new();
+                assert_eq!(
+                    av1::depacketize(&payloads, Framing::Dave, &mut joined),
+                    Ok(index == 0),
+                    "unit {index} at {max_payload}"
+                );
+                assert_eq!(joined, sealed, "unit {index} at {max_payload}");
+            }
+            let opened = receiver.decrypt_video(sender_id, &sealed).unwrap();
+            // Only the final OBU lost its size field, and DAVE removed the
+            // trailer.
+            assert!(opened.len() < plain.len(), "unit {index}");
+            let mut restored = Vec::new();
+            av1::normalize(&opened, &mut restored).unwrap();
+            assert_eq!(restored, plain, "unit {index}");
         }
     }
 
@@ -726,6 +783,8 @@ mod tests {
         round_trip(&mut bob, &mut alice, bob_id);
         round_trip_video(&mut alice, &mut bob, alice_id);
         round_trip_video(&mut bob, &mut alice, bob_id);
+        round_trip_av1(&mut alice, &mut bob, alice_id);
+        round_trip_av1(&mut bob, &mut alice, bob_id);
         seal_stress(&mut alice, &mut bob, alice_id);
 
         let expected_users = [alice_id, bob_id, carol_id];
@@ -769,6 +828,7 @@ mod tests {
         activate(&mut carol, 3);
         round_trip(&mut alice, &mut carol, alice_id);
         round_trip_video(&mut alice, &mut carol, alice_id);
+        round_trip_av1(&mut alice, &mut carol, alice_id);
         let retained_epoch = alice.epoch().unwrap();
         assert_ne!(retained_epoch, 1);
         assert!(alice.prepare_epoch(retained_epoch).unwrap().is_none());
@@ -804,9 +864,14 @@ mod tests {
         assert!(!bob.is_send_ready());
         round_trip(&mut alice, &mut carol, alice_id);
         round_trip_video(&mut alice, &mut carol, alice_id);
+        round_trip_av1(&mut alice, &mut carol, alice_id);
         // The departed member holds no keys: video is refused like audio.
         assert_eq!(
-            bob.decrypt_h264(alice_id, &[0, 0, 0, 1, 0x65, 1, 2, 3]),
+            bob.decrypt_video(alice_id, &[0, 0, 0, 1, 0x65, 1, 2, 3]),
+            Err(DaveError::NotReady)
+        );
+        assert_eq!(
+            bob.decrypt_video(alice_id, &[0x32, 3, 1, 2, 3]),
             Err(DaveError::NotReady)
         );
     }
@@ -942,12 +1007,155 @@ mod tests {
         let mut session = DaveSession::new(DAVE_PROTOCOL_VERSION, 1, 2).unwrap();
         let frame = [0, 0, 0, 1, 0x65, 1, 2, 3];
         assert_eq!(
-            session.encrypt_h264(&frame).unwrap_err(),
+            session.encrypt_video(VideoCodec::H264, &frame).unwrap_err(),
             DaveError::NotReady
         );
         assert_eq!(
-            session.decrypt_h264(7, &frame).unwrap_err(),
+            session.decrypt_video(7, &frame).unwrap_err(),
             DaveError::NotReady
         );
+        // AV1 (a sized OBU) is gated the same way: DAVE keys come first.
+        let unit = crate::video::av1_support::fixture_units()[0];
+        assert_eq!(
+            session.encrypt_video(VideoCodec::Av1, unit).unwrap_err(),
+            DaveError::NotReady
+        );
+        assert_eq!(
+            session.decrypt_video(7, unit).unwrap_err(),
+            DaveError::NotReady
+        );
+    }
+
+    /// Two members of a real MLS group, keys installed.
+    fn ready_pair() -> (DaveSession, DaveSession) {
+        let mut alice = DaveSession::new(DAVE_PROTOCOL_VERSION, 1, 2).unwrap();
+        let mut bob = DaveSession::new(DAVE_PROTOCOL_VERSION, 2, 2).unwrap();
+        let provider = OpenMlsRustCrypto::default();
+        let delivery_signer = SignatureKeyPair::new(SUITE.signature_algorithm()).unwrap();
+        delivery_signer.store(provider.storage()).unwrap();
+        let external_sender = ExternalSender::new(
+            delivery_signer.public().into(),
+            BasicCredential::new(b"voice-gateway".to_vec()).into(),
+        );
+        let external_sender_bytes = external_sender.tls_serialize_detached().unwrap();
+        for session in [&mut alice, &mut bob] {
+            session.set_external_sender(&external_sender_bytes).unwrap();
+        }
+        let add = add_proposal(&alice, key_package(&mut bob, &provider), &delivery_signer);
+        let initial = alice
+            .process_proposals(0, &proposal_payload(&add), &[1, 2])
+            .unwrap()
+            .unwrap();
+        alice.process_commit(1, &initial.commit).unwrap();
+        bob.process_welcome(1, initial.welcome.as_deref().unwrap())
+            .unwrap();
+        activate(&mut alice, 1);
+        activate(&mut bob, 1);
+        (alice, bob)
+    }
+
+    /// The OBUs of a sealed AV1 frame as (type, has_size_field, total bytes).
+    fn obu_layout(frame: &[u8]) -> Vec<(u8, bool, usize)> {
+        let mut layout = Vec::new();
+        let mut rest = frame;
+        while !rest.is_empty() {
+            let header = rest[0];
+            let header_len = 1 + usize::from(header & 4 != 0);
+            let (payload, size) = if header & 2 != 0 {
+                let mut value = 0;
+                let mut length = 0;
+                for (index, byte) in rest[header_len..].iter().enumerate() {
+                    value |= usize::from(byte & 0x7F) << (7 * index);
+                    length = index + 1;
+                    if byte & 0x80 == 0 {
+                        break;
+                    }
+                }
+                (value, length)
+            } else {
+                (rest.len() - header_len, 0)
+            };
+            let total = header_len + size + payload;
+            layout.push(((header >> 3) & 15, header & 2 != 0, total));
+            rest = &rest[total..];
+        }
+        layout
+    }
+
+    #[test]
+    fn av1_sealing_keeps_obu_headers_readable_drops_delimiters_and_unsizes_the_last_obu() {
+        let (mut alice, mut bob) = ready_pair();
+        // A synthetic temporal unit: delimiter, sequence header, padding,
+        // metadata with an extension header, and a final sized frame OBU.
+        let mut unit = vec![0x12, 0x00];
+        unit.extend_from_slice(&[0x0A, 4, 1, 2, 3, 4]);
+        unit.extend_from_slice(&[0x7A, 3, 9, 9, 9]);
+        unit.extend_from_slice(&[0x2E, 0x28, 4, 0xB5, 0, 0x31, 0x80]);
+        unit.extend_from_slice(&[0x32, 20]);
+        unit.extend((0..20).map(|byte| 0x40 + byte));
+        let sealed = alice
+            .encrypt_video(VideoCodec::Av1, &unit)
+            .unwrap()
+            .into_owned();
+        // The delimiter and the padding are dropped; the sequence header and
+        // the extension-bearing metadata keep header and size in the clear;
+        // the final OBU has no size field.
+        assert_eq!(&sealed[..2], &[0x0A, 4]);
+        let kinds = |frame: &[u8]| {
+            obu_layout(frame)
+                .iter()
+                .map(|obu| (obu.0, obu.1))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kinds(&sealed), [(1, true), (5, true), (6, false)]);
+        let opened = bob.decrypt_video(1, &sealed).unwrap();
+        let mut expected = vec![
+            0x0A, 4, 1, 2, 3, 4, 0x2E, 0x28, 4, 0xB5, 0, 0x31, 0x80, 0x30,
+        ];
+        expected.extend((0..20).map(|byte| 0x40 + byte));
+        assert_eq!(opened, expected);
+        assert_eq!(kinds(&opened), [(1, true), (5, true), (6, false)]);
+    }
+
+    #[test]
+    fn av1_frames_authenticate_clear_headers_sizes_ciphertext_and_tag() {
+        // Nonce, two unencrypted ranges, supplemental size, and marker: the
+        // varint fields at the end of the frame. davey 0.1.4 shifts without a
+        // bound while reading them, which panics in builds with overflow checks
+        // when a flipped bit makes a varint run on, so they stay out of the sweep.
+        const VARINT_FIELDS: usize = 8;
+        let (mut alice, mut bob) = ready_pair();
+        let unit = crate::video::av1_support::fixture_units()[0];
+        let sealed = alice
+            .encrypt_video(VideoCodec::Av1, unit)
+            .unwrap()
+            .into_owned();
+        let layout = obu_layout(&sealed);
+        assert_eq!(layout[0].0, 1, "the sequence header leads");
+        assert!(layout[0].1 && !layout.last().unwrap().1);
+        // Every single-bit change of what precedes them is refused: a byte
+        // outside the authentication would let an intermediary alter what the
+        // decoder sees. Refusals consume nothing, so the genuine frame still opens.
+        for index in 0..sealed.len() - VARINT_FIELDS {
+            for bit in 0..8 {
+                let mut changed = sealed.clone();
+                changed[index] ^= 1 << bit;
+                assert!(
+                    bob.decrypt_video(1, &changed).is_err(),
+                    "byte {index} bit {bit}"
+                );
+            }
+        }
+        let plain = crate::video::av1_support::without_delimiter(unit);
+        let opened = bob.decrypt_video(1, &sealed).unwrap();
+        assert!(opened.len() < plain.len());
+        assert_eq!(&opened[..2], &plain[..2]);
+        // A frame, however well sealed, opens only under its sender's identity.
+        let sealed = alice
+            .encrypt_video(VideoCodec::Av1, unit)
+            .unwrap()
+            .into_owned();
+        assert!(bob.decrypt_video(2, &sealed).is_err());
+        assert!(bob.decrypt_video(1, &sealed).is_ok());
     }
 }

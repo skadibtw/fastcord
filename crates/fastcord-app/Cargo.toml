@@ -17,6 +17,7 @@ fastcord-discord.workspace = true
 fastcord-platform.workspace = true
 fastcord-media.workspace = true
 fastcord-audio.workspace = true
+fastcord-video.workspace = true
 iced.workspace = true
 iced_renderer.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }

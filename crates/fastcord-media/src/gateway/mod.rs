@@ -8,7 +8,7 @@
 //! leaves, encrypted and after a Speaking announcement, once the transport
 //! key exists; nothing unencrypted is ever sent. Received audio is decrypted,
 //! parsed, and attributed to a user through SSRC mappings. A connection created
-//! with [`connect_with_video`] also negotiates, receives, and sends H.264 video
+//! with [`connect_with_video`] also negotiates H.264 send/receive and AV1 receive
 //! (see [`crate::video`]): frames cross DAVE whole, before packetization when
 //! sending and after reassembly when receiving.
 //!
@@ -230,9 +230,10 @@ impl std::error::Error for MediaSendError {}
 pub(crate) enum MediaCommand {
     Opus(Vec<u8>),
     EndSpeech,
+    VideoKeyframe(u32),
 }
 
-/// The sending half of a voice connection's audio. Never blocks.
+/// The sending/control half of a voice connection. Never blocks.
 #[derive(Clone)]
 pub struct MediaSender {
     queue: mpsc::Sender<MediaCommand>,
@@ -283,6 +284,15 @@ impl MediaSender {
     /// (the server then stops forwarding it) and on again to resume.
     pub fn set_video_wanted(&self, wanted: bool) {
         self.wanted.send_replace(wanted);
+    }
+
+    /// A decoder or bounded decode queue lost a frame of `ssrc`: suppress
+    /// dependent frames and ask its sender for a keyframe (PLI).
+    pub fn request_video_keyframe(&self, ssrc: u32) -> Result<(), MediaSendError> {
+        if ssrc == 0 {
+            return Err(MediaSendError::InvalidFrame);
+        }
+        self.push(MediaCommand::VideoKeyframe(ssrc))
     }
 
     fn push_audio(&self, frame: Vec<u8>) -> Result<(), MediaSendError> {
@@ -546,12 +556,6 @@ impl VoiceSession {
     /// The next received video frame; `None` once the connection ended.
     pub async fn next_video(&mut self) -> Option<ReceivedVideo> {
         self.video.recv().await
-    }
-    /// Discards the next event, audio packet, or video frame. Stream watchers
-    /// that do not render use this to keep the shared transport queues bounded
-    /// without opening audio devices.
-    pub async fn discard_next(&mut self) -> bool {
-        self.next_message().await.is_some()
     }
 
     /// Waits for the next event, audio packet, or video frame without requiring

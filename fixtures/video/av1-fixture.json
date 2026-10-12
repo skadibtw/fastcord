@@ -1,0 +1,1221 @@
+{
+  "schema": 1,
+  "provenance": {
+    "encoder": "libaom aomenc 3.15.2 (independent of dav1d)",
+    "package_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-aom-3.15.2-1-any.pkg.tar.zst",
+    "package_sha256": "e81f01d419f262e31275771fad18f93617f7b321deeb416e5ac39d70f295b286",
+    "aomenc_sha256": "34bb1e90173b7a5271ca93a01e85c367ef053e2c37e2538b2bb9ca5887f7d858",
+    "aomdec_sha256": "002770b850f4409cbd71b2a36b2f42cf51cc15872b5327163a4b36e88341efb0",
+    "libaom_dll_sha256": "61c2c12b0fd9fb42b4cdb5eca107eded4abe6ba8d59941e33737260da6f5355e",
+    "matches_pinned_windows_encoder": true,
+    "source": "Synthetic arithmetic YUV, owned by fastcord; no third-party media.",
+    "oracle": "libaom aomdec reference-decoder pictures converted to NV12 by the documented contract. Every luma/monochrome/4:4:4 sample and every other chroma sample is asserted equal to the arithmetic source; only odd-dimension edge chroma, which libaom's lossless encoder does not preserve, follows the reference decoder. Never dav1d.",
+    "generator": "gen_av1_fixture.py",
+    "regenerate": "python fixtures/video/gen_av1_fixture.py --aomenc /path/to/aomenc"
+  },
+  "width": 35,
+  "height": 27,
+  "frames": 3,
+  "nv12_bytes_per_frame": 1449,
+  "time_base": {
+    "rate": 30,
+    "scale": 1
+  },
+  "streams": [
+    {
+      "encoded": "av1-lossless-420-8.ivf",
+      "encoded_sha256": "e174854ae74be97c59d84703240f63f9e9086c6670bdb0b08f1c0993c9f1b164",
+      "expected_nv12": "av1-lossless-420-8.nv12",
+      "expected_nv12_sha256": "2c99c94f27e5f67341ca14725811cf32b56b99ea72493c34e494c1689014a4c1",
+      "layout": "420",
+      "bitdepth": 8,
+      "source_mismatches_at_odd_chroma_edge": [
+        62,
+        54,
+        55
+      ],
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--cpu-used=6",
+        "--passes=1",
+        "--threads=1",
+        "--row-mt=0",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--lossless=1",
+        "--end-usage=q",
+        "--cq-level=0",
+        "--min-q=0",
+        "--max-q=0",
+        "--kf-min-dist=3",
+        "--kf-max-dist=3",
+        "--fps=30/1",
+        "--ivf",
+        "--width=35",
+        "--height=27",
+        "--limit=3",
+        "--profile=0",
+        "--bit-depth=8",
+        "--input-bit-depth=8",
+        "--i420",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709"
+      ],
+      "pictures": [
+        {
+          "index": 0,
+          "ivf_timestamp": 0,
+          "timestamp_ns": 0,
+          "packet_offset": 44,
+          "packet_bytes": 1265,
+          "packet_sha256": "f21e1d14dfd43998fb641dbc55143783fd93d41d629f252cae00c68777facd68",
+          "nv12_sha256": "46437a43f3af2ff4a360d4f7e39ab9bb0d9d4e65a1dbca9e8e32aee5c3fa379a",
+          "pixels": {
+            "y_0_0": 17,
+            "y_last": 39,
+            "uv_first": [
+              134,
+              195
+            ],
+            "uv_last": [
+              84,
+              139
+            ]
+          }
+        },
+        {
+          "index": 1,
+          "ivf_timestamp": 1,
+          "timestamp_ns": 33333333,
+          "packet_offset": 1321,
+          "packet_bytes": 1045,
+          "packet_sha256": "9adeff1ef9a38b4428caf5085183d06d3159475e516be1ba30c14468569145f5",
+          "nv12_sha256": "b6d037c3b444a40a0159f65e15f1ea774ae7b6ad0a069c6cbfbbf0c4e8f834a3",
+          "pixels": {
+            "y_0_0": 46,
+            "y_last": 68,
+            "uv_first": [
+              147,
+              208
+            ],
+            "uv_last": [
+              98,
+              153
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "ivf_timestamp": 2,
+          "timestamp_ns": 66666666,
+          "packet_offset": 2378,
+          "packet_bytes": 1094,
+          "packet_sha256": "29a40d3f4e85ec0e330c107bb4844a13a435f676dcfa0096bf1472f08a2844bb",
+          "nv12_sha256": "4a728ddebd025af430694267b19d9a137d6c716c9db86bdc99e3b358c03da83a",
+          "pixels": {
+            "y_0_0": 75,
+            "y_last": 97,
+            "uv_first": [
+              160,
+              221
+            ],
+            "uv_last": [
+              111,
+              166
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "encoded": "av1-lossless-420-10.ivf",
+      "encoded_sha256": "9659a3e468551f7edf5f18c98e545f2c8a3be63e335e9d54e5a75e2dd6c9e6a6",
+      "expected_nv12": "av1-lossless-420-10.nv12",
+      "expected_nv12_sha256": "9fc79ee64bc09dda77d041884bb221723aad5b5434e3664a4d1fb5d22f10fd69",
+      "layout": "420",
+      "bitdepth": 10,
+      "source_mismatches_at_odd_chroma_edge": [
+        62,
+        62,
+        62
+      ],
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--cpu-used=6",
+        "--passes=1",
+        "--threads=1",
+        "--row-mt=0",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--lossless=1",
+        "--end-usage=q",
+        "--cq-level=0",
+        "--min-q=0",
+        "--max-q=0",
+        "--kf-min-dist=3",
+        "--kf-max-dist=3",
+        "--fps=30/1",
+        "--ivf",
+        "--width=35",
+        "--height=27",
+        "--limit=3",
+        "--profile=0",
+        "--bit-depth=10",
+        "--input-bit-depth=10",
+        "--i420",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709"
+      ],
+      "pictures": [
+        {
+          "index": 0,
+          "ivf_timestamp": 0,
+          "timestamp_ns": 0,
+          "packet_offset": 44,
+          "packet_bytes": 1889,
+          "packet_sha256": "73e2dd44edfbd81904a241a43d223ce6f580ed21d4a17eab37f1ebdf8ff47a66",
+          "nv12_sha256": "d4d22de43cba3773e4eeb8e40ad4d1155640d307a7200685228f4cc956f69ef3",
+          "pixels": {
+            "y_0_0": 17,
+            "y_last": 39,
+            "uv_first": [
+              134,
+              195
+            ],
+            "uv_last": [
+              80,
+              141
+            ]
+          }
+        },
+        {
+          "index": 1,
+          "ivf_timestamp": 1,
+          "timestamp_ns": 33333333,
+          "packet_offset": 1945,
+          "packet_bytes": 1465,
+          "packet_sha256": "f4b46c934d597fd2d6ebb635b573eb193a2c536159a1f47a93a429c53a078d42",
+          "nv12_sha256": "707e2a118842a771e81b4ce1698b2a0ba291cf8d1247a5555b1ffbe970d5163b",
+          "pixels": {
+            "y_0_0": 46,
+            "y_last": 68,
+            "uv_first": [
+              147,
+              208
+            ],
+            "uv_last": [
+              93,
+              154
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "ivf_timestamp": 2,
+          "timestamp_ns": 66666666,
+          "packet_offset": 3422,
+          "packet_bytes": 1375,
+          "packet_sha256": "b2cdbf66b7d120243faf76ff963e6f9b4a20e69a3b4fe27117cdae476da29ede",
+          "nv12_sha256": "8e109dbc181b655e3b4caa84601b9716f07c42aefa5455365aa43d6464ce4109",
+          "pixels": {
+            "y_0_0": 75,
+            "y_last": 97,
+            "uv_first": [
+              160,
+              221
+            ],
+            "uv_last": [
+              106,
+              167
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "encoded": "av1-lossless-420-12.ivf",
+      "encoded_sha256": "22c58ab94806076fa4b66bd8fe17b25b32f88f629c0b6008fb862f31a4f69c4e",
+      "expected_nv12": "av1-lossless-420-12.nv12",
+      "expected_nv12_sha256": "c2cc6fc5ec91f9cba09745a61fee003ab70195ccd0f302506c5e90a0e9ecea3f",
+      "layout": "420",
+      "bitdepth": 12,
+      "source_mismatches_at_odd_chroma_edge": [
+        62,
+        62,
+        62
+      ],
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--cpu-used=6",
+        "--passes=1",
+        "--threads=1",
+        "--row-mt=0",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--lossless=1",
+        "--end-usage=q",
+        "--cq-level=0",
+        "--min-q=0",
+        "--max-q=0",
+        "--kf-min-dist=3",
+        "--kf-max-dist=3",
+        "--fps=30/1",
+        "--ivf",
+        "--width=35",
+        "--height=27",
+        "--limit=3",
+        "--profile=2",
+        "--bit-depth=12",
+        "--input-bit-depth=12",
+        "--i420",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709"
+      ],
+      "pictures": [
+        {
+          "index": 0,
+          "ivf_timestamp": 0,
+          "timestamp_ns": 0,
+          "packet_offset": 44,
+          "packet_bytes": 2571,
+          "packet_sha256": "cadb3cb66f1e3d5750c5b9aa46140c0a6f9a3f3abca81818ead4354387447cb1",
+          "nv12_sha256": "2dc2fe1b074cf6a834bb06a77c5a32a1271e9ff4a1d9bd84386d791c2fe706d9",
+          "pixels": {
+            "y_0_0": 17,
+            "y_last": 39,
+            "uv_first": [
+              134,
+              195
+            ],
+            "uv_last": [
+              80,
+              141
+            ]
+          }
+        },
+        {
+          "index": 1,
+          "ivf_timestamp": 1,
+          "timestamp_ns": 33333333,
+          "packet_offset": 2627,
+          "packet_bytes": 1794,
+          "packet_sha256": "9e084a73214014998107ddd2e95f559f37e219c62cf62ebaa02fbbe6d356ed60",
+          "nv12_sha256": "9668e3e8d459f477525a4455cee947320f2d9308d9bd77f30beced8329eed1ff",
+          "pixels": {
+            "y_0_0": 46,
+            "y_last": 68,
+            "uv_first": [
+              147,
+              208
+            ],
+            "uv_last": [
+              93,
+              154
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "ivf_timestamp": 2,
+          "timestamp_ns": 66666666,
+          "packet_offset": 4433,
+          "packet_bytes": 1720,
+          "packet_sha256": "ba9d6ebf8aa1c8ade062052a17ddff6100009dee189cc96e20a61199daed5bdd",
+          "nv12_sha256": "ec584766a25c8b7f30bb07e086b041665c9aca4ebb2edf560d1c0aee669a0e51",
+          "pixels": {
+            "y_0_0": 75,
+            "y_last": 97,
+            "uv_first": [
+              160,
+              221
+            ],
+            "uv_last": [
+              106,
+              167
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "encoded": "av1-lossless-mono-8.ivf",
+      "encoded_sha256": "1145fa43a4b68e5f4f03fcc233bfa64dbbe015ade12e5ed145cb62951654d8c5",
+      "expected_nv12": "av1-lossless-mono-8.nv12",
+      "expected_nv12_sha256": "f845f293a28779123182a9e432bfdf244c557178c74358204549a6b972b13d0e",
+      "layout": "mono",
+      "bitdepth": 8,
+      "source_mismatches_at_odd_chroma_edge": [
+        0,
+        0,
+        0
+      ],
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--cpu-used=6",
+        "--passes=1",
+        "--threads=1",
+        "--row-mt=0",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--lossless=1",
+        "--end-usage=q",
+        "--cq-level=0",
+        "--min-q=0",
+        "--max-q=0",
+        "--kf-min-dist=3",
+        "--kf-max-dist=3",
+        "--fps=30/1",
+        "--ivf",
+        "--width=35",
+        "--height=27",
+        "--limit=3",
+        "--profile=0",
+        "--bit-depth=8",
+        "--input-bit-depth=8",
+        "--i420",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709",
+        "--monochrome"
+      ],
+      "pictures": [
+        {
+          "index": 0,
+          "ivf_timestamp": 0,
+          "timestamp_ns": 0,
+          "packet_offset": 44,
+          "packet_bytes": 944,
+          "packet_sha256": "a11fcaba4bedd7f2ba70934cbcd9751e3fa92c692552f3c229678589442064ac",
+          "nv12_sha256": "1913343aa0e18266be370ef27af798e88f62818c6e32d90afb154fb8e48ac3a3",
+          "pixels": {
+            "y_0_0": 17,
+            "y_last": 39,
+            "uv_first": [
+              128,
+              128
+            ],
+            "uv_last": [
+              128,
+              128
+            ]
+          }
+        },
+        {
+          "index": 1,
+          "ivf_timestamp": 1,
+          "timestamp_ns": 33333333,
+          "packet_offset": 1000,
+          "packet_bytes": 710,
+          "packet_sha256": "9c9917f66d762d8e2e8a07dc3fc1731c345b6a2cbbcb3b86e99542848bdba533",
+          "nv12_sha256": "b7a39a56882c6953b6e1d78c76398804d7f581b7b44e3e5a8d383a0f78115d2f",
+          "pixels": {
+            "y_0_0": 46,
+            "y_last": 68,
+            "uv_first": [
+              128,
+              128
+            ],
+            "uv_last": [
+              128,
+              128
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "ivf_timestamp": 2,
+          "timestamp_ns": 66666666,
+          "packet_offset": 1722,
+          "packet_bytes": 793,
+          "packet_sha256": "d5e81401d2c9b8663e218e4f84d6bf66c81ecfd1401af6970422878643d0de59",
+          "nv12_sha256": "7b7d20790d9d61cc402c19a9eb51dd3cbe43cca37204e881458f98db0ce2f208",
+          "pixels": {
+            "y_0_0": 75,
+            "y_last": 97,
+            "uv_first": [
+              128,
+              128
+            ],
+            "uv_last": [
+              128,
+              128
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "encoded": "av1-lossless-422-10.ivf",
+      "encoded_sha256": "27db5a5c4747fcdc1dd140d32335e03afdc464ff9d674c440b0692e2685cc2da",
+      "expected_nv12": "av1-lossless-422-10.nv12",
+      "expected_nv12_sha256": "f6fb9e7e8d113a9a4aa79156c4fd75584c63cff57efd008d741617eb1e6ba5d9",
+      "layout": "422",
+      "bitdepth": 10,
+      "source_mismatches_at_odd_chroma_edge": [
+        54,
+        54,
+        54
+      ],
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--cpu-used=6",
+        "--passes=1",
+        "--threads=1",
+        "--row-mt=0",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--lossless=1",
+        "--end-usage=q",
+        "--cq-level=0",
+        "--min-q=0",
+        "--max-q=0",
+        "--kf-min-dist=3",
+        "--kf-max-dist=3",
+        "--fps=30/1",
+        "--ivf",
+        "--width=35",
+        "--height=27",
+        "--limit=3",
+        "--profile=2",
+        "--bit-depth=10",
+        "--input-bit-depth=10",
+        "--i422",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709"
+      ],
+      "pictures": [
+        {
+          "index": 0,
+          "ivf_timestamp": 0,
+          "timestamp_ns": 0,
+          "packet_offset": 44,
+          "packet_bytes": 2367,
+          "packet_sha256": "0942c1cb0c08ef9c9f96c70df1eb993e32487b69079b1cd06561c60899e2795c",
+          "nv12_sha256": "b24d0cfacaf817a384f99b147efde266b2ca67673a1bba5815f6ba227016ba40",
+          "pixels": {
+            "y_0_0": 17,
+            "y_last": 39,
+            "uv_first": [
+              136,
+              197
+            ],
+            "uv_last": [
+              154,
+              215
+            ]
+          }
+        },
+        {
+          "index": 1,
+          "ivf_timestamp": 1,
+          "timestamp_ns": 33333333,
+          "packet_offset": 2423,
+          "packet_bytes": 1773,
+          "packet_sha256": "13ad2c0e2abe111398f33c0a7cf1cd9f1b123933df92f49ea29d4c5b5e09f5f9",
+          "nv12_sha256": "4b839ece1fd7ca59317a53238f1b8910c41f985f6c154da151cc068d9e2e7ed6",
+          "pixels": {
+            "y_0_0": 46,
+            "y_last": 68,
+            "uv_first": [
+              149,
+              210
+            ],
+            "uv_last": [
+              167,
+              228
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "ivf_timestamp": 2,
+          "timestamp_ns": 66666666,
+          "packet_offset": 4208,
+          "packet_bytes": 1621,
+          "packet_sha256": "bef733cee2a8cd305dfac02e89c0996d0c08ba19f5f446c269fc0aea278cc01e",
+          "nv12_sha256": "73f80d75a0a6030ad5d13c4d08168657f3f1285b3b28b37ef41d17e8ac0857f6",
+          "pixels": {
+            "y_0_0": 75,
+            "y_last": 97,
+            "uv_first": [
+              163,
+              224
+            ],
+            "uv_last": [
+              180,
+              241
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "encoded": "av1-lossless-444-8.ivf",
+      "encoded_sha256": "94d77882432021fbcb8fd56820299a531d5f28b7f7e2b2e4e9198053496d203d",
+      "expected_nv12": "av1-lossless-444-8.nv12",
+      "expected_nv12_sha256": "8ad445f4e37a07246afd02528f57ab3db043da143889d43670f6ca3915ace439",
+      "layout": "444",
+      "bitdepth": 8,
+      "source_mismatches_at_odd_chroma_edge": [
+        0,
+        0,
+        0
+      ],
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--cpu-used=6",
+        "--passes=1",
+        "--threads=1",
+        "--row-mt=0",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--lossless=1",
+        "--end-usage=q",
+        "--cq-level=0",
+        "--min-q=0",
+        "--max-q=0",
+        "--kf-min-dist=3",
+        "--kf-max-dist=3",
+        "--fps=30/1",
+        "--ivf",
+        "--width=35",
+        "--height=27",
+        "--limit=3",
+        "--profile=1",
+        "--bit-depth=8",
+        "--input-bit-depth=8",
+        "--i444",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709"
+      ],
+      "pictures": [
+        {
+          "index": 0,
+          "ivf_timestamp": 0,
+          "timestamp_ns": 0,
+          "packet_offset": 44,
+          "packet_bytes": 1898,
+          "packet_sha256": "69447c86d37a02c9198c4c38e773a0e5ef18caec3e8ee5465e601b05e18e0a03",
+          "nv12_sha256": "9a4088b4b9ebabab895445a8a700969e98d57ec583ecee7656bb141373f454a2",
+          "pixels": {
+            "y_0_0": 17,
+            "y_last": 39,
+            "uv_first": [
+              141,
+              202
+            ],
+            "uv_last": [
+              58,
+              119
+            ]
+          }
+        },
+        {
+          "index": 1,
+          "ivf_timestamp": 1,
+          "timestamp_ns": 33333333,
+          "packet_offset": 1954,
+          "packet_bytes": 1544,
+          "packet_sha256": "1210c1c901b3bdc5d720b96d73ff1fd8599f7fbeb80be82fa165d8a81b3d774b",
+          "nv12_sha256": "420a6744b60936e30554f79fb364bedecd69a3d728145a56d2079e41357527d2",
+          "pixels": {
+            "y_0_0": 46,
+            "y_last": 68,
+            "uv_first": [
+              154,
+              215
+            ],
+            "uv_last": [
+              71,
+              132
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "ivf_timestamp": 2,
+          "timestamp_ns": 66666666,
+          "packet_offset": 3510,
+          "packet_bytes": 1788,
+          "packet_sha256": "49e599ee08dc0733a2bf397904548d273f9d07b5db5757fe5bfa5b3bb2a5249a",
+          "nv12_sha256": "008cc4609b72968eed039be964eb6a6f7800d62c683526b002a25b51de10c72e",
+          "pixels": {
+            "y_0_0": 75,
+            "y_last": 97,
+            "uv_first": [
+              167,
+              228
+            ],
+            "uv_last": [
+              84,
+              145
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "rejected_streams": [
+    {
+      "encoded": "av1-rgb-identity.ivf",
+      "encoded_sha256": "74886cd6651e6768a0b84d72b69b08517cbab440ac6763eaee6e523dfb992232",
+      "reason": "Identity-matrix GBR cannot be labelled NV12 YUV",
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--cpu-used=6",
+        "--passes=1",
+        "--threads=1",
+        "--row-mt=0",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--lossless=1",
+        "--end-usage=q",
+        "--cq-level=0",
+        "--min-q=0",
+        "--max-q=0",
+        "--kf-min-dist=3",
+        "--kf-max-dist=3",
+        "--fps=30/1",
+        "--ivf",
+        "--width=35",
+        "--height=27",
+        "--limit=1",
+        "--profile=1",
+        "--bit-depth=8",
+        "--input-bit-depth=8",
+        "--i444",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=srgb",
+        "--matrix-coefficients=identity"
+      ]
+    },
+    {
+      "encoded": "av1-too-wide.obu",
+      "encoded_sha256": "f2d67551b754b5d30ae27e4bb1335c48b50c8e839ffb3a709c1cb417510ae053",
+      "width": 4097,
+      "height": 16,
+      "reason": "Genuine encoder sequence header exceeds decoder dimension/area limits",
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--cpu-used=6",
+        "--passes=1",
+        "--threads=1",
+        "--row-mt=0",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--lossless=1",
+        "--end-usage=q",
+        "--cq-level=0",
+        "--min-q=0",
+        "--max-q=0",
+        "--kf-min-dist=3",
+        "--kf-max-dist=3",
+        "--fps=30/1",
+        "--ivf",
+        "--width=4097",
+        "--height=16",
+        "--limit=1",
+        "--profile=0",
+        "--bit-depth=8",
+        "--input-bit-depth=8",
+        "--i420",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709"
+      ]
+    },
+    {
+      "encoded": "av1-too-tall.obu",
+      "encoded_sha256": "79a5bf4bdf1dba4b4f968389a6b97c3e433966f5ef966a516f718d3f939f4216",
+      "width": 16,
+      "height": 4097,
+      "reason": "Genuine encoder sequence header exceeds decoder dimension/area limits",
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--cpu-used=6",
+        "--passes=1",
+        "--threads=1",
+        "--row-mt=0",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--lossless=1",
+        "--end-usage=q",
+        "--cq-level=0",
+        "--min-q=0",
+        "--max-q=0",
+        "--kf-min-dist=3",
+        "--kf-max-dist=3",
+        "--fps=30/1",
+        "--ivf",
+        "--width=16",
+        "--height=4097",
+        "--limit=1",
+        "--profile=0",
+        "--bit-depth=8",
+        "--input-bit-depth=8",
+        "--i420",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709"
+      ]
+    },
+    {
+      "encoded": "av1-too-large-area.obu",
+      "encoded_sha256": "127d5f72251645fa3126b187b3e926855f130c908fc844a7b30775f800919aa3",
+      "width": 4096,
+      "height": 2305,
+      "reason": "Genuine encoder sequence header exceeds decoder dimension/area limits",
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--cpu-used=6",
+        "--passes=1",
+        "--threads=1",
+        "--row-mt=0",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--lossless=1",
+        "--end-usage=q",
+        "--cq-level=0",
+        "--min-q=0",
+        "--max-q=0",
+        "--kf-min-dist=3",
+        "--kf-max-dist=3",
+        "--fps=30/1",
+        "--ivf",
+        "--width=4096",
+        "--height=2305",
+        "--limit=1",
+        "--profile=0",
+        "--bit-depth=8",
+        "--input-bit-depth=8",
+        "--i420",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709"
+      ]
+    }
+  ],
+  "lossy_streams": [
+    {
+      "encoded": "av1-lossy-420-8.ivf",
+      "encoded_sha256": "9a5937abdcf04428fc15a537c2f4714f7b600546371a4c3ce7389711b329ed2c",
+      "description": "Gradients, stripes and texture translating between pictures: a keyframe and four inter frames with the default filters.",
+      "width": 130,
+      "height": 66,
+      "frames": 5,
+      "expected_nv12_sha256": "47cc7811b8168d64e3cab6cced5af3ed3623b55f71bbb4109b51a7345992972f",
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--threads=1",
+        "--row-mt=0",
+        "--end-usage=q",
+        "--cq-level=38",
+        "--min-q=20",
+        "--max-q=63",
+        "--fps=30/1",
+        "--ivf",
+        "--enable-cdef=1",
+        "--enable-restoration=1",
+        "--profile=0",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709",
+        "--passes=1",
+        "--cpu-used=4",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--kf-min-dist=5",
+        "--kf-max-dist=5",
+        "--width=130",
+        "--height=66",
+        "--limit=5",
+        "--i420"
+      ],
+      "pictures": [
+        {
+          "index": 0,
+          "ivf_timestamp": 0,
+          "timestamp_ns": 0,
+          "packet_bytes": 2929,
+          "packet_sha256": "fe8b1520bbe956e6504d8e8f14de67a15b8a8658c57531132d01c4eb70c6fb3b",
+          "nv12_sha256": "dadcaec3354124a8233cdd8d14889fa1cd337ddf0a1847e684b94e74364cfe7a"
+        },
+        {
+          "index": 1,
+          "ivf_timestamp": 1,
+          "timestamp_ns": 33333333,
+          "packet_bytes": 281,
+          "packet_sha256": "41fff88a010c694e386049d4d5418bdad3130245fa0fad85798392c7b94fc225",
+          "nv12_sha256": "d00e4668d41e8933dfe1f9527d110e68e87d2354fbc349947387e2b0641ec52b"
+        },
+        {
+          "index": 2,
+          "ivf_timestamp": 2,
+          "timestamp_ns": 66666666,
+          "packet_bytes": 92,
+          "packet_sha256": "6880f0d0992b6df09c2d6788dd78d6132a49fb7ef447fce609fb0476c71d1b09",
+          "nv12_sha256": "09a949c7e9a4b902f8eb92682897072e3d6c15a6a7fe2c4e92a8dacd4e6928ef"
+        },
+        {
+          "index": 3,
+          "ivf_timestamp": 3,
+          "timestamp_ns": 100000000,
+          "packet_bytes": 181,
+          "packet_sha256": "aa8f2fc5bd9c55581621d6aa853a4df628223e758a8d89318a6eb527ae7838de",
+          "nv12_sha256": "63e4f5db5e3213e9c58f3a4451ee089f8b8fa108c095c6ac55f9bf2ca34d4e58"
+        },
+        {
+          "index": 4,
+          "ivf_timestamp": 4,
+          "timestamp_ns": 133333333,
+          "packet_bytes": 85,
+          "packet_sha256": "af588a3098b757b40dca85c6a65fbcd0fb32e0f54059754b1145b2509e2007fa",
+          "nv12_sha256": "80c24dce287384ec6774bb98c0308d7b3220f26bde79bafaaf22a07e4d43f0c9"
+        }
+      ]
+    },
+    {
+      "encoded": "av1-lagged-420-8.ivf",
+      "encoded_sha256": "91b3e8f47446558c10d42a4454c1b2cc3325908f50872c3972d29f0c2af2f567",
+      "description": "Two-pass lookahead: temporal units that carry several hidden frames before the shown one, and show-existing-frame units that carry only a frame header.",
+      "width": 130,
+      "height": 66,
+      "frames": 16,
+      "expected_nv12_sha256": "ed2075bbe97162663be38db8a16ffd07f5404cf6c01616890329fb2f3890cd1d",
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--threads=1",
+        "--row-mt=0",
+        "--end-usage=q",
+        "--cq-level=38",
+        "--min-q=20",
+        "--max-q=63",
+        "--fps=30/1",
+        "--ivf",
+        "--enable-cdef=1",
+        "--enable-restoration=1",
+        "--profile=0",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709",
+        "--passes=2",
+        "--cpu-used=4",
+        "--lag-in-frames=16",
+        "--auto-alt-ref=1",
+        "--min-gf-interval=4",
+        "--max-gf-interval=8",
+        "--kf-min-dist=16",
+        "--kf-max-dist=16",
+        "--width=130",
+        "--height=66",
+        "--limit=16",
+        "--i420"
+      ],
+      "pictures": [
+        {
+          "index": 0,
+          "ivf_timestamp": 0,
+          "timestamp_ns": 0,
+          "packet_bytes": 1039,
+          "packet_sha256": "89352c9f4d3831054fff61444904d0bf5a909f575006b57ba765fa8121bd09af",
+          "nv12_sha256": "a2d237fc54a7bae662c43461d44babb101d96a17b6d7f42dcacbb715e41f7542"
+        },
+        {
+          "index": 1,
+          "ivf_timestamp": 1,
+          "timestamp_ns": 33333333,
+          "packet_bytes": 498,
+          "packet_sha256": "d6b670a11963ebbd82fccfb1c88d42c57817067f523427bf9e7a0b81c376ae86",
+          "nv12_sha256": "bcfa251eb40c4dc0b261b40ad2a174589b7c86352e7e72ac80357e44a540b92e"
+        },
+        {
+          "index": 2,
+          "ivf_timestamp": 2,
+          "timestamp_ns": 66666666,
+          "packet_bytes": 5,
+          "packet_sha256": "479f23cb9765428604e0fe8f001fb0fee81d92aeaef0809f27cc4188cc5da98c",
+          "nv12_sha256": "bca7050bb8bc3efcb41cae9e0e6b5641c0ab3268437cb801905427c33c87c871"
+        },
+        {
+          "index": 3,
+          "ivf_timestamp": 3,
+          "timestamp_ns": 100000000,
+          "packet_bytes": 30,
+          "packet_sha256": "73e7263773a4a81a9eb9320fd0e32a39a1b2d71e941471c013cf4b77565c8e72",
+          "nv12_sha256": "eb6e6a694a4921f32e3779444ce2d535f3321d3678aea1562b1b36c6371985a0"
+        },
+        {
+          "index": 4,
+          "ivf_timestamp": 4,
+          "timestamp_ns": 133333333,
+          "packet_bytes": 5,
+          "packet_sha256": "e9e33cf3c379510fa68d4b4fc7d0bfb5677c717177cf5831033332b14cc15bdb",
+          "nv12_sha256": "df0c71a6ce20577706818a44bcd7cd15e6e1913b19bbcfc3b45d77f5d9e22590"
+        },
+        {
+          "index": 5,
+          "ivf_timestamp": 5,
+          "timestamp_ns": 166666666,
+          "packet_bytes": 69,
+          "packet_sha256": "81b373b11e138ef9acf7f9a53a176cb26039149c5b767417d533cd965ad134fb",
+          "nv12_sha256": "0808dc64467739c8386fc84ea807064dba1c11ceec1428c7906098beafb887bc"
+        },
+        {
+          "index": 6,
+          "ivf_timestamp": 6,
+          "timestamp_ns": 200000000,
+          "packet_bytes": 5,
+          "packet_sha256": "a1a464ffc1119f353e3426b492870f734703b3b85bc6b0142c7f4b0b009e2828",
+          "nv12_sha256": "0b59a7f339ab8593cedbb162760aea7dc483fcf6e6c8f7e9208917931c64f1db"
+        },
+        {
+          "index": 7,
+          "ivf_timestamp": 7,
+          "timestamp_ns": 233333333,
+          "packet_bytes": 26,
+          "packet_sha256": "892454833e873c1b325331d8cff59fe3e0216064b7907b8e1367a33920066182",
+          "nv12_sha256": "6d95872a43c226f70c3e61a6d79ad84cb06a56b3bd84e6270cb666b58e0f2ba5"
+        },
+        {
+          "index": 8,
+          "ivf_timestamp": 8,
+          "timestamp_ns": 266666666,
+          "packet_bytes": 5,
+          "packet_sha256": "f5ed02db3266a0887ead55352763cdc6de84eae78ac77d1d6c528cad3498bd57",
+          "nv12_sha256": "b57ab91b99c1f0ca878d3e3e1ed372d3528d4bad2faf5065075b09e6bb23d710"
+        },
+        {
+          "index": 9,
+          "ivf_timestamp": 9,
+          "timestamp_ns": 300000000,
+          "packet_bytes": 318,
+          "packet_sha256": "ae19aa3d8de06bfbef297bf22b5215a24344131f2a0dfbad70b18905cedd2174",
+          "nv12_sha256": "a0fad5e6fa21b09d672fa78115baa62960756a2f52b49291f362be0ba0b40925"
+        },
+        {
+          "index": 10,
+          "ivf_timestamp": 10,
+          "timestamp_ns": 333333333,
+          "packet_bytes": 31,
+          "packet_sha256": "911566309081798c3d2d19e94f8f3ae33b3aef16f755b9f5531f736eb787848b",
+          "nv12_sha256": "27f9d97ec486495edec7f0e342df31436c52ee6d111d6935a02c23ed1ec96d95"
+        },
+        {
+          "index": 11,
+          "ivf_timestamp": 11,
+          "timestamp_ns": 366666666,
+          "packet_bytes": 5,
+          "packet_sha256": "793c19383682b7cd94530e98d8306fc23e4d4b27b662ea61a0547e7f695b7971",
+          "nv12_sha256": "e49d7d408939cd8bf2d75a8d03f1c0aa68cc86abfba28fc08ebb7e1bc830e9d5"
+        },
+        {
+          "index": 12,
+          "ivf_timestamp": 12,
+          "timestamp_ns": 400000000,
+          "packet_bytes": 62,
+          "packet_sha256": "cbc267e0bb5fcdaa72c65052745f9cc8bfc8deab79fe243baa007c1ba527442e",
+          "nv12_sha256": "169f9a5b4eda82d1bbf7c268ddc9c3fbfac493293fe224ae8bddbcdb418f70e3"
+        },
+        {
+          "index": 13,
+          "ivf_timestamp": 13,
+          "timestamp_ns": 433333333,
+          "packet_bytes": 5,
+          "packet_sha256": "a1a464ffc1119f353e3426b492870f734703b3b85bc6b0142c7f4b0b009e2828",
+          "nv12_sha256": "f47774fb37767e9d62c46215fe10ad61886e4d32899fb9557dda0dd36b4d28fb"
+        },
+        {
+          "index": 14,
+          "ivf_timestamp": 14,
+          "timestamp_ns": 466666666,
+          "packet_bytes": 25,
+          "packet_sha256": "d9eea6afb747ca88d7cdf12df8d058fb7898a9b9bb2ed83af354a8e001d4c3fa",
+          "nv12_sha256": "f25250e8d34b7d82a7e8c9c84af2fbdfd06310691716faba8be37c2450b75da4"
+        },
+        {
+          "index": 15,
+          "ivf_timestamp": 15,
+          "timestamp_ns": 500000000,
+          "packet_bytes": 5,
+          "packet_sha256": "479f23cb9765428604e0fe8f001fb0fee81d92aeaef0809f27cc4188cc5da98c",
+          "nv12_sha256": "d1d67c7df5f4a31a191d08c082d3acf48e1f221b58720e3bacdad202451051db"
+        }
+      ]
+    },
+    {
+      "encoded": "av1-grain-420-8.ivf",
+      "encoded_sha256": "99aa320b91359d7dca3fef0aab1a6e827c1df69149ba261970a40bd97e0bcf96",
+      "description": "Film grain synthesis parameters (libaom test vector 1) applied on output.",
+      "width": 130,
+      "height": 66,
+      "frames": 4,
+      "expected_nv12_sha256": "d72561a7ab63b2ceeb935a157e00cb5e420f5fb85f2fb210397e9018ee174338",
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--threads=1",
+        "--row-mt=0",
+        "--end-usage=q",
+        "--cq-level=38",
+        "--min-q=20",
+        "--max-q=63",
+        "--fps=30/1",
+        "--ivf",
+        "--enable-cdef=1",
+        "--enable-restoration=1",
+        "--profile=0",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709",
+        "--passes=1",
+        "--cpu-used=4",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--film-grain-test=1",
+        "--kf-min-dist=4",
+        "--kf-max-dist=4",
+        "--width=130",
+        "--height=66",
+        "--limit=4",
+        "--i420"
+      ],
+      "pictures": [
+        {
+          "index": 0,
+          "ivf_timestamp": 0,
+          "timestamp_ns": 0,
+          "packet_bytes": 3040,
+          "packet_sha256": "3a3618de0ef843286abb859f34a08e62b2ce72b75a0e8c690ff7c68e5191d4e0",
+          "nv12_sha256": "064717e5ffef0cab20a51fa2eda88b1513d61f0f08c10257cfcdd25e82d77a23"
+        },
+        {
+          "index": 1,
+          "ivf_timestamp": 1,
+          "timestamp_ns": 33333333,
+          "packet_bytes": 392,
+          "packet_sha256": "466b4a3672f796bab0f03bd42716dde5179396a0fe2f5ea1e8291a46d61d49db",
+          "nv12_sha256": "794062b7c58900dc0fb83f3bcda50fc678da8336dacbbef75091bcc58237b100"
+        },
+        {
+          "index": 2,
+          "ivf_timestamp": 2,
+          "timestamp_ns": 66666666,
+          "packet_bytes": 197,
+          "packet_sha256": "28b1f64dfddf7f0b1a203948467a9a460d2e53ff91c6028d1f20723fa8d17a36",
+          "nv12_sha256": "8d944134f42a991ec4e8319d81b0f96fb23b9fc6e84a9a0b5d52433beab7506e"
+        },
+        {
+          "index": 3,
+          "ivf_timestamp": 3,
+          "timestamp_ns": 100000000,
+          "packet_bytes": 378,
+          "packet_sha256": "69f874955287ed002b7b26efb2ec01f45e88f303ed84b3d808d9be42715b89fe",
+          "nv12_sha256": "aac88d6830d15295222ef4c213b4425cccace80236907f3b408b108385a6c782"
+        }
+      ]
+    },
+    {
+      "encoded": "av1-screen-420-8.ivf",
+      "encoded_sha256": "4e650a4d3827fdbe9bd01ec6d11428430edec72ae7a57db0591a115cb5398483",
+      "description": "Flat colours, glyph-like bitmaps and rules scrolling three rows per picture, tuned for screen content (palette and intra block copy).",
+      "width": 130,
+      "height": 66,
+      "frames": 4,
+      "expected_nv12_sha256": "79192c12c21202ef8f6cb7c52e31caac6125198f0ef9d317f562f525cd4f9635",
+      "encoder_options": [
+        "--debug",
+        "--codec=av1",
+        "--good",
+        "--threads=1",
+        "--row-mt=0",
+        "--end-usage=q",
+        "--cq-level=38",
+        "--min-q=20",
+        "--max-q=63",
+        "--fps=30/1",
+        "--ivf",
+        "--enable-cdef=1",
+        "--enable-restoration=1",
+        "--profile=0",
+        "--color-primaries=bt709",
+        "--transfer-characteristics=bt709",
+        "--matrix-coefficients=bt709",
+        "--passes=1",
+        "--cpu-used=1",
+        "--lag-in-frames=0",
+        "--auto-alt-ref=0",
+        "--tune-content=screen",
+        "--kf-min-dist=4",
+        "--kf-max-dist=4",
+        "--width=130",
+        "--height=66",
+        "--limit=4",
+        "--i420"
+      ],
+      "pictures": [
+        {
+          "index": 0,
+          "ivf_timestamp": 0,
+          "timestamp_ns": 0,
+          "packet_bytes": 846,
+          "packet_sha256": "ff39ca20bf880dcb85b3d94c99682718eb7c34f1efa98b6e28db47e63db95ed0",
+          "nv12_sha256": "08130294f4c3e357b48e46c8003c200ef90f6c797bba1f0486c7503321683f3c"
+        },
+        {
+          "index": 1,
+          "ivf_timestamp": 1,
+          "timestamp_ns": 33333333,
+          "packet_bytes": 546,
+          "packet_sha256": "feb18a25ee9684d5efa0cf2f023ac4804444541eea64b05b0cd69b796613690c",
+          "nv12_sha256": "35bbf62f7f761ab707cd8b24d6ad7cf4615b35e50cdcce4e08c93dff1d1bd857"
+        },
+        {
+          "index": 2,
+          "ivf_timestamp": 2,
+          "timestamp_ns": 66666666,
+          "packet_bytes": 247,
+          "packet_sha256": "e6cfaee68d555e566b4f330cf04937b943323bc5339c5c1f32c1b5058b058b84",
+          "nv12_sha256": "da10edfa28de0b3d87e9be2072df76685396f38734249afed4dfe499c418648e"
+        },
+        {
+          "index": 3,
+          "ivf_timestamp": 3,
+          "timestamp_ns": 100000000,
+          "packet_bytes": 320,
+          "packet_sha256": "bddd2097f7c920de8fd49518b0fbf04d6698f84d1e0e30301fc50a9595107fa8",
+          "nv12_sha256": "75d948f6199097355d7d1bfc1341639789f4298e4fc6c3984bb0b86e6724d432"
+        }
+      ]
+    }
+  ]
+}
