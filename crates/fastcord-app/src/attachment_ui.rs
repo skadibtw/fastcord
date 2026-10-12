@@ -156,15 +156,19 @@ fn failure_reason(error: &AttachmentError) -> &'static str {
         | AttachmentError::RefreshFailed
         | AttachmentError::InvalidUrl => "The image could not be fetched.",
         AttachmentError::CacheUnavailable => "The local attachment cache is unavailable.",
+        AttachmentError::DestinationUnavailable => "The file could not be saved there.",
         AttachmentError::WorkerStopped => "The image preview was cancelled.",
     }
 }
 
 fn action_failure(error: &AttachmentError) -> &'static str {
     match error {
-        AttachmentError::TooLarge => "This file is larger than the in-app download limit (64 MiB).",
+        AttachmentError::TooLarge => {
+            "This file is larger than the 64 MiB limit for Open. Use Download to save it."
+        }
         AttachmentError::WorkerStopped => "The attachment action was cancelled.",
         AttachmentError::CacheUnavailable => "The local attachment cache is unavailable.",
+        AttachmentError::DestinationUnavailable => "The file could not be saved there.",
         _ => "The attachment could not be fetched.",
     }
 }
@@ -325,8 +329,8 @@ pub fn loaded(
     }
 }
 
-/// Starts Download (native save dialog, then a copy of the cached file) or
-/// Open (the OS default application) for one attachment.
+/// Starts Download (native save dialog, then the file streamed straight to the
+/// chosen path) or Open (the OS default application) for one attachment.
 pub fn start_action(
     gateway: &mut GatewayPanel,
     session: &Session,
@@ -404,22 +408,19 @@ async fn run_action(
             else {
                 return ActionOutcome::Cancelled;
             };
-            let source = match cache.local_file(&refresh, key, &filename, &item.url).await {
-                Ok(path) => path,
-                Err(error) => return ActionOutcome::Failed(action_failure(&error)),
-            };
             let destination = destination.path().to_owned();
-            let saved = tokio::task::spawn_blocking(move || {
-                std::fs::copy(&source, &destination)?;
-                // Best effort: a volume without alternate streams (FAT, exFAT) still gets the file.
+            if let Err(error) = cache
+                .download_to(&refresh, key, &item.url, &destination)
+                .await
+            {
+                return ActionOutcome::Failed(action_failure(&error));
+            }
+            // Best effort: a volume without alternate streams (FAT, exFAT) still gets the file.
+            let _ = tokio::task::spawn_blocking(move || {
                 let _ = fastcord_platform::mark_downloaded(&destination);
-                Ok::<(), std::io::Error>(())
             })
             .await;
-            match saved {
-                Ok(Ok(())) => ActionOutcome::Saved,
-                _ => ActionOutcome::Failed("The file could not be saved there."),
-            }
+            ActionOutcome::Saved
         }
         AttachmentAction::Open => {
             if !can_open(&item) {

@@ -12,6 +12,9 @@
 //! * At most four fetches and two decodes run at once, all off the UI thread.
 //!   Image dimensions are read from the header and checked before any pixel
 //!   buffer is allocated; thumbnails are scaled down to the display size.
+//! * An explicit download streams straight to the file the user picks, through a
+//!   `.part` file that is renamed into place on success. It never enters the
+//!   cache and is not bounded by the cache size.
 use fastcord_model::{Attachment, Snowflake};
 use image::imageops::FilterType;
 use image::{ImageDecoder, ImageError, Limits};
@@ -33,8 +36,8 @@ pub const MAX_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
 pub const MAX_DISPLAY_DIMENSION: u32 = 2048;
 /// Compressed bytes fetched for an image preview.
 pub const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
-/// Compressed bytes fetched for an explicit download or open. Four may be in
-/// flight, so four of them always fit in the disk cache.
+/// Compressed bytes an Open may cache. Four may be in flight, so four of them
+/// always fit in the disk cache. Explicit downloads are not bounded by this.
 pub const MAX_FILE_BYTES: u64 = DISK_CACHE_LIMIT / 4;
 /// Decoder allocation ceiling: one 16-bit RGBA frame at the pixel limit.
 const MAX_DECODE_ALLOC: u64 = MAX_IMAGE_PIXELS * 8 + 32 * 1024 * 1024;
@@ -151,6 +154,7 @@ pub enum AttachmentError {
     UnsupportedImage,
     InvalidImage,
     CacheUnavailable,
+    DestinationUnavailable,
     WorkerStopped,
     RefreshFailed,
 }
@@ -161,10 +165,11 @@ impl std::fmt::Display for AttachmentError {
             Self::InvalidUrl => "Attachment URL is invalid.",
             Self::Network => "Attachment could not be fetched.",
             Self::Http(_) => "Attachment server rejected the request.",
-            Self::TooLarge => "Attachment exceeds the local image or download limit.",
+            Self::TooLarge => "Attachment exceeds the local image or open limit.",
             Self::UnsupportedImage => "This attachment is not a supported image.",
             Self::InvalidImage => "The image data could not be decoded.",
             Self::CacheUnavailable => "The local attachment cache is unavailable.",
+            Self::DestinationUnavailable => "The file could not be saved there.",
             Self::WorkerStopped => "Attachment work was cancelled.",
             Self::RefreshFailed => "The attachment URL could not be refreshed.",
         })
@@ -297,6 +302,81 @@ impl AttachmentCache {
         result
     }
 
+    /// Streams `url` straight to `destination`, the path the user chose in the
+    /// save dialog. Nothing enters the cache, so the cache size limit does not
+    /// apply. The bytes go to a `.part` file beside the destination, renamed into
+    /// place only once complete: a failed or cancelled download leaves the
+    /// destination exactly as it was.
+    pub async fn download_to<R: UrlRefresh>(
+        &self,
+        refresh: &R,
+        key: AttachmentKey,
+        url: &str,
+        destination: &Path,
+    ) -> Result<(), AttachmentError> {
+        self.check(key)?;
+        let _permit = self
+            .fetch_slots
+            .acquire()
+            .await
+            .map_err(|_| AttachmentError::WorkerStopped)?;
+        let response = self.fetch_response_refreshing(refresh, url).await?;
+        let part = partial_path(destination)?;
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part)
+            .await
+            .map_err(|_| AttachmentError::DestinationUnavailable)?;
+        let cleanup = TemporaryFile(Some(part.clone()));
+        match self.write_part(response, file, &part, destination).await {
+            Ok(()) => {
+                cleanup.keep();
+                Ok(())
+            }
+            Err(error) => {
+                cleanup.remove().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Writes `response`'s body into `file`, then moves the finished `part` onto
+    /// `destination`. Stops at once if the cache is purged.
+    async fn write_part(
+        &self,
+        response: reqwest::Response,
+        mut file: tokio::fs::File,
+        part: &Path,
+        destination: &Path,
+    ) -> Result<(), AttachmentError> {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            self.ensure_active()?;
+            let chunk = chunk.map_err(|_| AttachmentError::Network)?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|_| AttachmentError::DestinationUnavailable)?;
+        }
+        file.flush()
+            .await
+            .map_err(|_| AttachmentError::DestinationUnavailable)?;
+        file.sync_all()
+            .await
+            .map_err(|_| AttachmentError::DestinationUnavailable)?;
+        drop(file);
+        self.ensure_active()?;
+        let part = part.to_owned();
+        let destination = destination.to_owned();
+        tokio::task::spawn_blocking(move || fs::rename(&part, &destination))
+            .await
+            .map_err(|_| AttachmentError::WorkerStopped)?
+            .map_err(|_| AttachmentError::DestinationUnavailable)
+    }
+
     async fn download_and_store<R: UrlRefresh>(
         &self,
         refresh: &R,
@@ -305,13 +385,8 @@ impl AttachmentCache {
         name: &str,
         temporary: &Path,
     ) -> Result<PathBuf, AttachmentError> {
-        let size = match self.download(url, limit, temporary).await {
-            Err(AttachmentError::Http(403 | 404)) => {
-                let fresh = refresh.refresh(url.to_owned()).await?;
-                self.download(&fresh, limit, temporary).await?
-            }
-            other => other?,
-        };
+        let response = self.fetch_response_refreshing(refresh, url).await?;
+        let size = self.download(response, limit, temporary).await?;
         let root = self.root.clone();
         let active = self.active.clone();
         let temporary = temporary.to_owned();
@@ -370,23 +445,45 @@ impl AttachmentCache {
         .map_err(|_| AttachmentError::WorkerStopped)?
     }
 
-    /// Streams the URL's body into `temporary`, returning its size. Evicts old
+    /// Fetches `url` with the credential-free client, following redirects by
+    /// hand. A 4xx or 5xx status is an error, and no body is read.
+    async fn fetch_response(&self, url: &str) -> Result<reqwest::Response, AttachmentError> {
+        self.ensure_active()?;
+        let response = send_following_redirects(&self.http, url, self.allow_local_http).await?;
+        let status = response.status();
+        if status.is_client_error() || status.is_server_error() {
+            return Err(AttachmentError::Http(status.as_u16()));
+        }
+        Ok(response)
+    }
+
+    /// `fetch_response`, except that after a 403 or 404 it asks for a fresh URL
+    /// once and fetches that instead.
+    async fn fetch_response_refreshing<R: UrlRefresh>(
+        &self,
+        refresh: &R,
+        url: &str,
+    ) -> Result<reqwest::Response, AttachmentError> {
+        match self.fetch_response(url).await {
+            Err(AttachmentError::Http(403 | 404)) => {
+                let fresh = refresh.refresh(url.to_owned()).await?;
+                self.fetch_response(&fresh).await
+            }
+            other => other,
+        }
+    }
+
+    /// Streams `response`'s body into `temporary`, returning its size. Evicts old
     /// files first so the cache stays within its limit while the file grows.
     async fn download(
         &self,
-        raw_url: &str,
+        response: reqwest::Response,
         limit: u64,
         temporary: &Path,
     ) -> Result<u64, AttachmentError> {
         use futures_util::StreamExt;
         use tokio::io::AsyncWriteExt;
 
-        self.ensure_active()?;
-        let response = send_following_redirects(&self.http, raw_url, self.allow_local_http).await?;
-        let status = response.status();
-        if status.is_client_error() || status.is_server_error() {
-            return Err(AttachmentError::Http(status.as_u16()));
-        }
         if let Some(length) = response.content_length()
             && length > limit
         {
@@ -461,8 +558,9 @@ impl AttachmentCache {
         .map_err(|_| AttachmentError::WorkerStopped)?
     }
 
-    /// A cached local file with a safe extension for the OS default handler or
-    /// a save-as copy. The file is the cache entry itself, not a second copy.
+    /// A cached local file with a safe extension for the OS default handler. The
+    /// file is the cache entry itself. Explicit downloads stream to their chosen
+    /// path through `download_to` instead.
     pub async fn local_file<R: UrlRefresh>(
         &self,
         refresh: &R,
@@ -910,6 +1008,18 @@ fn is_temporary(path: &Path) -> bool {
         .is_some_and(|extension| extension == TEMPORARY_EXTENSION)
 }
 
+/// The `.part` file a download writes beside its destination. The name is
+/// unique to this process and call, and its extension is not the cache's
+/// temporary one, so it can never be mistaken for a cache partial.
+fn partial_path(destination: &Path) -> Result<PathBuf, AttachmentError> {
+    let parent = destination
+        .parent()
+        .ok_or(AttachmentError::DestinationUnavailable)?;
+    let pid = std::process::id();
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(".fastcord-download-{pid}-{sequence}.part")))
+}
+
 /// Evicts least-recently-used files, across every account's directory next to
 /// `root`, until at most `limit` bytes remain. Partial downloads count toward
 /// the total but are never evicted, and neither is `keep`.
@@ -1175,6 +1285,55 @@ mod tests {
         fs::read_dir(root.join(account.0.to_string()))
             .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
             .unwrap_or_default()
+    }
+
+    /// Names of the files directly inside `dir`, sorted. Empty if it is missing.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// Every cached file for the test account under `root`, with its length.
+    fn cache_snapshot(root: &Path) -> Vec<(PathBuf, u64)> {
+        let mut files: Vec<(PathBuf, u64)> = files_in(root, ACCOUNT)
+            .into_iter()
+            .map(|path| {
+                let length = fs::metadata(&path).unwrap().len();
+                (path, length)
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// Polls until `done` holds, failing the test after five seconds.
+    async fn wait_until(mut done: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("condition not reached in time");
+    }
+
+    /// Reads the request head the test server received, through its blank line.
+    async fn read_request_head(socket: &mut tokio::net::TcpStream) {
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert_ne!(read, 0, "the client closed before sending its request");
+            head.extend_from_slice(&chunk[..read]);
+        }
     }
 
     #[test]
@@ -2111,5 +2270,349 @@ mod tests {
         assert_eq!(third.await.unwrap().unwrap().frames.len(), 2);
         cache.purge().await.unwrap();
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn large_downloads_are_saved_exactly_and_leave_the_cache_alone() {
+        let body = Arc::new(
+            (0..MAX_FILE_BYTES as usize + 1024 * 1024)
+                .map(|i| (i % 251) as u8)
+                .collect::<Vec<u8>>(),
+        );
+        let small = b"small image".to_vec();
+        let (address, seen) = serve(respond({
+            let body = body.clone();
+            move |head: &str| {
+                if head.starts_with("get /small.png ") {
+                    ok(&small)
+                } else {
+                    ok(&body)
+                }
+            }
+        }))
+        .await;
+        let root = scratch("download-large");
+        let dir = scratch("download-large-dest");
+        fs::create_dir_all(&dir).unwrap();
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        cache
+            .fetch_file(
+                &NoRefresh,
+                key(5),
+                "small.png",
+                &format!("http://{address}/small.png"),
+                MAX_FILE_BYTES,
+            )
+            .await
+            .unwrap();
+        let cached = cache_snapshot(&root);
+        let destination = dir.join("big.bin");
+        fs::write(&destination, b"previous").unwrap();
+        cache
+            .download_to(
+                &NoRefresh,
+                key(6),
+                &format!("http://{address}/big.bin"),
+                &destination,
+            )
+            .await
+            .unwrap();
+        assert!(
+            fs::read(&destination).unwrap() == *body,
+            "the saved file is not the served body"
+        );
+        assert_eq!(cache_snapshot(&root), cached);
+        assert_eq!(names_in(&dir), ["big.bin"]);
+        assert_eq!(seen.lock().len(), 2);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn download_keeps_the_signed_query_and_sends_no_credentials_across_redirects() {
+        let body = b"download body".to_vec();
+        let (cdn, cdn_seen) = serve(respond({
+            let body = body.clone();
+            move |_| ok(&body)
+        }))
+        .await;
+        let (front, front_seen) = serve(respond(move |_| {
+            redirect(&format!(
+                "http://{cdn}/target?ex=1&is=2&hm=abc&redirected=yes"
+            ))
+        }))
+        .await;
+        let root = scratch("download-auth");
+        let dir = scratch("download-auth-dest");
+        fs::create_dir_all(&dir).unwrap();
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        cache
+            .download_to(
+                &NoRefresh,
+                key(4),
+                &format!("http://{front}/attachments/1/2/a.txt?ex=65d903de&is=65c68ede&hm=2481f3&"),
+                &dir.join("a.txt"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fs::read(dir.join("a.txt")).unwrap(), body);
+        let front_seen = front_seen.lock().clone();
+        let cdn_seen = cdn_seen.lock().clone();
+        assert!(
+            front_seen[0].starts_with(
+                "get /attachments/1/2/a.txt?ex=65d903de&is=65c68ede&hm=2481f3& http/1.1"
+            ),
+            "the signed query was not sent exactly as written"
+        );
+        assert!(
+            cdn_seen[0].starts_with("get /target?ex=1&is=2&hm=abc&redirected=yes http/1.1"),
+            "the redirect target was not requested exactly as written"
+        );
+        for head in front_seen.iter().chain(&cdn_seen) {
+            for forbidden in ["authorization:", "cookie:", "proxy-authorization:"] {
+                assert!(!head.contains(forbidden), "a credential header was sent");
+            }
+        }
+        assert!(!root.exists(), "a download must not create the cache");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn download_redirects_to_credentials_or_other_schemes_are_refused_and_create_nothing() {
+        let root = scratch("download-redirect");
+        let dir = scratch("download-redirect-dest");
+        fs::create_dir_all(&dir).unwrap();
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        for location in [
+            "http://user:pass@127.0.0.1:1/x".to_owned(),
+            "ftp://127.0.0.1/x".to_owned(),
+            "http://example.invalid/x".to_owned(),
+        ] {
+            let (address, _) = serve(respond(move |_| redirect(&location))).await;
+            let result = cache
+                .download_to(
+                    &NoRefresh,
+                    key(4),
+                    &format!("http://{address}/a"),
+                    &dir.join("a.bin"),
+                )
+                .await;
+            assert_eq!(result, Err(AttachmentError::InvalidUrl));
+        }
+        // A chain that never ends stops after a fixed number of hops.
+        let (address, seen) = serve(respond(move |_| redirect("/again"))).await;
+        let result = cache
+            .download_to(
+                &NoRefresh,
+                key(4),
+                &format!("http://{address}/a"),
+                &dir.join("a.bin"),
+            )
+            .await;
+        assert_eq!(result, Err(AttachmentError::Network));
+        assert_eq!(seen.lock().len(), MAX_REDIRECTS + 1);
+        assert!(names_in(&dir).is_empty(), "nothing was written");
+        assert!(!root.exists(), "a download must not create the cache");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn failed_downloads_leave_no_partial_file_and_keep_the_previous_destination() {
+        let root = scratch("download-failed");
+        let dir = scratch("download-failed-dest");
+        fs::create_dir_all(&dir).unwrap();
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let (address, _) = serve(respond(|head: &str| {
+            if head.starts_with("get /status ") {
+                status(500)
+            } else {
+                // Declares 4096 bytes, sends 1000, then closes the connection.
+                let mut response =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n"
+                        .to_vec();
+                response.extend([b'x'; 1000]);
+                response
+            }
+        }))
+        .await;
+        for previous in [false, true] {
+            let destination = dir.join("a.bin");
+            if previous {
+                fs::write(&destination, b"previous").unwrap();
+            }
+            let result = cache
+                .download_to(
+                    &NoRefresh,
+                    key(4),
+                    &format!("http://{address}/status"),
+                    &destination,
+                )
+                .await;
+            assert_eq!(result, Err(AttachmentError::Http(500)));
+            let result = cache
+                .download_to(
+                    &NoRefresh,
+                    key(4),
+                    &format!("http://{address}/truncated"),
+                    &destination,
+                )
+                .await;
+            assert_eq!(result, Err(AttachmentError::Network));
+            let expected: Vec<&str> = if previous { vec!["a.bin"] } else { Vec::new() };
+            assert_eq!(names_in(&dir), expected);
+            if previous {
+                assert_eq!(fs::read(&destination).unwrap(), b"previous");
+            }
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_save_into_a_missing_folder_is_refused_and_creates_nothing() {
+        let root = scratch("download-missing");
+        let dir = scratch("download-missing-dest");
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let (address, _) = serve(respond(|_| ok(b"abc"))).await;
+        let result = cache
+            .download_to(
+                &NoRefresh,
+                key(4),
+                &format!("http://{address}/a"),
+                &dir.join("a.bin"),
+            )
+            .await;
+        assert_eq!(result, Err(AttachmentError::DestinationUnavailable));
+        assert!(!dir.exists(), "the folder must not be created");
+        assert!(!root.exists(), "a download must not create the cache");
+    }
+
+    #[tokio::test]
+    async fn an_expired_signature_is_refreshed_once_for_a_download_too() {
+        let (address, _) = serve(respond(|head: &str| {
+            if head.contains("sig=old") {
+                status(403)
+            } else {
+                ok(b"fresh bytes")
+            }
+        }))
+        .await;
+        let root = scratch("download-refresh");
+        let dir = scratch("download-refresh-dest");
+        fs::create_dir_all(&dir).unwrap();
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let expired = format!("http://{address}/a?sig=old");
+        let fresh = format!("http://{address}/a?sig=new");
+
+        let refresher = Refresher::new(Some(fresh));
+        cache
+            .download_to(&refresher, key(4), &expired, &dir.join("a.bin"))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(dir.join("a.bin")).unwrap(), b"fresh bytes");
+        assert_eq!(refresher.calls(), 1);
+
+        let refresher = Refresher::new(None);
+        let result = cache
+            .download_to(&refresher, key(4), &expired, &dir.join("b.bin"))
+            .await;
+        assert_eq!(result, Err(AttachmentError::RefreshFailed));
+        assert_eq!(refresher.calls(), 1);
+        assert!(!dir.join("b.bin").exists());
+
+        let refresher = Refresher::new(Some(expired.clone()));
+        let result = cache
+            .download_to(&refresher, key(4), &expired, &dir.join("c.bin"))
+            .await;
+        assert_eq!(result, Err(AttachmentError::Http(403)));
+        assert_eq!(refresher.calls(), 1);
+        assert!(!dir.join("c.bin").exists());
+        assert_eq!(names_in(&dir), ["a.bin"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn cancelled_downloads_remove_their_part_file_and_keep_the_old_destination() {
+        let root = scratch("download-abort");
+        let dir = scratch("download-abort-dest");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.bin"), b"previous").unwrap();
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request_head(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\nx")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let worker = tokio::spawn({
+            let cache = cache.clone();
+            let destination = dir.join("a.bin");
+            async move {
+                cache
+                    .download_to(
+                        &NoRefresh,
+                        key(4),
+                        &format!("http://{address}/a"),
+                        &destination,
+                    )
+                    .await
+            }
+        });
+        wait_until(|| names_in(&dir).len() == 2).await;
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        wait_until(|| names_in(&dir) == ["a.bin"]).await;
+        assert_eq!(fs::read(dir.join("a.bin")).unwrap(), b"previous");
+        assert_eq!(cache.fetch_slots.available_permits(), FETCH_SLOTS);
+        server.abort();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn purge_mid_download_stops_the_stream_and_removes_its_part_file() {
+        let root = scratch("download-purge");
+        let dir = scratch("download-purge-dest");
+        fs::create_dir_all(&dir).unwrap();
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request_head(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\nx")
+                .await
+                .unwrap();
+            // The rest of the body arrives only after the cache is purged.
+            let _ = released.await;
+            let _ = socket.write_all(&[b'x'; 4095]).await;
+            std::future::pending::<()>().await;
+        });
+        let worker = tokio::spawn({
+            let cache = cache.clone();
+            let destination = dir.join("a.bin");
+            async move {
+                cache
+                    .download_to(
+                        &NoRefresh,
+                        key(4),
+                        &format!("http://{address}/a"),
+                        &destination,
+                    )
+                    .await
+            }
+        });
+        wait_until(|| names_in(&dir).len() == 1).await;
+        cache.purge().await.unwrap();
+        release.send(()).unwrap();
+        assert_eq!(worker.await.unwrap(), Err(AttachmentError::WorkerStopped));
+        assert!(names_in(&dir).is_empty(), "the part file was not removed");
+        server.abort();
+        let _ = fs::remove_dir_all(dir);
     }
 }
