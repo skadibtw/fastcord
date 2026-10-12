@@ -125,8 +125,12 @@ already at the bottom. Gateway edits and deletions update retained rows.
 
 History is memory-only and byte-bounded (16 MiB, at most 500 messages per
 channel and 2,000 globally). Variable-height rows build widgets only around the
-viewport, with measured heights and message-ID scroll anchoring. Attachment
-metadata is shown; fetching and viewing attachment images is milestone 14.
+viewport, with measured heights and message-ID scroll anchoring. Image attachments
+offer Load preview, which fetches a thumbnail on request, and a larger in-app view.
+Every attachment shows its name, size, and type with Download, which opens a native
+save dialog. Passive types (images, audio, video, PDF, and text) also offer Open with
+the OS default application; other types are Download-only. Previews and Open use a
+byte-bounded 256 MiB disk cache with a 64 MiB per-file limit.
 
 ## Sending messages
 

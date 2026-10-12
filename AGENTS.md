@@ -68,7 +68,7 @@ On the maintainer's Windows box, agent shells may not have `cargo` on `PATH`; ca
 
 ## Runtime/Tooling Preferences
 - Rust via rustup; Windows needs VS Build Tools with the C++ workload (MSVC linker).
-- GUI: iced with wgpu (tiny-skia fallback). Audio: `cpal`, `opus2` (bundled libopus, needs CMake), `rubato`, `nnnoiseless` (Light noise suppression), DeepFilterNet via the `deep_filter` crate pinned to a git revision (High quality; tract runtime and bundled model, so the first fetch needs `git` and network). Planned: `davey` (DAVE). Video: OS-native H.264 codecs (Media Foundation / VideoToolbox / VA-API) and AV1 through statically bundled `dav1d` 1.5.4 (compiled by `fastcord-video`'s `build.rs` from a pinned source archive in the repository, so builds need only the target C compiler: MSVC on Windows, GCC or Clang on Linux, Xcode tools on macOS); **no FFmpeg** (`docs/adr/`).
+- GUI: iced with wgpu (tiny-skia fallback). Audio: `cpal`, `opus2` (bundled libopus, needs CMake), `rubato`, `nnnoiseless` (Light noise suppression), DeepFilterNet via the `deep_filter` crate pinned to a git revision (High quality; tract runtime and bundled model, so the first fetch needs `git` and network). DAVE: `davey` pinned to 0.1.4 behind the `fastcord-media` `dave` adapter. Video: OS-native H.264 codecs (Media Foundation / VideoToolbox / VA-API) and AV1 through statically bundled `dav1d` 1.5.4 (compiled by `fastcord-video`'s `build.rs` from a pinned source archive in the repository, so builds need only the target C compiler: MSVC on Windows, GCC or Clang on Linux, Xcode tools on macOS); **no FFmpeg** (`docs/adr/`).
 - GitHub Actions are pinned by commit SHA; keep it that way when adding steps.
 
 ## Workflow
