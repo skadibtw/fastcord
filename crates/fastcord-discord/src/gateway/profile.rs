@@ -1,7 +1,7 @@
-//! The web-client Identify profile (ADR 0005).
+//! The shared Gateway and REST web-client identity (ADR 0005).
 //!
-//! One versioned module owns every property sent to the Gateway. The profile is
-//! built once per Gateway start and reused unchanged for every Identify across
+//! One versioned module owns the identity sent to the Gateway and REST API.
+//! The profile is built once at login and reused unchanged across requests and
 //! reconnects: nothing here is randomized per connection.
 
 use serde::Serialize;
@@ -17,6 +17,9 @@ const CHROME_MAJOR: u32 = 155;
 /// `client_build_number` of discord.com's web client observed on 2026-10-07.
 /// Used only when the live value cannot be fetched.
 pub const BUNDLED_BUILD_NUMBER: u32 = 631_730;
+/// The web client's REST fingerprint bundled with this versioned profile.
+/// Stable per fastcord build; review alongside the bundled build number and UA.
+pub(crate) const CLIENT_FINGERPRINT: &str = "1559116650832339032.2xwTQ4DcyLTfBV0bgPCx75HgxTw";
 
 const APP_URL: &str = "https://discord.com/app";
 const BUILD_MARKER: &[u8] = b"\"BUILD_NUMBER\":\"";

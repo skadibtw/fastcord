@@ -4,14 +4,14 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::attachment::{RefreshRequest, RefreshResponse, RefreshedAttachmentUrl};
 use crate::error::status_error;
-use crate::gateway::ClientProperties;
+use crate::gateway::{CLIENT_FINGERPRINT, ClientProperties};
 use crate::rate_limit::{RateLimiter, ResponseLimits};
 use crate::{Clock, MonotonicClock, NetworkFailure, RestError, RetryableFailure, Route, UserToken};
 
@@ -163,6 +163,7 @@ impl<C: Clock> RestClient<C> {
         clock: C,
         properties: ClientProperties,
     ) -> Result<Self, RestError> {
+        // Encode and validate the shared identity once per client, not per request.
         let headers = auth_headers(&token, &properties)?;
         // The token wrapper is zeroized here; HTTP internals necessarily own
         // their header copy. No default Debug path exposes that sensitive header.
@@ -293,7 +294,10 @@ impl<C: Clock> RestClient<C> {
 fn attachment_refresh_route() -> Result<Route, RestError> {
     Route::new(Method::POST, "/attachments/refresh-urls")
 }
-fn auth_headers(token: &UserToken, properties: &ClientProperties) -> Result<HeaderMap, RestError> {
+pub(crate) fn auth_headers(
+    token: &UserToken,
+    properties: &ClientProperties,
+) -> Result<HeaderMap, RestError> {
     if token.expose_secret().is_empty() {
         return Err(RestError::InvalidToken);
     }
@@ -304,24 +308,28 @@ fn auth_headers(token: &UserToken, properties: &ClientProperties) -> Result<Head
     headers.insert(AUTHORIZATION, authorization);
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
-    // Serialize client properties for x-super-properties header
-    let properties_json = serde_json::to_string(properties).map_err(|_| RestError::InvalidToken)?;
+    // This is the exact properties object used by Gateway Identify.
+    let properties_json =
+        serde_json::to_string(properties).map_err(|_| RestError::ClientConfiguration)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&properties_json);
     headers.insert(
         "x-super-properties",
-        HeaderValue::from_str(&encoded).map_err(|_| RestError::InvalidToken)?,
+        HeaderValue::from_str(&encoded).map_err(|_| RestError::ClientConfiguration)?,
     );
 
-    headers.insert("x-discord-locale", HeaderValue::from_static("en-US"));
     headers.insert(
-        "user-agent",
-        HeaderValue::from_static(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
-        ),
+        "x-discord-locale",
+        HeaderValue::from_str(&properties.system_locale)
+            .map_err(|_| RestError::ClientConfiguration)?,
+    );
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_str(&properties.browser_user_agent)
+            .map_err(|_| RestError::ClientConfiguration)?,
     );
     headers.insert(
         "x-fingerprint",
-        HeaderValue::from_static("1559116650832339032.2xwTQ4DcyLTfBV0bgPCx75HgxTw"),
+        HeaderValue::from_static(CLIENT_FINGERPRINT),
     );
 
     Ok(headers)
@@ -406,6 +414,28 @@ mod tests {
             auth_headers(&UserToken::new(String::new()), &properties),
             Err(RestError::InvalidToken)
         ));
+    }
+
+    #[test]
+    fn invalid_identity_headers_are_configuration_errors_without_secrets() {
+        let token = UserToken::new("offline-test-credential".to_owned());
+        for invalid in ["bad\r\nheader", "bad\0header"] {
+            for field in ["browser_user_agent", "system_locale"] {
+                let mut properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+                match field {
+                    "browser_user_agent" => properties.browser_user_agent = invalid.to_owned(),
+                    "system_locale" => properties.system_locale = invalid.to_owned(),
+                    _ => unreachable!(),
+                }
+                let error = auth_headers(&token, &properties).unwrap_err();
+                assert_eq!(error, RestError::ClientConfiguration);
+                assert!(!format!("{error:?}: {error}").contains(token.expose_secret()));
+                assert!(matches!(
+                    RestClient::new(UserToken::new(token.expose_secret().to_owned()), properties,),
+                    Err(RestError::ClientConfiguration)
+                ));
+            }
+        }
     }
 
     #[test]

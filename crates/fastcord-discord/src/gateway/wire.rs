@@ -252,6 +252,65 @@ mod tests {
 
     const IDENTIFY_FIXTURE: &str =
         include_str!("../../../../fixtures/gateway/identify.sanitized.json");
+    const REST_IDENTITY_FIXTURE: &str =
+        include_str!("../../../../fixtures/rest/client-identity-profiles.json");
+
+    #[test]
+    fn rest_headers_and_gateway_identify_share_every_host_and_locale_profile() {
+        use base64::Engine;
+        use reqwest::header::{AUTHORIZATION, USER_AGENT};
+
+        use crate::UserToken;
+        use crate::gateway::{BUNDLED_BUILD_NUMBER, CLIENT_FINGERPRINT};
+        use crate::rest::auth_headers;
+
+        let fixtures: Vec<Value> = serde_json::from_str(REST_IDENTITY_FIXTURE).unwrap();
+        assert_eq!(fixtures.len(), 4);
+        let cases = [
+            (HostOs::Windows, "en-US"),
+            (HostOs::MacOs, "en-US"),
+            (HostOs::Linux, "en-US"),
+            (HostOs::Linux, "ru-RU"),
+        ];
+        for ((host, locale), fixture) in cases.into_iter().zip(fixtures) {
+            let properties =
+                ClientProperties::web(host, locale, BUNDLED_BUILD_NUMBER).with_launch_identity();
+            let token = UserToken::new("REDACTED-TOKEN".to_owned());
+            let headers = auth_headers(&token, &properties).unwrap();
+            let gateway: Value =
+                serde_json::from_str(&identify(token.expose_secret(), &properties).unwrap())
+                    .unwrap();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(headers["x-super-properties"].as_bytes())
+                .unwrap();
+            let rest: Value = serde_json::from_slice(&decoded).unwrap();
+            assert_eq!(rest, gateway["d"]["properties"]);
+            assert_eq!(rest, serde_json::to_value(&properties).unwrap());
+            for field in ["os", "system_locale", "browser_user_agent"] {
+                assert_eq!(rest[field], fixture[field], "{host:?} {locale}: {field}");
+            }
+            assert_eq!(
+                headers[USER_AGENT].to_str().unwrap(),
+                rest["browser_user_agent"].as_str().unwrap()
+            );
+            assert_eq!(
+                headers["x-discord-locale"].to_str().unwrap(),
+                rest["system_locale"].as_str().unwrap()
+            );
+            assert_eq!(headers["x-fingerprint"], CLIENT_FINGERPRINT);
+            assert_eq!(headers[AUTHORIZATION], token.expose_secret());
+            assert!(headers[AUTHORIZATION].is_sensitive());
+            // An identical profile stays identical across requests/reconnects.
+            assert_eq!(headers, auth_headers(&token, &properties).unwrap());
+            assert_eq!(
+                gateway,
+                serde_json::from_str::<Value>(
+                    &identify(token.expose_secret(), &properties).unwrap()
+                )
+                .unwrap()
+            );
+        }
+    }
 
     #[test]
     fn identify_matches_the_recorded_sanitized_payload() {

@@ -49,6 +49,7 @@ pub use event::{
     PassiveUpdate, Ready, ReadySupplemental, ReconnectReason, SessionId, StopReason,
     SupplementalGuild, VoiceStateUpdate,
 };
+pub(crate) use profile::CLIENT_FINGERPRINT;
 pub use profile::{
     BUNDLED_BUILD_NUMBER, BuildNumber, BuildSource, ClientProperties, HostOs, PROFILE_VERSION,
     resolve_build_number,

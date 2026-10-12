@@ -67,13 +67,15 @@ VOICE_SERVER_UPDATE (`{token, guild_id, channel_id?, endpoint}`) is decoded for 
 
 ## REST client identity (ADR 0005)
 
-`RestClient` carries the same `ClientProperties` the Gateway Identifies with, so both halves of the client present one consistent web-client identity for the whole run. Every authenticated `/api/v10` request sends:
+`RestClient` carries the same `ClientProperties` the Gateway Identifies with, so both halves of the client present one consistent web-client identity for the whole run. The identity headers are encoded and validated once at REST client construction, then installed as default headers for every authenticated `/api/v10` request:
 
 - `Authorization: <raw user token>` (no `Bot `/`Bearer ` prefix, marked sensitive).
 - `x-super-properties`: the `ClientProperties` JSON, standard-base64 encoded — the exact same object Identify sends under `properties`.
 - `user-agent`: the `browser_user_agent` of the profile (Chrome 155 reduced UA for the host OS).
 - `x-discord-locale`: the profile's `system_locale`.
-- `x-fingerprint`: the web client's client fingerprint constant, stable per build.
+- `x-fingerprint`: the web client's client fingerprint constant, stable per fastcord build and defined once as `CLIENT_FINGERPRINT` in the versioned Gateway/REST profile module.
+
+Offline consistency tests use `fixtures/rest/client-identity-profiles.json` for Windows, macOS, Linux, and a non-en-US locale, comparing REST user-agent/locale and decoded `x-super-properties` against the actual Gateway Identify properties.
 
 The credential-free CDN client (`fixtures/`, `assets/`, signed attachment URLs) is a separate `RestClient`-independent HTTP client with no default headers and no `Authorization`, and never receives these headers.
 
