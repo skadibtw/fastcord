@@ -14,6 +14,11 @@
 //! a wrongly labelled YUV picture. Film grain and native in-loop filters stay
 //! enabled. Eight-bit luma is borrowed directly from the native picture; only
 //! UV interleaving/subsampling and high-bit-depth reduction need scratch data.
+//! Each callback carries the native sequence's matrix and quantization range.
+//! Sample aspect comes from that picture's AV1 render size (including
+//! show-existing frames). Unspecified matrix defaults to BT.709; unsupported
+//! explicit matrices are rejected rather than mislabelled. See
+//! [`ColorDescription`] for the limited-range/square-pixel defaults.
 //!
 //! Encoded input is capped at [`MAX_ENCODED_BYTES`]; retained native picture
 //! allocations (including unused reusable slots, alignment and padding) are
@@ -34,7 +39,7 @@ use crate::codec::{
     Backend, BackendKind, CodecError, DecodedFrame, MAX_DIMENSION, MAX_PIXELS, VideoDecoder,
     check_dimensions,
 };
-use crate::frame::Nv12;
+use crate::frame::{ColorDescription, ColorMatrix, ColorRange, Nv12};
 
 pub const API: &str = "dav1d";
 pub const VERSION: &str = "1.5.4";
@@ -57,6 +62,10 @@ struct NativePicture {
     bitdepth: u32,
     layout: u32,
     timestamp_ns: i64,
+    matrix: u32,
+    full_range: u32,
+    render_width: u32,
+    render_height: u32,
 }
 
 impl Default for NativePicture {
@@ -70,6 +79,10 @@ impl Default for NativePicture {
             bitdepth: 0,
             layout: 0,
             timestamp_ns: 0,
+            matrix: 2,
+            full_range: 0,
+            render_width: 0,
+            render_height: 0,
         }
     }
 }
@@ -221,6 +234,7 @@ impl Decoder {
                 "dav1d returned an unknown pixel format",
             ));
         }
+        let color = picture_color(picture)?;
         let timestamp = u64::try_from(picture.timestamp_ns)
             .map(Duration::from_nanos)
             .map_err(|_| CodecError::InvalidBitstream("AV1 picture has no input timestamp"))?;
@@ -273,9 +287,48 @@ impl Decoder {
             &self.chroma,
             uv_stride,
         )?;
-        out(DecodedFrame { image, timestamp });
+        out(DecodedFrame {
+            image,
+            color,
+            timestamp,
+        });
         Ok(())
     }
+}
+
+fn picture_color(picture: &NativePicture) -> Result<ColorDescription, CodecError> {
+    let matrix = ColorMatrix::from_h273(picture.matrix).ok_or(CodecError::Unsupported(
+        "AV1 color matrix is not BT.601/709/2020 NCL",
+    ))?;
+    let range = match picture.full_range {
+        0 => ColorRange::Limited,
+        1 => ColorRange::Full,
+        _ => return Err(CodecError::InvalidBitstream("invalid AV1 sample range")),
+    };
+    // AV1 signals display geometry via each frame's render size, not a SAR
+    // field in the sequence header. This also survives show-existing frames.
+    let numerator = u64::from(picture.render_width) * u64::from(picture.height);
+    let denominator = u64::from(picture.render_height) * u64::from(picture.width);
+    if numerator == 0 || denominator == 0 {
+        return Err(CodecError::InvalidBitstream(
+            "invalid AV1 render dimensions",
+        ));
+    }
+    let (mut a, mut b) = (numerator, denominator);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let pixel_aspect_ratio = (
+        u32::try_from(numerator / a)
+            .map_err(|_| CodecError::Unsupported("AV1 sample aspect ratio is too large"))?,
+        u32::try_from(denominator / a)
+            .map_err(|_| CodecError::Unsupported("AV1 sample aspect ratio is too large"))?,
+    );
+    Ok(ColorDescription {
+        matrix,
+        range,
+        pixel_aspect_ratio,
+    })
 }
 
 impl VideoDecoder for Decoder {

@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use crate::frame::{FrameError, Nv12};
+use crate::frame::{ColorDescription, FrameError, Nv12};
 
 /// Largest accepted picture width or height, in pixels.
 pub const MAX_DIMENSION: u32 = 4096;
@@ -108,11 +108,14 @@ impl fmt::Debug for EncodedFrame {
 }
 
 /// A decoded picture, borrowed from the decoder for the duration of the
-/// callback that receives it. Copy what must outlive the callback.
+/// callback that receives it. [`crate::frame::FramePool::lease`] preserves it
+/// beyond the callback with one copy (or direct BGRA conversion).
 #[derive(Clone, Copy, Debug)]
 pub struct DecodedFrame<'a> {
     /// The display area (cropping already applied).
     pub image: Nv12<'a>,
+    /// Matrix, sample range and pixel aspect ratio of the visible image.
+    pub color: ColorDescription,
     pub timestamp: Duration,
 }
 

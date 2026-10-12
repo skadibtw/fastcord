@@ -42,6 +42,7 @@ pub struct VoiceControls {
     pub server_muted: bool,
     pub server_deafened: bool,
     pub participants: Vec<VoiceParticipant>,
+    pub streams: Arc<[StreamOffer]>,
     pub volumes: Vec<UserVolume>,
     pub input_device: fastcord_audio::DeviceChoice,
     pub output_device: fastcord_audio::DeviceChoice,
@@ -53,6 +54,13 @@ pub struct VoiceControls {
     pub noise_generation: u64,
     /// The running engine's actual state; `None` outside a call.
     pub noise_status: Option<fastcord_audio::NoiseSuppressionStatus>,
+}
+
+/// A Go Live offer in the parent voice channel; at most 32, keys only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamOffer {
+    pub key: String,
+    pub owner: Snowflake,
 }
 impl VoiceControls {
     pub fn capture_enabled(&self) -> bool {
@@ -344,14 +352,11 @@ pub enum Command {
     },
     CloseReactionUsers,
     OpenPrivate(Vec<Snowflake>),
-    #[allow(dead_code)]
     Stream(StreamIntent),
 }
 
-/// An explicit Go Live control action. Video capture and encoding are not
-/// started by these signaling intents.
+/// An explicit Go Live control action. Capture/send UI belongs to milestone 29.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum StreamIntent {
     Create(StreamCreateRequest),
     Watch(String),
@@ -455,6 +460,7 @@ pub struct NavigationBridge {
     commands: mpsc::Sender<Command>,
     command_receiver: Arc<Mutex<Option<mpsc::Receiver<Command>>>>,
     outbox_slots: Slots,
+    watched: Arc<parking_lot::Mutex<Option<Arc<crate::playback::Session>>>>,
 }
 
 impl NavigationBridge {
@@ -474,6 +480,7 @@ impl NavigationBridge {
             commands,
             command_receiver: Arc::new(Mutex::new(Some(receiver))),
             outbox_slots: Slots::default(),
+            watched: Arc::default(),
         }
     }
 
@@ -592,19 +599,43 @@ impl NavigationBridge {
     }
 
     /// Watches the named Go Live stream through opcode 20.
-    #[allow(dead_code)]
     pub fn watch_stream(&self, stream_key: impl Into<String>) -> bool {
         let stream_key = stream_key.into();
-        StreamKey::from_wire(&stream_key)
-            .is_some_and(|_| self.stream_intent(StreamIntent::Watch(stream_key)))
+        if StreamKey::from_wire(&stream_key).is_none() {
+            return false;
+        }
+        let mut watched = self.watched.lock();
+        if watched.is_some() {
+            return false;
+        }
+        let session = crate::playback::Session::new(stream_key.clone());
+        *watched = Some(session.clone());
+        if self.stream_intent(StreamIntent::Watch(stream_key)) {
+            true
+        } else {
+            session.close();
+            *watched = None;
+            false
+        }
     }
 
     /// Stops watching (or ends an owned stream) through opcode 19.
-    #[allow(dead_code)]
     pub fn unwatch_stream(&self, stream_key: impl Into<String>) -> bool {
         let stream_key = stream_key.into();
-        StreamKey::from_wire(&stream_key)
-            .is_some_and(|_| self.stream_intent(StreamIntent::Unwatch(stream_key)))
+        if StreamKey::from_wire(&stream_key).is_none()
+            || !self.stream_intent(StreamIntent::Unwatch(stream_key.clone()))
+        {
+            return false;
+        }
+        let mut watched = self.watched.lock();
+        if watched
+            .as_ref()
+            .is_some_and(|session| session.key == stream_key)
+            && let Some(session) = watched.take()
+        {
+            session.close();
+        }
+        true
     }
 
     #[allow(dead_code)]
@@ -623,6 +654,16 @@ impl NavigationBridge {
 
     fn stream_intent(&self, intent: StreamIntent) -> bool {
         self.commands.try_send(Command::Stream(intent)).is_ok()
+    }
+
+    pub fn watched(&self) -> Option<Arc<crate::playback::Session>> {
+        self.watched.lock().clone()
+    }
+
+    pub fn stop_playback(&self) {
+        if let Some(session) = self.watched.lock().take() {
+            session.close();
+        }
     }
 
     /// The worker's end of the command queue; there is only one.
@@ -1433,6 +1474,10 @@ impl Worker {
         let Some(request) = *self.voice_requests.borrow_and_update() else {
             return false;
         };
+        if let Some(session) = self.bridge.watched() {
+            self.stream_command(gateway, StreamIntent::Unwatch(session.key.clone()));
+        }
+        self.stop_all_streams();
         if let Some(channel) = request.channel_id {
             if let Some(correlator) = self.voice_correlator.as_mut() {
                 correlator.join(request.guild_id, channel);
@@ -1571,14 +1616,68 @@ impl Worker {
             StreamCorrelation::Connect(credentials) => {
                 let key = credentials.key.clone();
                 self.stop_stream_key(&key.to_wire());
-                self.stream_tasks
-                    .insert(key, tokio::spawn(stream_audio::run(credentials)));
+                let presentation = self
+                    .bridge
+                    .watched()
+                    .filter(|session| session.key == key.to_wire())
+                    // An owned stream has no receive pane yet (capture/send is
+                    // M29); keep its independent RTC lifecycle without decoding.
+                    .unwrap_or_else(|| crate::playback::Session::new(key.to_wire()));
+                let status_session = presentation.clone();
+                let status: stream_video::StatusSink = Arc::new(move |status| {
+                    use stream_video::StreamStatus;
+                    status_session.status(match status {
+                        StreamStatus::Connecting => crate::playback::Status::Connecting,
+                        StreamStatus::Decoding { backend } => {
+                            crate::playback::Status::Playing(backend)
+                        }
+                        StreamStatus::Suspended => crate::playback::Status::Waiting,
+                        StreamStatus::Failed(error) => crate::playback::Status::Failed(error),
+                        StreamStatus::Ended => crate::playback::Status::Ended,
+                    });
+                });
+                self.stream_tasks.insert(
+                    key,
+                    tokio::spawn(stream_audio::run(
+                        credentials,
+                        presentation.visible.clone(),
+                        presentation.visibility(),
+                        Box::new(presentation.sink()),
+                        status,
+                    )),
+                );
             }
-            StreamCorrelation::Reallocating { key, .. } | StreamCorrelation::Ended { key, .. } => {
-                self.stop_stream_key(&key.to_wire())
+            StreamCorrelation::Reallocating { key, .. } => {
+                self.stop_stream_key(&key.to_wire());
+                if let Some(session) = self
+                    .bridge
+                    .watched()
+                    .filter(|session| session.key == key.to_wire())
+                {
+                    session.status(crate::playback::Status::Connecting);
+                }
+            }
+            StreamCorrelation::Ended { key, .. } => {
+                self.stop_stream_key(&key.to_wire());
+                if let Some(session) = self
+                    .bridge
+                    .watched()
+                    .filter(|session| session.key == key.to_wire())
+                {
+                    session.status(crate::playback::Status::Ended);
+                }
             }
             StreamCorrelation::Invalid { key: Some(key), .. } => {
-                self.stop_stream_key(&key.to_wire())
+                self.stop_stream_key(&key.to_wire());
+                if let Some(session) = self
+                    .bridge
+                    .watched()
+                    .filter(|session| session.key == key.to_wire())
+                {
+                    session.status(crate::playback::Status::Failed(
+                        "The stream's RTC identity or endpoint is invalid.".into(),
+                    ));
+                }
             }
             StreamCorrelation::Invalid { key: None, .. }
             | StreamCorrelation::Ignored
@@ -1599,6 +1698,7 @@ impl Worker {
         for (_, task) in self.stream_tasks.drain() {
             task.abort();
         }
+        self.bridge.stop_playback();
     }
 
     /// Ends the current call's audio: asks it to leave gracefully (speech ended, voice session
@@ -1637,7 +1737,10 @@ impl Worker {
                     self.bridge.voice_controls.clone(),
                 )));
             }
-            Correlation::Ended | Correlation::Reallocating => self.stop_voice().await,
+            Correlation::Ended | Correlation::Reallocating => {
+                self.stop_all_streams();
+                self.stop_voice().await;
+            }
             Correlation::Ignored | Correlation::Waiting => {}
         }
     }
@@ -1701,6 +1804,40 @@ impl Worker {
             .refresh(&self.rest, &navigation, &request.timeline);
         let timeline = self.tracker.history.snapshot();
         let emoji = emoji_picker::snapshot(&request.emoji, &self.tracker.store, &navigation);
+        let parent = *self.bridge.voice_requests.borrow();
+        let offers = parent
+            .and_then(|parent| parent.guild_id.zip(parent.channel_id))
+            .and_then(|(guild, channel)| {
+                self.tracker.store.guild(guild).map(|entry| {
+                    entry
+                        .voice_states()
+                        .filter(|voice| {
+                            voice.self_stream
+                                && voice.channel_id == Some(channel)
+                                && Some(voice.user_id) != self.stream_intents.user_id
+                        })
+                        .take(32)
+                        .map(|voice| StreamOffer {
+                            key: StreamKey::Guild {
+                                guild_id: guild,
+                                channel_id: channel,
+                                owner_id: voice.user_id,
+                            }
+                            .to_wire(),
+                            owner: voice.user_id,
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default();
+        self.bridge.voice_controls.send_if_modified(|controls| {
+            if controls.streams.as_ref() == offers.as_slice() {
+                false
+            } else {
+                controls.streams = offers.into();
+                true
+            }
+        });
         self.bridge.publish(navigation, timeline, emoji, status)
     }
 }
@@ -1912,6 +2049,7 @@ pub struct GatewayPanel {
     pub emoji: emoji::State,
     pub emoji_picker: emoji_picker::Picker,
     pub emoji_snapshot: Arc<emoji_picker::Snapshot>,
+    pub watch_open: bool,
     _worker: Handle,
     pub attachments: Option<AttachmentCache>,
     /// Render state for the account's cached/downloaded attachment previews.
@@ -1927,6 +2065,12 @@ pub struct GatewayPanel {
     /// The larger view of one image, if open; dropping it cancels its decode.
     pub attachment_viewer: Option<crate::attachment_ui::AttachmentViewer>,
     pub attachment_notice: Option<&'static str>,
+}
+
+impl Drop for GatewayPanel {
+    fn drop(&mut self) {
+        self.controls.stop_playback();
+    }
 }
 
 impl fmt::Debug for GatewayPanel {
@@ -2025,6 +2169,7 @@ impl GatewayPanel {
             emoji: emoji::State::default(),
             emoji_picker: emoji_picker::Picker::default(),
             emoji_snapshot: Arc::default(),
+            watch_open: false,
             voice_guild: None,
             composer: Composer::default(),
             confirm_delete: None,
@@ -2080,6 +2225,9 @@ impl GatewayPanel {
             self.attachment_viewer = None;
         }
         self.private.notice = consumed.private_notice;
+        if self.controls.watched().is_none() {
+            self.watch_open = false;
+        }
         self.composer.select(self.timeline.channel_id);
         if self
             .confirm_delete
@@ -2262,6 +2410,35 @@ mod bridge_tests {
             Ok(Command::Stream(StreamIntent::Unwatch(actual))) if actual == key
         ));
         assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn watch_slot_is_single_and_full_commands_do_not_claim_an_unwatch() {
+        use std::sync::atomic::Ordering;
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        for _ in 0..COMMAND_QUEUE {
+            assert!(bridge.ping_stream("guild:41:127:1"));
+        }
+        assert!(!bridge.watch_stream("guild:41:127:99"));
+        assert!(bridge.watched().is_none());
+        while commands.try_recv().is_ok() {}
+        assert!(bridge.watch_stream("guild:41:127:99"));
+        let session = bridge.watched().unwrap();
+        session.set_visible(true);
+        assert!(!bridge.watch_stream("guild:41:127:98"));
+        for _ in 1..COMMAND_QUEUE {
+            assert!(bridge.ping_stream("guild:41:127:1"));
+        }
+        assert!(!bridge.unwatch_stream(session.key.clone()));
+        assert!(session.active.load(Ordering::Acquire));
+        assert!(bridge.watched().is_some());
+        let _ = commands.try_recv().unwrap();
+        assert!(bridge.unwatch_stream(session.key.clone()));
+        assert!(bridge.watched().is_none());
+        assert!(!session.active.load(Ordering::Acquire));
+        assert!(!session.visible.load(Ordering::Acquire));
+        assert!(session.frame().is_none());
     }
     #[test]
     fn a_full_gateway_signal_queue_retains_the_accepted_app_intent_for_retry() {

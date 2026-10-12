@@ -55,6 +55,10 @@ struct fc_av1_picture {
     unsigned bitdepth;
     unsigned layout; /* dav1d: I400=0, I420=1, I422=2, I444=3 */
     int64_t timestamp_ns;
+    unsigned matrix;
+    unsigned full_range;
+    unsigned render_width;
+    unsigned render_height;
 };
 
 static int valid_dimensions(const struct fc_av1_decoder *d, int w, int h) {
@@ -239,6 +243,10 @@ static int export_picture(struct fc_av1_decoder *d, struct fc_av1_picture *out) 
     out->bitdepth = (unsigned)p->p.bpc;
     out->layout = (unsigned)p->p.layout;
     out->timestamp_ns = p->m.timestamp;
+    out->matrix = (unsigned)p->seq_hdr->mtrx;
+    out->full_range = p->seq_hdr->color_range;
+    out->render_width = (unsigned)p->frame_hdr->render_width;
+    out->render_height = (unsigned)p->frame_hdr->render_height;
     out->strides[0] = (size_t)p->stride[0];
     out->strides[1] = (size_t)p->stride[1];
     out->lengths[0] = out->strides[0] * (out->height - 1) +

@@ -5,7 +5,8 @@
 //! decoder check that needs no reference encoder. `fixtures/video/
 //! ipcm-128x96.h264` is the committed output of [`ipcm_stream`].
 
-use crate::h264::{NAL_AUD, NAL_PPS, NAL_SEI, NAL_SPS, nal_unit_type};
+use crate::frame::{ColorDescription, ColorMatrix, ColorRange};
+use crate::h264::{NAL_AUD, NAL_PPS, NAL_SEI, NAL_SPS, nal_unit_type, nal_units};
 
 /// MSB-first RBSP writer.
 #[derive(Default)]
@@ -163,11 +164,22 @@ fn push_nal(stream: &mut Vec<u8>, header: u8, rbsp: &[u8]) {
 
 /// Constrained Baseline, level 3.0, 128x96, pic_order_cnt_type 2.
 fn sps() -> Vec<u8> {
+    sps_rbsp(0, None)
+}
+
+/// The fixture's valid SPS with explicit VUI metadata and a chosen SPS id.
+pub fn color_sps(id: u32, color: ColorDescription) -> Vec<u8> {
+    let mut nal = vec![0x67];
+    nal.extend(escape(&sps_rbsp(id, Some(color))));
+    nal
+}
+
+fn sps_rbsp(id: u32, color: Option<ColorDescription>) -> Vec<u8> {
     let mut bits = BitWriter::default();
     bits.bits(66, 8); // profile_idc: Baseline
     bits.bits(0xC0, 8); // constraint_set0_flag, constraint_set1_flag
     bits.bits(30, 8); // level_idc
-    bits.ue(0); // seq_parameter_set_id
+    bits.ue(id); // seq_parameter_set_id
     bits.ue(0); // log2_max_frame_num_minus4
     bits.ue(2); // pic_order_cnt_type: output order is decoding order
     bits.ue(1); // max_num_ref_frames
@@ -177,7 +189,32 @@ fn sps() -> Vec<u8> {
     bits.flag(true); // frame_mbs_only_flag
     bits.flag(true); // direct_8x8_inference_flag
     bits.flag(false); // frame_cropping_flag
-    bits.flag(false); // vui_parameters_present_flag
+    bits.flag(color.is_some()); // vui_parameters_present_flag
+    if let Some(color) = color {
+        bits.flag(true); // aspect_ratio_info_present_flag
+        bits.bits(255, 8); // Extended_SAR
+        bits.bits(u64::from(color.pixel_aspect_ratio.0), 16);
+        bits.bits(u64::from(color.pixel_aspect_ratio.1), 16);
+        bits.flag(false); // overscan_info_present_flag
+        bits.flag(true); // video_signal_type_present_flag
+        bits.bits(5, 3); // unspecified video format
+        bits.flag(color.range == ColorRange::Full);
+        bits.flag(true); // colour_description_present_flag
+        let (primaries, transfer, matrix) = match color.matrix {
+            ColorMatrix::Bt601 => (6, 6, 6),
+            ColorMatrix::Bt709 => (1, 1, 1),
+            ColorMatrix::Bt2020 => (9, 14, 9),
+        };
+        bits.bits(primaries, 8);
+        bits.bits(transfer, 8);
+        bits.bits(matrix, 8);
+        bits.flag(false); // chroma_loc_info_present_flag
+        bits.flag(false); // timing_info_present_flag
+        bits.flag(false); // nal_hrd_parameters_present_flag
+        bits.flag(false); // vcl_hrd_parameters_present_flag
+        bits.flag(false); // pic_struct_present_flag
+        bits.flag(false); // bitstream_restriction_flag
+    }
     bits.trailing();
     bits.finish()
 }
@@ -251,6 +288,22 @@ pub fn ipcm_stream() -> Vec<u8> {
         }
         let header = if picture.idr { 0x65 } else { 0x61 };
         push_nal(&mut stream, header, &slice(picture, index));
+    }
+    stream
+}
+
+/// Reuses the fixture's real I_PCM slices/PPS, changing only its SPS VUI.
+pub fn ipcm_stream_with_color(color: ColorDescription) -> Vec<u8> {
+    let original = ipcm_stream();
+    let replacement = color_sps(0, color);
+    let mut stream = Vec::new();
+    for nal in nal_units(&original) {
+        stream.extend_from_slice(&[0, 0, 0, 1]);
+        stream.extend_from_slice(if nal_unit_type(nal) == NAL_SPS {
+            &replacement
+        } else {
+            nal
+        });
     }
     stream
 }

@@ -11,7 +11,10 @@
 #define FC_START_CODE_SIZE 4
 
 typedef void (*FcEncoded)(void *, const uint8_t *, size_t, uint64_t, int);
-typedef void (*FcDecoded)(void *, const uint8_t *, size_t, size_t, const uint8_t *, size_t, size_t, size_t, size_t, uint64_t);
+typedef struct {
+    uint32_t matrix, full_range, aspect_width, aspect_height;
+} FcColor;
+typedef void (*FcDecoded)(void *, const uint8_t *, size_t, size_t, const uint8_t *, size_t, size_t, size_t, size_t, uint64_t, const FcColor *);
 
 typedef struct {
     VTCompressionSessionRef session;
@@ -31,6 +34,7 @@ typedef struct {
     uint32_t width, height;
     int hardware;
     int allow_software_fallback;
+    int output_full_range;
     FcDecoded callback;
     void *callback_context;
     OSStatus callback_status;
@@ -192,6 +196,43 @@ void fc_vt_encoder_destroy(void *handle) {
     free(e);
 }
 
+/* Buffer attachments describe actual output pixels. A format extension is a
+ * fallback when the decoder does not attach the value to its CVPixelBuffer. */
+static CFTypeRef decoded_attachment(FcDecoder *d, CVPixelBufferRef p, CFStringRef buffer_key, CFStringRef format_key) {
+    CFTypeRef value = CVBufferGetAttachment(p, buffer_key, NULL);
+    return value ? value : CMFormatDescriptionGetExtension(d->format, format_key);
+}
+
+static FcColor decoded_color(FcDecoder *d, CVPixelBufferRef p) {
+    FcColor color = {0};
+    OSType pixel = CVPixelBufferGetPixelFormatType(p);
+    color.full_range = pixel == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ? 1 :
+                       pixel == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ? 0 : UINT32_MAX;
+    CFTypeRef matrix = decoded_attachment(d, p, kCVImageBufferYCbCrMatrixKey, kCMFormatDescriptionExtension_YCbCrMatrix);
+    if (matrix && CFGetTypeID(matrix) == CFStringGetTypeID()) {
+        if (CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2)) color.matrix = 1;
+        else if (CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_601_4)) color.matrix = 6;
+        else if (CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_2020)) color.matrix = 9;
+        else color.matrix = UINT32_MAX;
+    }
+    CFTypeRef aspect = decoded_attachment(d, p, kCVImageBufferPixelAspectRatioKey, kCMFormatDescriptionExtension_PixelAspectRatio);
+    if (aspect && CFGetTypeID(aspect) == CFDictionaryGetTypeID()) {
+        CFTypeRef horizontal = CFDictionaryGetValue((CFDictionaryRef)aspect, kCVImageBufferPixelAspectRatioHorizontalSpacingKey);
+        CFTypeRef vertical = CFDictionaryGetValue((CFDictionaryRef)aspect, kCVImageBufferPixelAspectRatioVerticalSpacingKey);
+        if (!horizontal) horizontal = CFDictionaryGetValue((CFDictionaryRef)aspect, kCMFormatDescriptionKey_PixelAspectRatioHorizontalSpacing);
+        if (!vertical) vertical = CFDictionaryGetValue((CFDictionaryRef)aspect, kCMFormatDescriptionKey_PixelAspectRatioVerticalSpacing);
+        int64_t width = 0, height = 0;
+        if (horizontal && vertical && CFGetTypeID(horizontal) == CFNumberGetTypeID() && CFGetTypeID(vertical) == CFNumberGetTypeID() &&
+            CFNumberGetValue((CFNumberRef)horizontal, kCFNumberSInt64Type, &width) &&
+            CFNumberGetValue((CFNumberRef)vertical, kCFNumberSInt64Type, &height) &&
+            width > 0 && height > 0 && width <= UINT32_MAX && height <= UINT32_MAX) {
+            color.aspect_width = (uint32_t)width;
+            color.aspect_height = (uint32_t)height;
+        }
+    }
+    return color;
+}
+
 static void decompression_output(void *refcon, void *source, OSStatus status, VTDecodeInfoFlags flags, CVImageBufferRef image, CMTime pts, CMTime duration) {
     (void)source; (void)flags; (void)duration;
     FcDecoder *d = refcon;
@@ -215,13 +256,14 @@ static void decompression_output(void *refcon, void *source, OSStatus status, VT
     y += top * ys + x;
     uv += (top / 2) * uvs + x;
     uint64_t ns = pts.timescale > 0 && pts.value >= 0 ? (uint64_t)((long double)pts.value * 1000000000.0L / pts.timescale) : 0;
-    d->callback(d->callback_context, y, ys, width, uv, uvs, width, width, height, ns);
+    FcColor color = decoded_color(d, p);
+    d->callback(d->callback_context, y, ys, width, uv, uvs, (width + 1) & ~(size_t)1, width, height, ns, &color);
     CVPixelBufferUnlockBaseAddress(p, kCVPixelBufferLock_ReadOnly);
 }
 
 static OSStatus create_decompression_session(FcDecoder *d, int hardware) {
     VTDecompressionOutputCallbackRecord cb = { decompression_output, d };
-    int32_t pixel = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    int32_t pixel = d->output_full_range ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
     CFNumberRef fmt = number_i32(pixel);
     CFDictionaryRef surface = CFDictionaryCreate(kCFAllocatorDefault, NULL, NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     const void *keys[] = { kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferIOSurfacePropertiesKey };
@@ -262,8 +304,9 @@ static size_t start_code(const uint8_t *p, size_t n, size_t from) {
     return n;
 }
 
-int fc_vt_decoder_decode(void *handle, const uint8_t *data, size_t len, uint64_t timestamp_ns, FcDecoded callback, void *context) {
+int fc_vt_decoder_decode(void *handle, const uint8_t *data, size_t len, uint64_t timestamp_ns, int full_range, FcDecoded callback, void *context) {
     FcDecoder *d = handle; d->callback = callback; d->callback_context = context; d->callback_status = noErr;
+    d->output_full_range = full_range != 0;
     size_t sps_at = 0, sps_n = 0, pps_at = 0, pps_n = 0;
     size_t at = start_code(data, len, 0);
     while (at < len) {

@@ -12,6 +12,7 @@ mod history;
 mod login;
 mod navigation;
 mod outbox;
+mod playback;
 mod qr;
 mod reactions;
 mod render;
@@ -61,6 +62,7 @@ struct App {
     audio_settings: audio_devices::Settings,
     audio_saving: Option<audio_devices::Preferences>,
     window_active: bool,
+    window_drawable: bool,
 }
 
 #[derive(Debug)]
@@ -116,6 +118,10 @@ enum Message {
     SelectGuild(Snowflake),
     SelectChannel(Snowflake, Snowflake),
     LeaveVoice,
+    WatchStream(String),
+    UnwatchStream,
+    ShowStream(bool),
+    VideoReady(u64),
     GuildViewport(virtual_list::Window),
     ChannelViewport(virtual_list::Window),
     SetSelfMute(bool),
@@ -161,6 +167,7 @@ enum Message {
     ),
     EmojiTick(std::time::Instant),
     WindowActive(bool),
+    WindowSize(iced::Size),
 }
 impl App {
     fn boot() -> (Self, Task<Message>) {
@@ -180,6 +187,7 @@ impl App {
                 audio_settings: audio_devices::Settings::default(),
                 audio_saving: None,
                 window_active: true,
+                window_drawable: true,
             },
             Task::perform(
                 async {
@@ -192,9 +200,13 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        let resynchronize = !matches!(message, Message::EmojiTick(_) | Message::EmojiLoaded(..));
+        let resynchronize = !matches!(
+            message,
+            Message::EmojiTick(_) | Message::EmojiLoaded(..) | Message::VideoReady(_)
+        );
         let task = self.handle(message);
         if resynchronize {
+            self.synchronize_video();
             Task::batch([task, self.synchronize_emoji()])
         } else {
             task
@@ -209,22 +221,58 @@ impl App {
             .controls
             .emoji_request(&gateway.emoji_picker.request);
         gateway.emoji.synchronize(
-            self.window_active && !self.audio_settings.open && gateway.attachment_viewer.is_none(),
+            self.window_active
+                && self.window_drawable
+                && !self.audio_settings.open
+                && !gateway.watch_open
+                && gateway.attachment_viewer.is_none(),
             gateway.emoji_picker.request.open,
             gateway.id,
             gateway.attachments.as_ref(),
         )
     }
 
+    fn synchronize_video(&self) {
+        if let Phase::Account { gateway, .. } = &self.phase
+            && let Some(session) = gateway.controls.watched()
+        {
+            session.set_visible(
+                self.window_active
+                    && self.window_drawable
+                    && gateway.watch_open
+                    && !self.audio_settings.open
+                    && gateway.attachment_viewer.is_none()
+                    && !gateway.emoji_picker.request.open,
+            );
+        }
+    }
+
+    fn video_subscription(&self) -> iced::Subscription<Message> {
+        if let Phase::Account { gateway, .. } = &self.phase
+            && let Some(session) = gateway.controls.watched()
+        {
+            session.subscription().map(Message::VideoReady)
+        } else {
+            iced::Subscription::none()
+        }
+    }
+
     fn subscription(&self) -> iced::Subscription<Message> {
         let activity = iced::event::listen_with(|event, _, _| match event {
+            iced::Event::Window(iced::window::Event::Resized(size)) => {
+                Some(Message::WindowSize(size))
+            }
             iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowActive(true)),
             iced::Event::Window(iced::window::Event::Unfocused | iced::window::Event::Closed) => {
                 Some(Message::WindowActive(false))
             }
             _ => None,
         });
-        iced::Subscription::batch([activity, self.animation_subscription()])
+        iced::Subscription::batch([
+            activity,
+            self.animation_subscription(),
+            self.video_subscription(),
+        ])
     }
 
     /// The 20 ms animation timer exists only while a visible, active emoji animates.
@@ -507,6 +555,54 @@ impl App {
                         .controls
                         .request_voice_state(VoiceStateRequest::leave(Some(guild)));
                 }
+                if let Phase::Account { gateway, .. } = &mut self.phase
+                    && let Some(session) = gateway.controls.watched()
+                {
+                    if !gateway.controls.unwatch_stream(session.key.clone()) {
+                        self.notice = Some(
+                            "Could not queue Stop watching; retry before leaving voice.".into(),
+                        );
+                    }
+                    gateway.watch_open = false;
+                }
+            }
+            Message::WatchStream(key) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    let controls = gateway.controls.voice_controls();
+                    if gateway.controls.voice_audio_state() == gateway::VoiceAudioState::Running
+                        && controls.streams.iter().any(|offer| offer.key == key)
+                        && gateway.controls.watch_stream(key)
+                    {
+                        gateway.watch_open = true;
+                        self.notice = None;
+                    } else {
+                        self.notice = Some("Could not watch this stream. Join its voice channel, or stop the current watch and retry.".into());
+                    }
+                }
+            }
+            Message::UnwatchStream => {
+                if let Phase::Account { gateway, .. } = &mut self.phase
+                    && let Some(session) = gateway.controls.watched()
+                {
+                    if gateway.controls.unwatch_stream(session.key.clone()) {
+                        gateway.watch_open = false;
+                        self.notice = None;
+                    } else {
+                        self.notice = Some("Could not queue Stop watching; retry.".into());
+                    }
+                }
+            }
+            Message::ShowStream(open) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.watch_open = open && gateway.controls.watched().is_some();
+                }
+            }
+            Message::VideoReady(id) => {
+                if let Phase::Account { gateway, .. } = &self.phase
+                    && let Some(session) = gateway.controls.watched()
+                {
+                    session.consume(id);
+                }
             }
             Message::SetSelfMute(muted) => {
                 if let Phase::Account { gateway, .. } = &self.phase {
@@ -593,6 +689,9 @@ impl App {
                 }
             }
             Message::WindowActive(active) => self.window_active = active,
+            Message::WindowSize(size) => {
+                self.window_drawable = size.width > 0.0 && size.height > 0.0
+            }
             Message::EmojiTick(now) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.emoji.tick(now);
@@ -1023,6 +1122,27 @@ impl App {
                     .spacing(8),
                 );
             }
+            let watching = gateway.controls.watched();
+            let mut streams = row![text("Go Live").size(14)].spacing(10);
+            if let Some(watching) = &watching {
+                streams = streams
+                    .push(text(watching.description()).size(12))
+                    .push(button("Show stream").on_press(Message::ShowStream(true)))
+                    .push(button("Stop watching").on_press(Message::UnwatchStream));
+            } else {
+                for offer in voice_controls.streams.iter() {
+                    streams = streams.push(
+                        button(text(format!("Watch User {}", offer.owner.0))).on_press_maybe(
+                            (voice_audio == gateway::VoiceAudioState::Running)
+                                .then(|| Message::WatchStream(offer.key.clone())),
+                        ),
+                    );
+                }
+                if voice_controls.streams.is_empty() {
+                    streams =
+                        streams.push(text("Join voice to watch an available stream.").size(12));
+                }
+            }
             let account = container(
                 column![
                     row![
@@ -1093,6 +1213,8 @@ impl App {
                     text(voice_controls.input_error.map_or_else(String::new, |error| format!("Microphone stopped: {error}. Open Audio devices to retry."))).size(12),
                     text(voice_controls.output_error.map_or_else(String::new, |error| format!("Playback stopped: {error}. Explicit devices never fall back; open Audio devices to retry."))).size(12),
                     scrollable(participants).height(Length::Fixed(160.0)),
+                    scrollable(streams).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::default())).height(Length::Fixed(42.0)),
+                    text(self.notice.as_deref().unwrap_or("")).size(12),
                     text(gateway.attachment_notice.unwrap_or("")).size(12),
                     navigation::view(
                         &gateway.navigation,
@@ -1119,6 +1241,33 @@ impl App {
             // The larger image view covers the account screen, which stays in
             // the widget tree underneath so the timeline keeps its scroll state.
             return match &gateway.attachment_viewer {
+                None if gateway.watch_open
+                    && watching.is_some()
+                    && !gateway.emoji_picker.request.open =>
+                {
+                    let session = watching.expect("watch pane has a session");
+                    let pane = container(
+                        column![
+                            row![
+                                text(session.description()).width(Length::Fill),
+                                button("Back to messages").on_press(Message::ShowStream(false)),
+                                button("Stop watching").on_press(Message::UnwatchStream),
+                            ]
+                            .spacing(12),
+                            text(self.notice.as_deref().unwrap_or("")).size(12),
+                            playback::view::<Message>(session),
+                        ]
+                        .spacing(12),
+                    )
+                    .padding(20)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(Color::from_rgb8(24, 25, 30).into()),
+                        ..Default::default()
+                    });
+                    iced::widget::stack![account, pane].into()
+                }
                 Some(viewer) => {
                     iced::widget::stack![account, attachment_ui::viewer_view(viewer)].into()
                 }
@@ -1966,5 +2115,45 @@ mod tests {
         };
         assert!(gateway.composer.submission(true, 0).is_some(), "text");
         assert!(commands.try_recv().is_err(), "nothing was reacted to");
+    }
+
+    #[test]
+    fn video_subscription_tracks_pane_focus_resize_occlusion_and_unwatch() {
+        use std::sync::atomic::Ordering;
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let bridge = gateway::NavigationBridge::new();
+        let _commands = bridge.take_commands().unwrap();
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        let (_, worker) = iced::Task::<()>::none().abortable();
+        **gateway = GatewayPanel::new(gateway.id, worker, bridge.clone());
+        assert!(bridge.watch_stream("guild:41:127:99"));
+        let watched = bridge.watched().unwrap();
+        assert_eq!(app.video_subscription().units(), 0);
+        let _ = app.update(Message::ShowStream(true));
+        assert_eq!(app.video_subscription().units(), 1);
+        let _ = app.update(Message::WindowActive(false));
+        assert_eq!(app.video_subscription().units(), 0);
+        assert!(!watched.visible.load(Ordering::Acquire));
+        let _ = app.update(Message::WindowActive(true));
+        assert_eq!(app.video_subscription().units(), 1);
+        let _ = app.update(Message::ShowStream(false));
+        assert_eq!(app.video_subscription().units(), 0);
+        let _ = app.update(Message::ShowStream(true));
+        let _ = app.update(Message::OpenAudioSettings);
+        assert_eq!(app.video_subscription().units(), 0);
+        let _ = app.update(Message::CloseAudioSettings);
+        assert_eq!(app.video_subscription().units(), 1);
+        let _ = app.update(Message::WindowSize(iced::Size::ZERO));
+        assert_eq!(app.video_subscription().units(), 0);
+        let _ = app.update(Message::WindowSize(iced::Size::new(640.0, 480.0)));
+        assert_eq!(app.video_subscription().units(), 1);
+        let _ = app.update(Message::UnwatchStream);
+        assert_eq!(app.video_subscription().units(), 0);
+        assert!(bridge.watched().is_none());
+        assert!(!watched.active.load(Ordering::Acquire));
+        assert!(watched.frame().is_none());
     }
 }

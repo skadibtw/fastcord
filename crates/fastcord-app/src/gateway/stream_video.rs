@@ -1,32 +1,26 @@
-//! Decoding of a watched stream's video (SPEC §8.2, §8.5; milestone 26).
+//! Decoding of a watched stream's video (SPEC §8.2, §8.5; milestone 28).
 //!
-//! The voice session hands over complete, DAVE-opened frames. Decoding never
-//! runs on the session task or the UI thread: [`StreamDecoder`] owns one
-//! dedicated thread per stream session, started by the first AV1 keyframe (a
-//! stream that never sends AV1 costs nothing), fed through a queue bounded in
-//! frames and bytes, and ended with the session. The thread opens its decoder
-//! only when that keyframe reaches it and frees it when the stream leaves AV1
-//! or ends. Codec objects belong to the thread that opened them.
+//! The session supplies complete, DAVE-opened H.264 access units or AV1
+//! temporal units. A dedicated thread starts only for a visible keyframe and
+//! opens the negotiated decoder there: Media Foundation on Windows,
+//! VideoToolbox on macOS, or dav1d for AV1. Linux H.264 is unavailable until
+//! M30 and is not offered by the watch session.
 //!
-//! Frames depend on their predecessors, so nothing is skipped silently. A
-//! decoder error, a decoder that cannot keep up (the queue is full), or a stream
-//! that changed under it breaks the chain: queued and arriving delta frames are
-//! dropped, the sender is asked for a keyframe once
-//! (`MediaSender::request_video_keyframe`, which also makes the voice driver
-//! drop delta frames and send a PLI), and decoding resumes at the next
-//! keyframe. Keyframes that fail to decode are asked for at most three times in
-//! a row, so a stream the decoder cannot handle is never answered with a stream
-//! of keyframes.
+//! The encoded queue is bounded by frames and bytes. A lost dependency breaks
+//! the chain, discards deltas, and requests one keyframe. Consecutive failing
+//! keyframes cause at most three requests. Codec/SSRC changes and suspension
+//! discard the queue and release decoder references on the owning thread.
+//! Resuming requests a keyframe once, without opening a decoder beforehand.
 //!
-//! Decoded pictures are counted and lent, for the duration of one call, to the
-//! frame sink; milestone 28 installs the renderer's hand-off there, and until
-//! then there is none, so they are discarded. Only AV1 is decoded here: the
-//! platform H.264 decoders join with the renderer in milestone 28, and until
-//! then H.264 frames are counted and ignored.
+//! Pictures are borrowed by the sink on the decoding thread. Visibility and
+//! a generation check suppress output from a decode already in flight when
+//! the stream is hidden, replaced, or ended. Native calls cannot be cancelled
+//! mid-frame, but no further frame is submitted while hidden. Failures and
+//! backend choices are reported through a lightweight status callback.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -44,27 +38,43 @@ const MAX_FAILED_KEYFRAMES: u32 = 3;
 /// The RTP clock of video.
 const RTP_CLOCK_HZ: u64 = 90_000;
 
-/// Opens the decoder on the decoding thread.
-pub(super) type OpenDecoder = Box<dyn FnMut() -> Result<Box<dyn VideoDecoder>, CodecError> + Send>;
+/// Opens the selected codec on the decoding thread.
+pub(super) type OpenDecoder =
+    Box<dyn FnMut(VideoCodec) -> Result<Box<dyn VideoDecoder>, CodecError> + Send>;
 /// Asks the stream's sender for a keyframe (PLI) for an SSRC. Never blocks.
 pub(super) type RequestKeyframe = Arc<dyn Fn(u32) -> Result<(), MediaSendError> + Send + Sync>;
 /// Borrows each decoded picture, with the SSRC of its stream, on the decoding
 /// thread.
-pub(super) type Sink = Box<dyn FnMut(u32, DecodedFrame<'_>) + Send>;
+pub type Sink = Box<dyn FnMut(u32, DecodedFrame<'_>) + Send>;
+/// Publishes state changes, never pictures; called from the session or worker.
+pub type StatusSink = Arc<dyn Fn(StreamStatus) + Send + Sync>;
 
-/// What the decoding thread needs; all of it moves to that thread.
+/// State for the actual watch UI. Failures retain a concrete backend/session
+/// explanation rather than silently leaving a permanently empty frame slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamStatus {
+    Connecting,
+    Decoding { backend: String },
+    Suspended,
+    Failed(String),
+    Ended,
+}
+
+/// What the decoding thread needs; all decoder/sink work moves to that thread.
 pub(super) struct Config {
     pub(super) open: OpenDecoder,
     pub(super) request_keyframe: RequestKeyframe,
+    pub(super) visible: Arc<AtomicBool>,
     pub(super) sink: Option<Sink>,
+    pub(super) status: StatusSink,
 }
 
-/// Counters of one stream's decoding. Every AV1 frame offered ends up in
-/// exactly one of `frames_dropped` and `frames_processed`.
+/// Counters of one stream's decoding. During normal operation, every frame
+/// offered ends up in exactly one of `frames_dropped` and `frames_processed`.
 #[cfg(any(test, debug_assertions))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct DecodeStats {
-    /// AV1 frames offered by the session.
+    /// Encoded frames offered by the session.
     pub(super) frames_received: u64,
     /// Frames discarded without reaching the decoder: the queue was full, the
     /// stream waited for a keyframe, or the decoding thread had ended.
@@ -76,7 +86,7 @@ pub(super) struct DecodeStats {
     /// Processed frames that did not decode: the decoder refused them, could
     /// not open, or they continued no stream it had.
     pub(super) decode_errors: u64,
-    /// Frames of a codec without a decoder here (H.264 until milestone 28).
+    /// Processed frames whose codec backend is unavailable on this platform.
     pub(super) frames_unsupported: u64,
     /// Keyframe requests the voice session accepted.
     pub(super) keyframes_requested: u64,
@@ -106,15 +116,29 @@ impl Counters {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stream {
+    codec: VideoCodec,
+    ssrc: u32,
+}
+
 struct Queue {
     frames: VecDeque<ReceivedVideo>,
     bytes: usize,
     /// No decodable chain exists: delta frames are dropped until a keyframe is
     /// queued. True before the first keyframe.
     awaiting_keyframe: bool,
+    /// Identity of the latest received stream, including while hidden.
+    stream: Option<Stream>,
+    last_ssrc: Option<u32>,
+    /// Invalidates a frame already in flight when its references are released.
+    generation: u64,
+    suspended: bool,
+    /// Resume/change needs one PLI once an SSRC is known.
+    request_needed: bool,
     /// A keyframe request the voice session could not take yet.
     retry_request: Option<u32>,
-    /// The stream left AV1: the thread frees its decoder.
+    /// The owner thread must discard its decoder before another frame.
     release_decoder: bool,
     /// The session ended or the decoding thread did.
     closed: bool,
@@ -127,6 +151,14 @@ impl Queue {
         self.frames.clear();
         self.bytes = 0;
         dropped
+    }
+    fn reset(&mut self) -> usize {
+        self.generation = self.generation.wrapping_add(1);
+        self.release_decoder = true;
+        self.awaiting_keyframe = true;
+        self.retry_request = None;
+        self.request_needed = false;
+        self.clear()
     }
 
     fn pop(&mut self) -> Option<ReceivedVideo> {
@@ -142,16 +174,29 @@ struct Shared {
     counters: Counters,
     backend: Mutex<Option<String>>,
     request_keyframe: RequestKeyframe,
+    visible: Arc<AtomicBool>,
+    status: StatusSink,
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Queue> {
         self.queue.lock()
     }
+    fn current(&self, generation: u64) -> bool {
+        if !self.visible.load(Ordering::Acquire) {
+            return false;
+        }
+        let queue = self.lock();
+        !queue.closed && !queue.suspended && queue.generation == generation
+    }
 
     /// Asks the sender for a keyframe. A full control queue is retried with the
     /// next frame, never forgotten.
     fn request(&self, queue: &mut Queue, ssrc: u32) {
+        if queue.suspended || queue.closed || !self.visible.load(Ordering::Acquire) {
+            return;
+        }
+        queue.request_needed = false;
         match (self.request_keyframe)(ssrc) {
             Ok(()) => {
                 queue.retry_request = None;
@@ -163,7 +208,7 @@ impl Shared {
     }
 }
 
-/// The session side of a stream's decoding. Nothing runs before the first AV1
+/// The session side of a stream's decoding. Nothing runs before a visible
 /// keyframe; dropping it ends the thread, which frees the decoder.
 pub(super) struct StreamDecoder {
     shared: Arc<Shared>,
@@ -172,23 +217,38 @@ pub(super) struct StreamDecoder {
 }
 
 impl StreamDecoder {
-    /// A decoder for one stream session: dav1d for AV1, keyframes asked for
-    /// through `media`.
-    pub(super) fn new(media: MediaSender) -> Self {
+    /// Native H.264 or dav1d AV1, with keyframes asked for through `media`.
+    pub(super) fn new(
+        media: MediaSender,
+        visible: Arc<AtomicBool>,
+        sink: Option<Sink>,
+        status: StatusSink,
+    ) -> Self {
         Self::with(Config {
-            open: Box::new(open_av1),
+            open: Box::new(open_decoder),
             request_keyframe: Arc::new(move |ssrc| media.request_video_keyframe(ssrc)),
-            sink: None,
+            visible,
+            sink,
+            status,
         })
     }
 
     pub(super) fn with(config: Config) -> Self {
+        let suspended = !config.visible.load(Ordering::Acquire);
+        if suspended {
+            (config.status)(StreamStatus::Suspended);
+        }
         Self {
             shared: Arc::new(Shared {
                 queue: Mutex::new(Queue {
                     frames: VecDeque::new(),
                     bytes: 0,
                     awaiting_keyframe: true,
+                    stream: None,
+                    last_ssrc: None,
+                    generation: 0,
+                    suspended,
+                    request_needed: false,
                     retry_request: None,
                     release_decoder: false,
                     closed: false,
@@ -197,6 +257,8 @@ impl StreamDecoder {
                 counters: Counters::default(),
                 backend: Mutex::new(None),
                 request_keyframe: config.request_keyframe,
+                visible: config.visible,
+                status: config.status,
             }),
             pending: Some((config.open, config.sink)),
             thread: None,
@@ -223,48 +285,149 @@ impl StreamDecoder {
         }
     }
 
-    /// Offers one frame for decoding without ever blocking the caller.
+    /// Applies the shared gate even if no media is arriving. The session's
+    /// visibility watch wakes this method; the atomic also gates in-flight work.
+    pub(super) fn visibility_changed(&self) {
+        if !self.shared.visible.load(Ordering::Acquire) {
+            self.suspend();
+            return;
+        }
+        let mut queue = self.shared.lock();
+        if !queue.suspended || queue.closed {
+            return;
+        }
+        queue.suspended = false;
+        queue.request_needed = true;
+        if let Some(ssrc) = queue.last_ssrc {
+            self.shared.request(&mut queue, ssrc);
+        }
+        drop(queue);
+        (self.shared.status)(StreamStatus::Connecting);
+    }
+
+    /// The watch publishes only actual changes. Equal successive observed
+    /// values therefore include a coalesced hide/show pulse, which must still
+    /// invalidate references before decoding resumes.
+    pub(super) fn visibility_notified(&self, previous: bool, announced: bool) {
+        if previous || !announced {
+            self.suspend();
+        }
+        self.visibility_changed();
+    }
+
+    /// Clears pending dependencies now and schedules native release on its
+    /// owner, including when a hide/show notification was coalesced.
+    pub(super) fn suspend(&self) {
+        let mut queue = self.shared.lock();
+        if queue.suspended || queue.closed {
+            return;
+        }
+        queue.suspended = true;
+        let dropped = queue.reset();
+        drop(queue);
+        Counters::add(&self.shared.counters.frames_dropped, dropped);
+        self.shared.wake.notify_one();
+        (self.shared.status)(StreamStatus::Suspended);
+    }
+
+    /// Remembers source announcements, allowing a resume PLI before any frame
+    /// has arrived. An inactive/replaced source also frees stale references.
+    pub(super) fn source_changed(&self, ssrc: u32) {
+        let source = (ssrc != 0).then_some(ssrc);
+        let mut queue = self.shared.lock();
+        if queue.closed || queue.last_ssrc == source {
+            return;
+        }
+        let replaced = queue.last_ssrc.is_some();
+        let resume_request = queue.request_needed;
+        let dropped = queue.reset();
+        queue.stream = None;
+        queue.last_ssrc = source;
+        queue.request_needed = (replaced || resume_request) && source.is_some();
+        if resume_request && let Some(ssrc) = source {
+            self.shared.request(&mut queue, ssrc);
+        }
+        drop(queue);
+        Counters::add(&self.shared.counters.frames_dropped, dropped);
+        self.shared.wake.notify_one();
+    }
+
+    /// Offers one frame without doing codec work or waiting for the worker.
     pub(super) fn push(&mut self, frame: ReceivedVideo) {
         let shared = Arc::clone(&self.shared);
         let counters = &shared.counters;
-        if frame.codec != VideoCodec::Av1 {
-            Counters::add(&counters.frames_unsupported, 1);
-            self.release_decoder();
-            return;
-        }
         Counters::add(&counters.frames_received, 1);
-        // A stream starts at a keyframe: before one there is nothing to decode
-        // with, so no thread and no decoder either.
-        if self.thread.is_none() && (!frame.keyframe || !self.start_thread()) {
-            Counters::add(&counters.frames_dropped, 1);
-            return;
+        // Do not resume ahead of the watch notification: otherwise a
+        // coalesced hide/show pulse could cause two resume requests.
+        if !shared.visible.load(Ordering::Acquire) {
+            self.suspend();
         }
-        let ssrc = frame.ssrc;
+        let stream = Stream {
+            codec: frame.codec,
+            ssrc: frame.ssrc,
+        };
         let len = frame.data.len();
         let mut queue = shared.lock();
         if queue.closed {
             Counters::add(&counters.frames_dropped, 1);
             return;
         }
+        if queue.stream != Some(stream) {
+            let replaced = queue.stream.is_some();
+            let request_needed = queue.request_needed;
+            let dropped = queue.reset();
+            queue.stream = Some(stream);
+            queue.last_ssrc = Some(stream.ssrc);
+            queue.request_needed = replaced || request_needed;
+            Counters::add(&counters.frames_dropped, dropped);
+            shared.wake.notify_one();
+        }
+        if queue.suspended || !shared.visible.load(Ordering::Acquire) {
+            Counters::add(&counters.frames_dropped, 1);
+            return;
+        }
+        // Even an oversized keyframe may not exceed the queue's byte bound.
+        if len > MAX_QUEUED_BYTES {
+            let was_waiting = queue.awaiting_keyframe;
+            let dropped = queue.clear();
+            queue.awaiting_keyframe = true;
+            Counters::add(&counters.frames_dropped, dropped + 1);
+            if !was_waiting {
+                shared.request(&mut queue, stream.ssrc);
+            }
+            return;
+        }
         if frame.keyframe {
-            // The keyframe being waited for is here.
             queue.retry_request = None;
+            queue.request_needed = false;
         } else if let Some(retry) = queue.retry_request {
             shared.request(&mut queue, retry);
+        } else if queue.request_needed {
+            shared.request(&mut queue, stream.ssrc);
         }
         if queue.awaiting_keyframe && !frame.keyframe {
             Counters::add(&counters.frames_dropped, 1);
             return;
         }
+        if self.thread.is_none() {
+            drop(queue);
+            if !self.start_thread() {
+                Counters::add(&counters.frames_dropped, 1);
+                return;
+            }
+            queue = shared.lock();
+            if queue.closed || queue.suspended || !shared.visible.load(Ordering::Acquire) {
+                Counters::add(&counters.frames_dropped, 1);
+                return;
+            }
+        }
         if queue.frames.len() >= MAX_QUEUED_FRAMES || queue.bytes + len > MAX_QUEUED_BYTES {
-            // The decoder cannot keep up. What it has not reached is stale, and
-            // a frame skipped breaks the chain; a keyframe restarts it.
             let dropped = queue.clear();
             Counters::add(&counters.frames_dropped, dropped);
             if !frame.keyframe {
                 Counters::add(&counters.frames_dropped, 1);
                 queue.awaiting_keyframe = true;
-                shared.request(&mut queue, ssrc);
+                shared.request(&mut queue, stream.ssrc);
                 return;
             }
         }
@@ -275,22 +438,6 @@ impl StreamDecoder {
         queue.frames.push_back(frame);
         drop(queue);
         shared.wake.notify_one();
-    }
-
-    /// The stream is no longer AV1: what the decoder holds describes nothing
-    /// that will arrive, so it is freed and the next AV1 keyframe opens a new one.
-    fn release_decoder(&self) {
-        if self.thread.is_none() {
-            return;
-        }
-        let mut queue = self.shared.lock();
-        queue.release_decoder = true;
-        queue.awaiting_keyframe = true;
-        queue.retry_request = None;
-        let dropped = queue.clear();
-        drop(queue);
-        Counters::add(&self.shared.counters.frames_dropped, dropped);
-        self.shared.wake.notify_one();
     }
 
     /// Starts the decoding thread; false when it cannot run.
@@ -307,8 +454,11 @@ impl StreamDecoder {
                 self.thread = Some(handle);
                 true
             }
-            Err(_) => {
+            Err(error) => {
                 self.shared.lock().closed = true;
+                (self.shared.status)(StreamStatus::Failed(format!(
+                    "Could not start video decoding worker: {error}"
+                )));
                 false
             }
         }
@@ -343,8 +493,48 @@ impl Drop for StreamDecoder {
     }
 }
 
-fn open_av1() -> Result<Box<dyn VideoDecoder>, CodecError> {
-    Ok(Box::new(fastcord_video::av1::Decoder::open()?))
+fn open_decoder(codec: VideoCodec) -> Result<Box<dyn VideoDecoder>, CodecError> {
+    match codec {
+        VideoCodec::Av1 => Ok(Box::new(fastcord_video::av1::Decoder::open()?)),
+        VideoCodec::H264 => open_h264(),
+    }
+}
+
+#[cfg(windows)]
+fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
+    fastcord_video::media_foundation::open_decoder(fastcord_video::BackendPreference::Auto)
+        .map(|selected| Box::new(selected.codec) as Box<dyn VideoDecoder>)
+        .map_err(codec_open_error)
+}
+
+#[cfg(target_os = "macos")]
+fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
+    fastcord_video::videotoolbox::open_decoder(fastcord_video::BackendPreference::Auto)
+        .map(|selected| Box::new(selected.codec) as Box<dyn VideoDecoder>)
+        .map_err(codec_open_error)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
+    Err(CodecError::PlatformUnavailable(
+        "H.264 decoding on this platform (Linux support requires M30)",
+    ))
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn codec_open_error(error: fastcord_video::OpenError) -> CodecError {
+    match error {
+        fastcord_video::OpenError::Invalid(error) | fastcord_video::OpenError::Discovery(error) => {
+            error
+        }
+        fastcord_video::OpenError::Failed(mut attempts) => attempts
+            .pop()
+            .map(|attempt| attempt.error)
+            .unwrap_or(CodecError::PlatformUnavailable("native H.264 decoder")),
+        fastcord_video::OpenError::NoBackend(_) => {
+            CodecError::PlatformUnavailable("native H.264 decoder")
+        }
+    }
 }
 
 /// Marks the stream closed when the decoding thread ends for any reason, so
@@ -358,6 +548,11 @@ impl Drop for CloseOnExit {
         let dropped = queue.clear();
         drop(queue);
         Counters::add(&self.0.counters.frames_dropped, dropped);
+        if std::thread::panicking() {
+            (self.0.status)(StreamStatus::Failed(
+                "Video decoding worker stopped unexpectedly".into(),
+            ));
+        }
     }
 }
 
@@ -366,9 +561,8 @@ struct Worker {
     open: OpenDecoder,
     sink: Option<Sink>,
     decoder: Option<Box<dyn VideoDecoder>>,
-    /// The stream the decoder's references belong to.
-    stream: Option<u32>,
     failed_keyframes: u32,
+    reported_backend: Option<fastcord_video::Backend>,
 }
 
 impl Worker {
@@ -378,22 +572,22 @@ impl Worker {
             open,
             sink,
             decoder: None,
-            stream: None,
             failed_keyframes: 0,
+            reported_backend: None,
         }
     }
 
     fn run(mut self) {
         let _exit = CloseOnExit(Arc::clone(&self.shared));
-        while let Some(frame) = self.next() {
-            self.process(frame);
+        while let Some((frame, generation)) = self.next() {
+            self.process(frame, generation);
         }
         // The decoder and every picture it holds are freed here, on the thread
         // that opened them.
     }
 
     /// The next frame, waiting for one; `None` once the session ended.
-    fn next(&mut self) -> Option<ReceivedVideo> {
+    fn next(&mut self) -> Option<(ReceivedVideo, u64)> {
         loop {
             let mut queue = self.shared.lock();
             if queue.closed {
@@ -402,52 +596,67 @@ impl Worker {
             if queue.release_decoder {
                 queue.release_decoder = false;
                 drop(queue);
-                self.decoder = None;
-                self.stream = None;
+                self.release();
                 continue;
             }
-            if let Some(frame) = queue.pop() {
-                return Some(frame);
+            if !queue.suspended
+                && self.shared.visible.load(Ordering::Acquire)
+                && let Some(frame) = queue.pop()
+            {
+                return Some((frame, queue.generation));
             }
             self.shared.wake.wait(&mut queue);
         }
     }
 
-    fn process(&mut self, frame: ReceivedVideo) {
+    fn release(&mut self) {
+        self.decoder = None;
+        self.failed_keyframes = 0;
+        self.reported_backend = None;
+    }
+
+    fn process(&mut self, frame: ReceivedVideo, generation: u64) {
         let shared = Arc::clone(&self.shared);
         let counters = &shared.counters;
-        let (ssrc, keyframe) = (frame.ssrc, frame.keyframe);
-        let mut broken = false;
-        if self.stream != Some(ssrc) {
-            // Another stream: the old one's references mean nothing to it.
-            self.decoder = None;
-            self.stream = Some(ssrc);
-            self.failed_keyframes = 0;
-            broken = !keyframe;
+        if !shared.current(generation) {
+            Counters::add(&counters.frames_dropped, 1);
+            return;
         }
-        if !broken {
-            broken = self.decode(&frame).is_err();
-        }
-        if broken {
-            self.fail(ssrc, keyframe);
+        if self.decode(&frame, generation).is_err() {
+            self.fail(frame.ssrc, frame.keyframe, generation);
             counters.decode_errors.fetch_add(1, Ordering::Relaxed);
-        } else if keyframe {
+        } else if frame.keyframe {
             self.failed_keyframes = 0;
         }
-        // Last: everything above is visible to whoever sees this counter.
+        // Last: side effects are visible to whoever sees this counter.
         counters.frames_processed.fetch_add(1, Ordering::Release);
     }
 
-    fn decode(&mut self, frame: &ReceivedVideo) -> Result<(), CodecError> {
+    fn decode(&mut self, frame: &ReceivedVideo, generation: u64) -> Result<(), CodecError> {
+        let shared = &self.shared;
         let decoder = match &mut self.decoder {
             Some(decoder) => decoder,
-            empty => {
-                let decoder = (self.open)()?;
-                *self.shared.backend.lock() = Some(decoder.backend().name.clone());
-                empty.insert(decoder)
-            }
+            empty => match (self.open)(frame.codec) {
+                Ok(decoder) => empty.insert(decoder),
+                Err(error) => {
+                    if matches!(error, CodecError::PlatformUnavailable(_)) {
+                        Counters::add(&shared.counters.frames_unsupported, 1);
+                    }
+                    if shared.current(generation) {
+                        (shared.status)(StreamStatus::Failed(format!(
+                            "Could not open {} decoder: {error}",
+                            frame.codec.wire_name()
+                        )));
+                    }
+                    return Err(error);
+                }
+            },
         };
-        let counters = &self.shared.counters;
+        // Opening a native context can outlast a visibility/source change.
+        if !shared.current(generation) {
+            return Ok(());
+        }
+        let counters = &shared.counters;
         let sink = &mut self.sink;
         let ssrc = frame.ssrc;
         let timestamp =
@@ -455,6 +664,9 @@ impl Worker {
         let mut pictures = 0;
         let result = decoder.decode(&frame.data, timestamp, &mut |picture| {
             pictures += 1;
+            if !shared.current(generation) {
+                return;
+            }
             counters
                 .width
                 .store(picture.image.width(), Ordering::Relaxed);
@@ -468,6 +680,27 @@ impl Worker {
         counters
             .pictures_decoded
             .fetch_add(pictures, Ordering::Relaxed);
+        if shared.current(generation) {
+            match &result {
+                Err(error) => (shared.status)(StreamStatus::Failed(format!(
+                    "{} decode failed: {error}",
+                    frame.codec.wire_name()
+                ))),
+                Ok(()) => {
+                    let backend = decoder.backend();
+                    if self.reported_backend.as_ref() != Some(backend) {
+                        self.reported_backend = Some(backend.clone());
+                        *shared.backend.lock() = Some(backend.name.clone());
+                        (shared.status)(StreamStatus::Decoding {
+                            backend: backend.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        if result.is_err() {
+            self.reported_backend = None;
+        }
         if let Err(CodecError::Platform { .. } | CodecError::Stalled(_)) = &result {
             // A native context that failed is not trusted again.
             self.decoder = None;
@@ -475,14 +708,20 @@ impl Worker {
         result
     }
 
-    /// The chain is broken at a frame of `ssrc`: drop what cannot decode and ask
-    /// for a keyframe, unless one is already queued (decoding restarts at it)
-    /// or keyframes keep failing.
-    fn fail(&mut self, ssrc: u32, was_keyframe: bool) {
-        if was_keyframe {
-            self.failed_keyframes += 1;
-        }
+    /// Drop failed dependencies up to a queued keyframe, or request one. A
+    /// failure in an old/invisible generation cannot disturb its replacement.
+    fn fail(&mut self, ssrc: u32, was_keyframe: bool, generation: u64) {
         let mut queue = self.shared.lock();
+        if queue.closed
+            || queue.suspended
+            || queue.generation != generation
+            || !self.shared.visible.load(Ordering::Acquire)
+        {
+            return;
+        }
+        if was_keyframe {
+            self.failed_keyframes = self.failed_keyframes.saturating_add(1);
+        }
         let mut dropped = 0;
         while queue.frames.front().is_some_and(|frame| !frame.keyframe) {
             queue.pop();
@@ -494,7 +733,6 @@ impl Worker {
                 self.shared.request(&mut queue, ssrc);
             }
         } else {
-            // A keyframe is next: the stream restarts there.
             queue.awaiting_keyframe = false;
         }
         drop(queue);

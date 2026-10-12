@@ -10,11 +10,51 @@ use crate::codec::{
     Backend, BackendKind, BackendPreference, CodecError, DecodedFrame, EncodedFrame, EncoderConfig,
     VideoDecoder, VideoEncoder,
 };
-use crate::frame::Nv12;
-use crate::h264::check_decodable;
+use crate::frame::{ColorDescription, ColorMatrix, ColorRange, Nv12};
+use crate::h264::ColorState;
 use crate::select::{Candidate, OpenError, Selected, select};
 
 pub const API: &str = "VideoToolbox";
+
+#[repr(C)]
+struct NativeColor {
+    /// H.273 matrix id, or zero when neither output buffer nor format states it.
+    matrix: u32,
+    full_range: u32,
+    aspect_width: u32,
+    aspect_height: u32,
+}
+
+fn output_color(
+    native: &NativeColor,
+    fallback: ColorDescription,
+) -> Result<ColorDescription, CodecError> {
+    let matrix = if native.matrix == 0 {
+        fallback.matrix
+    } else {
+        ColorMatrix::from_h273(native.matrix)
+            .ok_or(CodecError::Unsupported("VideoToolbox output color matrix"))?
+    };
+    let range = match native.full_range {
+        0 => ColorRange::Limited,
+        1 => ColorRange::Full,
+        _ => return Err(CodecError::Unsupported("VideoToolbox output sample range")),
+    };
+    let pixel_aspect_ratio = match (native.aspect_width, native.aspect_height) {
+        (0, 0) => fallback.pixel_aspect_ratio,
+        (0, _) | (_, 0) => {
+            return Err(CodecError::Unsupported(
+                "VideoToolbox output sample aspect ratio",
+            ));
+        }
+        ratio => ratio,
+    };
+    Ok(ColorDescription {
+        matrix,
+        range,
+        pixel_aspect_ratio,
+    })
+}
 
 unsafe extern "C" {
     fn fc_vt_encoder_create(
@@ -55,6 +95,7 @@ unsafe extern "C" {
         bytes: *const u8,
         len: usize,
         timestamp_ns: u64,
+        full_range: i32,
         callback: unsafe extern "C" fn(
             *mut c_void,
             *const u8,
@@ -66,6 +107,7 @@ unsafe extern "C" {
             usize,
             usize,
             u64,
+            *const NativeColor,
         ),
         context: *mut c_void,
     ) -> i32;
@@ -309,6 +351,7 @@ pub fn open_decoder(preference: BackendPreference) -> Result<Selected<VtDecoder>
                 api: API,
                 name: format!("VideoToolbox {kind} H.264 decoder"),
             },
+            colors: ColorState::default(),
         })
     })
 }
@@ -316,6 +359,7 @@ pub fn open_decoder(preference: BackendPreference) -> Result<Selected<VtDecoder>
 pub struct VtDecoder {
     handle: DecoderHandle,
     backend: Backend,
+    colors: ColorState,
 }
 
 impl VideoDecoder for VtDecoder {
@@ -329,8 +373,12 @@ impl VideoDecoder for VtDecoder {
         timestamp: Duration,
         out: &mut dyn FnMut(DecodedFrame<'_>),
     ) -> Result<(), CodecError> {
-        check_decodable(access_unit)?;
-        let mut output = DecodeOutput { out, error: None };
+        let color = self.colors.inspect(access_unit)?;
+        let mut output = DecodeOutput {
+            out,
+            color,
+            error: None,
+        };
         // SAFETY: the Annex B slice and callback context live through the
         // synchronous VT decode; callback plane pointers remain valid until
         // the callback returns, where the borrowed frame is consumed.
@@ -340,6 +388,7 @@ impl VideoDecoder for VtDecoder {
                 access_unit.as_ptr(),
                 access_unit.len(),
                 timestamp.as_nanos().min(u64::MAX as u128) as u64,
+                i32::from(color.range == ColorRange::Full),
                 decode_output,
                 (&mut output as *mut DecodeOutput<'_>).cast(),
             )
@@ -369,6 +418,7 @@ impl VideoDecoder for VtDecoder {
 
 struct DecodeOutput<'a> {
     out: &'a mut dyn FnMut(DecodedFrame<'_>),
+    color: ColorDescription,
     error: Option<CodecError>,
 }
 
@@ -383,13 +433,22 @@ unsafe extern "C" fn decode_output(
     width: usize,
     height: usize,
     timestamp_ns: u64,
+    native_color: *const NativeColor,
 ) {
-    if context.is_null() || y.is_null() || uv.is_null() {
+    if context.is_null() || y.is_null() || uv.is_null() || native_color.is_null() {
         return;
     }
     // SAFETY: callback context and plane pointers are valid for this callback
     // invocation, and row sizes were read from the locked CVPixelBuffer.
     let output = unsafe { &mut *context.cast::<DecodeOutput<'_>>() };
+    // SAFETY: the bridge's metadata value lives through this synchronous callback.
+    let color = match output_color(unsafe { &*native_color }, output.color) {
+        Ok(color) => color,
+        Err(error) => {
+            output.error = Some(error);
+            return;
+        }
+    };
     let y_len = y_stride
         .saturating_mul(height.saturating_sub(1))
         .saturating_add(y_width);
@@ -409,6 +468,7 @@ unsafe extern "C" fn decode_output(
     let result = catch_unwind(AssertUnwindSafe(|| match image {
         Ok(image) => (output.out)(DecodedFrame {
             image,
+            color,
             timestamp: Duration::from_nanos(timestamp_ns),
         }),
         Err(error) => output.error = Some(CodecError::InvalidFrame(error)),
@@ -438,6 +498,75 @@ mod tests {
         data[..CONFIG.width as usize * CONFIG.height as usize].fill(96);
         data[CONFIG.width as usize * CONFIG.height as usize..].fill(128);
         data
+    }
+
+    #[test]
+    fn native_output_metadata_overrides_sps_and_preserves_missing_aspect() {
+        let fallback = ColorDescription {
+            matrix: ColorMatrix::Bt601,
+            range: ColorRange::Full,
+            pixel_aspect_ratio: (12, 11),
+        };
+        let native = NativeColor {
+            matrix: 0,
+            full_range: 0,
+            aspect_width: 0,
+            aspect_height: 0,
+        };
+        assert_eq!(
+            output_color(&native, fallback).unwrap(),
+            ColorDescription {
+                range: ColorRange::Limited,
+                ..fallback
+            }
+        );
+        let native = NativeColor {
+            matrix: 9,
+            full_range: 1,
+            aspect_width: 4,
+            aspect_height: 3,
+        };
+        assert_eq!(
+            output_color(&native, fallback).unwrap(),
+            ColorDescription {
+                matrix: ColorMatrix::Bt2020,
+                range: ColorRange::Full,
+                pixel_aspect_ratio: (4, 3),
+            }
+        );
+    }
+
+    #[test]
+    fn software_fixture_output_preserves_vui_matrix_range_and_aspect() {
+        for matrix in [ColorMatrix::Bt601, ColorMatrix::Bt709, ColorMatrix::Bt2020] {
+            for range in [ColorRange::Limited, ColorRange::Full] {
+                let color = ColorDescription {
+                    matrix,
+                    range,
+                    pixel_aspect_ratio: (4, 3),
+                };
+                let stream = crate::test_vectors::ipcm_stream_with_color(color);
+                let mut decoder = open_decoder(BackendPreference::Software).unwrap().codec;
+                let mut count = 0;
+                for (index, unit) in crate::test_vectors::ipcm_access_units(&stream)
+                    .into_iter()
+                    .enumerate()
+                {
+                    decoder
+                        .decode(
+                            unit,
+                            Duration::from_millis(index as u64 * 33),
+                            &mut |frame| {
+                                assert_eq!(frame.color, color);
+                                assert_eq!((frame.image.width(), frame.image.height()), (128, 96));
+                                count += 1;
+                            },
+                        )
+                        .unwrap();
+                }
+                assert_eq!(count, crate::test_vectors::IPCM_FRAMES);
+            }
+        }
     }
 
     #[test]

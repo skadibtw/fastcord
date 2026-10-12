@@ -3,6 +3,7 @@
 //! SPS/PPS repetition before every IDR picture of an encoder's output.
 
 use crate::codec::{CodecError, check_dimensions};
+use crate::frame::{ColorDescription, ColorMatrix, ColorRange};
 
 pub const NAL_SLICE: u8 = 1;
 pub const NAL_IDR: u8 = 5;
@@ -117,6 +118,13 @@ pub fn inspect(access_unit: &[u8]) -> Result<AccessUnitSummary, CodecError> {
 /// or a sequence parameter set describing a picture over the size limits or a
 /// format other than 8-bit 4:2:0 (the NV12 output contract).
 pub fn check_decodable(access_unit: &[u8]) -> Result<AccessUnitSummary, CodecError> {
+    check_decodable_with(access_unit, |_| {})
+}
+
+fn check_decodable_with(
+    access_unit: &[u8],
+    mut remember: impl FnMut(Sps),
+) -> Result<AccessUnitSummary, CodecError> {
     if access_unit.len() > MAX_ACCESS_UNIT_BYTES {
         return Err(CodecError::Unsupported("access unit is larger than 8 MiB"));
     }
@@ -134,6 +142,7 @@ pub fn check_decodable(access_unit: &[u8]) -> Result<AccessUnitSummary, CodecErr
             ));
         }
         check_dimensions(sps.coded_width, sps.coded_height)?;
+        remember(sps);
     }
     Ok(summary)
 }
@@ -155,8 +164,10 @@ pub struct Sps {
     /// Display size after frame cropping.
     pub width: u32,
     pub height: u32,
+    /// VUI matrix/range/sample aspect, with documented defaults when absent.
+    pub color: ColorDescription,
 }
-/// Parses an SPS NAL unit (header byte included) up to its frame cropping.
+/// Parses an SPS NAL unit (header included) through its VUI color/aspect fields.
 pub fn parse_sps(nal: &[u8]) -> Result<Sps, CodecError> {
     const MALFORMED: CodecError = CodecError::InvalidBitstream("malformed sequence parameter set");
     if nal_unit_type(nal) != NAL_SPS {
@@ -244,6 +255,11 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, CodecError> {
     ) else {
         return Err(CodecError::Unsupported("picture is larger than 4096x2304"));
     };
+    let color = if bits.flag()? {
+        parse_vui_color(&mut bits)?
+    } else {
+        ColorDescription::default()
+    };
     Ok(Sps {
         profile_idc,
         constraint_flags,
@@ -256,7 +272,107 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, CodecError> {
         coded_height,
         width,
         height,
+        color,
     })
+}
+
+fn parse_vui_color(bits: &mut BitReader<'_>) -> Result<ColorDescription, CodecError> {
+    let mut color = ColorDescription::default();
+    if bits.flag()? {
+        color.pixel_aspect_ratio = match bits.bits(8)? {
+            0 | 1 => (1, 1),
+            2 => (12, 11),
+            3 => (10, 11),
+            4 => (16, 11),
+            5 => (40, 33),
+            6 => (24, 11),
+            7 => (20, 11),
+            8 => (32, 11),
+            9 => (80, 33),
+            10 => (18, 11),
+            11 => (15, 11),
+            12 => (64, 33),
+            13 => (160, 99),
+            14 => (4, 3),
+            15 => (3, 2),
+            16 => (2, 1),
+            255 => {
+                let ratio = (bits.bits(16)?, bits.bits(16)?);
+                if ratio.0 == 0 || ratio.1 == 0 {
+                    return Err(CodecError::InvalidBitstream(
+                        "zero H.264 sample aspect ratio",
+                    ));
+                }
+                ratio
+            }
+            _ => return Err(CodecError::InvalidBitstream("reserved H.264 aspect ratio")),
+        };
+    }
+    if bits.flag()? {
+        bits.flag()?; // overscan_appropriate_flag
+    }
+    if bits.flag()? {
+        bits.bits(3)?; // video_format
+        color.range = if bits.flag()? {
+            ColorRange::Full
+        } else {
+            ColorRange::Limited
+        };
+        if bits.flag()? {
+            bits.bits(8)?; // colour_primaries
+            bits.bits(8)?; // transfer_characteristics
+            color.matrix = ColorMatrix::from_h273(bits.bits(8)?).ok_or(CodecError::Unsupported(
+                "H.264 color matrix is not BT.601/709/2020 NCL",
+            ))?;
+        }
+    }
+    Ok(color)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+/// Fixed-size parameter-set metadata, selecting the SPS actually referenced
+/// by the access unit's first slice rather than the last SPS in the byte stream.
+pub(crate) struct ColorState {
+    sps: [Option<ColorDescription>; 32],
+    pps: [Option<u32>; 256],
+    current: ColorDescription,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+impl Default for ColorState {
+    fn default() -> Self {
+        Self {
+            sps: [None; 32],
+            pps: [None; 256],
+            current: ColorDescription::default(),
+        }
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+impl ColorState {
+    pub(crate) fn inspect(&mut self, access_unit: &[u8]) -> Result<ColorDescription, CodecError> {
+        check_decodable_with(access_unit, |sps| {
+            self.sps[sps.id as usize] = Some(sps.color)
+        })?;
+        for nal in nal_units(access_unit).filter(|nal| nal_unit_type(nal) == NAL_PPS) {
+            let mut bits = BitReader::new(&nal[1..]);
+            let pps = bits.ue_max(255)?;
+            self.pps[pps as usize] = Some(bits.ue_max(31)?);
+        }
+        if let Some(slice) =
+            nal_units(access_unit).find(|nal| matches!(nal_unit_type(nal), NAL_SLICE | 2 | NAL_IDR))
+        {
+            let mut bits = BitReader::new(&slice[1..]);
+            bits.ue()?; // first_mb_in_slice
+            bits.ue_max(9)?; // slice_type
+            let pps = bits.ue_max(255)?;
+            if let Some(color) = self.pps[pps as usize].and_then(|sps| self.sps[sps as usize]) {
+                self.current = color;
+            }
+        }
+        Ok(self.current)
+    }
 }
 
 fn skip_scaling_list(bits: &mut BitReader<'_>, size: usize) -> Result<(), CodecError> {
@@ -528,8 +644,115 @@ mod tests {
                 coded_height: 96,
                 width: 128,
                 height: 96,
+                color: ColorDescription::default(),
             }
         );
+    }
+
+    #[test]
+    fn vui_extracts_every_supported_matrix_range_and_extended_aspect() {
+        for matrix in [ColorMatrix::Bt601, ColorMatrix::Bt709, ColorMatrix::Bt2020] {
+            for range in [ColorRange::Limited, ColorRange::Full] {
+                let color = ColorDescription {
+                    matrix,
+                    range,
+                    pixel_aspect_ratio: (64, 45),
+                };
+                let sps = parse_sps(&test_vectors::color_sps(0, color)).unwrap();
+                assert_eq!(sps.color, color);
+                let stream = test_vectors::ipcm_stream_with_color(color);
+                let mut state = ColorState::default();
+                for unit in test_vectors::ipcm_access_units(&stream) {
+                    assert_eq!(state.inspect(unit).unwrap(), color);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vui_standard_aspects_and_absent_color_follow_documented_defaults() {
+        for (id, ratio) in [
+            (0, (1, 1)),
+            (1, (1, 1)),
+            (2, (12, 11)),
+            (14, (4, 3)),
+            (16, (2, 1)),
+        ] {
+            let mut bits = BitWriter::default();
+            bits.flag(true);
+            bits.bits(id, 8);
+            bits.flag(false); // overscan
+            bits.flag(false); // video signal type
+            bits.trailing();
+            let rbsp = bits.finish();
+            let color = parse_vui_color(&mut BitReader::new(&rbsp)).unwrap();
+            assert_eq!(color.pixel_aspect_ratio, ratio);
+            assert_eq!(color.matrix, ColorMatrix::Bt709);
+            assert_eq!(color.range, ColorRange::Limited);
+        }
+        let invalid = ColorDescription {
+            pixel_aspect_ratio: (0, 1),
+            ..ColorDescription::default()
+        };
+        assert!(matches!(
+            parse_sps(&test_vectors::color_sps(0, invalid)),
+            Err(CodecError::InvalidBitstream(_))
+        ));
+    }
+
+    #[test]
+    fn explicit_non_affine_or_unsupported_vui_matrices_are_rejected() {
+        for matrix in [0, 4, 7, 8, 10, 11, 12, 13, 14, 255] {
+            let mut bits = BitWriter::default();
+            bits.flag(false); // aspect ratio
+            bits.flag(false); // overscan
+            bits.flag(true); // video signal type
+            bits.bits(5, 3);
+            bits.flag(false); // limited range
+            bits.flag(true); // color description
+            bits.bits(2, 8);
+            bits.bits(2, 8);
+            bits.bits(matrix, 8);
+            bits.trailing();
+            let rbsp = bits.finish();
+            assert!(matches!(
+                parse_vui_color(&mut BitReader::new(&rbsp)),
+                Err(CodecError::Unsupported(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn color_state_uses_the_sps_selected_by_the_slice_pps() {
+        let first = ColorDescription {
+            matrix: ColorMatrix::Bt601,
+            range: ColorRange::Full,
+            pixel_aspect_ratio: (12, 11),
+        };
+        let second = ColorDescription {
+            matrix: ColorMatrix::Bt2020,
+            ..ColorDescription::default()
+        };
+        let mut stream = Vec::new();
+        push_nal(&mut stream, &test_vectors::color_sps(0, first));
+        push_nal(&mut stream, &test_vectors::color_sps(1, second));
+        let mut pps = BitWriter::default();
+        pps.ue(7);
+        pps.ue(0);
+        pps.trailing();
+        let mut nal = vec![0x68];
+        nal.extend(test_vectors::escape(&pps.finish()));
+        push_nal(&mut stream, &nal);
+        let mut slice = BitWriter::default();
+        slice.ue(0);
+        slice.ue(2);
+        slice.ue(7);
+        slice.trailing();
+        let mut nal = vec![0x65];
+        nal.extend(test_vectors::escape(&slice.finish()));
+        push_nal(&mut stream, &nal);
+        let mut state = ColorState::default();
+        assert_eq!(state.inspect(&stream).unwrap(), first);
     }
 
     /// A High-profile SPS with scaling lists, field coding, and frame cropping.

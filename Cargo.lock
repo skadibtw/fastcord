@@ -1757,6 +1757,7 @@ dependencies = [
 name = "fastcord-app"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "bytemuck",
  "bytes",
  "fastcord-audio",
  "fastcord-discord",
@@ -1768,12 +1769,15 @@ dependencies = [
  "futures-util",
  "iced",
  "iced_renderer",
+ "iced_tiny_skia",
  "image",
  "parking_lot 0.12.5",
  "reqwest",
  "rfd",
  "serde_json",
  "sha2 0.10.9",
+ "softbuffer",
+ "tiny-skia",
  "tokio",
  "unicode-segmentation",
  "zeroize",

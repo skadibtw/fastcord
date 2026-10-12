@@ -20,6 +20,10 @@ fastcord-audio.workspace = true
 fastcord-video.workspace = true
 iced.workspace = true
 iced_renderer.workspace = true
+iced_tiny_skia.workspace = true
+bytemuck.workspace = true
+softbuffer.workspace = true
+tiny-skia.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 zeroize.workspace = true
 futures-util.workspace = true

@@ -1,6 +1,14 @@
-//! Borrowed NV12 images, the pixel format exchanged with every codec backend.
+//! Borrowed NV12 images, stream color metadata and bounded immutable frame leases.
 
 use std::fmt;
+
+mod color;
+mod pool;
+
+pub use color::{ColorDescription, ColorMatrix, ColorRange};
+pub use pool::{
+    FrameFormat, FrameLease, FramePool, LeaseError, MAX_FRAME_BUFFERS, MAX_FRAME_POOL_BYTES,
+};
 
 /// A borrowed 8-bit 4:2:0 NV12 image: a full-resolution Y plane and a
 /// half-resolution plane of interleaved U/V pairs, each with its own stride.

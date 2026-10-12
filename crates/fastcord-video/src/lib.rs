@@ -2,7 +2,9 @@
 //! platform-neutral codec trait (SPEC §8.2, §8.5; ADR 0001).
 //!
 //! [`VideoEncoder`] and [`VideoDecoder`] exchange borrowed NV12 images
-//! ([`Nv12`]). H.264 uses Annex B access units; [`av1::Decoder`] receives sized
+//! ([`Nv12`]) with [`ColorDescription`]. [`FramePool`] retains immutable
+//! [`FrameLease`] handles for rendering, with no RGB work on the GPU path.
+//! H.264 uses Annex B access units; [`av1::Decoder`] receives sized
 //! low-overhead OBU temporal units and never encodes AV1. Native H.264 backends
 //! are selected at runtime (hardware first in automatic mode); the actual
 //! backend is always reported ([`Backend`], [`Selected::rejected`]). FFmpeg is
@@ -25,5 +27,8 @@ pub use codec::{
     Backend, BackendKind, BackendPreference, CodecError, DecodedFrame, EncodedFrame, EncoderConfig,
     VideoDecoder, VideoEncoder,
 };
-pub use frame::{FrameError, Nv12};
+pub use frame::{
+    ColorDescription, ColorMatrix, ColorRange, FrameError, FrameFormat, FrameLease, FramePool,
+    LeaseError, Nv12,
+};
 pub use select::{Attempt, OpenError, Selected};

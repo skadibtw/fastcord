@@ -6,6 +6,8 @@
 //! `wgpu::window::Compositor::request` settings API is used instead. A root-widget
 //! bridge keeps renderer-specific widgets (notably iced's QR code) compatible.
 
+mod software;
+
 use iced::application::{Application, BootFn, UpdateFn, ViewFn};
 use iced::{Element, Program, Theme};
 use iced_renderer::core::{self, layout, mouse, overlay, renderer, text, widget};
@@ -13,6 +15,40 @@ use iced_renderer::graphics::{self, compositor};
 use iced_renderer::wgpu::{self as gpu, wgpu};
 
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SOFTWARE_RENDERER: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    // Scoped to the root's synchronous draw, never shared across render threads.
+    static SOFTWARE_VIDEO: RefCell<Vec<SoftwareVideo>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) struct SoftwareVideo {
+    pub(crate) frame: fastcord_video::frame::FrameLease,
+    pub(crate) bounds: core::Rectangle,
+    pub(crate) clip: core::Rectangle,
+    pub(crate) active: Arc<AtomicBool>,
+}
+
+pub(crate) fn software_video(video: SoftwareVideo) {
+    SOFTWARE_VIDEO.with(|layers| {
+        let mut layers = layers.borrow_mut();
+        // MVP watches one stream; no hidden unbounded renderer-side queue.
+        layers.clear();
+        layers.push(video);
+    });
+}
+
+pub(crate) fn frame_format() -> fastcord_video::frame::FrameFormat {
+    if SOFTWARE_RENDERER.load(Ordering::Acquire) {
+        fastcord_video::frame::FrameFormat::Bgra
+    } else {
+        fastcord_video::frame::FrameFormat::Nv12
+    }
+}
 
 #[cfg(target_os = "windows")]
 const NATIVE_BACKEND: wgpu::Backends = wgpu::Backends::DX12;
@@ -60,8 +96,17 @@ fn adapter_missing(error: &gpu::window::compositor::Error) -> bool {
 }
 
 // The newtype changes iced's associated compositor, not its rendering engine.
-struct NativeRenderer(iced::Renderer);
-struct NativeCompositor(iced_renderer::Compositor);
+struct NativeRenderer(iced::Renderer, Vec<SoftwareVideo>);
+
+enum NativeCompositor {
+    Gpu(Box<gpu::window::Compositor>),
+    Software(software::Compositor),
+}
+
+enum NativeSurface {
+    Gpu(<gpu::window::Compositor as graphics::Compositor>::Surface),
+    Software(software::Surface),
+}
 
 impl compositor::Default for NativeRenderer {
     type Compositor = NativeCompositor;
@@ -69,7 +114,7 @@ impl compositor::Default for NativeRenderer {
 
 impl graphics::Compositor for NativeCompositor {
     type Renderer = NativeRenderer;
-    type Surface = <iced_renderer::Compositor as graphics::Compositor>::Surface;
+    type Surface = NativeSurface;
 
     async fn with_backend(
         settings: graphics::Settings,
@@ -79,43 +124,36 @@ impl graphics::Compositor for NativeCompositor {
         _backend: Option<&str>,
     ) -> Result<Self, graphics::Error> {
         let mut native_settings = gpu_settings(settings);
-
-        // Preserve iced's presentation-mode override; it cannot change the API.
         if let Some(present_mode) = gpu::settings::present_mode_from_env() {
             native_settings.present_mode = present_mode;
         }
-
-        match gpu::window::Compositor::request(
-            native_settings,
-            Some(compatible_window.clone()),
-            shell.clone(),
-        )
-        .await
+        match gpu::window::Compositor::request(native_settings, Some(compatible_window), shell)
+            .await
         {
-            Ok(compositor) => Ok(Self(iced_renderer::fallback::Compositor::Primary(
-                compositor,
-            ))),
+            Ok(compositor) => {
+                SOFTWARE_RENDERER.store(false, Ordering::Release);
+                Ok(Self::Gpu(Box::new(compositor)))
+            }
             Err(error) if adapter_missing(&error) => {
-                // An explicit preference bypasses ICED_BACKEND. The wgpu branch
-                // rejects "tiny-skia" before initialization, so no other GPU API
-                // is requested by the built-in fallback compositor.
-                iced_renderer::Compositor::with_backend(
-                    settings,
-                    display,
-                    compatible_window,
-                    shell,
-                    Some("tiny-skia"),
-                )
-                .await
-                .map(Self)
-                .map_err(|fallback| graphics::Error::List(vec![error.into(), fallback]))
+                let compositor = software::Compositor::new(settings, display)
+                    .map_err(|fallback| graphics::Error::List(vec![error.into(), fallback]))?;
+                SOFTWARE_RENDERER.store(true, Ordering::Release);
+                Ok(Self::Software(compositor))
             }
             Err(error) => Err(error.into()),
         }
     }
 
     fn create_renderer(&self) -> Self::Renderer {
-        NativeRenderer(self.0.create_renderer())
+        let renderer = match self {
+            Self::Gpu(compositor) => {
+                iced_renderer::fallback::Renderer::Primary(compositor.create_renderer())
+            }
+            Self::Software(compositor) => {
+                iced_renderer::fallback::Renderer::Secondary(compositor.renderer())
+            }
+        };
+        NativeRenderer(renderer, Vec::new())
     }
 
     fn create_surface<W: compositor::Window + Clone>(
@@ -124,19 +162,44 @@ impl graphics::Compositor for NativeCompositor {
         width: u32,
         height: u32,
     ) -> Self::Surface {
-        self.0.create_surface(window, width, height)
+        match self {
+            Self::Gpu(compositor) => {
+                NativeSurface::Gpu(compositor.create_surface(window, width, height))
+            }
+            Self::Software(compositor) => {
+                NativeSurface::Software(compositor.surface(window, width, height))
+            }
+        }
     }
 
     fn configure_surface(&mut self, surface: &mut Self::Surface, width: u32, height: u32) {
-        self.0.configure_surface(surface, width, height);
+        match (self, surface) {
+            (Self::Gpu(compositor), NativeSurface::Gpu(surface)) => {
+                compositor.configure_surface(surface, width, height)
+            }
+            (Self::Software(compositor), NativeSurface::Software(surface)) => {
+                compositor.configure(surface, width, height)
+            }
+            _ => unreachable!("surface belongs to its compositor"),
+        }
     }
 
     fn load_font(&mut self, font: Cow<'static, [u8]>) {
-        self.0.load_font(font);
+        // Both compositors use iced's process-wide font system.
+        graphics::text::font_system()
+            .write()
+            .expect("font system")
+            .load_font(font);
     }
 
     fn information(&self) -> compositor::Information {
-        self.0.information()
+        match self {
+            Self::Gpu(compositor) => compositor.information(),
+            Self::Software(_) => compositor::Information {
+                adapter: "CPU".into(),
+                backend: "tiny-skia".into(),
+            },
+        }
     }
 
     fn present(
@@ -147,13 +210,32 @@ impl graphics::Compositor for NativeCompositor {
         background_color: core::Color,
         on_pre_present: impl FnOnce(),
     ) -> Result<(), compositor::SurfaceError> {
-        self.0.present(
-            &mut renderer.0,
-            surface,
-            viewport,
-            background_color,
-            on_pre_present,
-        )
+        match (self, &mut renderer.0, surface) {
+            (
+                Self::Gpu(compositor),
+                iced_renderer::fallback::Renderer::Primary(renderer),
+                NativeSurface::Gpu(surface),
+            ) => compositor.present(
+                renderer,
+                surface,
+                viewport,
+                background_color,
+                on_pre_present,
+            ),
+            (
+                Self::Software(compositor),
+                iced_renderer::fallback::Renderer::Secondary(inner),
+                NativeSurface::Software(surface),
+            ) => compositor.present(
+                inner,
+                &renderer.1,
+                surface,
+                viewport,
+                background_color,
+                on_pre_present,
+            ),
+            _ => unreachable!("renderer and surface belong to their compositor"),
+        }
     }
 
     fn screenshot(
@@ -162,8 +244,15 @@ impl graphics::Compositor for NativeCompositor {
         viewport: &graphics::Viewport,
         background_color: core::Color,
     ) -> Vec<u8> {
-        self.0
-            .screenshot(&mut renderer.0, viewport, background_color)
+        match (self, &mut renderer.0) {
+            (Self::Gpu(compositor), iced_renderer::fallback::Renderer::Primary(renderer)) => {
+                compositor.screenshot(renderer, viewport, background_color)
+            }
+            (Self::Software(compositor), iced_renderer::fallback::Renderer::Secondary(inner)) => {
+                compositor.screenshot(inner, &renderer.1, viewport, background_color)
+            }
+            _ => unreachable!("renderer belongs to its compositor"),
+        }
     }
 }
 
@@ -190,6 +279,7 @@ impl core::Renderer for NativeRenderer {
 
     fn reset(&mut self, new_bounds: core::Rectangle) {
         self.0.reset(new_bounds);
+        self.1.clear();
     }
 
     fn allocate_image(
@@ -280,7 +370,7 @@ impl renderer::Headless for NativeRenderer {
                     Some("tiny-skia"),
                 )
                 .await
-                .map(Self);
+                .map(|renderer| Self(renderer, Vec::new()));
             }
         };
 
@@ -313,9 +403,14 @@ impl renderer::Headless for NativeRenderer {
             graphics::Shell::headless(),
         );
 
-        Some(Self(iced_renderer::fallback::Renderer::Primary(
-            gpu::Renderer::new(engine, default_font, default_text_size),
-        )))
+        Some(Self(
+            iced_renderer::fallback::Renderer::Primary(gpu::Renderer::new(
+                engine,
+                default_font,
+                default_text_size,
+            )),
+            Vec::new(),
+        ))
     }
 
     fn name(&self) -> String {
@@ -427,6 +522,12 @@ impl<'a, Message: 'a> core::Widget<Message, Theme, NativeRenderer> for NativeWid
         cursor: mouse::Cursor,
         viewport: &core::Rectangle,
     ) {
+        SOFTWARE_VIDEO.with(|layers| {
+            let mut layers = layers.borrow_mut();
+            layers.clear();
+            std::mem::swap(&mut *layers, &mut renderer.1);
+            layers.clear();
+        });
         self.0.as_widget().draw(
             tree,
             &mut renderer.0,
@@ -436,6 +537,9 @@ impl<'a, Message: 'a> core::Widget<Message, Theme, NativeRenderer> for NativeWid
             cursor,
             viewport,
         );
+        SOFTWARE_VIDEO.with(|layers| {
+            std::mem::swap(&mut *layers.borrow_mut(), &mut renderer.1);
+        });
     }
 
     fn mouse_interaction(

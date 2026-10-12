@@ -111,9 +111,59 @@ fn pool_stats(decoder: &Decoder) -> (usize, usize) {
     }
 }
 
+#[test]
+fn native_color_fields_preserve_matrix_range_and_render_aspect() {
+    for (id, matrix) in [
+        (1, ColorMatrix::Bt709),
+        (2, ColorMatrix::Bt709),
+        (5, ColorMatrix::Bt601),
+        (6, ColorMatrix::Bt601),
+        (9, ColorMatrix::Bt2020),
+    ] {
+        for (full_range, range) in [(0, ColorRange::Limited), (1, ColorRange::Full)] {
+            let picture = NativePicture {
+                width: 35,
+                height: 27,
+                matrix: id,
+                full_range,
+                render_width: 70,
+                render_height: 27,
+                ..NativePicture::default()
+            };
+            assert_eq!(
+                picture_color(&picture).unwrap(),
+                ColorDescription {
+                    matrix,
+                    range,
+                    pixel_aspect_ratio: (2, 1),
+                }
+            );
+        }
+    }
+    for matrix in [0, 4, 7, 8, 10, 11, 12, 13, 14, 255] {
+        let picture = NativePicture {
+            matrix,
+            ..NativePicture::default()
+        };
+        assert!(matches!(
+            picture_color(&picture),
+            Err(CodecError::Unsupported(_))
+        ));
+    }
+    let invalid = NativePicture {
+        width: 35,
+        height: 27,
+        ..NativePicture::default()
+    };
+    assert!(matches!(
+        picture_color(&invalid),
+        Err(CodecError::InvalidBitstream(_))
+    ));
+}
 fn assert_picture(frame: DecodedFrame<'_>, expected: &[u8], timestamp: Duration) {
     assert_eq!((frame.image.width(), frame.image.height()), (35, 27));
     assert_eq!(frame.timestamp, timestamp);
+    assert_eq!(frame.color, ColorDescription::default());
     let mut packed = Vec::with_capacity(FRAME_BYTES);
     frame.image.copy_packed_into(&mut packed);
     // A one-line failure beats a 1449-element array diff.
@@ -431,6 +481,7 @@ fn filtered_lossy_streams_match_the_reference_decoder_bit_for_bit() {
                 .decode(unit, timestamp, &mut |frame| {
                     assert_eq!((frame.image.width(), frame.image.height()), (width, height));
                     assert_eq!(frame.timestamp, timestamp, "{name} unit {index}");
+                    assert_eq!(frame.color, ColorDescription::default(), "{name} color");
                     let mut packed = Vec::new();
                     frame.image.copy_packed_into(&mut packed);
                     assert_eq!(
@@ -576,4 +627,34 @@ fn a_keyframe_dav1d_keeps_waiting_on_does_not_wedge_the_decoder() {
         })
         .unwrap();
     assert_eq!(count, 2);
+}
+
+#[test]
+fn leases_keep_genuine_decoded_pictures_after_later_callbacks_and_decoder_release() {
+    use crate::frame::{FrameFormat, FramePool};
+
+    let mut decoder = Decoder::open().unwrap();
+    let mut pool = FramePool::new(FrameFormat::Nv12);
+    let mut leases = Vec::with_capacity(3);
+    for (timestamp, packet) in packets(BASE) {
+        decoder
+            .decode(packet, timestamp, &mut |frame| {
+                leases.push(pool.lease(frame).unwrap());
+            })
+            .unwrap();
+    }
+    assert_eq!(leases.len(), 3);
+    assert_eq!(pool.buffers(), 3);
+    assert_eq!(pool.capacity_bytes(), FRAME_BYTES * 3);
+    decoder.reset();
+    drop(decoder);
+    drop(pool);
+    for (index, lease) in leases.into_iter().enumerate() {
+        assert_eq!(lease.color(), ColorDescription::default());
+        assert_eq!(
+            lease.pixels(),
+            &BASE_PIXELS[index * FRAME_BYTES..(index + 1) * FRAME_BYTES]
+        );
+        assert_eq!((lease.width(), lease.height()), (35, 27));
+    }
 }

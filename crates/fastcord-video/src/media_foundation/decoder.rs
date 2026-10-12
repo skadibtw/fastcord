@@ -6,7 +6,8 @@ use std::time::Duration;
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer2, IMFDXGIBuffer, IMFMediaBuffer, IMFMediaType, IMFSample, IMFTransform,
     MF_LOW_LATENCY, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-    MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE, MF2DBuffer_LockFlags_Read, MFMediaType_Video,
+    MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+    MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX, MF2DBuffer_LockFlags_Read, MFMediaType_Video,
     MFT_MESSAGE_SET_D3D_MANAGER, MFVideoArea, MFVideoFormat_H264, MFVideoFormat_NV12,
 };
 use windows::core::Interface;
@@ -18,8 +19,8 @@ use super::{from_hns, to_hns};
 use crate::codec::{
     Backend, BackendKind, CodecError, DecodedFrame, VideoDecoder, check_dimensions,
 };
-use crate::frame::Nv12;
-use crate::h264::check_decodable;
+use crate::frame::{ColorDescription, ColorMatrix, ColorRange, Nv12};
+use crate::h264::ColorState;
 
 /// A Media Foundation H.264 decoder (see [`super::open_decoder`]).
 pub struct MfDecoder {
@@ -36,6 +37,11 @@ struct DecoderState {
     backend: Backend,
     preference: crate::codec::BackendPreference,
     format: OutputFormat,
+    colors: ColorState,
+    // H.264's DPB is at most 16 pictures. Keep twice that many timestamped
+    // descriptions so reordered/drained output retains its own SPS metadata.
+    submitted: [Option<(i64, ColorDescription)>; 32],
+    next_color: usize,
 }
 
 /// The negotiated NV12 output layout.
@@ -48,6 +54,47 @@ struct OutputFormat {
     stride: Option<u32>,
     /// Display area: x, y, width, height.
     display: (u32, u32, u32, u32),
+    color: OutputColor,
+}
+
+/// Output attributes describe the actual MFT pixels. Missing/unknown fields
+/// fall back individually to the SPS referenced by that picture's input.
+#[derive(Clone, Copy, Debug, Default)]
+struct OutputColor {
+    matrix: Option<ColorMatrix>,
+    range: Option<ColorRange>,
+    pixel_aspect_ratio: Option<(u32, u32)>,
+}
+
+impl OutputColor {
+    fn resolve(self, fallback: ColorDescription) -> ColorDescription {
+        ColorDescription {
+            matrix: self.matrix.unwrap_or(fallback.matrix),
+            range: self.range.unwrap_or(fallback.range),
+            pixel_aspect_ratio: self
+                .pixel_aspect_ratio
+                .unwrap_or(fallback.pixel_aspect_ratio),
+        }
+    }
+}
+
+impl DecoderState {
+    fn remember_color(&mut self, timestamp: i64, color: ColorDescription) {
+        self.submitted[self.next_color] = Some((timestamp, color));
+        self.next_color = (self.next_color + 1) % self.submitted.len();
+    }
+
+    fn color_at(&self, timestamp: i64) -> ColorDescription {
+        (0..self.submitted.len())
+            .find_map(|offset| {
+                let index =
+                    (self.next_color + self.submitted.len() - 1 - offset) % self.submitted.len();
+                self.submitted[index]
+                    .filter(|&(time, _)| time == timestamp)
+                    .map(|(_, color)| color)
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl MfDecoder {
@@ -97,6 +144,9 @@ impl MfDecoder {
                 backend,
                 preference,
                 format,
+                colors: ColorState::default(),
+                submitted: [None; 32],
+                next_color: 0,
             },
             _device: device,
             session,
@@ -147,11 +197,42 @@ fn output_format(media_type: &IMFMediaType) -> Result<OutputFormat, CodecError> 
             ),
             Err(_) => (0, 0, width, height),
         };
+        let matrix = match media_type.GetUINT32(&MF_MT_YUV_MATRIX).ok() {
+            None | Some(0) => None,
+            Some(1) => Some(ColorMatrix::Bt709),
+            Some(2) => Some(ColorMatrix::Bt601),
+            Some(4 | 5) => Some(ColorMatrix::Bt2020),
+            _ => {
+                return Err(CodecError::Unsupported(
+                    "Media Foundation output color matrix",
+                ));
+            }
+        };
+        let range = match media_type.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE).ok() {
+            None | Some(0) => None,
+            Some(1) => Some(ColorRange::Full),
+            Some(2) => Some(ColorRange::Limited),
+            _ => {
+                return Err(CodecError::Unsupported(
+                    "Media Foundation output sample range",
+                ));
+            }
+        };
+        let pixel_aspect_ratio = media_type
+            .GetUINT64(&MF_MT_PIXEL_ASPECT_RATIO)
+            .ok()
+            .map(|ratio| ((ratio >> 32) as u32, ratio as u32))
+            .filter(|&(numerator, denominator)| numerator != 0 && denominator != 0);
         Ok(OutputFormat {
             width,
             height,
             stride,
             display,
+            color: OutputColor {
+                matrix,
+                range,
+                pixel_aspect_ratio,
+            },
         })
     }
 }
@@ -188,7 +269,7 @@ impl VideoDecoder for MfDecoder {
         timestamp: Duration,
         out: &mut dyn FnMut(DecodedFrame<'_>),
     ) -> Result<(), CodecError> {
-        check_decodable(access_unit)?;
+        let color = self.state.colors.inspect(access_unit)?;
         let alignment = self.transform.input_alignment()?;
         let sample = self
             .inputs
@@ -198,6 +279,7 @@ impl VideoDecoder for MfDecoder {
         // SAFETY: COM call on a valid sample.
         unsafe { sample.SetSampleTime(to_hns(timestamp)) }
             .or_platform("IMFSample::SetSampleTime")?;
+        self.state.remember_color(to_hns(timestamp), color);
         let allow_software_fallback = self.state.preference
             == crate::codec::BackendPreference::Auto
             && self._device.is_some();
@@ -289,6 +371,7 @@ impl Sink for Deliver<'_, '_> {
             }
         }
         let format = state.format;
+        let color = format.color.resolve(state.color_at(timestamp));
         if let Some(surface) = surface.as_ref() {
             let device = device.as_deref_mut().ok_or(CodecError::Unsupported(
                 "decoder returned a D3D11 surface without its device",
@@ -297,6 +380,7 @@ impl Sink for Deliver<'_, '_> {
             let image = mapped.image((format.width, format.height), format.display)?;
             (out)(DecodedFrame {
                 image,
+                color,
                 timestamp: from_hns(timestamp),
             });
             return Ok(());
@@ -334,6 +418,7 @@ impl Sink for Deliver<'_, '_> {
         let image = Nv12::new(width, height, luma, pitch, chroma, pitch)?;
         (out)(DecodedFrame {
             image,
+            color,
             timestamp: from_hns(timestamp),
         });
         Ok(())
@@ -423,3 +508,6 @@ impl Drop for Locked<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

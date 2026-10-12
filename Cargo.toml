@@ -21,6 +21,7 @@ aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zero
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain"] }
 base64 = "0.22"
 bytes = "1"
+bytemuck = "1"
 cpal = "0.18"
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
 davey = { version = "=0.1.4" }
@@ -36,6 +37,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 iced = { version = "0.14", default-features = false, features = ["advanced", "image", "wgpu", "tiny-skia", "tokio", "x11", "wayland", "qr_code"] }
 iced_renderer = { version = "0.14", default-features = false }
+iced_tiny_skia = { version = "0.14", default-features = false, features = ["image"] }
 keyring-core = "1.0.0"
 opus2 = { version = "0.4", default-features = false, features = ["backend-libopus", "static", "bundled"] }
 parking_lot = "0.12"
@@ -51,6 +53,8 @@ serde_json = { version = "1", features = ["raw_value"] }
 serde_repr = "0.1"
 sha2 = "0.10"
 sys-locale = "0.3"
+softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+tiny-skia = { version = "0.11.4", default-features = false, features = ["std", "simd"] }
 time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
 tar = { version = "0.4", default-features = false }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
