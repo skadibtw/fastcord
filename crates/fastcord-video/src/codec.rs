@@ -196,6 +196,16 @@ pub trait VideoEncoder {
 
     /// Appends all pending access units to `out`. The encoder stays usable.
     fn flush(&mut self, out: &mut Vec<EncodedFrame>) -> Result<(), CodecError>;
+
+    /// Changes the target bitrate of the running encoder, in bits per second
+    /// (64 kbit/s to 50 Mbit/s), for the frames submitted from now on. An
+    /// encoder that cannot do this while running answers
+    /// [`CodecError::Unsupported`], and the caller reopens it at the new rate.
+    fn set_bitrate(&mut self, _bitrate: u32) -> Result<(), CodecError> {
+        Err(CodecError::Unsupported(
+            "this encoder cannot change its bitrate while running",
+        ))
+    }
 }
 
 /// A receive decoder. Codec objects belong to the thread that opened them.

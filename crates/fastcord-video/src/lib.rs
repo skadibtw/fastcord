@@ -10,6 +10,10 @@
 //! backend is always reported ([`Backend`], [`Selected::rejected`]). FFmpeg is
 //! not used. Windows uses Media Foundation ([`media_foundation`]); macOS uses
 //! VideoToolbox ([`videotoolbox`]) with IOSurface-backed pixel buffers.
+//!
+//! [`share`] is the sending side of a screen share: it connects a platform
+//! capture session to an encoder and hands finished access units to the
+//! transport, with keyframe and bitrate control from the connection's feedback.
 
 pub mod av1;
 pub mod codec;
@@ -18,6 +22,7 @@ pub mod h264;
 #[cfg(windows)]
 pub mod media_foundation;
 mod select;
+pub mod share;
 #[cfg(test)]
 mod test_vectors;
 #[cfg(target_os = "macos")]

@@ -1,5 +1,8 @@
-//! Native credential storage. All methods may block and belong on a worker,
-//! never the UI thread. No default/global keyring store or plaintext fallback.
+//! Native credential storage, and screen capture (`capture`). All methods may
+//! block and belong on a worker, never the UI thread. No default/global keyring
+//! store or plaintext fallback.
+
+pub mod capture;
 
 use std::collections::HashMap;
 use std::fmt;

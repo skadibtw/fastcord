@@ -222,6 +222,20 @@ impl VideoEncoder for MfEncoder {
         };
         self.transform.drain(&self.session, &mut collect, false)
     }
+
+    fn set_bitrate(&mut self, bitrate: u32) -> Result<(), CodecError> {
+        let wanted = EncoderConfig {
+            bitrate,
+            ..self.config
+        };
+        wanted.validate()?;
+        // Encoder transforms accept a new mean bitrate while streaming; it
+        // applies to the frames submitted after this call.
+        set(&self.codec_api, &CODECAPI_AVEncCommonMeanBitRate, bitrate)
+            .or_platform("CODECAPI_AVEncCommonMeanBitRate")?;
+        self.config.bitrate = bitrate;
+        Ok(())
+    }
 }
 
 /// Collects encoded access units into the caller's vector.

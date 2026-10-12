@@ -7,9 +7,11 @@
 //! when the account screen is left (which closes the Gateway session cleanly).
 
 mod stream_audio;
+mod stream_share;
 mod stream_video;
 mod voice_audio;
 
+pub use stream_share::{SharePicker, ShareView};
 pub use voice_audio::VoiceAudioState;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -95,6 +97,7 @@ use crate::variable_list::{Measurement, Viewport};
 use crate::virtual_list::Window;
 use crate::{emoji, emoji_picker};
 use fastcord_discord::{PrivateChannelError, RestClient, UserToken};
+use fastcord_platform::capture::CaptureSource;
 use iced::futures::{Stream, stream};
 use iced::task::Handle;
 
@@ -353,6 +356,13 @@ pub enum Command {
     CloseReactionUsers,
     OpenPrivate(Vec<Snowflake>),
     Stream(StreamIntent),
+    /// Capture `source` and, once the capture runs, create a Go Live stream.
+    StartShare {
+        source: CaptureSource,
+        request: StreamCreateRequest,
+    },
+    /// End the screen share and its stream.
+    StopShare,
 }
 
 /// An explicit Go Live control action. Capture/send UI belongs to milestone 29.
@@ -437,6 +447,12 @@ impl fmt::Debug for Command {
             Self::CloseReactionUsers => f.write_str("CloseReactionUsers"),
             Self::OpenPrivate(_) => f.write_str("OpenPrivate([selected recipients])"),
             Self::Stream(intent) => f.debug_tuple("Stream").field(intent).finish(),
+            // The window title is private to the desktop and stays out of logs.
+            Self::StartShare { request, .. } => f
+                .debug_struct("StartShare")
+                .field("request", request)
+                .finish_non_exhaustive(),
+            Self::StopShare => f.write_str("StopShare"),
         }
     }
 }
@@ -461,6 +477,7 @@ pub struct NavigationBridge {
     command_receiver: Arc<Mutex<Option<mpsc::Receiver<Command>>>>,
     outbox_slots: Slots,
     watched: Arc<parking_lot::Mutex<Option<Arc<crate::playback::Session>>>>,
+    share_view: watch::Sender<ShareView>,
 }
 
 impl NavigationBridge {
@@ -481,6 +498,7 @@ impl NavigationBridge {
             command_receiver: Arc::new(Mutex::new(Some(receiver))),
             outbox_slots: Slots::default(),
             watched: Arc::default(),
+            share_view: watch::channel(ShareView::default()).0,
         }
     }
 
@@ -664,6 +682,40 @@ impl NavigationBridge {
         if let Some(session) = self.watched.lock().take() {
             session.close();
         }
+    }
+
+    /// What the screen shows about the screen share.
+    pub fn share_view(&self) -> ShareView {
+        self.share_view.borrow().clone()
+    }
+
+    /// The voice channel the account is in or joining: where a share goes.
+    pub fn voice_target(&self) -> Option<(Option<Snowflake>, Snowflake)> {
+        let request = (*self.voice_requests.borrow())?;
+        request
+            .channel_id
+            .map(|channel| (request.guild_id, channel))
+    }
+
+    /// Starts sharing `source` into the voice channel `request` names. The
+    /// capture starts first; the stream is created once the OS accepted it.
+    pub fn start_share(&self, source: CaptureSource, request: StreamCreateRequest) -> bool {
+        let text = format!("Starting capture of “{}”…", source.title);
+        let queued = self
+            .commands
+            .try_send(Command::StartShare { source, request })
+            .is_ok();
+        self.share_view.send_replace(if queued {
+            ShareView::active(text)
+        } else {
+            ShareView::failed("Could not start sharing; try again.".to_owned())
+        });
+        queued
+    }
+
+    /// Ends the screen share (and deletes its stream).
+    pub fn stop_share(&self) -> bool {
+        self.commands.try_send(Command::StopShare).is_ok()
     }
 
     /// The worker's end of the command queue; there is only one.
@@ -983,6 +1035,7 @@ enum WorkerInput {
     Command(Command),
     PrivateList(u64, Result<Vec<Channel>, String>),
     PrivateOpen(u64, Result<Channel, PrivateChannelError>),
+    Share,
 }
 
 struct Worker {
@@ -1010,6 +1063,9 @@ struct Worker {
     stream_tasks: HashMap<StreamKey, tokio::task::JoinHandle<()>>,
     stream_intents: StreamIntentState,
     pending_stream_signal: Option<StreamIntent>,
+    share: Option<stream_share::ShareSession>,
+    /// The share's view changed since the loop last signaled the UI.
+    share_dirty: bool,
 }
 
 fn stream_request_matches_key(
@@ -1284,6 +1340,14 @@ impl Worker {
             changed = self.voice_controls.changed() => {
                 changed.ok().map(|()| WorkerInput::VoiceControls)
             }
+            changed = async {
+                match self.share.as_mut() {
+                    Some(share) => share.progress.changed().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                changed.map(|()| WorkerInput::Share)
+            }
             completed = self.tracker.history.next_completed() => {
                 Some(WorkerInput::History(completed))
             }
@@ -1392,7 +1456,9 @@ impl Worker {
             } => history.reaction_users(&self.rest, channel, message, emoji),
             Command::CloseReactionUsers => history.close_reaction_users(),
             Command::OpenPrivate(_) => {}
-            Command::Stream(_) => unreachable!("stream commands are handled above"),
+            Command::Stream(_) | Command::StartShare { .. } | Command::StopShare => {
+                unreachable!("stream and share commands are handled above")
+            }
         }
     }
 
@@ -1477,6 +1543,7 @@ impl Worker {
         if let Some(session) = self.bridge.watched() {
             self.stream_command(gateway, StreamIntent::Unwatch(session.key.clone()));
         }
+        self.end_share(Some(gateway), ShareView::idle(), true);
         self.stop_all_streams();
         if let Some(channel) = request.channel_id {
             if let Some(correlator) = self.voice_correlator.as_mut() {
@@ -1582,6 +1649,7 @@ impl Worker {
                     return Some(StreamCorrelation::Ignored);
                 }
                 self.stream_intents.retire(&key);
+                self.share_stream_deleted(&key, deleted.reason, deleted.unavailable);
                 if let Some(correlator) = self.stream_correlator.as_mut() {
                     let correlation = correlator.delete(&deleted.stream_key);
                     if matches!(&correlation, StreamCorrelation::Ignored) {
@@ -1616,6 +1684,18 @@ impl Worker {
             StreamCorrelation::Connect(credentials) => {
                 let key = credentials.key.clone();
                 self.stop_stream_key(&key.to_wire());
+                if let Some(share) = self.share.as_ref().filter(|share| share.key == key)
+                    && let Some(worker) = share.worker.as_ref()
+                {
+                    // The account's own stream: it sends video and never decodes.
+                    let task = tokio::spawn(stream_share::run(
+                        credentials,
+                        worker.control(),
+                        Arc::clone(&share.sender),
+                    ));
+                    self.stream_tasks.insert(key, task);
+                    return;
+                }
                 let presentation = self
                     .bridge
                     .watched()
@@ -1694,7 +1774,10 @@ impl Worker {
         }
     }
 
+    /// Ends the screen share and every stream task without a stream delete: the
+    /// parent voice or Gateway session they belonged to is gone.
     fn stop_all_streams(&mut self) {
+        self.end_share(None, ShareView::idle(), false);
         for (_, task) in self.stream_tasks.drain() {
             task.abort();
         }
@@ -1897,6 +1980,8 @@ pub fn status_stream(
         stream_tasks: HashMap::new(),
         stream_intents: StreamIntentState::default(),
         pending_stream_signal: None,
+        share: None,
+        share_dirty: false,
     };
     stream::unfold(worker, |mut worker| async move {
         let mut gateway = match worker.gateway.take() {
@@ -1960,6 +2045,18 @@ pub fn status_stream(
                             worker.stream_command(&gateway, intent);
                             (None, false)
                         }
+                        WorkerInput::Command(Command::StartShare { source, request }) => {
+                            worker.start_share(source, request);
+                            (None, false)
+                        }
+                        WorkerInput::Command(Command::StopShare) => {
+                            worker.end_share(Some(&gateway), ShareView::idle(), true);
+                            (None, false)
+                        }
+                        WorkerInput::Share => {
+                            worker.share_progress(&gateway);
+                            (None, false)
+                        }
                         WorkerInput::Command(command) => {
                             worker.command(command);
                             (None, false)
@@ -1991,6 +2088,7 @@ pub fn status_stream(
                     (None, false)
                 }
             };
+            voice_changed |= std::mem::take(&mut worker.share_dirty);
             if !requested
                 && !worker.tracker.navigation_dirty
                 && !worker.tracker.history.dirty()
@@ -2050,6 +2148,8 @@ pub struct GatewayPanel {
     pub emoji_picker: emoji_picker::Picker,
     pub emoji_snapshot: Arc<emoji_picker::Snapshot>,
     pub watch_open: bool,
+    /// The source picker of the screen share.
+    pub share_picker: SharePicker,
     _worker: Handle,
     pub attachments: Option<AttachmentCache>,
     /// Render state for the account's cached/downloaded attachment previews.
@@ -2170,6 +2270,7 @@ impl GatewayPanel {
             emoji_picker: emoji_picker::Picker::default(),
             emoji_snapshot: Arc::default(),
             watch_open: false,
+            share_picker: SharePicker::default(),
             voice_guild: None,
             composer: Composer::default(),
             confirm_delete: None,
@@ -3169,6 +3270,8 @@ mod tests {
             stream_tasks: HashMap::new(),
             stream_intents: StreamIntentState::default(),
             pending_stream_signal: None,
+            share: None,
+            share_dirty: false,
             bridge,
         }
     }

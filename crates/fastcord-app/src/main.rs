@@ -122,6 +122,11 @@ enum Message {
     UnwatchStream,
     ShowStream(bool),
     VideoReady(u64),
+    OpenSharePicker,
+    ShareSources(Result<Vec<fastcord_platform::capture::CaptureSource>, String>),
+    CloseSharePicker,
+    StartShare(fastcord_platform::capture::SourceId),
+    StopShare,
     GuildViewport(virtual_list::Window),
     ChannelViewport(virtual_list::Window),
     SetSelfMute(bool),
@@ -597,6 +602,76 @@ impl App {
                     gateway.watch_open = open && gateway.controls.watched().is_some();
                 }
             }
+            Message::OpenSharePicker => {
+                if let Phase::Account { gateway, .. } = &mut self.phase
+                    && !gateway.controls.share_view().active
+                    && !gateway.share_picker.is_open()
+                {
+                    gateway.share_picker = gateway::SharePicker::Loading;
+                    // Enumeration touches the window system: never on the UI thread.
+                    return Task::perform(
+                        async {
+                            tokio::task::spawn_blocking(|| {
+                                fastcord_platform::capture::availability()?;
+                                fastcord_platform::capture::list_sources()
+                            })
+                            .await
+                            .map_err(|_| "Listing screens and windows failed.".to_owned())
+                            .and_then(|listed| listed.map_err(|error| error.to_string()))
+                        },
+                        Message::ShareSources,
+                    );
+                }
+            }
+            Message::ShareSources(result) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase
+                    && matches!(gateway.share_picker, gateway::SharePicker::Loading)
+                {
+                    gateway.share_picker = match result {
+                        Ok(sources) => gateway::SharePicker::Listed(sources),
+                        Err(error) => gateway::SharePicker::Failed(error),
+                    };
+                }
+            }
+            Message::CloseSharePicker => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.share_picker = gateway::SharePicker::Closed;
+                }
+            }
+            Message::StartShare(id) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    let source = match &gateway.share_picker {
+                        gateway::SharePicker::Listed(sources) => {
+                            sources.iter().find(|source| source.id == id).cloned()
+                        }
+                        _ => None,
+                    };
+                    gateway.share_picker = gateway::SharePicker::Closed;
+                    let target = gateway.controls.voice_target().filter(|_| {
+                        gateway.controls.voice_audio_state() == gateway::VoiceAudioState::Running
+                    });
+                    if let (Some(source), Some((guild, channel))) = (source, target) {
+                        let request = match guild {
+                            Some(guild) => {
+                                fastcord_model::StreamCreateRequest::guild(guild, channel)
+                            }
+                            None => fastcord_model::StreamCreateRequest::call(channel),
+                        };
+                        gateway.controls.start_share(source, request);
+                        self.notice = None;
+                    } else {
+                        self.notice =
+                            Some("Join a voice channel before sharing your screen.".into());
+                    }
+                }
+            }
+            Message::StopShare => {
+                if let Phase::Account { gateway, .. } = &self.phase
+                    && !gateway.controls.stop_share()
+                {
+                    self.notice = Some("Could not stop sharing; try again.".into());
+                }
+            }
             Message::VideoReady(id) => {
                 if let Phase::Account { gateway, .. } = &self.phase
                     && let Some(session) = gateway.controls.watched()
@@ -958,6 +1033,60 @@ impl App {
         Task::none()
     }
 
+    /// The overlay that lists the screens and windows that can be shared.
+    fn share_picker_view(picker: &gateway::SharePicker) -> Element<'_, Message> {
+        use fastcord_platform::capture::SourceKind;
+        let mut content = column![
+            row![
+                text("Share your screen").size(22).width(Length::Fill),
+                button("Cancel").on_press(Message::CloseSharePicker),
+            ]
+            .spacing(12),
+            text("Choose a screen or a window. Windows draws a border around what is shared, and your voice stays connected.").size(12),
+        ]
+        .spacing(12);
+        match picker {
+            gateway::SharePicker::Closed => {}
+            gateway::SharePicker::Loading => {
+                content = content.push(text("Looking for screens and windows…"));
+            }
+            gateway::SharePicker::Failed(error) => {
+                content = content.push(text(error.clone()));
+            }
+            gateway::SharePicker::Listed(sources) => {
+                let mut screens = column![text("Screens").size(16)].spacing(6);
+                let mut windows = column![text("Windows").size(16)].spacing(6);
+                let mut any_window = false;
+                for source in sources {
+                    let entry = button(text(source.title.clone()))
+                        .on_press(Message::StartShare(source.id))
+                        .width(Length::Fill);
+                    match source.id.kind() {
+                        SourceKind::Display => screens = screens.push(entry),
+                        SourceKind::Window => {
+                            any_window = true;
+                            windows = windows.push(entry);
+                        }
+                    }
+                }
+                if !any_window {
+                    windows = windows.push(text("No shareable windows are open.").size(12));
+                }
+                content = content
+                    .push(scrollable(column![screens, windows].spacing(16)).height(Length::Fill));
+            }
+        }
+        container(content)
+            .padding(20)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Color::from_rgb8(24, 25, 30).into()),
+                ..Default::default()
+            })
+            .into()
+    }
+
     fn can_login(&self) -> bool {
         self.acknowledged && !self.token.expose_secret().trim().is_empty()
     }
@@ -1143,6 +1272,30 @@ impl App {
                         streams.push(text("Join voice to watch an available stream.").size(12));
                 }
             }
+            let share = gateway.controls.share_view();
+            if share.active {
+                streams = streams
+                    .push(text(share.text.clone()).size(12))
+                    .push(button("Stop sharing").on_press(Message::StopShare));
+            } else {
+                streams = streams.push(
+                    button("Share screen").on_press_maybe(
+                        (cfg!(windows)
+                            && voice_audio == gateway::VoiceAudioState::Running
+                            && gateway.voice_guild.is_some()
+                            && !gateway.share_picker.is_open())
+                        .then_some(Message::OpenSharePicker),
+                    ),
+                );
+                if !share.text.is_empty() {
+                    streams = streams.push(text(share.text.clone()).size(12));
+                }
+                if !cfg!(windows) {
+                    streams = streams.push(
+                        text("Screen sharing is available on Windows in this version.").size(12),
+                    );
+                }
+            }
             let account = container(
                 column![
                     row![
@@ -1267,6 +1420,10 @@ impl App {
                         ..Default::default()
                     });
                     iced::widget::stack![account, pane].into()
+                }
+                None if gateway.share_picker.is_open() && !gateway.emoji_picker.request.open => {
+                    iced::widget::stack![account, Self::share_picker_view(&gateway.share_picker)]
+                        .into()
                 }
                 Some(viewer) => {
                     iced::widget::stack![account, attachment_ui::viewer_view(viewer)].into()

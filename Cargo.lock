@@ -1867,7 +1867,9 @@ dependencies = [
  "apple-native-keyring-store",
  "fastcord-model",
  "keyring-core",
+ "parking_lot 0.12.5",
  "sys-locale",
+ "windows 0.62.2",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
  "zeroize",
@@ -1878,7 +1880,9 @@ name = "fastcord-video"
 version = "0.1.0-alpha.1"
 dependencies = [
  "cc",
+ "fastcord-platform",
  "flate2",
+ "parking_lot 0.12.5",
  "serde_json",
  "sha2 0.10.9",
  "tar",
