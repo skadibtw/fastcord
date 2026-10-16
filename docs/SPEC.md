@@ -188,6 +188,7 @@ Message send uses a stable local operation ID and supported nonce/enforce-nonce 
 | Remove own normal reaction | User-client route `DELETE /channels/{channel}/messages/{message}/reactions/{emoji}/0/@me`; pin a compatibility fixture for this typed route |
 | Reaction detail | `GET /channels/{channel}/messages/{message}/reactions/{emoji}` on demand |
 | Friends and blocks | READY `relationships` and `RELATIONSHIP_ADD/UPDATE/REMOVE`; `PUT /users/@me/relationships/{id}` (accept, send by ID, block with `{"type":2}`), `DELETE` of it (decline, cancel, remove, unblock), `POST /users/@me/relationships` (send by username); one explicit request per click |
+| Presence | READY `presences`, READY_SUPPLEMENTAL `merged_presences.friends`, `PRESENCE_UPDATE`; own status via `PATCH /users/@me/settings` (`status`, `custom_status`); admitted only for referenced users |
 | User profile | `GET /users/{id}/profile` on demand when a name or avatar is clicked |
 | Attachment refresh | `POST /attachments/refresh-urls`, or refetch owning message to obtain a current URL |
 | Voice and Go Live | Main Gateway signaling, not REST polling |

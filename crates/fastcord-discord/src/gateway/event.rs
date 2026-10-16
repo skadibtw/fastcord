@@ -147,12 +147,28 @@ pub struct Ready {
     pub private_channels: Vec<Channel>,
     /// Friends, blocks and pending requests (at most [`MAX_RELATIONSHIPS`]).
     pub relationships: Vec<Relationship>,
+    /// Presences READY carried (at most [`MAX_PRESENCES`]); the store keeps
+    /// only those of referenced users.
+    pub presences: Vec<PresenceUpdate>,
     /// The account's read cursors and mutes.
     pub read: ReadyRead,
 }
 
 /// Most relationships kept from READY or events; the rest are dropped.
 pub const MAX_RELATIONSHIPS: usize = 2000;
+
+/// Most presences held or taken from one READY.
+pub const MAX_PRESENCES: usize = 2000;
+
+/// One user's presence, whole (READY) or partial (PRESENCE_UPDATE): a field
+/// the payload omitted is `None` and leaves what is held as it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresenceUpdate {
+    pub user: Snowflake,
+    pub status: Option<fastcord_model::Status>,
+    /// `Some(None)`: activities were sent and none is a custom status.
+    pub custom: Option<Option<String>>,
+}
 
 /// RELATIONSHIP_UPDATE: the type of a known relationship changed. A payload
 /// without a recognised type (a nickname change) leaves it as it is.
@@ -217,6 +233,8 @@ pub struct ReadySupplemental {
     pub users: Vec<User>,
     /// Private channels omitted from READY.
     pub lazy_private_channels: Vec<Channel>,
+    /// Friends' presences (`merged_presences.friends`).
+    pub presences: Vec<PresenceUpdate>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
@@ -471,6 +489,7 @@ pub enum Dispatch {
     MessageDeleteBulk(MessageDeleteBulk),
     /// The account's read cursor moved.
     MessageAck(MessageAck),
+    PresenceUpdate(Box<PresenceUpdate>),
     RelationshipAdd(Box<Relationship>),
     RelationshipUpdate(RelationshipUpdate),
     RelationshipRemove(Snowflake),
@@ -527,6 +546,7 @@ impl Dispatch {
             Self::MessageDelete(_) => "MESSAGE_DELETE",
             Self::MessageDeleteBulk(_) => "MESSAGE_DELETE_BULK",
             Self::MessageAck(_) => "MESSAGE_ACK",
+            Self::PresenceUpdate(_) => "PRESENCE_UPDATE",
             Self::RelationshipAdd(_) => "RELATIONSHIP_ADD",
             Self::RelationshipUpdate(_) => "RELATIONSHIP_UPDATE",
             Self::RelationshipRemove(_) => "RELATIONSHIP_REMOVE",

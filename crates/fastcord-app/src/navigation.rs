@@ -206,6 +206,7 @@ fn sidebar_row<'a>(
     unread: bool,
     mention_count: u32,
     intent: Option<Message>,
+    presence: Option<fastcord_model::Status>,
 ) -> Element<'a, Message> {
     let mut line = row![
         text(label)
@@ -214,7 +215,11 @@ fn sidebar_row<'a>(
             .wrapping(text::Wrapping::None)
             .width(Length::Fill)
     ]
+    .spacing(6)
     .align_y(alignment::Vertical::Center);
+    if presence.is_some() {
+        line = line.push(crate::status::dot(presence));
+    }
     if mention_count > 0 {
         line = line.push(
             container(
@@ -286,6 +291,10 @@ fn sidebar<'a>(
                 channel.unread,
                 channel.mentions,
                 Some(Message::SelectPrivateChannel(channel.id)),
+                channel
+                    .recipient
+                    .and_then(|id| snapshot.presences.get(&id))
+                    .map(|p| p.status),
             )
         });
         column![
@@ -295,6 +304,7 @@ fn sidebar<'a>(
                 false,
                 0,
                 Some(Message::Friends(crate::friends::Event::Open)),
+                None,
             ),
             column![
                 text_input("Recipient IDs, comma separated", recipients)
@@ -357,6 +367,7 @@ fn sidebar<'a>(
                 channel.unread,
                 channel.mentions,
                 intent,
+                None,
             )
         });
         virtual_list::view(

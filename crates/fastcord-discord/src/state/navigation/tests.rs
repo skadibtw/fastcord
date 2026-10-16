@@ -744,6 +744,7 @@ fn large_ready() -> Ready {
         session_id: SessionId::new("large-navigation-fixture".to_owned()),
         read: Default::default(),
         relationships: Vec::new(),
+        presences: Vec::new(),
         user,
         users: Vec::new(),
         guilds: (0..160)

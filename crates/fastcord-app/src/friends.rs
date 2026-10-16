@@ -7,15 +7,18 @@
 //! twice by the program; a failure is shown once and the user may click again.
 //! The lists themselves change only when Discord's event arrives.
 //!
-//! No presence is tracked, so there is no "Online" tab.
+//! Presence dots and the Online tab read the reducer's shared presence table
+//! (milestone 46); an unknown presence draws no dot.
 
 use std::collections::HashMap;
+
+type Presences = HashMap<Snowflake, Presence>;
 
 use fastcord_discord::{
     NetworkFailure, Profile, RelationshipAction, RestClient, RestError, RetryableFailure,
     UsernameError, parse_username,
 };
-use fastcord_model::{Relationship, RelationshipKind, Snowflake, User};
+use fastcord_model::{Presence, Relationship, RelationshipKind, Snowflake, Status, User};
 use iced::font::Weight;
 use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
 use iced::{Element, Font, Length, Task, alignment};
@@ -36,14 +39,23 @@ const BOLD: Font = Font {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
+    Online,
     All,
     Pending,
     Blocked,
 }
 
 impl Tab {
-    fn includes(self, kind: RelationshipKind) -> bool {
+    fn includes(self, relationship: &Relationship, presences: &Presences) -> bool {
+        let kind = relationship.kind;
         match self {
+            Self::Online => {
+                kind == RelationshipKind::Friend
+                    && matches!(
+                        presences.get(&relationship.user.id).map(|p| p.status),
+                        Some(Status::Online | Status::Idle | Status::Dnd)
+                    )
+            }
             Self::All => kind == RelationshipKind::Friend,
             Self::Pending => matches!(
                 kind,
@@ -360,6 +372,7 @@ fn kind_label(kind: RelationshipKind) -> &'static str {
 fn person_row<'a>(
     relationship: &'a Relationship,
     pending: Option<RelationshipAction>,
+    status: Option<Status>,
 ) -> Element<'a, Event> {
     let user = &relationship.user;
     let mut buttons = row![].spacing(6).align_y(alignment::Vertical::Center);
@@ -375,13 +388,20 @@ fn person_row<'a>(
             button(
                 column![
                     text(user.display_name()).font(BOLD).size(14),
-                    text(format!(
-                        "{} · {}",
-                        user.username,
-                        kind_label(relationship.kind)
-                    ))
-                    .size(12)
-                    .style(text::secondary),
+                    row![
+                        crate::status::dot(
+                            status.filter(|_| relationship.kind == RelationshipKind::Friend)
+                        ),
+                        text(format!(
+                            "{} · {}",
+                            user.username,
+                            kind_label(relationship.kind)
+                        ))
+                        .size(12)
+                        .style(text::secondary),
+                    ]
+                    .spacing(5)
+                    .align_y(alignment::Vertical::Center),
                 ]
                 .spacing(1),
             )
@@ -401,11 +421,15 @@ fn person_row<'a>(
 }
 
 /// The Friends screen, in place of the conversation.
-pub fn view<'a>(state: &'a State, relationships: &'a [Relationship]) -> Element<'a, Event> {
+pub fn view<'a>(
+    state: &'a State,
+    relationships: &'a [Relationship],
+    presences: &'a Presences,
+) -> Element<'a, Event> {
     let count = |tab: Tab| {
         relationships
             .iter()
-            .filter(|r| tab.includes(r.kind))
+            .filter(|r| tab.includes(r, presences))
             .count()
     };
     let tab_button = |tab: Tab, label: &str| {
@@ -415,6 +439,7 @@ pub fn view<'a>(state: &'a State, relationships: &'a [Relationship]) -> Element<
     };
     let tabs = row![
         text("Friends").size(16).font(BOLD),
+        tab_button(Tab::Online, "Online"),
         tab_button(Tab::All, "All"),
         tab_button(Tab::Pending, "Pending"),
         tab_button(Tab::Blocked, "Blocked"),
@@ -443,7 +468,7 @@ pub fn view<'a>(state: &'a State, relationships: &'a [Relationship]) -> Element<
     let mut total = 0;
     for relationship in relationships
         .iter()
-        .filter(|r| state.tab().includes(r.kind))
+        .filter(|r| state.tab().includes(r, presences))
     {
         total += 1;
         if shown < MAX_SHOWN {
@@ -451,12 +476,14 @@ pub fn view<'a>(state: &'a State, relationships: &'a [Relationship]) -> Element<
             list = list.push(person_row(
                 relationship,
                 state.pending.get(&relationship.user.id).copied(),
+                presences.get(&relationship.user.id).map(|p| p.status),
             ));
         }
     }
     if total == 0 {
         list = list.push(
             text(match state.tab() {
+                Tab::Online => "Nobody is online right now.",
                 Tab::All => "No friends yet. Add one by username above.",
                 Tab::Pending => "No pending friend requests.",
                 Tab::Blocked => "You have not blocked anyone.",
@@ -717,6 +744,7 @@ mod tests {
     fn tabs_split_the_relationships_and_views_build_for_every_kind() {
         use RelationshipKind::*;
         let all = [Friend, IncomingRequest, OutgoingRequest, Blocked];
+        let none = Presences::new();
         let mut state = State::default();
         let rows: Vec<Relationship> = all
             .iter()
@@ -726,23 +754,46 @@ mod tests {
                 kind: *kind,
             })
             .collect();
-        assert_eq!(rows.iter().filter(|r| Tab::All.includes(r.kind)).count(), 1);
+        assert_eq!(
+            rows.iter().filter(|r| Tab::All.includes(r, &none)).count(),
+            1
+        );
         assert_eq!(
             rows.iter()
-                .filter(|r| Tab::Pending.includes(r.kind))
+                .filter(|r| Tab::Pending.includes(r, &none))
                 .count(),
             2
         );
         assert_eq!(
             rows.iter()
-                .filter(|r| Tab::Blocked.includes(r.kind))
+                .filter(|r| Tab::Blocked.includes(r, &none))
                 .count(),
             1
         );
         let client = rest();
-        for tab in [Tab::All, Tab::Pending, Tab::Blocked] {
+        let mut online = Presences::new();
+        online.insert(
+            Snowflake(1),
+            Presence {
+                status: Status::Idle,
+                custom: None,
+            },
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|r| Tab::Online.includes(r, &online))
+                .count(),
+            1
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|r| Tab::Online.includes(r, &none))
+                .count(),
+            0
+        );
+        for tab in [Tab::Online, Tab::All, Tab::Pending, Tab::Blocked] {
             let _ = state.update(Event::Tab(tab), &client);
-            let _ = view(&state, &rows);
+            let _ = view(&state, &rows, &online);
         }
         let _ = state.update(Event::Profile(user(1)), &client);
         assert!(profile_view(&state, &rows, Snowflake(1)).is_some());

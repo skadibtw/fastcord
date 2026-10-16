@@ -134,6 +134,8 @@ pub struct ChannelRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrivateChannelRow {
     pub id: Snowflake,
+    /// The other person of a one-to-one conversation (for presence).
+    pub recipient: Option<Snowflake>,
     pub label: String,
     pub selected: bool,
     pub unread: bool,
@@ -177,6 +179,8 @@ pub struct NavigationSnapshot {
     pub permissions_pending: bool,
     /// Friends, blocks and pending requests (shared, rebuilt per change).
     pub relationships: std::sync::Arc<[fastcord_model::Relationship]>,
+    /// Presence of referenced users (shared, copied on write).
+    pub presences: std::sync::Arc<std::collections::HashMap<Snowflake, fastcord_model::Presence>>,
     /// Live DM and group-DM calls (shared, rebuilt per change).
     pub calls: std::sync::Arc<[super::CallInfo]>,
     /// Calls that ring this account, with the conversation's name.
@@ -319,6 +323,10 @@ impl Navigation {
                 let unread = store.unread(channel.id, None, channel.last_message_id);
                 PrivateChannelRow {
                     id: channel.id,
+                    recipient: match channel.recipient_ids[..] {
+                        [only] if channel.kind == fastcord_model::ChannelKind::Dm => Some(only),
+                        _ => None,
+                    },
                     label: private_name(store, channel),
                     selected: self.selected_private_channel == Some(channel.id),
                     unread: unread.unread,
@@ -516,6 +524,7 @@ impl Navigation {
                     })
                 })
                 .collect(),
+            presences: store.presences(),
         }
     }
 

@@ -9,6 +9,7 @@ mod guild;
 pub mod markup;
 mod message;
 mod permissions;
+mod presence;
 mod relationship;
 mod snowflake;
 mod user;
@@ -30,6 +31,7 @@ pub use permissions::{
     GuildScope, MemberScope, OverwriteKind, PermissionOverwrite, Permissions, channel_permissions,
     guild_permissions,
 };
+pub use presence::{MAX_CUSTOM_STATUS_CHARS, Presence, Status};
 pub use relationship::{Relationship, RelationshipKind};
 pub use snowflake::{DISCORD_EPOCH_MS, ParseSnowflakeError, Snowflake};
 pub use user::User;

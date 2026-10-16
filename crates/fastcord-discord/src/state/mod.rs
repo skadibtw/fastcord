@@ -29,6 +29,7 @@ mod calls;
 mod list_id;
 mod member_list;
 pub mod navigation;
+mod presences;
 mod read;
 #[cfg(test)]
 mod regressions;
@@ -459,6 +460,8 @@ pub struct Changes {
     pub relationships: bool,
     /// Private calls (ringing or connected users) changed.
     pub calls: bool,
+    /// A referenced user's presence changed.
+    pub presence: bool,
 }
 
 impl Changes {
@@ -483,6 +486,7 @@ pub struct Store {
     private_bytes: usize,
     relationships: relationships::Relationships,
     calls: calls::Calls,
+    presences: presences::Presences,
     focus: Focus,
     read: ReadStates,
 }
@@ -526,6 +530,7 @@ impl Store {
             private_bytes: 0,
             relationships: relationships::Relationships::default(),
             calls: calls::Calls::default(),
+            presences: presences::Presences::default(),
             focus: Focus::default(),
             read: ReadStates::default(),
         }
@@ -575,6 +580,7 @@ impl Store {
             + self.private_bytes
             + self.relationships.bytes()
             + self.calls.bytes()
+            + self.presences.bytes()
     }
 
     /// Friends, blocks and pending requests, sorted by kind then name.
@@ -589,6 +595,39 @@ impl Store {
 
     pub fn relationship(&self, id: Snowflake) -> Option<fastcord_model::RelationshipKind> {
         self.relationships.kind(id)
+    }
+
+    /// Presence of referenced users (friends, direct-conversation recipients,
+    /// visible members and the account), shared with snapshots.
+    pub fn presences(&self) -> std::sync::Arc<HashMap<Snowflake, fastcord_model::Presence>> {
+        self.presences.shared()
+    }
+
+    pub fn presences_held(&self) -> usize {
+        self.presences.len()
+    }
+
+    /// Whether anything on screen or in a list still refers to this user.
+    fn presence_wanted(&self, id: Snowflake) -> bool {
+        self.current_user == Some(id)
+            || self.relationships.kind(id).is_some()
+            || self
+                .private_channels
+                .values()
+                .any(|channel| channel.recipient_ids.contains(&id))
+            || self.guilds.values().any(|entry| {
+                entry.members.contains_key(&id)
+                    || entry
+                        .lists
+                        .iter()
+                        .any(|list| list.member_ids().any(|m| m == id))
+            })
+    }
+
+    fn prune_presences(&mut self) -> bool {
+        let mut wanted = self.user_references();
+        wanted.extend(self.relationships.ids().map(|id| (id, 1)));
+        self.presences.retain(|id| wanted.contains_key(&id))
     }
 
     pub fn relationships_held(&self) -> usize {
@@ -725,6 +764,7 @@ impl Store {
             + self.users.values().map(user_bytes).sum::<usize>()
             + self.relationships.recount()
             + self.calls.bytes()
+            + self.presences.recount()
             + self.guilds.values().map(GuildEntry::recount).sum::<usize>()
             + self
                 .private_channels
@@ -825,6 +865,15 @@ impl Store {
 
     fn dispatch(&mut self, event: Dispatch) -> Changes {
         let mut changes = Changes::default();
+        // Only these can make a user unreferenced; pruning scans the store.
+        let unreferences = matches!(
+            event,
+            Dispatch::RelationshipRemove(_)
+                | Dispatch::ChannelDelete(_)
+                | Dispatch::ChannelRecipientRemove(_)
+                | Dispatch::GuildDelete(_)
+                | Dispatch::GuildMemberRemove(_)
+        );
         match event {
             Dispatch::Ready(ready) => self.ready(*ready, &mut changes),
             Dispatch::ReadySupplemental(supplemental) => {
@@ -858,6 +907,11 @@ impl Store {
                     .ack(ack.channel_id, ack.message_id, ack.mention_count)
                 {
                     changes.read = true;
+                }
+            }
+            Dispatch::PresenceUpdate(update) => {
+                if self.presence_wanted(update.user) {
+                    changes.presence = self.presences.apply(&update);
                 }
             }
             Dispatch::RelationshipAdd(relationship) => {
@@ -981,6 +1035,9 @@ impl Store {
             | Dispatch::StreamUpdate(_)
             | Dispatch::StreamDelete(_) => {}
         }
+        if unreferences && self.prune_presences() {
+            changes.presence = true;
+        }
         self.refresh_list_key(&mut changes);
         changes
     }
@@ -1028,6 +1085,7 @@ impl Store {
         self.relationships.replace(ready.relationships);
         self.calls.reset(Some(ready.user.id));
         changes.calls = true;
+        self.presences.clear();
         changes.reset = true;
         changes.relationships = true;
 
@@ -1043,6 +1101,8 @@ impl Store {
         for channel in ready.private_channels {
             self.put_private_channel(channel);
         }
+        self.admit_presences(&ready.presences);
+        changes.presence = true;
         // Deduplicated users may only acquire member references in
         // READY_SUPPLEMENTAL. Retain them until that startup phase completes.
     }
@@ -1074,7 +1134,17 @@ impl Store {
             self.put_private_channel(channel);
             changes.private_channels = true;
         }
+        self.admit_presences(&supplemental.presences);
+        changes.presence |= !supplemental.presences.is_empty();
         self.sweep_users();
+    }
+
+    fn admit_presences(&mut self, updates: &[crate::gateway::PresenceUpdate]) {
+        for update in updates {
+            if self.presence_wanted(update.user) {
+                self.presences.apply(update);
+            }
+        }
     }
 
     fn guild_create(&mut self, created: GuildCreate, changes: &mut Changes) {

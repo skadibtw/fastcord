@@ -588,6 +588,7 @@ mod tests {
                 session_id: SessionId::new("emoji-fixture-session".into()),
                 read: Default::default(),
                 relationships: Vec::new(),
+                presences: Vec::new(),
                 user,
                 users: Vec::new(),
                 guilds: vec![

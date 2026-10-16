@@ -141,6 +141,7 @@ fn ready_waits_for_supplemental_before_forgetting_users_nothing_references() {
             guilds: Vec::new(),
             users: Vec::new(),
             lazy_private_channels: Vec::new(),
+            presences: Vec::new(),
         },
     ))));
     check(&store);
@@ -928,6 +929,7 @@ fn big_ready(guilds: u64, channels: u64) -> Ready {
         session_id: SessionId::new("big".to_owned()),
         read: Default::default(),
         relationships: Vec::new(),
+        presences: Vec::new(),
         user: User {
             id: id(ME),
             username: "alt".to_owned(),
@@ -1455,6 +1457,7 @@ fn focus_allocation_growth_is_subject_to_the_same_terminal_limit() {
             guilds: Vec::new(),
             users: Vec::new(),
             lazy_private_channels: Vec::new(),
+            presences: Vec::new(),
         },
     ))));
     store.budget = store.bytes();

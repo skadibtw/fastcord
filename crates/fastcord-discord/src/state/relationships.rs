@@ -83,6 +83,10 @@ impl Relationships {
         self.map.get(&id).map(|held| held.kind)
     }
 
+    pub(super) fn ids(&self) -> impl Iterator<Item = Snowflake> + '_ {
+        self.map.keys().copied()
+    }
+
     pub(super) fn rows(&self) -> Arc<[Relationship]> {
         Arc::clone(&self.rows)
     }

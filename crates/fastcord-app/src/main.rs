@@ -25,6 +25,7 @@ mod reactions;
 mod render;
 mod rich;
 mod search;
+mod status;
 mod style;
 mod timeline;
 mod variable_list;
@@ -95,6 +96,7 @@ struct App {
     search: search::State,
     pins: pins::State,
     friends: friends::State,
+    status: status::State,
 }
 
 #[derive(Debug)]
@@ -215,6 +217,7 @@ enum Message {
     Search(search::Event),
     Pins(pins::Event),
     Friends(friends::Event),
+    Status(status::Event),
     EmojiPicker(emoji_picker::Event),
     EmojiVisibility(emoji::Occurrence, bool),
     EmojiLoaded(
@@ -268,6 +271,7 @@ impl App {
                 search: search::State::default(),
                 pins: pins::State::default(),
                 friends: friends::State::default(),
+                status: status::State::default(),
             },
             Task::perform(
                 async {
@@ -294,6 +298,7 @@ impl App {
         );
         if !matches!(self.phase, Phase::Account { .. }) {
             self.friends.purge();
+            self.status.purge();
         }
         let task = self.handle(message);
         if resynchronize {
@@ -745,6 +750,18 @@ impl App {
             Message::ToggleVoiceDetails => self.voice_details = !self.voice_details,
             Message::Search(event) => return self.search_event(event),
             Message::Pins(event) => return self.pins_event(event),
+            Message::Status(event) => {
+                if let Phase::Account {
+                    session, gateway, ..
+                } = &self.phase
+                {
+                    let own = gateway.navigation.presences.get(&session.user.id);
+                    return self
+                        .status
+                        .update(event, own, &session.client)
+                        .map(Message::Status);
+                }
+            }
             Message::Friends(event) => {
                 if let Phase::Account {
                     session, gateway, ..
@@ -1624,6 +1641,7 @@ impl App {
         self.search = search::State::default();
         self.pins = pins::State::default();
         self.friends.reset();
+        self.status.reset();
         self.phase = Phase::Account {
             session,
             persistence,
@@ -2008,7 +2026,23 @@ impl App {
 
             // ---- the user's panel at the foot of the sidebar ----
             let display = session.user.display_name().to_owned();
+            let own = gateway.navigation.presences.get(&session.user.id);
+            let own_status = self.status.status(own);
             let mut foot = column![];
+            if self.status.open {
+                foot = foot.push(
+                    self.status
+                        .menu(
+                            own,
+                            if *persistence == Persistence::Saved {
+                                "Saved login"
+                            } else {
+                                "Memory-only"
+                            },
+                        )
+                        .map(Message::Status),
+                );
+            }
             if in_voice {
                 foot = foot.push(
                     container(
@@ -2063,13 +2097,25 @@ impl App {
                                 .size(13)
                                 .font(bold)
                                 .wrapping(text::Wrapping::None),
-                            text(if *persistence == Persistence::Saved {
-                                "Saved login"
-                            } else {
-                                "Memory-only"
-                            })
-                            .size(11)
-                            .style(text::secondary),
+                            button(
+                                row![
+                                    status::dot(own_status),
+                                    text(
+                                        self.status
+                                            .custom(own)
+                                            .or(own_status.map(status::label))
+                                            .unwrap_or("Set status")
+                                            .to_owned()
+                                    )
+                                    .size(11)
+                                    .wrapping(text::Wrapping::None),
+                                ]
+                                .spacing(5)
+                                .align_y(iced::alignment::Vertical::Center)
+                            )
+                            .padding(0)
+                            .on_press(Message::Status(status::Event::ToggleMenu))
+                            .style(style::tool_button(false, false)),
                         ]
                         .width(Length::Fill),
                         button(
@@ -2140,8 +2186,12 @@ impl App {
                     voice_bar,
                     voice_call: gateway.voice_call.filter(|_| in_voice),
                     friends: self.friends.open.then(|| {
-                        friends::view(&self.friends, &gateway.navigation.relationships)
-                            .map(Message::Friends)
+                        friends::view(
+                            &self.friends,
+                            &gateway.navigation.relationships,
+                            &gateway.navigation.presences,
+                        )
+                        .map(Message::Friends)
                     }),
                 },
             ))

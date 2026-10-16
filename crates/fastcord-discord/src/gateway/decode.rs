@@ -27,11 +27,11 @@ use serde::{Deserialize, Deserializer};
 use super::event::{
     ChannelRecipientAdd, ChannelRecipientRemove, ChannelUnread, Dispatch, GroupId, GuildCreate,
     GuildDelete, GuildMemberEvent, GuildMemberRemove, GuildMuteUpdate, GuildRoleDelete,
-    GuildRoleEvent, GuildUpdate, ListGroup, ListRow, MAX_RELATIONSHIPS, MemberListId, MemberListOp,
-    MemberListUpdate, MessageAck, MessageDelete, MessageDeleteBulk, MessageReaction,
-    MessageReactionRemoveAll, MessageReactionRemoveEmoji, MuteSettings, PassiveUpdate,
-    ReadStateEntry, Ready, ReadyRead, ReadySupplemental, RelationshipUpdate, SessionId,
-    SupplementalGuild, VoiceStateUpdate,
+    GuildRoleEvent, GuildUpdate, ListGroup, ListRow, MAX_PRESENCES, MAX_RELATIONSHIPS,
+    MemberListId, MemberListOp, MemberListUpdate, MessageAck, MessageDelete, MessageDeleteBulk,
+    MessageReaction, MessageReactionRemoveAll, MessageReactionRemoveEmoji, MuteSettings,
+    PassiveUpdate, PresenceUpdate, ReadStateEntry, Ready, ReadyRead, ReadySupplemental,
+    RelationshipUpdate, SessionId, SupplementalGuild, VoiceStateUpdate,
 };
 
 /// A known payload that did not decode into its typed form.
@@ -173,6 +173,9 @@ struct ReadyWire {
     /// itself, never the session.
     #[serde(default, deserialize_with = "null_default")]
     relationships: Vec<serde_json::Value>,
+    /// Read entry by entry like relationships (see `presence_of`).
+    #[serde(default, deserialize_with = "null_default")]
+    presences: Vec<serde_json::Value>,
     /// Read cursors and mutes are read leniently (see `read_entries`): a
     /// surprising shape costs the markers, never the session.
     #[serde(default)]
@@ -196,6 +199,14 @@ struct SupplementalWire {
     merged_members: Vec<Vec<MemberWire>>,
     #[serde(default, deserialize_with = "null_default")]
     lazy_private_channels: Vec<Channel>,
+    #[serde(default)]
+    merged_presences: Option<MergedPresences>,
+}
+
+#[derive(Deserialize)]
+struct MergedPresences {
+    #[serde(default, deserialize_with = "null_default")]
+    friends: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -531,6 +542,12 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
         .filter_map(relationship_of)
         .take(MAX_RELATIONSHIPS)
         .collect();
+    let presences = wire
+        .presences
+        .iter()
+        .filter_map(presence_of)
+        .take(MAX_PRESENCES)
+        .collect();
     let read = ReadyRead {
         entries: wire
             .read_state
@@ -547,6 +564,7 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
         ready: Ready {
             read,
             relationships,
+            presences,
             session_id: SessionId(wire.session_id),
             user: wire.user,
             users: normalizer.users.into_users(),
@@ -569,6 +587,43 @@ fn relationship_of(value: &serde_json::Value) -> Option<Relationship> {
         return None;
     }
     Some(Relationship { user, kind })
+}
+
+/// `{"user": {"id"} | "user_id", "status", "activities"}`. Omitted fields stay
+/// `None`; an unknown status string is treated as omitted. Only a custom
+/// status (activity type 4) is kept, as its `state` text.
+fn presence_of(value: &serde_json::Value) -> Option<PresenceUpdate> {
+    let user = snowflake_of(
+        value
+            .get("user_id")
+            .or_else(|| value.get("user")?.get("id"))?,
+    )?;
+    if user.0 == 0 {
+        return None;
+    }
+    let custom = value
+        .get("activities")
+        .and_then(serde_json::Value::as_array)
+        .map(|activities| {
+            activities
+                .iter()
+                .find(|a| a.get("type").and_then(serde_json::Value::as_u64) == Some(4))
+                .and_then(|a| a.get("state")?.as_str())
+                .filter(|text| !text.is_empty())
+                .map(|text| {
+                    text.chars()
+                        .take(fastcord_model::MAX_CUSTOM_STATUS_CHARS)
+                        .collect()
+                })
+        });
+    Some(PresenceUpdate {
+        user,
+        status: value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .and_then(fastcord_model::Status::from_wire),
+        custom,
+    })
 }
 
 fn snowflake_of(value: &serde_json::Value) -> Option<Snowflake> {
@@ -705,6 +760,13 @@ fn decode_supplemental(raw: &str) -> Result<ReadySupplemental, Malformed> {
         guilds,
         users: normalizer.users.into_users(),
         lazy_private_channels,
+        presences: wire
+            .merged_presences
+            .iter()
+            .flat_map(|merged| &merged.friends)
+            .filter_map(presence_of)
+            .take(MAX_PRESENCES)
+            .collect(),
     })
 }
 
@@ -939,6 +1001,11 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "USER_GUILD_SETTINGS_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
             mute_update(&value)
                 .map(|update| Dispatch::UserGuildSettingsUpdate(Box::new(update)))
+                .ok_or(Malformed)
+        }),
+        "PRESENCE_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
+            presence_of(&value)
+                .map(|update| Dispatch::PresenceUpdate(Box::new(update)))
                 .ok_or(Malformed)
         }),
         "RELATIONSHIP_ADD" => json::<serde_json::Value>(raw).and_then(|value| {
@@ -2100,6 +2167,32 @@ mod tests {
         ] {
             assert!(
                 matches!(decode_dispatch(name, raw), Decoded::Malformed),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn presence_events_decode_leniently_and_malformed_ones_are_rejected() {
+        let Decoded::Event(Dispatch::PresenceUpdate(update)) = decode_dispatch(
+            "PRESENCE_UPDATE",
+            r#"{"user":{"id":"5"},"guild_id":"9","status":"idle","client_status":{"web":"idle"},
+                "activities":[{"type":4,"state":"hi"}]}"#,
+        ) else {
+            panic!("PRESENCE_UPDATE did not decode");
+        };
+        assert_eq!(update.user, Snowflake(5));
+        assert_eq!(update.status, Some(fastcord_model::Status::Idle));
+        assert_eq!(update.custom, Some(Some("hi".to_owned())));
+        let Decoded::Event(Dispatch::PresenceUpdate(bare)) =
+            decode_dispatch("PRESENCE_UPDATE", r#"{"user_id":"5"}"#)
+        else {
+            panic!("bare PRESENCE_UPDATE did not decode");
+        };
+        assert_eq!((bare.status, bare.custom), (None, None));
+        for raw in ["{}", r#"{"user":{"id":"0"}}"#, r#"{"user":{}}"#] {
+            assert!(
+                matches!(decode_dispatch("PRESENCE_UPDATE", raw), Decoded::Malformed),
                 "{raw}"
             );
         }
