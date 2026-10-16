@@ -28,6 +28,7 @@
 mod list_id;
 mod member_list;
 pub mod navigation;
+mod read;
 #[cfg(test)]
 mod regressions;
 #[cfg(test)]
@@ -38,11 +39,12 @@ use std::fmt;
 use std::mem::size_of;
 
 use fastcord_model::{
-    Channel, Guild, GuildEmoji, GuildMember, OverwriteKind, PermissionOverwrite, Role, Snowflake,
-    User, VoiceState,
+    Channel, Guild, GuildEmoji, GuildMember, Message, OverwriteKind, PermissionOverwrite, Role,
+    Snowflake, User, VoiceState,
 };
 
 pub use member_list::{MAX_ROWS, MemberList};
+pub use read::{MAX_MUTED, MAX_READ_ENTRIES, ReadStates, Unread};
 
 use crate::gateway::{
     Dispatch, GatewayEvent, GuildCreate, GuildMemberEvent, GuildRoleDelete, GuildRoleEvent,
@@ -447,6 +449,9 @@ pub struct Changes {
     pub voice: BTreeSet<Snowflake>,
     /// Direct-message channels changed.
     pub private_channels: bool,
+    /// Read cursors, mention counts or mutes changed, so unread markers may
+    /// have: navigation is rebuilt even for message events.
+    pub read: bool,
 }
 
 impl Changes {
@@ -470,6 +475,7 @@ pub struct Store {
     private_channels: HashMap<Snowflake, Channel>,
     private_bytes: usize,
     focus: Focus,
+    read: ReadStates,
 }
 
 impl fmt::Debug for Store {
@@ -510,6 +516,7 @@ impl Store {
             private_channels: HashMap::new(),
             private_bytes: 0,
             focus: Focus::default(),
+            read: ReadStates::default(),
         }
     }
 
@@ -563,10 +570,103 @@ impl Store {
             // for its share of a partially occupied tree node.
             + self.unavailable.len() * (size_of::<Snowflake>() + 48)
             + self.focus.bytes()
+            + self.read.bytes()
     }
 
     pub fn budget(&self) -> usize {
         self.budget
+    }
+
+    // ----- read state -----
+
+    /// What a channel (or DM, `guild` `None`) shows, given its newest message.
+    pub fn unread(
+        &self,
+        channel: Snowflake,
+        guild: Option<Snowflake>,
+        last_message: Option<Snowflake>,
+    ) -> Unread {
+        self.read.unread(channel, guild, last_message)
+    }
+
+    /// What a guild shows: its channels' unread flags and mention counts.
+    pub fn guild_unread(&self, guild: Snowflake) -> Unread {
+        self.guild(guild).map_or_else(Unread::default, |entry| {
+            entry.channels().fold(Unread::default(), |total, channel| {
+                total.merge(
+                    self.read
+                        .unread(channel.id, Some(guild), channel.last_message_id),
+                )
+            })
+        })
+    }
+
+    /// The newest message Discord reported for a channel (`guild` `None` for a
+    /// direct message), whatever the account has read.
+    pub fn last_message(&self, guild: Option<Snowflake>, channel: Snowflake) -> Option<Snowflake> {
+        match guild {
+            Some(guild) => self.guild(guild)?.channel(channel)?.last_message_id,
+            None => self.private_channel(channel)?.last_message_id,
+        }
+    }
+
+    /// The account's read cursor for a channel, if it has one.
+    pub fn acked(&self, channel: Snowflake) -> Option<Snowflake> {
+        self.read.acked(channel)
+    }
+
+    /// Applies an acknowledgement this client made once Discord accepted it,
+    /// without waiting for the echo.
+    pub fn ack_local(&mut self, channel: Snowflake, message: Snowflake) -> Changes {
+        let mut changes = Changes::default();
+        // Only moves the cursor forward: a stale answer cannot mark newer
+        // messages read.
+        if self
+            .read
+            .acked(channel)
+            .is_some_and(|acked| message > acked)
+            && self.read.ack(channel, message, 0)
+        {
+            changes.read = true;
+        }
+        changes
+    }
+
+    /// Reads and mutes that follow from a new message: the sender's own
+    /// message reads the channel, a mention counts, anything newer than the
+    /// cursor in an unmuted channel makes it unread.
+    fn note_read_effects(&mut self, message: &Message, changes: &mut Changes) {
+        let Some(me) = self.current_user else {
+            return;
+        };
+        let channel = message.channel_id;
+        if message.author.id == me {
+            if self.read.ack(channel, message.id, 0) {
+                changes.read = true;
+            }
+            return;
+        }
+        let mentioned = message.guild_id.is_none()
+            || message.mention_everyone
+            || message.mentions.iter().any(|user| user.id == me)
+            || message.guild_id.is_some_and(|guild| {
+                !message.mention_roles.is_empty()
+                    && self
+                        .guild(guild)
+                        .and_then(|entry| entry.member(me))
+                        .is_some_and(|member| {
+                            message
+                                .mention_roles
+                                .iter()
+                                .any(|role| member.roles.contains(role))
+                        })
+            });
+        let moved = if mentioned {
+            self.read.note_mention(channel, message.id)
+        } else {
+            self.read.would_flag(channel, message.guild_id, message.id)
+        };
+        changes.read |= moved;
     }
 
     /// Whether the estimated retained state currently exceeds the budget.
@@ -690,24 +790,43 @@ impl Store {
                 self.ready_supplemental(*supplemental, &mut changes);
             }
             Dispatch::Resumed => {}
-            Dispatch::MessageCreate(message) => match message.guild_id {
-                Some(guild) => {
-                    let marked = self.with_guild(guild, |entry| {
-                        entry.mark_message(message.channel_id, message.id)
-                    });
-                    if marked == Some(true) {
-                        changes.guilds.insert(guild);
+            Dispatch::MessageCreate(message) => {
+                self.note_read_effects(&message, &mut changes);
+                match message.guild_id {
+                    Some(guild) => {
+                        let marked = self.with_guild(guild, |entry| {
+                            entry.mark_message(message.channel_id, message.id)
+                        });
+                        if marked == Some(true) {
+                            changes.guilds.insert(guild);
+                        }
+                    }
+                    None => {
+                        if let Some(channel) = self.private_channels.get_mut(&message.channel_id)
+                            && channel.last_message_id < Some(message.id)
+                        {
+                            channel.last_message_id = Some(message.id);
+                            changes.private_channels = true;
+                        }
                     }
                 }
-                None => {
-                    if let Some(channel) = self.private_channels.get_mut(&message.channel_id)
-                        && channel.last_message_id < Some(message.id)
-                    {
-                        channel.last_message_id = Some(message.id);
-                        changes.private_channels = true;
-                    }
+            }
+            Dispatch::MessageAck(ack) => {
+                if self
+                    .read
+                    .ack(ack.channel_id, ack.message_id, ack.mention_count)
+                {
+                    changes.read = true;
                 }
-            },
+            }
+            Dispatch::UserGuildSettingsUpdate(update) => {
+                if self
+                    .read
+                    .update_mutes(update.guild_id, update.guild_muted, &update.channels)
+                {
+                    changes.read = true;
+                }
+            }
             // Message bodies, reactions included, are the message store's;
             // none of these changes navigation metadata.
             Dispatch::MessageUpdate(_)
@@ -743,7 +862,11 @@ impl Store {
             Dispatch::ChannelCreate(channel) | Dispatch::ChannelUpdate(channel) => {
                 self.channel_upsert(*channel, &mut changes);
             }
-            Dispatch::ChannelDelete(channel) => self.channel_remove(&channel, &mut changes),
+            Dispatch::ChannelDelete(channel) => {
+                self.read.forget(channel.id);
+                changes.read = true;
+                self.channel_remove(&channel, &mut changes);
+            }
             Dispatch::ChannelRecipientAdd(event) => {
                 if self.private_channels.contains_key(&event.channel_id) {
                     let user_id = event.user.id;
@@ -847,6 +970,7 @@ impl Store {
         self.unavailable.clear();
         self.private_channels = HashMap::new();
         self.private_bytes = 0;
+        self.read.replace(ready.read.entries, ready.read.mutes);
         changes.reset = true;
 
         self.current_user = Some(ready.user.id);
@@ -1358,6 +1482,11 @@ impl Store {
         }
         let target = self.budget / 100 * LOW_WATER_PERCENT;
         self.shed_lists();
+        // Unread markers are optional detail: under pressure they go before
+        // members do, and READY brings them back.
+        if self.bytes() > target {
+            self.read = ReadStates::default();
+        }
         self.sweep_users();
         if self.bytes() > target {
             self.shed_members(target);

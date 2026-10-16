@@ -586,6 +586,7 @@ mod tests {
             sequence: 1,
             event: Dispatch::Ready(Box::new(Ready {
                 session_id: SessionId::new("emoji-fixture-session".into()),
+                read: Default::default(),
                 user,
                 users: Vec::new(),
                 guilds: vec![
@@ -609,6 +610,9 @@ mod tests {
         });
         let navigation = NavigationSnapshot {
             selection: Some(ChannelSelection {
+                acked: None,
+                unread: false,
+                mentions: 0,
                 guild_id: Snowflake(100),
                 channel_id: Snowflake(500),
                 name: "general".into(),

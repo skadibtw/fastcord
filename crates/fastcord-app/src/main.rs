@@ -189,6 +189,10 @@ enum Message {
     EmojiTick(std::time::Instant),
     WindowActive(bool),
     WindowSize(iced::Size),
+    /// Mark a conversation read (guild, channel); the user asked.
+    MarkRead(Option<Snowflake>, Snowflake),
+    /// Show the first message after the read cursor (channel, cursor).
+    FirstUnread(Snowflake, Snowflake),
     /// Files chosen in the system dialog to attach to the message.
     FilesPicked(Vec<std::path::PathBuf>),
     /// A file dropped on the window (one event per file).
@@ -887,9 +891,25 @@ impl App {
                     gateway.controls.private_viewport(window);
                 }
             }
-            Message::WindowActive(active) => self.window_active = active,
+            Message::WindowActive(active) => {
+                self.window_active = active;
+                self.sync_viewing();
+            }
             Message::WindowSize(size) => {
-                self.window_drawable = size.width > 0.0 && size.height > 0.0
+                self.window_drawable = size.width > 0.0 && size.height > 0.0;
+                self.sync_viewing();
+            }
+            Message::MarkRead(guild, channel) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.mark_read(guild, channel);
+                }
+            }
+            Message::FirstUnread(channel, acked) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway
+                        .controls
+                        .timeline_intent(history::Intent::FirstUnread { channel, acked });
+                }
             }
             Message::EmojiTick(now) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
@@ -1388,7 +1408,18 @@ impl App {
                 GatewayPanel::new(id, worker, controls).with_attachment_cache(attachment_cache),
             ),
         };
+        self.sync_viewing();
         task
+    }
+
+    /// What the timeline shows counts as read only while the window is active
+    /// and drawn.
+    fn sync_viewing(&self) {
+        if let Phase::Account { gateway, .. } = &self.phase {
+            gateway
+                .controls
+                .set_viewing(self.window_active && self.window_drawable);
+        }
     }
 
     fn view(&self) -> Element<'_, Message> {

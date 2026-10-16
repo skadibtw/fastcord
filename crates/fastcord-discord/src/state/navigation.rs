@@ -16,7 +16,7 @@ use fastcord_model::{
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::{GuildEntry, Store};
+use super::{GuildEntry, Store, Unread};
 use crate::gateway::SubscriptionTarget;
 
 /// Absolute response row cap, independent of a caller's requested viewport.
@@ -50,6 +50,9 @@ pub struct GuildRow {
     /// Outage guilds have only an ID and cannot be explicitly selected.
     pub available: bool,
     pub selected: bool,
+    /// Unmuted messages not yet read in some channel, and mentions in all.
+    pub unread: bool,
+    pub mentions: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +123,8 @@ pub struct ChannelRow {
     pub enabled: bool,
     pub selected: bool,
     pub permissions: PermissionSummary,
+    pub unread: bool,
+    pub mentions: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,12 +132,18 @@ pub struct PrivateChannelRow {
     pub id: Snowflake,
     pub label: String,
     pub selected: bool,
+    pub unread: bool,
+    pub mentions: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrivateChannelSelection {
     pub channel_id: Snowflake,
     pub name: String,
+    /// The account's read cursor for the conversation, if it has one.
+    pub acked: Option<Snowflake>,
+    pub unread: bool,
+    pub mentions: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,6 +153,10 @@ pub struct ChannelSelection {
     pub name: String,
     pub kind: ChannelKind,
     pub permissions: PermissionSummary,
+    /// The account's read cursor for the channel, if it has one.
+    pub acked: Option<Snowflake>,
+    pub unread: bool,
+    pub mentions: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -282,10 +297,15 @@ impl Navigation {
             .into_iter()
             .skip(offset)
             .take(count.min(MAX_WINDOW_ROWS))
-            .map(|channel| PrivateChannelRow {
-                id: channel.id,
-                label: private_name(store, channel),
-                selected: self.selected_private_channel == Some(channel.id),
+            .map(|channel| {
+                let unread = store.unread(channel.id, None, channel.last_message_id);
+                PrivateChannelRow {
+                    id: channel.id,
+                    label: private_name(store, channel),
+                    selected: self.selected_private_channel == Some(channel.id),
+                    unread: unread.unread,
+                    mentions: unread.mentions,
+                }
             })
             .collect();
         Window {
@@ -306,6 +326,9 @@ impl Navigation {
         Some(PrivateChannelSelection {
             channel_id: channel.id,
             name: private_name(store, channel),
+            acked: store.acked(channel.id),
+            unread: unread_of(store, channel).unread,
+            mentions: unread_of(store, channel).mentions,
         })
     }
 
@@ -330,7 +353,10 @@ impl Navigation {
             .take(count.min(MAX_WINDOW_ROWS))
             .map(|id| {
                 let guild = store.guild(id);
+                let unread = store.guild_unread(id);
                 GuildRow {
+                    unread: unread.unread,
+                    mentions: unread.mentions,
                     id,
                     name: guild.map_or_else(
                         || id.to_string(),
@@ -367,6 +393,8 @@ impl Navigation {
             .skip(offset)
             .take(count.min(MAX_WINDOW_ROWS))
             .map(|row| ChannelRow {
+                unread: unread_of(store, row.channel).unread,
+                mentions: unread_of(store, row.channel).mentions,
                 id: row.channel.id,
                 name: capped_name(row.channel.name.as_deref(), "Unnamed channel"),
                 kind: row.kind,
@@ -394,6 +422,9 @@ impl Navigation {
         let channel_id = self.selected_channel?;
         let (channel, kind, permissions) = enabled_channel(store, guild, channel_id)?;
         Some(ChannelSelection {
+            acked: store.acked(channel_id),
+            unread: unread_of(store, channel).unread,
+            mentions: unread_of(store, channel).mentions,
             guild_id,
             channel_id,
             name: capped_name(channel.name.as_deref(), "Unnamed channel"),
@@ -485,6 +516,11 @@ impl Navigation {
 
 fn known_guild(store: &Store, id: Snowflake) -> bool {
     store.guild(id).is_some() || store.unavailable.contains(&id)
+}
+
+/// What a channel row shows.
+fn unread_of(store: &Store, channel: &Channel) -> Unread {
+    store.unread(channel.id, channel.guild_id, channel.last_message_id)
 }
 
 fn capped_name(value: Option<&str>, fallback: &str) -> String {

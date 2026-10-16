@@ -254,8 +254,9 @@ impl Tracker {
                     }
                 );
                 let changes = self.store.apply(dispatch);
-                self.navigation_dirty =
-                    (relevant && !changes.is_empty()) || self.store.limit_exceeded();
+                self.navigation_dirty = (relevant && !changes.is_empty())
+                    || changes.read
+                    || self.store.limit_exceeded();
                 if self.navigation_dirty {
                     self.navigation.reconcile(&self.store);
                 }
@@ -263,6 +264,21 @@ impl Tracker {
                     .limit_exceeded()
                     .then_some(GatewayStatus::Stopped(StopReason::StateTooLarge))
             }
+        }
+    }
+}
+
+impl Tracker {
+    /// Applies acknowledgements Discord accepted to the store without waiting
+    /// for their echo, so the markers clear at once.
+    fn apply_acked(&mut self) {
+        for (channel, message) in self.history.take_acked() {
+            if self.store.ack_local(channel, message).read {
+                self.navigation_dirty = true;
+            }
+        }
+        if self.navigation_dirty {
+            self.navigation.reconcile(&self.store);
         }
     }
 }
@@ -318,6 +334,11 @@ pub enum Command {
     },
     Retry(OpId),
     Discard(OpId),
+    /// Mark a conversation read up to its newest message (the user asked).
+    MarkRead {
+        guild: Option<Snowflake>,
+        channel: Snowflake,
+    },
     /// Stop a send that is still uploading its files.
     CancelUpload(OpId),
     /// Save new text for one of the user's messages.
@@ -407,6 +428,10 @@ impl fmt::Debug for Command {
             Self::Retry(id) => f.debug_tuple("Retry").field(id).finish(),
             Self::Discard(id) => f.debug_tuple("Discard").field(id).finish(),
             Self::CancelUpload(id) => f.debug_tuple("CancelUpload").field(id).finish(),
+            Self::MarkRead { channel, .. } => f
+                .debug_struct("MarkRead")
+                .field("channel", channel)
+                .finish_non_exhaustive(),
             Self::Edit {
                 channel, message, ..
             } => f
@@ -776,6 +801,24 @@ impl NavigationBridge {
 
     pub fn retry_send(&self, id: OpId) -> bool {
         self.commands.try_send(Command::Retry(id)).is_ok()
+    }
+
+    pub fn mark_read(&self, guild: Option<Snowflake>, channel: Snowflake) -> bool {
+        self.commands
+            .try_send(Command::MarkRead { guild, channel })
+            .is_ok()
+    }
+
+    /// Tells the worker whether what the timeline shows counts as read: the
+    /// window is active and drawn.
+    pub fn set_viewing(&self, viewing: bool) {
+        self.requests.send_if_modified(|request| {
+            if request.timeline.viewing == viewing {
+                return false;
+            }
+            request.timeline.viewing = viewing;
+            true
+        });
     }
 
     pub fn cancel_upload(&self, id: OpId) -> bool {
@@ -1449,6 +1492,11 @@ impl Worker {
                 history.send_with_files(&self.rest, channel, &content, files, everyone, reply);
             }
             Command::CancelUpload(id) => history.cancel_upload(id),
+            Command::MarkRead { guild, channel } => {
+                if let Some(last) = self.tracker.store.last_message(guild, channel) {
+                    history.mark_read(&self.rest, channel, last);
+                }
+            }
             Command::Retry(id) => history.retry_send(&self.rest, id),
             Command::Discard(id) => history.discard_send(id),
             Command::Edit {
@@ -2064,6 +2112,7 @@ pub fn status_stream(
                         }
                         WorkerInput::History(completed) => {
                             let rejected = worker.tracker.history.complete(&worker.rest, completed);
+                            worker.tracker.apply_acked();
                             (rejected.then_some(GatewayStatus::AuthenticationRequired), false)
                         }
                         WorkerInput::Command(Command::OpenPrivate(recipients)) => {
@@ -3359,6 +3408,7 @@ mod tests {
             event: Dispatch::Ready(Box::new(Ready {
                 session_id: SessionId::new("fixture-session".to_owned()),
                 user: user(),
+                read: Default::default(),
                 users: vec![user()],
                 guilds: (0..guilds as u64).map(guild).collect(),
                 unavailable_guilds: (0..unavailable as u64).map(Snowflake).collect(),

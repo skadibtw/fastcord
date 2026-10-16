@@ -52,6 +52,7 @@ const DELETED_WHILE_EDITING: &str = "That message was deleted before your edit w
 const UNSHOWN_FAILURE: &str = "A change to a message that is no longer shown failed.";
 const DELETED_JUMP: &str = "That message was deleted and cannot be opened.";
 const UNAVAILABLE_JUMP: &str = "That message is unavailable and cannot be opened.";
+const NO_UNREAD: &str = "There are no newer messages.";
 const NO_REACTIONS: &str = "You cannot add reactions in this channel.";
 const BAD_EMOJI: &str = "That emoji cannot be used as a reaction.";
 
@@ -60,9 +61,19 @@ type ReferenceFuture =
     Pin<Box<dyn Future<Output = (Snowflake, Result<Option<Message>, RestError>)> + Send>>;
 type SendFuture = Pin<Box<dyn Future<Output = (OpId, Result<Box<Message>, SendFailure>)> + Send>>;
 type ChangeFuture = Pin<Box<dyn Future<Output = ChangeDone> + Send>>;
+type AckFuture =
+    Pin<Box<dyn Future<Output = (Snowflake, Snowflake, Result<(), RestError>)> + Send>>;
 type ReactionFuture = Pin<Box<dyn Future<Output = ReactionDone> + Send>>;
 type UsersFuture =
     Pin<Box<dyn Future<Output = (u64, Result<Vec<ReactionUser>, RestError>)> + Send>>;
+
+/// An acknowledgement to send: the channel's cursor to this message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Ack {
+    channel: Snowflake,
+    message: Snowflake,
+    manual: bool,
+}
 
 enum ReferenceState {
     Preview { author: String, content: String },
@@ -119,6 +130,8 @@ pub enum Completed {
     Page(Result<Vec<Message>, RestError>),
     Reference(Snowflake, Box<Result<Option<Message>, RestError>>),
     Send(OpId, Result<Box<Message>, SendFailure>),
+    /// An acknowledgement of (channel, message) was answered.
+    Ack(Snowflake, Snowflake, Result<(), RestError>),
     Change(ChangeDone),
     Reaction(ReactionDone),
     ReactionUsers(u64, Result<Vec<ReactionUser>, RestError>),
@@ -134,11 +147,19 @@ pub enum Intent {
         channel: Snowflake,
         message: Snowflake,
     },
+    /// Show the first message after the account's read cursor `acked`.
+    FirstUnread {
+        channel: Snowflake,
+        acked: Snowflake,
+    },
 }
 
 /// The timeline's one-shot inputs to the worker, coalesced.
 #[derive(Clone, Debug, Default)]
 pub struct Request {
+    /// The window is active and the timeline is on screen: what is shown
+    /// counts as read.
+    pub viewing: bool,
     pub revision: u64,
     pub intent: Option<Intent>,
     pub viewport: Option<(Snowflake, Viewport)>,
@@ -193,6 +214,19 @@ pub struct History {
     /// Sends still uploading files, so the user can stop them. Posting the
     /// message is never abortable: that outcome would be unknowable.
     uploads: HashMap<OpId, AbortHandle>,
+    /// Read acknowledgements: one request at a time, the newest wish kept.
+    acks: FuturesUnordered<AckFuture>,
+    ack_inflight: Option<Ack>,
+    ack_wanted: Option<Ack>,
+    /// The last automatic acknowledgement tried, so one that fails is not
+    /// repeated until a newer message is on screen.
+    ack_last: Option<(Snowflake, Snowflake)>,
+    /// Acknowledgements Discord accepted, for the reducer to apply locally.
+    acked_done: Vec<(Snowflake, Snowflake)>,
+    viewing: bool,
+    /// (channel, read cursor) whose first unread message the next page around
+    /// the cursor finds.
+    first_unread: Option<(Snowflake, Snowflake)>,
     /// The credential-free client for file bytes, built on first use.
     uploader: Option<Uploader>,
     /// Edits and deletions of the user's own messages.
@@ -247,6 +281,9 @@ impl History {
         self.failed = None;
         self.notice = None;
         self.check_paging = false;
+        self.ack_wanted = None;
+        self.ack_last = None;
+        self.first_unread = None;
         self.prune_changes();
         self.dirty = true;
     }
@@ -1142,6 +1179,99 @@ impl History {
             self.page_for_position(rest);
         }
         self.resolve_visible_references(rest);
+        self.viewing = request.viewing;
+        let acked = guild_selection
+            .filter(|selection| Some(selection.channel_id) == selected)
+            .and_then(|selection| selection.acked)
+            .or_else(|| {
+                private_selection
+                    .filter(|selection| Some(selection.channel_id) == selected)
+                    .and_then(|selection| selection.acked)
+            });
+        self.auto_ack(rest, acked);
+    }
+
+    /// Acknowledges the newest message when the reader is looking at it: the
+    /// window is active, the list follows the live edge and sits at the bottom.
+    /// Reading older history, or an inactive window, never moves the cursor.
+    fn auto_ack(&mut self, rest: &RestClient, acked: Option<Snowflake>) {
+        let (Some(channel), Some(acked)) = (self.channel, acked) else {
+            return;
+        };
+        let live = self
+            .store
+            .window(channel)
+            .is_some_and(|window| window.newer.is_none());
+        if !self.viewing || !live || !self.list.window().pinned {
+            return;
+        }
+        let Some(newest) = self.store.ids(channel).last() else {
+            return;
+        };
+        if newest <= acked || self.ack_last == Some((channel, newest)) {
+            return;
+        }
+        self.ack_last = Some((channel, newest));
+        self.want_ack(rest, channel, newest, false);
+    }
+
+    fn want_ack(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        message: Snowflake,
+        manual: bool,
+    ) {
+        self.ack_wanted = Some(Ack {
+            channel,
+            message,
+            manual,
+        });
+        self.start_ack(rest);
+    }
+
+    fn start_ack(&mut self, rest: &RestClient) {
+        if self.ack_inflight.is_some() {
+            return;
+        }
+        let Some(ack) = self.ack_wanted.take() else {
+            return;
+        };
+        self.ack_inflight = Some(ack);
+        let rest = rest.clone();
+        self.acks.push(Box::pin(async move {
+            let result = rest.ack_message(ack.channel, ack.message, ack.manual).await;
+            (ack.channel, ack.message, result)
+        }));
+    }
+
+    /// The user marked a conversation read. `message` is its newest.
+    pub fn mark_read(&mut self, rest: &RestClient, channel: Snowflake, message: Snowflake) {
+        self.want_ack(rest, channel, message, true);
+    }
+
+    /// Acknowledgements Discord accepted since the last call.
+    pub fn take_acked(&mut self) -> Vec<(Snowflake, Snowflake)> {
+        std::mem::take(&mut self.acked_done)
+    }
+
+    /// Applies an acknowledgement's answer. Returns whether Discord rejected
+    /// the login. A failure changes nothing here: the cursor on Discord did
+    /// not move, and the markers stay.
+    fn finish_ack(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        message: Snowflake,
+        result: Result<(), RestError>,
+    ) -> bool {
+        self.ack_inflight = None;
+        let rejected = result == Err(RestError::AuthenticationRequired);
+        if result.is_ok() {
+            self.acked_done.push((channel, message));
+        }
+        self.start_ack(rest);
+        rejected
     }
 
     fn intent(&mut self, rest: &RestClient, intent: Option<Intent>) {
@@ -1172,6 +1302,31 @@ impl History {
                 self.dirty = true;
                 if let Some(cursor) = self.failed.take() {
                     self.start(rest, cursor);
+                }
+            }
+            Some(Intent::FirstUnread {
+                channel: target,
+                acked,
+            }) if target == channel => {
+                self.cancel();
+                self.failed = None;
+                self.error = None;
+                self.notice = None;
+                self.highlight = None;
+                let first = self.store.ids(channel).find(|id| *id > acked);
+                match first {
+                    Some(first) if self.store.covers(channel, acked) => {
+                        if self.list.jump_to(first) {
+                            self.highlight = Some(first);
+                        } else {
+                            self.notice = Some(UNAVAILABLE_JUMP);
+                        }
+                        self.dirty = true;
+                    }
+                    _ => {
+                        self.first_unread = Some((channel, acked));
+                        self.start(rest, HistoryCursor::Around(acked));
+                    }
                 }
             }
             Some(Intent::JumpTo {
@@ -1238,6 +1393,12 @@ impl History {
                 None => std::future::pending().await,
             }
         };
+        let ack = async {
+            match self.acks.next().await {
+                Some(done) => done,
+                None => std::future::pending().await,
+            }
+        };
         let reference = async {
             match &mut self.reference_pending {
                 Some((_, future)) => future.await,
@@ -1272,6 +1433,7 @@ impl History {
             page = page => Completed::Page(page),
             (target, result) = reference => Completed::Reference(target, Box::new(result)),
             (id, result) = send => Completed::Send(id, result),
+            (channel, message, result) = ack => Completed::Ack(channel, message, result),
             done = change => Completed::Change(done),
             done = reaction => Completed::Reaction(done),
             (serial, result) = users => Completed::ReactionUsers(serial, result),
@@ -1284,6 +1446,9 @@ impl History {
             Completed::Page(result) => self.finish(result),
             Completed::Reference(target, result) => self.finish_reference(target, *result),
             Completed::Send(id, result) => self.finish_send(rest, id, result),
+            Completed::Ack(channel, message, result) => {
+                self.finish_ack(rest, channel, message, result)
+            }
             Completed::Change(done) => self.finish_change(done),
             Completed::Reaction(done) => self.finish_reaction(done),
             Completed::ReactionUsers(serial, result) => self.finish_reaction_users(serial, result),
@@ -1296,8 +1461,16 @@ impl History {
             return false;
         };
         let cursor = token.cursor();
+        // A page around the read cursor looks for the first unread message,
+        // not for the cursor's own message, which may be long gone.
+        let first_unread_page = match (cursor, self.first_unread) {
+            (HistoryCursor::Around(target), Some((channel, acked))) => {
+                (Some(channel) == self.channel && target == acked).then_some(acked)
+            }
+            _ => None,
+        };
         let jump_target = match cursor {
-            HistoryCursor::Around(target) => Some(target),
+            HistoryCursor::Around(target) if first_unread_page.is_none() => Some(target),
             _ => None,
         };
         self.dirty = true;
@@ -1314,6 +1487,13 @@ impl History {
                 }
                 let jump = jump_target
                     .map(|target| (target, page.iter().any(|message| message.id == target)));
+                let first_unread = first_unread_page.map(|acked| {
+                    self.first_unread = None;
+                    page.iter()
+                        .map(|message| message.id)
+                        .filter(|id| *id > acked)
+                        .min()
+                });
                 match self.store.merge_page(token, page) {
                     PageMerge::Applied { rejected, .. } => {
                         if rejected > 0 {
@@ -1344,6 +1524,13 @@ impl History {
                                 self.remember_reference(target, ReferenceState::Unavailable);
                                 self.notice = Some(UNAVAILABLE_JUMP);
                             }
+                        }
+                        match first_unread {
+                            Some(Some(first)) if self.list.jump_to(first) => {
+                                self.highlight = Some(first);
+                            }
+                            Some(_) => self.notice = Some(NO_UNREAD),
+                            None => {}
                         }
                         self.check_paging = true;
                         false
@@ -1652,6 +1839,9 @@ mod tests {
     fn navigation(readable: bool) -> NavigationSnapshot {
         NavigationSnapshot {
             selection: Some(ChannelSelection {
+                acked: None,
+                unread: false,
+                mentions: 0,
                 guild_id: Snowflake(5),
                 channel_id: CHANNEL,
                 name: "general".to_owned(),
@@ -1702,6 +1892,140 @@ mod tests {
         assert_eq!(snapshot.rows.len(), snapshot.window.range.len());
         assert!(snapshot.rows.len() <= 128);
         snapshot
+    }
+
+    fn navigation_acked(acked: u64) -> NavigationSnapshot {
+        let mut navigation = navigation(true);
+        navigation.selection.as_mut().unwrap().acked = Some(Snowflake(acked));
+        navigation
+    }
+
+    fn watching() -> Request {
+        Request {
+            viewing: true,
+            ..Request::default()
+        }
+    }
+
+    #[test]
+    fn the_newest_message_is_acknowledged_only_when_read_live_and_once() {
+        let rest = rest();
+        let mut history = sending_history();
+        let navigation = navigation_acked(NEWEST - 5);
+
+        // An inactive window reads nothing.
+        history.refresh(&rest, &navigation, &Request::default());
+        assert_eq!(history.acks.len(), 0);
+        // Looking at the live edge acknowledges the newest message, once.
+        history.refresh(&rest, &navigation, &watching());
+        assert_eq!(history.acks.len(), 1);
+        assert_eq!(
+            history.ack_inflight.map(|ack| (ack.message, ack.manual)),
+            Some((Snowflake(NEWEST), false))
+        );
+        history.refresh(&rest, &navigation, &watching());
+        assert_eq!(history.acks.len(), 1, "no duplicate while one is in flight");
+
+        // Discord accepted it: the reducer is told, and nothing is repeated.
+        assert!(!history.complete(&rest, Completed::Ack(CHANNEL, Snowflake(NEWEST), Ok(()))));
+        assert_eq!(history.take_acked(), [(CHANNEL, Snowflake(NEWEST))]);
+        history.refresh(&rest, &navigation, &watching());
+        assert_eq!(
+            history.acks.len(),
+            1,
+            "the same newest message is not re-sent"
+        );
+    }
+
+    #[test]
+    fn browsing_older_history_or_a_conversation_without_a_cursor_never_acknowledges() {
+        let rest = rest();
+        let mut history = sending_history();
+        // No read cursor: nothing to move.
+        history.refresh(&rest, &navigation(true), &watching());
+        assert_eq!(history.acks.len(), 0);
+        // The reader scrolled up: what arrives below stays unread.
+        let navigation = navigation_acked(NEWEST - 5);
+        history.refresh(
+            &rest,
+            &navigation,
+            &Request {
+                viewing: true,
+                ..viewport(Snowflake(NEWEST - 100), 10.0, false)
+            },
+        );
+        history.apply(&Dispatch::MessageCreate(Box::new(message(NEWEST + 1))));
+        history.refresh(&rest, &navigation, &watching());
+        assert_eq!(history.acks.len(), 0);
+    }
+
+    #[test]
+    fn a_failed_acknowledgement_changes_nothing_and_a_login_rejection_is_reported() {
+        let rest = rest();
+        let mut history = sending_history();
+        let navigation = navigation_acked(NEWEST - 5);
+        history.refresh(&rest, &navigation, &watching());
+        assert!(!history.complete(
+            &rest,
+            Completed::Ack(CHANNEL, Snowflake(NEWEST), Err(RestError::PermissionDenied))
+        ));
+        assert!(history.take_acked().is_empty());
+        // Not retried in a loop, but marking read on purpose goes through.
+        history.refresh(&rest, &navigation, &watching());
+        assert_eq!(history.acks.len(), 1);
+        history.mark_read(&rest, CHANNEL, Snowflake(NEWEST));
+        assert_eq!(history.acks.len(), 2);
+        assert!(history.complete(
+            &rest,
+            Completed::Ack(
+                CHANNEL,
+                Snowflake(NEWEST),
+                Err(RestError::AuthenticationRequired)
+            )
+        ));
+    }
+
+    #[test]
+    fn first_unread_shows_the_message_after_the_cursor_held_or_fetched() {
+        let rest = rest();
+        let mut history = sending_history();
+        let navigation = navigation_acked(NEWEST - 5);
+        // The cursor is inside the retained run: no request is needed.
+        history.refresh(
+            &rest,
+            &navigation,
+            &Request {
+                revision: 1,
+                intent: Some(Intent::FirstUnread {
+                    channel: CHANNEL,
+                    acked: Snowflake(NEWEST - 5),
+                }),
+                ..Request::default()
+            },
+        );
+        assert_eq!(cursor(&history), None);
+        assert_eq!(history.highlight, Some(Snowflake(NEWEST - 4)));
+
+        // Far behind the retained run: the messages right after it are fetched
+        // and the oldest of them is shown.
+        history.refresh(
+            &rest,
+            &navigation,
+            &Request {
+                revision: 2,
+                intent: Some(Intent::FirstUnread {
+                    channel: CHANNEL,
+                    acked: Snowflake(100),
+                }),
+                ..Request::default()
+            },
+        );
+        assert_eq!(
+            cursor(&history),
+            Some(HistoryCursor::Around(Snowflake(100)))
+        );
+        assert!(!history.finish(Ok(serve(HistoryCursor::Around(Snowflake(100)), NEWEST))));
+        assert_eq!(history.highlight, Some(Snowflake(101)));
     }
 
     fn open_latest(history: &mut History) {
@@ -2720,6 +3044,9 @@ mod tests {
                 fastcord_discord::state::navigation::PrivateChannelSelection {
                     channel_id: channel,
                     name: "Nelly".to_owned(),
+                    acked: None,
+                    unread: false,
+                    mentions: 0,
                 },
             ),
             ..NavigationSnapshot::default()
@@ -3175,6 +3502,7 @@ mod tests {
         history.apply(&Dispatch::Ready(Box::new(
             fastcord_discord::gateway::Ready {
                 session_id: fastcord_discord::gateway::SessionId::new("fixture-session".to_owned()),
+                read: Default::default(),
                 user: User {
                     id: SELF,
                     username: "alt".to_owned(),

@@ -742,6 +742,7 @@ fn large_ready() -> Ready {
     let name = "界".repeat(160);
     Ready {
         session_id: SessionId::new("large-navigation-fixture".to_owned()),
+        read: Default::default(),
         user,
         users: Vec::new(),
         guilds: (0..160)

@@ -145,6 +145,47 @@ pub struct Ready {
     /// Guilds in an outage or geo-restricted: known by ID only.
     pub unavailable_guilds: Vec<Snowflake>,
     pub private_channels: Vec<Channel>,
+    /// The account's read cursors and mutes.
+    pub read: ReadyRead,
+}
+
+/// One channel's read cursor from READY: the last message the account
+/// acknowledged (not the channel's newest) and its unread mentions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadStateEntry {
+    pub channel_id: Snowflake,
+    pub last_acked: Snowflake,
+    pub mention_count: u32,
+}
+
+/// Muted guilds and channels (including DMs) at READY.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MuteSettings {
+    pub guilds: Vec<Snowflake>,
+    pub channels: Vec<Snowflake>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReadyRead {
+    pub entries: Vec<ReadStateEntry>,
+    pub mutes: MuteSettings,
+}
+
+/// MESSAGE_ACK: some client of the account moved a channel's read cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MessageAck {
+    pub channel_id: Snowflake,
+    pub message_id: Snowflake,
+    pub mention_count: u32,
+}
+
+/// USER_GUILD_SETTINGS_UPDATE, reduced to what unread markers need.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuildMuteUpdate {
+    /// `None` for the account's direct messages.
+    pub guild_id: Option<Snowflake>,
+    pub guild_muted: bool,
+    pub channels: Vec<(Snowflake, bool)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -415,6 +456,10 @@ pub enum Dispatch {
     MessageUpdate(Box<MessageUpdate>),
     MessageDelete(MessageDelete),
     MessageDeleteBulk(MessageDeleteBulk),
+    /// The account's read cursor moved.
+    MessageAck(MessageAck),
+    /// Mute settings changed.
+    UserGuildSettingsUpdate(Box<GuildMuteUpdate>),
     /// A user reacted to a message.
     MessageReactionAdd(Box<MessageReaction>),
     /// A user took a reaction back.
@@ -461,6 +506,8 @@ impl Dispatch {
             Self::MessageUpdate(_) => "MESSAGE_UPDATE",
             Self::MessageDelete(_) => "MESSAGE_DELETE",
             Self::MessageDeleteBulk(_) => "MESSAGE_DELETE_BULK",
+            Self::MessageAck(_) => "MESSAGE_ACK",
+            Self::UserGuildSettingsUpdate(_) => "USER_GUILD_SETTINGS_UPDATE",
             Self::MessageReactionAdd(_) => "MESSAGE_REACTION_ADD",
             Self::MessageReactionRemove(_) => "MESSAGE_REACTION_REMOVE",
             Self::MessageReactionRemoveAll(_) => "MESSAGE_REACTION_REMOVE_ALL",

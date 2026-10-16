@@ -10,6 +10,7 @@
 //! taken back, and listed through [`RestClient::add_reaction`],
 //! [`RestClient::remove_own_reaction`], and [`RestClient::reaction_users`].
 
+mod ack;
 mod attachment;
 mod clock;
 mod edit;

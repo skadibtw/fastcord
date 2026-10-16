@@ -9,6 +9,10 @@
 //! Normalization turns the deduplicated READY shape (`users` plus ID references,
 //! `merged_members` parallel to `guilds`) into entities stored once. A payload
 //! that still embeds user objects (no dedupe) normalizes to the same result.
+//!
+//! The one exception to typed streaming is the account's read cursors and mute
+//! settings, which are read from a transient JSON value so that an unexpected
+//! shape drops the unread markers instead of failing the whole session.
 
 use std::collections::HashMap;
 
@@ -21,10 +25,11 @@ use serde::{Deserialize, Deserializer};
 
 use super::event::{
     ChannelRecipientAdd, ChannelRecipientRemove, ChannelUnread, Dispatch, GroupId, GuildCreate,
-    GuildDelete, GuildMemberEvent, GuildMemberRemove, GuildRoleDelete, GuildRoleEvent, GuildUpdate,
-    ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate, MessageDelete,
-    MessageDeleteBulk, MessageReaction, MessageReactionRemoveAll, MessageReactionRemoveEmoji,
-    PassiveUpdate, Ready, ReadySupplemental, SessionId, SupplementalGuild, VoiceStateUpdate,
+    GuildDelete, GuildMemberEvent, GuildMemberRemove, GuildMuteUpdate, GuildRoleDelete,
+    GuildRoleEvent, GuildUpdate, ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate,
+    MessageAck, MessageDelete, MessageDeleteBulk, MessageReaction, MessageReactionRemoveAll,
+    MessageReactionRemoveEmoji, MuteSettings, PassiveUpdate, ReadStateEntry, Ready, ReadyRead,
+    ReadySupplemental, SessionId, SupplementalGuild, VoiceStateUpdate,
 };
 
 /// A known payload that did not decode into its typed form.
@@ -162,6 +167,12 @@ struct ReadyWire {
     private_channels: Vec<Channel>,
     #[serde(default)]
     required_action: Option<String>,
+    /// Read cursors and mutes are read leniently (see `read_entries`): a
+    /// surprising shape costs the markers, never the session.
+    #[serde(default)]
+    read_state: Option<serde_json::Value>,
+    #[serde(default)]
+    user_guild_settings: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -508,8 +519,21 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
         .into_iter()
         .map(|channel| normalizer.channel(channel, None))
         .collect();
+    let read = ReadyRead {
+        entries: wire
+            .read_state
+            .as_ref()
+            .map(read_entries)
+            .unwrap_or_default(),
+        mutes: wire
+            .user_guild_settings
+            .as_ref()
+            .map(mute_settings)
+            .unwrap_or_default(),
+    };
     Ok(DecodedReady {
         ready: Ready {
+            read,
             session_id: SessionId(wire.session_id),
             user: wire.user,
             users: normalizer.users.into_users(),
@@ -520,6 +544,112 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
         resume_gateway_url: wire.resume_gateway_url,
         required_action: wire.required_action.filter(|action| !action.is_empty()),
     })
+}
+
+fn snowflake_of(value: &serde_json::Value) -> Option<Snowflake> {
+    match value {
+        serde_json::Value::String(text) => text.parse().ok(),
+        serde_json::Value::Number(number) => number.as_u64().map(Snowflake),
+        _ => None,
+    }
+    .filter(|id: &Snowflake| id.0 != 0)
+}
+
+/// The array of entries of a READY settings object, which Discord has sent
+/// both as `{"entries": [...]}` and as a bare array.
+fn entries_of(value: &serde_json::Value) -> &[serde_json::Value] {
+    value
+        .get("entries")
+        .unwrap_or(value)
+        .as_array()
+        .map_or(&[], Vec::as_slice)
+}
+
+/// Read cursors from `read_state`. An entry whose ids do not parse is skipped.
+fn read_entries(value: &serde_json::Value) -> Vec<ReadStateEntry> {
+    entries_of(value)
+        .iter()
+        .filter_map(|entry| {
+            let channel_id = snowflake_of(entry.get("id")?)?;
+            let last_acked = entry
+                .get("last_acked_id")
+                .filter(|id| !id.is_null())
+                .or_else(|| entry.get("last_message_id"))
+                .and_then(snowflake_of)?;
+            let mention_count = entry
+                .get("mention_count")
+                .and_then(serde_json::Value::as_u64)
+                .map_or(0, |n| n.min(u64::from(u32::MAX)) as u32);
+            Some(ReadStateEntry {
+                channel_id,
+                last_acked,
+                mention_count,
+            })
+        })
+        .collect()
+}
+
+/// Whether a mute is in force: `muted` set and `mute_config.end_time`, when
+/// there is one, not yet passed.
+fn mute_active(entry: &serde_json::Value) -> bool {
+    if entry.get("muted") != Some(&serde_json::Value::Bool(true)) {
+        return false;
+    }
+    let end = entry
+        .get("mute_config")
+        .and_then(|config| config.get("end_time"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| {
+            time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
+        });
+    end.is_none_or(|end| end > time::OffsetDateTime::now_utc())
+}
+
+fn mute_settings(value: &serde_json::Value) -> MuteSettings {
+    let mut mutes = MuteSettings::default();
+    for entry in entries_of(value) {
+        if let Some(update) = mute_update(entry) {
+            if let Some(guild) = update.guild_id.filter(|_| update.guild_muted) {
+                mutes.guilds.push(guild);
+            }
+            mutes.channels.extend(
+                update
+                    .channels
+                    .iter()
+                    .filter(|(_, m)| *m)
+                    .map(|(id, _)| *id),
+            );
+        }
+    }
+    mutes
+}
+
+/// One settings entry (READY's or an update's) as a [`GuildMuteUpdate`].
+fn mute_update(entry: &serde_json::Value) -> Option<GuildMuteUpdate> {
+    let guild_id = entry.get("guild_id").and_then(snowflake_of);
+    let channels = entry
+        .get("channel_overrides")
+        .and_then(serde_json::Value::as_array)
+        .map(|overrides| {
+            overrides
+                .iter()
+                .filter_map(|o| Some((snowflake_of(o.get("channel_id")?)?, mute_active(o))))
+                .collect()
+        })
+        .unwrap_or_default();
+    entry.is_object().then(|| GuildMuteUpdate {
+        guild_id,
+        guild_muted: mute_active(entry),
+        channels,
+    })
+}
+
+#[derive(Deserialize)]
+struct MessageAckWire {
+    channel_id: Snowflake,
+    message_id: Snowflake,
+    #[serde(default, deserialize_with = "null_default")]
+    mention_count: u32,
 }
 
 fn decode_supplemental(raw: &str) -> Result<ReadySupplemental, Malformed> {
@@ -774,6 +904,18 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         }
         "MESSAGE_DELETE" => json::<MessageDelete>(raw).map(Dispatch::MessageDelete),
         "MESSAGE_DELETE_BULK" => json::<MessageDeleteBulk>(raw).map(Dispatch::MessageDeleteBulk),
+        "MESSAGE_ACK" => json::<MessageAckWire>(raw).map(|ack| {
+            Dispatch::MessageAck(MessageAck {
+                channel_id: ack.channel_id,
+                message_id: ack.message_id,
+                mention_count: ack.mention_count,
+            })
+        }),
+        "USER_GUILD_SETTINGS_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
+            mute_update(&value)
+                .map(|update| Dispatch::UserGuildSettingsUpdate(Box::new(update)))
+                .ok_or(Malformed)
+        }),
         "MESSAGE_REACTION_ADD" => {
             decode_reaction(raw).map(|r| Dispatch::MessageReactionAdd(Box::new(r)))
         }

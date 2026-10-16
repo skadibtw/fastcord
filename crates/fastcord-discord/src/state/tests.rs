@@ -475,6 +475,121 @@ fn member_events_keep_members_and_counts_current() {
     assert!(apply(&mut store, "GUILD_MEMBER_ADD", &stranger).is_empty());
 }
 
+/// READY with a read cursor for GENERAL, one for a DM-less channel that does
+/// not exist, and a muted second guild.
+fn ready_with_read_state(acked: u64, mentions: u64) -> Store {
+    let mut value: serde_json::Value = serde_json::from_str(READY).unwrap();
+    value["read_state"] = serde_json::json!({
+        "entries": [
+            {"id": GENERAL.to_string(), "last_acked_id": acked.to_string(), "mention_count": mentions},
+            {"id": "bad", "last_acked_id": "1"},
+        ],
+        "partial": false,
+        "version": 1,
+    });
+    value["user_guild_settings"] = serde_json::json!({
+        "entries": [
+            {"guild_id": SECOND.to_string(), "muted": true, "channel_overrides": []},
+            {"guild_id": FIRST.to_string(), "muted": false,
+             "channel_overrides": [{"channel_id": VOICE.to_string(), "muted": true,
+                                    "mute_config": {"end_time": "2001-01-01T00:00:00+00:00"}}]},
+        ],
+    });
+    let mut store = Store::new();
+    store.apply(fixture("READY", &value.to_string()));
+    store.apply(fixture("READY_SUPPLEMENTAL", SUPPLEMENTAL));
+    check(&store);
+    store
+}
+
+fn channel_message(channel: u64, message: u64, author: u64, mentions: &[u64]) -> GatewayEvent {
+    let mentioned: Vec<_> = mentions
+        .iter()
+        .map(|id| serde_json::json!({"id": id.to_string(), "username": "m"}))
+        .collect();
+    let raw = serde_json::json!({
+        "id": message.to_string(), "channel_id": channel.to_string(),
+        "guild_id": FIRST.to_string(),
+        "author": {"id": author.to_string(), "username": "a"},
+        "content": "x", "timestamp": "2026-10-16T00:00:00.000000+00:00",
+        "mentions": mentioned,
+    });
+    fixture("MESSAGE_CREATE", &raw.to_string())
+}
+
+fn general_unread(store: &Store) -> Unread {
+    let last = store
+        .guild(id(FIRST))
+        .and_then(|guild| guild.channel(id(GENERAL)))
+        .and_then(|channel| channel.last_message_id);
+    store.unread(id(GENERAL), Some(id(FIRST)), last)
+}
+
+#[test]
+fn read_cursors_mentions_and_mutes_follow_ready_messages_and_acks() {
+    let newer = 9_000_000_000_000_000_000u64;
+    let mut store = ready_with_read_state(41_771_983_423_143_000, 2);
+    // A bad entry is skipped; the good one is kept. The cursor is the
+    // account's, not the channel's newest message.
+    assert_eq!(store.acked(id(GENERAL)), Some(id(41_771_983_423_143_000)));
+    assert_eq!(store.acked(id(1)), None);
+    // Muted guild: no dot, no matter what arrives. An expired channel mute is ignored.
+    assert!(
+        !store
+            .unread(id(GENERAL), Some(id(SECOND)), Some(id(newer)))
+            .unread
+    );
+
+    // Someone else's message makes the channel unread; a mention counts.
+    let changes = store.apply(channel_message(GENERAL, newer, NELLY, &[]));
+    assert!(changes.read);
+    assert!(general_unread(&store).unread);
+    assert_eq!(general_unread(&store).mentions, 2);
+    store.apply(channel_message(GENERAL, newer + 1, NELLY, &[ME]));
+    assert_eq!(general_unread(&store).mentions, 3);
+    assert!(store.guild_unread(id(FIRST)).unread);
+    assert_eq!(store.guild_unread(id(FIRST)).mentions, 3);
+    check(&store);
+
+    // Another client reads it: the marker goes, mentions reset.
+    let ack = event(Dispatch::MessageAck(crate::gateway::MessageAck {
+        channel_id: id(GENERAL),
+        message_id: id(newer + 1),
+        mention_count: 0,
+    }));
+    assert!(store.apply(ack).read);
+    assert_eq!(general_unread(&store), Unread::default());
+
+    // Our own message reads the channel too; an old ack cannot move us back.
+    store.apply(channel_message(GENERAL, newer + 2, NELLY, &[]));
+    assert!(general_unread(&store).unread);
+    store.apply(channel_message(GENERAL, newer + 3, ME, &[]));
+    assert!(!general_unread(&store).unread);
+    assert!(!store.ack_local(id(GENERAL), id(5)).read, "stale local ack");
+
+    // A new session replaces the cursors; a deleted channel loses its state.
+    let gone = fixture(
+        "CHANNEL_DELETE",
+        &serde_json::json!({"id": GENERAL.to_string(), "type": 0, "guild_id": FIRST.to_string()})
+            .to_string(),
+    );
+    assert!(store.apply(gone).read);
+    assert_eq!(store.acked(id(GENERAL)), None);
+    check(&store);
+}
+
+#[test]
+fn malformed_read_state_costs_only_the_markers() {
+    let mut value: serde_json::Value = serde_json::from_str(READY).unwrap();
+    value["read_state"] = serde_json::json!("surprise");
+    value["user_guild_settings"] = serde_json::json!({"entries": 7});
+    let mut store = Store::new();
+    let changes = store.apply(fixture("READY", &value.to_string()));
+    assert!(changes.reset);
+    assert!(store.guild(id(FIRST)).is_some(), "the session still starts");
+    assert_eq!(general_unread(&store), Unread::default());
+}
+
 #[test]
 fn guild_and_channel_lifecycle_events_are_idempotent() {
     let mut store = ready_store();
@@ -811,6 +926,7 @@ fn member_event(guild: u64, n: u64) -> GatewayEvent {
 fn big_ready(guilds: u64, channels: u64) -> Ready {
     Ready {
         session_id: SessionId::new("big".to_owned()),
+        read: Default::default(),
         user: User {
             id: id(ME),
             username: "alt".to_owned(),

@@ -29,9 +29,11 @@ pub fn view<'a>(
     } = private;
     let guilds = snapshot.guilds.rows.iter().map(|guild| {
         let label = format!(
-            "{}{}{}",
+            "{}{}{}{}{}",
             if guild.selected { "› " } else { "" },
+            marker(guild.unread),
             guild.name,
+            mentions(guild.mentions),
             if guild.available {
                 ""
             } else {
@@ -50,10 +52,12 @@ pub fn view<'a>(
             ChannelKind::Voice => "Voice · ",
         };
         let label = format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}{}",
             if channel.selected { "› " } else { "" },
+            marker(channel.unread),
             prefix,
             channel.name,
+            mentions(channel.mentions),
             if channel.kind == ChannelKind::Voice && !channel.enabled {
                 " (no Connect permission)"
             } else {
@@ -69,9 +73,11 @@ pub fn view<'a>(
     let private_channels = snapshot.private_channels.rows.iter().map(|channel| {
         fixed_button(
             format!(
-                "{}{}",
+                "{}{}{}{}",
                 if channel.selected { "› " } else { "" },
-                channel.label
+                marker(channel.unread),
+                channel.label,
+                mentions(channel.mentions)
             ),
             Some(Message::SelectPrivateChannel(channel.id)),
         )
@@ -85,6 +91,15 @@ pub fn view<'a>(
             )
             .size(13),
         ];
+        if let Some(bar) = unread_bar(
+            selection.unread,
+            selection.mentions,
+            selection.acked,
+            None,
+            selection.channel_id,
+        ) {
+            detail = detail.push(bar);
+        }
         if history.channel_id == Some(selection.channel_id) {
             detail = detail
                 .push(timeline::view(history, interaction, attachments).map(Message::Timeline))
@@ -114,6 +129,15 @@ pub fn view<'a>(
                     .size(13),
                 );
                 if permissions.read_history {
+                    if let Some(bar) = unread_bar(
+                        selection.unread,
+                        selection.mentions,
+                        selection.acked,
+                        Some(selection.guild_id),
+                        selection.channel_id,
+                    ) {
+                        detail = detail.push(bar);
+                    }
                     if history.channel_id == Some(selection.channel_id) {
                         // The timeline takes the free height; the composer sits below it.
                         detail = detail
@@ -215,6 +239,49 @@ pub fn view<'a>(
     .spacing(12)
     .height(Length::Fill)
     .into()
+}
+
+/// A dot in front of a name that has unread messages.
+fn marker(unread: bool) -> &'static str {
+    if unread { "\u{2022} " } else { "" }
+}
+
+/// ` (3)` after a name with mentions.
+fn mentions(count: u32) -> String {
+    match count {
+        0 => String::new(),
+        1..=99 => format!(" ({count})"),
+        _ => " (99+)".to_owned(),
+    }
+}
+
+/// The bar above an open conversation that has unread messages: jump to where
+/// the reader left off, or mark it all read. Only conversations with a read
+/// cursor have one.
+fn unread_bar<'a>(
+    unread: bool,
+    mention_count: u32,
+    acked: Option<fastcord_model::Snowflake>,
+    guild: Option<fastcord_model::Snowflake>,
+    channel: fastcord_model::Snowflake,
+) -> Option<Element<'a, Message>> {
+    let acked = acked.filter(|_| unread || mention_count > 0)?;
+    let summary = match mention_count {
+        0 => "You have unread messages here.".to_owned(),
+        1 => "You have unread messages here, 1 mention.".to_owned(),
+        n => format!("You have unread messages here, {n} mentions."),
+    };
+    Some(
+        row![
+            text(summary).size(13),
+            button(text("Jump to first unread").size(12))
+                .on_press(Message::FirstUnread(channel, acked)),
+            button(text("Mark as read").size(12)).on_press(Message::MarkRead(guild, channel)),
+        ]
+        .spacing(8)
+        .align_y(alignment::Vertical::Center)
+        .into(),
+    )
 }
 
 fn fixed_button<'a>(label: String, intent: Option<Message>) -> Element<'a, Message> {
