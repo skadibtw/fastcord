@@ -51,6 +51,7 @@ pub(super) async fn run(
                 input: Some(initial.input_device),
                 output: Some(initial.output_device),
                 noise_suppression: initial.noise_suppression,
+                echo_cancellation: !initial.echo_cancellation_off,
                 capture_enabled,
                 ..EngineConfig::default()
             })
@@ -79,6 +80,7 @@ struct EngineSync {
     input_device: (fastcord_audio::DeviceChoice, u64),
     output_device: (fastcord_audio::DeviceChoice, u64),
     noise_suppression: (NoiseSuppression, u64),
+    echo_cancellation: bool,
 }
 
 impl EngineSync {
@@ -92,6 +94,8 @@ impl EngineSync {
             input_device: (fastcord_audio::DeviceChoice::SystemDefault, 0),
             output_device: (fastcord_audio::DeviceChoice::SystemDefault, 0),
             noise_suppression: (NoiseSuppression::Light, 0),
+            // The engine starts with the preference it was configured with.
+            echo_cancellation: true,
         }
     }
 
@@ -163,6 +167,18 @@ impl EngineSync {
                 self.retry = true;
             }
         }
+        let echo = !controls.echo_cancellation_off;
+        if self.echo_cancellation != echo {
+            if self
+                .controls
+                .try_send(EngineControl::EchoCancellation(echo))
+                .is_ok()
+            {
+                self.echo_cancellation = echo;
+            } else {
+                self.retry = true;
+            }
+        }
         for participant in &controls.participants {
             if let Some(ssrc) = participant.ssrc {
                 self.gain(ssrc, controls.volume_percent(participant.user_id));
@@ -203,11 +219,33 @@ impl NoiseStatus<'_> {
         self.0
             .send_modify(|controls| controls.noise_status = Some(status));
     }
+
+    /// Publishes the engine counters the dialog shows, only when one of them changed.
+    fn publish_stats(&self, stats: fastcord_audio::EngineStats) {
+        self.0.send_if_modified(|controls| {
+            let key = |s: &fastcord_audio::EngineStats| {
+                (
+                    s.output_underruns,
+                    s.plc_frames,
+                    s.device_xruns,
+                    s.input_overrun_samples,
+                )
+            };
+            if controls.audio_stats.as_ref().map(key) == Some(key(&stats)) {
+                return false;
+            }
+            controls.audio_stats = Some(stats);
+            true
+        });
+    }
 }
 
 impl Drop for NoiseStatus<'_> {
     fn drop(&mut self) {
-        self.0.send_modify(|controls| controls.noise_status = None);
+        self.0.send_modify(|controls| {
+            controls.noise_status = None;
+            controls.audio_stats = None;
+        });
     }
 }
 async fn run_with(
@@ -243,6 +281,7 @@ async fn run_with(
         initial.capture_enabled()
     };
     let mut retry_at = sync.retry_deadline();
+    let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
     let mut engine_failed = false;
     let mut participants = HashMap::<Snowflake, VoiceParticipant>::new();
     let mut release_at = HashMap::<Snowflake, Instant>::new();
@@ -325,6 +364,7 @@ async fn run_with(
                 }
                 capture_enabled = enabled;
             }
+            _ = stats_tick.tick() => noise_status.publish_stats(engine.stats()),
             _ = wait_for_release(retry_at) => {
                 sync.apply(&controls.borrow());
                 retry_at = sync.retry_deadline();

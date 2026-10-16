@@ -6,6 +6,7 @@
 //! - [`codec`]: Opus encode/decode with FEC and concealment.
 //! - [`denoise`]: microphone-only noise suppression (Off, Light, High quality) behind one
 //!   [`Denoiser`] trait.
+//! - `echo`: acoustic echo cancellation of the microphone against the played mix.
 //! - [`audit`]: the callback marker used by allocation instrumentation.
 //!
 //! Device callbacks only convert samples and move them through preallocated
@@ -17,6 +18,7 @@ mod channels;
 pub mod codec;
 pub mod denoise;
 pub mod device;
+mod echo;
 mod engine;
 mod error;
 mod jitter;

@@ -167,6 +167,7 @@ enum Message {
     Initialized(audio_devices::Preferences, Result<StoreReady, StoreError>),
     SelectAudioDevice(fastcord_audio::Direction, audio_devices::DeviceOption),
     NoiseSuppressionChanged(fastcord_audio::NoiseSuppression),
+    EchoCancellationChanged(bool),
     AudioPreferencesSaved(Result<(), &'static str>),
     Timeline(timeline::Event),
     SelectPrivateChannel(Snowflake),
@@ -389,6 +390,15 @@ impl App {
                 self.audio_preferences.noise_suppression = mode;
                 if let Phase::Account { gateway, .. } = &self.phase {
                     gateway.controls.select_noise_suppression(mode);
+                }
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::EchoCancellationChanged(enabled) => {
+                self.audio_preferences.echo_cancellation = enabled;
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.select_echo_cancellation(enabled);
                 }
                 if self.audio_saving.is_none() {
                     return self.save_audio_preferences();
@@ -1513,16 +1523,17 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         if self.audio_settings.open {
-            let (input_error, output_error, noise_status) = match &self.phase {
+            let (input_error, output_error, noise_status, audio_stats) = match &self.phase {
                 Phase::Account { gateway, .. } => {
                     let controls = gateway.controls.voice_controls();
                     (
                         controls.input_error,
                         controls.output_error,
                         controls.noise_status,
+                        controls.audio_stats,
                     )
                 }
-                _ => (None, None, None),
+                _ => (None, None, None, None),
             };
             // The dialog is taller than the default window: scroll instead of hiding Close.
             return center(scrollable(
@@ -1533,6 +1544,7 @@ impl App {
                         input_error,
                         output_error,
                         noise_status,
+                        audio_stats,
                     ),
                     text(self.notice.as_deref().unwrap_or("")),
                 ]

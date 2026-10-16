@@ -22,6 +22,7 @@ use crate::denoise::{
     Factory, MicrophoneDenoiser, NoiseSuppression, NoiseSuppressionStatus, high_quality_factory,
 };
 use crate::device::{Backend, CpalBackend, DeviceChoice, DeviceErrorKind, Direction, StreamFormat};
+use crate::echo::EchoCanceller;
 use crate::error::AudioError;
 use crate::pipeline::{
     CapturePipeline, CapturedFrame, PipelineCounters, PlaybackPipeline, RING_LIMIT_MS, RemoteFrame,
@@ -51,6 +52,9 @@ pub struct EngineConfig {
     /// Microphone-only suppression at call start. High quality is built on its own thread:
     /// the call starts with Light and switches when the model is ready.
     pub noise_suppression: NoiseSuppression,
+    /// Remove the speaker echo from the microphone using the played mix as reference. Needs
+    /// both an input and an output.
+    pub echo_cancellation: bool,
     /// Initial mute/deafen gate, applied before the first input callback.
     pub capture_enabled: bool,
 }
@@ -62,6 +66,7 @@ impl Default for EngineConfig {
             output: Some(DeviceChoice::SystemDefault),
             bitrate: DEFAULT_BITRATE,
             noise_suppression: NoiseSuppression::Light,
+            echo_cancellation: true,
             capture_enabled: true,
         }
     }
@@ -132,6 +137,8 @@ pub enum EngineControl {
     RemoteGain { ssrc: u32, gain: f32 },
     /// Select a microphone denoiser without reopening either device.
     NoiseSuppression(NoiseSuppression),
+    /// Turn acoustic echo cancellation on or off without reopening either device.
+    EchoCancellation(bool),
     /// Replace only this direction, on the owner thread. IDs are bounded to 512 bytes.
     SelectDevice {
         direction: Direction,
@@ -173,6 +180,8 @@ pub struct EngineStats {
     pub denoise_blocks: u64,
     pub packets_decoded: u64,
     pub decode_errors: u64,
+    /// Remote 20 ms frames recovered from FEC or concealed because a packet was lost or late.
+    pub plc_frames: u64,
 }
 
 #[derive(Default)]
@@ -362,6 +371,7 @@ impl AudioEngine {
             denoise_blocks: load(&pipeline.denoise_blocks),
             packets_decoded: load(&pipeline.packets_decoded),
             decode_errors: load(&pipeline.decode_errors),
+            plc_frames: load(&pipeline.plc_frames),
         }
     }
 
@@ -496,6 +506,8 @@ fn run_owner<B: Backend>(
         .as_ref()
         .map(|_| MicrophoneDenoiser::new(config.noise_suppression, high_quality.clone()));
     let mut output_enabled = true;
+    let mut echo_enabled = config.echo_cancellation;
+    let mut echo: Option<Box<EchoCanceller>> = None;
     let mut gains = std::collections::HashMap::<u32, f32>::new();
     let mut probe_at = std::time::Instant::now() + Duration::from_secs(1);
     // Coalesced input/output/suppression notifications bound control backpressure.
@@ -537,6 +549,7 @@ fn run_owner<B: Backend>(
                         denoiser.select(mode);
                     }
                 }
+                EngineControl::EchoCancellation(enabled) => echo_enabled = enabled,
                 EngineControl::SelectDevice { direction, choice } => {
                     if direction == Direction::Input {
                         if let Some(denoiser) = &mut denoiser {
@@ -561,6 +574,7 @@ fn run_owner<B: Backend>(
                         &gains,
                         &mut pending,
                     );
+                    echo = None;
                     match direction {
                         Direction::Input => config.input = Some(choice),
                         Direction::Output => config.output = Some(choice),
@@ -601,6 +615,7 @@ fn run_owner<B: Backend>(
                         &gains,
                         &mut pending,
                     );
+                    echo = None;
                 }
             }
         }
@@ -631,21 +646,44 @@ fn run_owner<B: Backend>(
         if let Some(denoiser) = &mut denoiser {
             denoiser.poll();
         }
+        // Echo cancellation needs both streams; it follows the preference and is rebuilt
+        // from scratch after either device changes.
+        match (&mut playback, echo_enabled && capture.is_some()) {
+            (Some((_, pipeline)), true) => {
+                let canceller = echo.get_or_insert_with(|| Box::new(EchoCanceller::new()));
+                pipeline.set_echo_reference(true);
+                pipeline.feed_echo(canceller, std::time::Instant::now());
+            }
+            (playback, _) => {
+                echo = None;
+                if let Some((_, pipeline)) = playback {
+                    pipeline.set_echo_reference(false);
+                }
+            }
+        }
         if let Some((_, pipeline)) = capture.as_mut() {
             if capture_enabled {
                 if let (Some(captured), Some(denoiser)) = (io.captured.as_ref(), denoiser.as_mut())
                 {
-                    pipeline.run(&shared.pipeline, denoiser, &mut |frame| {
-                        if captured.try_send(frame).is_err() {
-                            shared
-                                .pipeline
-                                .frames_dropped
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                    });
+                    pipeline.run(
+                        &shared.pipeline,
+                        denoiser,
+                        echo.as_deref_mut(),
+                        &mut |frame| {
+                            if captured.try_send(frame).is_err() {
+                                shared
+                                    .pipeline
+                                    .frames_dropped
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        },
+                    );
                 }
             } else {
                 pipeline.discard();
+                if let Some(echo) = &mut echo {
+                    echo.clear_far();
+                }
             }
         }
         if let Some(denoiser) = &mut denoiser {
@@ -1348,9 +1386,11 @@ mod tests {
         fake.manual_callbacks = true;
         let heap_before = crate::alloc_counter::callback_heap_ops();
         let backend = fake.clone();
-        // A codec/device round-trip checks a pure tone, not speech enhancement.
+        // A codec/device round-trip checks a pure tone, not speech enhancement; the tone
+        // would also be the echo canceller's reference, which it rightly removes.
         let config = EngineConfig {
             noise_suppression: NoiseSuppression::Off,
+            echo_cancellation: false,
             ..EngineConfig::default()
         };
         let (engine, channels) = AudioEngine::start_with(config, move || backend).unwrap();

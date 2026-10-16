@@ -56,6 +56,10 @@ pub struct VoiceControls {
     pub noise_generation: u64,
     /// The running engine's actual state; `None` outside a call.
     pub noise_status: Option<fastcord_audio::NoiseSuppressionStatus>,
+    /// Echo cancellation is on unless this is set (so the derived default is on).
+    pub echo_cancellation_off: bool,
+    /// Playback underrun/concealment counters of the running engine; `None` outside a call.
+    pub audio_stats: Option<fastcord_audio::EngineStats>,
 }
 
 /// A Go Live offer in the parent voice channel; at most 32, keys only.
@@ -587,7 +591,13 @@ impl NavigationBridge {
             controls.input_device = preferences.input.choice.clone();
             controls.output_device = preferences.output.choice.clone();
             controls.noise_suppression = preferences.noise_suppression;
+            controls.echo_cancellation_off = !preferences.echo_cancellation;
         });
+    }
+
+    pub fn select_echo_cancellation(&self, enabled: bool) {
+        self.voice_controls
+            .send_modify(|controls| controls.echo_cancellation_off = !enabled);
     }
 
     pub fn select_audio_device(

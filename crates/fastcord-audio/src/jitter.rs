@@ -239,6 +239,7 @@ pub(crate) struct JitterMixer {
     /// When the mixer last found nothing scheduled at all, to release the limiter by
     /// elapsed time while no one is speaking.
     idle_since: Option<Instant>,
+    concealed: u64,
 }
 
 impl JitterMixer {
@@ -248,6 +249,7 @@ impl JitterMixer {
             gains: Vec::with_capacity(128),
             limiter: LimiterEnvelope::default(),
             idle_since: None,
+            concealed: 0,
         })
     }
     fn new_speaker(&self, ssrc: u32) -> Result<Speaker, crate::CodecError> {
@@ -334,11 +336,17 @@ impl JitterMixer {
         self.idle_since = None;
     }
     /// Produces one 20 ms stereo block when any speaker is due; zeroes `out` otherwise.
+    /// Remote frames recovered from FEC or concealed since the mixer was created.
+    pub(crate) fn concealed_frames(&self) -> u64 {
+        self.concealed
+    }
+
     pub(crate) fn mix(&mut self, out: &mut [f32; FRAME_SAMPLES * CHANNELS], now: Instant) -> bool {
         out.fill(0.0);
         self.speakers
             .retain(|speaker| now.duration_since(speaker.last_packet) <= INACTIVE);
         let mut active = false;
+        let mut concealed = 0;
 
         for speaker in &mut self.speakers {
             let Some(due) = speaker.next_due else {
@@ -372,6 +380,7 @@ impl JitterMixer {
                 // next packet's FEC data when adjacent, otherwise conceal, and move on.
                 let expected = speaker.expected.unwrap_or(next.frame.sequence);
                 let adjacent = next.frame.sequence == expected.wrapping_add(1);
+                concealed += 1;
                 let decoded = if adjacent {
                     speaker
                         .decoder
@@ -397,6 +406,7 @@ impl JitterMixer {
                     speaker.next_due = None;
                     None
                 } else {
+                    concealed += 1;
                     speaker
                         .decoder
                         .conceal(FRAME_SAMPLES, &mut speaker.pcm)
@@ -424,6 +434,7 @@ impl JitterMixer {
                 active = true;
             }
         }
+        self.concealed += concealed;
 
         if active {
             self.idle_since = None;

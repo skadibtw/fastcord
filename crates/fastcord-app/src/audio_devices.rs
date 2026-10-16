@@ -5,10 +5,10 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use fastcord_audio::{
-    DeviceChoice, DeviceInfo, DeviceKey, Direction, NoiseSuppression, NoiseSuppressionStatus,
-    list_devices,
+    DeviceChoice, DeviceInfo, DeviceKey, Direction, EngineStats, NoiseSuppression,
+    NoiseSuppressionStatus, list_devices,
 };
-use iced::widget::{button, column, container, pick_list, row, text};
+use iced::widget::{button, checkbox, column, container, pick_list, row, text};
 use iced::{Element, Length};
 use serde_json::{Value, json};
 
@@ -20,11 +20,23 @@ pub struct Selection {
     pub label: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preferences {
     pub input: Selection,
     pub output: Selection,
     pub noise_suppression: NoiseSuppression,
+    pub echo_cancellation: bool,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            input: Selection::default(),
+            output: Selection::default(),
+            noise_suppression: NoiseSuppression::default(),
+            echo_cancellation: true,
+        }
+    }
 }
 
 impl Preferences {
@@ -136,12 +148,28 @@ fn noise_summary(preference: NoiseSuppression, status: Option<NoiseSuppressionSt
     }
 }
 
+/// Playback health counters of the running call, so audible glitches can be told apart.
+fn stats_summary(stats: Option<EngineStats>) -> String {
+    match stats {
+        None => String::new(),
+        Some(s) => format!(
+            "This call: {} playback underruns ({} samples of silence), {} lost or late frames concealed, {} device xruns, {} microphone samples dropped.",
+            s.output_underruns,
+            s.output_underrun_samples,
+            s.plc_frames,
+            s.device_xruns,
+            s.input_overrun_samples
+        ),
+    }
+}
+
 pub fn view<'a>(
     settings: &'a Settings,
     prefs: &Preferences,
     input_error: Option<fastcord_audio::DeviceErrorKind>,
     output_error: Option<fastcord_audio::DeviceErrorKind>,
     noise_status: Option<NoiseSuppressionStatus>,
+    stats: Option<EngineStats>,
 ) -> Element<'a, crate::Message> {
     let (inputs, input) = options(&settings.inputs, &prefs.input);
     let (outputs, output) = options(&settings.outputs, &prefs.output);
@@ -161,7 +189,9 @@ pub fn view<'a>(
         text(noise_summary(prefs.noise_suppression, noise_status)),
         text(noise_status.and_then(|status| status.error).map_or_else(String::new, |error| error.to_string())),
         text("Light (RNNoise) is the default and uses little CPU. High quality (DeepFilterNet 3) removes keyboard and background voices better, but adds about 30 ms of delay and uses more CPU and memory; it loads only while selected and is released when you switch away. Microphone only; never applied to shared or system audio."),
-        text("Noise suppression is not echo cancellation. Use a headset to avoid speaker echo."),
+        checkbox(prefs.echo_cancellation).label("Echo cancellation").on_toggle(crate::Message::EchoCancellationChanged),
+        text("Removes what your speakers play from your microphone, so others do not hear themselves. It needs a few seconds of speech to adapt, works best with the microphone and speakers in a fixed position, and is not needed with a headset."),
+        text(stats_summary(stats)),
         text(if settings.probing { "Looking for audio devices…" } else { "System default follows the OS only when selected. Refresh lists after plugging a device in." }),
         row![button("Refresh devices").on_press_maybe((!settings.probing).then_some(crate::Message::RefreshAudioDevices)), button("Close").on_press(crate::Message::CloseAudioSettings)].spacing(12),
     ].spacing(12)).padding(24).width(Length::Fixed(650.0)).style(container::rounded_box).into()
@@ -210,6 +240,12 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
             Some(Value::String(mode)) => NoiseSuppression::from_persisted(mode)?,
             _ => return None,
         },
+        // Older settings predate echo cancellation, which is on by default.
+        echo_cancellation: match value.get("echo_cancellation") {
+            None => true,
+            Some(Value::Bool(enabled)) => *enabled,
+            _ => return None,
+        },
     })
 }
 
@@ -225,7 +261,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted()}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -300,6 +336,7 @@ mod tests {
             input: explicit("wasapi:microphone", "Duplicate name"),
             output: explicit("wasapi:headset", "Duplicate name"),
             noise_suppression: NoiseSuppression::HighQuality,
+            echo_cancellation: false,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);

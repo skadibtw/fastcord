@@ -1,0 +1,567 @@
+//! Acoustic echo cancellation for the microphone path (pure Rust, no native dependency).
+//!
+//! The reference is what the output device actually played: [`ReferenceTap`] copies every
+//! sample the playback pipeline writes into the output ring, and releases it to the canceller
+//! only when the ring has been consumed, so the reference follows the output device clock
+//! and is silent while nothing plays (wall clock fills idle time).
+//!
+//! [`EchoCanceller`] is a partitioned-block frequency-domain adaptive filter (overlap-save,
+//! 240-sample hop, 512-point FFT, 64 partitions = 320 ms of echo path), the same structure as
+//! the MDF/PBFDAF family. Delay is not estimated separately: partitions that cover the actual
+//! round-trip delay converge, the rest stay near zero. A fixed 20 ms lead on the reference
+//! absorbs the jitter between the two device callback clocks; real round trips (device
+//! buffers plus propagation) are always longer than that.
+//!
+//! Double-talk protection: adaptation is frozen when the microphone is not explained by the
+//! filter output (low correlation) after the filter has converged, and the output is never
+//! allowed to be louder than the raw microphone. Everything is allocated up front (about
+//! 0.3 MiB); processing never allocates and never runs in a device callback.
+use std::collections::VecDeque;
+use std::time::Instant;
+
+use crate::codec::SAMPLE_RATE;
+use crate::resample::RateConverter;
+
+/// Samples per adaptation step (5 ms at 48 kHz); two per 480-sample microphone block.
+const HOP: usize = 240;
+const FFT: usize = 512;
+const BINS: usize = FFT / 2 + 1;
+const PARTITIONS: usize = 64;
+/// Microphone block size accepted by [`EchoCanceller::process`].
+pub(crate) const FRAME: usize = 480;
+/// Standing reference lead (20 ms). The reference is only consumed after this much is queued.
+const LEAD: usize = 960;
+/// Reference queue limit: lead plus 100 ms; the oldest samples are dropped beyond it.
+const FAR_LIMIT: usize = LEAD + 4_800;
+/// Mean-square level (about -60 dBFS) below which the reference carries no information.
+const FAR_ACTIVE: f32 = 1e-6;
+const REGULARIZATION: f32 = 1e-2;
+
+struct Fft {
+    cos: [f32; FFT / 2],
+    sin: [f32; FFT / 2],
+    rev: [u16; FFT],
+}
+
+impl Fft {
+    fn new() -> Self {
+        let mut fft = Self {
+            cos: [0.0; FFT / 2],
+            sin: [0.0; FFT / 2],
+            rev: [0; FFT],
+        };
+        for k in 0..FFT / 2 {
+            let angle = -2.0 * std::f64::consts::PI * k as f64 / FFT as f64;
+            fft.cos[k] = angle.cos() as f32;
+            fft.sin[k] = angle.sin() as f32;
+        }
+        let shift = 16 - FFT.trailing_zeros();
+        for (i, slot) in fft.rev.iter_mut().enumerate() {
+            *slot = (i as u16).reverse_bits() >> shift;
+        }
+        fft
+    }
+
+    /// In-place radix-2 transform; the inverse is scaled by 1/N.
+    fn transform(&self, re: &mut [f32; FFT], im: &mut [f32; FFT], inverse: bool) {
+        for i in 0..FFT {
+            let j = self.rev[i] as usize;
+            if j > i {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
+        }
+        let mut len = 2;
+        while len <= FFT {
+            let (half, step) = (len / 2, FFT / len);
+            for start in (0..FFT).step_by(len) {
+                for k in 0..half {
+                    let wr = self.cos[k * step];
+                    let wi = if inverse {
+                        -self.sin[k * step]
+                    } else {
+                        self.sin[k * step]
+                    };
+                    let (a, b) = (start + k, start + k + half);
+                    let tr = re[b] * wr - im[b] * wi;
+                    let ti = re[b] * wi + im[b] * wr;
+                    re[b] = re[a] - tr;
+                    im[b] = im[a] - ti;
+                    re[a] += tr;
+                    im[a] += ti;
+                }
+            }
+            len *= 2;
+        }
+        if inverse {
+            let scale = 1.0 / FFT as f32;
+            re.iter_mut().chain(im.iter_mut()).for_each(|v| *v *= scale);
+        }
+    }
+}
+
+/// Mirrors bins `0..BINS` into a full conjugate-symmetric spectrum.
+fn expand(re: &mut [f32; FFT], im: &mut [f32; FFT]) {
+    im[0] = 0.0;
+    im[BINS - 1] = 0.0;
+    for k in 1..BINS - 1 {
+        re[FFT - k] = re[k];
+        im[FFT - k] = -im[k];
+    }
+}
+
+pub(crate) struct EchoCanceller {
+    fft: Fft,
+    /// Last `FFT` reference samples.
+    window: [f32; FFT],
+    /// Reference spectra history, newest at `head`, and the filter, indexed by partition.
+    xr: Box<[f32]>,
+    xi: Box<[f32]>,
+    wr: Box<[f32]>,
+    wi: Box<[f32]>,
+    head: usize,
+    next_constrained: usize,
+    re: Box<[f32; FFT]>,
+    im: Box<[f32; FFT]>,
+    yr: [f32; BINS],
+    yi: [f32; BINS],
+    power: [f32; BINS],
+    far: VecDeque<f32>,
+    // Smoothed energies for the double-talk decision.
+    s_near: f32,
+    s_echo: f32,
+    s_cross: f32,
+    s_error: f32,
+    /// Smoothed correlation of the residual with the echo estimate: residual echo, not speech.
+    s_residual: f32,
+    converged: bool,
+    frozen_steps: u32,
+}
+
+impl EchoCanceller {
+    pub(crate) fn new() -> Self {
+        let spectra = || vec![0.0; PARTITIONS * BINS].into_boxed_slice();
+        Self {
+            fft: Fft::new(),
+            window: [0.0; FFT],
+            xr: spectra(),
+            xi: spectra(),
+            wr: spectra(),
+            wi: spectra(),
+            head: 0,
+            next_constrained: 0,
+            re: Box::new([0.0; FFT]),
+            im: Box::new([0.0; FFT]),
+            yr: [0.0; BINS],
+            yi: [0.0; BINS],
+            power: [0.0; BINS],
+            far: VecDeque::with_capacity(FAR_LIMIT + FRAME),
+            s_near: 0.0,
+            s_echo: 0.0,
+            s_cross: 0.0,
+            s_error: 0.0,
+            s_residual: 0.0,
+            converged: false,
+            frozen_steps: 0,
+        }
+    }
+
+    /// Drops queued reference without forgetting the filter (microphone muted).
+    pub(crate) fn clear_far(&mut self) {
+        self.far.clear();
+    }
+
+    pub(crate) fn push_far(&mut self, samples: &[f32]) {
+        let samples = &samples[samples.len().saturating_sub(FAR_LIMIT)..];
+        let excess = (self.far.len() + samples.len()).saturating_sub(FAR_LIMIT);
+        self.far.drain(..excess);
+        self.far.extend(samples.iter().copied());
+    }
+
+    pub(crate) fn push_far_silence(&mut self, mut count: usize) {
+        const ZEROS: [f32; FRAME] = [0.0; FRAME];
+        while count > 0 {
+            let take = count.min(FRAME);
+            self.push_far(&ZEROS[..take]);
+            count -= take;
+        }
+    }
+
+    /// Removes the echo of the queued reference from one 10 ms microphone block.
+    pub(crate) fn process(&mut self, near: &[f32; FRAME], out: &mut [f32; FRAME]) {
+        if self.far.len() < FRAME {
+            // Prime (or re-prime after a stall) with the standing lead.
+            let missing = FRAME + LEAD - self.far.len();
+            for _ in 0..missing {
+                self.far.push_front(0.0);
+            }
+        }
+        let mut far = [0.0; FRAME];
+        for (slot, sample) in far.iter_mut().zip(self.far.drain(..FRAME)) {
+            *slot = sample;
+        }
+        for half in 0..FRAME / HOP {
+            let range = half * HOP..(half + 1) * HOP;
+            self.step(&near[range.clone()], &far[range.clone()], &mut out[range]);
+        }
+    }
+
+    fn step(&mut self, near: &[f32], far: &[f32], out: &mut [f32]) {
+        self.window.copy_within(HOP.., 0);
+        self.window[FFT - HOP..].copy_from_slice(far);
+        self.re.copy_from_slice(&self.window);
+        self.im.fill(0.0);
+        self.fft.transform(&mut self.re, &mut self.im, false);
+        self.head = (self.head + PARTITIONS - 1) % PARTITIONS;
+        let newest = self.head * BINS;
+        self.xr[newest..newest + BINS].copy_from_slice(&self.re[..BINS]);
+        self.xi[newest..newest + BINS].copy_from_slice(&self.im[..BINS]);
+
+        // Echo estimate: sum over partitions of W_p * X(t - p).
+        self.yr.fill(0.0);
+        self.yi.fill(0.0);
+        for p in 0..PARTITIONS {
+            let x = ((self.head + p) % PARTITIONS) * BINS;
+            let w = p * BINS;
+            let (xr, xi) = (&self.xr[x..x + BINS], &self.xi[x..x + BINS]);
+            let (wr, wi) = (&self.wr[w..w + BINS], &self.wi[w..w + BINS]);
+            for k in 0..BINS {
+                self.yr[k] += xr[k] * wr[k] - xi[k] * wi[k];
+                self.yi[k] += xr[k] * wi[k] + xi[k] * wr[k];
+            }
+        }
+        self.re[..BINS].copy_from_slice(&self.yr);
+        self.im[..BINS].copy_from_slice(&self.yi);
+        expand(&mut self.re, &mut self.im);
+        self.fft.transform(&mut self.re, &mut self.im, true);
+
+        let (mut p_near, mut p_echo, mut p_cross, mut p_error, mut p_residual) =
+            (0.0, 0.0, 0.0, 0.0, 0.0);
+        let mut error = [0.0; HOP];
+        for i in 0..HOP {
+            let echo = self.re[FFT - HOP + i];
+            error[i] = near[i] - echo;
+            p_near += near[i] * near[i];
+            p_echo += echo * echo;
+            p_cross += near[i] * echo;
+            p_error += error[i] * error[i];
+            p_residual += error[i] * echo;
+        }
+        // Never louder than the microphone (diverged filter, double talk).
+        // ponytail: hard per-step switch, a cross-fade if it is ever audible.
+        let diverged = p_error > 2.0 * p_near + 1e-9;
+        out.copy_from_slice(if diverged { near } else { &error });
+
+        let far_active = self.window.iter().map(|s| s * s).sum::<f32>() / FFT as f32 > FAR_ACTIVE;
+        const SMOOTH: f32 = 0.9;
+        self.s_near = SMOOTH * self.s_near + (1.0 - SMOOTH) * p_near;
+        self.s_echo = SMOOTH * self.s_echo + (1.0 - SMOOTH) * p_echo;
+        self.s_cross = SMOOTH * self.s_cross + (1.0 - SMOOTH) * p_cross;
+        self.s_error = SMOOTH * self.s_error + (1.0 - SMOOTH) * p_error;
+        self.s_residual = SMOOTH * self.s_residual + (1.0 - SMOOTH) * p_residual;
+        let dominant = self.s_echo > 1e-9
+            && self.s_cross > 0.0
+            && self.s_cross * self.s_cross > 0.8 * self.s_near * self.s_echo;
+        if dominant && self.s_error < 0.25 * self.s_near {
+            self.converged = true;
+            self.frozen_steps = 0;
+        }
+        let mu = if !far_active {
+            0.0
+        } else if dominant && self.converged {
+            // Cancelling well: adapt in proportion to how much of what is left is still echo
+            // (correlated with the estimate) rather than a near-end talker.
+            let echoed = self.s_residual.max(0.0).powi(2) / (self.s_error * self.s_echo + 1e-12);
+            0.8 * echoed.sqrt().clamp(0.05, 1.0)
+        } else if dominant {
+            0.8
+        } else if self.converged {
+            // Double talk (or an echo path change): hold, but not forever.
+            self.frozen_steps += 1;
+            if self.frozen_steps > 400 {
+                self.converged = false;
+            }
+            0.0
+        } else {
+            0.15
+        };
+        if mu > 0.0 {
+            self.adapt(&error, mu);
+        }
+    }
+
+    fn adapt(&mut self, error: &[f32; HOP], mu: f32) {
+        self.re[..FFT - HOP].fill(0.0);
+        self.re[FFT - HOP..].copy_from_slice(error);
+        self.im.fill(0.0);
+        self.fft.transform(&mut self.re, &mut self.im, false);
+
+        self.power.fill(0.0);
+        for slot in 0..PARTITIONS {
+            let x = slot * BINS;
+            for k in 0..BINS {
+                self.power[k] += self.xr[x + k].powi(2) + self.xi[x + k].powi(2);
+            }
+        }
+        for p in 0..PARTITIONS {
+            let x = ((self.head + p) % PARTITIONS) * BINS;
+            let w = p * BINS;
+            for k in 0..BINS {
+                let gain = mu / (self.power[k] + REGULARIZATION);
+                let (xr, xi) = (self.xr[x + k], self.xi[x + k]);
+                self.wr[w + k] += gain * (xr * self.re[k] + xi * self.im[k]);
+                self.wi[w + k] += gain * (xr * self.im[k] - xi * self.re[k]);
+            }
+        }
+        // Gradient constraint (keep each partition `HOP` taps long), one partition per step.
+        let w = self.next_constrained * BINS;
+        self.next_constrained = (self.next_constrained + 1) % PARTITIONS;
+        self.re[..BINS].copy_from_slice(&self.wr[w..w + BINS]);
+        self.im[..BINS].copy_from_slice(&self.wi[w..w + BINS]);
+        expand(&mut self.re, &mut self.im);
+        self.fft.transform(&mut self.re, &mut self.im, true);
+        self.re[HOP..].fill(0.0);
+        self.im.fill(0.0);
+        self.fft.transform(&mut self.re, &mut self.im, false);
+        self.wr[w..w + BINS].copy_from_slice(&self.re[..BINS]);
+        self.wi[w..w + BINS].copy_from_slice(&self.im[..BINS]);
+    }
+}
+
+/// Copies what the playback pipeline writes to the output ring and releases it, resampled to
+/// 48 kHz mono, as the device consumes it. Owned by the playback pipeline.
+pub(crate) struct ReferenceTap {
+    /// Device-rate mono samples written to the ring and not yet consumed by the device.
+    queued: VecDeque<f32>,
+    converter: RateConverter,
+    chunk: Box<[f32]>,
+    last: Instant,
+    owed_silence: f64,
+}
+
+impl ReferenceTap {
+    pub(crate) fn new(rate: u32, ring_frames: usize) -> Result<Self, crate::UnsupportedRate> {
+        let chunk = crate::pipeline::frames_for(rate, 10);
+        Ok(Self {
+            queued: VecDeque::with_capacity(ring_frames),
+            converter: RateConverter::new(rate, SAMPLE_RATE, 1, chunk)?,
+            chunk: vec![0.0; chunk].into_boxed_slice(),
+            last: Instant::now(),
+            owed_silence: 0.0,
+        })
+    }
+
+    pub(crate) fn push(&mut self, mono: f32) {
+        self.queued.push_back(mono);
+    }
+
+    /// Forgets queued samples when the ring itself was cleared.
+    pub(crate) fn clear(&mut self) {
+        self.queued.clear();
+    }
+
+    /// Releases the frames the device consumed since the last call (`unread` frames remain in
+    /// the ring), or, while the device is idle, wall-clock silence.
+    pub(crate) fn advance(&mut self, unread: usize, now: Instant, echo: &mut EchoCanceller) {
+        let elapsed = now.duration_since(self.last).as_secs_f64();
+        self.last = now;
+        let mut consumed = self.queued.len().saturating_sub(unread);
+        if consumed == 0 && unread == 0 {
+            self.owed_silence = (self.owed_silence + elapsed * f64::from(SAMPLE_RATE)).min(4_800.0);
+            let whole = self.owed_silence as usize;
+            self.owed_silence -= whole as f64;
+            echo.push_far_silence(whole);
+            return;
+        }
+        self.owed_silence = 0.0;
+        while consumed > 0 {
+            let take = consumed.min(self.chunk.len());
+            for (slot, sample) in self.chunk.iter_mut().zip(self.queued.drain(..take)) {
+                *slot = sample;
+            }
+            consumed -= take;
+            self.converter
+                .process(&self.chunk[..take], &mut |block: &[f32]| {
+                    echo.push_far(block)
+                });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Noise(u64);
+    impl Noise {
+        fn next(&mut self) -> f32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 40) as f32 / (1u64 << 23) as f32) - 1.0
+        }
+        /// Speech-like: noise with a slowly varying envelope, pauses included.
+        fn speech(&mut self, len: usize, level: f32) -> Vec<f32> {
+            let mut lowpass = 0.0;
+            (0..len)
+                .map(|i| {
+                    lowpass += 0.6 * (self.next() - lowpass);
+                    let envelope = (0.5
+                        + 0.5 * (i as f32 * 2.0 * std::f32::consts::PI / 9_600.0).sin())
+                    .powi(2);
+                    lowpass * envelope * level
+                })
+                .collect()
+        }
+    }
+
+    /// 100 ms decaying room response with a 40 ms bulk delay.
+    fn echo_path(seed: u64) -> Vec<f32> {
+        let mut noise = Noise(seed);
+        let mut taps = vec![0.0; 1_920 + 4_800];
+        for (i, tap) in taps[1_920..].iter_mut().enumerate() {
+            *tap = noise.next() * 0.5 * (-(i as f32) / 900.0).exp();
+        }
+        taps[1_920] = 0.5;
+        taps
+    }
+
+    fn convolve(signal: &[f32], taps: &[f32]) -> Vec<f32> {
+        let mut out = vec![0.0; signal.len()];
+        for (n, slot) in out.iter_mut().enumerate() {
+            let reach = taps.len().min(n + 1);
+            *slot = (0..reach).map(|m| taps[m] * signal[n - m]).sum();
+        }
+        out
+    }
+
+    fn energy(signal: &[f32]) -> f64 {
+        signal.iter().map(|&s| f64::from(s).powi(2)).sum()
+    }
+
+    fn db(numerator: f64, denominator: f64) -> f64 {
+        10.0 * (numerator / denominator.max(1e-20)).log10()
+    }
+
+    /// Runs `near` through the canceller one block at a time, `far` fed ahead of it.
+    fn run(aec: &mut EchoCanceller, far: &[f32], near: &[f32]) -> Vec<f32> {
+        let mut out = Vec::with_capacity(near.len());
+        let mut block = [0.0; FRAME];
+        for (far, near) in far
+            .as_chunks::<FRAME>()
+            .0
+            .iter()
+            .zip(near.as_chunks::<FRAME>().0)
+        {
+            aec.push_far(far);
+            aec.process(near, &mut block);
+            out.extend_from_slice(&block);
+        }
+        out
+    }
+
+    #[test]
+    fn fft_round_trips() {
+        let fft = Fft::new();
+        let mut noise = Noise(1);
+        let mut re = Box::new([0.0; FFT]);
+        re.iter_mut().for_each(|v| *v = noise.next());
+        let original = *re;
+        let mut im = Box::new([0.0; FFT]);
+        fft.transform(&mut re, &mut im, false);
+        fft.transform(&mut re, &mut im, true);
+        assert!(re.iter().zip(original).all(|(a, b)| (a - b).abs() < 1e-4));
+    }
+
+    #[test]
+    fn synthetic_echo_is_cancelled_by_at_least_25_db() {
+        let len = 48_000 * 8;
+        let far = Noise(7).speech(len, 0.5);
+        let mut near = convolve(&far, &echo_path(3));
+        let mut floor = Noise(11);
+        near.iter_mut().for_each(|s| *s += floor.next() * 1e-4);
+        let mut aec = EchoCanceller::new();
+        let out = run(&mut aec, &far, &near);
+        let tail = len - 48_000 * 2..;
+        let erle = db(energy(&near[tail.clone()]), energy(&out[tail]));
+        assert!(erle >= 25.0, "ERLE {erle:.1} dB");
+    }
+
+    #[test]
+    fn near_end_speech_survives_double_talk_and_the_filter_does_not_diverge() {
+        let seconds = 12;
+        let len = 48_000 * seconds;
+        let far = Noise(21).speech(len, 0.5);
+        let echo = convolve(&far, &echo_path(5));
+        let mut talker = Noise(99).speech(len, 0.5);
+        // Near-end talker only between 7 s and 9 s.
+        for (i, sample) in talker.iter_mut().enumerate() {
+            if !(48_000 * 7..48_000 * 9).contains(&i) {
+                *sample = 0.0;
+            }
+        }
+        let near: Vec<f32> = echo.iter().zip(&talker).map(|(e, t)| e + t).collect();
+        let mut aec = EchoCanceller::new();
+        let out = run(&mut aec, &far, &near);
+
+        let talk = 48_000 * 7 + 24_000..48_000 * 9;
+        let removed: Vec<f32> = out[talk.clone()]
+            .iter()
+            .zip(&talker[talk.clone()])
+            .map(|(o, t)| o - t)
+            .collect();
+        let kept = db(energy(&talker[talk.clone()]), energy(&removed));
+        let echo_gain = db(energy(&echo[talk.clone()]), energy(&removed));
+        assert!(kept >= 8.0, "near speech distorted: {kept:.1} dB");
+        assert!(
+            echo_gain >= 10.0,
+            "echo not reduced in double talk: {echo_gain:.1} dB"
+        );
+
+        let after = len - 48_000 * 2..;
+        let erle = db(energy(&near[after.clone()]), energy(&out[after]));
+        assert!(erle >= 20.0, "no recovery after double talk: {erle:.1} dB");
+    }
+
+    #[test]
+    fn silent_reference_passes_the_microphone_through() {
+        let mut aec = EchoCanceller::new();
+        let mut noise = Noise(4);
+        let near = noise.speech(48_000, 0.3);
+        let silence = vec![0.0; 48_000];
+        let out = run(&mut aec, &silence, &near);
+        assert!(out.iter().zip(&near).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+
+    #[test]
+    fn memory_is_bounded() {
+        assert!(std::mem::size_of::<EchoCanceller>() < 64 * 1024);
+        let mut aec = EchoCanceller::new();
+        aec.push_far(&vec![0.1; 100_000]);
+        assert_eq!(aec.far.len(), FAR_LIMIT);
+        assert!(aec.far.capacity() < 4 * FAR_LIMIT);
+        // 4 spectra of 64 x 257 bins as f32 = about 0.25 MiB.
+        const { assert!(4 * PARTITIONS * BINS * 4 < 300 * 1024) };
+    }
+
+    #[test]
+    fn tap_releases_consumed_audio_and_pads_idle_time_with_silence() {
+        let mut tap = ReferenceTap::new(48_000, 4_800).unwrap();
+        let mut aec = EchoCanceller::new();
+        let start = tap.last;
+        for _ in 0..960 {
+            tap.push(0.5);
+        }
+        // Device consumed 480 of 960 frames.
+        tap.advance(480, start + std::time::Duration::from_millis(10), &mut aec);
+        assert_eq!(aec.far.len(), 480);
+        assert!(aec.far.iter().all(|&s| s == 0.5));
+        tap.advance(0, start + std::time::Duration::from_millis(20), &mut aec);
+        assert_eq!(aec.far.len(), 960);
+        // Idle: 100 ms of wall clock becomes 4800 silent samples.
+        tap.advance(0, start + std::time::Duration::from_millis(120), &mut aec);
+        assert_eq!(aec.far.len(), 960 + 4_800);
+        assert!(aec.far.iter().skip(960).all(|&s| s == 0.0));
+    }
+}

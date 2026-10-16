@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! capture ring (device rate, device channels)
-//!   -> downmix to mono -> resample to 48 kHz -> 480-sample denoise -> 960-sample frames -> Opus
+//!   -> downmix to mono -> resample to 48 kHz -> echo cancel -> 480-sample denoise -> 960-sample frames -> Opus
 //! Opus packets -> decode 48 kHz stereo -> resample to device rate
 //!   -> device channel layout -> playback ring (~40 ms target, 100 ms cap)
 //! ```
@@ -18,6 +18,7 @@ use crate::codec::{
 };
 use crate::denoise::{BLOCK_SAMPLES, MicrophoneDenoiser};
 use crate::device::StreamFormat;
+use crate::echo::{EchoCanceller, ReferenceTap};
 use crate::error::AudioError;
 use crate::jitter::JitterMixer;
 use crate::resample::RateConverter;
@@ -59,6 +60,8 @@ pub(crate) struct PipelineCounters {
     pub(crate) frames_dropped: AtomicU64,
     pub(crate) packets_decoded: AtomicU64,
     pub(crate) decode_errors: AtomicU64,
+    /// 20 ms remote frames recovered from FEC or concealed (lost or late packets).
+    pub(crate) plc_frames: AtomicU64,
 }
 
 /// Frames of `ms` milliseconds at `rate`, at least one.
@@ -165,6 +168,7 @@ impl CapturePipeline {
         &mut self,
         counters: &PipelineCounters,
         denoiser: &mut MicrophoneDenoiser,
+        mut echo: Option<&mut EchoCanceller>,
         emit: &mut impl FnMut(CapturedFrame),
     ) {
         let Self {
@@ -193,6 +197,10 @@ impl CapturePipeline {
                         continue;
                     }
                     *block_filled = 0;
+                    if let Some(echo) = echo.as_deref_mut() {
+                        let near = *block;
+                        echo.process(&near, block);
+                    }
                     denoiser.push(block);
                     while denoiser.pop(&mut processed) {
                         frames.accept(&processed, counters, emit);
@@ -219,6 +227,9 @@ pub(crate) struct PlaybackPipeline {
     pending: Vec<f32>,
     pending_start: usize,
     enabled: bool,
+    /// Echo-cancellation reference; present only while cancellation is on.
+    tap: Option<ReferenceTap>,
+    rate: u32,
 }
 
 impl PlaybackPipeline {
@@ -239,6 +250,8 @@ impl PlaybackPipeline {
             pending: Vec::with_capacity(pending_frames * CHANNELS),
             pending_start: 0,
             enabled: true,
+            tap: None,
+            rate: format.rate,
             ring,
         })
     }
@@ -253,6 +266,29 @@ impl PlaybackPipeline {
             self.pending.clear();
             self.pending_start = 0;
             self.mixer.clear();
+            if let Some(tap) = &mut self.tap {
+                tap.clear();
+            }
+        }
+    }
+
+    /// Starts or stops copying played audio for echo cancellation.
+    pub(crate) fn set_echo_reference(&mut self, active: bool) {
+        if active == self.tap.is_some() {
+            return;
+        }
+        self.tap = if active {
+            ReferenceTap::new(self.rate, self.ring.limit() / self.ring.channels()).ok()
+        } else {
+            None
+        };
+    }
+
+    /// Hands the echo canceller whatever the output device has played since the last call.
+    pub(crate) fn feed_echo(&mut self, echo: &mut EchoCanceller, now: std::time::Instant) {
+        let unread = self.ring.len() / self.ring.channels();
+        if let Some(tap) = &mut self.tap {
+            tap.advance(unread, now, echo);
         }
     }
     pub(crate) fn push_remote(&mut self, frame: RemoteFrame) {
@@ -279,7 +315,11 @@ impl PlaybackPipeline {
                 return;
             }
             let Some(packet) = next() else {
-                if self.mixer.mix(&mut self.mixed, std::time::Instant::now()) {
+                let active = self.mixer.mix(&mut self.mixed, std::time::Instant::now());
+                counters
+                    .plc_frames
+                    .store(self.mixer.concealed_frames(), Ordering::Relaxed);
+                if active {
                     self.pending_start = 0;
                     self.pending.clear();
                     let Self {
@@ -325,6 +365,11 @@ impl PlaybackPipeline {
         }
         let channels = self.ring.channels();
         let written = self.ring.push_available(stereo_to_device(stereo, channels));
+        if let Some(tap) = &mut self.tap {
+            for frame in stereo.as_chunks::<2>().0.iter().take(written / channels) {
+                tap.push((frame[0] + frame[1]) * 0.5);
+            }
+        }
         self.pending_start += written / channels * CHANNELS;
     }
 }
@@ -368,7 +413,7 @@ mod tests {
         pipeline.discard();
         let counters = PipelineCounters::default();
         let mut denoiser = denoiser(NoiseSuppression::Light);
-        pipeline.run(&counters, &mut denoiser, &mut |_| {
+        pipeline.run(&counters, &mut denoiser, None, &mut |_| {
             panic!("muted capture emitted a frame")
         });
         assert_eq!(denoiser.inference_blocks(), 0);
@@ -383,7 +428,7 @@ mod tests {
             let counters = PipelineCounters::default();
             let mut denoiser = denoiser(mode);
             let mut frames = 0;
-            pipeline.run(&counters, &mut denoiser, &mut |_| frames += 1);
+            pipeline.run(&counters, &mut denoiser, None, &mut |_| frames += 1);
             assert_eq!(frames, 5, "{mode:?}: 100 ms is five 20 ms frames");
             assert_eq!(denoiser.inference_blocks(), blocks, "{mode:?}");
         }
@@ -412,7 +457,9 @@ mod tests {
             let n = block.len() * channels;
             ring.push_overwrite(interleaved.collect::<Vec<_>>().into_iter());
             assert!(n <= ring.limit());
-            pipeline.run(&counters, &mut denoiser, &mut |frame| frames.push(frame));
+            pipeline.run(&counters, &mut denoiser, None, &mut |frame| {
+                frames.push(frame)
+            });
         }
         assert_eq!(
             counters.frames_encoded.load(Ordering::Relaxed),
@@ -473,7 +520,7 @@ mod tests {
         let counters = PipelineCounters::default();
         let mut frames = 0;
         let mut denoiser = denoiser(NoiseSuppression::Off);
-        pipeline.run(&counters, &mut denoiser, &mut |_| frames += 1);
+        pipeline.run(&counters, &mut denoiser, None, &mut |_| frames += 1);
         assert_eq!(frames, 5, "100 ms = five 20 ms frames");
     }
 
@@ -589,7 +636,7 @@ mod tests {
         // counting allocator attributes any heap use.
         let mut step = |emitted: &mut usize| {
             capture_ring.push_overwrite(block.iter().copied());
-            capture.run(&counters, &mut denoiser, &mut |_| *emitted += 1);
+            capture.run(&counters, &mut denoiser, None, &mut |_| *emitted += 1);
             playback.run(&counters, &mut || queue.next());
             playback_ring.pop(&mut device);
         };
