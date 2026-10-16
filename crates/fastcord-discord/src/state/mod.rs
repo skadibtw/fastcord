@@ -44,7 +44,7 @@ use std::mem::size_of;
 
 use fastcord_model::{
     Channel, Guild, GuildEmoji, GuildMember, Message, OverwriteKind, PermissionOverwrite, Role,
-    Snowflake, User, VoiceState,
+    Snowflake, ThreadMember, User, VoiceState,
 };
 
 pub use member_list::{MAX_ROWS, MemberList};
@@ -53,7 +53,7 @@ pub use read::{MAX_MUTED, MAX_READ_ENTRIES, ReadStates, Unread};
 use crate::gateway::{
     Dispatch, GatewayEvent, GuildCreate, GuildMemberEvent, GuildRoleDelete, GuildRoleEvent,
     GuildUpdate, MemberListUpdate, PassiveUpdate, Ready, ReadySupplemental, SubscriptionTarget,
-    VoiceStateUpdate,
+    ThreadListSync, VoiceStateUpdate,
 };
 
 /// Budget for guild/channel/role metadata, users, members, voice states, and
@@ -63,6 +63,10 @@ pub const METADATA_BUDGET: usize = 12 * 1024 * 1024;
 /// Shedding stops at this share of the budget, so a store at its limit does
 /// not shed on every event.
 const LOW_WATER_PERCENT: usize = 80;
+
+/// Threads kept per guild. Past it, threads the account has not joined and
+/// archived ones go first, then the oldest by ID.
+pub const MAX_THREADS_PER_GUILD: usize = 1024;
 
 /// Member lists kept per guild: the visible one plus the one it just replaced,
 /// whose late events must not resurrect an unbounded set.
@@ -197,6 +201,7 @@ impl GuildEntry {
             members_bytes: 0,
             voice_bytes: 0,
         };
+        entry.trim_threads();
         entry.recompute_meta();
         for member in guild.members {
             entry.put_member(member, tick);
@@ -369,10 +374,88 @@ impl GuildEntry {
             Ok(at) => {
                 channel.last_message_id =
                     newest(self.channels[at].last_message_id, channel.last_message_id);
+                // Only some thread payloads say whether the account joined;
+                // silence is not leaving.
+                if channel.member.is_none() {
+                    channel.member = self.channels[at].member.take();
+                }
                 self.channels[at] = channel;
             }
             Err(at) => self.channels.insert(at, channel),
         }
+        self.trim_threads();
+        self.recompute_meta();
+    }
+
+    /// Keeps at most [`MAX_THREADS_PER_GUILD`] threads: unjoined and archived
+    /// ones are dropped first, then the oldest.
+    fn trim_threads(&mut self) {
+        let archived = |c: &Channel| c.thread_metadata.as_ref().is_some_and(|m| m.archived);
+        let count = self.channels.iter().filter(|c| c.kind.is_thread()).count();
+        let Some(excess) = count.checked_sub(MAX_THREADS_PER_GUILD).filter(|n| *n > 0) else {
+            return;
+        };
+        let mut order: Vec<_> = self
+            .channels
+            .iter()
+            .filter(|c| c.kind.is_thread())
+            .map(|c| (c.member.is_some(), !archived(c), c.id))
+            .collect();
+        order.sort_unstable();
+        let doomed: HashSet<Snowflake> = order.iter().take(excess).map(|key| key.2).collect();
+        self.channels.retain(|c| !doomed.contains(&c.id));
+        self.channels.shrink_to_fit();
+    }
+
+    /// Marks the account as (not) a member of a thread held here.
+    fn set_thread_joined(&mut self, thread: Snowflake, joined: bool) -> bool {
+        let Ok(at) = self.channels.binary_search_by_key(&thread, |c| c.id) else {
+            return false;
+        };
+        let channel = &mut self.channels[at];
+        if !channel.kind.is_thread() || channel.member.is_some() == joined {
+            return false;
+        }
+        channel.member = joined.then_some(ThreadMember {});
+        true
+    }
+
+    /// THREAD_LIST_SYNC: replaces the threads of `parents` (every thread when
+    /// empty) with `threads`, remembering what was read.
+    fn sync_threads(&mut self, sync: ThreadListSync) {
+        let mut read = HashMap::new();
+        self.channels.retain(|c| {
+            let doomed = c.kind.is_thread()
+                && (sync.parent_ids.is_empty()
+                    || c.parent_id.is_some_and(|p| sync.parent_ids.contains(&p)));
+            if doomed {
+                read.insert(c.id, c.last_message_id);
+            }
+            !doomed
+        });
+        for mut thread in sync.threads {
+            if !thread.kind.is_thread() {
+                continue;
+            }
+            thread.last_message_id = newest(
+                read.get(&thread.id).copied().flatten(),
+                thread.last_message_id,
+            );
+            if sync.joined.contains(&thread.id) {
+                thread.member = Some(ThreadMember {});
+            }
+            let at = self
+                .channels
+                .binary_search_by_key(&thread.id, |c| c.id)
+                .unwrap_or_else(|at| at);
+            if self.channels.get(at).is_some_and(|c| c.id == thread.id) {
+                self.channels[at] = thread;
+            } else {
+                self.channels.insert(at, thread);
+            }
+        }
+        self.trim_threads();
+        self.channels.shrink_to_fit();
         self.recompute_meta();
     }
 
@@ -975,6 +1058,39 @@ impl Store {
                 changes.read = true;
                 self.channel_remove(&channel, &mut changes);
             }
+            Dispatch::ThreadListSync(sync) => {
+                let guild = sync.guild_id;
+                if self
+                    .with_guild(guild, |entry| entry.sync_threads(*sync))
+                    .is_some()
+                {
+                    changes.guilds.insert(guild);
+                }
+            }
+            Dispatch::ThreadMemberUpdate(update) => {
+                if self
+                    .with_guild(update.guild_id, |entry| {
+                        entry.set_thread_joined(update.thread_id, true)
+                    })
+                    .unwrap_or(false)
+                {
+                    changes.guilds.insert(update.guild_id);
+                }
+            }
+            Dispatch::ThreadMembersUpdate(update) => {
+                let me = self.current_user;
+                let joined = me.is_some_and(|me| update.added.contains(&me));
+                let left = me.is_some_and(|me| update.removed.contains(&me));
+                if (joined || left)
+                    && self
+                        .with_guild(update.guild_id, |entry| {
+                            entry.set_thread_joined(update.thread_id, joined)
+                        })
+                        .unwrap_or(false)
+                {
+                    changes.guilds.insert(update.guild_id);
+                }
+            }
             Dispatch::ChannelRecipientAdd(event) => {
                 if self.private_channels.contains_key(&event.channel_id) {
                     let user_id = event.user.id;
@@ -1227,6 +1343,7 @@ impl Store {
                 }
             }
             entry.channels = channels;
+            entry.trim_threads();
             entry.recompute_meta();
             for member in guild.members {
                 entry.put_member(member, tick);
@@ -1332,6 +1449,10 @@ impl Store {
                         return false;
                     };
                     entry.channels.remove(at);
+                    let id = channel.id;
+                    entry
+                        .channels
+                        .retain(|c| !(c.kind.is_thread() && c.parent_id == Some(id)));
                     if entry.channels.capacity() > entry.channels.len().saturating_mul(2) {
                         entry.channels.shrink_to_fit();
                     }

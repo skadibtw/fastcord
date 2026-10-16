@@ -120,4 +120,28 @@ pub struct Channel {
     pub recipient_ids: Vec<Snowflake>,
     #[serde(default)]
     pub last_message_id: Option<Snowflake>,
+    /// Present on threads only.
+    #[serde(default)]
+    pub thread_metadata: Option<ThreadMetadata>,
+    /// Present on a thread the current user has joined (the thread-member
+    /// object itself carries nothing this client keeps).
+    #[serde(default)]
+    pub member: Option<ThreadMember>,
 }
+
+/// Archive/lock state of a thread.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThreadMetadata {
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub locked: bool,
+    /// When the thread was archived (ISO 8601): the paging cursor of the
+    /// archived-thread listing.
+    #[serde(default)]
+    pub archive_timestamp: Option<String>,
+}
+
+/// Marks the current user as a member of a thread.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThreadMember {}

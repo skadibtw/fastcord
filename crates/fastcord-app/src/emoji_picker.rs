@@ -619,6 +619,7 @@ mod tests {
                 channel_id: Snowflake(500),
                 name: "general".into(),
                 kind: ChannelKind::Text,
+                thread: None,
                 permissions: PermissionSummary {
                     send_messages: true,
                     ..PermissionSummary::default()

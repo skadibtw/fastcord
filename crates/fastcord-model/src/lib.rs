@@ -17,7 +17,7 @@ mod voice;
 mod wire;
 
 pub use call::{CallCreate, CallDelete, CallUpdate};
-pub use channel::{Channel, ChannelKind};
+pub use channel::{Channel, ChannelKind, ThreadMember, ThreadMetadata};
 pub use embed::{
     Embed, EmbedField, EmbedFooter, EmbedMedia, EmbedText, MAX_EMBED_FIELDS, MAX_EMBEDS,
 };

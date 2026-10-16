@@ -346,6 +346,7 @@ fn sidebar<'a>(
                 ChannelKind::Text => "# ",
                 ChannelKind::Announcement => "\u{25B6} ",
                 ChannelKind::Voice => "\u{266A} ",
+                ChannelKind::Thread => "    \u{21B3} ",
                 ChannelKind::Category => "",
             };
             let label = format!(
@@ -353,6 +354,8 @@ fn sidebar<'a>(
                 channel.name,
                 if channel.kind == ChannelKind::Voice && !channel.enabled {
                     " (no access)"
+                } else if channel.thread.is_some_and(|t| t.archived) {
+                    " (archived)"
                 } else {
                     ""
                 }
@@ -393,6 +396,18 @@ fn header<'a>(
     pins: bool,
     call: Option<(&'static str, Message)>,
 ) -> Element<'a, Message> {
+    header_with(title, note, emoji, pins, call, Vec::new())
+}
+
+/// [`header`] with extra tool buttons (thread controls) before the usual ones.
+fn header_with<'a>(
+    title: String,
+    note: &'static str,
+    emoji: bool,
+    pins: bool,
+    call: Option<(&'static str, Message)>,
+    tools: Vec<(&'static str, Message)>,
+) -> Element<'a, Message> {
     let mut line = row![
         text(title).size(16).font(BOLD),
         text(note).size(12).style(text::secondary),
@@ -405,6 +420,13 @@ fn header<'a>(
             button(text(label).size(13))
                 .on_press(message)
                 .style(style::action_button(false)),
+        );
+    }
+    for (label, intent) in tools {
+        line = line.push(
+            button(text(label).size(13))
+                .on_press(intent)
+                .style(style::tool_button(true, false)),
         );
     }
     if pins {
@@ -525,18 +547,58 @@ fn main_pane<'a>(
     } else if let Some(selection) = &snapshot.selection {
         let permissions = selection.permissions;
         match selection.kind {
-            ChannelKind::Text | ChannelKind::Announcement => {
-                let note = match (permissions.read_history, permissions.send_messages) {
-                    (false, _) => "You can view this channel but not read its history.",
-                    (true, true) => "",
-                    (true, false) => "Read-only",
+            ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Thread => {
+                let thread = selection.thread;
+                let note = match (
+                    permissions.read_history,
+                    permissions.send_messages,
+                    thread.map(|t| (t.archived, t.locked)),
+                ) {
+                    (false, _, _) => "You can view this channel but not read its history.",
+                    (true, false, Some((_, true))) => "Locked: only thread managers can write",
+                    (true, true, Some((true, _))) => "Archived: sending a message reopens it",
+                    (true, false, Some((true, _))) => "Archived",
+                    (true, true, _) => "",
+                    (true, false, _) => "Read-only",
                 };
-                body = body.push(header(
-                    format!("# {}", selection.name),
+                let mut tools = Vec::new();
+                let title = match thread {
+                    Some(state) => {
+                        tools.push(if state.joined {
+                            (
+                                "Leave",
+                                Message::Threads(crate::threads::Event::Leave(
+                                    selection.channel_id,
+                                )),
+                            )
+                        } else {
+                            (
+                                "Join",
+                                Message::Threads(crate::threads::Event::Join(selection.channel_id)),
+                            )
+                        });
+                        format!("\u{21B3} {}", selection.name)
+                    }
+                    None => {
+                        if permissions.read_history {
+                            tools.push((
+                                "Threads",
+                                Message::Threads(crate::threads::Event::ToggleArchived(
+                                    selection.guild_id,
+                                    selection.channel_id,
+                                )),
+                            ));
+                        }
+                        format!("# {}", selection.name)
+                    }
+                };
+                body = body.push(header_with(
+                    title,
                     note,
                     history.can_send || composer.editing().is_some(),
                     permissions.read_history,
                     None,
+                    tools,
                 ));
                 if let Some(banner) = banner {
                     body = body.push(container(banner).padding([4, 16]));

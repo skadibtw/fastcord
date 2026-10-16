@@ -4,8 +4,14 @@
 //! IDs, never row indices; a fresh READY for the same account preserves valid IDs.
 //! Windows own at most 128 capped names, not guilds, members, or message histories.
 //! Queries perform no I/O, subscriptions request no member-list viewport, and no
-//! timer is needed. Unsupported channel kinds (threads, forums, DMs) are not part
-//! of guild navigation.
+//! timer is needed. Unsupported channel kinds (forums, DMs) are not part of guild
+//! navigation.
+//!
+//! Threads (milestone 48) are channels the store holds under their parent. They
+//! inherit the parent's overwrites, are listed right after the parent while
+//! active (an archived one only while open), a private thread only for its
+//! members and thread managers, and a thread whose parent is not viewable or
+//! not held is never exposed.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -63,6 +69,8 @@ pub enum ChannelKind {
     Text,
     Announcement,
     Voice,
+    /// A public, announcement or private thread.
+    Thread,
 }
 
 impl ChannelKind {
@@ -72,6 +80,7 @@ impl ChannelKind {
             ModelChannelKind::GuildText => Some(Self::Text),
             ModelChannelKind::GuildAnnouncement => Some(Self::Announcement),
             ModelChannelKind::GuildVoice | ModelChannelKind::GuildStageVoice => Some(Self::Voice),
+            kind if kind.is_thread() => Some(Self::Thread),
             _ => None,
         }
     }
@@ -88,6 +97,8 @@ pub struct PermissionSummary {
     pub use_external_emojis: bool,
     pub connect: bool,
     pub speak: bool,
+    pub create_threads: bool,
+    pub manage_threads: bool,
 }
 
 impl From<Permissions> for PermissionSummary {
@@ -101,6 +112,8 @@ impl From<Permissions> for PermissionSummary {
             use_external_emojis: permissions.contains(Permissions::USE_EXTERNAL_EMOJIS),
             connect: permissions.contains(Permissions::CONNECT),
             speak: permissions.contains(Permissions::SPEAK),
+            create_threads: permissions.contains(Permissions::CREATE_PUBLIC_THREADS),
+            manage_threads: permissions.contains(Permissions::MANAGE_THREADS),
         }
     }
 }
@@ -111,8 +124,33 @@ impl PermissionSummary {
             && match kind {
                 ChannelKind::Category => false,
                 ChannelKind::Voice => self.connect,
-                ChannelKind::Text | ChannelKind::Announcement => true,
+                ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Thread => true,
             }
+    }
+}
+
+/// What a thread's row or header shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadState {
+    pub parent_id: Snowflake,
+    pub archived: bool,
+    /// Only thread managers can write to a locked thread.
+    pub locked: bool,
+    /// The account is a member (it follows the thread).
+    pub joined: bool,
+}
+
+impl ThreadState {
+    fn of(channel: &Channel) -> Option<Self> {
+        channel.kind.is_thread().then(|| {
+            let metadata = channel.thread_metadata.as_ref();
+            Self {
+                parent_id: channel.parent_id.unwrap_or(Snowflake(0)),
+                archived: metadata.is_some_and(|m| m.archived),
+                locked: metadata.is_some_and(|m| m.locked),
+                joined: channel.member.is_some(),
+            }
+        })
     }
 }
 
@@ -129,6 +167,8 @@ pub struct ChannelRow {
     pub permissions: PermissionSummary,
     pub unread: bool,
     pub mentions: u32,
+    /// Set for threads, which `parent_id` (a category) does not describe.
+    pub thread: Option<ThreadState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +203,7 @@ pub struct ChannelSelection {
     pub acked: Option<Snowflake>,
     pub unread: bool,
     pub mentions: u32,
+    pub thread: Option<ThreadState>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -412,7 +453,9 @@ impl Navigation {
             .selected_guild
             .filter(|_| self.account == store.current_user().map(|user| user.id))
             .and_then(|id| store.guild(id))
-            .map_or_else(Vec::new, |guild| visible_channels(store, guild));
+            .map_or_else(Vec::new, |guild| {
+                visible_channels(store, guild, self.selected_channel)
+            });
         let total = visible.len();
         let offset = offset.min(total);
         let rows = visible
@@ -426,6 +469,7 @@ impl Navigation {
                 name: capped_name(row.channel.name.as_deref(), "Unnamed channel"),
                 kind: row.kind,
                 parent_id: row.parent_id,
+                thread: ThreadState::of(row.channel),
                 enabled: row.permissions.enables(row.kind),
                 selected: self.selected_channel == Some(row.channel.id)
                     && row.permissions.enables(row.kind),
@@ -457,6 +501,7 @@ impl Navigation {
             name: capped_name(channel.name.as_deref(), "Unnamed channel"),
             kind,
             permissions,
+            thread: ThreadState::of(channel),
         })
     }
 
@@ -655,17 +700,36 @@ impl<'a> PermissionContext<'a> {
         })
     }
 
-    fn permissions(&self, channel: &Channel) -> PermissionSummary {
+    fn permissions(&self, entry: &GuildEntry, channel: &Channel) -> PermissionSummary {
+        // A thread has no overwrites of its own: it inherits its parent's, and
+        // a missing parent leaves it inaccessible.
+        let overwrites = if channel.kind.is_thread() {
+            match channel.parent_id.and_then(|id| entry.channel(id)) {
+                Some(parent) => &parent.permission_overwrites,
+                None => return PermissionSummary::default(),
+            }
+        } else {
+            &channel.permission_overwrites
+        };
         let permissions = match self {
             Self::Owner => Permissions::ALL,
-            Self::Member { guild, member } => channel_permissions(
-                *guild,
-                *member,
-                &channel.permission_overwrites,
-                channel.kind.is_text_like(),
-            ),
+            Self::Member { guild, member } => {
+                channel_permissions(*guild, *member, overwrites, channel.kind.is_text_like())
+            }
         };
-        permissions.into()
+        let mut summary = PermissionSummary::from(permissions);
+        if let Some(thread) = ThreadState::of(channel) {
+            // Private threads exist only for members and thread managers.
+            if channel.kind == ModelChannelKind::PrivateThread
+                && !thread.joined
+                && !summary.manage_threads
+            {
+                return PermissionSummary::default();
+            }
+            summary.send_messages = permissions.contains(Permissions::SEND_MESSAGES_IN_THREADS)
+                && (!thread.locked || summary.manage_threads);
+        }
+        summary
     }
 }
 
@@ -682,13 +746,15 @@ fn enabled_channel<'a>(
 ) -> Option<(&'a Channel, ChannelKind, PermissionSummary)> {
     let channel = guild.channel(id)?;
     let kind = ChannelKind::from_model(channel.kind)?;
-    let permissions = PermissionContext::new(store, guild)?.permissions(channel);
+    let permissions = PermissionContext::new(store, guild)?.permissions(guild, channel);
     permissions
         .enables(kind)
         .then_some((channel, kind, permissions))
 }
 
-type ChannelOrder = (u8, i32, Snowflake, u8, i32, Snowflake);
+/// Category group, then the channel's slot, then (for a thread) its place
+/// after the parent: `(0, 0)` for everything else, `(1, thread)` for threads.
+type ChannelOrder = (u8, i32, Snowflake, u8, i32, Snowflake, u8, Snowflake);
 
 struct VisibleChannel<'a> {
     channel: &'a Channel,
@@ -698,7 +764,11 @@ struct VisibleChannel<'a> {
     order: ChannelOrder,
 }
 
-fn visible_channels<'a>(store: &'a Store, guild: &'a GuildEntry) -> Vec<VisibleChannel<'a>> {
+fn visible_channels<'a>(
+    store: &'a Store,
+    guild: &'a GuildEntry,
+    open: Option<Snowflake>,
+) -> Vec<VisibleChannel<'a>> {
     let Some(context) = PermissionContext::new(store, guild) else {
         return Vec::new();
     };
@@ -708,15 +778,20 @@ fn visible_channels<'a>(store: &'a Store, guild: &'a GuildEntry) -> Vec<VisibleC
         .channels()
         .filter_map(|channel| {
             let kind = ChannelKind::from_model(channel.kind)?;
-            let permissions = context.permissions(channel);
+            let permissions = context.permissions(guild, channel);
             if !permissions.view_channel {
+                return None;
+            }
+            // Archived threads are reached through the archive list, and stay
+            // in the sidebar only while open.
+            if ThreadState::of(channel).is_some_and(|t| t.archived) && open != Some(channel.id) {
                 return None;
             }
             let position = channel.position.unwrap_or(0);
             let order = if kind == ChannelKind::Category {
-                (1, position, channel.id, 0, 0, channel.id)
+                (1, position, channel.id, 0, 0, channel.id, 0, Snowflake(0))
             } else {
-                (0, 0, Snowflake(0), 1, position, channel.id)
+                (0, 0, Snowflake(0), 1, position, channel.id, 0, Snowflake(0))
             };
             Some(VisibleChannel {
                 channel,
@@ -728,7 +803,10 @@ fn visible_channels<'a>(store: &'a Store, guild: &'a GuildEntry) -> Vec<VisibleC
         })
         .collect();
     for at in 0..visible.len() {
-        if visible[at].kind == ChannelKind::Category {
+        if matches!(
+            visible[at].kind,
+            ChannelKind::Category | ChannelKind::Thread
+        ) {
             continue;
         }
         let category = visible[at]
@@ -748,6 +826,38 @@ fn visible_channels<'a>(store: &'a Store, guild: &'a GuildEntry) -> Vec<VisibleC
             visible[at].order.2 = parent.id;
         }
     }
+    // Threads follow their parent, which must itself be visible.
+    let mut orphan = vec![false; visible.len()];
+    for at in 0..visible.len() {
+        if visible[at].kind != ChannelKind::Thread {
+            continue;
+        }
+        let parent = visible[at].channel.parent_id.and_then(|parent| {
+            visible
+                .binary_search_by_key(&parent, |row| row.channel.id)
+                .ok()
+                .filter(|p| {
+                    !matches!(
+                        visible[*p].kind,
+                        ChannelKind::Category | ChannelKind::Thread
+                    )
+                })
+        });
+        match parent {
+            Some(parent) => {
+                let mut order = visible[parent].order;
+                order.6 = 1;
+                order.7 = visible[at].channel.id;
+                visible[at].order = order;
+            }
+            None => orphan[at] = true,
+        }
+    }
+    let mut at = 0;
+    visible.retain(|_| {
+        at += 1;
+        !orphan[at - 1]
+    });
     visible.sort_unstable_by_key(|row| row.order);
     visible
 }

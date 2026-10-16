@@ -132,12 +132,12 @@ fn category_groups_positions_and_id_ties_have_deterministic_order() {
     assert_eq!(
         ids(&before),
         [
-            1000, 1001, 2201, 2301, 3000, 3002, 3003, 3004, 2000, 2002, 2003, 2001, 2100, 2101,
-            2400,
+            1000, 2502, 1001, 2201, 2301, 3000, 3002, 3003, 3004, 2000, 2002, 2003, 2001, 2100,
+            2101, 2400,
         ]
         .map(id)
     );
-    assert_eq!(before.len(), 15);
+    assert_eq!(before.len(), 16);
     assert!(
         before
             .iter()
@@ -199,7 +199,7 @@ fn category_groups_positions_and_id_ties_have_deterministic_order() {
 fn injected_hidden_disabled_category_unknown_and_foreign_ids_are_rejected() {
     let (store, mut navigation) = setup(NAV_READY);
     assert!(navigation.select_channel(&store, id(1000)));
-    for forbidden in [1002, 3001, 2200, 2000, 3003, 2501, 2502, 9999] {
+    for forbidden in [1002, 3001, 2200, 2000, 3003, 2501, 9999] {
         assert!(
             !navigation.select_channel(&store, id(forbidden)),
             "{forbidden}"
@@ -778,6 +778,8 @@ fn large_ready() -> Ready {
                             recipients: Vec::new(),
                             recipient_ids: Vec::new(),
                             last_message_id: None,
+                            thread_metadata: None,
+                            member: None,
                         })
                         .collect(),
                     members: vec![GuildMember {
@@ -926,8 +928,8 @@ fn timeout_permissions_use_injected_clock_without_polling_or_expired_restriction
         );
         let guild = store.guild(id(100)).unwrap();
         let context = PermissionContext::with_clock(&store, guild, || now).unwrap();
-        let voice = context.permissions(guild.channel(id(1001)).unwrap());
-        let text = context.permissions(guild.channel(id(1000)).unwrap());
+        let voice = context.permissions(guild, guild.channel(id(1001)).unwrap());
+        let text = context.permissions(guild, guild.channel(id(1000)).unwrap());
         assert!(voice.view_channel && text.view_channel && text.read_history);
         assert_eq!(voice.connect, !blocked);
         assert_eq!(voice.speak, !blocked);
@@ -1044,4 +1046,328 @@ fn add_reactions_follows_the_role_and_overwrite_rules() {
     let row = rows.iter().find(|row| row.id == id(1000)).unwrap();
     assert!(!row.permissions.add_reactions);
     assert!(row.permissions.view_channel);
+}
+
+// ----- threads (milestone 48); every payload here is synthetic and unverified -----
+
+const THREAD_SEND: Permissions = Permissions::SEND_MESSAGES_IN_THREADS;
+
+fn thread_json(id: u64, kind: u8, parent: u64, extra: Value) -> Value {
+    let mut value = json!({
+        "id": id.to_string(), "guild_id": "100", "type": kind, "name": format!("t{id}"),
+        "parent_id": parent.to_string(),
+        "thread_metadata": {"archived": false, "locked": false},
+    });
+    for (key, field) in extra.as_object().unwrap() {
+        value[key] = field.clone();
+    }
+    value
+}
+
+/// Guild 100 owned by 2; the account (1) holds role 200 with `permissions`.
+/// Channel 10 is open text, channel 11 hides itself from the account.
+fn thread_store(permissions: Permissions, threads: &[Value]) -> (Store, Navigation) {
+    let raw = json!({
+        "id": "100", "name": "G", "owner_id": "2", "member_count": 2,
+        "roles": [
+            {"id": "100", "name": "@everyone", "permissions": (Permissions::VIEW_CHANNEL
+                | Permissions::READ_MESSAGE_HISTORY).0.to_string()},
+            {"id": "200", "name": "r", "permissions": permissions.0.to_string()},
+        ],
+        "channels": [
+            {"id": "10", "type": 0, "name": "general"},
+            {"id": "11", "type": 0, "name": "secret", "permission_overwrites":
+                [{"id": "100", "type": 0, "allow": "0", "deny": "1024"}]},
+        ],
+        "threads": threads,
+        "members": [{"user": {"id": "1", "username": "me"}, "roles": ["200"]}],
+    });
+    let mut store = Store::new();
+    let mut start = ready(NAV_READY);
+    start.guilds.clear();
+    start.unavailable_guilds.clear();
+    replace(&mut store, start);
+    apply(&mut store, "GUILD_CREATE", &raw.to_string());
+    let mut navigation = Navigation::default();
+    navigation.reconcile(&store);
+    assert!(navigation.select_guild(&store, id(100)));
+    (store, navigation)
+}
+
+fn thread_rows(navigation: &Navigation, store: &Store) -> Vec<(u64, bool)> {
+    rows(navigation, store)
+        .iter()
+        .map(|row| (row.id.0, row.thread.is_some()))
+        .collect()
+}
+
+const ACCESS: Permissions =
+    Permissions(Permissions::VIEW_CHANNEL.0 | Permissions::READ_MESSAGE_HISTORY.0 | THREAD_SEND.0);
+
+#[test]
+fn threads_list_under_their_parent_and_only_when_accessible() {
+    let (store, navigation) = thread_store(
+        ACCESS,
+        &[
+            thread_json(30, 11, 10, json!({})),
+            thread_json(20, 11, 10, json!({})),
+            // archived: reached through the archive list
+            thread_json(21, 11, 10, json!({"thread_metadata": {"archived": true}})),
+            // private and not joined: never exposed
+            thread_json(22, 12, 10, json!({})),
+            thread_json(23, 12, 10, json!({"member": {"user_id": "1"}})),
+            // parent the account cannot view, and a parent that is not held
+            thread_json(24, 11, 11, json!({})),
+            thread_json(25, 11, 99, json!({})),
+        ],
+    );
+    assert_eq!(
+        thread_rows(&navigation, &store),
+        [(10, false), (20, true), (23, true), (30, true)]
+    );
+    let rows = rows(&navigation, &store);
+    assert_eq!(rows[1].kind, ChannelKind::Thread);
+    assert!(rows[1].enabled && rows[1].permissions.send_messages);
+    let state = rows[2].thread.unwrap();
+    assert!(state.joined && !state.archived && state.parent_id == id(10));
+    assert_eq!(store.bytes(), store.recount());
+}
+
+#[test]
+fn an_archived_thread_can_be_opened_and_shows_while_open() {
+    let (store, mut navigation) = thread_store(
+        ACCESS,
+        &[thread_json(
+            21,
+            11,
+            10,
+            json!({"thread_metadata": {"archived": true, "locked": false}}),
+        )],
+    );
+    assert!(navigation.select_channel(&store, id(21)));
+    let selection = navigation.selection(&store).unwrap();
+    assert_eq!(selection.kind, ChannelKind::Thread);
+    assert!(selection.thread.unwrap().archived);
+    assert!(selection.permissions.send_messages, "writing unarchives it");
+    assert_eq!(thread_rows(&navigation, &store), [(10, false), (21, true)]);
+    // The hidden parent and a private thread stay closed to explicit selection.
+    let (store, mut navigation) = thread_store(
+        ACCESS,
+        &[
+            thread_json(22, 12, 10, json!({})),
+            thread_json(24, 11, 11, json!({})),
+        ],
+    );
+    assert!(!navigation.select_channel(&store, id(22)));
+    assert!(!navigation.select_channel(&store, id(24)));
+}
+
+#[test]
+fn locked_threads_are_read_only_without_manage_threads() {
+    let locked = thread_json(20, 11, 10, json!({"thread_metadata": {"locked": true}}));
+    let (store, navigation) = thread_store(ACCESS, std::slice::from_ref(&locked));
+    let row = &rows(&navigation, &store)[1];
+    assert!(row.thread.unwrap().locked);
+    assert!(row.permissions.view_channel && row.permissions.read_history);
+    assert!(!row.permissions.send_messages);
+
+    let (store, navigation) = thread_store(ACCESS | Permissions::MANAGE_THREADS, &[locked]);
+    assert!(rows(&navigation, &store)[1].permissions.send_messages);
+
+    // Plain SEND_MESSAGES does not write in a thread.
+    let (store, navigation) = thread_store(
+        Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY | Permissions::SEND_MESSAGES,
+        &[thread_json(20, 11, 10, json!({}))],
+    );
+    assert!(!rows(&navigation, &store)[1].permissions.send_messages);
+}
+
+#[test]
+fn thread_managers_see_private_threads_and_create_rights_are_reported() {
+    let (store, navigation) = thread_store(
+        ACCESS | Permissions::MANAGE_THREADS | Permissions::CREATE_PUBLIC_THREADS,
+        &[thread_json(22, 12, 10, json!({}))],
+    );
+    assert_eq!(thread_rows(&navigation, &store), [(10, false), (22, true)]);
+    let rows = rows(&navigation, &store);
+    assert!(rows[0].permissions.create_threads && rows[0].permissions.manage_threads);
+}
+
+#[test]
+fn thread_events_converge_and_the_ledger_never_drifts() {
+    let (mut store, mut navigation) = thread_store(ACCESS, &[thread_json(20, 11, 10, json!({}))]);
+    // THREAD_CREATE (ours: it carries a member object) and THREAD_UPDATE keeping membership.
+    apply(
+        &mut store,
+        "THREAD_CREATE",
+        &thread_json(31, 11, 10, json!({"member": {"user_id": "1"}})).to_string(),
+    );
+    apply(
+        &mut store,
+        "THREAD_UPDATE",
+        &thread_json(31, 11, 10, json!({"name": "renamed"})).to_string(),
+    );
+    let rows_now = rows(&navigation, &store);
+    let created = rows_now.iter().find(|r| r.id == id(31)).unwrap();
+    assert_eq!(created.name, "renamed");
+    assert!(created.thread.unwrap().joined, "silence is not leaving");
+
+    // Archiving removes it from the sidebar; deleting forgets it.
+    apply(
+        &mut store,
+        "THREAD_UPDATE",
+        &thread_json(20, 11, 10, json!({"thread_metadata": {"archived": true}})).to_string(),
+    );
+    assert_eq!(ids(&rows(&navigation, &store)), [id(10), id(31)]);
+    apply(
+        &mut store,
+        "THREAD_DELETE",
+        r#"{"id":"31","guild_id":"100","parent_id":"10","type":11}"#,
+    );
+    assert_eq!(ids(&rows(&navigation, &store)), [id(10)]);
+
+    // A private thread appears when the account is added, and goes when it leaves.
+    apply(
+        &mut store,
+        "THREAD_CREATE",
+        &thread_json(22, 12, 10, json!({})).to_string(),
+    );
+    assert_eq!(ids(&rows(&navigation, &store)), [id(10)]);
+    apply(
+        &mut store,
+        "THREAD_MEMBER_UPDATE",
+        r#"{"id":"22","guild_id":"100","user_id":"1","flags":0}"#,
+    );
+    assert_eq!(ids(&rows(&navigation, &store)), [id(10), id(22)]);
+    assert!(navigation.select_channel(&store, id(22)));
+    apply(
+        &mut store,
+        "THREAD_MEMBERS_UPDATE",
+        r#"{"id":"22","guild_id":"100","member_count":1,"removed_member_ids":["77"]}"#,
+    );
+    assert_eq!(
+        ids(&rows(&navigation, &store)),
+        [id(10), id(22)],
+        "someone else left"
+    );
+    apply(
+        &mut store,
+        "THREAD_MEMBERS_UPDATE",
+        r#"{"id":"22","guild_id":"100","member_count":0,"removed_member_ids":["1"]}"#,
+    );
+    assert_eq!(ids(&rows(&navigation, &store)), [id(10)]);
+    navigation.reconcile(&store);
+    assert!(
+        navigation.selection(&store).is_none(),
+        "leaving closes a private thread"
+    );
+
+    // Deleting the parent takes its threads along.
+    apply(
+        &mut store,
+        "CHANNEL_DELETE",
+        r#"{"id":"10","guild_id":"100","type":0}"#,
+    );
+    assert!(
+        store
+            .guild(id(100))
+            .unwrap()
+            .channels()
+            .all(|c| !c.kind.is_thread())
+    );
+}
+
+#[test]
+fn thread_list_sync_replaces_only_the_listed_parents() {
+    let (mut store, navigation) = thread_store(
+        ACCESS,
+        &[
+            thread_json(20, 11, 10, json!({})),
+            thread_json(26, 11, 11, json!({})),
+        ],
+    );
+    let sync = |channels: Value, threads: Vec<Value>, members: Value| {
+        json!({"guild_id": "100", "channel_ids": channels, "threads": threads,
+               "members": members})
+        .to_string()
+    };
+    apply(
+        &mut store,
+        "THREAD_LIST_SYNC",
+        &sync(
+            json!(["10"]),
+            vec![thread_json(40, 12, 10, json!({}))],
+            json!([{"id": "40", "user_id": "1"}]),
+        ),
+    );
+    let held: Vec<_> = store
+        .guild(id(100))
+        .unwrap()
+        .channels()
+        .filter(|c| c.kind.is_thread())
+        .map(|c| (c.id.0, c.member.is_some()))
+        .collect();
+    assert_eq!(
+        held,
+        [(26, false), (40, true)],
+        "20 is gone, 26 under 11 stays"
+    );
+    assert_eq!(ids(&rows(&navigation, &store)), [id(10), id(40)]);
+    // An unscoped sync replaces every thread of the guild.
+    apply(
+        &mut store,
+        "THREAD_LIST_SYNC",
+        &sync(json!([]), vec![], json!([])),
+    );
+    assert!(
+        store
+            .guild(id(100))
+            .unwrap()
+            .channels()
+            .all(|c| !c.kind.is_thread())
+    );
+    // An unknown guild changes nothing.
+    let unknown = sync(json!([]), vec![], json!([])).replace("\"100\"", "\"555\"");
+    assert!(
+        apply(&mut store, "THREAD_LIST_SYNC", &unknown)
+            .guilds
+            .is_empty()
+    );
+}
+
+#[test]
+fn threads_are_capped_per_guild_dropping_unjoined_and_archived_first() {
+    let many: Vec<Value> = (0..crate::state::MAX_THREADS_PER_GUILD as u64 + 5)
+        .map(|n| {
+            let extra = match n {
+                0 => json!({"member": {"user_id": "1"}}),
+                1 => json!({"thread_metadata": {"archived": true}}),
+                _ => json!({}),
+            };
+            thread_json(1_000 + n, 11, 10, extra)
+        })
+        .collect();
+    let (mut store, _) = thread_store(ACCESS, &many);
+    let threads = |store: &Store| {
+        store
+            .guild(id(100))
+            .unwrap()
+            .channels()
+            .filter(|c| c.kind.is_thread())
+            .map(|c| c.id.0)
+            .collect::<Vec<_>>()
+    };
+    let held = threads(&store);
+    assert_eq!(held.len(), crate::state::MAX_THREADS_PER_GUILD);
+    assert!(held.contains(&1_000), "joined threads outlive the cap");
+    assert!(!held.contains(&1_001), "archived ones go first");
+    // One more arrives: an old unjoined thread makes room, and the ledger agrees.
+    apply(
+        &mut store,
+        "THREAD_CREATE",
+        &thread_json(9_999, 11, 10, json!({})).to_string(),
+    );
+    let held = threads(&store);
+    assert_eq!(held.len(), crate::state::MAX_THREADS_PER_GUILD);
+    assert!(held.contains(&9_999) && held.contains(&1_000));
 }

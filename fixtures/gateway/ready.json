@@ -26,7 +26,6 @@
         {"id": "41771983423143939", "type": 2, "name": "Voice", "position": 1, "permission_overwrites": [{"id": "41771983444444444", "type": 0, "allow": "1048576", "deny": "0"}]},
         {"id": "41771983423143950", "type": 15, "name": "forum-from-the-future", "position": 2, "permission_overwrites": []}
       ],
-      "threads": [{"id": "999", "type": 11, "name": "skipped", "parent_id": "41771983423143938"}],
       "stage_instances": [],
       "guild_scheduled_events": [],
       "stickers": [],

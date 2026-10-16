@@ -343,6 +343,8 @@ pub struct Interaction {
     pub confirming: Option<Snowflake>,
     /// The account may pin and unpin messages in the open channel.
     pub can_pin: bool,
+    /// The account may start a public thread from a message of the open channel.
+    pub can_thread: bool,
 }
 
 /// What the timeline asks of the worker. Each event names its channel.
@@ -461,6 +463,13 @@ pub enum Event {
     },
     /// A message author's name or avatar was clicked: show their profile.
     OpenProfile(fastcord_model::User),
+    /// Start a thread from a message.
+    StartThread {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    /// Open the thread a "thread created" row announces.
+    OpenThread(Snowflake),
     /// Choose an emoji to react to a message with (opens the emoji picker).
     React {
         channel_id: Snowflake,
@@ -960,6 +969,9 @@ fn message_view<'a>(
     {
         body = body.push(text(note).size(13).style(text::secondary));
     }
+    if let Some(thread) = created_thread(message) {
+        body = body.push(row![row_button("Open thread", Event::OpenThread(thread))]);
+    }
     for embed in rich::embeds(message, channel_id, row.revision, cx) {
         body = body.push(embed);
     }
@@ -1084,7 +1096,9 @@ fn message_view<'a>(
     let show_copy = !content.is_empty() && idle;
     let show_react = snapshot.can_react && idle;
     let show_pin = interaction.can_pin && idle;
-    if !show_own_actions && !show_reply && !show_copy && !show_react && !show_pin {
+    // Only ordinary messages can start a thread.
+    let show_thread = interaction.can_thread && idle && matches!(message.kind, 0 | 19);
+    if !show_own_actions && !show_reply && !show_copy && !show_react && !show_pin && !show_thread {
         return base.into();
     }
     // Hover controls are layered over the top right so the measured row height
@@ -1124,6 +1138,15 @@ fn message_view<'a>(
                 channel_id,
                 message_id,
                 pinned: !message.pinned,
+            },
+        ));
+    }
+    if show_thread {
+        actions = actions.push(row_button(
+            "Thread",
+            Event::StartThread {
+                channel_id,
+                message_id,
             },
         ));
     }
@@ -1249,6 +1272,14 @@ fn continues_group(before: &Row, row: &Row) -> bool {
         && (b.id.0 >> 22).saturating_sub(a.id.0 >> 22) <= WINDOW_MS
 }
 
+/// The thread a "thread created" system message (type 18) announces: its
+/// reference names the thread, and the content is the thread's name.
+fn created_thread(message: &Message) -> Option<Snowflake> {
+    (message.kind == 18)
+        .then(|| message.message_reference.as_ref()?.channel_id)
+        .flatten()
+}
+
 /// What to show for a message without text or attachments.
 fn placeholder(message: &Message) -> Option<String> {
     if !message.attachments.is_empty() {
@@ -1265,6 +1296,7 @@ fn placeholder(message: &Message) -> Option<String> {
         7 => "A member joined.".to_owned(),
         8..=11 => "The server was boosted.".to_owned(),
         18 => "A thread was created.".to_owned(),
+        21 => "The message this thread was started from.".to_owned(),
         kind => format!("Unsupported message type ({kind})."),
     })
 }
@@ -2122,6 +2154,49 @@ mod tests {
     }
 
     #[test]
+    fn starting_a_thread_needs_the_permission_and_an_ordinary_message() {
+        let is_start = |event: &Event| matches!(event, Event::StartThread { .. });
+        assert!(
+            !clickable(&mixed(), Interaction::default())
+                .iter()
+                .any(is_start)
+        );
+        let allowed = Interaction {
+            can_thread: true,
+            ..Interaction::default()
+        };
+        assert!(clickable(&mixed(), allowed).iter().any(is_start));
+        // A system message cannot start one.
+        let mut system = one_row(7);
+        let mut joined = (*system.rows[0].message).clone();
+        joined.kind = 7;
+        system.rows[0].message = Arc::new(joined);
+        assert!(!clickable(&system, allowed).iter().any(is_start));
+    }
+
+    #[test]
+    fn a_thread_created_row_opens_the_thread_its_reference_names() {
+        let mut row = one_row(8);
+        let mut created = (*row.rows[0].message).clone();
+        created.kind = 18;
+        created.content = "release plans".to_owned();
+        created.attachments.clear();
+        assert_eq!(created_thread(&created), None, "no reference, no thread");
+        created.message_reference = Some(fastcord_model::MessageReference {
+            message_id: None,
+            channel_id: Some(Snowflake(900)),
+            guild_id: None,
+        });
+        assert_eq!(created_thread(&created), Some(Snowflake(900)));
+        row.rows[0].message = Arc::new(created.clone());
+        assert!(
+            clickable(&row, Interaction::default()).contains(&Event::OpenThread(Snowflake(900)))
+        );
+        created.kind = 0;
+        assert_eq!(created_thread(&created), None, "only type 18 announces");
+    }
+
+    #[test]
     fn deleting_needs_a_confirmation_in_the_row() {
         let found = clickable(
             &mixed(),
@@ -2130,6 +2205,7 @@ mod tests {
                 editing: Some(Snowflake(3)),
                 replying: None,
                 can_pin: false,
+                can_thread: false,
             },
         );
         assert!(found.contains(&Event::ConfirmDelete {
@@ -2160,6 +2236,7 @@ mod tests {
             editing: Some(Snowflake(2)),
             replying: None,
             can_pin: false,
+            can_thread: false,
         };
         let edit = saving(ChangeKind::Edit(Arc::from("new")));
         assert_eq!(row_state(&edit, ui), RowState::Saving { delete: false });

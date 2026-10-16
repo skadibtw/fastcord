@@ -880,6 +880,8 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
                 recipients: Vec::new(),
                 recipient_ids: Vec::new(),
                 last_message_id: Some(id(n + 1)),
+                thread_metadata: None,
+                member: None,
             })
             .collect(),
         members: vec![GuildMember {

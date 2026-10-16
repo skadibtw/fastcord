@@ -27,6 +27,7 @@ mod rich;
 mod search;
 mod status;
 mod style;
+mod threads;
 mod timeline;
 mod variable_list;
 mod virtual_list;
@@ -97,6 +98,7 @@ struct App {
     pins: pins::State,
     friends: friends::State,
     status: status::State,
+    threads: threads::State,
 }
 
 #[derive(Debug)]
@@ -218,6 +220,7 @@ enum Message {
     Pins(pins::Event),
     Friends(friends::Event),
     Status(status::Event),
+    Threads(threads::Event),
     EmojiPicker(emoji_picker::Event),
     EmojiVisibility(emoji::Occurrence, bool),
     EmojiLoaded(
@@ -272,6 +275,7 @@ impl App {
                 pins: pins::State::default(),
                 friends: friends::State::default(),
                 status: status::State::default(),
+                threads: threads::State::default(),
             },
             Task::perform(
                 async {
@@ -762,6 +766,7 @@ impl App {
                         .map(Message::Status);
                 }
             }
+            Message::Threads(event) => return self.threads_event(event),
             Message::Friends(event) => {
                 if let Phase::Account {
                     session, gateway, ..
@@ -793,6 +798,7 @@ impl App {
                 }
             }
             Message::SelectGuild(guild) => {
+                self.threads.close();
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.directs = false;
                     gateway.controls.select_guild(guild);
@@ -803,6 +809,7 @@ impl App {
                 }
             }
             Message::SelectChannel(guild, channel) => {
+                self.threads.close();
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     let join = gateway.navigation.selected_guild == Some(guild)
                         && gateway.navigation.channels.rows.iter().any(|row| {
@@ -1051,6 +1058,7 @@ impl App {
                 }
             }
             Message::SelectPrivateChannel(channel) => {
+                self.threads.close();
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     self.friends.close();
                     gateway.directs = true;
@@ -1234,6 +1242,42 @@ impl App {
                                 .friends
                                 .update(friends::Event::Profile(user), &session.client)
                                 .map(Message::Friends);
+                        }
+                        timeline::Event::StartThread {
+                            channel_id,
+                            message_id,
+                        } => {
+                            if let Some(selection) = gateway
+                                .navigation
+                                .selection
+                                .as_ref()
+                                .filter(|s| s.channel_id == channel_id)
+                            {
+                                let first =
+                                    timeline::copy_text(&gateway.timeline, channel_id, message_id)
+                                        .unwrap_or_default()
+                                        .to_owned();
+                                return self
+                                    .threads
+                                    .update(
+                                        threads::Event::Start(
+                                            selection.guild_id,
+                                            channel_id,
+                                            message_id,
+                                            first,
+                                        ),
+                                        &session.client,
+                                    )
+                                    .map(Message::Threads);
+                            }
+                        }
+                        // A thread this client has never held cannot be opened
+                        // from here; the archive list brings it in.
+                        timeline::Event::OpenThread(thread) => {
+                            if let Some(guild) = gateway.navigation.selected_guild {
+                                self.threads.close();
+                                gateway.controls.select_channel(guild, thread);
+                            }
                         }
                         timeline::Event::ToggleSpoiler {
                             message_id,
@@ -1419,6 +1463,7 @@ impl App {
             }
             Message::Logout => {
                 self.pins = pins::State::default();
+                self.threads.drop_all();
                 if let Phase::Account {
                     session, gateway, ..
                 } = &self.phase
@@ -1640,6 +1685,7 @@ impl App {
             crate::attachments::AttachmentCache::default_root(session.user.id).ok();
         self.search = search::State::default();
         self.pins = pins::State::default();
+        self.threads.drop_all();
         self.friends.reset();
         self.status.reset();
         self.phase = Phase::Account {
@@ -1674,6 +1720,35 @@ impl App {
             .permissions
             .read_history
             .then_some((Some(selection.guild_id), selection.channel_id))
+    }
+
+    fn threads_event(&mut self, event: threads::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        match event {
+            threads::Event::OpenArchived(index) => {
+                if let Some((guild, thread)) = self.threads.archived_thread(index) {
+                    self.threads.close();
+                    gateway.controls.open_thread(guild, thread);
+                }
+                Task::none()
+            }
+            threads::Event::Created(Ok(thread)) => {
+                self.threads.close();
+                if let Some(guild) = thread.guild_id {
+                    gateway.controls.open_thread(guild, thread);
+                }
+                Task::none()
+            }
+            event => self
+                .threads
+                .update(event, &session.client)
+                .map(Message::Threads),
+        }
     }
 
     fn pins_event(&mut self, event: pins::Event) -> Task<Message> {
@@ -1987,6 +2062,9 @@ impl App {
                 && self.pins.shows(channel)
             {
                 banner_column = banner_column.push(pins::view(&self.pins).map(Message::Pins));
+            }
+            if let Some(panel) = threads::view(&self.threads) {
+                banner_column = banner_column.push(panel.map(Message::Threads));
             }
             for (line, danger) in notes {
                 let line = text(line).size(12);

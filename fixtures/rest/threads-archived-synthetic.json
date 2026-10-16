@@ -1,0 +1,8 @@
+{
+  "threads": [
+    {"id": "9001", "type": 11, "guild_id": "1000", "parent_id": "500", "name": "release plans", "owner_id": "42", "last_message_id": "9100", "thread_metadata": {"archived": true, "locked": false, "auto_archive_duration": 1440, "archive_timestamp": "2026-10-06T10:00:00.000000+00:00"}},
+    {"id": "9002", "type": 11, "parent_id": "500", "name": "old topic", "thread_metadata": {"archived": true, "locked": true, "archive_timestamp": "2026-10-05T09:00:00.000000+00:00"}, "unknown_future_field": 1}
+  ],
+  "members": [{"id": "9001", "user_id": "42", "join_timestamp": "2026-10-01T10:00:00.000000+00:00", "flags": 0}],
+  "has_more": true
+}

@@ -314,11 +314,15 @@ impl Tracker {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum SelectionIntent {
     Guild(Snowflake),
     Channel(Snowflake, Snowflake),
     PrivateChannel(Snowflake),
+    /// A thread of the guild that the store may not hold yet (just created, or
+    /// read from the archive): it is entered into the store, which still
+    /// decides whether the account may open it.
+    Thread(Snowflake, Box<Channel>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1047,6 +1051,14 @@ impl NavigationBridge {
         self.requests.send_modify(|request| {
             request.revision = request.revision.wrapping_add(1);
             request.selection = Some(SelectionIntent::Channel(guild, channel));
+        });
+    }
+
+    pub fn open_thread(&self, guild: Snowflake, thread: Channel) {
+        self.clear_private_notice();
+        self.requests.send_modify(|request| {
+            request.revision = request.revision.wrapping_add(1);
+            request.selection = Some(SelectionIntent::Thread(guild, Box::new(thread)));
         });
     }
 
@@ -2003,6 +2015,20 @@ impl Worker {
                         .navigation
                         .select_private_channel(&self.tracker.store, channel);
                 }
+                Some(SelectionIntent::Thread(guild, thread))
+                    if self.tracker.navigation.selected_guild() == Some(guild)
+                        && thread.kind.is_thread()
+                        && thread.guild_id == Some(guild) =>
+                {
+                    let id = thread.id;
+                    self.tracker.store.apply(GatewayEvent::Dispatch {
+                        sequence: 0,
+                        event: Dispatch::ChannelCreate(thread),
+                    });
+                    self.tracker
+                        .navigation
+                        .select_channel(&self.tracker.store, id);
+                }
                 _ => {}
             }
             self.revision = request.revision;
@@ -2638,6 +2664,22 @@ impl GatewayPanel {
                     .is_some_and(|s| Some(s.channel_id) == open && s.permissions.manage_messages))
     }
 
+    /// A public thread can be started from a message of a server text channel
+    /// where the account may create them (not inside a thread).
+    fn can_thread(&self) -> bool {
+        let open = self.timeline.channel_id;
+        open.is_some()
+            && self.navigation.selection.as_ref().is_some_and(|s| {
+                Some(s.channel_id) == open
+                    && matches!(
+                        s.kind,
+                        fastcord_discord::state::navigation::ChannelKind::Text
+                            | fastcord_discord::state::navigation::ChannelKind::Announcement
+                    )
+                    && s.permissions.create_threads
+            })
+    }
+
     /// What the timeline shows about rows the UI is working on.
     pub fn interaction(&self) -> timeline::Interaction {
         timeline::Interaction {
@@ -2648,6 +2690,7 @@ impl GatewayPanel {
                 .filter(|(channel, _)| self.timeline.channel_id == Some(*channel))
                 .map(|(_, message)| message),
             can_pin: self.can_pin(),
+            can_thread: self.can_thread(),
         }
     }
 
@@ -3435,6 +3478,7 @@ mod bridge_tests {
                 editing: Some(Snowflake(7)),
                 replying: None,
                 can_pin: false,
+                can_thread: false,
                 confirming: None,
             }
         );
@@ -3507,6 +3551,8 @@ mod tests {
             recipients: Vec::new(),
             recipient_ids: Vec::new(),
             last_message_id: None,
+            thread_metadata: None,
+            member: None,
         };
         GatewayEvent::Dispatch {
             sequence: 1,
@@ -3573,6 +3619,8 @@ mod tests {
             recipients: Vec::new(),
             recipient_ids: Vec::new(),
             last_message_id: None,
+            thread_metadata: None,
+            member: None,
         }
     }
 

@@ -358,6 +358,36 @@ pub struct GuildMemberEvent {
     pub users: Vec<User>,
 }
 
+/// THREAD_LIST_SYNC: the active threads of some parent channels (all of the
+/// guild's when `parent_ids` is empty), replacing what was held for them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadListSync {
+    pub guild_id: Snowflake,
+    pub parent_ids: Vec<Snowflake>,
+    /// Always carry their `guild_id`.
+    pub threads: Vec<Channel>,
+    /// Threads the current user has joined.
+    pub joined: Vec<Snowflake>,
+}
+
+/// THREAD_MEMBER_UPDATE: the current user's own thread membership changed
+/// (they joined or were added).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadMemberUpdate {
+    pub guild_id: Snowflake,
+    pub thread_id: Snowflake,
+}
+
+/// THREAD_MEMBERS_UPDATE: other members joined or left. Only the current
+/// user's entries change what the client shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadMembersUpdate {
+    pub guild_id: Snowflake,
+    pub thread_id: Snowflake,
+    pub added: Vec<Snowflake>,
+    pub removed: Vec<Snowflake>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuildMemberRemove {
     pub guild_id: Snowflake,
@@ -508,6 +538,9 @@ pub enum Dispatch {
     ChannelCreate(Box<Channel>),
     ChannelUpdate(Box<Channel>),
     ChannelDelete(Box<Channel>),
+    ThreadListSync(Box<ThreadListSync>),
+    ThreadMemberUpdate(ThreadMemberUpdate),
+    ThreadMembersUpdate(Box<ThreadMembersUpdate>),
     ChannelRecipientAdd(Box<ChannelRecipientAdd>),
     ChannelRecipientRemove(Box<ChannelRecipientRemove>),
     PassiveUpdate(Box<PassiveUpdate>),
@@ -562,6 +595,9 @@ impl Dispatch {
             Self::ChannelCreate(_) => "CHANNEL_CREATE",
             Self::ChannelUpdate(_) => "CHANNEL_UPDATE",
             Self::ChannelDelete(_) => "CHANNEL_DELETE",
+            Self::ThreadListSync(_) => "THREAD_LIST_SYNC",
+            Self::ThreadMemberUpdate(_) => "THREAD_MEMBER_UPDATE",
+            Self::ThreadMembersUpdate(_) => "THREAD_MEMBERS_UPDATE",
             Self::ChannelRecipientAdd(_) => "CHANNEL_RECIPIENT_ADD",
             Self::ChannelRecipientRemove(_) => "CHANNEL_RECIPIENT_REMOVE",
             Self::PassiveUpdate(_) => "PASSIVE_UPDATE_V2",

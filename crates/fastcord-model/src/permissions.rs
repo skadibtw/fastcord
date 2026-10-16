@@ -32,6 +32,8 @@ impl Permissions {
     pub const CONNECT: Self = Self(1 << 20);
     pub const SPEAK: Self = Self(1 << 21);
     pub const USE_VAD: Self = Self(1 << 25);
+    pub const MANAGE_THREADS: Self = Self(1 << 34);
+    pub const CREATE_PUBLIC_THREADS: Self = Self(1 << 35);
     pub const SEND_MESSAGES_IN_THREADS: Self = Self(1 << 38);
 
     pub const fn contains(self, other: Self) -> bool {

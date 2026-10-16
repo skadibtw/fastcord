@@ -1119,7 +1119,7 @@ impl History {
             .filter(|selection| {
                 matches!(
                     selection.kind,
-                    ChannelKind::Text | ChannelKind::Announcement
+                    ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Thread
                 ) && selection.permissions.read_history
             })
             .map(|selection| selection.channel_id)
@@ -1847,6 +1847,7 @@ mod tests {
                 channel_id: CHANNEL,
                 name: "general".to_owned(),
                 kind: ChannelKind::Text,
+                thread: None,
                 permissions: PermissionSummary {
                     view_channel: true,
                     read_history: readable,

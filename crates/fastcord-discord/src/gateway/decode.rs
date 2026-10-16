@@ -31,7 +31,8 @@ use super::event::{
     MemberListId, MemberListOp, MemberListUpdate, MessageAck, MessageDelete, MessageDeleteBulk,
     MessageReaction, MessageReactionRemoveAll, MessageReactionRemoveEmoji, MuteSettings,
     PassiveUpdate, PresenceUpdate, ReadStateEntry, Ready, ReadyRead, ReadySupplemental,
-    RelationshipUpdate, SessionId, SupplementalGuild, VoiceStateUpdate,
+    RelationshipUpdate, SessionId, SupplementalGuild, ThreadListSync, ThreadMemberUpdate,
+    ThreadMembersUpdate, VoiceStateUpdate,
 };
 
 /// A known payload that did not decode into its typed form.
@@ -119,6 +120,9 @@ struct GuildWire {
     roles: Vec<Role>,
     #[serde(default, deserialize_with = "null_default")]
     channels: Vec<Channel>,
+    /// Active threads the account can see.
+    #[serde(default, deserialize_with = "null_default")]
+    threads: Vec<Channel>,
     #[serde(default, deserialize_with = "null_default")]
     emojis: Vec<GuildEmoji>,
     #[serde(default, deserialize_with = "null_default")]
@@ -482,6 +486,7 @@ impl Normalizer {
         let channels = wire
             .channels
             .into_iter()
+            .chain(wire.threads)
             .map(|channel| self.channel(channel, Some(id)))
             .collect();
         NormalizedGuild::Available(Box::new(Guild {
@@ -832,6 +837,58 @@ fn decode_member_event(raw: &str) -> Result<GuildMemberEvent, Malformed> {
     })
 }
 
+#[derive(Deserialize)]
+struct ThreadMemberWire {
+    id: Snowflake,
+    guild_id: Snowflake,
+}
+
+#[derive(Deserialize)]
+struct ThreadMembersWire {
+    id: Snowflake,
+    guild_id: Snowflake,
+    #[serde(default, deserialize_with = "null_default")]
+    added_members: Vec<AddedThreadMember>,
+    #[serde(default, deserialize_with = "null_default")]
+    removed_member_ids: Vec<Snowflake>,
+}
+
+#[derive(Deserialize)]
+struct AddedThreadMember {
+    #[serde(default)]
+    user_id: Option<Snowflake>,
+}
+
+#[derive(Deserialize)]
+struct ThreadListSyncWire {
+    guild_id: Snowflake,
+    #[serde(default, deserialize_with = "null_default")]
+    channel_ids: Vec<Snowflake>,
+    #[serde(default, deserialize_with = "null_default")]
+    threads: Vec<Channel>,
+    #[serde(default, deserialize_with = "null_default")]
+    members: Vec<ListedThreadMember>,
+}
+
+#[derive(Deserialize)]
+struct ListedThreadMember {
+    id: Snowflake,
+}
+
+fn decode_thread_list_sync(raw: &str) -> Result<ThreadListSync, Malformed> {
+    let wire: ThreadListSyncWire = json(raw)?;
+    let mut threads = wire.threads;
+    for thread in &mut threads {
+        thread.guild_id = Some(wire.guild_id);
+    }
+    Ok(ThreadListSync {
+        guild_id: wire.guild_id,
+        parent_ids: wire.channel_ids,
+        threads,
+        joined: wire.members.into_iter().map(|m| m.id).collect(),
+    })
+}
+
 fn decode_member_remove(raw: &str) -> Result<GuildMemberRemove, Malformed> {
     let wire: GuildMemberRemoveWire = json(raw)?;
     Ok(GuildMemberRemove {
@@ -1051,6 +1108,31 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "CHANNEL_CREATE" => json::<Channel>(raw).map(|c| Dispatch::ChannelCreate(Box::new(c))),
         "CHANNEL_UPDATE" => json::<Channel>(raw).map(|c| Dispatch::ChannelUpdate(Box::new(c))),
         "CHANNEL_DELETE" => json::<Channel>(raw).map(|c| Dispatch::ChannelDelete(Box::new(c))),
+        // Threads are channels: the same upsert and removal apply.
+        "THREAD_CREATE" => json::<Channel>(raw).map(|c| Dispatch::ChannelCreate(Box::new(c))),
+        "THREAD_UPDATE" => json::<Channel>(raw).map(|c| Dispatch::ChannelUpdate(Box::new(c))),
+        "THREAD_DELETE" => json::<Channel>(raw).map(|c| Dispatch::ChannelDelete(Box::new(c))),
+        "THREAD_LIST_SYNC" => {
+            decode_thread_list_sync(raw).map(|s| Dispatch::ThreadListSync(Box::new(s)))
+        }
+        "THREAD_MEMBER_UPDATE" => json::<ThreadMemberWire>(raw).map(|m| {
+            Dispatch::ThreadMemberUpdate(ThreadMemberUpdate {
+                guild_id: m.guild_id,
+                thread_id: m.id,
+            })
+        }),
+        "THREAD_MEMBERS_UPDATE" => json::<ThreadMembersWire>(raw).map(|m| {
+            Dispatch::ThreadMembersUpdate(Box::new(ThreadMembersUpdate {
+                guild_id: m.guild_id,
+                thread_id: m.id,
+                added: m
+                    .added_members
+                    .into_iter()
+                    .filter_map(|a| a.user_id)
+                    .collect(),
+                removed: m.removed_member_ids,
+            }))
+        }),
         "CHANNEL_RECIPIENT_ADD" => {
             json::<ChannelRecipientAdd>(raw).map(|c| Dispatch::ChannelRecipientAdd(Box::new(c)))
         }
