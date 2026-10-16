@@ -2228,6 +2228,8 @@ pub struct GatewayPanel {
     /// Spoilers the viewer uncovered (message, spoiler), at most
     /// [`rich::MAX_REVEALED`].
     pub revealed: HashSet<(Snowflake, u16)>,
+    /// The sidebar lists direct messages rather than a server's channels.
+    pub directs: bool,
     pub watch_open: bool,
     /// The source picker of the screen share.
     pub share_picker: SharePicker,
@@ -2447,6 +2449,7 @@ impl GatewayPanel {
             emoji_picker: emoji_picker::Picker::default(),
             emoji_snapshot: Arc::default(),
             revealed: HashSet::new(),
+            directs: false,
             watch_open: false,
             share_picker: SharePicker::default(),
             voice_guild: None,

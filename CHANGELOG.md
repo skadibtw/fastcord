@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- The main screen follows the web client's layout and dark palette: a rail of server icons, a sidebar of channels (or direct messages) with the user and voice panel at its foot (Mic, Sound, Audio, Exit), a conversation pane with a channel header, round letter avatars and messages from the same author within seven minutes grouped under one header, red mention badges and bold unread names. The voice call (people with a speaking ring, per-person volume, Go Live) is a bar above the conversation instead of a debug column. Server and profile pictures are not fetched yet (letters stand in).
+
 ### Added
 - Read state, unread markers and mentions (M41, #56): channels, servers and DMs show a dot when they have unmuted messages newer than the account's own read cursor and a mention count; muted servers and channels hide the dot but keep mentions. The newest message is acknowledged only when the window is active and the live edge is on screen (reading older history never marks anything read), acknowledgements are coalesced to one in flight, and `MESSAGE_ACK` from other clients converges the markers. An open conversation with unread messages offers Jump to first unread and Mark as read. Live comparison with the official client is pending.
 - Attachment uploads (M40, #55): attach up to ten files to a message from a file dialog, by dropping them on the window or with an explicit Paste image (Windows clipboard bitmap, re-encoded as PNG). Files are streamed in 64 KiB chunks to Discord's storage URL by a credential-free, host-restricted client, with progress, Cancel and explicit Retry; a file that changed after it was chosen fails instead of being sent; the message is posted with the existing nonce rules so a lost answer never creates a second message. Live Discord acceptance is pending.

@@ -166,6 +166,8 @@ pub struct NavigationSnapshot {
     pub private_channels: Window<PrivateChannelRow>,
     pub private_selection: Option<PrivateChannelSelection>,
     pub selected_guild: Option<Snowflake>,
+    /// The selected guild's name, empty when none is selected.
+    pub selected_guild_name: String,
     pub selection: Option<ChannelSelection>,
     /// Available guild lacks authoritative own-member/role/owner data.
     pub permissions_pending: bool,
@@ -475,6 +477,11 @@ impl Navigation {
                 private_rows.end.saturating_sub(private_rows.start),
             ),
             private_selection: self.private_selection(store),
+            selected_guild_name: selected_guild
+                .and_then(|id| store.guild(id))
+                .map_or_else(String::new, |guild| {
+                    capped_name(Some(guild.name()), "Unnamed guild")
+                }),
             selected_guild,
             selection: self.selection(store),
             permissions_pending,

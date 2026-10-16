@@ -20,6 +20,7 @@ mod qr;
 mod reactions;
 mod render;
 mod rich;
+mod style;
 mod timeline;
 mod variable_list;
 mod virtual_list;
@@ -46,6 +47,7 @@ const MAX_PRIVATE_RECIPIENTS: usize = fastcord_discord::MAX_PRIVATE_RECIPIENTS;
 fn main() -> iced::Result {
     render::application(App::boot, App::update, App::view)
         .title("fastcord")
+        .theme(App::theme)
         .subscription(App::subscription)
         .window_size((1080, 640))
         .run()
@@ -70,6 +72,8 @@ struct App {
     audio_saving: Option<audio_devices::Preferences>,
     window_active: bool,
     window_drawable: bool,
+    /// The per-person volume sliders are open.
+    voice_details: bool,
 }
 
 #[derive(Debug)]
@@ -189,6 +193,10 @@ enum Message {
     EmojiTick(std::time::Instant),
     WindowActive(bool),
     WindowSize(iced::Size),
+    /// Direct messages (true) or a server's channels in the sidebar.
+    ShowDirects(bool),
+    /// Show or hide the per-person volume sliders.
+    ToggleVoiceDetails,
     /// Mark a conversation read (guild, channel); the user asked.
     MarkRead(Option<Snowflake>, Snowflake),
     /// Show the first message after the read cursor (channel, cursor).
@@ -222,6 +230,7 @@ impl App {
                 audio_saving: None,
                 window_active: true,
                 window_drawable: true,
+                voice_details: false,
             },
             Task::perform(
                 async {
@@ -232,6 +241,10 @@ impl App {
                 |(preferences, store)| Message::Initialized(preferences, store),
             ),
         )
+    }
+
+    fn theme(&self) -> iced::Theme {
+        style::theme()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -647,8 +660,15 @@ impl App {
                     return self.handle(Message::Gateway(id, status));
                 }
             }
+            Message::ShowDirects(on) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.directs = on;
+                }
+            }
+            Message::ToggleVoiceDetails => self.voice_details = !self.voice_details,
             Message::SelectGuild(guild) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.directs = false;
                     gateway.controls.select_guild(guild);
                     return iced::widget::operation::scroll_to(
                         "channel-list",
@@ -845,7 +865,8 @@ impl App {
                 }
             }
             Message::SelectPrivateChannel(channel) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.directs = true;
                     gateway.controls.select_private_channel(channel);
                 }
             }
@@ -1460,177 +1481,327 @@ impl App {
         {
             let voice_audio = gateway.controls.voice_audio_state();
             let voice_controls = gateway.controls.voice_controls();
-            let mut participants = column![text("Voice participants").size(16)].spacing(6);
-            for participant in &voice_controls.participants {
-                let user = participant.user_id;
-                let volume = voice_controls.volume_percent(user);
-                participants = participants.push(
-                    row![
-                        text(format!("User {}", user.0)).width(Length::Fixed(150.0)),
-                        text(if participant.speaking {
-                            "Speaking"
-                        } else {
-                            "Not speaking"
-                        })
-                        .width(Length::Fixed(120.0)),
-                        text(format!(
-                            "SSRC {}",
-                            participant
-                                .ssrc
-                                .map_or_else(|| "—".to_owned(), |ssrc| ssrc.to_string())
-                        ))
-                        .width(Length::Fixed(120.0)),
-                        slider(0.0..=200.0, volume as f32, move |value| {
-                            Message::SetParticipantVolume(user, value.round() as u16)
-                        })
-                        .on_release(Message::CommitParticipantVolume(user)),
-                        button("0%").on_press(Message::PresetParticipantVolume(user, 0)),
-                        button("200%").on_press(Message::PresetParticipantVolume(user, 200)),
-                        text(format!("{volume}%")),
-                    ]
-                    .spacing(8),
-                );
-            }
             let watching = gateway.controls.watched();
-            let mut streams = row![text("Go Live").size(14)].spacing(10);
-            if let Some(watching) = &watching {
-                streams = streams
-                    .push(text(watching.description()).size(12))
-                    .push(button("Show stream").on_press(Message::ShowStream(true)))
-                    .push(button("Stop watching").on_press(Message::UnwatchStream));
-            } else {
-                for offer in voice_controls.streams.iter() {
-                    streams = streams.push(
-                        button(text(format!("Watch User {}", offer.owner.0))).on_press_maybe(
-                            (voice_audio == gateway::VoiceAudioState::Running)
-                                .then(|| Message::WatchStream(offer.key.clone())),
-                        ),
+            let in_voice = voice_audio != gateway::VoiceAudioState::Idle;
+            let running = voice_audio == gateway::VoiceAudioState::Running;
+            let bold = iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            };
+
+            // ---- the voice bar: who is in the call, Go Live ----
+            let voice_bar: Option<Element<'_, Message>> = (in_voice
+                || !voice_controls.streams.is_empty()
+                || watching.is_some())
+            .then(|| {
+                let mut people = row![].spacing(8).align_y(iced::alignment::Vertical::Center);
+                for participant in &voice_controls.participants {
+                    let user = participant.user_id;
+                    let name = format!("User {}", user.0 % 10_000);
+                    people = people.push(
+                        container(
+                            row![
+                                container(text(style::initial(&name)).size(12).font(bold))
+                                    .center(24)
+                                    .style(style::avatar(style::avatar_color(user.0))),
+                                text(name).size(13),
+                            ]
+                            .spacing(6)
+                            .align_y(iced::alignment::Vertical::Center),
+                        )
+                        .padding([3, 8])
+                        .style(style::speaking(participant.speaking)),
                     );
                 }
-                if voice_controls.streams.is_empty() {
-                    streams =
-                        streams.push(text("Join voice to watch an available stream.").size(12));
-                }
-            }
-            let share = gateway.controls.share_view();
-            if share.active {
-                streams = streams
-                    .push(text(share.text.clone()).size(12))
-                    .push(button("Stop sharing").on_press(Message::StopShare));
-            } else {
-                streams = streams.push(
-                    button("Share screen").on_press_maybe(
-                        (cfg!(windows)
-                            && voice_audio == gateway::VoiceAudioState::Running
-                            && gateway.voice_guild.is_some()
-                            && !gateway.share_picker.is_open())
-                        .then_some(Message::OpenSharePicker),
-                    ),
-                );
-                if !share.text.is_empty() {
-                    streams = streams.push(text(share.text.clone()).size(12));
-                }
-                if !cfg!(windows) {
-                    streams = streams.push(
-                        text("Screen sharing is available on Windows in this version.").size(12),
+                if voice_controls.participants.is_empty() {
+                    people = people.push(
+                        text(if in_voice {
+                            "Waiting for others to speak…"
+                        } else {
+                            ""
+                        })
+                        .size(12)
+                        .style(text::secondary),
                     );
                 }
-            }
-            let account = container(
-                column![
-                    row![
-                        text(format!(
-                            "{} (@{})",
-                            session.user.display_name(),
-                            session.user.username
-                        ))
-                        .size(20),
-                        text(if *persistence == Persistence::Saved {
-                            "Saved login"
+                let mut actions = row![
+                    button(
+                        text(if self.voice_details {
+                            "Hide volume"
                         } else {
-                            "Memory-only login"
-                        }),
-                        button("Log out").on_press(Message::Logout),
-                        button("Audio devices").on_press(Message::OpenAudioSettings),
-                    ]
-                    .spacing(16),
-                    text(gateway.status.describe()),
-                    row![
-                        text(match voice_audio {
-                            gateway::VoiceAudioState::Idle => "Voice: not connected",
-                            gateway::VoiceAudioState::Connecting => "Voice: connecting…",
-                            gateway::VoiceAudioState::Running => "Voice: connected",
-                            gateway::VoiceAudioState::EngineFailed => {
-                                "Voice audio failed to start; the voice connection was left."
-                            }
-                        }),
-                        button("Leave voice").on_press_maybe(
-                            gateway
-                                .voice_guild
-                                .filter(|_| voice_audio != gateway::VoiceAudioState::Idle)
-                                .map(|_| Message::LeaveVoice),
-                        ),
-                    ]
-                    .spacing(12),
-                    row![
-                        button(if voice_controls.self_muted {
-                            "Unmute"
-                        } else {
-                            "Mute"
+                            "Volume"
                         })
-                        .on_press_maybe(
-                            (voice_audio == gateway::VoiceAudioState::Running)
-                                .then_some(Message::SetSelfMute(!voice_controls.self_muted))
-                        ),
-                        button(if voice_controls.deafened {
-                            "Undeafen"
-                        } else {
-                            "Deafen"
-                        })
-                        .on_press_maybe(
-                            (voice_audio == gateway::VoiceAudioState::Running)
-                                .then_some(Message::SetDeafen(!voice_controls.deafened))
-                        ),
-                        text(if voice_controls.server_muted {
-                            "Server restriction: muted"
-                        } else {
-                            "Server restriction: not muted"
-                        }),
-                        text(if voice_controls.server_deafened {
-                            "Server restriction: deafened"
-                        } else {
-                            "Server restriction: not deafened"
-                        }),
-                    ]
-                    .spacing(12),
-                    text(voice_controls.input_error.map_or_else(String::new, |error| format!("Microphone stopped: {error}. Open Audio devices to retry."))).size(12),
-                    text(voice_controls.output_error.map_or_else(String::new, |error| format!("Playback stopped: {error}. Explicit devices never fall back; open Audio devices to retry."))).size(12),
-                    scrollable(participants).height(Length::Fixed(160.0)),
-                    scrollable(streams).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::default())).height(Length::Fixed(42.0)),
-                    text(self.notice.as_deref().unwrap_or("")).size(12),
-                    text(gateway.attachment_notice.unwrap_or("")).size(12),
-                    navigation::view(
-                        &gateway.navigation,
-                        &gateway.timeline,
-                        &gateway.composer,
-                        gateway.interaction(),
-                        navigation::PrivateConversation {
-                            recipients: &gateway.private.recipients,
-                            notice: gateway.private.notice.as_deref(),
-                        },
-                        timeline::Attachments {
-                            account: session.user.id,
-                            views: &gateway.attachment_views,
-                            emojis: &gateway.emoji.views,
-                            revealed: &gateway.revealed,
-                        },
-                        voice_audio,
-                    ),
+                        .size(12)
+                    )
+                    .on_press(Message::ToggleVoiceDetails)
+                    .style(style::tool_button(self.voice_details, false)),
                 ]
-                .spacing(16)
-                .height(Length::Fill),
-            )
-            .padding(20)
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center);
+                if let Some(watching) = &watching {
+                    actions = actions
+                        .push(text(watching.description()).size(12))
+                        .push(
+                            button(text("Show stream").size(12))
+                                .on_press(Message::ShowStream(true))
+                                .style(style::action_button(false)),
+                        )
+                        .push(
+                            button(text("Stop watching").size(12))
+                                .on_press(Message::UnwatchStream)
+                                .style(style::action_button(true)),
+                        );
+                } else {
+                    for offer in voice_controls.streams.iter() {
+                        actions = actions.push(
+                            button(text(format!("Watch User {}", offer.owner.0 % 10_000)).size(12))
+                                .on_press_maybe(
+                                    running.then(|| Message::WatchStream(offer.key.clone())),
+                                )
+                                .style(style::action_button(false)),
+                        );
+                    }
+                }
+                let share = gateway.controls.share_view();
+                if share.active {
+                    actions = actions.push(text(share.text.clone()).size(12)).push(
+                        button(text("Stop sharing").size(12))
+                            .on_press(Message::StopShare)
+                            .style(style::action_button(true)),
+                    );
+                } else if cfg!(windows) {
+                    actions = actions.push(
+                        button(text("Share screen").size(12))
+                            .on_press_maybe(
+                                (running
+                                    && gateway.voice_guild.is_some()
+                                    && !gateway.share_picker.is_open())
+                                .then_some(Message::OpenSharePicker),
+                            )
+                            .style(style::action_button(false)),
+                    );
+                    if !share.text.is_empty() {
+                        actions = actions.push(text(share.text.clone()).size(12));
+                    }
+                }
+                let mut bar = column![
+                    scrollable(people).direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::default()
+                    )),
+                    scrollable(actions).direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::default()
+                    )),
+                ]
+                .spacing(6);
+                if self.voice_details {
+                    for participant in &voice_controls.participants {
+                        let user = participant.user_id;
+                        let volume = voice_controls.volume_percent(user);
+                        bar = bar.push(
+                            row![
+                                text(format!("User {}", user.0 % 10_000))
+                                    .size(12)
+                                    .width(Length::Fixed(110.0)),
+                                slider(0.0..=200.0, volume as f32, move |value| {
+                                    Message::SetParticipantVolume(user, value.round() as u16)
+                                })
+                                .on_release(Message::CommitParticipantVolume(user))
+                                .width(Length::Fixed(220.0)),
+                                button(text("0%").size(11))
+                                    .on_press(Message::PresetParticipantVolume(user, 0))
+                                    .style(style::tool_button(false, false)),
+                                button(text("100%").size(11))
+                                    .on_press(Message::PresetParticipantVolume(user, 100))
+                                    .style(style::tool_button(false, false)),
+                                text(format!("{volume}%")).size(12),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::alignment::Vertical::Center),
+                        );
+                    }
+                    bar = bar.push(
+                        text(
+                            "Server restrictions: ".to_owned()
+                                + if voice_controls.server_muted {
+                                    "muted. "
+                                } else {
+                                    "none to mute. "
+                                }
+                                + if voice_controls.server_deafened {
+                                    "Deafened."
+                                } else {
+                                    ""
+                                },
+                        )
+                        .size(11)
+                        .style(text::secondary),
+                    );
+                }
+                container(bar)
+                    .padding(8)
+                    .width(Length::Fill)
+                    .style(style::card)
+                    .into()
+            });
+
+            // ---- connection and notices above the conversation ----
+            let mut notes: Vec<(String, bool)> = Vec::new();
+            let mut say = |line: String, danger: bool| {
+                if !line.is_empty() {
+                    notes.push((line, danger));
+                }
+            };
+            if !matches!(gateway.status, gateway::GatewayStatus::Ready(_)) {
+                say(gateway.status.describe(), false);
+            }
+            if let Some(error) = voice_controls.input_error {
+                say(
+                    format!("Microphone stopped: {error}. Open Audio devices to retry."),
+                    true,
+                );
+            }
+            if let Some(error) = voice_controls.output_error {
+                say(
+                    format!(
+                        "Playback stopped: {error}. Explicit devices never fall back; open Audio devices to retry."
+                    ),
+                    true,
+                );
+            }
+            say(self.notice.clone().unwrap_or_default(), false);
+            say(gateway.attachment_notice.unwrap_or("").to_owned(), false);
+            let banner: Option<Element<'_, Message>> = (!notes.is_empty()).then(|| {
+                column(notes.into_iter().map(|(line, danger)| {
+                    let line = text(line).size(12);
+                    if danger {
+                        line.style(text::danger).into()
+                    } else {
+                        line.style(text::secondary).into()
+                    }
+                }))
+                .spacing(2)
+                .into()
+            });
+
+            // ---- the user's panel at the foot of the sidebar ----
+            let display = session.user.display_name().to_owned();
+            let mut foot = column![];
+            if in_voice {
+                foot = foot.push(
+                    container(
+                        row![
+                            column![
+                                text(match voice_audio {
+                                    gateway::VoiceAudioState::Connecting => "Connecting…",
+                                    gateway::VoiceAudioState::EngineFailed => "Audio failed",
+                                    _ => "Voice connected",
+                                })
+                                .size(13)
+                                .font(bold)
+                                .color(match voice_audio {
+                                    gateway::VoiceAudioState::EngineFailed => style::RED,
+                                    gateway::VoiceAudioState::Connecting => style::YELLOW,
+                                    _ => style::GREEN,
+                                }),
+                            ]
+                            .width(Length::Fill),
+                            button(text("Leave").size(12))
+                                .on_press_maybe(gateway.voice_guild.map(|_| Message::LeaveVoice),)
+                                .style(style::action_button(true)),
+                        ]
+                        .align_y(iced::alignment::Vertical::Center),
+                    )
+                    .padding([8, 10])
+                    .style(style::footer),
+                );
+            }
+            foot = foot.push(
+                container(
+                    row![
+                        container(text(style::initial(&display)).size(14).font(bold))
+                            .center(32)
+                            .style(style::avatar(style::avatar_color(session.user.id.0))),
+                        column![
+                            text(display)
+                                .size(13)
+                                .font(bold)
+                                .wrapping(text::Wrapping::None),
+                            text(if *persistence == Persistence::Saved {
+                                "Saved login"
+                            } else {
+                                "Memory-only"
+                            })
+                            .size(11)
+                            .style(text::secondary),
+                        ]
+                        .width(Length::Fill),
+                        button(
+                            text(if voice_controls.self_muted {
+                                "Muted"
+                            } else {
+                                "Mic"
+                            })
+                            .size(12)
+                        )
+                        .on_press_maybe(
+                            running.then_some(Message::SetSelfMute(!voice_controls.self_muted)),
+                        )
+                        .style(style::tool_button(
+                            !voice_controls.self_muted,
+                            voice_controls.self_muted
+                        )),
+                        button(
+                            text(if voice_controls.deafened {
+                                "Deaf"
+                            } else {
+                                "Sound"
+                            })
+                            .size(12)
+                        )
+                        .on_press_maybe(
+                            running.then_some(Message::SetDeafen(!voice_controls.deafened)),
+                        )
+                        .style(style::tool_button(
+                            !voice_controls.deafened,
+                            voice_controls.deafened
+                        )),
+                        button(text("Audio").size(12))
+                            .on_press(Message::OpenAudioSettings)
+                            .style(style::tool_button(true, false)),
+                        button(text("Exit").size(12))
+                            .on_press(Message::Logout)
+                            .style(style::tool_button(false, false)),
+                    ]
+                    .spacing(2)
+                    .align_y(iced::alignment::Vertical::Center),
+                )
+                .padding([8, 8])
+                .style(style::footer),
+            );
+
+            let account = container(navigation::view(
+                &gateway.navigation,
+                &gateway.timeline,
+                &gateway.composer,
+                gateway.interaction(),
+                navigation::PrivateConversation {
+                    recipients: &gateway.private.recipients,
+                    notice: gateway.private.notice.as_deref(),
+                },
+                timeline::Attachments {
+                    account: session.user.id,
+                    views: &gateway.attachment_views,
+                    emojis: &gateway.emoji.views,
+                    revealed: &gateway.revealed,
+                },
+                voice_audio,
+                navigation::Chrome {
+                    directs: gateway.directs,
+                    footer: foot.into(),
+                    banner,
+                    voice_bar,
+                },
+            ))
             .height(Length::Fill);
             // The larger image view covers the account screen, which stays in
             // the widget tree underneath so the timeline keeps its scroll state.

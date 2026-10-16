@@ -19,10 +19,18 @@ impl Default for Window {
     }
 }
 
+/// The tallest list the window arithmetic plans for.
+pub const MAX_VIEW_HEIGHT: f32 = 1_200.0;
+
 impl Window {
     pub fn viewport(offset: f32, height: f32) -> Self {
-        let visible = (height.clamp(ROW_HEIGHT, LIST_HEIGHT) / ROW_HEIGHT).ceil() as usize;
-        let first = (offset.max(0.0) / ROW_HEIGHT).floor() as usize;
+        Self::viewport_rows(offset, height, ROW_HEIGHT)
+    }
+
+    /// The window for rows of `row_height`.
+    pub fn viewport_rows(offset: f32, height: f32, row_height: f32) -> Self {
+        let visible = (height.clamp(row_height, MAX_VIEW_HEIGHT) / row_height).ceil() as usize;
+        let first = (offset.max(0.0) / row_height).floor() as usize;
         Self {
             start: first.saturating_sub(visible),
             count: (visible * 3).min(MAX_ROWS),
@@ -37,22 +45,35 @@ pub fn view<'a, Message: Clone + 'a>(
     rows: impl IntoIterator<Item = Element<'a, Message>>,
     on_scroll: impl Fn(Window) -> Message + 'a,
 ) -> Element<'a, Message> {
+    view_rows(id, start, total, rows, on_scroll, ROW_HEIGHT)
+}
+
+/// [`view`] for rows of `row_height`, filling the height it is given.
+pub fn view_rows<'a, Message: Clone + 'a>(
+    id: &'static str,
+    start: usize,
+    total: usize,
+    rows: impl IntoIterator<Item = Element<'a, Message>>,
+    on_scroll: impl Fn(Window) -> Message + 'a,
+    row_height: f32,
+) -> Element<'a, Message> {
     let start = start.min(total);
-    let mut content = column![space().height(start as f32 * ROW_HEIGHT)];
+    let mut content = column![space().height(start as f32 * row_height)];
     let mut built = 0;
     for item in rows.into_iter().take(MAX_ROWS) {
         content = content.push(item);
         built += 1;
     }
     let skipped = total.saturating_sub(start + built);
-    content = content.push(space().height(skipped as f32 * ROW_HEIGHT));
+    content = content.push(space().height(skipped as f32 * row_height));
     scrollable(content.width(Length::Fill))
         .id(id)
-        .height(LIST_HEIGHT)
+        .height(Length::Fill)
         .on_scroll(move |viewport| {
-            on_scroll(Window::viewport(
+            on_scroll(Window::viewport_rows(
                 viewport.absolute_offset().y,
                 viewport.bounds().height,
+                row_height,
             ))
         })
         .into()

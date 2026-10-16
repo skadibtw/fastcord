@@ -52,6 +52,7 @@ use crate::emoji::{self, Occurrence, Origin};
 use crate::outbox::OutboxItem;
 use crate::reactions::{Action, Pending};
 use crate::rich;
+use crate::style;
 use crate::variable_list::{self, Item, Measurement, Report, ScrollRequest, Viewport, Window};
 
 /// Closer to the first retained message than this, the view offers to load older ones.
@@ -525,7 +526,11 @@ pub fn view<'a>(
     let Some(channel_id) = snapshot.channel_id else {
         return centered("Select a channel to read its messages.");
     };
-    let rows = snapshot.rows.iter().map(|row| {
+    let rows = snapshot.rows.iter().enumerate().map(|(at, row)| {
+        let continues = at
+            .checked_sub(1)
+            .and_then(|before| snapshot.rows.get(before))
+            .is_some_and(|before| continues_group(before, row));
         (
             Item {
                 id: row.message.id,
@@ -538,6 +543,7 @@ pub fn view<'a>(
                 snapshot,
                 snapshot.highlight == Some(row.message.id)
                     || interaction.replying == Some(row.message.id),
+                continues,
                 assets,
             ),
         )
@@ -852,6 +858,7 @@ fn message_view<'a>(
     interaction: Interaction,
     snapshot: &'a Snapshot,
     highlighted: bool,
+    continues: bool,
     assets: Attachments<'a>,
 ) -> Element<'a, Event> {
     let account_id = assets.account;
@@ -910,7 +917,9 @@ fn message_view<'a>(
             )
         };
     }
-    body = body.push(header);
+    if !continues {
+        body = body.push(header);
+    }
     let cx = rich::Cx {
         names: &snapshot.names,
         revealed: assets.revealed,
@@ -1021,12 +1030,28 @@ fn message_view<'a>(
             .push(actions.spacing(8))
         }
     };
-    let base = container(body).width(Length::Fill).padding(Padding {
-        top: 6.0,
-        right: 16.0,
-        bottom: 6.0,
-        left: 12.0,
-    });
+    // The avatar sits in a gutter; a message that continues its author's
+    // group has an empty gutter instead and no header.
+    let gutter: Element<'a, Event> = if continues {
+        container(text("")).width(40).into()
+    } else {
+        let name = message.author.display_name();
+        container(text(style::initial(name)).size(17).font(BOLD))
+            .center(40)
+            .style(style::avatar(style::avatar_color(message.author.id.0)))
+            .into()
+    };
+    if continues && message.edited_timestamp.is_some() {
+        body = body.push(text("(edited)").size(11).style(text::secondary));
+    }
+    let base = container(row![gutter, body.width(Length::Fill)].spacing(14))
+        .width(Length::Fill)
+        .padding(Padding {
+            top: if continues { 1.0 } else { 14.0 },
+            right: 16.0,
+            bottom: 2.0,
+            left: 16.0,
+        });
     let can_reply = snapshot.can_send && interaction.editing.is_none();
     let show_own_actions = matches!(state, RowState::Actions | RowState::Failed { .. });
     let idle = matches!(
@@ -1173,6 +1198,22 @@ fn attachment_view(
     }
     content = content.push(actions);
     container(content).width(Length::Fill).into()
+}
+
+/// Whether `row` continues the group of the message before it: the same
+/// author within seven minutes, neither a reply or system message, and
+/// nothing about either that needs its own header.
+fn continues_group(before: &Row, row: &Row) -> bool {
+    const WINDOW_MS: u64 = 7 * 60 * 1000;
+    let (a, b) = (&*before.message, &*row.message);
+    let plain = |m: &Message| matches!(m.kind, 0 | 19) && m.message_reference.is_none();
+    a.author.id == b.author.id
+        && plain(a)
+        && plain(b)
+        && row.reply.is_none()
+        && row.change.is_none()
+        && before.change.is_none()
+        && (b.id.0 >> 22).saturating_sub(a.id.0 >> 22) <= WINDOW_MS
 }
 
 /// What to show for a message without text or attachments.
