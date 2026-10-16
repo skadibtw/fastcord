@@ -1210,7 +1210,7 @@ fn describe_attachment(attachment: &Attachment) -> String {
     )
 }
 
-fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
     if bytes < 1024 {
         return format!("{bytes} B");

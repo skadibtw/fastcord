@@ -14,6 +14,7 @@ mod login;
 mod navigation;
 mod outbox;
 mod password;
+mod paste;
 mod playback;
 mod qr;
 mod reactions;
@@ -188,6 +189,12 @@ enum Message {
     EmojiTick(std::time::Instant),
     WindowActive(bool),
     WindowSize(iced::Size),
+    /// Files chosen in the system dialog to attach to the message.
+    FilesPicked(Vec<std::path::PathBuf>),
+    /// A file dropped on the window (one event per file).
+    FileDropped(std::path::PathBuf),
+    /// The clipboard image, saved as a PNG file, or why there is none.
+    ImagePasted(Result<std::path::PathBuf, &'static str>),
 }
 impl App {
     fn boot() -> (Self, Task<Message>) {
@@ -214,6 +221,7 @@ impl App {
             },
             Task::perform(
                 async {
+                    paste::purge_stale();
                     let preferences = audio_devices::load().await;
                     (preferences, login::initialize_store().await)
                 },
@@ -284,6 +292,9 @@ impl App {
         let activity = iced::event::listen_with(|event, _, _| match event {
             iced::Event::Window(iced::window::Event::Resized(size)) => {
                 Some(Message::WindowSize(size))
+            }
+            iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                Some(Message::FileDropped(path))
             }
             iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowActive(true)),
             iced::Event::Window(iced::window::Event::Unfocused | iced::window::Event::Closed) => {
@@ -1084,6 +1095,56 @@ impl App {
                             }
                         }
                     }
+                }
+            }
+            Message::FilesPicked(paths) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.composer.attach(paths);
+                }
+            }
+            Message::ImagePasted(result) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    match result {
+                        Ok(path) => gateway.composer.attach_pasted(&path),
+                        Err(reason) => gateway.composer.paste_failed(reason),
+                    }
+                }
+            }
+            Message::Composer(composer::Event::PasteImage) => {
+                if matches!(self.phase, Phase::Account { .. }) {
+                    return Task::perform(
+                        async {
+                            tokio::task::spawn_blocking(paste::paste_image)
+                                .await
+                                .unwrap_or(Err("The pasted image could not be read."))
+                        },
+                        Message::ImagePasted,
+                    );
+                }
+            }
+            Message::FileDropped(path) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.composer.attach(vec![path]);
+                }
+            }
+            Message::Composer(composer::Event::Attach) => {
+                if matches!(self.phase, Phase::Account { .. }) {
+                    return Task::perform(
+                        async {
+                            rfd::AsyncFileDialog::new()
+                                .set_title("Attach files")
+                                .pick_files()
+                                .await
+                                .map(|files| {
+                                    files
+                                        .into_iter()
+                                        .map(|file| file.path().to_owned())
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        },
+                        Message::FilesPicked,
+                    );
                 }
             }
             Message::Composer(event) => {

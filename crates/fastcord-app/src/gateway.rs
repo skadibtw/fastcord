@@ -79,6 +79,7 @@ impl VoiceControls {
             .map_or(100, |volume| volume.percent)
     }
 }
+use fastcord_discord::UploadFile;
 use fastcord_discord::state::Store;
 use fastcord_discord::state::navigation::{Navigation, NavigationSnapshot};
 use fastcord_media::{Correlation, JoinCorrelator, StreamCorrelation, StreamCorrelator};
@@ -311,11 +312,14 @@ pub enum Command {
     Send {
         channel: Snowflake,
         content: String,
+        files: Vec<UploadFile>,
         everyone: bool,
         reply: Option<Reply>,
     },
     Retry(OpId),
     Discard(OpId),
+    /// Stop a send that is still uploading its files.
+    CancelUpload(OpId),
     /// Save new text for one of the user's messages.
     Edit {
         channel: Snowflake,
@@ -402,6 +406,7 @@ impl fmt::Debug for Command {
                 .finish_non_exhaustive(),
             Self::Retry(id) => f.debug_tuple("Retry").field(id).finish(),
             Self::Discard(id) => f.debug_tuple("Discard").field(id).finish(),
+            Self::CancelUpload(id) => f.debug_tuple("CancelUpload").field(id).finish(),
             Self::Edit {
                 channel, message, ..
             } => f
@@ -730,10 +735,23 @@ impl NavigationBridge {
     /// Queues a message for sending. Returns whether it was accepted; on
     /// `false` (the outbox is full or the worker is gone) nothing was queued
     /// and the caller must keep the text.
+    #[cfg(test)]
     pub fn send_message(
         &self,
         channel: Snowflake,
         content: String,
+        everyone: bool,
+        reply: Option<Reply>,
+    ) -> bool {
+        self.send_message_with_files(channel, content, Vec::new(), everyone, reply)
+    }
+
+    /// [`send_message`](Self::send_message) with files to upload first.
+    pub fn send_message_with_files(
+        &self,
+        channel: Snowflake,
+        content: String,
+        files: Vec<UploadFile>,
         everyone: bool,
         reply: Option<Reply>,
     ) -> bool {
@@ -745,6 +763,7 @@ impl NavigationBridge {
             .try_send(Command::Send {
                 channel,
                 content,
+                files,
                 everyone,
                 reply,
             })
@@ -757,6 +776,10 @@ impl NavigationBridge {
 
     pub fn retry_send(&self, id: OpId) -> bool {
         self.commands.try_send(Command::Retry(id)).is_ok()
+    }
+
+    pub fn cancel_upload(&self, id: OpId) -> bool {
+        self.commands.try_send(Command::CancelUpload(id)).is_ok()
     }
 
     pub fn discard_send(&self, id: OpId) -> bool {
@@ -1419,11 +1442,13 @@ impl Worker {
             Command::Send {
                 channel,
                 content,
+                files,
                 everyone,
                 reply,
             } => {
-                history.send(&self.rest, channel, &content, everyone, reply);
+                history.send_with_files(&self.rest, channel, &content, files, everyone, reply);
             }
+            Command::CancelUpload(id) => history.cancel_upload(id),
             Command::Retry(id) => history.retry_send(&self.rest, id),
             Command::Discard(id) => history.discard_send(id),
             Command::Edit {

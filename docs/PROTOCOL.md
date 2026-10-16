@@ -254,7 +254,18 @@ Evidence: Discord's documented message object (`mentions`, `mention_roles`, `men
 - Links open only when `http`/`https` with a host and no whitespace or control characters, through the OS default browser as a single process argument (never a shell). A masked link shows its host after the label.
 - Sending is unchanged (`allowed_mentions` is always sent, see Replies). Composer completion replaces an `@`/`#` word at the cursor (after whitespace or at line start) with `<@id>`, `<@&id>` or `<#id>` from the shown authors, the server's roles and its text/announcement channels (at most 8 offered); nothing is sent until the user sends.
 
-## Custom emoji (milestone 15)## Custom emoji (milestone 15)
+## Attachment uploads (milestone 40)
+
+Evidence: Discord's documented cloud-upload flow as the web client uses it (`POST /channels/{id}/attachments`, a `PUT` to the returned storage URL, then `POST /channels/{id}/messages` with `attachments`); no live capture exists yet (docs/TESTING.md lists the pending checks).
+
+- Slots: one authenticated `POST /channels/{channel}/attachments` (user-write priority, the shared rate limiter) with `{"files": [{"filename", "file_size", "id": "<index>"}]}`. The answer's `attachments[]` (`id`, `upload_url`, `upload_filename`) must match the request one to one by index; any other count, a duplicate or an out-of-range id is refused. `upload_url` is signed and never logged.
+- Bytes: a `PUT` of the file with `Content-Length` and `Content-Type: application/octet-stream` from a separate client with no default headers, cookies or credentials, `https` only, no redirects, 60 s read timeout, and a host allowlist (`*.storage.googleapis.com`, `*.discordapp.com`, `*.discordapp.net`, `*.discord.com`, `*.discord.media`; no user info). The user token cannot reach it. The file is read in 64 KiB chunks and counted into the progress shown to the user; reading to the end must give exactly the size announced, and size and modification time are checked when chosen, before the slot request and before the `PUT`, so a changed file fails with "changed after you chose it" instead of sending other bytes.
+- Message: `POST /channels/{channel}/messages` as in Sending messages, plus `attachments: [{"id": "<index>", "filename", "uploaded_filename"}]`; the text may be empty. Same nonce, `enforce_nonce` and `allowed_mentions` rules.
+- Outcomes: a failure before the message `POST` (a file problem, the slot request, the `PUT`, a cancel) created no message, so the send is plainly Failed and an explicit retry uploads again; the message `POST` keeps the Sending rules (a lost answer is Uncertain, a retry reuses the nonce so Discord returns the message it already made). A cancel aborts only the upload phase; once the message `POST` has started it cannot be cancelled. Retrying always re-uploads (new slots); uploaded-but-unreferenced files expire on Discord's side. 413 and 4xx slot refusals are shown as size/permission limits; the real limits depend on the account and server and Discord stays authoritative (fastcord only refuses more than 10 files, empty files, non-files and files over 512 MiB).
+- Ordering: one send per channel is in flight, with or without files, so messages keep the order they were written in.
+- Choosing files: the system dialog, files dropped on the window (one event per file) and an explicit "Paste image" (clipboard `CF_DIB`, Windows only, read only when asked, re-encoded as PNG without alpha into a private temporary directory; the file is deleted when its last reference goes and stale ones at the next start).
+
+## Custom emoji (milestone 15)
 
 Evidence: Discord's public Guild and Gateway documentation (guild `emojis`, `GUILD_EMOJIS_UPDATE`) and the public emoji CDN; fabricated-ID payloads only, no live capture yet (docs/TESTING.md).
 

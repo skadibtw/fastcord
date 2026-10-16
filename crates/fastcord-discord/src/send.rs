@@ -20,6 +20,7 @@ use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 
 use crate::error::RetryableFailure;
+use crate::upload::UploadedFile;
 use crate::{Clock, Method, NetworkFailure, Priority, RestClient, RestError, RestRequest, Route};
 
 /// Longest message the composer lets a send reach Discord with: Discord's
@@ -164,6 +165,7 @@ pub struct OutgoingMessage {
     nonce: Nonce,
     mentions: MentionPolicy,
     reply: Option<ReplyTo>,
+    files: Vec<UploadedFile>,
 }
 
 impl OutgoingMessage {
@@ -181,6 +183,30 @@ impl OutgoingMessage {
             nonce,
             mentions,
             reply: None,
+            files: Vec::new(),
+        })
+    }
+
+    /// A message that carries uploaded files; its text may be empty.
+    pub fn with_files(
+        content: &str,
+        files: Vec<UploadedFile>,
+        nonce: Nonce,
+        mentions: MentionPolicy,
+    ) -> Result<Self, ComposeError> {
+        let content = content.trim();
+        if content.is_empty() && files.is_empty() {
+            return Err(ComposeError::Empty);
+        }
+        if content.chars().count() > MAX_CONTENT_CHARS {
+            return Err(ComposeError::TooLong);
+        }
+        Ok(Self {
+            content: content.to_owned(),
+            nonce,
+            mentions,
+            reply: None,
+            files,
         })
     }
 
@@ -212,6 +238,15 @@ impl OutgoingMessage {
                 message_id: reply.message,
                 fail_if_not_exists: true,
             }),
+            attachments: self
+                .files
+                .iter()
+                .map(|file| WireAttachment {
+                    id: file.id.to_string(),
+                    filename: &file.filename,
+                    uploaded_filename: &file.uploaded_filename,
+                })
+                .collect(),
         }
     }
 }
@@ -223,6 +258,7 @@ impl fmt::Debug for OutgoingMessage {
             .field("content_chars", &self.content.chars().count())
             .field("mentions", &self.mentions)
             .field("reply", &self.reply)
+            .field("files", &self.files.len())
             .finish()
     }
 }
@@ -237,6 +273,16 @@ struct CreateMessage<'a> {
     allowed_mentions: AllowedMentions,
     #[serde(skip_serializing_if = "Option::is_none")]
     message_reference: Option<WireReference>,
+    /// Present exactly when files were uploaded for this message.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<WireAttachment<'a>>,
+}
+
+#[derive(Serialize)]
+struct WireAttachment<'a> {
+    id: String,
+    filename: &'a str,
+    uploaded_filename: &'a str,
 }
 
 #[derive(Serialize)]
@@ -387,6 +433,41 @@ mod tests {
         assert_eq!(sent, recorded);
         // The wire nonce is a string, never a JSON integer that could lose precision.
         assert!(sent["nonce"].is_string());
+    }
+
+    #[test]
+    fn a_message_with_files_may_have_no_text_and_names_each_upload() {
+        let file = UploadedFile {
+            id: 0,
+            filename: "photo.png".to_owned(),
+            uploaded_filename: "token/photo.png".to_owned(),
+        };
+        assert_eq!(
+            OutgoingMessage::with_files("  ", Vec::new(), Nonce(1), MentionPolicy::default()).err(),
+            Some(ComposeError::Empty)
+        );
+        let message = OutgoingMessage::with_files(
+            "",
+            vec![file],
+            Nonce(1_290_000_000_000_000_003),
+            MentionPolicy::default(),
+        )
+        .unwrap();
+        let sent = serde_json::to_value(message.body()).unwrap();
+        assert_eq!(sent["content"], "");
+        assert_eq!(
+            sent["attachments"],
+            serde_json::json!([{"id": "0", "filename": "photo.png", "uploaded_filename": "token/photo.png"}])
+        );
+        // Plain messages never mention attachments.
+        let plain = OutgoingMessage::new("x", Nonce(2), MentionPolicy::default()).unwrap();
+        assert!(
+            serde_json::to_value(plain.body())
+                .unwrap()
+                .get("attachments")
+                .is_none()
+        );
+        assert!(!format!("{message:?}").contains("token/photo.png"));
     }
 
     #[test]

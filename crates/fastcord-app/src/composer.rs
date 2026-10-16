@@ -9,9 +9,10 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use fastcord_discord::MAX_CONTENT_CHARS;
+use fastcord_discord::{MAX_CONTENT_CHARS, MAX_UPLOAD_FILES, UploadFile};
 use fastcord_model::Snowflake;
 use iced::keyboard::{self, key};
 use iced::widget::text_editor::{Action, Binding, Content, Edit, Motion, Status};
@@ -118,6 +119,14 @@ pub enum Event {
     Everyone(bool),
     ReplyMention(bool),
     CancelReply,
+    /// Ask for files to attach. The window opens the system file dialog.
+    Attach,
+    /// Take the chosen file at this position off the message.
+    Detach(usize),
+    /// Attach the image on the clipboard (read when asked, never before).
+    PasteImage,
+    /// Stop an upload that is in progress.
+    CancelUpload(OpId),
     /// Replace the `@`/`#` word before the cursor with a reference.
     Complete {
         replaced: usize,
@@ -136,6 +145,7 @@ pub enum Event {
 pub struct Submission {
     pub channel: Snowflake,
     pub content: String,
+    pub files: Vec<UploadFile>,
     pub everyone: bool,
     pub reply: Option<Reply>,
 }
@@ -208,6 +218,9 @@ pub struct Composer {
     blank: bool,
     /// The user's choice for the message being written; never carried over.
     everyone: bool,
+    /// Files chosen for the message being written (at most
+    /// [`MAX_UPLOAD_FILES`]); checked again when they are uploaded.
+    files: Vec<UploadFile>,
     /// The target and explicit replied-user notification choice.
     replying: Option<Reply>,
     notice: Option<&'static str>,
@@ -225,6 +238,7 @@ impl Default for Composer {
             trimmed_chars: 0,
             blank: true,
             everyone: false,
+            files: Vec::new(),
             replying: None,
             notice: None,
             drafts: Drafts::default(),
@@ -259,6 +273,7 @@ impl Composer {
         self.content.perform(Action::Move(Motion::DocumentEnd));
         self.channel = channel;
         self.everyone = false;
+        self.files.clear();
         self.replying = None;
         self.notice = None;
         self.recount();
@@ -420,8 +435,66 @@ impl Composer {
             && self.editing.is_none()
             && can_send
             && outbox_len < MAX_OUTBOX
-            && !self.blank
+            && (!self.blank || !self.files.is_empty())
             && self.trimmed_chars <= MAX_CONTENT_CHARS
+    }
+
+    /// Adds chosen files to the message being written. Each is checked now and
+    /// again when it is uploaded. The first problem is said; files before it
+    /// stay attached.
+    pub fn attach(&mut self, paths: Vec<PathBuf>) {
+        if self.channel.is_none() || self.editing.is_some() {
+            return;
+        }
+        for path in paths {
+            if self.files.iter().any(|file| file.path() == path) {
+                continue;
+            }
+            if self.files.len() >= MAX_UPLOAD_FILES {
+                self.notice = Some(fastcord_discord::UploadError::TooMany.reason());
+                return;
+            }
+            match UploadFile::inspect(&path) {
+                Ok(file) => {
+                    self.files.push(file);
+                    self.notice = None;
+                }
+                Err(error) => self.notice = Some(error.reason()),
+            }
+        }
+    }
+
+    /// Adds an image the program saved from the clipboard; it is deleted when
+    /// it is no longer attached to anything.
+    pub fn attach_pasted(&mut self, path: &std::path::Path) {
+        if self.channel.is_none() || self.editing.is_some() {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
+        if self.files.len() >= MAX_UPLOAD_FILES {
+            self.notice = Some(fastcord_discord::UploadError::TooMany.reason());
+            let _ = std::fs::remove_file(path);
+            return;
+        }
+        match UploadFile::inspect_temporary(path) {
+            Ok(file) => {
+                self.files.push(file);
+                self.notice = None;
+            }
+            Err(error) => self.notice = Some(error.reason()),
+        }
+    }
+
+    /// Says why a paste did not produce a file.
+    pub fn paste_failed(&mut self, reason: &'static str) {
+        self.notice = Some(reason);
+    }
+
+    /// Takes one chosen file off the message being written.
+    pub fn detach(&mut self, index: usize) {
+        if index < self.files.len() {
+            self.files.remove(index);
+        }
     }
 
     /// The draft as a send request, if it may be sent now (see `ready`). Does
@@ -432,6 +505,7 @@ impl Composer {
         Some(Submission {
             channel,
             content: self.content.text(),
+            files: self.files.clone(),
             everyone: self.everyone,
             reply: self.replying.clone(),
         })
@@ -540,6 +614,7 @@ impl Composer {
     pub fn sent(&mut self) {
         self.content = Content::new();
         self.everyone = false;
+        self.files.clear();
         self.replying = None;
         self.notice = None;
         self.recount();
@@ -572,14 +647,21 @@ impl Composer {
     }
     /// Restores a failed send with its original reply target and notification
     /// choice. A nonblank draft can only merge when its reply metadata matches.
-    pub fn restore_send(&mut self, text: &str, reply: Option<Reply>) -> bool {
-        let replacing = self.blank;
+    pub fn restore_send(&mut self, text: &str, files: &[UploadFile], reply: Option<Reply>) -> bool {
+        let replacing = self.blank && self.files.is_empty();
         if !replacing && self.replying != reply {
             self.notice = Some("Finish the current draft before editing this failed send.");
             return false;
         }
-        if !self.restore(text) {
+        if !text.is_empty() && !self.restore(text) {
             return false;
+        }
+        for file in files {
+            if self.files.len() < MAX_UPLOAD_FILES
+                && !self.files.iter().any(|known| known.path() == file.path())
+            {
+                self.files.push(file.clone());
+            }
         }
         if replacing {
             self.replying = reply;
@@ -602,6 +684,14 @@ pub fn update(
         Event::Everyone(allowed) => composer.set_everyone(allowed),
         Event::ReplyMention(allowed) => composer.set_reply_mention(allowed),
         Event::CancelReply => composer.cancel_reply(),
+        // The dialog is opened by the window; the files come back as `attach`.
+        Event::Attach | Event::PasteImage => {}
+        Event::Detach(index) => composer.detach(index),
+        Event::CancelUpload(id) => {
+            if !bridge.cancel_upload(id) {
+                composer.notice = Some(BUSY);
+            }
+        }
         Event::Complete {
             replaced,
             insertion,
@@ -626,9 +716,10 @@ pub fn update(
             let Some(submission) = composer.submission(open, snapshot.outbox.len()) else {
                 return;
             };
-            if bridge.send_message(
+            if bridge.send_message_with_files(
                 submission.channel,
                 submission.content,
+                submission.files,
                 submission.everyone,
                 submission.reply,
             ) {
@@ -658,7 +749,7 @@ pub fn update(
             });
             // The text moves only if it fits; the failed entry goes once it has.
             if let Some(item) = failed
-                && composer.restore_send(&item.content, item.reply.clone())
+                && composer.restore_send(&item.content, &item.files, item.reply.clone())
                 && !bridge.discard_send(id)
             {
                 composer.notice = Some(BUSY);
@@ -731,10 +822,35 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
                 .style(text::secondary),
         );
     }
+    for file in &item.files {
+        content = content.push(
+            text(format!(
+                "Attachment: {} ({})",
+                file.filename(),
+                crate::timeline::format_size(file.size())
+            ))
+            .size(12)
+            .style(text::secondary),
+        );
+    }
     content = match item.state {
-        OutboxState::Sending => content
-            .push(body.style(text::secondary))
-            .push(text("Sending…").size(12).style(text::secondary)),
+        OutboxState::Sending => {
+            let status = match item.upload {
+                Some((sent, total)) if total > 0 => format!(
+                    "Uploading {} of {}\u{2026}",
+                    crate::timeline::format_size(sent.min(total)),
+                    crate::timeline::format_size(total)
+                ),
+                _ => "Sending\u{2026}".to_owned(),
+            };
+            let mut line = row![text(status).size(12).style(text::secondary)]
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center);
+            if item.upload.is_some() {
+                line = line.push(small_button("Cancel upload", Event::CancelUpload(item.id)));
+            }
+            content.push(body.style(text::secondary)).push(line)
+        }
         OutboxState::Failed(reason) => {
             let mut actions = row![].spacing(8);
             if actionable {
@@ -868,6 +984,26 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         .padding(8)
         .min_height(38)
         .max_height(150);
+    if !composer.files.is_empty() {
+        layout = layout.push(column(composer.files.iter().enumerate().map(
+            |(index, file)| {
+                row![
+                    text(format!(
+                        "{} ({})",
+                        file.filename(),
+                        crate::timeline::format_size(file.size())
+                    ))
+                    .size(12)
+                    .width(Length::Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+                    small_button("Remove", Event::Detach(index)),
+                ]
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center)
+                .into()
+            },
+        )));
+    }
     let picks = composer.completions(snapshot);
     if !picks.is_empty() {
         layout = layout.push(
@@ -906,6 +1042,11 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
                 && !composer.reply_deleted(snapshot),
         )
     };
+    if !editing {
+        controls = controls
+            .push(small_button("Attach files", Event::Attach))
+            .push(small_button("Paste image", Event::PasteImage));
+    }
     controls = controls.push(space::horizontal());
     if let Some(note) = length_note(composer, snapshot.outbox.len()) {
         controls = controls.push(text(note).size(12).style(text::secondary));
@@ -1045,6 +1186,7 @@ mod tests {
             Command::Send {
                 channel,
                 content,
+                files: _,
                 everyone,
                 reply: Some(reply),
             } => {
@@ -1094,6 +1236,8 @@ mod tests {
                 content: Arc::from("answer"),
                 reply: Some(reply.clone()),
                 state: OutboxState::Failed("Discord rejected the reply."),
+                files: Vec::new(),
+                upload: None,
             }],
         );
         snapshot.deleted.push(Snowflake(7));
@@ -1135,7 +1279,7 @@ mod tests {
             mention_author: true,
         };
         composer.replying = Some(current.clone());
-        assert!(!composer.restore_send("failed text", Some(failed)));
+        assert!(!composer.restore_send("failed text", &[], Some(failed)));
         assert_eq!(composer.content.text(), "current draft");
         assert_eq!(composer.replying, Some(current));
         assert!(composer.notice.is_some());
@@ -1325,6 +1469,89 @@ mod tests {
         assert_eq!(composer.completions(&snapshot)[0].0.reference(), "<@&13> ");
     }
 
+    fn real_file(name: &str, bytes: &[u8]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fastcord-composer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn attached_files_make_a_text_free_send_and_clear_when_it_is_queued() {
+        let mut composer = composer_in(A);
+        let snapshot = open(A, Vec::new());
+        assert!(
+            composer.submission(true, 0).is_none(),
+            "nothing to send yet"
+        );
+        let photo = real_file("send-a.png", b"png");
+        composer.attach(vec![photo.clone(), photo.clone()]);
+        assert_eq!(composer.files.len(), 1, "the same file is not added twice");
+        let submission = composer.submission(true, 0).unwrap();
+        assert_eq!(
+            (submission.content.as_str(), submission.files.len()),
+            ("", 1)
+        );
+        // Missing, empty and folder choices are said and not attached.
+        composer.attach(vec![photo.with_file_name("gone.png")]);
+        assert!(composer.notice.unwrap().contains("missing"));
+        composer.attach(vec![real_file("empty-a.png", b"")]);
+        assert!(composer.notice.unwrap().contains("empty"));
+        assert_eq!(composer.files.len(), 1);
+        // The bridge queues it and the draft clears only then.
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        update(&mut composer, Event::Send, &snapshot, &bridge);
+        assert!(composer.files.is_empty());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::gateway::Command::Send { files, .. }) if files.len() == 1
+        ));
+    }
+
+    #[test]
+    fn at_most_ten_files_and_none_survive_a_channel_switch_or_removal() {
+        let mut composer = composer_in(A);
+        let paths: Vec<PathBuf> = (0..11)
+            .map(|n| real_file(&format!("many-{n}.png"), b"x"))
+            .collect();
+        composer.attach(paths);
+        assert_eq!(composer.files.len(), MAX_UPLOAD_FILES);
+        assert!(composer.notice.unwrap().contains("10"));
+        composer.detach(0);
+        composer.detach(99);
+        assert_eq!(composer.files.len(), MAX_UPLOAD_FILES - 1);
+        composer.select(Some(B));
+        assert!(composer.files.is_empty());
+    }
+
+    #[test]
+    fn a_failed_send_brings_its_files_back_with_its_text() {
+        let mut composer = composer_in(A);
+        let file = UploadFile::inspect(&real_file("restore-a.png", b"x")).unwrap();
+        assert!(composer.restore_send("caption", std::slice::from_ref(&file), None));
+        assert_eq!(composer.files.len(), 1);
+        assert!(!composer.blank);
+    }
+
+    #[test]
+    fn a_pasted_image_is_deleted_once_nothing_holds_it() {
+        let mut composer = composer_in(A);
+        let path = real_file("pasted-a.png", b"png");
+        composer.attach_pasted(&path);
+        assert!(path.exists());
+        let held = composer.submission(true, 0).unwrap();
+        composer.detach(0);
+        assert!(path.exists(), "the queued send still needs it");
+        drop(held);
+        assert!(!path.exists());
+        // Refused pastes (no open channel) leave no file behind either.
+        let other = real_file("pasted-b.png", b"png");
+        Composer::default().attach_pasted(&other);
+        assert!(!other.exists());
+    }
+
     fn open(channel: Snowflake, outbox: Vec<OutboxItem>) -> Snapshot {
         Snapshot {
             channel_id: Some(channel),
@@ -1381,6 +1608,8 @@ mod tests {
             content: Arc::from(format!("text {id}")),
             reply: None,
             state,
+            files: Vec::new(),
+            upload: None,
         };
         let snapshot = open(
             A,
@@ -1605,6 +1834,8 @@ mod tests {
             content: Arc::from("unsent"),
             reply: None,
             state: OutboxState::Failed("refused"),
+            files: Vec::new(),
+            upload: None,
         };
         let bridge = NavigationBridge::new();
         let _commands = bridge.take_commands().unwrap();

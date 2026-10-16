@@ -7,7 +7,7 @@
 //! Sends, and edits and deletions of the user's own messages, start only from
 //! explicit commands and are checked here against the store, never against
 //! what a possibly stale UI showed.
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -18,15 +18,17 @@ use fastcord_discord::message_store::{
 };
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot};
 use fastcord_discord::{
-    ComposeError, EditedMessage, MentionPolicy, NonceGenerator, ReactionEmoji, ReactionUser,
-    RestClient, RestError, SendError, edit_response_update, is_own_message,
+    ComposeError, EditedMessage, MentionPolicy, NetworkFailure, NonceGenerator, ReactionEmoji,
+    ReactionUser, RestClient, RestError, UploadError, UploadFile, Uploader, edit_response_update,
+    is_own_message,
 };
 use fastcord_model::{Emoji, Message, Referenced, Snowflake};
 use iced::futures::StreamExt;
+use iced::futures::future::{AbortHandle, Abortable};
 use iced::futures::stream::FuturesUnordered;
 
 use crate::changes::{self, ChangeKind, ChangeRequest, Changes};
-use crate::outbox::{Finished, MAX_REPLY_AUTHOR_CHARS, OpId, Outbox, Reply, Slots};
+use crate::outbox::{Finished, MAX_REPLY_AUTHOR_CHARS, OpId, Outbox, Reply, SendFailure, Slots};
 use crate::reactions::{self, Action, Reactions};
 use crate::timeline::{ReactionUsers, ReplyLine, ReplyState, Row, Snapshot, UsersState};
 use crate::variable_list::{Item, Measurement, VariableList, Viewport};
@@ -56,7 +58,7 @@ const BAD_EMOJI: &str = "That emoji cannot be used as a reaction.";
 type PageFuture = Pin<Box<dyn Future<Output = Result<Vec<Message>, RestError>> + Send>>;
 type ReferenceFuture =
     Pin<Box<dyn Future<Output = (Snowflake, Result<Option<Message>, RestError>)> + Send>>;
-type SendFuture = Pin<Box<dyn Future<Output = (OpId, Result<Box<Message>, SendError>)> + Send>>;
+type SendFuture = Pin<Box<dyn Future<Output = (OpId, Result<Box<Message>, SendFailure>)> + Send>>;
 type ChangeFuture = Pin<Box<dyn Future<Output = ChangeDone> + Send>>;
 type ReactionFuture = Pin<Box<dyn Future<Output = ReactionDone> + Send>>;
 type UsersFuture =
@@ -116,7 +118,7 @@ struct Inspection {
 pub enum Completed {
     Page(Result<Vec<Message>, RestError>),
     Reference(Snowflake, Box<Result<Option<Message>, RestError>>),
-    Send(OpId, Result<Box<Message>, SendError>),
+    Send(OpId, Result<Box<Message>, SendFailure>),
     Change(ChangeDone),
     Reaction(ReactionDone),
     ReactionUsers(u64, Result<Vec<ReactionUser>, RestError>),
@@ -188,6 +190,11 @@ pub struct History {
     outbox: Outbox,
     nonces: NonceGenerator,
     sends: FuturesUnordered<SendFuture>,
+    /// Sends still uploading files, so the user can stop them. Posting the
+    /// message is never abortable: that outcome would be unknowable.
+    uploads: HashMap<OpId, AbortHandle>,
+    /// The credential-free client for file bytes, built on first use.
+    uploader: Option<Uploader>,
     /// Edits and deletions of the user's own messages.
     changes: Changes,
     change_requests: FuturesUnordered<ChangeFuture>,
@@ -361,11 +368,25 @@ impl History {
     /// Records a message to send and starts posting it. `channel` must be the
     /// open channel and sendable, or the text is kept as a failed operation.
     /// Returns the operation's identity.
+    #[cfg(test)]
     pub fn send(
         &mut self,
         rest: &RestClient,
         channel: Snowflake,
         content: &str,
+        everyone: bool,
+        reply: Option<Reply>,
+    ) -> OpId {
+        self.send_with_files(rest, channel, content, Vec::new(), everyone, reply)
+    }
+
+    /// [`send`](Self::send) for a message that also uploads `files`.
+    pub fn send_with_files(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        content: &str,
+        files: Vec<UploadFile>,
         everyone: bool,
         reply: Option<Reply>,
     ) -> OpId {
@@ -377,7 +398,7 @@ impl History {
         };
         let id = self
             .outbox
-            .enqueue(channel, content, mentions, reply, nonce, allowed);
+            .enqueue_with_files(channel, content, files, mentions, reply, nonce, allowed);
         // client does; away from the live edge nothing moves.
         let live = self
             .store
@@ -401,6 +422,14 @@ impl History {
             self.start_sends(rest);
         }
         self.dirty = true;
+    }
+
+    /// Stops a send that is still uploading its files. Nothing was created, so
+    /// it stays in the outbox as failed for an explicit retry or discard.
+    pub fn cancel_upload(&mut self, id: OpId) {
+        if let Some(handle) = self.uploads.get(&id) {
+            handle.abort();
+        }
     }
 
     /// The user's explicit discard of a failed or unconfirmed send.
@@ -845,7 +874,45 @@ impl History {
             self.sends.push(Box::pin(async move {
                 (
                     id,
-                    rest.create_message(channel, &message).await.map(Box::new),
+                    rest.create_message(channel, &message)
+                        .await
+                        .map(Box::new)
+                        .map_err(SendFailure::from),
+                )
+            }));
+        }
+        for (id, channel, post) in self.outbox.take_ready_files() {
+            let Some(uploader) = self.uploader.clone().or_else(|| {
+                self.uploader = Uploader::new().ok();
+                self.uploader.clone()
+            }) else {
+                self.outbox.fail(
+                    id,
+                    SendFailure::Upload(UploadError::Network(NetworkFailure::Other)),
+                );
+                continue;
+            };
+            let rest = rest.clone();
+            let (handle, registration) = AbortHandle::new_pair();
+            self.uploads.insert(id, handle);
+            self.sends.push(Box::pin(async move {
+                let upload = rest.upload_files(&uploader, channel, post.files(), post.progress());
+                let uploaded = match Abortable::new(upload, registration).await {
+                    Ok(Ok(uploaded)) => uploaded,
+                    Ok(Err(error)) => return (id, Err(SendFailure::Upload(error))),
+                    Err(_) => return (id, Err(SendFailure::Cancelled)),
+                };
+                // From here the outcome of the post can be unknowable, so it
+                // is no longer abortable.
+                let Ok(message) = post.message(uploaded) else {
+                    return (id, Err(SendFailure::Upload(UploadError::BadSlots)));
+                };
+                (
+                    id,
+                    rest.create_message(channel, &message)
+                        .await
+                        .map(Box::new)
+                        .map_err(SendFailure::from),
                 )
             }));
         }
@@ -860,9 +927,10 @@ impl History {
         &mut self,
         rest: &RestClient,
         id: OpId,
-        result: Result<Box<Message>, SendError>,
+        result: Result<Box<Message>, SendFailure>,
     ) -> bool {
         self.dirty = true;
+        self.uploads.remove(&id);
         let rejected = match result {
             Ok(message) => {
                 if self.outbox.finish(id, Ok(())) == Finished::Confirmed {
@@ -870,9 +938,15 @@ impl History {
                 }
                 false
             }
-            Err(error) => {
-                self.outbox.finish(id, Err(error));
-                error.cause() == RestError::AuthenticationRequired
+            Err(failure) => {
+                self.outbox.fail(id, failure);
+                matches!(
+                    failure,
+                    SendFailure::Send(error) if error.cause() == RestError::AuthenticationRequired
+                ) || matches!(
+                    failure,
+                    SendFailure::Upload(UploadError::Rest(RestError::AuthenticationRequired))
+                )
             }
         };
         self.start_sends(rest);
@@ -1490,6 +1564,7 @@ impl History {
 
 #[cfg(test)]
 mod tests {
+    use fastcord_discord::SendError;
     use fastcord_discord::gateway::{ClientProperties, HostOs};
     use fastcord_discord::gateway::{MessageDelete, MessageDeleteBulk};
     use fastcord_discord::message_store::{MAX_MESSAGES_PER_CHANNEL, MESSAGE_BUDGET};
@@ -2132,7 +2207,7 @@ mod tests {
         let timeout = SendError::Ambiguous(RestError::Retryable(RetryableFailure::Network(
             NetworkFailure::Timeout,
         )));
-        assert!(!history.complete(&rest, Completed::Send(id, Err(timeout))));
+        assert!(!history.complete(&rest, Completed::Send(id, Err(timeout.into()))));
         let shown = history.snapshot().outbox;
         assert!(matches!(shown[0].state, OutboxState::Uncertain(_)));
 
@@ -2182,7 +2257,7 @@ mod tests {
         take_posts(&mut history);
         let nonce = wire_nonce(&history, id);
         let refused = SendError::NotSent(RestError::Http(StatusCode::BAD_REQUEST));
-        history.complete(&rest, Completed::Send(id, Err(refused)));
+        history.complete(&rest, Completed::Send(id, Err(refused.into())));
         assert!(matches!(
             history.snapshot().outbox[0].state,
             OutboxState::Failed(_)
@@ -2233,7 +2308,7 @@ mod tests {
             &rest,
             Completed::Send(
                 id,
-                Err(SendError::NotSent(RestError::AuthenticationRequired))
+                Err(SendError::NotSent(RestError::AuthenticationRequired).into())
             )
         ));
     }

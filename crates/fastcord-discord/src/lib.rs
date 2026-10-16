@@ -27,6 +27,7 @@ mod route;
 mod secret;
 mod send;
 pub mod state;
+mod upload;
 mod ws;
 
 pub use attachment::RefreshedAttachmentUrl;
@@ -48,4 +49,8 @@ pub use secret::UserToken;
 pub use send::{
     ComposeError, MAX_CONTENT_CHARS, MentionPolicy, Nonce, NonceGenerator, OutgoingMessage,
     ReplyTo, SendError,
+};
+pub use upload::{
+    CHUNK as UPLOAD_CHUNK, MAX_FILENAME_CHARS, MAX_UPLOAD_BYTES, MAX_UPLOAD_FILES, UploadError,
+    UploadFile, UploadProgress, UploadedFile, Uploader,
 };

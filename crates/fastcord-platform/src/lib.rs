@@ -3,6 +3,7 @@
 //! store or plaintext fallback.
 
 pub mod capture;
+pub mod clipboard;
 
 use std::collections::HashMap;
 use std::fmt;

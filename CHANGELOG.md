@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Attachment uploads (M40, #55): attach up to ten files to a message from a file dialog, by dropping them on the window or with an explicit Paste image (Windows clipboard bitmap, re-encoded as PNG). Files are streamed in 64 KiB chunks to Discord's storage URL by a credential-free, host-restricted client, with progress, Cancel and explicit Retry; a file that changed after it was chosen fails instead of being sent; the message is posted with the existing nonce rules so a lost answer never creates a second message. Live Discord acceptance is pending.
 - Message formatting, embeds and mentions (M39, #54): the timeline renders Markdown (bold, italic, underline, strike-through, inline and fenced code, quotes, headings, lists, spoilers, links, masked links) and user, role, channel and `@everyone`/`@here` mentions from the unchanged source text, so Copy text and editing keep the original; received embeds (title, description, fields, footer, image links) are kept within byte bounds and shown below the message; http(s) links open in the default browser; the composer completes `@` and `#` words to real mention references. Live comparison with the official client is pending.
 
 ### Fixed

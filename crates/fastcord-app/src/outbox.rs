@@ -21,8 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fastcord_discord::{
-    ComposeError, MentionPolicy, NetworkFailure, Nonce, OutgoingMessage, ReplyTo, RestError,
-    RetryableFailure, SendError,
+    ComposeError, MAX_CONTENT_CHARS, MentionPolicy, NetworkFailure, Nonce, OutgoingMessage,
+    ReplyTo, RestError, RetryableFailure, SendError, UploadError, UploadFile, UploadProgress,
+    UploadedFile,
 };
 use fastcord_model::{REPLY_PREVIEW_CHARS, Snowflake};
 
@@ -106,6 +107,23 @@ fn bound_reply_text(value: Arc<str>, max_chars: usize) -> Arc<str> {
     }
 }
 
+/// Why a send with files did not finish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendFailure {
+    Send(SendError),
+    /// A file could not be uploaded; no message was created.
+    Upload(UploadError),
+    /// The user stopped the upload; no message was created.
+    Cancelled,
+}
+
+impl From<SendError> for SendFailure {
+    fn from(error: SendError) -> Self {
+        Self::Send(error)
+    }
+}
+
+const CANCELLED: &str = "Upload cancelled. Retry to start it again.";
 const NOT_ALLOWED: &str = "The channel was closed, or you cannot send messages in it.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,7 +142,40 @@ struct Op {
     nonce: Nonce,
     mentions: MentionPolicy,
     reply: Option<Reply>,
+    /// Files to upload with the message. They are re-checked and uploaded again
+    /// on every attempt: a failed upload created nothing, and a repeated nonce
+    /// makes Discord return a message it already made.
+    files: Vec<UploadFile>,
+    progress: Arc<UploadProgress>,
     phase: Phase,
+}
+
+/// A queued send with files: what the account worker uploads and then posts.
+pub struct FilePost {
+    content: String,
+    nonce: Nonce,
+    mentions: MentionPolicy,
+    reply: Option<ReplyTo>,
+    files: Vec<UploadFile>,
+    progress: Arc<UploadProgress>,
+}
+
+impl FilePost {
+    pub fn files(&self) -> &[UploadFile] {
+        &self.files
+    }
+
+    pub fn progress(&self) -> Arc<UploadProgress> {
+        Arc::clone(&self.progress)
+    }
+
+    /// The message that names the uploaded files.
+    pub fn message(&self, uploaded: Vec<UploadedFile>) -> Result<OutgoingMessage, ComposeError> {
+        Ok(
+            OutgoingMessage::with_files(&self.content, uploaded, self.nonce, self.mentions)?
+                .replying_to(self.reply),
+        )
+    }
 }
 
 /// What the user is told about an unconfirmed message.
@@ -147,6 +198,10 @@ pub struct OutboxItem {
     pub content: Arc<str>,
     pub reply: Option<Reply>,
     pub state: OutboxState,
+    /// Files this send uploads.
+    pub files: Vec<UploadFile>,
+    /// Bytes uploaded and in total, while the files are being sent.
+    pub upload: Option<(u64, u64)>,
 }
 
 impl fmt::Debug for OutboxItem {
@@ -214,6 +269,11 @@ fn compose_reason(error: ComposeError) -> &'static str {
     }
 }
 
+enum Taken {
+    Plain(OutgoingMessage),
+    Files(FilePost),
+}
+
 #[derive(Default)]
 pub struct Outbox {
     ops: VecDeque<Op>,
@@ -248,10 +308,34 @@ impl Outbox {
 
     /// Records a new send. A channel the user cannot send to is recorded as an
     /// already failed operation, so the text is never lost.
+    #[cfg(test)]
     pub fn enqueue(
         &mut self,
         channel: Snowflake,
         content: &str,
+        mentions: MentionPolicy,
+        reply: Option<Reply>,
+        nonce: Nonce,
+        allowed: bool,
+    ) -> OpId {
+        self.enqueue_with_files(
+            channel,
+            content,
+            Vec::new(),
+            mentions,
+            reply,
+            nonce,
+            allowed,
+        )
+    }
+
+    /// [`enqueue`](Self::enqueue) for a message that uploads `files` too.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_with_files(
+        &mut self,
+        channel: Snowflake,
+        content: &str,
+        files: Vec<UploadFile>,
         mentions: MentionPolicy,
         reply: Option<Reply>,
         nonce: Nonce,
@@ -271,6 +355,8 @@ impl Outbox {
             nonce,
             mentions,
             reply,
+            files,
+            progress: Arc::default(),
             phase: if allowed {
                 Phase::Queued
             } else {
@@ -283,6 +369,30 @@ impl Outbox {
     /// Starts every queued operation whose channel has nothing in flight, in
     /// the order the messages were written, and returns what to post.
     pub fn take_ready(&mut self) -> Vec<(OpId, Snowflake, OutgoingMessage)> {
+        self.take(false)
+            .into_iter()
+            .filter_map(|(id, channel, taken)| match taken {
+                Taken::Plain(message) => Some((id, channel, message)),
+                Taken::Files(_) => None,
+            })
+            .collect()
+    }
+
+    /// [`take_ready`](Self::take_ready) for the sends that carry files.
+    pub fn take_ready_files(&mut self) -> Vec<(OpId, Snowflake, FilePost)> {
+        self.take(true)
+            .into_iter()
+            .filter_map(|(id, channel, taken)| match taken {
+                Taken::Files(post) => Some((id, channel, post)),
+                Taken::Plain(_) => None,
+            })
+            .collect()
+    }
+
+    /// Starts the queued operations of one kind. An operation of the other
+    /// kind that is next in its channel holds back everything behind it, so
+    /// messages with and without files keep the order they were written in.
+    fn take(&mut self, files: bool) -> Vec<(OpId, Snowflake, Taken)> {
         let mut busy: Vec<Snowflake> = self
             .ops
             .iter()
@@ -295,17 +405,63 @@ impl Outbox {
                 continue;
             }
             let reply = op.reply.as_ref().map(Reply::wire);
+            if op.files.is_empty() == files {
+                busy.push(op.channel);
+                continue;
+            }
+            if files {
+                if op.content.trim().chars().count() > MAX_CONTENT_CHARS {
+                    op.phase = Phase::Failed(compose_reason(ComposeError::TooLong));
+                    continue;
+                }
+                op.phase = Phase::InFlight;
+                busy.push(op.channel);
+                ready.push((
+                    op.id,
+                    op.channel,
+                    Taken::Files(FilePost {
+                        content: op.content.to_string(),
+                        nonce: op.nonce,
+                        mentions: op.mentions,
+                        reply,
+                        files: op.files.clone(),
+                        progress: Arc::clone(&op.progress),
+                    }),
+                ));
+                continue;
+            }
             match OutgoingMessage::new(&op.content, op.nonce, op.mentions) {
                 Ok(message) => {
                     let message = message.replying_to(reply);
                     op.phase = Phase::InFlight;
                     busy.push(op.channel);
-                    ready.push((op.id, op.channel, message));
+                    ready.push((op.id, op.channel, Taken::Plain(message)));
                 }
                 Err(error) => op.phase = Phase::Failed(compose_reason(error)),
             }
         }
         ready
+    }
+
+    /// Applies a failure that is not a send's: an upload that failed or was
+    /// stopped. Nothing was created, so the operation is plainly failed.
+    pub fn fail(&mut self, id: OpId, failure: SendFailure) -> Finished {
+        let reason = match failure {
+            SendFailure::Send(error) => return self.finish(id, Err(error)),
+            SendFailure::Upload(error) => error.reason(),
+            SendFailure::Cancelled => CANCELLED,
+        };
+        match self
+            .ops
+            .iter_mut()
+            .find(|op| op.id == id && op.phase == Phase::InFlight)
+        {
+            Some(op) => {
+                op.phase = Phase::Failed(reason);
+                Finished::Kept
+            }
+            None => Finished::Unknown,
+        }
     }
 
     /// Applies a transport answer to the operation that was in flight.
@@ -388,6 +544,9 @@ impl Outbox {
                 channel_id: op.channel,
                 content: Arc::clone(&op.content),
                 reply: op.reply.clone(),
+                files: op.files.clone(),
+                upload: (op.phase == Phase::InFlight && !op.files.is_empty())
+                    .then(|| (op.progress.sent(), op.progress.total())),
                 state: match op.phase {
                     Phase::Queued | Phase::InFlight => OutboxState::Sending,
                     Phase::Failed(reason) => OutboxState::Failed(reason),
@@ -435,6 +594,97 @@ mod tests {
                 .map(|item| item.state)
                 .collect()
         }
+    }
+
+    fn sample_file(name: &str, bytes: &[u8]) -> UploadFile {
+        let dir = std::env::temp_dir().join(format!("fastcord-outbox-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        UploadFile::inspect(&path).unwrap()
+    }
+
+    fn send_files(f: &mut Fixture, channel: Snowflake, text: &str, name: &str) -> OpId {
+        let nonce = f.nonces.next(1_790_000_000_000, 0);
+        let file = sample_file(name, b"data");
+        f.outbox.enqueue_with_files(
+            channel,
+            text,
+            vec![file],
+            MentionPolicy::default(),
+            None,
+            nonce,
+            true,
+        )
+    }
+
+    #[test]
+    fn a_send_with_files_keeps_its_place_and_a_failed_upload_creates_nothing() {
+        let mut f = Fixture::new();
+        let files = send_files(&mut f, A, "", "order-a.png");
+        let after = f.send(A, "after the files");
+        // The plain message waits behind the earlier one that carries files.
+        assert!(f.outbox.take_ready().is_empty());
+        let started = f.outbox.take_ready_files();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].0, files);
+        // A file-only message has no text and is still a valid post.
+        let uploaded = Vec::new();
+        assert!(started[0].2.message(uploaded).is_err(), "no files, no text");
+        let item = &f.outbox.items()[0];
+        assert_eq!(item.files.len(), 1);
+        assert_eq!(item.upload, Some((0, 0)));
+        assert_eq!(item.state, OutboxState::Sending);
+
+        // A rejected upload is a plain failure and holds nothing back for good.
+        let rejected = SendFailure::Upload(UploadError::Rejected(403));
+        assert_eq!(f.outbox.fail(files, rejected), Finished::Kept);
+        assert!(
+            matches!(f.states(A)[0], OutboxState::Failed(reason) if reason.contains("refused"))
+        );
+        assert!(
+            f.outbox.take_ready_files().is_empty(),
+            "never retried by itself"
+        );
+        // The retry is explicit; the message behind it still waits for it.
+        assert!(f.outbox.retry(files));
+        assert!(f.outbox.take_ready().is_empty());
+        assert_eq!(f.outbox.take_ready_files().len(), 1);
+        assert_eq!(f.outbox.finish(files, Ok(())), Finished::Confirmed);
+        let next: Vec<OpId> = f.outbox.take_ready().iter().map(|(id, ..)| *id).collect();
+        assert_eq!(next, [after]);
+    }
+
+    #[test]
+    fn cancelling_an_upload_fails_it_for_a_retry_and_ambiguous_posts_stay_uncertain() {
+        let mut f = Fixture::new();
+        let id = send_files(&mut f, A, "caption", "cancel-a.png");
+        f.outbox.take_ready_files();
+        assert_eq!(f.outbox.fail(id, SendFailure::Cancelled), Finished::Kept);
+        let shown = f.outbox.items();
+        assert!(matches!(shown[0].state, OutboxState::Failed(r) if r.contains("cancelled")));
+        assert_eq!(shown[0].upload, None);
+        assert_eq!(shown[0].files.len(), 1, "the files stay for the retry");
+        // Only an upload in flight can be failed; anything else is unknown.
+        assert_eq!(f.outbox.fail(id, SendFailure::Cancelled), Finished::Unknown);
+        assert!(f.outbox.retry(id));
+        f.outbox.take_ready_files();
+        // A post whose answer was lost keeps the nonce and says it is unconfirmed.
+        assert_eq!(
+            f.outbox.fail(id, SendFailure::Send(ambiguous())),
+            Finished::Kept
+        );
+        assert!(matches!(f.states(A)[0], OutboxState::Uncertain(_)));
+        assert_eq!(f.outbox.nonce_of(id), f.outbox.nonce_of(id));
+    }
+
+    #[test]
+    fn too_long_text_with_files_is_failed_without_uploading_anything() {
+        let mut f = Fixture::new();
+        let long = "x".repeat(MAX_CONTENT_CHARS + 1);
+        send_files(&mut f, A, &long, "long-a.png");
+        assert!(f.outbox.take_ready_files().is_empty());
+        assert!(matches!(f.states(A)[0], OutboxState::Failed(_)));
     }
 
     fn ambiguous() -> SendError {
