@@ -294,8 +294,11 @@ Clicking a chip asks for the opposite of the *stored* state (take the reaction b
 
 At most one request per (message, emoji) is in flight and at most 16 exist (a click on a busy reaction, or a full ledger, says so and asks nothing), so an add and a remove of one reaction can never race to Discord. An unanswered request is only an overlay: its chip is drawn as if Discord had accepted it and is disabled; the store changes when Discord answers. A 2xx answer goes into the store through the same path as the Gateway's report of the account's own reaction, so whichever arrives second is a no-op in either order. A 404 for a removal means the reaction is already gone and counts as removed. Every other failure changes nothing, is shown once as a fixed secret-free sentence above the message box (permission refused, message or emoji gone, rejected, "could not reach Discord", "did not confirm; it may have been applied"), and is never retried by the program; a 401 stops the account as everywhere else. Requests in flight survive a channel change; their answers meet an empty store.
 
+### Live observation (2026-10-16)
+The alt-account Windows app added a Unicode heart reaction to a DM through the bare `PUT`, listed both reacting accounts through the `type=0` route, and removed its own reaction through the typed `DELETE`. The official client's count changed 1 → 2 → 1. This establishes those three normal-reaction requests for the tested client profile; no raw authenticated traffic or sanitized live packet fixture was committed. See `docs/TESTING.md` for the executable and scope.
+
 ### Not established (verify live, see docs/TESTING.md)
-That Discord accepts the bare `PUT` (no `location`/`type` query like the web client sends) and the typed delete from this client profile; the real answer for removing a reaction that is already gone (404 is assumed); the error codes Discord uses for a blocked reactor, the 20-emoji limit, and an unavailable custom emoji; whether `type=0` is accepted on the list route; the burst/normal count arithmetic against the official client's chips; moderators' remove-emoji/remove-all events.
+The real answer for removing a reaction that is already gone (404 is assumed); custom-reaction interoperability and the error codes Discord uses for a blocked reactor, the 20-emoji limit, and an unavailable custom emoji; the burst/normal count arithmetic against the official client's chips; moderators' remove-emoji/remove-all events.
 
 ## Voice session and transport (milestone 17)
 

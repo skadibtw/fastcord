@@ -95,7 +95,7 @@ pub fn is_passive_file(path: &std::path::Path) -> bool {
 /// The contents of a Windows `Zone.Identifier` stream for a file from the
 /// Internet zone (zone 3), which is what makes SmartScreen and Office
 /// Protected View treat the file as untrusted.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 const ZONE_IDENTIFIER: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
 
 /// The Mark-of-the-Web could not be written.

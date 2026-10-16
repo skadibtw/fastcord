@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Restrict the Windows download-zone constant to Windows builds, fixing dead-code errors in Linux and macOS test targets with warnings denied.
+
 ### Added
 - Email/password login (ADR 0006, amended): `fastcord-discord::password_auth` posts `/auth/login` and `/auth/mfa/totp` with the shared web-client identity headers and returns the token, a TOTP challenge or a CAPTCHA challenge; the app shows hCaptcha to the person in a short-lived WebView2 window (Windows only, throwaway profile, never solved or bypassed), asks for an authenticator code when required, then runs the same validation and storage path as QR and pasted tokens. Tickets, captcha keys and passwords are redacted; one attempt, one CAPTCHA per login, no automatic retry. Live Discord acceptance is pending.
 - Approved post-MVP everyday-client roadmap (M39-M51): formatted messages/mentions, uploads, read state, notifications, search/pins, friends/status, private calls, threads/forums and keyboard navigation. GitHub tracker #67 links the existing acceptance work and the new issues; the three-platform MVP remains the first release gate.
