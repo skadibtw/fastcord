@@ -1255,10 +1255,10 @@ fn placeholder(message: &Message) -> Option<String> {
         return None;
     }
     Some(match message.kind {
+        3 => call_summary(message),
         0 | 19 | 20 | 23 => "No text content.".to_owned(),
         1 => "A member was added to the conversation.".to_owned(),
         2 => "A member left the conversation.".to_owned(),
-        3 => "A call.".to_owned(),
         4 => "The conversation name was changed.".to_owned(),
         5 => "The conversation icon was changed.".to_owned(),
         6 => "A message was pinned.".to_owned(),
@@ -1267,6 +1267,25 @@ fn placeholder(message: &Message) -> Option<String> {
         18 => "A thread was created.".to_owned(),
         kind => format!("Unsupported message type ({kind})."),
     })
+}
+
+/// A call message: still going, missed (nobody but the caller joined), or over.
+/// Call data absent from the payload reads as a plain call.
+fn call_summary(message: &Message) -> String {
+    let name = message.author.display_name();
+    match &message.call {
+        None => format!("{name} started a call."),
+        Some(call) if call.ended_timestamp.is_none() => format!("{name} started a call."),
+        Some(call)
+            if call
+                .participants
+                .iter()
+                .all(|user| *user == message.author.id) =>
+        {
+            format!("Missed call from {name}.")
+        }
+        Some(_) => format!("{name} called. The call has ended."),
+    }
 }
 
 fn describe_attachment(attachment: &Attachment) -> String {
@@ -1598,6 +1617,24 @@ mod tests {
         assert_eq!(placeholder(&bare).as_deref(), Some("No text content."));
         bare.kind = 7;
         assert_eq!(placeholder(&bare).as_deref(), Some("A member joined."));
+        bare.kind = 3;
+        assert_eq!(
+            placeholder(&bare).as_deref(),
+            Some("Alt Account started a call.")
+        );
+        bare.call = Some(fastcord_model::MessageCall {
+            participants: vec![bare.author.id],
+            ended_timestamp: Some("2026-10-07T12:01:00.000000+00:00".to_owned()),
+        });
+        assert_eq!(
+            placeholder(&bare).as_deref(),
+            Some("Missed call from Alt Account.")
+        );
+        bare.call.as_mut().unwrap().participants.push(Snowflake(77));
+        assert_eq!(
+            placeholder(&bare).as_deref(),
+            Some("Alt Account called. The call has ended.")
+        );
         bare.kind = 250;
         assert_eq!(
             placeholder(&bare).as_deref(),

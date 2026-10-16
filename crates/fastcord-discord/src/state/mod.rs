@@ -25,6 +25,7 @@
 //! measurements. [`Store::recount`] recomputes the total from scratch so tests
 //! can prove the incremental ledger never drifts.
 
+mod calls;
 mod list_id;
 mod member_list;
 pub mod navigation;
@@ -32,6 +33,7 @@ mod read;
 #[cfg(test)]
 mod regressions;
 mod relationships;
+pub use calls::{CallInfo, MAX_CALL_USERS, MAX_CALLS};
 #[cfg(test)]
 mod tests;
 
@@ -455,6 +457,8 @@ pub struct Changes {
     pub read: bool,
     /// Friends, blocks or pending requests changed.
     pub relationships: bool,
+    /// Private calls (ringing or connected users) changed.
+    pub calls: bool,
 }
 
 impl Changes {
@@ -478,6 +482,7 @@ pub struct Store {
     private_channels: HashMap<Snowflake, Channel>,
     private_bytes: usize,
     relationships: relationships::Relationships,
+    calls: calls::Calls,
     focus: Focus,
     read: ReadStates,
 }
@@ -520,6 +525,7 @@ impl Store {
             private_channels: HashMap::new(),
             private_bytes: 0,
             relationships: relationships::Relationships::default(),
+            calls: calls::Calls::default(),
             focus: Focus::default(),
             read: ReadStates::default(),
         }
@@ -568,11 +574,17 @@ impl Store {
             + self.guilds_bytes
             + self.private_bytes
             + self.relationships.bytes()
+            + self.calls.bytes()
     }
 
     /// Friends, blocks and pending requests, sorted by kind then name.
     pub fn relationships(&self) -> std::sync::Arc<[fastcord_model::Relationship]> {
         self.relationships.rows()
+    }
+
+    /// Live private calls, sorted by channel.
+    pub fn calls(&self) -> std::sync::Arc<[CallInfo]> {
+        self.calls.rows()
     }
 
     pub fn relationship(&self, id: Snowflake) -> Option<fastcord_model::RelationshipKind> {
@@ -712,6 +724,7 @@ impl Store {
         self.allocation_overhead()
             + self.users.values().map(user_bytes).sum::<usize>()
             + self.relationships.recount()
+            + self.calls.bytes()
             + self.guilds.values().map(GuildEntry::recount).sum::<usize>()
             + self
                 .private_channels
@@ -899,7 +912,11 @@ impl Store {
             Dispatch::ChannelCreate(channel) | Dispatch::ChannelUpdate(channel) => {
                 self.channel_upsert(*channel, &mut changes);
             }
+            Dispatch::CallCreate(create) => changes.calls = self.calls.create(*create),
+            Dispatch::CallUpdate(update) => changes.calls = self.calls.update(update),
+            Dispatch::CallDelete(delete) => changes.calls = self.calls.delete(delete.channel_id),
             Dispatch::ChannelDelete(channel) => {
+                changes.calls = self.calls.delete(channel.id);
                 self.read.forget(channel.id);
                 changes.read = true;
                 self.channel_remove(&channel, &mut changes);
@@ -1009,6 +1026,8 @@ impl Store {
         self.private_bytes = 0;
         self.read.replace(ready.read.entries, ready.read.mutes);
         self.relationships.replace(ready.relationships);
+        self.calls.reset(Some(ready.user.id));
+        changes.calls = true;
         changes.reset = true;
         changes.relationships = true;
 
@@ -1349,7 +1368,10 @@ impl Store {
 
     fn voice_update(&mut self, update: VoiceStateUpdate, changes: &mut Changes) {
         let Some(guild) = update.state.guild_id else {
-            // Private calls belong to the voice milestones.
+            for user in update.users {
+                self.put_user(user);
+            }
+            changes.calls = self.calls.voice(&update.state);
             return;
         };
         if !self.guilds.contains_key(&guild) {

@@ -187,6 +187,19 @@ pub struct Message {
         skip_serializing_if = "Option::is_none"
     )]
     pub nonce: Option<String>,
+    /// How a call message (type 3) ended; absent on every other type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<MessageCall>,
+}
+
+/// The `call` object of a call message: who joined and when it ended
+/// (`None` while it is still going).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MessageCall {
+    #[serde(default)]
+    pub participants: Vec<Snowflake>,
+    #[serde(default)]
+    pub ended_timestamp: Option<String>,
 }
 
 /// The part of a replied-to message a reply's preview line shows: who wrote it
@@ -585,6 +598,7 @@ mod tests {
             message_reference: None,
             referenced_message: Referenced::Unknown,
             nonce: None,
+            call: None,
         }
     }
 

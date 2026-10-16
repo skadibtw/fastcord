@@ -109,6 +109,9 @@ fn message_heap(message: &Message) -> usize {
         + message.timestamp.capacity()
         + text(&message.edited_timestamp)
         + text(&message.nonce)
+        + message.call.as_ref().map_or(0, |call| {
+            call.participants.capacity() * size_of::<Snowflake>() + text(&call.ended_timestamp)
+        })
         + message.attachments.capacity() * size_of::<Attachment>()
         + message
             .attachments

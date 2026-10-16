@@ -1671,6 +1671,7 @@ mod tests {
                 message_reference: None,
                 referenced_message: fastcord_model::Referenced::Unknown,
                 nonce: None,
+                call: None,
             }),
             revision: 1,
             own,

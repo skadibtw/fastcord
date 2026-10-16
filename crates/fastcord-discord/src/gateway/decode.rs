@@ -17,9 +17,10 @@
 use std::collections::HashMap;
 
 use fastcord_model::{
-    Channel, Emoji, Guild, GuildEmoji, GuildMember, MAX_REACTION_EMOJI_NAME_BYTES, Message,
-    MessageUpdate, Relationship, RelationshipKind, Role, Snowflake, StreamCreate, StreamDelete,
-    StreamServerUpdate, StreamUpdate, User, VoiceServerUpdate, VoiceState,
+    CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildEmoji, GuildMember,
+    MAX_REACTION_EMOJI_NAME_BYTES, Message, MessageUpdate, Relationship, RelationshipKind, Role,
+    Snowflake, StreamCreate, StreamDelete, StreamServerUpdate, StreamUpdate, User,
+    VoiceServerUpdate, VoiceState,
 };
 use serde::{Deserialize, Deserializer};
 
@@ -1011,6 +1012,9 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "VOICE_STATE_UPDATE" => {
             decode_voice_state(raw).map(|v| Dispatch::VoiceStateUpdate(Box::new(v)))
         }
+        "CALL_CREATE" => json::<CallCreate>(raw).map(|c| Dispatch::CallCreate(Box::new(c))),
+        "CALL_UPDATE" => json::<CallUpdate>(raw).map(Dispatch::CallUpdate),
+        "CALL_DELETE" => json::<CallDelete>(raw).map(Dispatch::CallDelete),
         "VOICE_SERVER_UPDATE" => {
             json::<VoiceServerUpdate>(raw).map(|v| Dispatch::VoiceServerUpdate(Box::new(v)))
         }

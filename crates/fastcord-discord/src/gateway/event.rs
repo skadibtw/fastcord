@@ -4,8 +4,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fastcord_model::{
-    Channel, Emoji, Guild, GuildMember, Message, MessageUpdate, Relationship, RelationshipKind,
-    Role, Snowflake, User, VoiceServerUpdate, VoiceState,
+    CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildMember, Message, MessageUpdate,
+    Relationship, RelationshipKind, Role, Snowflake, User, VoiceServerUpdate, VoiceState,
 };
 
 /// The Gateway session ID. Not a credential on its own (resuming also needs the
@@ -500,6 +500,10 @@ pub enum Dispatch {
     GuildRoleUpdate(Box<GuildRoleEvent>),
     GuildRoleDelete(GuildRoleDelete),
     VoiceStateUpdate(Box<VoiceStateUpdate>),
+    /// A DM or group-DM call started, with who is ringing and connected.
+    CallCreate(Box<CallCreate>),
+    CallUpdate(CallUpdate),
+    CallDelete(CallDelete),
     /// The voice server for the account's voice connection; for the voice
     /// layer, not the reducer. A `None` endpoint means it is being reallocated.
     VoiceServerUpdate(Box<VoiceServerUpdate>),
@@ -549,6 +553,9 @@ impl Dispatch {
             Self::GuildRoleUpdate(_) => "GUILD_ROLE_UPDATE",
             Self::GuildRoleDelete(_) => "GUILD_ROLE_DELETE",
             Self::VoiceStateUpdate(_) => "VOICE_STATE_UPDATE",
+            Self::CallCreate(_) => "CALL_CREATE",
+            Self::CallUpdate(_) => "CALL_UPDATE",
+            Self::CallDelete(_) => "CALL_DELETE",
             Self::VoiceServerUpdate(_) => "VOICE_SERVER_UPDATE",
             Self::StreamCreate(_) => "STREAM_CREATE",
             Self::StreamServerUpdate(_) => "STREAM_SERVER_UPDATE",

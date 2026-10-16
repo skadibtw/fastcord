@@ -42,6 +42,8 @@ pub struct Chrome<'a> {
     pub voice_bar: Option<Element<'a, Message>>,
     /// The Friends screen, which replaces the conversation in direct messages.
     pub friends: Option<Element<'a, Message>>,
+    /// The private call this account is connected to, if any.
+    pub voice_call: Option<fastcord_model::Snowflake>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -61,6 +63,7 @@ pub fn view<'a>(
         banner,
         voice_bar,
         friends,
+        voice_call,
     } = chrome;
     let rail = rail(snapshot, directs, attachments.avatars);
     let sidebar = sidebar(snapshot, private, directs, footer);
@@ -76,6 +79,7 @@ pub fn view<'a>(
             directs,
             banner,
             voice_bar,
+            voice_call,
         ),
     };
     row![rail, sidebar, main].height(Length::Fill).into()
@@ -371,7 +375,13 @@ fn sidebar<'a>(
 }
 
 /// The strip over the conversation: its name and what the account can do there.
-fn header<'a>(title: String, note: &'static str, emoji: bool, pins: bool) -> Element<'a, Message> {
+fn header<'a>(
+    title: String,
+    note: &'static str,
+    emoji: bool,
+    pins: bool,
+    call: Option<(&'static str, Message)>,
+) -> Element<'a, Message> {
     let mut line = row![
         text(title).size(16).font(BOLD),
         text(note).size(12).style(text::secondary),
@@ -379,6 +389,13 @@ fn header<'a>(title: String, note: &'static str, emoji: bool, pins: bool) -> Ele
     ]
     .spacing(12)
     .align_y(alignment::Vertical::Center);
+    if let Some((label, message)) = call {
+        line = line.push(
+            button(text(label).size(13))
+                .on_press(message)
+                .style(style::action_button(false)),
+        );
+    }
     if pins {
         line = line.push(
             button(text("Pins").size(13))
@@ -418,6 +435,7 @@ fn main_pane<'a>(
     directs: bool,
     banner: Option<Element<'a, Message>>,
     voice_bar: Option<Element<'a, Message>>,
+    voice_call: Option<fastcord_model::Snowflake>,
 ) -> Element<'a, Message> {
     let mut body = column![].width(Length::Fill).height(Length::Fill);
     let conversation = |body: iced::widget::Column<'a, Message>,
@@ -441,7 +459,22 @@ fn main_pane<'a>(
         }
     };
     if let (true, Some(selection)) = (directs, &snapshot.private_selection) {
-        body = body.push(header(format!("@ {}", selection.name), "", true, true));
+        let live = snapshot
+            .calls
+            .iter()
+            .any(|call| call.channel_id == selection.channel_id && !call.participants.is_empty());
+        let call = match (voice_call == Some(selection.channel_id), live) {
+            (true, _) => None,
+            (false, true) => Some(("Join call", Message::AcceptCall(selection.channel_id))),
+            (false, false) => Some(("Call", Message::StartCall(selection.channel_id))),
+        };
+        body = body.push(header(
+            format!("@ {}", selection.name),
+            "",
+            true,
+            true,
+            call,
+        ));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
         }
@@ -457,7 +490,7 @@ fn main_pane<'a>(
         );
         body = conversation(body, selection.channel_id, bar);
     } else if directs {
-        body = body.push(header("Direct Messages".to_owned(), "", false, false));
+        body = body.push(header("Direct Messages".to_owned(), "", false, false, None));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
         }
@@ -470,7 +503,7 @@ fn main_pane<'a>(
             .center(Length::Fill),
         );
     } else if snapshot.permissions_pending {
-        body = body.push(header("Loading".to_owned(), "", false, false)).push(
+        body = body.push(header("Loading".to_owned(), "", false, false, None)).push(
             container(
                 text("Waiting for your membership and permissions. Channels stay closed until Discord supplies them.")
                     .size(14)
@@ -492,6 +525,7 @@ fn main_pane<'a>(
                     note,
                     history.can_send || composer.editing().is_some(),
                     permissions.read_history,
+                    None,
                 ));
                 if let Some(banner) = banner {
                     body = body.push(container(banner).padding([4, 16]));
@@ -520,6 +554,7 @@ fn main_pane<'a>(
                     },
                     false,
                     false,
+                    None,
                 ));
                 if let Some(banner) = banner {
                     body = body.push(container(banner).padding([4, 16]));
@@ -546,7 +581,7 @@ fn main_pane<'a>(
             ChannelKind::Category => {}
         }
     } else {
-        body = body.push(header("fastcord".to_owned(), "", false, false));
+        body = body.push(header("fastcord".to_owned(), "", false, false, None));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
         }

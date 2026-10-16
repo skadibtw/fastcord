@@ -12,6 +12,7 @@
 
 mod ack;
 mod attachment;
+mod call;
 mod clock;
 mod edit;
 mod error;
@@ -35,6 +36,7 @@ mod upload;
 mod ws;
 
 pub use attachment::RefreshedAttachmentUrl;
+pub use call::CallSignal;
 pub use clock::{Clock, MonotonicClock};
 pub use edit::{EditedMessage, edit_response_update, is_own_message};
 pub use error::{NetworkFailure, RestError, RetryableFailure};

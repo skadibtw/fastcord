@@ -424,3 +424,28 @@ fn unknown_channel_type_is_preserved() {
     assert!(!ch.kind.is_text_like());
     assert_eq!(serde_json::to_value(ch.kind).unwrap(), 99);
 }
+
+// Synthetic call message in the observed web-client shape; unverified against
+// a live account (docs/TESTING.md).
+#[test]
+fn call_messages_keep_who_joined_and_when_it_ended() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fixture("message_create.json")).unwrap();
+    let plain: Message = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(plain.call, None);
+    value["type"] = 3.into();
+    value["call"] = serde_json::json!({
+        "participants": ["42"],
+        "ended_timestamp": "2026-10-07T12:01:00.000000+00:00"
+    });
+    let message: Message = serde_json::from_value(value.clone()).unwrap();
+    let call = message.call.as_ref().unwrap();
+    assert_eq!(call.participants.len(), 1);
+    assert!(call.ended_timestamp.is_some());
+    // A running call has no end yet; the message still round-trips.
+    value["call"] = serde_json::json!({"participants": ["42"], "ended_timestamp": null});
+    let running: Message = serde_json::from_value(value).unwrap();
+    assert_eq!(running.call.as_ref().unwrap().ended_timestamp, None);
+    let again: Message = serde_json::from_str(&serde_json::to_string(&running).unwrap()).unwrap();
+    assert_eq!(again, running);
+}

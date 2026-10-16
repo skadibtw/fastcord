@@ -2294,6 +2294,9 @@ pub struct GatewayPanel {
     pub timeline: Arc<timeline::Snapshot>,
     pub controls: NavigationBridge,
     pub voice_guild: Option<Snowflake>,
+    /// The DM or group-DM channel of the private call joined (exclusive with
+    /// `voice_guild`: there is one parent voice connection).
+    pub voice_call: Option<Snowflake>,
     /// The draft and composer state; local to the UI until the user sends.
     pub composer: Composer,
     /// The user's message (channel, message) whose deletion waits for confirmation.
@@ -2532,6 +2535,7 @@ impl GatewayPanel {
             watch_open: false,
             share_picker: SharePicker::default(),
             voice_guild: None,
+            voice_call: None,
             composer: Composer::default(),
             confirm_delete: None,
             _worker: worker.abort_on_drop(),

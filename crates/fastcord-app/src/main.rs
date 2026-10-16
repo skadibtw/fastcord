@@ -34,7 +34,7 @@ mod voice_settings;
 use crate::attachments::AttachmentKey;
 use std::sync::Arc;
 
-use fastcord_discord::{RemoteAuthEvent, UserToken};
+use fastcord_discord::{CallSignal, RemoteAuthEvent, UserToken};
 use fastcord_model::{Snowflake, VoiceStateRequest};
 use fastcord_platform::{NativeCredentialStore, StoreError};
 use gateway::{AttachmentAction, GatewayPanel, GatewayStatus};
@@ -51,6 +51,15 @@ const MAX_PRIVATE_RECIPIENTS: usize = fastcord_discord::MAX_PRIVATE_RECIPIENTS;
 
 fn search_bar_is_empty(gateway: &GatewayPanel) -> bool {
     App::search_target(gateway).is_none()
+}
+
+/// One ring or stop-ringing request for a private call.
+fn call_signal(session: &Session, channel: Snowflake, signal: CallSignal) -> Task<Message> {
+    let client = session.client.clone();
+    Task::perform(
+        async move { client.call_signal(channel, signal).await },
+        Message::CallSignalled,
+    )
 }
 
 fn main() -> iced::Result {
@@ -150,6 +159,13 @@ enum Message {
     SelectGuild(Snowflake),
     SelectChannel(Snowflake, Snowflake),
     LeaveVoice,
+    /// Call a DM or group DM: join its voice and ring the others.
+    StartCall(Snowflake),
+    /// Answer a ringing call, or join one in progress.
+    AcceptCall(Snowflake),
+    /// Stop this account's ringing for a call without joining.
+    DeclineCall(Snowflake),
+    CallSignalled(Result<(), fastcord_discord::RestError>),
     WatchStream(String),
     UnwatchStream,
     ShowStream(bool),
@@ -781,6 +797,7 @@ impl App {
                     gateway.controls.select_channel(guild, channel);
                     if join {
                         gateway.voice_guild = Some(guild);
+                        gateway.voice_call = None;
                         let controls = gateway.controls.voice_controls();
                         gateway
                             .controls
@@ -793,13 +810,69 @@ impl App {
                     }
                 }
             }
-            Message::LeaveVoice => {
-                if let Phase::Account { gateway, .. } = &mut self.phase
-                    && let Some(guild) = gateway.voice_guild.take()
+            Message::StartCall(channel) | Message::AcceptCall(channel) => {
+                if let Phase::Account {
+                    session, gateway, ..
+                } = &mut self.phase
                 {
-                    gateway
-                        .controls
-                        .request_voice_state(VoiceStateRequest::leave(Some(guild)));
+                    let busy = gateway.voice_call == Some(channel)
+                        && gateway.controls.voice_audio_state() != gateway::VoiceAudioState::Idle;
+                    if !busy {
+                        // One parent voice connection: this request replaces a
+                        // guild voice join (the correlator moves away from it).
+                        gateway.voice_guild = None;
+                        gateway.voice_call = Some(channel);
+                        let controls = gateway.controls.voice_controls();
+                        gateway
+                            .controls
+                            .request_voice_state(VoiceStateRequest::join(
+                                None,
+                                channel,
+                                controls.self_muted,
+                                controls.deafened,
+                            ));
+                        if matches!(message, Message::StartCall(_)) {
+                            return call_signal(session, channel, CallSignal::Ring);
+                        }
+                    }
+                }
+            }
+            Message::DeclineCall(channel) => {
+                if let Phase::Account { session, .. } = &self.phase {
+                    return call_signal(session, channel, CallSignal::StopRinging);
+                }
+            }
+            Message::CallSignalled(result) => {
+                self.notice = result
+                    .err()
+                    .map(|_| "The call request failed; try again.".to_owned());
+            }
+            Message::LeaveVoice => {
+                let mut cancel = None;
+                if let Phase::Account {
+                    session, gateway, ..
+                } = &mut self.phase
+                {
+                    let call = gateway.voice_call.take();
+                    if let Some(guild) = gateway.voice_guild.take().map(Some).or(call.map(|_| None))
+                    {
+                        gateway
+                            .controls
+                            .request_voice_state(VoiceStateRequest::leave(guild));
+                    }
+                    // Hanging up before anyone answered also stops the ringing.
+                    cancel = call
+                        .filter(|channel| {
+                            gateway.navigation.calls.iter().any(|call| {
+                                call.channel_id == *channel
+                                    && !call.ringing.is_empty()
+                                    && call
+                                        .participants
+                                        .iter()
+                                        .all(|user| *user == session.user.id)
+                            })
+                        })
+                        .map(|channel| call_signal(session, channel, CallSignal::StopRinging));
                 }
                 if let Phase::Account { gateway, .. } = &mut self.phase
                     && let Some(session) = gateway.controls.watched()
@@ -810,6 +883,9 @@ impl App {
                         );
                     }
                     gateway.watch_open = false;
+                }
+                if let Some(task) = cancel {
+                    return task;
                 }
             }
             Message::WatchStream(key) => {
@@ -1787,7 +1863,8 @@ impl App {
                             button(text("Share screen").size(12))
                                 .on_press_maybe(
                                     (running
-                                        && gateway.voice_guild.is_some()
+                                        && (gateway.voice_guild.is_some()
+                                            || gateway.voice_call.is_some())
                                         && !gateway.share_picker.is_open())
                                     .then_some(Message::OpenSharePicker),
                                 )
@@ -1901,6 +1978,32 @@ impl App {
                     line.style(text::secondary)
                 });
             }
+            for call in &gateway.navigation.incoming_calls {
+                // Answering joins voice; a call already joined has no prompt.
+                if gateway.voice_call == Some(call.channel_id) && in_voice {
+                    continue;
+                }
+                banner_column = banner_column.push(
+                    container(
+                        row![
+                            text(format!("Incoming call: {}", call.label))
+                                .size(13)
+                                .font(bold)
+                                .width(Length::Fill),
+                            button(text("Accept").size(12))
+                                .on_press(Message::AcceptCall(call.channel_id))
+                                .style(style::action_button(false)),
+                            button(text("Decline").size(12))
+                                .on_press(Message::DeclineCall(call.channel_id))
+                                .style(style::action_button(true)),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::alignment::Vertical::Center),
+                    )
+                    .padding([6, 10])
+                    .style(style::card),
+                );
+            }
             let banner: Option<Element<'_, Message>> = Some(banner_column.into());
 
             // ---- the user's panel at the foot of the sidebar ----
@@ -1926,7 +2029,12 @@ impl App {
                             ]
                             .width(Length::Fill),
                             button(text("Leave").size(12))
-                                .on_press_maybe(gateway.voice_guild.map(|_| Message::LeaveVoice),)
+                                .on_press_maybe(
+                                    gateway
+                                        .voice_guild
+                                        .or(gateway.voice_call)
+                                        .map(|_| Message::LeaveVoice),
+                                )
                                 .style(style::action_button(true)),
                         ]
                         .align_y(iced::alignment::Vertical::Center),
@@ -2030,6 +2138,7 @@ impl App {
                     footer: foot.into(),
                     banner,
                     voice_bar,
+                    voice_call: gateway.voice_call.filter(|_| in_voice),
                     friends: self.friends.open.then(|| {
                         friends::view(&self.friends, &gateway.navigation.relationships)
                             .map(Message::Friends)

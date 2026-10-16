@@ -1804,6 +1804,7 @@ mod tests {
             message_reference: None,
             referenced_message: Referenced::Unknown,
             nonce: None,
+            call: None,
         }
     }
 

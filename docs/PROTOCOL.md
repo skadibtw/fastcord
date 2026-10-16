@@ -462,6 +462,17 @@ Implemented in `fastcord-discord::relationship` (REST), `gateway/decode.rs` and 
 - Profile: `GET /users/{id}/profile?with_mutual_guilds=true&with_mutual_friends_count=true`. Only `user` is required; `user_profile.bio` (600 characters kept), `user_profile.pronouns`, the length of `mutual_guilds` and `mutual_friends_count` (or the length of `mutual_friends`) are used when present, everything else is ignored.
 - Not established: whether accepting needs `{}` or `{"type": 1}`, the exact error codes for blocked senders and disabled requests, and whether bots have profiles.
 
+## Direct and group calls (milestone 47)
+
+Implemented in `fastcord-model::call`, `gateway/decode.rs`, `state/calls.rs` and `fastcord-discord::call`. Shapes come from observed web-client traffic and are **unverified** against a live account.
+
+- `CALL_CREATE` (`channel_id`, `ringing: [user ids]`, `voice_states: [...]`) adds or replaces a call; `CALL_UPDATE` (`channel_id`, `ringing`) replaces the ringing set; `CALL_DELETE` (`channel_id`) removes it. A guild-less `VOICE_STATE_UPDATE` adds, moves or removes the participant (a connected user is never ringing). `CHANNEL_DELETE` drops the call. READY clears all calls: a reconnect rebuilds them from new `CALL_CREATE`s. At most 32 calls and 16 users per list are kept.
+- The account is rung when its own ID is in `ringing` (an incoming call).
+- Join / accept / leave: main Gateway opcode 4 with `guild_id: null` and the DM `channel_id` (`channel_id: null` leaves). `VOICE_STATE_UPDATE` has a null `guild_id` and `VOICE_SERVER_UPDATE` carries `channel_id` instead of `guild_id`; the media session correlator, the voice Identify `server_id` (the channel ID) and DAVE are the guild path unchanged. Joining a call replaces any guild voice connection (one request, one parent connection).
+- Ring: `POST /channels/{id}/call/ring` with `{"recipients": null}` (ring everyone not connected) after the join request. Decline, and hang up before anyone answered: `POST /channels/{id}/call/stop-ringing` with `{"recipients": null}`. Each is one request at user-write priority; a failure is shown, never retried.
+- Call messages are type 3 with `call: {"participants": [ids], "ended_timestamp": string|null}`. Presentation: no end yet reads "started a call", an end with only the caller connected reads "Missed call from ...", otherwise "called. The call has ended."
+- Not established: whether `recipients` must name the account on stop-ringing, whether Discord rings automatically on the join request (the ring request is then redundant), `call/ring` error codes (for example a blocked user), and the screen-share stream key form in a private call beyond the documented `call:{channel}:{owner}`.
+
 ## Message search (milestone 43)
 
 Implemented in `fastcord-discord::search`. Evidence: route and field shapes come from community user-client documentation and are **unverified**: `fixtures/rest/message-search.json` and `message-search-not-ready.json` are synthetic, fabricated-ID payloads in those shapes, not captures. No live check exists yet (see `docs/TESTING.md`).

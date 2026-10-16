@@ -313,6 +313,12 @@ Each milestone in `docs/SPEC.md` §16 lists acceptance criteria. Before committi
 - **Unverified fixtures:** `fixtures/rest/user-profile-synthetic.json` and the inline READY/RELATIONSHIP payloads are synthetic, shaped from community documentation, not captured from Discord.
 - **Not covered offline / pending live checks (alt account only):** convergence with an official client across READY and reconnect, the accept body (`{}`), real error codes for blocked senders, the profile route, and a real launch of the Friends screen and profile popup. No Online tab exists (presence is milestone 46).
 
+### Direct and group calls (milestone 47)
+
+- Offline: `fastcord-model` `tests/fixtures.rs` (call message `call` field), `fastcord-discord` `state::calls::tests` (create/update/delete, incoming marker, joining stops ringing, move and leave, 32-call and 16-user bounds) and `state::tests` (events through the decoder, convergence, READY reset, byte ledger), `call::tests` (route and channel major parameter for ring and stop-ringing), `fastcord-app` `timeline::tests` (started, missed and ended call messages). The media session correlator already has private-call join tests (`fastcord-media` `session`).
+- **Unverified fixtures:** the inline CALL_CREATE/UPDATE/DELETE, voice state and call-message payloads are synthetic, shaped from observed web-client traffic, not captured from Discord.
+- **Not covered offline / pending live checks (alt account only):** calls in both directions with an official client for DM and group DM, mute/deafen/device settings and screen sharing inside a call, cancel-before-answer and answer-elsewhere convergence, reconnect with a call in progress, whether `call/ring` is needed after the join, the stop-ringing body, and a real launch of the Call button and incoming-call bar. No camera is claimed.
+
 ### Desktop notifications (milestone 42)
 
 Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, window inactive, enabled, unmuted, not own), the 5 s cooldown with text-free coalescing, replay de-duplication and the 128-ID / 80-character bounds; `fastcord-platform` `notify::tests` cover clipping. Manual and not yet recorded: a real toast on Windows (an unpackaged build may need a Start-menu shortcut with AUMID `fastcord`), and Linux/macOS adapters (not implemented).

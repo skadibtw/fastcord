@@ -177,6 +177,16 @@ pub struct NavigationSnapshot {
     pub permissions_pending: bool,
     /// Friends, blocks and pending requests (shared, rebuilt per change).
     pub relationships: std::sync::Arc<[fastcord_model::Relationship]>,
+    /// Live DM and group-DM calls (shared, rebuilt per change).
+    pub calls: std::sync::Arc<[super::CallInfo]>,
+    /// Calls that ring this account, with the conversation's name.
+    pub incoming_calls: Vec<IncomingCall>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IncomingCall {
+    pub channel_id: Snowflake,
+    pub label: String,
 }
 
 /// Reducer-owned selection. Memory has at most one channel ID per joined guild
@@ -493,6 +503,19 @@ impl Navigation {
             selection: self.selection(store),
             permissions_pending,
             relationships: store.relationships(),
+            calls: store.calls(),
+            incoming_calls: store
+                .calls()
+                .iter()
+                .filter(|call| call.ringing_me)
+                .filter_map(|call| {
+                    let channel = store.private_channel(call.channel_id)?;
+                    Some(IncomingCall {
+                        channel_id: call.channel_id,
+                        label: private_name(store, channel),
+                    })
+                })
+                .collect(),
         }
     }
 

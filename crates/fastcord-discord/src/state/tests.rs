@@ -1588,3 +1588,33 @@ fn oversized_required_emoji_metadata_trips_the_existing_store_safety_limit() {
     assert!(store.bytes() <= 32 * 1024);
     check(&store);
 }
+
+// Synthetic payloads in the observed web-client shape; unverified against a
+// live account (docs/TESTING.md).
+#[test]
+fn private_calls_follow_create_update_voice_and_delete_and_reset_on_ready() {
+    let mut store = ready_store();
+    let ring = format!(
+        r#"{{"channel_id":"900","ringing":["{ME}","31"],"voice_states":[{{"channel_id":"900","user_id":"31","session_id":"s"}}]}}"#
+    );
+    assert!(apply(&mut store, "CALL_CREATE", &ring).calls);
+    let calls = store.calls();
+    assert_eq!(calls.len(), 1);
+    // A user who is connected is no longer ringing; the account still is.
+    assert!(calls[0].ringing_me && calls[0].participants == [id(31)]);
+    assert!(!apply(&mut store, "CALL_CREATE", &ring).calls);
+
+    // Answering elsewhere: the account joins and Discord stops ringing it.
+    let joined = format!(r#"{{"channel_id":"900","user_id":"{ME}","session_id":"s"}}"#);
+    assert!(apply(&mut store, "VOICE_STATE_UPDATE", &joined).calls);
+    assert!(!store.calls()[0].ringing_me);
+
+    let update = r#"{"channel_id":"900","ringing":[]}"#;
+    assert!(!apply(&mut store, "CALL_UPDATE", update).calls);
+    assert!(apply(&mut store, "CALL_DELETE", r#"{"channel_id":"900"}"#).calls);
+    assert!(store.calls().is_empty());
+
+    apply(&mut store, "CALL_CREATE", &ring);
+    apply(&mut store, "READY", READY);
+    assert!(store.calls().is_empty(), "a reconnect forgets stale calls");
+}
