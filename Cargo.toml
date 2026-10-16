@@ -1,6 +1,14 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor/block", "vendor/coreaudio-rs"]
+
+# coreaudio-rs 0.14.2 leaks callback allocations when registration fails (#68).
+# block 0.1.6 declares an uninhabited foreign static; keep Metal's existing
+# dependency/API while fixing its opaque class declaration (see provenance).
+[patch.crates-io]
+block = { path = "vendor/block" }
+coreaudio-rs = { path = "vendor/coreaudio-rs" }
 
 [workspace.package]
 version = "0.1.0-alpha.1"

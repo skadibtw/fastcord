@@ -1,0 +1,5 @@
+# Match packaging/macos/Info.plist and the CoreVideo APIs used by the codecs.
+# An explicitly supplied deployment target (for example a newer SDK baseline)
+# remains authoritative. This variable affects only Apple-target builds.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "12.3"

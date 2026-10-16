@@ -9,6 +9,7 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
@@ -287,7 +288,8 @@ pub(crate) fn plan_stream(
 /// Opens device streams for the engine thread. The engine is generic over
 /// this so its lifecycle can be exercised without hardware.
 pub(crate) trait Backend {
-    /// Dropping a stream stops it and releases its callback thread.
+    /// Dropping a stream stops it and releases the application's callback
+    /// resources before returning; backend disposal may finish separately.
     type Stream;
 
     /// The current default endpoint identity; queried only during an active call.
@@ -311,6 +313,55 @@ pub(crate) trait Backend {
 /// The platform's native audio host through cpal.
 pub(crate) struct CpalBackend {
     host: cpal::Host,
+}
+
+/// cpal's CoreAudio monitors shut down asynchronously when their stream is
+/// dropped. Keep teardown on the owner until both data and error closures have
+/// released their resources, including any last monitor-held stream reference.
+/// No channel operation takes place while invoking either callback.
+pub(crate) struct RetiringStream<S> {
+    stream: Option<S>,
+    retired: mpsc::Receiver<()>,
+}
+
+type CpalStream = RetiringStream<cpal::Stream>;
+
+impl<S> RetiringStream<S> {
+    fn build<E>(
+        build: impl FnOnce(mpsc::SyncSender<()>, mpsc::SyncSender<()>) -> Result<S, E>,
+    ) -> Result<Self, E> {
+        let (retirement, retired) = mpsc::sync_channel(0);
+        // Only successful builds have a stream whose drop initiates shutdown.
+        // Do not wait after an error: a backend may retain a callback from a
+        // failed native registration, without providing any cleanup handle.
+        let stream = build(retirement.clone(), retirement)?;
+        Ok(Self {
+            stream: Some(stream),
+            retired,
+        })
+    }
+}
+
+impl<S> Drop for RetiringStream<S> {
+    fn drop(&mut self) {
+        drop(self.stream.take());
+        // Nobody sends a message; disconnection proves both closures retired.
+        let _ = self.retired.recv();
+    }
+}
+
+/// Fields drop in declaration order: release callback resources before waking
+/// the owner. Access through a method keeps the complete owner in the closure
+/// (Rust's disjoint closure capture must not discard the retirement sender).
+struct CallbackOwner<C> {
+    callback: C,
+    _retirement: mpsc::SyncSender<()>,
+}
+
+impl<C> CallbackOwner<C> {
+    fn callback(&mut self) -> &mut C {
+        &mut self.callback
+    }
 }
 
 impl CpalBackend {
@@ -352,9 +403,9 @@ impl CpalBackend {
             StreamPlan,
             C,
             Arc<StreamCounters>,
-        ) -> Result<cpal::Stream, cpal::Error>,
+        ) -> Result<CpalStream, cpal::Error>,
         counters: &Arc<StreamCounters>,
-    ) -> Result<(cpal::Stream, StreamFormat), AudioError> {
+    ) -> Result<(CpalStream, StreamFormat), AudioError> {
         let mut plan = plan;
         let format = |plan: StreamPlan, period: Option<u32>| StreamFormat {
             rate: plan.config.sample_rate,
@@ -375,8 +426,9 @@ impl CpalBackend {
                 Err(error) => return Err(AudioError::backend(direction, &error)),
             }
         };
-        let period = stream.buffer_size().ok();
-        stream
+        let native = stream.stream.as_ref().expect("successfully built stream");
+        let period = native.buffer_size().ok();
+        native
             .play()
             .map_err(|error| AudioError::backend(direction, &error))?;
         Ok((stream, format(plan, period)))
@@ -408,23 +460,33 @@ fn build_input(
     plan: StreamPlan,
     callback: InputCallback,
     counters: Arc<StreamCounters>,
-) -> Result<cpal::Stream, cpal::Error> {
+) -> Result<CpalStream, cpal::Error> {
     fn typed<T>(
         device: &cpal::Device,
         config: StreamConfig,
-        mut callback: InputCallback,
+        callback: InputCallback,
         counters: Arc<StreamCounters>,
-    ) -> Result<cpal::Stream, cpal::Error>
+    ) -> Result<CpalStream, cpal::Error>
     where
         T: SizedSample,
         f32: FromSample<T>,
     {
-        device.build_input_stream::<T, _, _>(
-            config,
-            move |data: &[T], _: &cpal::InputCallbackInfo| callback.process(data),
-            move |error: cpal::Error| counters.record_error(error.kind()),
-            None,
-        )
+        RetiringStream::build(|data_retirement, error_retirement| {
+            let mut callback = CallbackOwner {
+                callback,
+                _retirement: data_retirement,
+            };
+            let mut counters = CallbackOwner {
+                callback: counters,
+                _retirement: error_retirement,
+            };
+            device.build_input_stream::<T, _, _>(
+                config,
+                move |data: &[T], _: &cpal::InputCallbackInfo| callback.callback().process(data),
+                move |error: cpal::Error| counters.callback().record_error(error.kind()),
+                None,
+            )
+        })
     }
     dispatch_format!(plan.format, typed, device, plan.config, callback, counters)
 }
@@ -434,28 +496,40 @@ fn build_output(
     plan: StreamPlan,
     callback: OutputCallback,
     counters: Arc<StreamCounters>,
-) -> Result<cpal::Stream, cpal::Error> {
+) -> Result<CpalStream, cpal::Error> {
     fn typed<T>(
         device: &cpal::Device,
         config: StreamConfig,
-        mut callback: OutputCallback,
+        callback: OutputCallback,
         counters: Arc<StreamCounters>,
-    ) -> Result<cpal::Stream, cpal::Error>
+    ) -> Result<CpalStream, cpal::Error>
     where
         T: SizedSample + Sample + FromSample<f32>,
     {
-        device.build_output_stream::<T, _, _>(
-            config,
-            move |data: &mut [T], _: &cpal::OutputCallbackInfo| callback.process(data),
-            move |error: cpal::Error| counters.record_error(error.kind()),
-            None,
-        )
+        RetiringStream::build(|data_retirement, error_retirement| {
+            let mut callback = CallbackOwner {
+                callback,
+                _retirement: data_retirement,
+            };
+            let mut counters = CallbackOwner {
+                callback: counters,
+                _retirement: error_retirement,
+            };
+            device.build_output_stream::<T, _, _>(
+                config,
+                move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+                    callback.callback().process(data)
+                },
+                move |error: cpal::Error| counters.callback().record_error(error.kind()),
+                None,
+            )
+        })
     }
     dispatch_format!(plan.format, typed, device, plan.config, callback, counters)
 }
 
 impl Backend for CpalBackend {
-    type Stream = cpal::Stream;
+    type Stream = CpalStream;
 
     fn default_key(&mut self, direction: Direction) -> Option<DeviceKey> {
         default_device(&self.host, direction)
@@ -496,6 +570,111 @@ impl Backend for CpalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn teardown_waits_for_detached_data_and_error_callbacks() {
+        let counters = Arc::new(StreamCounters::default());
+        let probe = Arc::downgrade(&counters);
+        let (shutdown, stopped) = mpsc::channel::<()>();
+        let (release_data, data_release) = mpsc::channel::<()>();
+        let (release_error, error_release) = mpsc::channel::<()>();
+        let (data_retired, data_done) = mpsc::channel();
+        let (dropping, drop_started) = mpsc::channel();
+        let (done, finished) = mpsc::channel();
+        let stream = RetiringStream::build(|data_retirement, error_retirement| {
+            let data = CallbackOwner {
+                callback: Arc::clone(&counters),
+                _retirement: data_retirement,
+            };
+            let error = CallbackOwner {
+                callback: counters,
+                _retirement: error_retirement,
+            };
+            std::thread::spawn(move || {
+                assert!(stopped.recv().is_err());
+                dropping.send(()).unwrap();
+                data_release.recv().unwrap();
+                drop(data);
+                data_retired.send(()).unwrap();
+                error_release.recv().unwrap();
+                drop(error);
+            });
+            Ok::<_, ()>(shutdown)
+        })
+        .unwrap();
+        let owner = std::thread::spawn(move || {
+            drop(stream);
+            done.send(probe.upgrade().is_none()).unwrap();
+        });
+        drop_started.recv().unwrap();
+        assert!(matches!(
+            finished.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_data.send(()).unwrap();
+        data_done.recv().unwrap();
+        assert!(matches!(
+            finished.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_error.send(()).unwrap();
+        assert!(
+            finished.recv().unwrap(),
+            "callback resources survived teardown"
+        );
+        owner.join().unwrap();
+    }
+
+    #[test]
+    fn failed_build_returns_without_waiting_for_an_unowned_callback() {
+        let counters = Arc::new(StreamCounters::default());
+        let probe = Arc::downgrade(&counters);
+        let mut retained = None;
+        let result = RetiringStream::<()>::build(|data_retirement, error_retirement| {
+            drop(data_retirement);
+            retained = Some(CallbackOwner {
+                callback: counters,
+                _retirement: error_retirement,
+            });
+            Err("failed to open stream")
+        });
+        assert!(matches!(result, Err("failed to open stream")));
+        assert!(probe.upgrade().is_some());
+        drop(retained);
+        assert!(probe.upgrade().is_none());
+    }
+
+    #[test]
+    fn retirement_tracking_does_not_touch_the_heap_in_callbacks() {
+        let (retirement, retired) = mpsc::sync_channel(0);
+        let counters = Arc::new(StreamCounters::default());
+        let (producer, _consumer) = crate::ring::sample_ring(1, 480);
+        let mut input = CallbackOwner {
+            callback: InputCallback::new(
+                producer,
+                Arc::clone(&counters),
+                Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ),
+            _retirement: retirement.clone(),
+        };
+        let mut error = CallbackOwner {
+            callback: counters,
+            _retirement: retirement,
+        };
+        let before = crate::alloc_counter::thread_callback_heap_ops();
+        {
+            let _scope = crate::audit::CallbackScope::enter();
+            input.callback().process(&[0.25f32; 480]);
+            error.callback().record_error(cpal::ErrorKind::Xrun);
+        }
+        assert_eq!(crate::alloc_counter::thread_callback_heap_ops(), before);
+        drop(input);
+        drop(error);
+        assert!(matches!(
+            retired.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
 
     fn range(
         channels: u16,

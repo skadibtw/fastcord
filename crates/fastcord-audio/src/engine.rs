@@ -4,8 +4,9 @@
 //! pipelines, and closes the streams again; device callbacks only touch the
 //! preallocated rings. The engine exists only while audio is needed, so idle
 //! has no audio thread or callback stream (SPEC §2.3 invariant 8).
-//! Dropping [`AudioEngine`] stops the streams (which joins their callback
-//! threads) and then joins the owner thread.
+//! Dropping [`AudioEngine`] stops the streams, waits for the application's data
+//! and error callback resources to retire, and joins the owner thread. Native
+//! backend disposal can finish after releasing those callback resources.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -364,8 +365,10 @@ impl AudioEngine {
         }
     }
 
-    /// Weak handles to the per-stream counters, which the callbacks keep
-    /// alive: once both are dead, no callback closure exists anymore.
+    /// Weak handles to counters held by the application's data and error
+    /// closures: once both are dead, those callback resources have retired.
+    /// This does not assert completion of every backend thread or native
+    /// disposal operation that can follow destruction of our closures.
     #[cfg(test)]
     fn callback_probes(
         &self,

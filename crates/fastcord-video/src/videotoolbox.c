@@ -197,10 +197,13 @@ void fc_vt_encoder_destroy(void *handle) {
 }
 
 /* Buffer attachments describe actual output pixels. A format extension is a
- * fallback when the decoder does not attach the value to its CVPixelBuffer. */
-static CFTypeRef decoded_attachment(FcDecoder *d, CVPixelBufferRef p, CFStringRef buffer_key, CFStringRef format_key) {
-    CFTypeRef value = CVBufferGetAttachment(p, buffer_key, NULL);
-    return value ? value : CMFormatDescriptionGetExtension(d->format, format_key);
+ * fallback when the decoder does not attach the value to its CVPixelBuffer.
+ * Both paths return an owned reference; the caller must release it. */
+static CFTypeRef copy_decoded_attachment(FcDecoder *d, CVPixelBufferRef p, CFStringRef buffer_key, CFStringRef format_key) {
+    CFTypeRef value = CVBufferCopyAttachment(p, buffer_key, NULL);
+    if (value) return value;
+    value = CMFormatDescriptionGetExtension(d->format, format_key);
+    return value ? CFRetain(value) : NULL;
 }
 
 static FcColor decoded_color(FcDecoder *d, CVPixelBufferRef p) {
@@ -208,14 +211,15 @@ static FcColor decoded_color(FcDecoder *d, CVPixelBufferRef p) {
     OSType pixel = CVPixelBufferGetPixelFormatType(p);
     color.full_range = pixel == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ? 1 :
                        pixel == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ? 0 : UINT32_MAX;
-    CFTypeRef matrix = decoded_attachment(d, p, kCVImageBufferYCbCrMatrixKey, kCMFormatDescriptionExtension_YCbCrMatrix);
+    CFTypeRef matrix = copy_decoded_attachment(d, p, kCVImageBufferYCbCrMatrixKey, kCMFormatDescriptionExtension_YCbCrMatrix);
     if (matrix && CFGetTypeID(matrix) == CFStringGetTypeID()) {
         if (CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2)) color.matrix = 1;
         else if (CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_601_4)) color.matrix = 6;
         else if (CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_2020)) color.matrix = 9;
         else color.matrix = UINT32_MAX;
     }
-    CFTypeRef aspect = decoded_attachment(d, p, kCVImageBufferPixelAspectRatioKey, kCMFormatDescriptionExtension_PixelAspectRatio);
+    if (matrix) CFRelease(matrix);
+    CFTypeRef aspect = copy_decoded_attachment(d, p, kCVImageBufferPixelAspectRatioKey, kCMFormatDescriptionExtension_PixelAspectRatio);
     if (aspect && CFGetTypeID(aspect) == CFDictionaryGetTypeID()) {
         CFTypeRef horizontal = CFDictionaryGetValue((CFDictionaryRef)aspect, kCVImageBufferPixelAspectRatioHorizontalSpacingKey);
         CFTypeRef vertical = CFDictionaryGetValue((CFDictionaryRef)aspect, kCVImageBufferPixelAspectRatioVerticalSpacingKey);
@@ -230,6 +234,7 @@ static FcColor decoded_color(FcDecoder *d, CVPixelBufferRef p) {
             color.aspect_height = (uint32_t)height;
         }
     }
+    if (aspect) CFRelease(aspect);
     return color;
 }
 
