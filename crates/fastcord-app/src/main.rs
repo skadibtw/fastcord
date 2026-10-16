@@ -20,6 +20,7 @@ mod qr;
 mod reactions;
 mod render;
 mod rich;
+mod search;
 mod style;
 mod timeline;
 mod variable_list;
@@ -43,6 +44,10 @@ use zeroize::Zeroize;
 
 const MAX_PRIVATE_RECIPIENT_INPUT_BYTES: usize = 256;
 const MAX_PRIVATE_RECIPIENTS: usize = fastcord_discord::MAX_PRIVATE_RECIPIENTS;
+
+fn search_bar_is_empty(gateway: &GatewayPanel) -> bool {
+    App::search_target(gateway).is_none()
+}
 
 fn main() -> iced::Result {
     render::application(App::boot, App::update, App::view)
@@ -74,6 +79,7 @@ struct App {
     window_drawable: bool,
     /// The per-person volume sliders are open.
     voice_details: bool,
+    search: search::State,
 }
 
 #[derive(Debug)]
@@ -182,6 +188,7 @@ enum Message {
     ),
     CloseViewer,
     Composer(composer::Event),
+    Search(search::Event),
     EmojiPicker(emoji_picker::Event),
     EmojiVisibility(emoji::Occurrence, bool),
     EmojiLoaded(
@@ -231,6 +238,7 @@ impl App {
                 window_active: true,
                 window_drawable: true,
                 voice_details: false,
+                search: search::State::default(),
             },
             Task::perform(
                 async {
@@ -659,6 +667,15 @@ impl App {
                 if let Some(status) = status {
                     return self.handle(Message::Gateway(id, status));
                 }
+                if let Phase::Account { gateway, .. } = &self.phase
+                    && let Some(message) =
+                        self.search.take_pending_jump(gateway.timeline.channel_id)
+                    && let Some(channel) = gateway.timeline.channel_id
+                {
+                    gateway
+                        .controls
+                        .timeline_intent(history::Intent::JumpTo { channel, message });
+                }
             }
             Message::ShowDirects(on) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
@@ -666,6 +683,7 @@ impl App {
                 }
             }
             Message::ToggleVoiceDetails => self.voice_details = !self.voice_details,
+            Message::Search(event) => return self.search_event(event),
             Message::SelectGuild(guild) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.directs = false;
@@ -1422,6 +1440,7 @@ impl App {
         let (task, worker) = Task::run(stream, move |()| Message::Navigation(id)).abortable();
         let attachment_cache =
             crate::attachments::AttachmentCache::default_root(session.user.id).ok();
+        self.search = search::State::default();
         self.phase = Phase::Account {
             session,
             persistence,
@@ -1441,6 +1460,55 @@ impl App {
                 .controls
                 .set_viewing(self.window_active && self.window_drawable);
         }
+    }
+
+    /// The open conversation as the search needs it: (guild, channel).
+    fn search_target(gateway: &GatewayPanel) -> Option<(Option<Snowflake>, Snowflake)> {
+        let navigation = &gateway.navigation;
+        if let Some(private) = &navigation.private_selection {
+            return Some((None, private.channel_id));
+        }
+        let selection = navigation.selection.as_ref()?;
+        selection
+            .permissions
+            .read_history
+            .then_some((Some(selection.guild_id), selection.channel_id))
+    }
+
+    fn search_event(&mut self, event: search::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        if let search::Event::Jump(index) = event {
+            if let Some(hit) = self.search.hit(index).cloned() {
+                if gateway.timeline.channel_id == Some(hit.channel) {
+                    gateway.controls.timeline_intent(history::Intent::JumpTo {
+                        channel: hit.channel,
+                        message: hit.message,
+                    });
+                } else {
+                    self.search.set_pending_jump(hit.channel, hit.message);
+                    match hit.guild {
+                        Some(guild) => gateway.controls.select_channel(guild, hit.channel),
+                        None => gateway.controls.select_private_channel(hit.channel),
+                    }
+                }
+            }
+            return Task::none();
+        }
+        let Some((guild, channel)) = Self::search_target(gateway) else {
+            return Task::none();
+        };
+        let context = search::Context {
+            client: &session.client,
+            account: session.user.id,
+            guild,
+            channel,
+        };
+        self.search.update(event, &context).map(Message::Search)
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -1481,6 +1549,12 @@ impl App {
         {
             let voice_audio = gateway.controls.voice_audio_state();
             let voice_controls = gateway.controls.voice_controls();
+            let search_bar: Element<'_, Message> = match Self::search_target(gateway) {
+                Some((guild, _)) => {
+                    search::view(&self.search, guild.is_some()).map(Message::Search)
+                }
+                None => text("").size(1).into(),
+            };
             let watching = gateway.controls.watched();
             let in_voice = voice_audio != gateway::VoiceAudioState::Idle;
             let running = voice_audio == gateway::VoiceAudioState::Running;
@@ -1670,18 +1744,20 @@ impl App {
             }
             say(self.notice.clone().unwrap_or_default(), false);
             say(gateway.attachment_notice.unwrap_or("").to_owned(), false);
-            let banner: Option<Element<'_, Message>> = (!notes.is_empty()).then(|| {
-                column(notes.into_iter().map(|(line, danger)| {
-                    let line = text(line).size(12);
-                    if danger {
-                        line.style(text::danger).into()
-                    } else {
-                        line.style(text::secondary).into()
-                    }
-                }))
-                .spacing(2)
-                .into()
-            });
+            let has_search = !search_bar_is_empty(gateway);
+            let mut banner_column = column![].spacing(2);
+            if has_search {
+                banner_column = banner_column.push(search_bar);
+            }
+            for (line, danger) in notes {
+                let line = text(line).size(12);
+                banner_column = banner_column.push(if danger {
+                    line.style(text::danger)
+                } else {
+                    line.style(text::secondary)
+                });
+            }
+            let banner: Option<Element<'_, Message>> = Some(banner_column.into());
 
             // ---- the user's panel at the foot of the sidebar ----
             let display = session.user.display_name().to_owned();

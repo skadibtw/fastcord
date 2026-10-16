@@ -1,0 +1,40 @@
+{
+  "analytics_id": "fixture",
+  "doing_deep_historical_index": false,
+  "total_results": 27,
+  "messages": [
+    [
+      {
+        "id": "1290000000000000010", "type": 0, "content": "before the match", "channel_id": "500",
+        "author": {"id": "2", "username": "alt_fixture", "avatar": null, "discriminator": "0", "global_name": "Fixture Author"},
+        "attachments": [], "embeds": [], "mentions": [], "mention_roles": [], "pinned": false,
+        "mention_everyone": false, "tts": false, "timestamp": "2026-10-07T12:00:00.000000+00:00",
+        "edited_timestamp": null, "flags": 0, "components": []
+      },
+      {
+        "id": "1290000000000000011", "type": 0, "content": "the needle is here", "channel_id": "500", "hit": true,
+        "author": {"id": "2", "username": "alt_fixture", "avatar": null, "discriminator": "0", "global_name": "Fixture Author"},
+        "attachments": [{"id": "9000", "filename": "a.png", "size": 10, "url": "https://cdn.example.invalid/a.png", "content_type": "image/png"}],
+        "embeds": [], "mentions": [], "mention_roles": [], "pinned": false,
+        "mention_everyone": false, "tts": false, "timestamp": "2026-10-07T12:01:00.000000+00:00",
+        "edited_timestamp": null, "flags": 0, "components": []
+      },
+      {
+        "id": "1290000000000000012", "type": 0, "content": "after the match", "channel_id": "500",
+        "author": {"id": "3", "username": "other_fixture", "avatar": null, "discriminator": "0", "global_name": null},
+        "attachments": [], "embeds": [], "mentions": [], "mention_roles": [], "pinned": false,
+        "mention_everyone": false, "tts": false, "timestamp": "2026-10-07T12:02:00.000000+00:00",
+        "edited_timestamp": null, "flags": 0, "components": []
+      }
+    ],
+    [
+      {
+        "id": "1290000000000000005", "type": 0, "content": "another needle", "channel_id": "501", "hit": true,
+        "author": {"id": "2", "username": "alt_fixture", "avatar": null, "discriminator": "0", "global_name": "Fixture Author"},
+        "attachments": [], "embeds": [], "mentions": [], "mention_roles": [], "pinned": false,
+        "mention_everyone": false, "tts": false, "timestamp": "2026-10-06T08:00:00.000000+00:00",
+        "edited_timestamp": null, "flags": 0, "components": []
+      }
+    ]
+  ]
+}

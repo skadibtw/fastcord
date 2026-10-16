@@ -25,6 +25,7 @@ mod reaction;
 mod remote_auth;
 mod rest;
 mod route;
+mod search;
 mod secret;
 mod send;
 pub mod state;
@@ -46,6 +47,10 @@ pub use remote_auth::{QrLink, RemoteAuth, RemoteAuthError, RemoteAuthEvent, Remo
 pub use reqwest::{Method, StatusCode};
 pub use rest::{Priority, RestClient, RestRequest, RestResponse};
 pub use route::{MajorParameter, Route, RouteKey};
+pub use search::{
+    MAX_SEARCH_CHARS, MAX_SEARCH_OFFSET, SEARCH_PAGE_SIZE, SearchHas, SearchOutcome, SearchPage,
+    SearchQuery, SearchScope,
+};
 pub use secret::UserToken;
 pub use send::{
     ComposeError, MAX_CONTENT_CHARS, MentionPolicy, Nonce, NonceGenerator, OutgoingMessage,

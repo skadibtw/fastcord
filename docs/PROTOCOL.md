@@ -451,3 +451,13 @@ Implemented by `fastcord-platform::capture` (sources, Windows.Graphics.Capture, 
 
 ### Not established (verify live, see docs/TESTING.md)
 Whether the official client accepts the H.264 stream without a profile in Select Protocol, and renders its colors correctly when the encoder's SPS carries no VUI color description (fastcord's own decoder assumes BT.709 limited range; the capture converts to exactly that, but nothing signals it); whether Discord answers a Go Live from this client profile (U1b) and what STREAM_DELETE reasons occur in practice; whether `Media Sink Wants` 0 arrives when nobody watches (the pause path is tested against fakes only); the encoder bitrate honored by the hardware transform within the layer's ceiling over a real network; resource figures for SPEC §12.
+
+## Message search (milestone 43)
+
+Implemented in `fastcord-discord::search`. Evidence: route and field shapes come from community user-client documentation and are **unverified**: `fixtures/rest/message-search.json` and `message-search-not-ready.json` are synthetic, fabricated-ID payloads in those shapes, not captures. No live check exists yet (see `docs/TESTING.md`).
+
+- Routes: `GET /guilds/{guild}/messages/search` and, for DMs and group DMs, `GET /channels/{channel}/messages/search`. Query: `content` (at most 1024 characters), `author_id`, `channel_id` (guild searches only), `has` (`image|video|sound|file|link|embed|sticker`), `min_id`/`max_id` (date bounds as snowflakes), `offset` (multiples of 25, at most 9975). A query with no text, author or `has` is never sent.
+- Response: `{ "total_results", "messages": [[context..., hit, ...context]] }`, at most 25 groups of at most 8 messages; the message with `"hit": true` is the result. A hit outside the requested channel makes the page invalid.
+- `202` with `{ "code": 110000, "retry_after": seconds }` means the index is not ready. The delay is clamped to 1-30 s (a missing or invalid value waits 1 s); the app retries at most five times and then reports it.
+- Searches use the `UserRead` priority and the normal 429 handling of the REST scheduler.
+- Not established: whether a `retry_after` on `202` is in seconds for every client build, the exact `has` values accepted, behaviour for forum/thread channels, and whether `channel_id` may be repeated.

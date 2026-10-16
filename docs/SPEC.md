@@ -627,6 +627,8 @@ Live-test platforms (see `docs/TESTING.md`): **Windows** — the maintainer's PC
 37. **macOS stream audio.** Add ScreenCaptureKit audio and self-exclusion. Acceptance: official viewer hears stream audio with sync; source/permission changes stop only affected media; fastcord is excluded on supported mode.
 38. **Performance and release acceptance.** Enforce final byte caps, idle scheduling, resource teardown, and documented measurements; fix violations in the same feature commit. Acceptance: idle <150 MB and mean <0.5% one core on the recorded primary scenario; 30-minute voice and 20-cycle share tests meet section 12; all four packaged targets pass their defined live/manual matrix; every supported MVP action is usable without a stub.
 
+43. **Server-backed message search.** Guild and DM search through Discord's search routes with content, author, channel and attachment filters, bounded paging (100 previews, 128 KiB), stale-answer rejection, visible indexing/error states and jump-to-message via the history intent. Acceptance: filters return paginated server results and a result opens its exact context; no history crawl and no persisted plaintext. Wire shapes are unverified until checked on the alt account.
+
 ### Feature coverage
 
 | Required capability | Milestones |
