@@ -47,6 +47,8 @@ impl<T> Default for Window<T> {
 pub struct GuildRow {
     pub id: Snowflake,
     pub name: String,
+    /// The icon hash for the public CDN; none without an icon.
+    pub icon: Option<String>,
     /// Outage guilds have only an ID and cannot be explicitly selected.
     pub available: bool,
     pub selected: bool,
@@ -362,6 +364,7 @@ impl Navigation {
                     unread: unread.unread,
                     mentions: unread.mentions,
                     id,
+                    icon: guild.and_then(|guild| guild.icon().map(str::to_owned)),
                     name: guild.map_or_else(
                         || id.to_string(),
                         |guild| capped_name(Some(guild.name()), "Unnamed guild"),

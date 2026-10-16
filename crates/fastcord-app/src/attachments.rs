@@ -135,6 +135,9 @@ const MAX_EMOJI_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_EMOJI_FRAMES: usize = 120;
 const MAX_EMOJI_RGBA: usize = 512 * 1024;
 const EMOJI_SIDE: u32 = 32;
+/// Avatars and icons are requested at `size=64` and never decoded larger.
+pub const AVATAR_SIDE: u32 = 64;
+const MAX_AVATAR_FILE_BYTES: u64 = 512 * 1024;
 
 struct PublicEmoji;
 impl UrlRefresh for PublicEmoji {
@@ -672,6 +675,48 @@ impl AttachmentCache {
         }
         self.ensure_active()?;
         Ok(bytes.into())
+    }
+
+    /// A public avatar or server icon (`kind` 2 = user, 3 = server icon, 4 =
+    /// default avatar) from the same credential-free fetcher and disk LRU,
+    /// decoded to at most [`AVATAR_SIDE`] square on the shared decode slots. The
+    /// cache identity is the kind, id and hash, never the URL.
+    pub async fn avatar(
+        &self,
+        kind: u8,
+        id: Snowflake,
+        hash: &str,
+        url: &str,
+    ) -> Result<DecodedImage, AttachmentError> {
+        // Zero channel plus a message >= 2 cannot collide with emoji (0/1) or
+        // with any real attachment.
+        let digest = Sha256::digest(hash.as_bytes());
+        let mut fold = [0u8; 8];
+        fold.copy_from_slice(&digest[..8]);
+        let key = AttachmentKey {
+            account: self.account,
+            channel: Snowflake(0),
+            message: Snowflake((u64::from_le_bytes(fold) << 8) | u64::from(kind.max(2))),
+            attachment: id,
+        };
+        let path = self
+            .fetch_file(&PublicEmoji, key, "avatar.png", url, MAX_AVATAR_FILE_BYTES)
+            .await?;
+        let permit = self
+            .decode_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AttachmentError::WorkerStopped)?;
+        self.ensure_active()?;
+        let image = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            decode_thumbnail(&path, AVATAR_SIDE, AVATAR_SIDE)
+        })
+        .await
+        .map_err(|_| AttachmentError::WorkerStopped)??;
+        self.ensure_active()?;
+        Ok(image)
     }
 
     /// Shares the attachment decoder semaphore: no second independent pool.
@@ -1686,6 +1731,42 @@ mod tests {
         }
         assert_eq!(peak.load(Ordering::SeqCst), FETCH_SLOTS);
         assert_eq!(cache.decode_slots.available_permits(), DECODE_SLOTS);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_avatar_is_fetched_without_credentials_bounded_cached_and_distinct_per_hash() {
+        let (address, seen) = serve(respond({
+            let png = png(256, 256);
+            move |_| ok(&png)
+        }))
+        .await;
+        let root = scratch("avatar");
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let url = format!("http://{address}/avatars/9/h1.png?size=64");
+        let first = cache.avatar(2, Snowflake(9), "h1", &url).await.unwrap();
+        assert_eq!((first.width, first.height), (AVATAR_SIDE, AVATAR_SIDE));
+        cache.avatar(2, Snowflake(9), "h1", &url).await.unwrap();
+        assert_eq!(seen.lock().len(), 1, "the second read is a disk hit");
+        {
+            let head = &seen.lock()[0];
+            assert!(head.starts_with("get /avatars/9/h1.png?size=64 "));
+            assert!(!head.contains("authorization") && !head.contains("cookie"));
+        }
+        // A changed hash is a different cache entry; so is a different kind.
+        cache.avatar(2, Snowflake(9), "h2", &url).await.unwrap();
+        cache.avatar(3, Snowflake(9), "h1", &url).await.unwrap();
+        assert_eq!(seen.lock().len(), 3);
+        // An unavailable avatar fails, leaving the caller's fallback.
+        let (address, _) = serve(respond(|_| status(404))).await;
+        let missing = format!("http://{address}/avatars/9/gone.png");
+        assert_eq!(
+            cache
+                .avatar(2, Snowflake(9), "gone", &missing)
+                .await
+                .unwrap_err(),
+            AttachmentError::Http(404)
+        );
         let _ = fs::remove_dir_all(root);
     }
 

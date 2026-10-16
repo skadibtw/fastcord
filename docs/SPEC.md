@@ -201,6 +201,7 @@ Use a separate unauthenticated HTTP client for CDN resources. Do not forward `Au
 - UI texture/glyph budget: target 16 MiB resident allocation, measured separately from process RSS where drivers keep separate GPU memory.
 - At most four concurrent image fetches and two decodes; decode off the UI thread and cancel off-screen speculative work.
 - Clamp decoded dimensions/pixel count before allocating. Decode thumbnails to display size, not full camera resolution.
+- Avatars and server icons (`cdn.discordapp.com/avatars|icons/{id}/{hash}.png?size=64`, default avatars `embed/avatars/{(id>>22)%6}.png`; `a_` hashes use the static PNG) share the fetcher, disk LRU and decode slots; the UI keeps at most 256 decoded 64x64 handles, requested only for the rows on screen, with the letter circle as fallback.
 - In-app attachment view supports images and common media formats included in the media build; other files expose type, name, size, and user-driven open/download.
 - Animated assets run only while visible and the window is active. Their timers stop when not needed.
 

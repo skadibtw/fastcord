@@ -3,6 +3,7 @@
 mod attachment_ui;
 mod attachments;
 mod audio_devices;
+mod avatars;
 mod captcha;
 mod changes;
 mod composer;
@@ -204,6 +205,7 @@ enum Message {
         Result<attachments::DecodedAnimation, &'static str>,
     ),
     EmojiTick(std::time::Instant),
+    AvatarLoaded(u64, avatars::AvatarKey, Option<attachments::DecodedImage>),
     WindowActive(bool),
     WindowSize(iced::Size),
     /// Direct messages (true) or a server's channels in the sidebar.
@@ -265,7 +267,10 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         let resynchronize = !matches!(
             message,
-            Message::EmojiTick(_) | Message::EmojiLoaded(..) | Message::VideoReady(_)
+            Message::EmojiTick(_)
+                | Message::EmojiLoaded(..)
+                | Message::AvatarLoaded(..)
+                | Message::VideoReady(_)
         );
         let task = self.handle(message);
         if resynchronize {
@@ -277,13 +282,20 @@ impl App {
     }
 
     fn synchronize_emoji(&mut self) -> Task<Message> {
-        let Phase::Account { gateway, .. } = &mut self.phase else {
+        let Phase::Account {
+            session, gateway, ..
+        } = &mut self.phase
+        else {
             return Task::none();
         };
         gateway
             .controls
             .emoji_request(&gateway.emoji_picker.request);
-        gateway.emoji.synchronize(
+        let wanted = wanted_avatars(gateway, &session.user);
+        let avatars = gateway
+            .avatars
+            .synchronize(wanted, gateway.id, gateway.attachments.as_ref());
+        let emoji = gateway.emoji.synchronize(
             self.window_active
                 && self.window_drawable
                 && !self.audio_settings.open
@@ -292,7 +304,8 @@ impl App {
             gateway.emoji_picker.request.open,
             gateway.id,
             gateway.attachments.as_ref(),
-        )
+        );
+        Task::batch([avatars, emoji])
     }
 
     fn synchronize_video(&self) {
@@ -992,6 +1005,18 @@ impl App {
                     );
                 }
             }
+            Message::AvatarLoaded(generation, key, image) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase
+                    && gateway.id == generation
+                {
+                    return gateway.avatars.loaded(
+                        generation,
+                        key,
+                        image,
+                        gateway.attachments.as_ref(),
+                    );
+                }
+            }
             Message::EmojiVisibility(occurrence, visible) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.emoji_visibility(occurrence, visible);
@@ -1629,159 +1654,163 @@ impl App {
             };
 
             // ---- the voice bar: who is in the call, Go Live ----
-            let voice_bar: Option<Element<'_, Message>> = (in_voice
-                || !voice_controls.streams.is_empty()
-                || watching.is_some())
-            .then(|| {
-                let mut people = row![].spacing(8).align_y(iced::alignment::Vertical::Center);
-                for participant in &voice_controls.participants {
-                    let user = participant.user_id;
-                    let name = format!("User {}", user.0 % 10_000);
-                    people = people.push(
-                        container(
-                            row![
-                                container(text(style::initial(&name)).size(12).font(bold))
-                                    .center(24)
-                                    .style(style::avatar(style::avatar_color(user.0))),
-                                text(name).size(13),
-                            ]
-                            .spacing(6)
-                            .align_y(iced::alignment::Vertical::Center),
-                        )
-                        .padding([3, 8])
-                        .style(style::speaking(participant.speaking)),
-                    );
-                }
-                if voice_controls.participants.is_empty() {
-                    people = people.push(
-                        text(if in_voice {
-                            "Waiting for others to speak…"
-                        } else {
-                            ""
-                        })
-                        .size(12)
-                        .style(text::secondary),
-                    );
-                }
-                let mut actions = row![
-                    button(
-                        text(if self.voice_details {
-                            "Hide volume"
-                        } else {
-                            "Volume"
-                        })
-                        .size(12)
-                    )
-                    .on_press(Message::ToggleVoiceDetails)
-                    .style(style::tool_button(self.voice_details, false)),
-                ]
-                .spacing(8)
-                .align_y(iced::alignment::Vertical::Center);
-                if let Some(watching) = &watching {
-                    actions = actions
-                        .push(text(watching.description()).size(12))
-                        .push(
-                            button(text("Show stream").size(12))
-                                .on_press(Message::ShowStream(true))
-                                .style(style::action_button(false)),
-                        )
-                        .push(
-                            button(text("Stop watching").size(12))
-                                .on_press(Message::UnwatchStream)
-                                .style(style::action_button(true)),
+            let voice_bar: Option<Element<'_, Message>> =
+                (in_voice || !voice_controls.streams.is_empty() || watching.is_some()).then(|| {
+                    let mut people = row![].spacing(8).align_y(iced::alignment::Vertical::Center);
+                    for participant in &voice_controls.participants {
+                        let user = participant.user_id;
+                        let name = voice_controls.display_name(user);
+                        people = people.push(
+                            container(
+                                row![
+                                    container(text(style::initial(&name)).size(12).font(bold))
+                                        .center(24)
+                                        .style(style::avatar(style::avatar_color(user.0))),
+                                    text(name).size(13),
+                                ]
+                                .spacing(6)
+                                .align_y(iced::alignment::Vertical::Center),
+                            )
+                            .padding([3, 8])
+                            .style(style::speaking(participant.speaking)),
                         );
-                } else {
-                    for offer in voice_controls.streams.iter() {
-                        actions = actions.push(
-                            button(text(format!("Watch User {}", offer.owner.0 % 10_000)).size(12))
+                    }
+                    if voice_controls.participants.is_empty() {
+                        people = people.push(
+                            text(if in_voice {
+                                "Waiting for others to speak…"
+                            } else {
+                                ""
+                            })
+                            .size(12)
+                            .style(text::secondary),
+                        );
+                    }
+                    let mut actions = row![
+                        button(
+                            text(if self.voice_details {
+                                "Hide volume"
+                            } else {
+                                "Volume"
+                            })
+                            .size(12)
+                        )
+                        .on_press(Message::ToggleVoiceDetails)
+                        .style(style::tool_button(self.voice_details, false)),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::alignment::Vertical::Center);
+                    if let Some(watching) = &watching {
+                        actions = actions
+                            .push(text(watching.description()).size(12))
+                            .push(
+                                button(text("Show stream").size(12))
+                                    .on_press(Message::ShowStream(true))
+                                    .style(style::action_button(false)),
+                            )
+                            .push(
+                                button(text("Stop watching").size(12))
+                                    .on_press(Message::UnwatchStream)
+                                    .style(style::action_button(true)),
+                            );
+                    } else {
+                        for offer in voice_controls.streams.iter() {
+                            actions = actions.push(
+                                button(
+                                    text(format!(
+                                        "Watch {}",
+                                        voice_controls.display_name(offer.owner)
+                                    ))
+                                    .size(12),
+                                )
                                 .on_press_maybe(
                                     running.then(|| Message::WatchStream(offer.key.clone())),
                                 )
                                 .style(style::action_button(false)),
+                            );
+                        }
+                    }
+                    let share = gateway.controls.share_view();
+                    if share.active {
+                        actions = actions.push(text(share.text.clone()).size(12)).push(
+                            button(text("Stop sharing").size(12))
+                                .on_press(Message::StopShare)
+                                .style(style::action_button(true)),
                         );
+                    } else if cfg!(windows) {
+                        actions = actions.push(
+                            button(text("Share screen").size(12))
+                                .on_press_maybe(
+                                    (running
+                                        && gateway.voice_guild.is_some()
+                                        && !gateway.share_picker.is_open())
+                                    .then_some(Message::OpenSharePicker),
+                                )
+                                .style(style::action_button(false)),
+                        );
+                        if !share.text.is_empty() {
+                            actions = actions.push(text(share.text.clone()).size(12));
+                        }
                     }
-                }
-                let share = gateway.controls.share_view();
-                if share.active {
-                    actions = actions.push(text(share.text.clone()).size(12)).push(
-                        button(text("Stop sharing").size(12))
-                            .on_press(Message::StopShare)
-                            .style(style::action_button(true)),
-                    );
-                } else if cfg!(windows) {
-                    actions = actions.push(
-                        button(text("Share screen").size(12))
-                            .on_press_maybe(
-                                (running
-                                    && gateway.voice_guild.is_some()
-                                    && !gateway.share_picker.is_open())
-                                .then_some(Message::OpenSharePicker),
-                            )
-                            .style(style::action_button(false)),
-                    );
-                    if !share.text.is_empty() {
-                        actions = actions.push(text(share.text.clone()).size(12));
-                    }
-                }
-                let mut bar = column![
-                    scrollable(people).direction(scrollable::Direction::Horizontal(
-                        scrollable::Scrollbar::default()
-                    )),
-                    scrollable(actions).direction(scrollable::Direction::Horizontal(
-                        scrollable::Scrollbar::default()
-                    )),
-                ]
-                .spacing(6);
-                if self.voice_details {
-                    for participant in &voice_controls.participants {
-                        let user = participant.user_id;
-                        let volume = voice_controls.volume_percent(user);
+                    let mut bar = column![
+                        scrollable(people).direction(scrollable::Direction::Horizontal(
+                            scrollable::Scrollbar::default()
+                        )),
+                        scrollable(actions).direction(scrollable::Direction::Horizontal(
+                            scrollable::Scrollbar::default()
+                        )),
+                    ]
+                    .spacing(6);
+                    if self.voice_details {
+                        for participant in &voice_controls.participants {
+                            let user = participant.user_id;
+                            let volume = voice_controls.volume_percent(user);
+                            bar = bar.push(
+                                row![
+                                    text(voice_controls.display_name(user))
+                                        .size(12)
+                                        .width(Length::Fixed(110.0)),
+                                    slider(0.0..=200.0, volume as f32, move |value| {
+                                        Message::SetParticipantVolume(user, value.round() as u16)
+                                    })
+                                    .on_release(Message::CommitParticipantVolume(user))
+                                    .width(Length::Fixed(220.0)),
+                                    button(text("0%").size(11))
+                                        .on_press(Message::PresetParticipantVolume(user, 0))
+                                        .style(style::tool_button(false, false)),
+                                    button(text("100%").size(11))
+                                        .on_press(Message::PresetParticipantVolume(user, 100))
+                                        .style(style::tool_button(false, false)),
+                                    text(format!("{volume}%")).size(12),
+                                ]
+                                .spacing(8)
+                                .align_y(iced::alignment::Vertical::Center),
+                            );
+                        }
                         bar = bar.push(
-                            row![
-                                text(format!("User {}", user.0 % 10_000))
-                                    .size(12)
-                                    .width(Length::Fixed(110.0)),
-                                slider(0.0..=200.0, volume as f32, move |value| {
-                                    Message::SetParticipantVolume(user, value.round() as u16)
-                                })
-                                .on_release(Message::CommitParticipantVolume(user))
-                                .width(Length::Fixed(220.0)),
-                                button(text("0%").size(11))
-                                    .on_press(Message::PresetParticipantVolume(user, 0))
-                                    .style(style::tool_button(false, false)),
-                                button(text("100%").size(11))
-                                    .on_press(Message::PresetParticipantVolume(user, 100))
-                                    .style(style::tool_button(false, false)),
-                                text(format!("{volume}%")).size(12),
-                            ]
-                            .spacing(8)
-                            .align_y(iced::alignment::Vertical::Center),
+                            text(
+                                "Server restrictions: ".to_owned()
+                                    + if voice_controls.server_muted {
+                                        "muted. "
+                                    } else {
+                                        "none to mute. "
+                                    }
+                                    + if voice_controls.server_deafened {
+                                        "Deafened."
+                                    } else {
+                                        ""
+                                    },
+                            )
+                            .size(11)
+                            .style(text::secondary),
                         );
                     }
-                    bar = bar.push(
-                        text(
-                            "Server restrictions: ".to_owned()
-                                + if voice_controls.server_muted {
-                                    "muted. "
-                                } else {
-                                    "none to mute. "
-                                }
-                                + if voice_controls.server_deafened {
-                                    "Deafened."
-                                } else {
-                                    ""
-                                },
-                        )
-                        .size(11)
-                        .style(text::secondary),
-                    );
-                }
-                container(bar)
-                    .padding(8)
-                    .width(Length::Fill)
-                    .style(style::card)
-                    .into()
-            });
+                    container(bar)
+                        .padding(8)
+                        .width(Length::Fill)
+                        .style(style::card)
+                        .into()
+                });
 
             // ---- connection and notices above the conversation ----
             let mut notes: Vec<(String, bool)> = Vec::new();
@@ -1864,9 +1893,18 @@ impl App {
             foot = foot.push(
                 container(
                     row![
-                        container(text(style::initial(&display)).size(14).font(bold))
-                            .center(32)
-                            .style(style::avatar(style::avatar_color(session.user.id.0))),
+                        avatars::view(
+                            &gateway.avatars.views,
+                            &avatars::AvatarKey::user(
+                                session.user.id,
+                                session.user.avatar.as_deref(),
+                            ),
+                            32.0,
+                            || container(text(style::initial(&display)).size(14).font(bold))
+                                .center(32)
+                                .style(style::avatar(style::avatar_color(session.user.id.0)))
+                                .into(),
+                        ),
                         column![
                             text(display)
                                 .size(13)
@@ -1938,6 +1976,7 @@ impl App {
                     account: session.user.id,
                     views: &gateway.attachment_views,
                     emojis: &gateway.emoji.views,
+                    avatars: &gateway.avatars.views,
                     revealed: &gateway.revealed,
                 },
                 voice_audio,
@@ -2214,6 +2253,33 @@ fn token_edited(mut value: String) -> Message {
     } else {
         Message::TokenEdited(Arc::new(UserToken::new(value)))
     }
+}
+
+/// Avatars and icons the shown rows ask for: the user's own, the rail window,
+/// then the timeline authors newest first. Bounded.
+fn wanted_avatars(
+    gateway: &gateway::GatewayPanel,
+    user: &fastcord_model::User,
+) -> Vec<avatars::AvatarKey> {
+    let mut wanted = vec![avatars::AvatarKey::user(user.id, user.avatar.as_deref())];
+    let guilds = gateway
+        .navigation
+        .guilds
+        .rows
+        .iter()
+        .filter_map(|guild| avatars::AvatarKey::guild(guild.id, guild.icon.as_deref()));
+    let authors = gateway.timeline.rows.iter().rev().map(|row| {
+        avatars::AvatarKey::user(row.message.author.id, row.message.author.avatar.as_deref())
+    });
+    for key in guilds.chain(authors) {
+        if wanted.len() == avatars::MAX_WANTED {
+            break;
+        }
+        if !wanted.contains(&key) {
+            wanted.push(key);
+        }
+    }
+    wanted
 }
 
 #[cfg(test)]

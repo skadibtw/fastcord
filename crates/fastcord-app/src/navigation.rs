@@ -4,10 +4,12 @@
 //! navigation windows, never full state.
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot};
 use iced::font::Weight;
-use iced::widget::{button, column, container, row, space, text, text_input};
+use iced::widget::{button, column, container, image, row, space, text, text_input};
 use iced::{Element, Font, Length, Padding, alignment};
+use std::collections::HashMap;
 
 use crate::Message;
+use crate::avatars::{self, AvatarKey};
 use crate::composer::{self, Composer};
 use crate::gateway::VoiceAudioState;
 use crate::style;
@@ -57,7 +59,7 @@ pub fn view<'a>(
         banner,
         voice_bar,
     } = chrome;
-    let rail = rail(snapshot, directs);
+    let rail = rail(snapshot, directs, attachments.avatars);
     let sidebar = sidebar(snapshot, private, directs, footer);
     let main = main_pane(
         snapshot,
@@ -94,10 +96,22 @@ fn centered_label<'a>(label: impl text::IntoFragment<'a>, size: f32) -> Element<
         .into()
 }
 
-fn rail(snapshot: &NavigationSnapshot, directs: bool) -> Element<'_, Message> {
-    let icon = |label: String, selected: bool, intent: Option<Message>| -> Element<'_, Message> {
+fn rail<'a>(
+    snapshot: &'a NavigationSnapshot,
+    directs: bool,
+    avatars: &HashMap<AvatarKey, image::Handle>,
+) -> Element<'a, Message> {
+    let icon = |label: String,
+                picture: Option<&AvatarKey>,
+                selected: bool,
+                intent: Option<Message>|
+     -> Element<'a, Message> {
+        let face = match picture {
+            Some(key) => avatars::view(avatars, key, 48.0, || centered_label(label.clone(), 15.0)),
+            None => centered_label(label, 15.0),
+        };
         container(
-            button(centered_label(label, 15.0))
+            button(face)
                 .on_press_maybe(intent)
                 .width(48)
                 .height(48)
@@ -133,8 +147,10 @@ fn rail(snapshot: &NavigationSnapshot, directs: bool) -> Element<'_, Message> {
                     ..container::Style::default()
                 }),
         );
+        let picture = AvatarKey::guild(guild.id, guild.icon.as_deref());
         cell = cell.push(icon(
             initials(&guild.name),
+            picture.as_ref(),
             selected,
             guild.available.then_some(Message::SelectGuild(guild.id)),
         ));
@@ -142,7 +158,12 @@ fn rail(snapshot: &NavigationSnapshot, directs: bool) -> Element<'_, Message> {
     });
     container(
         column![
-            icon("DM".to_owned(), directs, Some(Message::ShowDirects(true))),
+            icon(
+                "DM".to_owned(),
+                None,
+                directs,
+                Some(Message::ShowDirects(true))
+            ),
             container(space())
                 .width(32)
                 .height(2)

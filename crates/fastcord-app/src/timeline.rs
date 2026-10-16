@@ -523,6 +523,7 @@ pub struct Attachments<'a> {
     pub account: Snowflake,
     pub views: &'a HashMap<AttachmentKey, AttachmentView>,
     pub emojis: &'a HashMap<emoji::Asset, emoji::View>,
+    pub avatars: &'a HashMap<crate::avatars::AvatarKey, iced::widget::image::Handle>,
     pub revealed: &'a std::collections::HashSet<(Snowflake, u16)>,
 }
 
@@ -1044,10 +1045,14 @@ fn message_view<'a>(
         container(text("")).width(40).into()
     } else {
         let name = message.author.display_name();
-        container(text(style::initial(name)).size(17).font(BOLD))
-            .center(40)
-            .style(style::avatar(style::avatar_color(message.author.id.0)))
-            .into()
+        let key =
+            crate::avatars::AvatarKey::user(message.author.id, message.author.avatar.as_deref());
+        crate::avatars::view(assets.avatars, &key, 40.0, || {
+            container(text(style::initial(name)).size(17).font(BOLD))
+                .center(40)
+                .style(style::avatar(style::avatar_color(message.author.id.0)))
+                .into()
+        })
     };
     if continues && message.edited_timestamp.is_some() {
         body = body.push(text("(edited)").size(11).style(text::secondary));
@@ -1382,10 +1387,14 @@ mod tests {
             std::sync::LazyLock::new(HashMap::new);
         static REVEALED: std::sync::LazyLock<std::collections::HashSet<(Snowflake, u16)>> =
             std::sync::LazyLock::new(Default::default);
+        static AVATARS: std::sync::LazyLock<
+            HashMap<crate::avatars::AvatarKey, iced::widget::image::Handle>,
+        > = std::sync::LazyLock::new(HashMap::new);
         Attachments {
             account: Snowflake(1),
             views,
             emojis: &EMOJI,
+            avatars: &AVATARS,
             revealed: &REVEALED,
         }
     }

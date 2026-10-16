@@ -44,6 +44,9 @@ pub struct VoiceControls {
     pub server_muted: bool,
     pub server_deafened: bool,
     pub participants: Vec<VoiceParticipant>,
+    /// Display names of the participants and stream owners the state store
+    /// knows, at most [`MAX_VOICE_NAMES`]; resolved by the reducer's worker.
+    pub names: Vec<(Snowflake, String)>,
     pub streams: Arc<[StreamOffer]>,
     pub volumes: Vec<UserVolume>,
     pub input_device: fastcord_audio::DeviceChoice,
@@ -68,7 +71,19 @@ pub struct StreamOffer {
     pub key: String,
     pub owner: Snowflake,
 }
+/// Most names (and so participants plus stream offers) a snapshot carries.
+pub const MAX_VOICE_NAMES: usize = 64;
+const MAX_NAME_CHARS: usize = 48;
+
 impl VoiceControls {
+    /// The server nickname or display name, or `User NNNN` while unknown.
+    pub fn display_name(&self, user: Snowflake) -> String {
+        self.names
+            .iter()
+            .find(|(id, _)| *id == user)
+            .map_or_else(|| format!("User {}", user.0 % 10_000), |(_, n)| n.clone())
+    }
+
     pub fn capture_enabled(&self) -> bool {
         !self.self_muted && !self.deafened && !self.server_muted
     }
@@ -1608,8 +1623,48 @@ impl Worker {
         None
     }
 
+    /// Looks up who is in the call (and who streams) in the state store. The
+    /// snapshot is only rewritten when the answer changes, so this settles.
+    fn resolve_voice_names(&self) {
+        let guild = self
+            .voice_requests
+            .borrow()
+            .and_then(|request| request.guild_id);
+        let store = &self.tracker.store;
+        let mut names = Vec::new();
+        {
+            let controls = self.voice_controls.borrow();
+            let users = controls
+                .participants
+                .iter()
+                .map(|participant| participant.user_id)
+                .chain(controls.streams.iter().map(|offer| offer.owner));
+            for id in users {
+                if names.len() == MAX_VOICE_NAMES || names.iter().any(|(seen, _)| *seen == id) {
+                    continue;
+                }
+                let nick = guild
+                    .and_then(|guild| store.guild(guild))
+                    .and_then(|entry| entry.member(id))
+                    .and_then(|member| member.nick.as_deref());
+                let name = nick.or_else(|| store.user(id).map(|user| user.display_name()));
+                if let Some(name) = name {
+                    names.push((id, name.chars().take(MAX_NAME_CHARS).collect::<String>()));
+                }
+            }
+        }
+        self.bridge.voice_controls.send_if_modified(|controls| {
+            let changed = controls.names != names;
+            if changed {
+                controls.names = names;
+            }
+            changed
+        });
+    }
+
     /// A local mute or deafen change is sent to Discord with the current voice state.
     fn voice_controls_changed(&mut self, gateway: &Gateway) {
+        self.resolve_voice_names();
         let flags = {
             let controls = self.voice_controls.borrow_and_update();
             (controls.self_muted, controls.deafened)
@@ -2245,6 +2300,7 @@ pub struct GatewayPanel {
     pub confirm_delete: Option<(Snowflake, Snowflake)>,
     pub private: Box<PrivateConversationUi>,
     pub emoji: emoji::State,
+    pub avatars: crate::avatars::State,
     pub emoji_picker: emoji_picker::Picker,
     pub emoji_snapshot: Arc<emoji_picker::Snapshot>,
     /// Spoilers the viewer uncovered (message, spoiler), at most
@@ -2468,6 +2524,7 @@ impl GatewayPanel {
             controls,
             private: Box::default(),
             emoji: emoji::State::default(),
+            avatars: crate::avatars::State::default(),
             emoji_picker: emoji_picker::Picker::default(),
             emoji_snapshot: Arc::default(),
             revealed: HashSet::new(),
@@ -3917,6 +3974,16 @@ mod tests {
         assert_eq!(controls.volumes.len(), 256);
         assert_eq!(controls.volume_percent(Snowflake(1_000)), 200);
         assert_eq!(controls.volume_percent(Snowflake(0)), 100);
+    }
+
+    #[test]
+    fn voice_names_fall_back_to_the_short_id_form() {
+        let controls = VoiceControls {
+            names: vec![(Snowflake(7), "Alice".to_owned())],
+            ..VoiceControls::default()
+        };
+        assert_eq!(controls.display_name(Snowflake(7)), "Alice");
+        assert_eq!(controls.display_name(Snowflake(12_345)), "User 2345");
     }
 
     #[test]
