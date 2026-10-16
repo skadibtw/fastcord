@@ -1149,7 +1149,9 @@ impl Store {
             | Dispatch::StreamCreate(_)
             | Dispatch::StreamServerUpdate(_)
             | Dispatch::StreamUpdate(_)
-            | Dispatch::StreamDelete(_) => {}
+            | Dispatch::StreamDelete(_)
+            // Typing is transient and lives outside the store.
+            | Dispatch::TypingStart(_) => {}
         }
         if unreferences && self.prune_presences() {
             changes.presence = true;

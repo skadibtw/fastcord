@@ -1450,12 +1450,24 @@ impl App {
             Message::Composer(event) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     let refocus = matches!(event, composer::Event::Send | composer::Event::Edit(_));
+                    // Typing is announced only by a focused window's edits.
+                    let typing = self
+                        .window_active
+                        .then(|| gateway.composer.typing_channel(&event))
+                        .flatten()
+                        .filter(|channel| {
+                            gateway.timeline.can_send
+                                && gateway.timeline.channel_id == Some(*channel)
+                        });
                     composer::update(
                         &mut gateway.composer,
                         event,
                         &gateway.timeline,
                         &gateway.controls,
                     );
+                    if let Some(channel) = typing {
+                        gateway.controls.typing(channel);
+                    }
                     if refocus {
                         return iced::widget::operation::focus(composer::EDITOR_ID);
                     }

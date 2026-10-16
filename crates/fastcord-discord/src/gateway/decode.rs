@@ -737,6 +737,12 @@ struct MessageAckWire {
     mention_count: u32,
 }
 
+#[derive(Deserialize)]
+struct TypingWire {
+    channel_id: Snowflake,
+    user_id: Snowflake,
+}
+
 fn decode_supplemental(raw: &str) -> Result<ReadySupplemental, Malformed> {
     let wire: SupplementalWire = serde_json::from_str(raw).map_err(|_| Malformed)?;
     if !wire.merged_members.is_empty() && wire.merged_members.len() != wire.guilds.len() {
@@ -1053,6 +1059,12 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
                 channel_id: ack.channel_id,
                 message_id: ack.message_id,
                 mention_count: ack.mention_count,
+            })
+        }),
+        "TYPING_START" => json::<TypingWire>(raw).map(|t| {
+            Dispatch::TypingStart(super::event::TypingStart {
+                channel_id: t.channel_id,
+                user_id: t.user_id,
             })
         }),
         "USER_GUILD_SETTINGS_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
@@ -1457,7 +1469,14 @@ mod tests {
         ));
         assert!(matches!(
             decode_dispatch("TYPING_START", "{}"),
-            Decoded::Unhandled
+            Decoded::Malformed
+        ));
+        assert!(matches!(
+            decode_dispatch(
+                "TYPING_START",
+                r#"{"channel_id":"2","user_id":"5","timestamp":1,"guild_id":"3","member":{}}"#
+            ),
+            Decoded::Event(Dispatch::TypingStart(t)) if t.channel_id == id(2) && t.user_id == id(5)
         ));
         assert!(matches!(
             decode_dispatch("MESSAGE_CREATE", r#"{"id":"1"}"#),

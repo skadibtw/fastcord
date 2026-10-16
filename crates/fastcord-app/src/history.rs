@@ -260,6 +260,11 @@ impl History {
         self.dirty
     }
 
+    /// The account may send to `channel` (validated by the worker).
+    pub fn can_send_in(&self, channel: Snowflake) -> bool {
+        self.sendable == Some(channel)
+    }
+
     fn cancel(&mut self) {
         if let Some((token, _)) = self.pending.take() {
             self.store.cancel_page(token);
@@ -1734,6 +1739,7 @@ impl History {
             error: self.error,
             outbox: self.outbox.items(),
             can_send: self.sendable == Some(channel),
+            typing: Vec::new(),
             highlight: self.highlight,
             deleted,
             notice: self.notice,

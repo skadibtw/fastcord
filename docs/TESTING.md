@@ -340,3 +340,9 @@ Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, wind
 - Offline: `fastcord-discord` `state::presences::tests` (READY filtering to referenced users, custom status extraction, partial-update merging, repeats and unknown statuses changing nothing, pruning on relationship/channel removal, READY replacement, supplemental friend presences, the 2000 bound, byte ledger), `gateway::decode::tests` (PRESENCE_UPDATE decoding and malformed rejection) and `presence::tests` (settings body and route); `fastcord-app` `status::tests` (a confirmed choice shown until the table moves on, unknown stays unknown, stale answers dropped) and `friends::tests` (Online tab).
 - **Unverified fixtures:** every READY/READY_SUPPLEMENTAL/PRESENCE_UPDATE payload and the settings PATCH bodies are synthetic, shaped from community documentation, not captured from Discord.
 - **Not covered offline / pending live checks (alt account only):** own status round trip with an official client, whether the legacy settings PATCH is accepted, real incoming updates, and a real launch of the status menu and dots. Message-author avatars show no dot yet.
+
+### Typing indicators (#69)
+
+- **Automated:** `fastcord-discord` `typing::tests` (route, 10 s lapse and refresh, stop/clear, per-channel and total bounds, 8 s send throttle, all with injected times) and `gateway::decode::tests` (`TYPING_START` decode, malformed rejection); `fastcord-app` `composer::tests` (only text edits of a new message announce, the one/two/several line) and `gateway::tests` (table fed by the tracker, cleared by a new session, no timer when idle).
+- **Unverified fixtures:** the payload shape is synthetic.
+- **Pending live checks (alt account only):** indicators between two sessions in a guild channel, thread and DM/group DM, that the typing POST is accepted, and a real launch showing the line above the composer.

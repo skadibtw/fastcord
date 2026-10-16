@@ -255,6 +255,17 @@ impl Composer {
         self.blank = text.trim().is_empty();
     }
 
+    /// The channel to announce typing in after an editor action: only while
+    /// writing a new message (never editing one) that has some text.
+    pub fn typing_channel(&self, event: &Event) -> Option<Snowflake> {
+        let Event::Action(Act(action)) = event else {
+            return None;
+        };
+        (action.is_edit() && self.editing.is_none() && !self.blank)
+            .then_some(self.channel)
+            .flatten()
+    }
+
     /// Follows the open channel: the draft of the one being left is kept, the
     /// one being entered is restored. The `@everyone` choice never survives a
     /// switch, and neither does editing a message.
@@ -758,6 +769,16 @@ pub fn update(
     }
 }
 
+/// "X is typing…", "X and Y are typing…", or "Several people are typing…".
+fn typing_line(names: &[String]) -> Option<String> {
+    match names {
+        [] => None,
+        [one] => Some(format!("{one} is typing…")),
+        [a, b] => Some(format!("{a} and {b} are typing…")),
+        _ => Some("Several people are typing…".to_owned()),
+    }
+}
+
 const BUSY: &str = "That is not possible right now (busy or disconnected); try again.";
 const EMPTY_EDIT: &str = "A message needs some text. Use Delete to remove it instead.";
 const NOT_QUEUED: &str =
@@ -908,6 +929,9 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
     }
     if let Some(notice) = snapshot.notice {
         layout = layout.push(text(notice).size(12).style(text::danger));
+    }
+    if let Some(line) = typing_line(&snapshot.typing) {
+        layout = layout.push(text(line).size(12).style(text::secondary));
     }
     let editing = composer.editing.is_some();
     if let Some(reply) = &composer.replying {
@@ -1129,6 +1153,33 @@ mod tests {
         assert!(composer.submission(true, 0).is_some());
         composer.sent();
         assert_eq!(composer.submission(true, 0), None);
+    }
+
+    #[test]
+    fn typing_is_announced_only_for_text_edits_of_a_new_message() {
+        let mut composer = composer_in(A);
+        let edit = Event::Action(Act(Action::Edit(Edit::Insert('x'))));
+        let motion = Event::Action(Act(Action::Move(Motion::Left)));
+        assert_eq!(composer.typing_channel(&edit), None, "nothing written yet");
+        type_text(&mut composer, "hi");
+        assert_eq!(composer.typing_channel(&edit), Some(A));
+        assert_eq!(
+            composer.typing_channel(&motion),
+            None,
+            "cursor moves are silent"
+        );
+        assert_eq!(composer.typing_channel(&Event::Send), None);
+    }
+
+    #[test]
+    fn the_typing_line_names_one_two_or_several() {
+        let n = |names: &[&str]| {
+            typing_line(&names.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(n(&[]), None);
+        assert_eq!(n(&["Ann"]).unwrap(), "Ann is typing…");
+        assert_eq!(n(&["Ann", "Bo"]).unwrap(), "Ann and Bo are typing…");
+        assert_eq!(n(&["A", "B", "C"]).unwrap(), "Several people are typing…");
     }
 
     #[test]

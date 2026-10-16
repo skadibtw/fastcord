@@ -117,7 +117,9 @@ use crate::timeline::AttachmentView;
 use crate::variable_list::{Measurement, Viewport};
 use crate::virtual_list::Window;
 use crate::{emoji, emoji_picker};
-use fastcord_discord::{PrivateChannelError, RestClient, UserToken};
+use fastcord_discord::{
+    Clock, MonotonicClock, PrivateChannelError, RestClient, TypingSend, TypingTable, UserToken,
+};
 use fastcord_platform::capture::CaptureSource;
 use iced::futures::{Stream, stream};
 use iced::task::Handle;
@@ -221,6 +223,11 @@ struct Tracker {
     history: History,
     navigation: Navigation,
     navigation_dirty: bool,
+    /// Who else is typing; expires on its own one-shot timer (see `Worker::typing_wait`).
+    typing: TypingTable,
+    /// The typing line changed: the snapshot is rebuilt.
+    typing_dirty: bool,
+    clock: MonotonicClock,
 }
 
 impl Tracker {
@@ -257,6 +264,7 @@ impl Tracker {
             dispatch @ GatewayEvent::Dispatch { .. } => {
                 if let GatewayEvent::Dispatch { event, .. } = &dispatch {
                     self.history.apply(event);
+                    self.apply_typing(event);
                 }
                 let relevant = !matches!(
                     &dispatch,
@@ -300,6 +308,48 @@ impl Tracker {
 }
 
 impl Tracker {
+    /// Keeps the typing table: a started user shows (never the account's own),
+    /// and a sent message, a deleted channel, or a new session clears.
+    fn apply_typing(&mut self, event: &Dispatch) {
+        let now = self.clock.now();
+        let changed = match event {
+            Dispatch::TypingStart(start) => {
+                if self.store.current_user().map(|u| u.id) == Some(start.user_id) {
+                    false
+                } else {
+                    self.typing.start(now, start.channel_id, start.user_id);
+                    true
+                }
+            }
+            Dispatch::MessageCreate(message) => {
+                self.typing.stop(message.channel_id, message.author.id)
+            }
+            Dispatch::ChannelDelete(channel) => self.typing.clear_channel(channel.id),
+            Dispatch::Ready(_) | Dispatch::Resumed => {
+                self.typing.clear();
+                true
+            }
+            _ => false,
+        };
+        self.typing_dirty |= changed;
+    }
+
+    /// The display names typing in `channel`, longest-typing first.
+    fn typing_names(&self, channel: Option<Snowflake>) -> Vec<String> {
+        let Some(channel) = channel else {
+            return Vec::new();
+        };
+        self.typing
+            .users(self.clock.now(), channel)
+            .into_iter()
+            .map(|id| {
+                self.store
+                    .user(id)
+                    .map_or_else(|| "Someone".to_owned(), |u| u.display_name().to_owned())
+            })
+            .collect()
+    }
+
     /// Applies acknowledgements Discord accepted to the store without waiting
     /// for their echo, so the markers clear at once.
     fn apply_acked(&mut self) {
@@ -415,6 +465,8 @@ pub enum Command {
         emoji: Emoji,
     },
     CloseReactionUsers,
+    /// The user is composing in this channel (the worker throttles and validates).
+    Typing(Snowflake),
     OpenPrivate(Vec<Snowflake>),
     Stream(StreamIntent),
     /// Capture `source` and, once the capture runs, create a Go Live stream.
@@ -511,6 +563,7 @@ impl fmt::Debug for Command {
                 .field("message", message)
                 .finish_non_exhaustive(),
             Self::CloseReactionUsers => f.write_str("CloseReactionUsers"),
+            Self::Typing(channel) => f.debug_tuple("Typing").field(channel).finish(),
             Self::OpenPrivate(_) => f.write_str("OpenPrivate([selected recipients])"),
             Self::Stream(intent) => f.debug_tuple("Stream").field(intent).finish(),
             // The window title is private to the desktop and stays out of logs.
@@ -842,6 +895,12 @@ impl NavigationBridge {
 
     pub fn retry_send(&self, id: OpId) -> bool {
         self.commands.try_send(Command::Retry(id)).is_ok()
+    }
+
+    /// The user is typing in `channel`; the worker sends at most one typing
+    /// request per interval and only where sending is allowed.
+    pub fn typing(&self, channel: Snowflake) -> bool {
+        self.commands.try_send(Command::Typing(channel)).is_ok()
     }
 
     pub fn mark_read(&self, guild: Option<Snowflake>, channel: Snowflake) -> bool {
@@ -1182,6 +1241,7 @@ struct Worker {
     share: Option<stream_share::ShareSession>,
     /// The share's view changed since the loop last signaled the UI.
     share_dirty: bool,
+    typing_send: TypingSend,
 }
 
 fn stream_request_matches_key(
@@ -1527,6 +1587,17 @@ impl Worker {
         self.queue_stream_intent(gateway, intent);
     }
 
+    /// How long until the next typing entry lapses (a little past it, so it
+    /// has lapsed when the timer fires). Only awaited while one exists.
+    fn typing_wait(&self) -> Duration {
+        self.tracker
+            .typing
+            .next_expiry()
+            .map_or(Duration::ZERO, |at| {
+                at.saturating_sub(self.tracker.clock.now()) + Duration::from_millis(5)
+            })
+    }
+
     /// Applies one explicit outbox or message action.
     fn command(&mut self, command: Command) {
         let history = &mut self.tracker.history;
@@ -1578,6 +1649,16 @@ impl Worker {
                 emoji,
             } => history.reaction_users(&self.rest, channel, message, emoji),
             Command::CloseReactionUsers => history.close_reaction_users(),
+            Command::Typing(channel) => {
+                let now = self.tracker.clock.now();
+                if history.can_send_in(channel) && self.typing_send.permit(now, channel) {
+                    let rest = self.rest.clone();
+                    // Best effort: a refusal or a limit just means no indicator.
+                    tokio::spawn(async move {
+                        let _ = rest.trigger_typing(channel).await;
+                    });
+                }
+            }
             Command::OpenPrivate(_) => {}
             Command::Stream(_) | Command::StartShare { .. } | Command::StopShare => {
                 unreachable!("stream and share commands are handled above")
@@ -2063,6 +2144,7 @@ impl Worker {
             .history
             .refresh(&self.rest, &navigation, &request.timeline);
         let mut timeline = self.tracker.history.snapshot();
+        timeline.typing = self.tracker.typing_names(timeline.channel_id);
         timeline.names = mention_names(&self.tracker.store, navigation.selected_guild, &timeline);
         timeline.candidates =
             mention_candidates(&self.tracker.store, navigation.selected_guild, &timeline);
@@ -2162,6 +2244,7 @@ pub fn status_stream(
         pending_stream_signal: None,
         share: None,
         share_dirty: false,
+        typing_send: TypingSend::default(),
     };
     stream::unfold(worker, |mut worker| async move {
         let mut gateway = match worker.gateway.take() {
@@ -2173,6 +2256,8 @@ pub fn status_stream(
         };
         loop {
             let mut voice_changed = false;
+            let typing_wait = worker.typing_wait();
+            let typing_armed = worker.tracker.typing.next_expiry().is_some();
             let (status, requested) = tokio::select! {
                 event = gateway.next_event() => {
                     let event = event?;
@@ -2253,6 +2338,13 @@ pub fn status_stream(
                         }
                     }
                 }
+                // One-shot: armed only while a typing indicator is showing.
+                _ = tokio::time::sleep(typing_wait), if typing_armed =>
+                {
+                    let now = worker.tracker.clock.now();
+                    worker.tracker.typing_dirty |= worker.tracker.typing.prune(now);
+                    (None, false)
+                }
                 _ = tokio::time::sleep(Duration::from_millis(10)),
                     if worker.pending_stream_signal.is_some() =>
                 {
@@ -2273,6 +2365,7 @@ pub fn status_stream(
             if !requested
                 && !worker.tracker.navigation_dirty
                 && !worker.tracker.history.dirty()
+                && !worker.tracker.typing_dirty
                 && status.is_none()
             {
                 // Voice controls are read straight from the bridge's watches, so a
@@ -2284,6 +2377,7 @@ pub fn status_stream(
                 continue;
             }
             worker.tracker.navigation_dirty = false;
+            worker.tracker.typing_dirty = false;
             let request = worker.bridge.take_request();
             let terminal = matches!(
                 status,
@@ -3604,6 +3698,7 @@ mod tests {
             pending_stream_signal: None,
             share: None,
             share_dirty: false,
+            typing_send: TypingSend::default(),
             bridge,
         }
     }
@@ -3870,6 +3965,23 @@ mod tests {
             status.describe(),
             "Connected to Discord: 3 servers, 2 direct messages. 1 servers are unavailable."
         );
+    }
+
+    #[test]
+    fn typing_shows_until_a_new_session_and_unknown_users_are_someone() {
+        let mut tracker = Tracker::default();
+        let channel = Snowflake(7);
+        let started = Dispatch::TypingStart(fastcord_discord::gateway::TypingStart {
+            channel_id: channel,
+            user_id: Snowflake(9),
+        });
+        tracker.apply_typing(&started);
+        assert!(tracker.typing_dirty);
+        assert_eq!(tracker.typing_names(Some(channel)), ["Someone"]);
+        assert!(tracker.typing_names(Some(Snowflake(8))).is_empty());
+        tracker.apply_typing(&Dispatch::Resumed);
+        assert!(tracker.typing_names(Some(channel)).is_empty());
+        assert!(tracker.typing.next_expiry().is_none(), "no timer when idle");
     }
 
     #[test]

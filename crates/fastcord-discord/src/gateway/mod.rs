@@ -48,7 +48,8 @@ pub use event::{
     MessageAck, MessageDelete, MessageDeleteBulk, MessageReaction, MessageReactionRemoveAll,
     MessageReactionRemoveEmoji, MuteSettings, PassiveUpdate, ReadStateEntry, Ready, ReadyRead,
     ReadySupplemental, ReconnectReason, RelationshipUpdate, SessionId, StopReason,
-    SupplementalGuild, ThreadListSync, ThreadMemberUpdate, ThreadMembersUpdate, VoiceStateUpdate,
+    SupplementalGuild, ThreadListSync, ThreadMemberUpdate, ThreadMembersUpdate, TypingStart,
+    VoiceStateUpdate,
 };
 pub use event::{MAX_PRESENCES, MAX_RELATIONSHIPS, PresenceUpdate};
 pub(crate) use profile::CLIENT_FINGERPRINT;

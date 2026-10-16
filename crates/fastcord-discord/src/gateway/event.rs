@@ -208,6 +208,14 @@ pub struct MessageAck {
     pub mention_count: u32,
 }
 
+/// TYPING_START: someone began typing in a channel. The server's timestamp is
+/// not kept; expiry is local.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TypingStart {
+    pub channel_id: Snowflake,
+    pub user_id: Snowflake,
+}
+
 /// USER_GUILD_SETTINGS_UPDATE, reduced to what unread markers need.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuildMuteUpdate {
@@ -519,6 +527,7 @@ pub enum Dispatch {
     MessageDeleteBulk(MessageDeleteBulk),
     /// The account's read cursor moved.
     MessageAck(MessageAck),
+    TypingStart(TypingStart),
     PresenceUpdate(Box<PresenceUpdate>),
     RelationshipAdd(Box<Relationship>),
     RelationshipUpdate(RelationshipUpdate),
@@ -579,6 +588,7 @@ impl Dispatch {
             Self::MessageDelete(_) => "MESSAGE_DELETE",
             Self::MessageDeleteBulk(_) => "MESSAGE_DELETE_BULK",
             Self::MessageAck(_) => "MESSAGE_ACK",
+            Self::TypingStart(_) => "TYPING_START",
             Self::PresenceUpdate(_) => "PRESENCE_UPDATE",
             Self::RelationshipAdd(_) => "RELATIONSHIP_ADD",
             Self::RelationshipUpdate(_) => "RELATIONSHIP_UPDATE",

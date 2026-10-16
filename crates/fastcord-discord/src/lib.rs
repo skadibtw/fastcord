@@ -34,6 +34,7 @@ mod secret;
 mod send;
 pub mod state;
 mod thread;
+mod typing;
 mod upload;
 mod ws;
 
@@ -68,6 +69,7 @@ pub use send::{
 pub use thread::{
     ARCHIVED_PAGE_SIZE, ArchivedThreads, MAX_THREAD_NAME_CHARS, ThreadError, thread_name,
 };
+pub use typing::{TYPING_LIFETIME, TypingSend, TypingTable};
 pub use upload::{
     CHUNK as UPLOAD_CHUNK, MAX_FILENAME_CHARS, MAX_UPLOAD_BYTES, MAX_UPLOAD_FILES, UploadError,
     UploadFile, UploadProgress, UploadedFile, Uploader,

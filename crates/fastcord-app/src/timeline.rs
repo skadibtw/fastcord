@@ -273,6 +273,8 @@ pub struct Snapshot {
     pub names: rich::Names,
     /// What `@` and `#` can complete to in this channel's server.
     pub candidates: Vec<crate::composer::Candidate>,
+    /// Display names of the other people typing here, longest-typing first.
+    pub typing: Vec<String>,
 }
 
 /// A decoded preview: shared RGBA pixels (a clone shares the buffer) and the
