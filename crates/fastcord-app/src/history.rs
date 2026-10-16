@@ -1477,6 +1477,8 @@ impl History {
             deleted,
             notice: self.notice,
             can_react: self.reactable == Some(channel),
+            names: Default::default(),
+            candidates: Vec::new(),
             reaction_users: self.inspection.as_ref().map(|inspection| ReactionUsers {
                 message: inspection.message,
                 emoji: inspection.emoji.clone(),
@@ -1533,6 +1535,10 @@ mod tests {
             pinned: false,
             attachments: Vec::new(),
             reactions: Vec::new(),
+            mentions: Vec::new(),
+            mention_roles: Vec::new(),
+            mention_everyone: false,
+            embeds: Vec::new(),
             message_reference: None,
             referenced_message: Referenced::Unknown,
             nonce: None,
@@ -1877,6 +1883,10 @@ mod tests {
             flags: None,
             pinned: None,
             attachments: None,
+            mentions: None,
+            mention_roles: None,
+            mention_everyone: None,
+            embeds: None,
         })));
         assert!(history.dirty());
         let snapshot = history.snapshot();
@@ -2279,6 +2289,10 @@ mod tests {
             flags: None,
             pinned: None,
             attachments: None,
+            mentions: None,
+            mention_roles: None,
+            mention_everyone: None,
+            embeds: None,
         }))
     }
 

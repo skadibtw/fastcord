@@ -71,6 +71,37 @@ pub fn open_local_file(path: &std::path::Path) -> Result<(), FileOpenError> {
         .map_err(|_| FileOpenError)
 }
 
+/// Opens an `http(s)` link with the OS default browser. Anything else (other
+/// schemes, whitespace or control characters, no host) is refused, and the URL
+/// is one argument of a spawned program, never parsed by a shell.
+pub fn open_url(url: &str) -> Result<(), FileOpenError> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .ok_or(FileOpenError)?;
+    if url.len() > 2048
+        || rest.starts_with(['/', '?', '#'])
+        || rest.is_empty()
+        || url.contains(|c: char| c.is_whitespace() || c.is_control())
+    {
+        return Err(FileOpenError);
+    }
+    #[cfg(target_os = "windows")]
+    let program = "explorer.exe";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+    #[cfg(not(any(target_os = "windows", unix)))]
+    return Err(FileOpenError);
+
+    std::process::Command::new(program)
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| FileOpenError)
+}
+
 /// The only extensions `open_local_file` hands to the OS: the image, audio and
 /// video types the app names for content types, plus PDF and plain text. The
 /// match is on the final extension only, ASCII case-insensitively, so `a.pdf.exe`

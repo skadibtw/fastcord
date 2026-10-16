@@ -18,6 +18,7 @@ mod playback;
 mod qr;
 mod reactions;
 mod render;
+mod rich;
 mod timeline;
 mod variable_list;
 mod virtual_list;
@@ -971,6 +972,15 @@ impl App {
                                 return iced::clipboard::write(source.to_owned());
                             }
                         }
+                        timeline::Event::OpenLink(url) => {
+                            if rich::safe_url(&url) {
+                                let _ = fastcord_platform::open_url(&url);
+                            }
+                        }
+                        timeline::Event::ToggleSpoiler {
+                            message_id,
+                            spoiler,
+                        } => gateway.toggle_spoiler(message_id, spoiler),
                         timeline::Event::EmojiVisibility(occurrence, visible) => {
                             gateway.emoji_visibility(occurrence, visible);
                         }
@@ -1520,6 +1530,7 @@ impl App {
                             account: session.user.id,
                             views: &gateway.attachment_views,
                             emojis: &gateway.emoji.views,
+                            revealed: &gateway.revealed,
                         },
                         voice_audio,
                     ),

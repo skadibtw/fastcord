@@ -3,7 +3,9 @@
 //! This crate has no runtime, GUI, or I/O dependencies.
 
 mod channel;
+mod embed;
 mod guild;
+pub mod markup;
 mod message;
 mod permissions;
 mod snowflake;
@@ -12,6 +14,9 @@ mod voice;
 mod wire;
 
 pub use channel::{Channel, ChannelKind};
+pub use embed::{
+    Embed, EmbedField, EmbedFooter, EmbedMedia, EmbedText, MAX_EMBED_FIELDS, MAX_EMBEDS,
+};
 pub use guild::{Guild, GuildEmoji, GuildMember, Role};
 pub use message::{
     Attachment, Emoji, MAX_REACTION_EMOJI_NAME_BYTES, MAX_REACTIONS, Message, MessageReference,

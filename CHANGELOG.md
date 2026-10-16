@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Message formatting, embeds and mentions (M39, #54): the timeline renders Markdown (bold, italic, underline, strike-through, inline and fenced code, quotes, headings, lists, spoilers, links, masked links) and user, role, channel and `@everyone`/`@here` mentions from the unchanged source text, so Copy text and editing keep the original; received embeds (title, description, fields, footer, image links) are kept within byte bounds and shown below the message; http(s) links open in the default browser; the composer completes `@` and `#` words to real mention references. Live comparison with the official client is pending.
+
 ### Fixed
 - Readable one-line text for common system message types (joins, pins, calls, renames, boosts, threads); unknown types read "Unsupported message type (N)." (Refs #110).
 - Restrict the Windows download-zone constant to Windows builds, fixing dead-code errors in Linux and macOS test targets with warnings denied.

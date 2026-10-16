@@ -2,6 +2,8 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::Embed;
+use crate::embed::lenient_embeds;
 use crate::wire::{double_option, lenient_nonce};
 use crate::{Snowflake, User};
 
@@ -159,6 +161,15 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub reactions: Vec<Reaction>,
+    /// Users this message mentions (their names resolve `<@id>`).
+    #[serde(default)]
+    pub mentions: Vec<User>,
+    #[serde(default)]
+    pub mention_roles: Vec<Snowflake>,
+    #[serde(default)]
+    pub mention_everyone: bool,
+    #[serde(default, deserialize_with = "lenient_embeds")]
+    pub embeds: Vec<Embed>,
     #[serde(default)]
     pub message_reference: Option<MessageReference>,
     /// What Discord reported about the message a reply answers.
@@ -286,6 +297,18 @@ pub struct MessageUpdate {
     pub pinned: Option<bool>,
     #[serde(default)]
     pub attachments: Option<Vec<Attachment>>,
+    #[serde(default)]
+    pub mentions: Option<Vec<User>>,
+    #[serde(default)]
+    pub mention_roles: Option<Vec<Snowflake>>,
+    #[serde(default)]
+    pub mention_everyone: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_some_embeds")]
+    pub embeds: Option<Vec<Embed>>,
+}
+
+fn lenient_some_embeds<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<Embed>>, D::Error> {
+    lenient_embeds(d).map(Some)
 }
 
 impl MessageUpdate {
@@ -297,6 +320,12 @@ impl MessageUpdate {
             || self.flags.is_some()
             || self.pinned.is_some()
             || self.attachments.is_some()
+            || self.mentions.is_some()
+            || self.mention_roles.is_some()
+            || self.mention_everyone.is_some()
+            // An empty list is an unfurl that shows nothing or a removal; the
+            // latter still applies to a cached message through `alters`.
+            || self.embeds.as_ref().is_some_and(|e| !e.is_empty())
     }
 
     /// Whether [`Message::apply`] would change `message`. An update that only
@@ -314,6 +343,18 @@ impl MessageUpdate {
                 .attachments
                 .as_ref()
                 .is_some_and(|v| *v != message.attachments)
+            || self
+                .mentions
+                .as_ref()
+                .is_some_and(|v| *v != message.mentions)
+            || self
+                .mention_roles
+                .as_ref()
+                .is_some_and(|v| *v != message.mention_roles)
+            || self
+                .mention_everyone
+                .is_some_and(|v| v != message.mention_everyone)
+            || self.embeds.as_ref().is_some_and(|v| *v != message.embeds)
     }
 }
 
@@ -335,6 +376,18 @@ impl Message {
         }
         if let Some(attachments) = update.attachments {
             self.attachments = attachments;
+        }
+        if let Some(mentions) = update.mentions {
+            self.mentions = mentions;
+        }
+        if let Some(roles) = update.mention_roles {
+            self.mention_roles = roles;
+        }
+        if let Some(everyone) = update.mention_everyone {
+            self.mention_everyone = everyone;
+        }
+        if let Some(embeds) = update.embeds {
+            self.embeds = embeds;
         }
     }
 
@@ -525,6 +578,10 @@ mod tests {
                     emoji: emoji.clone(),
                 })
                 .collect(),
+            mentions: Vec::new(),
+            mention_roles: Vec::new(),
+            mention_everyone: false,
+            embeds: Vec::new(),
             message_reference: None,
             referenced_message: Referenced::Unknown,
             nonce: None,

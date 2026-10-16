@@ -150,6 +150,10 @@ pub fn edit_response_update(held: Option<&Message>, answer: Message) -> Option<M
         flags: Some(answer.flags),
         pinned: Some(answer.pinned),
         attachments: Some(answer.attachments),
+        mentions: Some(answer.mentions),
+        mention_roles: Some(answer.mention_roles),
+        mention_everyone: Some(answer.mention_everyone),
+        embeds: Some(answer.embeds),
     })
 }
 

@@ -51,6 +51,7 @@ use crate::changes::{ChangeKind, ChangeState, RowChange};
 use crate::emoji::{self, Occurrence, Origin};
 use crate::outbox::OutboxItem;
 use crate::reactions::{Action, Pending};
+use crate::rich;
 use crate::variable_list::{self, Item, Measurement, Report, ScrollRequest, Viewport, Window};
 
 /// Closer to the first retained message than this, the view offers to load older ones.
@@ -267,6 +268,10 @@ pub struct Snapshot {
     pub can_react: bool,
     /// Who reacted with one emoji, loaded only because the user asked.
     pub reaction_users: Option<ReactionUsers>,
+    /// Names of the roles and channels the rows mention.
+    pub names: rich::Names,
+    /// What `@` and `#` can complete to in this channel's server.
+    pub candidates: Vec<crate::composer::Candidate>,
 }
 
 /// A decoded preview: shared RGBA pixels (a clone shares the buffer) and the
@@ -438,6 +443,13 @@ pub enum Event {
         emoji: Emoji,
     },
     CloseReactionUsers,
+    /// A link in a message or embed was clicked; the target is http(s) only.
+    OpenLink(String),
+    /// A spoiler was clicked: uncover it.
+    ToggleSpoiler {
+        message_id: Snowflake,
+        spoiler: u16,
+    },
     /// Choose an emoji to react to a message with (opens the emoji picker).
     React {
         channel_id: Snowflake,
@@ -502,6 +514,7 @@ pub struct Attachments<'a> {
     pub account: Snowflake,
     pub views: &'a HashMap<AttachmentKey, AttachmentView>,
     pub emojis: &'a HashMap<emoji::Asset, emoji::View>,
+    pub revealed: &'a std::collections::HashSet<(Snowflake, u16)>,
 }
 
 pub fn view<'a>(
@@ -898,20 +911,34 @@ fn message_view<'a>(
         };
     }
     body = body.push(header);
+    let cx = rich::Cx {
+        names: &snapshot.names,
+        revealed: assets.revealed,
+        emojis: assets.emojis,
+    };
     if !content.is_empty() {
-        body = body.push(emoji::inline(
-            content,
-            assets.emojis,
-            |run| Origin::Timeline {
-                channel: channel_id,
-                message: message_id,
-                revision: row.revision,
-                run,
-            },
-            Event::EmojiVisibility,
-        ));
-    } else if let Some(note) = placeholder(message) {
+        body = body.push(
+            rich::body(content, message, channel_id, row.revision, cx).unwrap_or_else(|| {
+                emoji::inline(
+                    content,
+                    assets.emojis,
+                    |run| Origin::Timeline {
+                        channel: channel_id,
+                        message: message_id,
+                        revision: row.revision,
+                        run,
+                    },
+                    Event::EmojiVisibility,
+                )
+            }),
+        );
+    } else if message.embeds.is_empty()
+        && let Some(note) = placeholder(message)
+    {
         body = body.push(text(note).size(13).style(text::secondary));
+    }
+    for embed in rich::embeds(message, channel_id, row.revision, cx) {
+        body = body.push(embed);
     }
     for attachment in &message.attachments {
         let key = AttachmentKey {
@@ -1293,10 +1320,13 @@ mod tests {
     fn assets(views: &HashMap<AttachmentKey, AttachmentView>) -> Attachments<'_> {
         static EMOJI: std::sync::LazyLock<HashMap<emoji::Asset, emoji::View>> =
             std::sync::LazyLock::new(HashMap::new);
+        static REVEALED: std::sync::LazyLock<std::collections::HashSet<(Snowflake, u16)>> =
+            std::sync::LazyLock::new(Default::default);
         Attachments {
             account: Snowflake(1),
             views,
             emojis: &EMOJI,
+            revealed: &REVEALED,
         }
     }
 

@@ -56,7 +56,7 @@ use std::slice;
 use std::sync::Arc;
 
 use fastcord_model::{
-    Attachment, Message, MessageUpdate, Reaction, ReactionChange, Referenced, ReplyPreview,
+    Attachment, Embed, Message, MessageUpdate, Reaction, ReactionChange, Referenced, ReplyPreview,
     Snowflake, User,
 };
 
@@ -115,6 +115,11 @@ fn message_heap(message: &Message) -> usize {
             .iter()
             .map(attachment_heap)
             .sum::<usize>()
+        + message.mentions.capacity() * size_of::<User>()
+        + message.mentions.iter().map(user_heap).sum::<usize>()
+        + message.mention_roles.capacity() * size_of::<Snowflake>()
+        + message.embeds.capacity() * size_of::<Embed>()
+        + message.embeds.iter().map(Embed::heap_bytes).sum::<usize>()
         + message.reactions.capacity() * size_of::<Reaction>()
         + message
             .reactions
@@ -136,6 +141,17 @@ fn update_heap(update: &MessageUpdate) -> usize {
             .as_ref()
             .and_then(Option::as_ref)
             .map_or(0, String::capacity)
+        + update.embeds.as_ref().map_or(0, |embeds| {
+            embeds.capacity() * size_of::<Embed>()
+                + embeds.iter().map(Embed::heap_bytes).sum::<usize>()
+        })
+        + update.mentions.as_ref().map_or(0, |users| {
+            users.capacity() * size_of::<User>() + users.iter().map(user_heap).sum::<usize>()
+        })
+        + update
+            .mention_roles
+            .as_ref()
+            .map_or(0, |roles| roles.capacity() * size_of::<Snowflake>())
         + update.attachments.as_ref().map_or(0, |attachments| {
             attachments.capacity() * size_of::<Attachment>()
                 + attachments.iter().map(attachment_heap).sum::<usize>()
@@ -178,6 +194,15 @@ fn compact(message: &mut Message) {
         attachment.url.shrink_to_fit();
         shrink_text(&mut attachment.proxy_url);
         shrink_text(&mut attachment.content_type);
+    }
+    message.mentions.shrink_to_fit();
+    for user in &mut message.mentions {
+        compact_user(user);
+    }
+    message.mention_roles.shrink_to_fit();
+    message.embeds.shrink_to_fit();
+    for embed in &mut message.embeds {
+        embed.compact();
     }
     message.reactions.shrink_to_fit();
     for reaction in &mut message.reactions {

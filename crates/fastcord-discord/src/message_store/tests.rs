@@ -1002,7 +1002,7 @@ fn an_update_to_an_uncached_message_makes_a_page_that_carries_it_stale() {
     let mut fresh = MessageStore::new();
     let token = fresh.begin_page(CHANNEL, HistoryCursor::Latest);
     fresh.apply_dispatch(&update(CHANNEL, 99, r#","content":"elsewhere""#));
-    fresh.apply_dispatch(&update(CHANNEL, 7, r#","embeds":[]"#));
+    fresh.apply_dispatch(&update(CHANNEL, 7, r#","components":[]"#));
     let merge = fresh.merge_page(
         token,
         through_rest(CHANNEL, HistoryCursor::Latest, &page(1..=10)),

@@ -88,9 +88,10 @@ use fastcord_model::{
 use tokio::sync::{mpsc, watch};
 
 use crate::attachments::AttachmentCache;
-use crate::composer::Composer;
+use crate::composer::{Candidate, CandidateKind, Composer};
 use crate::history::{Completed, History, Intent};
 use crate::outbox::{OpId, Reply, Slots};
+use crate::rich;
 use crate::timeline;
 use crate::timeline::AttachmentView;
 use crate::variable_list::{Measurement, Viewport};
@@ -1885,7 +1886,10 @@ impl Worker {
         self.tracker
             .history
             .refresh(&self.rest, &navigation, &request.timeline);
-        let timeline = self.tracker.history.snapshot();
+        let mut timeline = self.tracker.history.snapshot();
+        timeline.names = mention_names(&self.tracker.store, navigation.selected_guild, &timeline);
+        timeline.candidates =
+            mention_candidates(&self.tracker.store, navigation.selected_guild, &timeline);
         let emoji = emoji_picker::snapshot(&request.emoji, &self.tracker.store, &navigation);
         let parent = *self.bridge.voice_requests.borrow();
         let offers = parent
@@ -2147,6 +2151,9 @@ pub struct GatewayPanel {
     pub emoji: emoji::State,
     pub emoji_picker: emoji_picker::Picker,
     pub emoji_snapshot: Arc<emoji_picker::Snapshot>,
+    /// Spoilers the viewer uncovered (message, spoiler), at most
+    /// [`rich::MAX_REVEALED`].
+    pub revealed: HashSet<(Snowflake, u16)>,
     pub watch_open: bool,
     /// The source picker of the screen share.
     pub share_picker: SharePicker,
@@ -2199,6 +2206,97 @@ fn is_attachment_in(
         })
 }
 
+/// Names of the roles and channels the shown rows mention, looked up in the
+/// selected guild. Only what the rows reference is copied.
+fn mention_names(
+    store: &Store,
+    guild: Option<Snowflake>,
+    timeline: &timeline::Snapshot,
+) -> rich::Names {
+    let Some(entry) = guild.and_then(|guild| store.guild(guild)) else {
+        return rich::Names::default();
+    };
+    let (roles, channels) = rich::wanted(timeline.rows.iter().map(timeline::content));
+    rich::Names {
+        roles: roles
+            .into_iter()
+            .filter_map(|id| {
+                let role = entry.roles().iter().find(|role| role.id == id)?;
+                Some((id, role.name.clone()))
+            })
+            .collect(),
+        channels: channels
+            .into_iter()
+            .filter_map(|id| Some((id, entry.channel(id)?.name.clone()?)))
+            .collect(),
+    }
+}
+
+/// Most people, roles and channels one channel offers for completion.
+const MAX_CANDIDATES: usize = 128;
+
+/// What `@` and `#` can complete to: the people shown in the timeline, then
+/// the selected server's roles and text channels. Bounded; nothing is held
+/// beyond the snapshot.
+fn mention_candidates(
+    store: &Store,
+    guild: Option<Snowflake>,
+    timeline: &timeline::Snapshot,
+) -> Vec<Candidate> {
+    if timeline.channel_id.is_none() || !timeline.can_send {
+        return Vec::new();
+    }
+    let mut out: Vec<Candidate> = Vec::new();
+    let mut person = |user: &fastcord_model::User| {
+        if out.len() < MAX_CANDIDATES && !out.iter().any(|c| c.id == user.id) {
+            out.push(Candidate {
+                kind: CandidateKind::User,
+                id: user.id,
+                label: user.display_name().to_owned(),
+            });
+        }
+    };
+    for row in timeline.rows.iter().rev() {
+        person(&row.message.author);
+        row.message.mentions.iter().for_each(&mut person);
+    }
+    if let Some(entry) = guild.and_then(|guild| store.guild(guild)) {
+        let everyone = entry.id();
+        out.extend(
+            entry
+                .roles()
+                .iter()
+                .filter(|role| role.id != everyone)
+                .take(MAX_CANDIDATES)
+                .map(|role| Candidate {
+                    kind: CandidateKind::Role,
+                    id: role.id,
+                    label: role.name.clone(),
+                }),
+        );
+        out.extend(
+            entry
+                .channels()
+                .filter(|channel| {
+                    matches!(
+                        channel.kind,
+                        fastcord_model::ChannelKind::GuildText
+                            | fastcord_model::ChannelKind::GuildAnnouncement
+                    )
+                })
+                .filter_map(|channel| {
+                    Some(Candidate {
+                        kind: CandidateKind::Channel,
+                        id: channel.id,
+                        label: channel.name.clone()?,
+                    })
+                })
+                .take(MAX_CANDIDATES),
+        );
+    }
+    out
+}
+
 fn occurrence_in(
     timeline: &timeline::Snapshot,
     picker: &emoji_picker::Picker,
@@ -2218,13 +2316,8 @@ fn occurrence_in(
                     .iter()
                     .find(|row| row.message.id == message && row.revision == revision)
                     .is_some_and(|row| {
-                        emoji::runs(timeline::content(row))
-                            .filter_map(|run| match run {
-                                emoji::Run::Emoji { asset, .. } => Some(asset),
-                                _ => None,
-                            })
-                            .nth(usize::from(run))
-                            == Some(occurrence.asset)
+                        rich::emoji_assets(timeline::content(row)).get(usize::from(run))
+                            == Some(&occurrence.asset)
                     })
         }
         emoji::Origin::Reaction {
@@ -2258,6 +2351,16 @@ fn occurrence_in(
 }
 
 impl GatewayPanel {
+    /// Uncovers a hidden spoiler (or hides it again), within a fixed bound.
+    pub fn toggle_spoiler(&mut self, message: Snowflake, spoiler: u16) {
+        if !self.revealed.remove(&(message, spoiler)) {
+            if self.revealed.len() >= rich::MAX_REVEALED {
+                self.revealed.clear();
+            }
+            self.revealed.insert((message, spoiler));
+        }
+    }
+
     pub fn new(id: u64, worker: Handle, controls: NavigationBridge) -> Self {
         Self {
             id,
@@ -2269,6 +2372,7 @@ impl GatewayPanel {
             emoji: emoji::State::default(),
             emoji_picker: emoji_picker::Picker::default(),
             emoji_snapshot: Arc::default(),
+            revealed: HashSet::new(),
             watch_open: false,
             share_picker: SharePicker::default(),
             voice_guild: None,

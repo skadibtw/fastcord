@@ -39,6 +39,63 @@ const STRIP_HEIGHT: f32 = 168.0;
 
 pub const EDITOR_ID: &str = "composer";
 
+/// Completions offered at once.
+const MAX_COMPLETIONS: usize = 8;
+/// Longest `@`/`#` query that still completes.
+const MAX_QUERY_CHARS: usize = 32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidateKind {
+    User,
+    Role,
+    Channel,
+}
+
+/// Something a `@` or `#` can complete to, from the open channel's server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub kind: CandidateKind,
+    pub id: Snowflake,
+    pub label: String,
+}
+
+impl Candidate {
+    /// The reference Discord expects in the message text.
+    fn reference(&self) -> String {
+        match self.kind {
+            CandidateKind::User => format!("<@{}> ", self.id),
+            CandidateKind::Role => format!("<@&{}> ", self.id),
+            CandidateKind::Channel => format!("<#{}> ", self.id),
+        }
+    }
+
+    fn shown(&self) -> String {
+        match self.kind {
+            CandidateKind::Channel => format!("#{}", self.label),
+            _ => format!("@{}", self.label),
+        }
+    }
+}
+
+/// The `@`/`#` word the cursor ends: its trigger and the query typed after it.
+/// The trigger must start the line or follow whitespace, so addresses and
+/// anchors do not complete.
+pub fn mention_token(line: &str, column: usize) -> Option<(char, &str)> {
+    let end = line.floor_char_boundary(column.min(line.len()));
+    let before = &line[..end];
+    let query_start = before
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .last()
+        .map_or(end, |(at, _)| at);
+    let query = &before[query_start..];
+    let mut earlier = before[..query_start].chars().rev();
+    let trigger = earlier.next().filter(|c| matches!(c, '@' | '#'))?;
+    (earlier.next().is_none_or(char::is_whitespace) && query.chars().count() <= MAX_QUERY_CHARS)
+        .then_some((trigger, query))
+}
+
 /// An editor action. `Debug` names the kind of action, never typed or pasted text.
 #[derive(Clone)]
 pub struct Act(pub Action);
@@ -61,6 +118,11 @@ pub enum Event {
     Everyone(bool),
     ReplyMention(bool),
     CancelReply,
+    /// Replace the `@`/`#` word before the cursor with a reference.
+    Complete {
+        replaced: usize,
+        insertion: String,
+    },
     Retry(OpId),
     Discard(OpId),
     /// Move a failed message's text back into the editor and drop the failure.
@@ -222,6 +284,56 @@ impl Composer {
             self.notice = None;
             self.recount();
         }
+    }
+
+    /// Completions for the `@`/`#` word at the cursor: each candidate with the
+    /// number of characters (trigger included) it replaces.
+    pub fn completions<'s>(&self, snapshot: &'s Snapshot) -> Vec<(&'s Candidate, usize)> {
+        if self.editing.is_some() || self.channel.is_none() || snapshot.candidates.is_empty() {
+            return Vec::new();
+        }
+        let cursor = self.content.cursor();
+        if cursor.selection.is_some() {
+            return Vec::new();
+        }
+        let Some(line) = self.content.line(cursor.position.line) else {
+            return Vec::new();
+        };
+        let Some((trigger, query)) = mention_token(&line.text, cursor.position.column) else {
+            return Vec::new();
+        };
+        let query_lower = query.to_lowercase();
+        let wanted =
+            |candidate: &&Candidate| (trigger == '#') == (candidate.kind == CandidateKind::Channel);
+        let mut found: Vec<(&Candidate, bool)> = snapshot
+            .candidates
+            .iter()
+            .filter(wanted)
+            .filter_map(|candidate| {
+                let name = candidate.label.to_lowercase();
+                if name.starts_with(&query_lower) {
+                    Some((candidate, true))
+                } else {
+                    name.contains(&query_lower).then_some((candidate, false))
+                }
+            })
+            .collect();
+        found.sort_by_key(|(_, prefix)| !prefix);
+        let replaced = 1 + query.chars().count();
+        found
+            .into_iter()
+            .take(MAX_COMPLETIONS)
+            .map(|(candidate, _)| (candidate, replaced))
+            .collect()
+    }
+
+    /// Replaces the `replaced` characters before the cursor with `insertion`.
+    pub fn complete(&mut self, replaced: usize, insertion: &str) {
+        for _ in 0..replaced {
+            self.content.perform(Action::Edit(Edit::Backspace));
+        }
+        self.recount();
+        self.insert_emoji(insertion);
     }
 
     /// Picker insertion is a normal editor paste: it replaces the selection at
@@ -490,6 +602,10 @@ pub fn update(
         Event::Everyone(allowed) => composer.set_everyone(allowed),
         Event::ReplyMention(allowed) => composer.set_reply_mention(allowed),
         Event::CancelReply => composer.cancel_reply(),
+        Event::Complete {
+            replaced,
+            insertion,
+        } => composer.complete(replaced, &insertion),
         Event::Send if composer.editing.is_some() => {
             if let Some(edit) = composer.edit_submission() {
                 if bridge.edit_message(edit.channel, edit.message, edit.content) {
@@ -752,6 +868,23 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         .padding(8)
         .min_height(38)
         .max_height(150);
+    let picks = composer.completions(snapshot);
+    if !picks.is_empty() {
+        layout = layout.push(
+            row(picks.into_iter().map(|(candidate, replaced)| {
+                button(text(candidate.shown()).size(12))
+                    .on_press(Event::Complete {
+                        replaced,
+                        insertion: candidate.reference(),
+                    })
+                    .padding([2, 6])
+                    .style(button::secondary)
+                    .into()
+            }))
+            .spacing(4)
+            .wrap(),
+        );
+    }
     layout = layout.push(editor);
 
     let mut controls = row![]
@@ -1136,6 +1269,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mention_words_need_a_leading_boundary_and_a_short_query() {
+        assert_eq!(mention_token("hi @al", 6), Some(('@', "al")));
+        assert_eq!(mention_token("@", 1), Some(('@', "")));
+        assert_eq!(mention_token("see #gen", 8), Some(('#', "gen")));
+        assert_eq!(mention_token("mail me@example", 15), None);
+        assert_eq!(mention_token("hi @al b", 8), None);
+        assert_eq!(mention_token("hi @al b", 6), Some(('@', "al")));
+        assert_eq!(mention_token("@\u{e9}", 3), Some(('@', "\u{e9}")));
+        assert_eq!(mention_token("@\u{e9}", 1), Some(('@', "")));
+        assert_eq!(mention_token(&format!("@{}", "a".repeat(40)), 41), None);
+    }
+
+    fn candidate(kind: CandidateKind, id: u64, label: &str) -> Candidate {
+        Candidate {
+            kind,
+            id: Snowflake(id),
+            label: label.to_owned(),
+        }
+    }
+
+    #[test]
+    fn completion_inserts_the_chosen_reference_and_keeps_the_rest() {
+        let mut composer = composer_in(A);
+        let mut snapshot = open(A, Vec::new());
+        snapshot.candidates = vec![
+            candidate(CandidateKind::User, 11, "Malice"),
+            candidate(CandidateKind::User, 12, "Alice"),
+            candidate(CandidateKind::Role, 13, "mods"),
+            candidate(CandidateKind::Channel, 14, "general"),
+        ];
+        type_text(&mut composer, "hi @ali");
+        let picks = composer.completions(&snapshot);
+        // Prefix matches come before substring matches; channels are not offered.
+        assert_eq!(
+            picks.iter().map(|(c, _)| c.id.0).collect::<Vec<_>>(),
+            [12, 11]
+        );
+        let (pick, replaced) = picks[0];
+        assert_eq!(replaced, 4);
+        let insertion = pick.reference();
+        composer.complete(replaced, &insertion);
+        assert_eq!(composer.content.text().trim_end(), "hi <@12>");
+        assert!(composer.completions(&snapshot).is_empty());
+
+        type_text(&mut composer, "#gen");
+        let picks = composer.completions(&snapshot);
+        assert_eq!(picks.len(), 1);
+        assert_eq!(picks[0].0.reference(), "<#14> ");
+        composer.complete(picks[0].1, &picks[0].0.reference());
+        assert_eq!(composer.content.text().trim_end(), "hi <@12> <#14>");
+
+        type_text(&mut composer, "@mo");
+        assert_eq!(composer.completions(&snapshot)[0].0.reference(), "<@&13> ");
+    }
+
     fn open(channel: Snowflake, outbox: Vec<OutboxItem>) -> Snapshot {
         Snapshot {
             channel_id: Some(channel),
@@ -1246,6 +1435,10 @@ mod tests {
                 pinned: false,
                 attachments: Vec::new(),
                 reactions: Vec::new(),
+                mentions: Vec::new(),
+                mention_roles: Vec::new(),
+                mention_everyone: false,
+                embeds: Vec::new(),
                 message_reference: None,
                 referenced_message: fastcord_model::Referenced::Unknown,
                 nonce: None,
