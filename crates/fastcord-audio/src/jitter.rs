@@ -4,13 +4,13 @@ use crate::codec::{CHANNELS, FRAME_SAMPLES, MAX_FRAME_SAMPLES, VoiceDecoder};
 use crate::pipeline::RemoteFrame;
 
 const SPEAKERS: usize = 4;
-const PACKETS: usize = 8;
-const INITIAL_TARGET: Duration = Duration::from_millis(20);
-const MIN_TARGET: Duration = Duration::from_millis(20);
-const MAX_TARGET: Duration = Duration::from_millis(120);
+const PACKETS: usize = 12;
+const INITIAL_TARGET: Duration = Duration::from_millis(60);
+const MIN_TARGET: Duration = Duration::from_millis(40);
+const MAX_TARGET: Duration = Duration::from_millis(160);
 const INACTIVE: Duration = Duration::from_secs(2);
 const MAX_CONSECUTIVE_PLC: usize = 3;
-const FAR_SEQUENCE_THRESHOLD: u64 = 8;
+const FAR_SEQUENCE_THRESHOLD: u64 = 12;
 
 struct Queued {
     frame: RemoteFrame,

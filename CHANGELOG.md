@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Voice playback no longer starves on ordinary internet jitter: the per-speaker jitter buffer started at 20 ms and could not adapt below it, so any burst over 20 ms became concealed (choppy, robotic) audio; it now starts at 60 ms, adapts between 40 and 160 ms, and holds up to 12 packets. Echo (speakers into the microphone) is still not cancelled; use headphones until echo cancellation (#83) lands.
+
 ### Changed
 - The main screen follows the web client's layout and dark palette: a rail of server icons, a sidebar of channels (or direct messages) with the user and voice panel at its foot (Mic, Sound, Audio, Exit), a conversation pane with a channel header, round letter avatars and messages from the same author within seven minutes grouped under one header, red mention badges and bold unread names. The voice call (people with a speaking ring, per-person volume, Go Live) is a bar above the conversation instead of a debug column. Server and profile pictures are not fetched yet (letters stand in).
 
