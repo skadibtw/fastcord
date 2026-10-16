@@ -12,6 +12,7 @@ mod gateway;
 mod history;
 mod login;
 mod navigation;
+mod notify;
 mod outbox;
 mod password;
 mod paste;
@@ -168,6 +169,7 @@ enum Message {
     SelectAudioDevice(fastcord_audio::Direction, audio_devices::DeviceOption),
     NoiseSuppressionChanged(fastcord_audio::NoiseSuppression),
     EchoCancellationChanged(bool),
+    NotificationsToggled(bool),
     AudioPreferencesSaved(Result<(), &'static str>),
     Timeline(timeline::Event),
     SelectPrivateChannel(Snowflake),
@@ -347,6 +349,7 @@ impl App {
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Initialized(preferences, store) => {
+                notify::set_enabled(!preferences.notifications_off);
                 self.audio_preferences = preferences;
                 return self.handle(Message::StoreReady(store));
             }
@@ -400,6 +403,13 @@ impl App {
                 if let Phase::Account { gateway, .. } = &self.phase {
                     gateway.controls.select_echo_cancellation(enabled);
                 }
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::NotificationsToggled(on) => {
+                self.audio_preferences.notifications_off = !on;
+                notify::set_enabled(on);
                 if self.audio_saving.is_none() {
                     return self.save_audio_preferences();
                 }
@@ -943,6 +953,7 @@ impl App {
             Message::WindowActive(active) => {
                 self.window_active = active;
                 self.sync_viewing();
+                notify::set_active(active);
             }
             Message::WindowSize(size) => {
                 self.window_drawable = size.width > 0.0 && size.height > 0.0;

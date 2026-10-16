@@ -257,6 +257,18 @@ impl Tracker {
                         ..
                     }
                 );
+                if let GatewayEvent::Dispatch {
+                    event: Dispatch::MessageCreate(message),
+                    ..
+                } = &dispatch
+                {
+                    let muted = self.store.is_muted(message.channel_id, message.guild_id);
+                    crate::notify::on_message(
+                        message,
+                        self.store.current_user().map(|u| u.id),
+                        muted,
+                    );
+                }
                 let changes = self.store.apply(dispatch);
                 self.navigation_dirty = (relevant && !changes.is_empty())
                     || changes.read

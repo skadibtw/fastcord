@@ -26,6 +26,8 @@ pub struct Preferences {
     pub output: Selection,
     pub noise_suppression: NoiseSuppression,
     pub echo_cancellation: bool,
+    /// Desktop notifications are on unless this is set (so `Default` is on).
+    pub notifications_off: bool,
 }
 
 impl Default for Preferences {
@@ -35,6 +37,7 @@ impl Default for Preferences {
             output: Selection::default(),
             noise_suppression: NoiseSuppression::default(),
             echo_cancellation: true,
+            notifications_off: false,
         }
     }
 }
@@ -191,6 +194,7 @@ pub fn view<'a>(
         text("Light (RNNoise) is the default and uses little CPU. High quality (DeepFilterNet 3) removes keyboard and background voices better, but adds about 30 ms of delay and uses more CPU and memory; it loads only while selected and is released when you switch away. Microphone only; never applied to shared or system audio."),
         checkbox(prefs.echo_cancellation).label("Echo cancellation").on_toggle(crate::Message::EchoCancellationChanged),
         text("Removes what your speakers play from your microphone, so others do not hear themselves. It needs a few seconds of speech to adapt, works best with the microphone and speakers in a fixed position, and is not needed with a headset."),
+        checkbox(!prefs.notifications_off).label("Desktop notifications for DMs and mentions while the window is not active").on_toggle(crate::Message::NotificationsToggled),
         text(stats_summary(stats)),
         text(if settings.probing { "Looking for audio devices…" } else { "System default follows the OS only when selected. Refresh lists after plugging a device in." }),
         row![button("Refresh devices").on_press_maybe((!settings.probing).then_some(crate::Message::RefreshAudioDevices)), button("Close").on_press(crate::Message::CloseAudioSettings)].spacing(12),
@@ -246,6 +250,7 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
             Some(Value::Bool(enabled)) => *enabled,
             _ => return None,
         },
+        notifications_off: value.get("notifications_off").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -261,7 +266,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "notifications_off": prefs.notifications_off}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -337,6 +342,7 @@ mod tests {
             output: explicit("wasapi:headset", "Duplicate name"),
             noise_suppression: NoiseSuppression::HighQuality,
             echo_cancellation: false,
+            notifications_off: true,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);

@@ -4,6 +4,7 @@
 
 pub mod capture;
 pub mod clipboard;
+pub mod notify;
 
 use std::collections::HashMap;
 use std::fmt;

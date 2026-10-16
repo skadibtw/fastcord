@@ -22,7 +22,9 @@ zeroize.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store.workspace = true
 windows = { workspace = true, features = [
+    "Data_Xml_Dom",
     "Foundation",
+    "UI_Notifications",
     "Graphics_Capture",
     "Graphics_DirectX",
     "Graphics_DirectX_Direct3D11",
