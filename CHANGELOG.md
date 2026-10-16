@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Readable one-line text for common system message types (joins, pins, calls, renames, boosts, threads); unknown types read "Unsupported message type (N)." (Refs #110).
 - Restrict the Windows download-zone constant to Windows builds, fixing dead-code errors in Linux and macOS test targets with warnings denied.
 
 ### Added

@@ -1155,7 +1155,16 @@ fn placeholder(message: &Message) -> Option<String> {
     }
     Some(match message.kind {
         0 | 19 | 20 | 23 => "No text content.".to_owned(),
-        kind => format!("System message (type {kind})."),
+        1 => "A member was added to the conversation.".to_owned(),
+        2 => "A member left the conversation.".to_owned(),
+        3 => "A call.".to_owned(),
+        4 => "The conversation name was changed.".to_owned(),
+        5 => "The conversation icon was changed.".to_owned(),
+        6 => "A message was pinned.".to_owned(),
+        7 => "A member joined.".to_owned(),
+        8..=11 => "The server was boosted.".to_owned(),
+        18 => "A thread was created.".to_owned(),
+        kind => format!("Unsupported message type ({kind})."),
     })
 }
 
@@ -1480,9 +1489,11 @@ mod tests {
         bare.attachments.clear();
         assert_eq!(placeholder(&bare).as_deref(), Some("No text content."));
         bare.kind = 7;
+        assert_eq!(placeholder(&bare).as_deref(), Some("A member joined."));
+        bare.kind = 250;
         assert_eq!(
             placeholder(&bare).as_deref(),
-            Some("System message (type 7).")
+            Some("Unsupported message type (250).")
         );
     }
 
