@@ -31,7 +31,7 @@ Track four separate forms of evidence: implementation, deterministic/offline che
 
 New functions reuse the single-writer reducer, small UI read models, existing nonce-aware outbox, byte-bounded caches and native media engines. Search uses server pagination, uploads stream from disk, drafts stay in session memory, and no persistent plaintext message database is added. Every new authenticated protocol action needs sanitized fixtures and live alt-account evidence rather than assuming a bot endpoint proves user-client compatibility.
 
-Camera, server administration/moderation, store/Activities, plugins, rich activity integrations and selfbot automation remain excluded. Audio/video attachment playback remains delegated to the OS player.
+These are the boundaries of the M39-M51 stage: camera, server administration/moderation and inline audio/video attachment playback were not included. On 2026-10-16 the maintainer approved the later [full free communication stage](COMMUNICATION_COVERAGE.md), tracked in [#109](https://github.com/skadibtw/fastcord/issues/109). It adds these functions and communication apps/community tools through #69-#108. Paid/Nitro features, game library/game activities, store/ads and selfbot automation remain excluded. M51 is not the final parity gate; #108 is.
 
 ## Release gates
 
