@@ -3,6 +3,7 @@
 mod attachment_ui;
 mod attachments;
 mod audio_devices;
+mod captcha;
 mod changes;
 mod composer;
 mod emoji;
@@ -12,6 +13,7 @@ mod history;
 mod login;
 mod navigation;
 mod outbox;
+mod password;
 mod playback;
 mod qr;
 mod reactions;
@@ -56,6 +58,9 @@ struct App {
     store: Option<NativeCredentialStore>,
     saved_accounts: Vec<Snowflake>,
     qr_attempts: u64,
+    password_login: String,
+    password: Arc<UserToken>,
+    captcha_solved: bool,
     gateway_sessions: u64,
     attachment_purge_failed: bool,
     audio_preferences: audio_devices::Preferences,
@@ -89,6 +94,7 @@ enum Phase {
         error: StoreError,
     },
     Qr(QrAttempt),
+    Mfa(fastcord_discord::MfaChallenge),
 }
 
 // Every message containing a token uses the redacted wrapper; Debug cannot
@@ -102,6 +108,14 @@ enum Message {
     StartQr,
     CancelQr,
     Qr(u64, RemoteAuthEvent),
+    PasswordLoginEdited(String),
+    PasswordEdited(Arc<UserToken>),
+    PasswordSubmit,
+    PasswordStep(Result<password::Step, fastcord_discord::PasswordAuthError>),
+    CaptchaDone(Result<fastcord_discord::CaptchaSolution, captcha::CaptchaError>),
+    MfaSubmit,
+    CancelMfa,
+    MfaResult(Result<Arc<UserToken>, fastcord_discord::PasswordAuthError>),
     Login,
     RetrySaved,
     StoreReady(Result<StoreReady, StoreError>),
@@ -186,6 +200,9 @@ impl App {
                 store: None,
                 saved_accounts: Vec::new(),
                 qr_attempts: 0,
+                password_login: String::new(),
+                password: Arc::new(UserToken::new(String::new())),
+                captcha_solved: false,
                 gateway_sessions: 0,
                 attachment_purge_failed: false,
                 audio_preferences: audio_devices::Preferences::default(),
@@ -378,7 +395,102 @@ impl App {
                     );
                 }
             }
-            Message::TokenEdited(token) if matches!(self.phase, Phase::Login) => {
+            Message::PasswordLoginEdited(value) if matches!(self.phase, Phase::Login) => {
+                self.password_login = value;
+            }
+            Message::PasswordEdited(value) if matches!(self.phase, Phase::Login) => {
+                self.password = value;
+            }
+            Message::PasswordSubmit
+                if matches!(self.phase, Phase::Login) && self.can_password_login() =>
+            {
+                self.notice = None;
+                self.captcha_solved = false;
+                self.phase = Phase::Authenticating {
+                    saved_account: None,
+                };
+                return self.password_attempt(None);
+            }
+            Message::PasswordStep(result) if matches!(self.phase, Phase::Authenticating { .. }) => {
+                match result {
+                    Ok(password::Step::Token(token)) => {
+                        self.clear_password();
+                        return Task::perform(
+                            login::token_login(token, self.store.clone(), !self.memory_only),
+                            Message::LoginFinished,
+                        );
+                    }
+                    Ok(password::Step::Mfa(challenge)) => {
+                        self.clear_password();
+                        self.clear_token();
+                        self.phase = Phase::Mfa(challenge);
+                    }
+                    Ok(password::Step::Captcha(_)) if self.captcha_solved => {
+                        // One challenge per login: a repeat means Discord did not accept ours.
+                        self.clear_password();
+                        self.phase = Phase::Login;
+                        self.notice = Some("Discord asked for another CAPTCHA. Login stopped; try again later or use QR or token login.".to_owned());
+                    }
+                    Ok(password::Step::Captcha(challenge)) => {
+                        self.notice =
+                            Some("Complete the CAPTCHA in the window that opened.".to_owned());
+                        return Task::perform(captcha::solve(challenge), Message::CaptchaDone);
+                    }
+                    Err(error) => {
+                        self.clear_password();
+                        self.phase = Phase::Login;
+                        self.notice = Some(error.to_string());
+                    }
+                }
+            }
+            Message::CaptchaDone(result) if matches!(self.phase, Phase::Authenticating { .. }) => {
+                match result {
+                    Ok(solution) => {
+                        self.captcha_solved = true;
+                        self.notice = None;
+                        return self.password_attempt(Some(solution));
+                    }
+                    Err(error) => {
+                        self.clear_password();
+                        self.phase = Phase::Login;
+                        self.notice = Some(error.to_string());
+                    }
+                }
+            }
+            Message::MfaSubmit
+                if matches!(self.phase, Phase::Mfa(_))
+                    && !self.token.expose_secret().trim().is_empty() =>
+            {
+                let Phase::Mfa(challenge) = std::mem::replace(
+                    &mut self.phase,
+                    Phase::Authenticating {
+                        saved_account: None,
+                    },
+                ) else {
+                    return Task::none();
+                };
+                let code = self.take_input_token();
+                return Task::perform(password::second_factor(challenge, code), Message::MfaResult);
+            }
+            Message::CancelMfa if matches!(self.phase, Phase::Mfa(_)) => {
+                self.clear_token();
+                self.phase = Phase::Login;
+            }
+            Message::MfaResult(result) if matches!(self.phase, Phase::Authenticating { .. }) => {
+                match result {
+                    Ok(token) => {
+                        return Task::perform(
+                            login::token_login(token, self.store.clone(), !self.memory_only),
+                            Message::LoginFinished,
+                        );
+                    }
+                    Err(error) => {
+                        self.phase = Phase::Login;
+                        self.notice = Some(error.to_string());
+                    }
+                }
+            }
+            Message::TokenEdited(token) if matches!(self.phase, Phase::Login | Phase::Mfa(_)) => {
                 self.token = token;
             }
             Message::InputTooLong if matches!(self.phase, Phase::Login) => {
@@ -1101,6 +1213,32 @@ impl App {
         }
     }
 
+    fn can_password_login(&self) -> bool {
+        self.acknowledged
+            && !self.password_login.trim().is_empty()
+            && !self.password.expose_secret().is_empty()
+    }
+
+    fn clear_password(&mut self) {
+        self.password = Arc::new(UserToken::new(String::new()));
+        self.password_login.clear();
+        self.captcha_solved = false;
+    }
+
+    fn password_attempt(
+        &self,
+        captcha: Option<fastcord_discord::CaptchaSolution>,
+    ) -> Task<Message> {
+        Task::perform(
+            password::attempt(
+                self.password_login.clone(),
+                Arc::clone(&self.password),
+                captcha,
+            ),
+            Message::PasswordStep,
+        )
+    }
+
     fn clear_token(&mut self) {
         self.token = Arc::new(UserToken::new(String::new()));
     }
@@ -1449,6 +1587,7 @@ impl App {
             Phase::Starting => text("Looking for a saved login in the native credential store…").into(),
             Phase::Login => self.login_view(),
             Phase::Qr(attempt) => self.qr_view(attempt),
+            Phase::Mfa(_) => self.mfa_view(),
             Phase::Authenticating { saved_account } => {
                 text(if saved_account.is_some() {
                     "Restoring saved login: validating the token with Discord…"
@@ -1478,13 +1617,24 @@ impl App {
     fn login_view(&self) -> Element<'_, Message> {
         let mut content = column![
             text("fastcord").size(36),
-            text("Warning: third-party Discord clients violate Discord’s Terms of Service and may get your account banned. Use an alternate account. Never share your token; it grants access to your account. fastcord never asks for your password."),
+            text("Warning: third-party Discord clients violate Discord’s Terms of Service and may get your account banned. Use an alternate account. Never share your token; it grants access to your account. Never share your password or token with anyone but Discord and this app."),
             checkbox(self.acknowledged).label("I understand the risk and am using an alternate account").on_toggle(Message::Acknowledge),
             checkbox(self.memory_only).label("Memory-only session (do not save this login)").on_toggle(Message::MemoryOnly),
             text("Otherwise, the login is saved securely using Windows Credential Manager, macOS Keychain, or Linux Secret Service. Native-store and network operations do not run on the UI thread."),
             text("Log in with QR code (recommended)").size(24),
             text("Open Discord on your phone, go to Settings, choose Scan QR Code, and scan the code fastcord shows. You never handle the token yourself."),
             button("Show QR code").on_press_maybe(self.acknowledged.then_some(Message::StartQr)),
+            text("Email and password").size(24),
+            text("Discord may ask you to complete a CAPTCHA and a two-factor code. fastcord only shows them to you; it never solves or bypasses them."),
+            text_input("Email or phone", &self.password_login)
+                .on_input(Message::PasswordLoginEdited)
+                .padding(12),
+            text_input("Password", self.password.expose_secret())
+                .secure(true)
+                .on_input(password_edited)
+                .on_submit_maybe(self.can_password_login().then_some(Message::PasswordSubmit))
+                .padding(12),
+            button("Log in with password").on_press_maybe(self.can_password_login().then_some(Message::PasswordSubmit)),
             text("Token login (advanced)").size(24),
             text_input("Paste your alt-account token", self.token.expose_secret())
                 .id("token-input")
@@ -1511,6 +1661,29 @@ impl App {
         content
             .push(button("Retry saved login").on_press(Message::RetrySaved))
             .into()
+    }
+
+    fn mfa_view(&self) -> Element<'_, Message> {
+        let mut content = column![
+            text("Two-factor authentication").size(24),
+            text("Enter the code from your authenticator app."),
+            text_input("Authentication code", self.token.expose_secret())
+                .secure(true)
+                .on_input(token_edited)
+                .on_submit(Message::MfaSubmit)
+                .padding(12),
+            row![
+                button("Continue").on_press(Message::MfaSubmit),
+                button("Cancel").on_press(Message::CancelMfa)
+            ]
+            .spacing(12),
+        ]
+        .spacing(16)
+        .width(Length::Fill);
+        if let Some(notice) = &self.notice {
+            content = content.push(text(notice));
+        }
+        content.into()
     }
 
     fn qr_view<'a>(&'a self, attempt: &'a QrAttempt) -> Element<'a, Message> {
@@ -1603,6 +1776,15 @@ fn parse_private_recipients(
         return Err("Select at least one recipient ID.");
     }
     Ok(recipients)
+}
+
+fn password_edited(mut value: String) -> Message {
+    if value.len() > fastcord_discord::MAX_CREDENTIAL_BYTES {
+        value.zeroize();
+        Message::InputTooLong
+    } else {
+        Message::PasswordEdited(Arc::new(UserToken::new(value)))
+    }
 }
 
 fn token_edited(mut value: String) -> Message {

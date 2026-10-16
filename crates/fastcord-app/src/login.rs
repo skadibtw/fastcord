@@ -98,6 +98,17 @@ pub async fn initialize_store() -> Result<StoreReady, StoreError> {
     .map_err(|_| StoreError::Unavailable)?
 }
 
+/// The web-client identity shared by password login and the validated session.
+pub async fn client_properties() -> ClientProperties {
+    let build = fastcord_discord::gateway::resolve_build_number().await;
+    ClientProperties::web(
+        HostOs::current(),
+        &fastcord_platform::system_locale(),
+        build.value,
+    )
+    .with_launch_identity()
+}
+
 /// Exactly one validation request before an authenticated account is displayed.
 /// Tokens and raw error bodies never enter a displayable diagnostic.
 pub async fn validate(
@@ -107,13 +118,7 @@ pub async fn validate(
     if token.expose_secret().is_empty() || token.expose_secret().len() > MAX_TOKEN_BYTES {
         return Err(LoginError::InvalidInput);
     }
-    let build = fastcord_discord::gateway::resolve_build_number().await;
-    let properties = ClientProperties::web(
-        HostOs::current(),
-        &fastcord_platform::system_locale(),
-        build.value,
-    )
-    .with_launch_identity();
+    let properties = client_properties().await;
     let client = RestClient::new(
         UserToken::new(token.expose_secret().to_owned()),
         properties.clone(),

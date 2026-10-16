@@ -17,6 +17,7 @@ mod error;
 pub mod gateway;
 pub mod history;
 pub mod message_store;
+mod password_auth;
 mod private_channel;
 mod rate_limit;
 mod reaction;
@@ -33,6 +34,10 @@ pub use clock::{Clock, MonotonicClock};
 pub use edit::{EditedMessage, edit_response_update, is_own_message};
 pub use error::{NetworkFailure, RestError, RetryableFailure};
 pub use gateway::{ConnectionState, Gateway, GatewayEvent};
+pub use password_auth::{
+    CaptchaChallenge, CaptchaSolution, MAX_CREDENTIAL_BYTES, MfaChallenge, PasswordAuth,
+    PasswordAuthError, PasswordLogin,
+};
 pub use private_channel::{MAX_PRIVATE_RECIPIENTS, PrivateChannelError};
 pub use reaction::{ReactionEmoji, ReactionEmojiError, ReactionUser};
 pub use remote_auth::{QrLink, RemoteAuth, RemoteAuthError, RemoteAuthEvent, RemoteUser};

@@ -66,6 +66,8 @@ tiny-skia = { version = "0.11.4", default-features = false, features = ["std", "
 time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
 tar = { version = "0.4", default-features = false }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
+tao = { version = "0.37", default-features = false, features = ["rwh_06"] }
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 webpki-roots = "1"

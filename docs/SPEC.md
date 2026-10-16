@@ -427,7 +427,7 @@ No fixed 60 Hz subscription. Enable animation ticks only for currently visible a
 
 ## 11. Login and token storage
 
-MVP login offers two methods (ADR 0006): **QR code** (primary, shown first) and **explicit token paste** (advanced) with a clear account/ToS warning and password-style input. There is no embedded Discord login page, token extraction, browser-store scraping, or password collection. Validate the resulting token once with `GET /users/@me` before establishing the Gateway.
+Login offers **QR code** (primary, shown first), **email/password** (Windows only; a CAPTCHA is shown to the person in a short-lived web view and never solved; TOTP second factor; ADR 0006 amendment) and **explicit token paste** (advanced), all with a clear account/ToS warning and password-style input. There is no embedded Discord login page, token extraction or browser-store scraping. Validate the resulting token once with `GET /users/@me` before establishing the Gateway.
 
 Use the keyring ecosystem with one selected native backend per OS: Windows Credential Manager, macOS Keychain, and Linux Secret Service. Prefer `keyring-core` plus the exact backend crate, not the CLI feature that pulls every store. Native-store calls run off the UI thread. Store under application service `fastcord` and account ID after validation. [S26]
 
@@ -553,7 +553,6 @@ Ship all required third-party notices (dav1d, libvpx if used, openh264 on Linux,
 | CPU RGBA conversion plus new iced image per video frame | Repeats conversion/upload/allocation and undermines memory/frame-time budgets |
 | DeepFilterNet as the default | CPU/RAM cost conflicts with the low-resource goal; offered as opt-in High quality mode instead (ADR 0004) |
 | OS emoji fonts as the sole renderer | Inconsistent asset/version/color support across targets; attributed Twemoji gives a deterministic baseline |
-| Password/CAPTCHA login in MVP | More unstable user-auth surfaces and challenge handling; QR remote auth plus token paste cover login (ADR 0006) |
 | Plaintext token configuration fallback | Turns a missing keyring into credential exposure; explicit memory-only login is safer and honest |
 
 These are project design decisions, not benchmark claims about the alternatives.
@@ -668,6 +667,12 @@ The initial MVP above remains unchanged and must pass M38 before these features 
 49. **Forum posts and replies.** Browse forum posts and tags, open posts, create a post and reply using thread infrastructure. Creating/configuring forum channels and moderation are excluded. Acceptance: Post lists, tags and paginated/archive views match accessible official-client content. New post title/body/attachments/tags and replies appear correctly in the official client. Required tags, permissions, archived/locked state and stale/deleted posts fail clearly without losing drafts. Track: [#64](https://github.com/skadibtw/fastcord/issues/64).
 50. **Everyday keyboard navigation and session drafts.** Add a channel/DM quick switcher, keyboard navigation and per-conversation drafts retained in memory for the active session. Preserve composer metadata when switching contexts. Acceptance: Switching channels/DMs preserves text and reply/attachment intent within a bounded draft budget; draft loss is never silent. Quick switch and keyboard navigation work without loading all message histories. IME composition, focus restoration and navigation from search, pins and notifications work on Windows/Linux/macOS. Track: [#65](https://github.com/skadibtw/fastcord/issues/65).
 51. **Everyday-client release acceptance.** Validate M39-M50 together on Windows, Linux and macOS, repeat M38 performance/resource gates and document supported behavior and remaining limitations. Acceptance: Messages, uploads, read-state, notifications, search/pins, friends/status, private calls and thread/forum participation work end-to-end against official clients. Authenticated idle remains below 150,000,000 resident bytes on the primary Windows scenario and mean CPU below 0.5% of one logical core over ten minutes; report other platforms and GPU memory separately. Thirty-minute voice, twenty share cycles, four packaged targets and return within 10 MB of warmed memory two minutes after media teardown pass the SPEC matrix. Track: [#66](https://github.com/skadibtw/fastcord/issues/66).
+
+### Full free communication stage (approved 2026-10-16, after M51)
+
+The maintainer expanded the post-M51 scope to all free communication capabilities. [COMMUNICATION_COVERAGE.md](COMMUNICATION_COVERAGE.md) is the ordered extension of this milestone list; [tracker #109](https://github.com/skadibtw/fastcord/issues/109) maps the existing work and issues #69-#108. Implement its forty rows in order after M51, respecting their prerequisites and one feature per commit. #108 is the final free-communication acceptance gate, while M51/#66 retains its narrower original meaning.
+
+This stage supersedes prior exclusions for camera/video, inline media playback, communication-related server/channel/role administration and moderation, community tools, manually invoked app commands and free non-game collaborative activities. It preserves the native architecture, single-writer reducer, byte bounds, no FFmpeg and no selfbot automation. Paid/Nitro entitlements, billing/boosts, premium cosmetics or limits, subscription-only bookmarks/reminders, game library/game activities and store/ads remain excluded. Receiving legitimately accessible content from paid clients is not a premium sending feature. Each issue records free-account/platform eligibility, concrete acceptance, references and dependencies; an unsupported route or missing native check remains pending.
 
 ## 17. Sources and rationale evidence
 

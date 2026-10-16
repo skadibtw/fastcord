@@ -304,8 +304,14 @@ pub(crate) fn auth_headers(
     let mut authorization =
         HeaderValue::from_str(token.expose_secret()).map_err(|_| RestError::InvalidToken)?;
     authorization.set_sensitive(true);
-    let mut headers = HeaderMap::new();
+    let mut headers = identity_headers(properties)?;
     headers.insert(AUTHORIZATION, authorization);
+    Ok(headers)
+}
+
+/// Everything but `Authorization`: also used by the pre-token password login.
+pub(crate) fn identity_headers(properties: &ClientProperties) -> Result<HeaderMap, RestError> {
+    let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
     // This is the exact properties object used by Gateway Identify.

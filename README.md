@@ -72,6 +72,9 @@ acknowledgement before any login method can start. Two methods are offered:
   in memory and are dropped when an attempt ends. If Discord demands a CAPTCHA,
   fastcord stops and points you to token login or the official client; it does not
   solve or bypass CAPTCHAs.
+- **Email and password.** Windows only for now. Discord may ask for a CAPTCHA, which fastcord shows to you in a
+  temporary window (it never solves or bypasses it), and for an authenticator code. Password login is the
+  riskiest method for an account; prefer QR.
 - **Token login (advanced).** Paste a token into the masked field.
 
 Either way the resulting token is validated once with Discord's `GET /users/@me`
