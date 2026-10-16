@@ -310,3 +310,9 @@ Each milestone in `docs/SPEC.md` §16 lists acceptance criteria. Before committi
 ### Desktop notifications (milestone 42)
 
 Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, window inactive, enabled, unmuted, not own), the 5 s cooldown with text-free coalescing, replay de-duplication and the 128-ID / 80-character bounds; `fastcord-platform` `notify::tests` cover clipping. Manual and not yet recorded: a real toast on Windows (an unpackaged build may need a Start-menu shortcut with AUMID `fastcord`), and Linux/macOS adapters (not implemented).
+
+### Pinned-message browser (milestone 44)
+
+- `cargo test -p fastcord-discord -p fastcord-app --locked`: `pins` (discord) covers the route and cursor encoding, PUT/DELETE pin routes, both list shapes, and foreign-channel, oversized and malformed pages; `pins` (app) covers stale list answers, other-channel events, de-duplicated paging by cursor, clipped previews and byte/count bounds, visible permission errors, and release on close or channel change; `timeline::tests::pin_actions_need_the_permission` covers the row Pin/Unpin action.
+- **Unverified fixtures:** `fixtures/rest/pins-items.json` and `pins-array.json` are synthetic and shaped from public/community documentation, not captured from Discord.
+- **Pending live checks (alt account only):** compare the list with the official client, pin/unpin in a DM and a server with and without Manage Messages, and confirm the `before` cursor and `has_more`. A real app launch with the Pins panel is also pending.

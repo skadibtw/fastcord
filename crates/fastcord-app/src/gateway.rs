@@ -2560,6 +2560,23 @@ impl GatewayPanel {
         is_attachment_in(&self.timeline, key)
     }
 
+    /// Anyone may pin in a DM; a server needs Manage Messages in the channel.
+    fn can_pin(&self) -> bool {
+        let open = self.timeline.channel_id;
+        open.is_some()
+            && (self
+                .navigation
+                .private_selection
+                .as_ref()
+                .map(|p| p.channel_id)
+                == open
+                || self
+                    .navigation
+                    .selection
+                    .as_ref()
+                    .is_some_and(|s| Some(s.channel_id) == open && s.permissions.manage_messages))
+    }
+
     /// What the timeline shows about rows the UI is working on.
     pub fn interaction(&self) -> timeline::Interaction {
         timeline::Interaction {
@@ -2569,6 +2586,7 @@ impl GatewayPanel {
                 .confirm_delete
                 .filter(|(channel, _)| self.timeline.channel_id == Some(*channel))
                 .map(|(_, message)| message),
+            can_pin: self.can_pin(),
         }
     }
 
@@ -3355,6 +3373,7 @@ mod bridge_tests {
             timeline::Interaction {
                 editing: Some(Snowflake(7)),
                 replying: None,
+                can_pin: false,
                 confirming: None,
             }
         );

@@ -341,6 +341,8 @@ pub struct Interaction {
     pub replying: Option<Snowflake>,
     /// The message whose deletion waits for confirmation.
     pub confirming: Option<Snowflake>,
+    /// The account may pin and unpin messages in the open channel.
+    pub can_pin: bool,
 }
 
 /// What the timeline asks of the worker. Each event names its channel.
@@ -450,6 +452,12 @@ pub enum Event {
     ToggleSpoiler {
         message_id: Snowflake,
         spoiler: u16,
+    },
+    /// Pin (`true`) or unpin a message.
+    SetPinned {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        pinned: bool,
     },
     /// Choose an emoji to react to a message with (opens the emoji picker).
     React {
@@ -1061,7 +1069,8 @@ fn message_view<'a>(
     let show_reply = can_reply && idle;
     let show_copy = !content.is_empty() && idle;
     let show_react = snapshot.can_react && idle;
-    if !show_own_actions && !show_reply && !show_copy && !show_react {
+    let show_pin = interaction.can_pin && idle;
+    if !show_own_actions && !show_reply && !show_copy && !show_react && !show_pin {
         return base.into();
     }
     // Hover controls are layered over the top right so the measured row height
@@ -1091,6 +1100,16 @@ fn message_view<'a>(
             Event::React {
                 channel_id,
                 message_id,
+            },
+        ));
+    }
+    if show_pin {
+        actions = actions.push(row_button(
+            if message.pinned { "Unpin" } else { "Pin" },
+            Event::SetPinned {
+                channel_id,
+                message_id,
+                pinned: !message.pinned,
             },
         ));
     }
@@ -2033,6 +2052,21 @@ mod tests {
     }
 
     #[test]
+    fn pin_actions_need_the_permission() {
+        let is_pin = |event: &Event| matches!(event, Event::SetPinned { pinned: true, .. });
+        let without = clickable(&mixed(), Interaction::default());
+        assert!(!without.iter().any(is_pin));
+        let with = clickable(
+            &mixed(),
+            Interaction {
+                can_pin: true,
+                ..Interaction::default()
+            },
+        );
+        assert!(with.iter().any(is_pin));
+    }
+
+    #[test]
     fn deleting_needs_a_confirmation_in_the_row() {
         let found = clickable(
             &mixed(),
@@ -2040,6 +2074,7 @@ mod tests {
                 confirming: Some(Snowflake(2)),
                 editing: Some(Snowflake(3)),
                 replying: None,
+                can_pin: false,
             },
         );
         assert!(found.contains(&Event::ConfirmDelete {
@@ -2069,6 +2104,7 @@ mod tests {
             confirming: Some(Snowflake(2)),
             editing: Some(Snowflake(2)),
             replying: None,
+            can_pin: false,
         };
         let edit = saving(ChangeKind::Edit(Arc::from("new")));
         assert_eq!(row_state(&edit, ui), RowState::Saving { delete: false });

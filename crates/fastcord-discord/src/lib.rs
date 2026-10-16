@@ -19,6 +19,7 @@ pub mod gateway;
 pub mod history;
 pub mod message_store;
 mod password_auth;
+mod pins;
 mod private_channel;
 mod rate_limit;
 mod reaction;
@@ -41,6 +42,7 @@ pub use password_auth::{
     CaptchaChallenge, CaptchaSolution, MAX_CREDENTIAL_BYTES, MfaChallenge, PasswordAuth,
     PasswordAuthError, PasswordLogin,
 };
+pub use pins::{PINS_PAGE_SIZE, PinnedMessage, PinsPage};
 pub use private_channel::{MAX_PRIVATE_RECIPIENTS, PrivateChannelError};
 pub use reaction::{ReactionEmoji, ReactionEmojiError, ReactionUser};
 pub use remote_auth::{QrLink, RemoteAuth, RemoteAuthError, RemoteAuthEvent, RemoteUser};

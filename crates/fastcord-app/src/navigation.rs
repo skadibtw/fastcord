@@ -337,7 +337,7 @@ fn sidebar<'a>(
 }
 
 /// The strip over the conversation: its name and what the account can do there.
-fn header<'a>(title: String, note: &'static str, emoji: bool) -> Element<'a, Message> {
+fn header<'a>(title: String, note: &'static str, emoji: bool, pins: bool) -> Element<'a, Message> {
     let mut line = row![
         text(title).size(16).font(BOLD),
         text(note).size(12).style(text::secondary),
@@ -345,6 +345,13 @@ fn header<'a>(title: String, note: &'static str, emoji: bool) -> Element<'a, Mes
     ]
     .spacing(12)
     .align_y(alignment::Vertical::Center);
+    if pins {
+        line = line.push(
+            button(text("Pins").size(13))
+                .on_press(Message::Pins(crate::pins::Event::Toggle))
+                .style(style::tool_button(true, false)),
+        );
+    }
     if emoji {
         line = line.push(
             button(text("Emoji").size(13))
@@ -400,7 +407,7 @@ fn main_pane<'a>(
         }
     };
     if let (true, Some(selection)) = (directs, &snapshot.private_selection) {
-        body = body.push(header(format!("@ {}", selection.name), "", true));
+        body = body.push(header(format!("@ {}", selection.name), "", true, true));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
         }
@@ -416,7 +423,7 @@ fn main_pane<'a>(
         );
         body = conversation(body, selection.channel_id, bar);
     } else if directs {
-        body = body.push(header("Direct Messages".to_owned(), "", false));
+        body = body.push(header("Direct Messages".to_owned(), "", false, false));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
         }
@@ -429,7 +436,7 @@ fn main_pane<'a>(
             .center(Length::Fill),
         );
     } else if snapshot.permissions_pending {
-        body = body.push(header("Loading".to_owned(), "", false)).push(
+        body = body.push(header("Loading".to_owned(), "", false, false)).push(
             container(
                 text("Waiting for your membership and permissions. Channels stay closed until Discord supplies them.")
                     .size(14)
@@ -450,6 +457,7 @@ fn main_pane<'a>(
                     format!("# {}", selection.name),
                     note,
                     history.can_send || composer.editing().is_some(),
+                    permissions.read_history,
                 ));
                 if let Some(banner) = banner {
                     body = body.push(container(banner).padding([4, 16]));
@@ -477,6 +485,7 @@ fn main_pane<'a>(
                         "You cannot speak here"
                     },
                     false,
+                    false,
                 ));
                 if let Some(banner) = banner {
                     body = body.push(container(banner).padding([4, 16]));
@@ -503,7 +512,7 @@ fn main_pane<'a>(
             ChannelKind::Category => {}
         }
     } else {
-        body = body.push(header("fastcord".to_owned(), "", false));
+        body = body.push(header("fastcord".to_owned(), "", false, false));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
         }

@@ -16,6 +16,7 @@ mod notify;
 mod outbox;
 mod password;
 mod paste;
+mod pins;
 mod playback;
 mod qr;
 mod reactions;
@@ -81,6 +82,7 @@ struct App {
     /// The per-person volume sliders are open.
     voice_details: bool,
     search: search::State,
+    pins: pins::State,
 }
 
 #[derive(Debug)]
@@ -192,6 +194,7 @@ enum Message {
     CloseViewer,
     Composer(composer::Event),
     Search(search::Event),
+    Pins(pins::Event),
     EmojiPicker(emoji_picker::Event),
     EmojiVisibility(emoji::Occurrence, bool),
     EmojiLoaded(
@@ -242,6 +245,7 @@ impl App {
                 window_drawable: true,
                 voice_details: false,
                 search: search::State::default(),
+                pins: pins::State::default(),
             },
             Task::perform(
                 async {
@@ -704,6 +708,7 @@ impl App {
             }
             Message::ToggleVoiceDetails => self.voice_details = !self.voice_details,
             Message::Search(event) => return self.search_event(event),
+            Message::Pins(event) => return self.pins_event(event),
             Message::SelectGuild(guild) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.directs = false;
@@ -1149,6 +1154,15 @@ impl App {
                             channel: channel_id,
                             message: message_id,
                         }),
+                        timeline::Event::SetPinned {
+                            channel_id,
+                            message_id,
+                            pinned,
+                        } => {
+                            return self.pins_event(pins::Event::SetPinned(
+                                channel_id, message_id, pinned,
+                            ));
+                        }
                         timeline::Event::LoadOlder { channel_id } => {
                             gateway
                                 .controls
@@ -1242,6 +1256,7 @@ impl App {
                 }
             }
             Message::Logout => {
+                self.pins = pins::State::default();
                 if let Phase::Account {
                     session, gateway, ..
                 } = &self.phase
@@ -1462,6 +1477,7 @@ impl App {
         let attachment_cache =
             crate::attachments::AttachmentCache::default_root(session.user.id).ok();
         self.search = search::State::default();
+        self.pins = pins::State::default();
         self.phase = Phase::Account {
             session,
             persistence,
@@ -1494,6 +1510,32 @@ impl App {
             .permissions
             .read_history
             .then_some((Some(selection.guild_id), selection.channel_id))
+    }
+
+    fn pins_event(&mut self, event: pins::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let Some(channel) = gateway.timeline.channel_id else {
+            return Task::none();
+        };
+        if let pins::Event::Jump(index) = event {
+            if self.pins.shows(channel)
+                && let Some(pin) = self.pins.pin(index)
+            {
+                gateway.controls.timeline_intent(history::Intent::JumpTo {
+                    channel,
+                    message: pin.message,
+                });
+            }
+            return Task::none();
+        }
+        self.pins
+            .update(event, &session.client, channel)
+            .map(Message::Pins)
     }
 
     fn search_event(&mut self, event: search::Event) -> Task<Message> {
@@ -1771,6 +1813,11 @@ impl App {
             let mut banner_column = column![].spacing(2);
             if has_search {
                 banner_column = banner_column.push(search_bar);
+            }
+            if let Some(channel) = gateway.timeline.channel_id
+                && self.pins.shows(channel)
+            {
+                banner_column = banner_column.push(pins::view(&self.pins).map(Message::Pins));
             }
             for (line, danger) in notes {
                 let line = text(line).size(12);

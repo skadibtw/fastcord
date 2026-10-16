@@ -461,3 +461,11 @@ Implemented in `fastcord-discord::search`. Evidence: route and field shapes come
 - `202` with `{ "code": 110000, "retry_after": seconds }` means the index is not ready. The delay is clamped to 1-30 s (a missing or invalid value waits 1 s); the app retries at most five times and then reports it.
 - Searches use the `UserRead` priority and the normal 429 handling of the REST scheduler.
 - Not established: whether a `retry_after` on `202` is in seconds for every client build, the exact `has` values accepted, behaviour for forum/thread channels, and whether `channel_id` may be repeated.
+
+## Pinned messages (milestone 44)
+
+Implemented in `fastcord-discord::pins`. Evidence: shapes come from public/community user-client documentation and are **unverified**: `fixtures/rest/pins-items.json` and `pins-array.json` are synthetic, fabricated-ID payloads, not captures. No live check exists yet (see `docs/TESTING.md`).
+
+- List: `GET /channels/{channel}/messages/pins?limit=50[&before={pinned_at}]`. Two answers are accepted: a bare array of messages (one final page) or `{ "items": [{ "pinned_at", "message" }], "has_more" }`. At most 50 items; a message from another channel makes the page invalid. The next page asks `before` the last item's `pinned_at`; the app keeps at most 250 pins and 128 KiB of previews.
+- Pin / unpin: `PUT` / `DELETE /channels/{channel}/pins/{message}` at `UserWrite` priority; a server needs Manage Messages, a DM none. The app lists pins again after a success.
+- Not consumed yet: `CHANNEL_PINS_UPDATE`; changes made elsewhere appear on Refresh or reopening. Not established: the maximum `limit` and the `before` format for every build.

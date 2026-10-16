@@ -1,0 +1,25 @@
+{
+  "has_more": true,
+  "items": [
+    {
+      "pinned_at": "2026-10-07T12:05:00.000000+00:00",
+      "message": {
+        "id": "1290000000000000020", "type": 0, "content": "pinned one", "channel_id": "500",
+        "author": {"id": "2", "username": "alt_fixture", "avatar": null, "discriminator": "0", "global_name": "Fixture Author"},
+        "attachments": [], "embeds": [], "mentions": [], "mention_roles": [], "pinned": true,
+        "mention_everyone": false, "tts": false, "timestamp": "2026-10-07T12:00:00.000000+00:00",
+        "edited_timestamp": null, "flags": 0, "components": []
+      }
+    },
+    {
+      "pinned_at": "2026-10-07T12:04:00.000000+00:00",
+      "message": {
+        "id": "1290000000000000021", "type": 0, "content": "pinned two", "channel_id": "500",
+        "author": {"id": "3", "username": "other_fixture", "avatar": null, "discriminator": "0", "global_name": null},
+        "attachments": [], "embeds": [], "mentions": [], "mention_roles": [], "pinned": true,
+        "mention_everyone": false, "tts": false, "timestamp": "2026-10-07T12:01:00.000000+00:00",
+        "edited_timestamp": null, "flags": 0, "components": []
+      }
+    }
+  ]
+}
