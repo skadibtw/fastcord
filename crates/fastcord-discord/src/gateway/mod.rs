@@ -41,13 +41,15 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub use capabilities::{Capability, SELECTED as SELECTED_CAPABILITIES, selected_value};
+pub use event::MAX_RELATIONSHIPS;
 pub use event::{
     ChannelUnread, ConnectionState, Dispatch, GatewayEvent, GroupId, GuildCreate, GuildDelete,
     GuildEmojisUpdate, GuildMemberEvent, GuildMemberRemove, GuildMuteUpdate, GuildRoleDelete,
     GuildRoleEvent, GuildUpdate, ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate,
     MessageAck, MessageDelete, MessageDeleteBulk, MessageReaction, MessageReactionRemoveAll,
     MessageReactionRemoveEmoji, MuteSettings, PassiveUpdate, ReadStateEntry, Ready, ReadyRead,
-    ReadySupplemental, ReconnectReason, SessionId, StopReason, SupplementalGuild, VoiceStateUpdate,
+    ReadySupplemental, ReconnectReason, RelationshipUpdate, SessionId, StopReason,
+    SupplementalGuild, VoiceStateUpdate,
 };
 pub(crate) use profile::CLIENT_FINGERPRINT;
 pub use profile::{

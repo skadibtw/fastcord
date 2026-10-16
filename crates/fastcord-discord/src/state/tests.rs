@@ -927,6 +927,7 @@ fn big_ready(guilds: u64, channels: u64) -> Ready {
     Ready {
         session_id: SessionId::new("big".to_owned()),
         read: Default::default(),
+        relationships: Vec::new(),
         user: User {
             id: id(ME),
             username: "alt".to_owned(),

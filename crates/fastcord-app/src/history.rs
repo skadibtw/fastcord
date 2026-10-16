@@ -3503,6 +3503,7 @@ mod tests {
             fastcord_discord::gateway::Ready {
                 session_id: fastcord_discord::gateway::SessionId::new("fixture-session".to_owned()),
                 read: Default::default(),
+                relationships: Vec::new(),
                 user: User {
                     id: SELF,
                     username: "alt".to_owned(),

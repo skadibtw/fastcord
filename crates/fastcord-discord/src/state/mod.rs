@@ -31,6 +31,7 @@ pub mod navigation;
 mod read;
 #[cfg(test)]
 mod regressions;
+mod relationships;
 #[cfg(test)]
 mod tests;
 
@@ -452,6 +453,8 @@ pub struct Changes {
     /// Read cursors, mention counts or mutes changed, so unread markers may
     /// have: navigation is rebuilt even for message events.
     pub read: bool,
+    /// Friends, blocks or pending requests changed.
+    pub relationships: bool,
 }
 
 impl Changes {
@@ -474,6 +477,7 @@ pub struct Store {
     unavailable: BTreeSet<Snowflake>,
     private_channels: HashMap<Snowflake, Channel>,
     private_bytes: usize,
+    relationships: relationships::Relationships,
     focus: Focus,
     read: ReadStates,
 }
@@ -515,6 +519,7 @@ impl Store {
             unavailable: BTreeSet::new(),
             private_channels: HashMap::new(),
             private_bytes: 0,
+            relationships: relationships::Relationships::default(),
             focus: Focus::default(),
             read: ReadStates::default(),
         }
@@ -558,7 +563,24 @@ impl Store {
 
     /// Estimated bytes held.
     pub fn bytes(&self) -> usize {
-        self.allocation_overhead() + self.users_bytes + self.guilds_bytes + self.private_bytes
+        self.allocation_overhead()
+            + self.users_bytes
+            + self.guilds_bytes
+            + self.private_bytes
+            + self.relationships.bytes()
+    }
+
+    /// Friends, blocks and pending requests, sorted by kind then name.
+    pub fn relationships(&self) -> std::sync::Arc<[fastcord_model::Relationship]> {
+        self.relationships.rows()
+    }
+
+    pub fn relationship(&self, id: Snowflake) -> Option<fastcord_model::RelationshipKind> {
+        self.relationships.kind(id)
+    }
+
+    pub fn relationships_held(&self) -> usize {
+        self.relationships.len()
     }
 
     fn allocation_overhead(&self) -> usize {
@@ -689,6 +711,7 @@ impl Store {
     pub fn recount(&self) -> usize {
         self.allocation_overhead()
             + self.users.values().map(user_bytes).sum::<usize>()
+            + self.relationships.recount()
             + self.guilds.values().map(GuildEntry::recount).sum::<usize>()
             + self
                 .private_channels
@@ -823,6 +846,15 @@ impl Store {
                 {
                     changes.read = true;
                 }
+            }
+            Dispatch::RelationshipAdd(relationship) => {
+                changes.relationships = self.relationships.add(*relationship);
+            }
+            Dispatch::RelationshipUpdate(update) => {
+                changes.relationships = self.relationships.update(update);
+            }
+            Dispatch::RelationshipRemove(id) => {
+                changes.relationships = self.relationships.remove(id);
             }
             Dispatch::UserGuildSettingsUpdate(update) => {
                 if self
@@ -976,7 +1008,9 @@ impl Store {
         self.private_channels = HashMap::new();
         self.private_bytes = 0;
         self.read.replace(ready.read.entries, ready.read.mutes);
+        self.relationships.replace(ready.relationships);
         changes.reset = true;
+        changes.relationships = true;
 
         self.current_user = Some(ready.user.id);
         for user in ready.users {

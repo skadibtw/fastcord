@@ -9,6 +9,7 @@ mod changes;
 mod composer;
 mod emoji;
 mod emoji_picker;
+mod friends;
 mod gateway;
 mod history;
 mod login;
@@ -84,6 +85,7 @@ struct App {
     voice_details: bool,
     search: search::State,
     pins: pins::State,
+    friends: friends::State,
 }
 
 #[derive(Debug)]
@@ -196,6 +198,7 @@ enum Message {
     Composer(composer::Event),
     Search(search::Event),
     Pins(pins::Event),
+    Friends(friends::Event),
     EmojiPicker(emoji_picker::Event),
     EmojiVisibility(emoji::Occurrence, bool),
     EmojiLoaded(
@@ -248,6 +251,7 @@ impl App {
                 voice_details: false,
                 search: search::State::default(),
                 pins: pins::State::default(),
+                friends: friends::State::default(),
             },
             Task::perform(
                 async {
@@ -272,6 +276,9 @@ impl App {
                 | Message::AvatarLoaded(..)
                 | Message::VideoReady(_)
         );
+        if !matches!(self.phase, Phase::Account { .. }) {
+            self.friends.purge();
+        }
         let task = self.handle(message);
         if resynchronize {
             self.synchronize_video();
@@ -722,6 +729,36 @@ impl App {
             Message::ToggleVoiceDetails => self.voice_details = !self.voice_details,
             Message::Search(event) => return self.search_event(event),
             Message::Pins(event) => return self.pins_event(event),
+            Message::Friends(event) => {
+                if let Phase::Account {
+                    session, gateway, ..
+                } = &mut self.phase
+                {
+                    match event {
+                        friends::Event::OpenDm(user) => {
+                            self.friends.close();
+                            gateway.directs = true;
+                            gateway.private.notice = Some(
+                                if gateway.controls.open_private_channel(vec![user]) {
+                                    "Opening the conversation…"
+                                } else {
+                                    "The conversation request could not be queued."
+                                }
+                                .to_owned(),
+                            );
+                        }
+                        event => {
+                            if matches!(event, friends::Event::Open) {
+                                gateway.directs = true;
+                            }
+                            return self
+                                .friends
+                                .update(event, &session.client)
+                                .map(Message::Friends);
+                        }
+                    }
+                }
+            }
             Message::SelectGuild(guild) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.directs = false;
@@ -922,6 +959,7 @@ impl App {
             }
             Message::SelectPrivateChannel(channel) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
+                    self.friends.close();
                     gateway.directs = true;
                     gateway.controls.select_private_channel(channel);
                 }
@@ -1097,6 +1135,12 @@ impl App {
                             if rich::safe_url(&url) {
                                 let _ = fastcord_platform::open_url(&url);
                             }
+                        }
+                        timeline::Event::OpenProfile(user) => {
+                            return self
+                                .friends
+                                .update(friends::Event::Profile(user), &session.client)
+                                .map(Message::Friends);
                         }
                         timeline::Event::ToggleSpoiler {
                             message_id,
@@ -1503,6 +1547,7 @@ impl App {
             crate::attachments::AttachmentCache::default_root(session.user.id).ok();
         self.search = search::State::default();
         self.pins = pins::State::default();
+        self.friends.reset();
         self.phase = Phase::Account {
             session,
             persistence,
@@ -1985,9 +2030,22 @@ impl App {
                     footer: foot.into(),
                     banner,
                     voice_bar,
+                    friends: self.friends.open.then(|| {
+                        friends::view(&self.friends, &gateway.navigation.relationships)
+                            .map(Message::Friends)
+                    }),
                 },
             ))
             .height(Length::Fill);
+            // A profile popup covers whatever is under it.
+            let account: Element<'_, Message> = match friends::profile_view(
+                &self.friends,
+                &gateway.navigation.relationships,
+                session.user.id,
+            ) {
+                Some(popup) => iced::widget::stack![account, popup.map(Message::Friends)].into(),
+                None => account.into(),
+            };
             // The larger image view covers the account screen, which stays in
             // the widget tree underneath so the timeline keeps its scroll state.
             return match &gateway.attachment_viewer {
@@ -2039,7 +2097,7 @@ impl App {
                     .padding(20),
                 ]
                 .into(),
-                None => account.into(),
+                None => account,
             };
         }
         let content: Element<'_, Message> = match &self.phase {

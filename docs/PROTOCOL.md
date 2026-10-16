@@ -452,6 +452,16 @@ Implemented by `fastcord-platform::capture` (sources, Windows.Graphics.Capture, 
 ### Not established (verify live, see docs/TESTING.md)
 Whether the official client accepts the H.264 stream without a profile in Select Protocol, and renders its colors correctly when the encoder's SPS carries no VUI color description (fastcord's own decoder assumes BT.709 limited range; the capture converts to exactly that, but nothing signals it); whether Discord answers a Go Live from this client profile (U1b) and what STREAM_DELETE reasons occur in practice; whether `Media Sink Wants` 0 arrives when nobody watches (the pause path is tested against fakes only); the encoder bitrate honored by the hardware transform within the layer's ceiling over a real network; resource figures for SPEC §12.
 
+## Friends, relationships and profiles (milestone 45)
+
+Implemented in `fastcord-discord::relationship` (REST), `gateway/decode.rs` and `state/relationships.rs`. Shapes come from community user-client documentation and are **unverified** against a live account.
+
+- READY `relationships`: `[{ "id", "type", "user": {...} }]`. Types 1 friend, 2 blocked, 3 incoming request, 4 outgoing request are kept; type 5 (implicit) and anything else, entries without a `user`, with a zero ID or whose `id` differs from `user.id`, and non-objects are skipped one by one. At most 2000 are kept. READY replaces the list.
+- `RELATIONSHIP_ADD` (`id`, `type`, `user`) inserts or replaces; `RELATIONSHIP_UPDATE` (`id`, optional `type`) changes the type of a known relationship only (a nickname-only payload or an unknown ID is ignored); `RELATIONSHIP_REMOVE` (`id`) deletes. Malformed payloads are dropped. Replays change nothing.
+- Mutations, each one request at user-write priority and never retried by the program: `PUT /users/@me/relationships/{id}` with `{}` (accept an incoming request, or send one to a known ID); the same with `{"type": 2}` (block); `DELETE` of that path (decline, cancel, remove friend, unblock); `POST /users/@me/relationships` with `{"username", "discriminator": null}` (send by username; an optional typed `#1234` becomes the discriminator). 429 is rescheduled by the REST scheduler; every other failure reaches the user.
+- Profile: `GET /users/{id}/profile?with_mutual_guilds=true&with_mutual_friends_count=true`. Only `user` is required; `user_profile.bio` (600 characters kept), `user_profile.pronouns`, the length of `mutual_guilds` and `mutual_friends_count` (or the length of `mutual_friends`) are used when present, everything else is ignored.
+- Not established: whether accepting needs `{}` or `{"type": 1}`, the exact error codes for blocked senders and disabled requests, and whether bots have profiles.
+
 ## Message search (milestone 43)
 
 Implemented in `fastcord-discord::search`. Evidence: route and field shapes come from community user-client documentation and are **unverified**: `fixtures/rest/message-search.json` and `message-search-not-ready.json` are synthetic, fabricated-ID payloads in those shapes, not captures. No live check exists yet (see `docs/TESTING.md`).

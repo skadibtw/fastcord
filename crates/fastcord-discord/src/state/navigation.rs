@@ -175,6 +175,8 @@ pub struct NavigationSnapshot {
     pub selection: Option<ChannelSelection>,
     /// Available guild lacks authoritative own-member/role/owner data.
     pub permissions_pending: bool,
+    /// Friends, blocks and pending requests (shared, rebuilt per change).
+    pub relationships: std::sync::Arc<[fastcord_model::Relationship]>,
 }
 
 /// Reducer-owned selection. Memory has at most one channel ID per joined guild
@@ -490,6 +492,7 @@ impl Navigation {
             selected_guild,
             selection: self.selection(store),
             permissions_pending,
+            relationships: store.relationships(),
         }
     }
 

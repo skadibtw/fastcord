@@ -23,6 +23,7 @@ mod pins;
 mod private_channel;
 mod rate_limit;
 mod reaction;
+mod relationship;
 mod remote_auth;
 mod rest;
 mod route;
@@ -45,6 +46,7 @@ pub use password_auth::{
 pub use pins::{PINS_PAGE_SIZE, PinnedMessage, PinsPage};
 pub use private_channel::{MAX_PRIVATE_RECIPIENTS, PrivateChannelError};
 pub use reaction::{ReactionEmoji, ReactionEmojiError, ReactionUser};
+pub use relationship::{Profile, RelationshipAction, UsernameError, parse_profile, parse_username};
 pub use remote_auth::{QrLink, RemoteAuth, RemoteAuthError, RemoteAuthEvent, RemoteUser};
 pub use reqwest::{Method, StatusCode};
 pub use rest::{Priority, RestClient, RestRequest, RestResponse};

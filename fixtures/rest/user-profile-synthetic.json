@@ -1,0 +1,8 @@
+{
+  "user": {"id": "42", "username": "synthetic_user", "global_name": "Synthetic User", "avatar": null, "bot": false},
+  "user_profile": {"bio": "Synthetic bio", "pronouns": "they/them", "accent_color": null},
+  "mutual_guilds": [{"id": "1000", "nick": null}, {"id": "1001", "nick": "Syn"}],
+  "mutual_friends_count": 3,
+  "connected_accounts": [{"type": "unknown", "name": "ignored"}],
+  "unknown_future_field": {"nested": true}
+}

@@ -8,6 +8,7 @@ mod guild;
 pub mod markup;
 mod message;
 mod permissions;
+mod relationship;
 mod snowflake;
 mod user;
 mod voice;
@@ -27,6 +28,7 @@ pub use permissions::{
     GuildScope, MemberScope, OverwriteKind, PermissionOverwrite, Permissions, channel_permissions,
     guild_permissions,
 };
+pub use relationship::{Relationship, RelationshipKind};
 pub use snowflake::{DISCORD_EPOCH_MS, ParseSnowflakeError, Snowflake};
 pub use user::User;
 pub use voice::{

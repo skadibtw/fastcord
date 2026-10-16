@@ -459,6 +459,8 @@ pub enum Event {
         message_id: Snowflake,
         pinned: bool,
     },
+    /// A message author's name or avatar was clicked: show their profile.
+    OpenProfile(fastcord_model::User),
     /// Choose an emoji to react to a message with (opens the emoji picker).
     React {
         channel_id: Snowflake,
@@ -875,7 +877,10 @@ fn message_view<'a>(
     let message_id = message.id;
     let state = row_state(row, interaction);
     let mut header = row![
-        text(message.author.display_name()).font(BOLD).size(15),
+        button(text(message.author.display_name()).font(BOLD).size(15))
+            .padding(0)
+            .style(style::plain_button)
+            .on_press_with(|| Event::OpenProfile(message.author.clone())),
         text(format_timestamp(&message.timestamp))
             .size(12)
             .style(text::secondary),
@@ -1047,12 +1052,16 @@ fn message_view<'a>(
         let name = message.author.display_name();
         let key =
             crate::avatars::AvatarKey::user(message.author.id, message.author.avatar.as_deref());
-        crate::avatars::view(assets.avatars, &key, 40.0, || {
+        button(crate::avatars::view(assets.avatars, &key, 40.0, || {
             container(text(style::initial(name)).size(17).font(BOLD))
                 .center(40)
                 .style(style::avatar(style::avatar_color(message.author.id.0)))
                 .into()
-        })
+        }))
+        .padding(0)
+        .style(style::plain_button)
+        .on_press_with(|| Event::OpenProfile(message.author.clone()))
+        .into()
     };
     if continues && message.edited_timestamp.is_some() {
         body = body.push(text("(edited)").size(11).style(text::secondary));
@@ -2130,14 +2139,16 @@ mod tests {
             },
             ..snapshot
         };
-        // Attachment buttons stay (they act on the file, not the message), but
-        // nothing that changes or answers the message is offered.
+        // Attachment buttons and the author's profile stay (they act on the
+        // file or the person, not the message), but nothing that changes or
+        // answers the message is offered.
         assert!(
             clickable(&snapshot, Interaction::default())
                 .iter()
                 .all(|event| matches!(
                     event,
-                    Event::LoadAttachment { .. }
+                    Event::OpenProfile(_)
+                        | Event::LoadAttachment { .. }
                         | Event::ViewAttachment { .. }
                         | Event::DownloadAttachment { .. }
                         | Event::OpenAttachment { .. }

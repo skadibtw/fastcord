@@ -18,18 +18,19 @@ use std::collections::HashMap;
 
 use fastcord_model::{
     Channel, Emoji, Guild, GuildEmoji, GuildMember, MAX_REACTION_EMOJI_NAME_BYTES, Message,
-    MessageUpdate, Role, Snowflake, StreamCreate, StreamDelete, StreamServerUpdate, StreamUpdate,
-    User, VoiceServerUpdate, VoiceState,
+    MessageUpdate, Relationship, RelationshipKind, Role, Snowflake, StreamCreate, StreamDelete,
+    StreamServerUpdate, StreamUpdate, User, VoiceServerUpdate, VoiceState,
 };
 use serde::{Deserialize, Deserializer};
 
 use super::event::{
     ChannelRecipientAdd, ChannelRecipientRemove, ChannelUnread, Dispatch, GroupId, GuildCreate,
     GuildDelete, GuildMemberEvent, GuildMemberRemove, GuildMuteUpdate, GuildRoleDelete,
-    GuildRoleEvent, GuildUpdate, ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate,
-    MessageAck, MessageDelete, MessageDeleteBulk, MessageReaction, MessageReactionRemoveAll,
-    MessageReactionRemoveEmoji, MuteSettings, PassiveUpdate, ReadStateEntry, Ready, ReadyRead,
-    ReadySupplemental, SessionId, SupplementalGuild, VoiceStateUpdate,
+    GuildRoleEvent, GuildUpdate, ListGroup, ListRow, MAX_RELATIONSHIPS, MemberListId, MemberListOp,
+    MemberListUpdate, MessageAck, MessageDelete, MessageDeleteBulk, MessageReaction,
+    MessageReactionRemoveAll, MessageReactionRemoveEmoji, MuteSettings, PassiveUpdate,
+    ReadStateEntry, Ready, ReadyRead, ReadySupplemental, RelationshipUpdate, SessionId,
+    SupplementalGuild, VoiceStateUpdate,
 };
 
 /// A known payload that did not decode into its typed form.
@@ -167,6 +168,10 @@ struct ReadyWire {
     private_channels: Vec<Channel>,
     #[serde(default)]
     required_action: Option<String>,
+    /// Read entry by entry (see `relationship_of`): one odd entry costs only
+    /// itself, never the session.
+    #[serde(default, deserialize_with = "null_default")]
+    relationships: Vec<serde_json::Value>,
     /// Read cursors and mutes are read leniently (see `read_entries`): a
     /// surprising shape costs the markers, never the session.
     #[serde(default)]
@@ -519,6 +524,12 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
         .into_iter()
         .map(|channel| normalizer.channel(channel, None))
         .collect();
+    let relationships = wire
+        .relationships
+        .iter()
+        .filter_map(relationship_of)
+        .take(MAX_RELATIONSHIPS)
+        .collect();
     let read = ReadyRead {
         entries: wire
             .read_state
@@ -534,6 +545,7 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
     Ok(DecodedReady {
         ready: Ready {
             read,
+            relationships,
             session_id: SessionId(wire.session_id),
             user: wire.user,
             users: normalizer.users.into_users(),
@@ -544,6 +556,18 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
         resume_gateway_url: wire.resume_gateway_url,
         required_action: wire.required_action.filter(|action| !action.is_empty()),
     })
+}
+
+/// `{"id", "type", "user": {...}}`; the entry's `user` is required (a
+/// relationship is shown by name), its `id` must agree, and types other than
+/// 1 to 4 are not kept.
+fn relationship_of(value: &serde_json::Value) -> Option<Relationship> {
+    let kind = RelationshipKind::from_wire(value.get("type")?.as_u64()?)?;
+    let user: User = WireUser::deserialize(value.get("user")?).ok()?.into();
+    if user.id.0 == 0 || snowflake_of(value.get("id")?)? != user.id {
+        return None;
+    }
+    Some(Relationship { user, kind })
 }
 
 fn snowflake_of(value: &serde_json::Value) -> Option<Snowflake> {
@@ -914,6 +938,25 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "USER_GUILD_SETTINGS_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
             mute_update(&value)
                 .map(|update| Dispatch::UserGuildSettingsUpdate(Box::new(update)))
+                .ok_or(Malformed)
+        }),
+        "RELATIONSHIP_ADD" => json::<serde_json::Value>(raw).and_then(|value| {
+            relationship_of(&value)
+                .map(|relationship| Dispatch::RelationshipAdd(Box::new(relationship)))
+                .ok_or(Malformed)
+        }),
+        "RELATIONSHIP_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
+            Ok(Dispatch::RelationshipUpdate(RelationshipUpdate {
+                id: snowflake_of(value.get("id").ok_or(Malformed)?).ok_or(Malformed)?,
+                kind: value
+                    .get("type")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(RelationshipKind::from_wire),
+            }))
+        }),
+        "RELATIONSHIP_REMOVE" => json::<serde_json::Value>(raw).and_then(|value| {
+            snowflake_of(value.get("id").ok_or(Malformed)?)
+                .map(Dispatch::RelationshipRemove)
                 .ok_or(Malformed)
         }),
         "MESSAGE_REACTION_ADD" => {
@@ -2017,6 +2060,44 @@ mod tests {
             "STREAM_DELETE",
         ] {
             assert!(matches!(decode_dispatch(name, "{}"), Decoded::Malformed));
+        }
+    }
+
+    #[test]
+    fn relationship_events_decode_and_malformed_ones_are_rejected() {
+        let add = r#"{"id":"5","type":3,"user":{"id":"5","username":"x"}}"#;
+        assert!(matches!(
+            decode_dispatch("RELATIONSHIP_ADD", add),
+            Decoded::Event(Dispatch::RelationshipAdd(r)) if r.kind == RelationshipKind::IncomingRequest
+        ));
+        assert!(matches!(
+            decode_dispatch("RELATIONSHIP_UPDATE", r#"{"id":"5","nickname":"n"}"#),
+            Decoded::Event(Dispatch::RelationshipUpdate(RelationshipUpdate {
+                kind: None,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            decode_dispatch("RELATIONSHIP_REMOVE", r#"{"id":"5","type":3}"#),
+            Decoded::Event(Dispatch::RelationshipRemove(Snowflake(5)))
+        ));
+        for (name, raw) in [
+            ("RELATIONSHIP_ADD", r#"{"id":"5","type":3}"#),
+            (
+                "RELATIONSHIP_ADD",
+                r#"{"id":"6","type":3,"user":{"id":"5","username":"x"}}"#,
+            ),
+            (
+                "RELATIONSHIP_ADD",
+                r#"{"id":"5","type":9,"user":{"id":"5","username":"x"}}"#,
+            ),
+            ("RELATIONSHIP_UPDATE", "{}"),
+            ("RELATIONSHIP_REMOVE", r#"{"id":"0"}"#),
+        ] {
+            assert!(
+                matches!(decode_dispatch(name, raw), Decoded::Malformed),
+                "{raw}"
+            );
         }
     }
 }

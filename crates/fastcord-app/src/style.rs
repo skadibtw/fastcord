@@ -179,6 +179,14 @@ pub fn tool_button(active: bool, danger: bool) -> impl Fn(&Theme, button::Status
     }
 }
 
+/// A button that looks like its content (a name or avatar that opens a profile).
+pub fn plain_button(_: &Theme, _: button::Status) -> button::Style {
+    button::Style {
+        text_color: TEXT,
+        ..button::Style::default()
+    }
+}
+
 /// A filled action (blurple), or a danger action (red).
 pub fn action_button(danger: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {

@@ -40,6 +40,8 @@ pub struct Chrome<'a> {
     pub banner: Option<Element<'a, Message>>,
     /// Who is in the call and Go Live controls, while there is one.
     pub voice_bar: Option<Element<'a, Message>>,
+    /// The Friends screen, which replaces the conversation in direct messages.
+    pub friends: Option<Element<'a, Message>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -58,20 +60,24 @@ pub fn view<'a>(
         footer,
         banner,
         voice_bar,
+        friends,
     } = chrome;
     let rail = rail(snapshot, directs, attachments.avatars);
     let sidebar = sidebar(snapshot, private, directs, footer);
-    let main = main_pane(
-        snapshot,
-        history,
-        composer,
-        interaction,
-        attachments,
-        voice_audio,
-        directs,
-        banner,
-        voice_bar,
-    );
+    let main = match friends.filter(|_| directs) {
+        Some(friends) => friends,
+        None => main_pane(
+            snapshot,
+            history,
+            composer,
+            interaction,
+            attachments,
+            voice_audio,
+            directs,
+            banner,
+            voice_bar,
+        ),
+    };
     row![rail, sidebar, main].height(Length::Fill).into()
 }
 
@@ -279,6 +285,13 @@ fn sidebar<'a>(
             )
         });
         column![
+            sidebar_row(
+                "Friends".to_owned(),
+                false,
+                false,
+                0,
+                Some(Message::Friends(crate::friends::Event::Open)),
+            ),
             column![
                 text_input("Recipient IDs, comma separated", recipients)
                     .on_input(Message::PrivateRecipients)

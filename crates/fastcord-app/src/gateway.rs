@@ -3510,6 +3510,7 @@ mod tests {
                 session_id: SessionId::new("fixture-session".to_owned()),
                 user: user(),
                 read: Default::default(),
+                relationships: Vec::new(),
                 users: vec![user()],
                 guilds: (0..guilds as u64).map(guild).collect(),
                 unavailable_guilds: (0..unavailable as u64).map(Snowflake).collect(),

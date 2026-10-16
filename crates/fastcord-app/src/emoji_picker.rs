@@ -587,6 +587,7 @@ mod tests {
             event: Dispatch::Ready(Box::new(Ready {
                 session_id: SessionId::new("emoji-fixture-session".into()),
                 read: Default::default(),
+                relationships: Vec::new(),
                 user,
                 users: Vec::new(),
                 guilds: vec![

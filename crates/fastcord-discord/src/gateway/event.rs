@@ -4,8 +4,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fastcord_model::{
-    Channel, Emoji, Guild, GuildMember, Message, MessageUpdate, Role, Snowflake, User,
-    VoiceServerUpdate, VoiceState,
+    Channel, Emoji, Guild, GuildMember, Message, MessageUpdate, Relationship, RelationshipKind,
+    Role, Snowflake, User, VoiceServerUpdate, VoiceState,
 };
 
 /// The Gateway session ID. Not a credential on its own (resuming also needs the
@@ -145,8 +145,21 @@ pub struct Ready {
     /// Guilds in an outage or geo-restricted: known by ID only.
     pub unavailable_guilds: Vec<Snowflake>,
     pub private_channels: Vec<Channel>,
+    /// Friends, blocks and pending requests (at most [`MAX_RELATIONSHIPS`]).
+    pub relationships: Vec<Relationship>,
     /// The account's read cursors and mutes.
     pub read: ReadyRead,
+}
+
+/// Most relationships kept from READY or events; the rest are dropped.
+pub const MAX_RELATIONSHIPS: usize = 2000;
+
+/// RELATIONSHIP_UPDATE: the type of a known relationship changed. A payload
+/// without a recognised type (a nickname change) leaves it as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelationshipUpdate {
+    pub id: Snowflake,
+    pub kind: Option<RelationshipKind>,
 }
 
 /// One channel's read cursor from READY: the last message the account
@@ -458,6 +471,9 @@ pub enum Dispatch {
     MessageDeleteBulk(MessageDeleteBulk),
     /// The account's read cursor moved.
     MessageAck(MessageAck),
+    RelationshipAdd(Box<Relationship>),
+    RelationshipUpdate(RelationshipUpdate),
+    RelationshipRemove(Snowflake),
     /// Mute settings changed.
     UserGuildSettingsUpdate(Box<GuildMuteUpdate>),
     /// A user reacted to a message.
@@ -507,6 +523,9 @@ impl Dispatch {
             Self::MessageDelete(_) => "MESSAGE_DELETE",
             Self::MessageDeleteBulk(_) => "MESSAGE_DELETE_BULK",
             Self::MessageAck(_) => "MESSAGE_ACK",
+            Self::RelationshipAdd(_) => "RELATIONSHIP_ADD",
+            Self::RelationshipUpdate(_) => "RELATIONSHIP_UPDATE",
+            Self::RelationshipRemove(_) => "RELATIONSHIP_REMOVE",
             Self::UserGuildSettingsUpdate(_) => "USER_GUILD_SETTINGS_UPDATE",
             Self::MessageReactionAdd(_) => "MESSAGE_REACTION_ADD",
             Self::MessageReactionRemove(_) => "MESSAGE_REACTION_REMOVE",
