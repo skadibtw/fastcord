@@ -817,4 +817,53 @@ mod tests {
             Err(RestError::AuthenticationRequired)
         );
     }
+
+    /// Alt account only: `FASTCORD_LIVE_TOKEN`, `FASTCORD_LIVE_CHANNEL` and
+    /// `FASTCORD_LIVE_MESSAGE` (a message in a DM with another account).
+    /// Adds, lists and takes back a normal reaction through the real routes.
+    #[tokio::test]
+    #[ignore = "contacts Discord with the alt account"]
+    async fn live_reaction_add_list_remove() {
+        let var = |k: &str| std::env::var(k).unwrap();
+        let properties = ClientProperties::web(
+            HostOs::current(),
+            "en-US",
+            crate::gateway::BUNDLED_BUILD_NUMBER,
+        );
+        let client =
+            RestClient::new(UserToken::new(var("FASTCORD_LIVE_TOKEN")), properties).unwrap();
+        let channel = Snowflake(var("FASTCORD_LIVE_CHANNEL").parse().unwrap());
+        let message = Snowflake(var("FASTCORD_LIVE_MESSAGE").parse().unwrap());
+        let up = emoji(&unicode("\u{1F44D}"));
+        println!(
+            "initial remove: {:?}",
+            client.remove_own_reaction(channel, message, &up).await
+        );
+        println!(
+            "initial users: {:?}",
+            client.reaction_users(channel, message, &up, 25).await
+        );
+        let users = client.reaction_users(channel, message, &up, 25).await;
+        assert!(users.unwrap().is_empty());
+        client
+            .add_reaction(channel, message, &up)
+            .await
+            .expect("add");
+        let users = client
+            .reaction_users(channel, message, &up, 25)
+            .await
+            .unwrap();
+        println!("after add: {} user(s)", users.len());
+        assert_eq!(users.len(), 1);
+        client
+            .remove_own_reaction(channel, message, &up)
+            .await
+            .unwrap();
+        let users = client
+            .reaction_users(channel, message, &up, 25)
+            .await
+            .unwrap();
+        println!("after remove: {} user(s)", users.len());
+        assert!(users.is_empty());
+    }
 }
