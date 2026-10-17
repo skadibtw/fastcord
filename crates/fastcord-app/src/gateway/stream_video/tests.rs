@@ -1077,7 +1077,7 @@ fn even_a_single_oversized_keyframe_cannot_exceed_the_encoded_byte_bound() {
     assert_accounted(&stats);
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 #[test]
 fn unsupported_platforms_do_not_open_a_fabricated_h264_decoder() {
     assert!(matches!(
@@ -1086,7 +1086,7 @@ fn unsupported_platforms_do_not_open_a_fabricated_h264_decoder() {
     ));
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 #[test]
 #[ignore = "requires an installed native H.264 decoder; run on the M27 fixture runner"]
 fn the_native_h264_factory_delivers_real_fixture_pixels_to_the_borrowed_sink() {
@@ -1130,6 +1130,8 @@ fn the_native_h264_factory_delivers_real_fixture_pixels_to_the_borrowed_sink() {
     assert!(
         backend.contains("Media Foundation")
             || backend.contains("VideoToolbox")
+            || backend.contains("VA-API")
+            || backend.contains("OpenH264")
             || backend.contains("H264")
             || backend.contains("H.264"),
         "{backend}"

@@ -329,7 +329,7 @@ fn parse_vui_color(bits: &mut BitReader<'_>) -> Result<ColorDescription, CodecEr
     Ok(color)
 }
 
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
 /// Fixed-size parameter-set metadata, selecting the SPS actually referenced
 /// by the access unit's first slice rather than the last SPS in the byte stream.
 pub(crate) struct ColorState {
@@ -338,7 +338,7 @@ pub(crate) struct ColorState {
     current: ColorDescription,
 }
 
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
 impl Default for ColorState {
     fn default() -> Self {
         Self {
@@ -349,7 +349,7 @@ impl Default for ColorState {
     }
 }
 
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
 impl ColorState {
     pub(crate) fn inspect(&mut self, access_unit: &[u8]) -> Result<ColorDescription, CodecError> {
         check_decodable_with(access_unit, |sps| {
@@ -488,14 +488,20 @@ impl<'a> BitReader<'a> {
 /// Keeps every IDR access unit of an encoder's output self-contained: H.264
 /// encoders may emit SPS/PPS only once, but each keyframe a receiver joins on
 /// (or requests by PLI) must carry them.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "macos", target_os = "linux")),
+    allow(dead_code)
+)]
 #[derive(Default)]
 pub(crate) struct ParameterSets {
     sps: Vec<u8>,
     pps: Vec<u8>,
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "macos", target_os = "linux")),
+    allow(dead_code)
+)]
 impl ParameterSets {
     /// Records the parameter sets in `access_unit` and returns it with any
     /// missing SPS/PPS inserted before an IDR picture, plus whether it is a
@@ -544,7 +550,10 @@ impl ParameterSets {
     }
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "macos", target_os = "linux")),
+    allow(dead_code)
+)]
 fn push_nal(out: &mut Vec<u8>, nal: &[u8]) {
     out.extend_from_slice(&START_CODE);
     out.extend_from_slice(nal);

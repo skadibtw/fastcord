@@ -57,6 +57,10 @@ const BITDEPTH_SOURCES: &[&str] = &[
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo target OS");
     build_dav1d(&target_os);
+    if target_os == "linux" {
+        link_libva();
+        return;
+    }
     if target_os != "macos" {
         return;
     }
@@ -113,6 +117,20 @@ fn build_dav1d(target_os: &str) {
     if target_os != "windows" {
         println!("cargo:rustc-link-lib=pthread");
     }
+}
+
+/// Links the Linux VA-API runtime. Nothing is compiled from the pinned
+/// `native/libva-2.24.1.tar.bz2` (see `native/libva-source.json`); it exists
+/// so `src/vaapi/bindings.rs` can be regenerated exactly. The bindings are
+/// pre-generated and committed, so the build needs no bindgen, libclang or
+/// pkg-config — only a system libva installation new enough for the
+/// VA-API 1.x public interface the bindings were generated against. The
+/// distro packages providing the link-time shims are named in the packaging
+/// docs.
+fn link_libva() {
+    println!("cargo:rerun-if-changed=native/libva-source.json");
+    println!("cargo:rustc-link-lib=dylib=va");
+    println!("cargo:rustc-link-lib=dylib=va-drm");
 }
 
 fn native_compiler(source: &Path, out: &Path, target_os: &str) -> cc::Build {

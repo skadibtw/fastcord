@@ -15,12 +15,21 @@
 //! capture session to an encoder and hands finished access units to the
 //! transport, with keyframe and bitrate control from the connection's feedback.
 
+#[cfg(target_os = "linux")]
+pub mod vaapi;
+// The software H.264 codec itself is platform-neutral, but it is only
+// registered as a candidate on Linux; Windows and macOS keep their native
+// backends. Compiling it everywhere lets the identical round-trip tests run on
+// every OS in CI (SPEC §8.2; ADR 0001).
 pub mod av1;
 pub mod codec;
 pub mod frame;
 pub mod h264;
 #[cfg(windows)]
 pub mod media_foundation;
+pub mod openh264;
+#[cfg(target_os = "linux")]
+mod platform_h264;
 mod select;
 pub mod share;
 #[cfg(test)]

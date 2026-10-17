@@ -5,7 +5,8 @@ fastcord itself is GPL-3.0-only (see `LICENSE`). Release archives carry this fil
 `THIRD_PARTY_CRATES.md`, and the emoji notices under `assets/emoji/`. This file covers the
 bundled native codecs and models: libopus (voice), the microphone noise-suppression engines of
 `fastcord-audio` (SPEC section 7.4, ADR 0004), the bundled AV1 decoder of `fastcord-video`
-(ADR 0001), and the davey/OpenMLS end-to-end encryption crates.
+(ADR 0001), the bundled OpenH264 H.264 codec and the runtime-linked libva (ADR 0001), and the
+davey/OpenMLS end-to-end encryption crates.
 
 ## nnnoiseless and RNNoise (Light mode)
 
@@ -240,6 +241,84 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+## OpenH264 (software H.264 codec)
+
+OpenH264, https://github.com/cisco/openh264, is compiled from the unmodified upstream source
+at commit `4a2615fac570c6ca1ed4f157b9fdab9466edfd80` that the `openh264` 0.9.8 Rust wrapper
+(https://github.com/ralfbiedert/openh264-rs, vendored by `openh264-sys2`, whose `upstream/VERSION`
+and `upstream/LICENSE` record this pin) bundles, into every release binary for `fastcord-video`
+(SPEC section 8.2, ADR 0001; SPEC milestone 30). The wrapper crate's license is listed in
+`THIRD_PARTY_CRATES.md`. The bundled source is BSD-2-Clause-style:
+
+```text
+Copyright (c) 2013, Cisco Systems
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice, this
+  list of conditions and the following disclaimer in the documentation and/or
+  other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+H.264/AVC: making an H.264 codec implementation available for distribution or
+using it in some deployment scenarios may require a royalty-bearing license from
+MPEG LA or its successors for uses outside the scope of the BSD license above.
+Cisco operates a pre-compiled OpenH264 binary distribution under its own H.264
+licensing arrangements; those arrangements apply to Cisco's binaries and do not
+extend automatically to fastcord's own builds from source. Upstream
+documentation: https://www.openh264.org/BINARY_LICENSE.txt.
+
+## libva (VA-API Linux runtime)
+
+libva 2.24.1, https://github.com/intel/libva, is dynamically linked into Linux
+release binaries (`cargo:rustc-link-lib=dylib=va` and `dylib=va-drm` emitted by
+the `fastcord-video` build script), so a Linux user needs the distribution's
+VA-API runtime packages installed (typically `libva2` and `libva-drm2` on
+Debian/Ubuntu, or the `libva`/`libva-drm` packages on Fedora) plus a working
+VA-API driver. The complete source archive is committed for the provenance of
+`fastcord-video`'s generated VA-API bindings as
+`crates/fastcord-video/native/libva-2.24.1.tar.bz2` (SHA-256
+`eec6050b52876f229bd35e9df17cd31a06785e18e6f7990c445b584628483d67`, provenance
+in `native/libva-source.json`); no libva object code is compiled from it. The
+archive's `COPYING` is the MIT license, reproduced here:
+
+```text
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice (including the
+next paragraph) shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ## dav1d (AV1 receive decoding)

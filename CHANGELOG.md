@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Linux H.264 encode/decode (M30, #30): the platform's H.264 openers are real on all three OSes now. Linux candidates are the VA-API hardware devices under `/dev/dri/renderD*` (probed for `VAEntrypointEncSlice` with 4:2:0 + CBR, and `VAEntrypointVLD` for decode), with Cisco's bundled OpenH264 source as the single software fallback candidate on every Linux path: automatic preference walks hardware then software and reports what it skipped, explicit Hardware/Software never falls back, and `share`/`stream_video`/`stream_audio` use these factories (Linux now watches H.264 in addition to AV1 send-free receive, and the screen-share encoder opens hardware-then-software the same way). libva 2.24.1 is dynamically linked (runtime packages `libva2`/`libva-drm2`, listed in the notices); offline round-trip tests for the bundled OpenH264 run on every OS, the Linux/VA-API offline tests run in Linux CI, and real-GPU/live acceptance remains deferred (see docs/TESTING.md).
+
 ### Fixed
 - Voice playback no longer starves on ordinary internet jitter: the per-speaker jitter buffer started at 20 ms and could not adapt below it, so any burst over 20 ms became concealed (choppy, robotic) audio; it now starts at 60 ms, adapts between 40 and 160 ms, and holds up to 12 packets. Echo (speakers into the microphone) is still not cancelled; use headphones until echo cancellation (#83) lands.
 

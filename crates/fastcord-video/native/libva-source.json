@@ -1,0 +1,17 @@
+{
+  "name": "libva",
+  "version": "2.24.1",
+  "license": "MIT",
+  "upstream": "https://github.com/intel/libva",
+  "tag": "2.24.1",
+  "archive": "libva-2.24.1.tar.bz2",
+  "archive_url": "https://github.com/intel/libva/releases/download/2.24.1/libva-2.24.1.tar.bz2",
+  "archive_sha256": "eec6050b52876f229bd35e9df17cd31a06785e18e6f7990c445b584628483d67",
+  "archive_root": "libva-2.24.1",
+  "recipe": "../build.rs",
+  "recipe_basis": "The archive is committed for provenance of the generated bindings only; no C sources are compiled from it. build.rs links the runtime libva shared libraries already present on the Linux system (/usr/lib/x86_64-linux-gnu/libva.so and libva-drm.so).",
+  "linkage": "Dynamic link against the system installation of libva/libva-drm at runtime on Linux; the archive is not extracted during the Rust build.",
+  "build_prerequisites": "Nothing extra for the Rust build: the VA-API bindings are pre-generated and committed in src/vaapi/bindings.rs, so bindgen, libclang and the headers are only needed when regenerating bindings (tools/gen_vaapi_bindings.ps1). Running fastcord on Linux needs the distribution libva2 and libva-drm2 packages; the drm device discovery uses /dev/dri/renderD*.",
+  "rust_binding_decision": "The upstream libva-sys/egovva crates run bindgen, pkg-config and Meson during build and cannot be pinned reproducibly offline. Bindings were instead generated once offline from the pinned archive with bindgen 0.73.2 (tools/vaapi_bindings_wrapper.h + tools/gen_vaapi_bindings.ps1, codec families unused by fastcord blocklisted) and committed. The bound surface is the VA-API 1.24 public ABI: device enumeration, config/context/surface/buffer management, H.264 encode and decode structures and the DRM display lookup; these layouts are part of the stable libva runtime ABI offered by the corresponding 2.24.x packages, which build.rs requires at link time.",
+  "license_file": "COPYING inside the archive; reproduced in docs/THIRD_PARTY_NOTICES.md"
+}

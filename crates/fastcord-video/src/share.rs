@@ -140,8 +140,10 @@ pub type OpenEncoder =
     Box<dyn FnMut(EncoderConfig, BackendPreference) -> Result<OpenedEncoder, OpenError> + Send>;
 
 /// The platform's H.264 encoders: Media Foundation on Windows (hardware first,
-/// Microsoft's software transform as the fallback). Other platforms have no
-/// capture backend yet (SPEC milestones 30, 33, 34) and report no encoder.
+/// Microsoft's software transform as the fallback), VA-API hardware plus the
+/// bundled OpenH264 software codec on Linux, and VideoToolbox on macOS once
+/// milestone 31 lands. Platforms without a capture backend yet report no
+/// encoder (SPEC milestones 30, 33, 34).
 pub fn platform_encoder() -> OpenEncoder {
     #[cfg(windows)]
     {
@@ -153,7 +155,17 @@ pub fn platform_encoder() -> OpenEncoder {
             })
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(|config, preference| {
+            let selected = crate::platform_h264::open_encoder(config, preference)?;
+            Ok(OpenedEncoder {
+                encoder: selected.codec,
+                rejected: selected.rejected,
+            })
+        })
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Box::new(|_, preference| Err(OpenError::NoBackend(preference)))
     }

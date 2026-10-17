@@ -7,9 +7,12 @@ use std::fmt;
 use crate::codec::{BackendKind, BackendPreference, CodecError};
 
 /// A backend that may be able to open.
-// Windows (Media Foundation) is the first platform backend; VA-API and
-// VideoToolbox use the same selection in milestones 30 and 31.
-#[cfg_attr(not(windows), allow(dead_code))]
+// Windows (Media Foundation), macOS (VideoToolbox) and Linux (VA-API plus
+// OpenH264) all select through this helper.
+#[cfg_attr(
+    not(any(windows, target_os = "macos", target_os = "linux")),
+    allow(dead_code)
+)]
 pub(crate) struct Candidate<S> {
     pub kind: BackendKind,
     pub name: String,
@@ -87,7 +90,10 @@ impl std::error::Error for OpenError {}
 
 /// Opens the first allowed candidate that succeeds: hardware candidates in the
 /// given order, then software candidates in the given order.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "macos", target_os = "linux")),
+    allow(dead_code)
+)]
 pub(crate) fn select<S, T>(
     preference: BackendPreference,
     candidates: Vec<Candidate<S>>,

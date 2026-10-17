@@ -39,13 +39,14 @@ pub(super) async fn run(
 }
 
 fn watch_options() -> VideoOptions {
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     {
         VideoOptions::watch()
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
-        // A depacketizer is not a decoder: Linux H.264 requires M30.
+        // All watch codecs need a real decoder backend; this platform has none
+        // yet, so it offers AV1 receive only (which still depacketizes).
         VideoOptions {
             codecs: vec![fastcord_media::video::CodecOffer::av1()],
             send: None,
@@ -173,7 +174,7 @@ mod tests {
                 .codecs
                 .iter()
                 .any(|offer| offer.codec == VideoCodec::H264),
-            cfg!(any(windows, target_os = "macos"))
+            cfg!(any(windows, target_os = "macos", target_os = "linux"))
         );
         options.validate().unwrap();
     }

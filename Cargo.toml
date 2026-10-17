@@ -36,6 +36,9 @@ davey = { version = "=0.1.4" }
 deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "978576aa8400552a4ce9730838c635aa30db5e61", default-features = false, features = ["tract", "default-model"] }
 ndarray = { version = "0.15", default-features = false }
 nnnoiseless = { version = "=0.5.2", default-features = false }
+# Bundled Cisco OpenH264 source built by `openh264-sys2` via `cc` (card 030 /
+# #30); the version pin tracks the upstream hash recorded in ADR 0001.
+openh264 = { version = "=0.9.8" }
 openmls = { version = "=0.8.1" }
 openmls_basic_credential = { version = "=0.5.0" }
 openmls_rust_crypto = { version = "=0.5.1" }

@@ -17,6 +17,11 @@ grep -q "Copyright 2001-2023 Xiph.Org, Skype Limited" "$stage/THIRD_PARTY_NOTICE
   echo "THIRD_PARTY_NOTICES.md lacks the libopus notice" >&2
   exit 1
 }
+# The bundled OpenH264 source is compiled into every binary: refuse without its notice.
+grep -q "Copyright (c) 2013, Cisco Systems" "$stage/THIRD_PARTY_NOTICES.md" || {
+  echo "THIRD_PARTY_NOTICES.md lacks the OpenH264 notice" >&2
+  exit 1
+}
 mkdir -p "$stage/assets/emoji"
 cp assets/emoji/NOTICE.txt assets/emoji/TWEMOJI-LICENSE-GRAPHICS.txt \
   assets/emoji/TWEMOJI-LICENSE.txt assets/emoji/EMOJI-DATA-LICENSE.txt \

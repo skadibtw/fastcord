@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 fastcord-platform.workspace = true
+openh264.workspace = true
 parking_lot.workspace = true
 
 [target.'cfg(windows)'.dependencies]
