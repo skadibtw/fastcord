@@ -1297,9 +1297,13 @@ fn placeholder(message: &Message) -> Option<String> {
         6 => "A message was pinned.".to_owned(),
         7 => "A member joined.".to_owned(),
         8..=11 => "The server was boosted.".to_owned(),
+        12 => "A channel was followed.".to_owned(),
         18 => "A thread was created.".to_owned(),
         21 => "The message this thread was started from.".to_owned(),
-        kind => format!("Unsupported message type ({kind})."),
+        22 => "An invite reminder was posted.".to_owned(),
+        24 => "AutoMod flagged a message.".to_owned(),
+        46 => "A poll has ended.".to_owned(),
+        kind => format!("Message type {kind} is not displayed by this client."),
     })
 }
 
@@ -1672,7 +1676,7 @@ mod tests {
         bare.kind = 250;
         assert_eq!(
             placeholder(&bare).as_deref(),
-            Some("Unsupported message type (250).")
+            Some("Message type 250 is not displayed by this client.")
         );
     }
 
