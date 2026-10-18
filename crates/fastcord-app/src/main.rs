@@ -11,6 +11,7 @@ mod emoji;
 mod emoji_picker;
 mod friends;
 mod gateway;
+mod gif;
 mod history;
 mod login;
 mod navigation;
@@ -96,6 +97,7 @@ struct App {
     voice_details: bool,
     search: search::State,
     pins: pins::State,
+    gif: gif::State,
     friends: friends::State,
     status: status::State,
     threads: threads::State,
@@ -218,6 +220,7 @@ enum Message {
     Composer(composer::Event),
     Search(search::Event),
     Pins(pins::Event),
+    Gif(gif::Event),
     Friends(friends::Event),
     Status(status::Event),
     Threads(threads::Event),
@@ -273,6 +276,7 @@ impl App {
                 voice_details: false,
                 search: search::State::default(),
                 pins: pins::State::default(),
+                gif: gif::State::default(),
                 friends: friends::State::default(),
                 status: status::State::default(),
                 threads: threads::State::default(),
@@ -754,6 +758,7 @@ impl App {
             Message::ToggleVoiceDetails => self.voice_details = !self.voice_details,
             Message::Search(event) => return self.search_event(event),
             Message::Pins(event) => return self.pins_event(event),
+            Message::Gif(event) => return self.gif_event(event),
             Message::Status(event) => {
                 if let Phase::Account {
                     session, gateway, ..
@@ -1475,6 +1480,7 @@ impl App {
             }
             Message::Logout => {
                 self.pins = pins::State::default();
+                self.gif = gif::State::default();
                 self.threads.drop_all();
                 if let Phase::Account {
                     session, gateway, ..
@@ -1697,6 +1703,7 @@ impl App {
             crate::attachments::AttachmentCache::default_root(session.user.id).ok();
         self.search = search::State::default();
         self.pins = pins::State::default();
+        self.gif = gif::State::default();
         self.threads.drop_all();
         self.friends.reset();
         self.status.reset();
@@ -1761,6 +1768,30 @@ impl App {
                 .update(event, &session.client)
                 .map(Message::Threads),
         }
+    }
+
+    fn gif_event(&mut self, event: gif::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &mut self.phase
+        else {
+            return Task::none();
+        };
+        if let gif::Event::Pick(index) = event {
+            if let Some(url) = self.gif.url(index).map(str::to_owned)
+                && gateway.composer.insert_emoji(&url)
+            {
+                self.gif.close();
+                return iced::widget::operation::focus(composer::EDITOR_ID);
+            }
+            return Task::none();
+        }
+        if matches!(event, gif::Event::Toggle) && !self.gif.open && !gateway.timeline.can_send {
+            return Task::none();
+        }
+        self.gif
+            .update(event, &session.client, gateway.attachments.as_ref())
+            .map(Message::Gif)
     }
 
     fn pins_event(&mut self, event: pins::Event) -> Task<Message> {
@@ -2074,6 +2105,9 @@ impl App {
                 && self.pins.shows(channel)
             {
                 banner_column = banner_column.push(pins::view(&self.pins).map(Message::Pins));
+            }
+            if let Some(panel) = gif::view(&self.gif) {
+                banner_column = banner_column.push(panel.map(Message::Gif));
             }
             if let Some(panel) = threads::view(&self.threads) {
                 banner_column = banner_column.push(panel.map(Message::Threads));

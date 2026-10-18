@@ -520,3 +520,7 @@ Evidence: community documentation of `TYPING_START` and `POST /channels/{id}/typ
 - No periodic work: the worker arms one sleep until the next entry lapses only while the table is non-empty.
 - Outgoing: `POST /channels/{id}/typing` with no body, user-write priority, never retried. Sent only for text edits of a new message (not cursor moves, not while editing a sent message, not on an empty draft), while the window is active, in the open channel where sending is allowed, at most once per 8 s per channel (`TypingSend`). Failures (401/403/404/429) are dropped silently; the only cost is a missing indicator for others.
 - Not established: whether threads and group DMs accept the same route for the user client, and whether the sending session receives its own `TYPING_START`.
+
+## GIF picker (#70)
+
+`GET /gifs/trending` and `GET /gifs/search?q=...` (both with `provider=tenor&locale=en-US&media_format=gif`) answer a bare array or `{"gifs":[...]}` of `{title,url,preview,gif_src,src}`; unverified against a live account. `url` (https only) is what a message carries; previews are fetched without `Authorization` through the credential-free fetcher and are the only traffic to the GIF provider. At most 24 results are kept; each request is sent once.

@@ -442,6 +442,11 @@ fn header_with<'a>(
                 .on_press(Message::EmojiPicker(crate::emoji_picker::Event::Toggle))
                 .style(style::tool_button(true, false)),
         );
+        line = line.push(
+            button(text("GIF").size(13))
+                .on_press(Message::Gif(crate::gif::Event::Toggle))
+                .style(style::tool_button(true, false)),
+        );
     }
     container(line)
         .padding([10, 16])
