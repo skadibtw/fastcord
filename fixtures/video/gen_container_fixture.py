@@ -13,6 +13,9 @@ committed elementary streams that the codec tests already use, repackaged:
 * container-h264-aac.mp4: the same video with an AAC (mp4a/esds) track of five
   1024-sample payloads that are not real AAC; the demuxer must report the track
   as unsupported audio, never read it.
+* container-h264-aac-lc.mp4: the same video with the genuine AAC-LC frames of
+  ../audio/aac-lc-tone.m4a (Windows Media Foundation encoder output, see
+  ../audio/gen_aac_tone.py), re-muxed with that file's AudioSpecificConfig.
 * container-av1-opus.webm: av1-lossless-420-8.ivf (three temporal units) without
   temporal delimiters, its sequence header as av1C, in two clusters (a
   SimpleBlock and a BlockGroup with a ReferenceBlock) plus an Opus track.
@@ -133,9 +136,9 @@ def avc1(sps, pps):
     )
 
 
-def audio_entry(kind, config_box):
+def audio_entry(kind, config_box, rate=48000):
     return box(kind, bytes(6), u16(1), bytes(8), u16(2), u16(16), u16(0), u16(0),
-               u32(48000 << 16), config_box)
+               u32(rate << 16), config_box)
 
 
 def opus_entry():
@@ -143,20 +146,48 @@ def opus_entry():
     return audio_entry(b"Opus", dops)
 
 
-def aac_entry():
+def aac_entry(asc=bytes([0x12, 0x10]), rate=48000):
     esds = full(
         b"esds", 0, 0,
-        bytes([3, 25]), u16(2), bytes([0]),
-        bytes([4, 17, 0x40, 0x15]), bytes(3), u32(0), u32(0),
-        bytes([5, 2, 0x12, 0x10]), bytes([6, 1, 2]),
+        bytes([3, 23 + len(asc)]), u16(2), bytes([0]),
+        bytes([4, 15 + len(asc), 0x40, 0x15]), bytes(3), u32(0), u32(0),
+        bytes([5, len(asc)]), asc, bytes([6, 1, 2]),
     )
-    return audio_entry(b"mp4a", esds)
+    return audio_entry(b"mp4a", esds, rate)
+
+
+def real_aac():
+    """(AudioSpecificConfig, sample rate, frames) of the committed Windows-encoded M4A."""
+    data = (HERE.parent / "audio" / "aac-lc-tone.m4a").read_bytes()
+
+    def find(kind, start=0):
+        at = data.index(kind, start)
+        return at, struct.unpack(">I", data[at - 4:at])[0]
+
+    esds, size = find(b"esds")
+    # ES_Descriptor, DecoderConfigDescriptor and DecoderSpecificInfo with 4-byte sizes.
+    at = data.index(bytes([5, 0x80, 0x80, 0x80]), esds) + 5
+    asc = data[at:at + data[at - 1]]
+    stsz, _ = find(b"stsz")
+    count = struct.unpack(">I", data[stsz + 12:stsz + 16])[0]
+    sizes = struct.unpack(f">{count}I", data[stsz + 16:stsz + 16 + 4 * count])
+    stco, _ = find(b"stco")
+    assert struct.unpack(">I", data[stco + 8:stco + 12])[0] == 1, "one chunk expected"
+    offset = struct.unpack(">I", data[stco + 12:stco + 16])[0]
+    frames = []
+    for n in sizes:
+        frames.append(data[offset:offset + n])
+        offset += n
+    rate = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050][(asc[0] & 7) << 1 | asc[1] >> 7]
+    return asc, rate, frames
 
 
 def mp4(audio):
     sps, pps, slices = h264_access_units()
     avcc_samples = [u32(len(n)) + n for n in slices]
     a_packets = OPUS_PACKETS if audio == "opus" else AAC_PACKETS
+    if audio == "aac-lc":
+        asc, a_rate, a_packets = real_aac()
 
     def build(video_offsets, audio_offset):
         v_sizes = [len(s) for s in avcc_samples]
@@ -171,6 +202,10 @@ def mp4(audio):
         if audio == "opus":
             sound = trak(2, b"soun", 48000, 5760, opus_entry(), [(6, 960)], a_sizes,
                          [(6, audio_offset)])
+        elif audio == "aac-lc":
+            n = len(a_packets)
+            sound = trak(2, b"soun", a_rate, n * 1024, aac_entry(asc, a_rate), [(n, 1024)],
+                         a_sizes, [(n, audio_offset)])
         else:
             sound = trak(2, b"soun", 48000, 5120, aac_entry(), [(5, 1024)], a_sizes,
                          [(5, audio_offset)])
@@ -317,6 +352,7 @@ def main():
     outputs = {
         "container-h264-opus.mp4": mp4("opus"),
         "container-h264-aac.mp4": mp4("aac"),
+        "container-h264-aac-lc.mp4": mp4("aac-lc"),
         "container-av1-opus.webm": webm(),
     }
     manifest = {"schema": 1, "generator": "gen_container_fixture.py", "files": {}}

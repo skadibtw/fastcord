@@ -12,6 +12,7 @@
 //! Device callbacks only convert samples and move them through preallocated
 //! lock-free rings; they never allocate, lock, or perform I/O.
 
+pub mod aac;
 pub mod audit;
 mod callback;
 mod channels;

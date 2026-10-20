@@ -4,8 +4,8 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use super::{
-    AudioSkipped, AudioTrack, ContainerError, MAX_METADATA_BYTES, MAX_SAMPLES, Media, Sample,
-    VideoCodecId, VideoTrack, finish_samples, ms_from, parse_avcc, read_up_to,
+    AudioCodecId, AudioSkipped, AudioTrack, ContainerError, MAX_METADATA_BYTES, MAX_SAMPLES, Media,
+    Sample, VideoCodecId, VideoTrack, aac_lc_info, finish_samples, ms_from, parse_avcc, read_up_to,
 };
 
 const MAX_TOP_LEVEL_BOXES: usize = 4096;
@@ -121,7 +121,8 @@ enum Entry {
     Opus {
         channels: u8,
     },
-    Aac,
+    /// The AudioSpecificConfig when it is one the player decodes (AAC-LC, mono or stereo).
+    Aac(Option<Vec<u8>>),
     OtherAudio,
     OtherVideo,
     Other,
@@ -169,7 +170,8 @@ fn parse_moov(moov: &[u8], file_len: u64) -> Result<Media> {
                 };
                 match (&handler, &track.entry) {
                     (b"vide", _) if video.is_none() => video = Some(track),
-                    (b"soun", Entry::Aac) => {
+                    (b"soun", Entry::Aac(Some(_))) if audio.is_none() => audio = Some(track),
+                    (b"soun", Entry::Aac(_)) => {
                         audio_skipped.get_or_insert(AudioSkipped::Aac);
                     }
                     (b"soun", Entry::Opus { .. }) if audio.is_none() => audio = Some(track),
@@ -224,11 +226,20 @@ fn parse_moov(moov: &[u8], file_len: u64) -> Result<Media> {
         .transpose()?;
     let audio = audio
         .map(|track| -> Result<AudioTrack> {
-            let Entry::Opus { channels } = track.entry else {
-                return Err(ContainerError::NoPlayableTrack);
+            let (codec, channels, rate, config) = match &track.entry {
+                Entry::Opus { channels } => (AudioCodecId::Opus, *channels, 48_000, Vec::new()),
+                Entry::Aac(Some(config)) => {
+                    let (rate, channels) =
+                        aac_lc_info(config).ok_or(ContainerError::NoPlayableTrack)?;
+                    (AudioCodecId::Aac, channels, rate, config.clone())
+                }
+                _ => return Err(ContainerError::NoPlayableTrack),
             };
             Ok(AudioTrack {
+                codec,
                 channels,
+                rate,
+                config,
                 samples: build_samples(&track, false, file_len, &mut budget)?,
             })
         })
@@ -406,7 +417,13 @@ fn parse_entry(handler: &[u8; 4], stsd: &[u8]) -> Result<Entry> {
     }
     let children = body.get(28..).unwrap_or_default();
     Ok(match &kind {
-        b"mp4a" => Entry::Aac,
+        b"mp4a" => Entry::Aac(
+            Boxes(children)
+                .filter_map(|child| child.ok())
+                .find(|(kind, _)| *kind == *b"esds")
+                .and_then(|(_, body)| esds_config(body))
+                .filter(|config| aac_lc_info(config).is_some()),
+        ),
         b"Opus" => {
             let mut config = None;
             for child in Boxes(children) {
@@ -615,4 +632,44 @@ fn build_samples(
     }
     finish_samples(&samples, file_len)?;
     Ok(samples)
+}
+
+/// The AudioSpecificConfig inside an `esds` box body: ES_Descriptor (3) holding a
+/// DecoderConfigDescriptor (4, object type 0x40 = MPEG-4 audio) holding DecoderSpecificInfo (5).
+fn esds_config(body: &[u8]) -> Option<Vec<u8>> {
+    /// One descriptor: its tag, body and the bytes after it.
+    fn descriptor(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+        let (&tag, mut rest) = data.split_first()?;
+        let mut size = 0usize;
+        for _ in 0..4 {
+            let (&byte, tail) = rest.split_first()?;
+            rest = tail;
+            size = (size << 7) | usize::from(byte & 0x7F);
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        Some((tag, rest.get(..size)?, rest.get(size..)?))
+    }
+    let (tag, es, _) = descriptor(body.get(4..)?)?;
+    if tag != 3 {
+        return None;
+    }
+    let flags = *es.get(2)?;
+    let mut skip = 3;
+    if flags & 0x80 != 0 {
+        skip += 2;
+    }
+    if flags & 0x40 != 0 {
+        skip += 1 + usize::from(*es.get(skip)?);
+    }
+    if flags & 0x20 != 0 {
+        skip += 2;
+    }
+    let (tag, config, _) = descriptor(es.get(skip..)?)?;
+    if tag != 4 || *config.first()? != 0x40 {
+        return None;
+    }
+    let (tag, asc, _) = descriptor(config.get(13..)?)?;
+    (tag == 5).then(|| asc.to_vec())
 }

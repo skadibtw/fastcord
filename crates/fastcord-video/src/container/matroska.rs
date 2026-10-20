@@ -4,8 +4,8 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use super::{
-    AudioSkipped, AudioTrack, ContainerError, MAX_METADATA_BYTES, MAX_SAMPLES, Media, Sample,
-    VideoCodecId, VideoTrack, finish_samples, ms_from, parse_avcc, read_up_to,
+    AudioCodecId, AudioSkipped, AudioTrack, ContainerError, MAX_METADATA_BYTES, MAX_SAMPLES, Media,
+    Sample, VideoCodecId, VideoTrack, aac_lc_info, finish_samples, ms_from, parse_avcc, read_up_to,
 };
 
 type Result<T> = std::result::Result<T, ContainerError>;
@@ -175,7 +175,10 @@ enum Selected {
     },
     Audio {
         number: u64,
+        codec: AudioCodecId,
         channels: u8,
+        rate: u32,
+        config: Vec<u8>,
     },
 }
 
@@ -258,10 +261,24 @@ fn parse_tracks(payload: &[u8]) -> Result<Tracks> {
                     && !encoded
                     && matches!(channels, 1 | 2)
                     && (private.len() < 19 || private[18] == 0);
+                let aac = (codec == b"A_AAC" && !encoded)
+                    .then(|| aac_lc_info(private))
+                    .flatten();
                 if opus {
                     tracks.audio = Some(Selected::Audio {
                         number,
+                        codec: AudioCodecId::Opus,
                         channels: channels as u8,
+                        rate: 48_000,
+                        config: Vec::new(),
+                    });
+                } else if let Some((rate, channels)) = aac {
+                    tracks.audio = Some(Selected::Audio {
+                        number,
+                        codec: AudioCodecId::Aac,
+                        channels,
+                        rate,
+                        config: private.to_vec(),
                     });
                 } else {
                     tracks.audio_skipped.get_or_insert(if codec == b"A_AAC" {
@@ -547,12 +564,19 @@ pub(super) fn open<R: Read + Seek>(r: &mut R, len: u64) -> Result<Media> {
         _ => None,
     };
     let audio = match tracks.audio {
-        Some(Selected::Audio { channels, .. }) if !scan.audio_laced && !scan.audio.is_empty() => {
-            Some(AudioTrack {
-                channels,
-                samples: std::mem::take(&mut scan.audio),
-            })
-        }
+        Some(Selected::Audio {
+            codec,
+            channels,
+            rate,
+            config,
+            ..
+        }) if !scan.audio_laced && !scan.audio.is_empty() => Some(AudioTrack {
+            codec,
+            channels,
+            rate,
+            config,
+            samples: std::mem::take(&mut scan.audio),
+        }),
         Some(_) => {
             audio_skipped = Some(AudioSkipped::Other);
             None

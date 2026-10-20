@@ -11,7 +11,7 @@
 //! error, never a panic or an unbounded allocation.
 //!
 //! Unsupported on purpose: fragmented MP4, lacing and content encodings in Matroska,
-//! H.265/VP8/VP9/MPEG video, and audio other than Opus (AAC is reported through
+//! H.265/VP8/VP9/MPEG video, and audio other than Opus and AAC-LC (reported through
 //! [`Media::audio_skipped`] so the caller can play the video silently). This module only
 //! frames data; decoding is [`crate::VideoDecoder`] and the audio engine.
 
@@ -110,9 +110,47 @@ pub struct VideoTrack {
 
 #[derive(Clone, Debug)]
 pub struct AudioTrack {
+    pub codec: AudioCodecId,
     pub channels: u8,
-    /// Opus packets in playing order.
+    /// Sample rate of the coded audio (48 000 for Opus).
+    pub rate: u32,
+    /// AAC: the AudioSpecificConfig. Empty for Opus.
+    pub config: Vec<u8>,
+    /// Opus packets or AAC frames in playing order.
     pub samples: Vec<Sample>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioCodecId {
+    Opus,
+    Aac,
+}
+
+/// Sample rate and channel count of an AAC-LC AudioSpecificConfig with 1024-sample frames
+/// and one or two channels, the only AAC the player decodes; `None` for anything else.
+pub fn aac_lc_info(asc: &[u8]) -> Option<(u32, u8)> {
+    const RATES: [u32; 13] = [
+        96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025,
+        8_000, 7_350,
+    ];
+    let mut bits = asc
+        .iter()
+        .flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1));
+    let mut take = |n: u32| -> Option<u32> {
+        (0..n).try_fold(0u32, |acc, _| Some((acc << 1) | u32::from(bits.next()?)))
+    };
+    if take(5)? != 2 {
+        return None;
+    }
+    let rate = match take(4)? {
+        index @ 0..=12 => RATES[index as usize],
+        15 => take(24)?,
+        _ => return None,
+    };
+    let channels = take(4)?;
+    let frame_length_flag = take(1)?;
+    (rate != 0 && matches!(channels, 1 | 2) && frame_length_flag == 0)
+        .then_some((rate, channels as u8))
 }
 
 #[derive(Clone, Debug)]

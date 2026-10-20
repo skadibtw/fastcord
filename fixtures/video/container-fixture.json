@@ -10,6 +10,10 @@
       "bytes": 57304,
       "sha256": "f0579cf03cdd49fec69da897b50065fefc1ba23e4dfe309dd0cc11096d844d31"
     },
+    "container-h264-aac-lc.mp4": {
+      "bytes": 65384,
+      "sha256": "c84746690c54d8df6efd76ce9b67fecc137a6832eb39b18b541085e7c00e4f1a"
+    },
     "container-av1-opus.webm": {
       "bytes": 3741,
       "sha256": "7f1a9a253c09fdce2fbc08d5d67e36c299fc5e065a21822d72ac53dad13c3d60"

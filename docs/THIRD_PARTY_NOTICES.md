@@ -363,3 +363,13 @@ independent libaom `aomenc` 3.15.2, https://aomedia.googlesource.com/aom/. The
 encoder and its libraries are fixture-generation tools only and are not linked
 or redistributed in fastcord packages; `fixtures/video/gen_av1_fixture.py` and
 `av1-fixture.json` record their pinned provenance and regeneration command.
+
+## Symphonia AAC decoder (MPL-2.0)
+
+Inline playback of AAC-LC audio in MP4 and WebM attachments (ADR 0008) uses `symphonia-codec-aac`
+0.6.1 with `symphonia-core`, `symphonia-common` and `symphonia-metadata` (Copyright (c) 2019-2026
+The Project Symphonia Developers, https://github.com/pdeljanov/Symphonia), licensed under the
+Mozilla Public License 2.0. The crates are used unmodified from crates.io; their source is
+available from crates.io and the repository above, and the license text is in
+`THIRD_PARTY_CRATES.md`. The AAC decoder source originates from the NihAV project and was
+relicensed for Symphonia with its author's permission.

@@ -32,19 +32,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
+use fastcord_audio::aac::AacTranscoder;
 use fastcord_audio::ogg::packet_samples;
 use fastcord_audio::{
     DeviceChoice, EncodedPacket, FilePlayer, PacketSource, PlayerClock, PlayerError, PlayerFailure,
     PlayerSnapshot, PlayerState, Silence,
 };
 use fastcord_video::container::{
-    self, AudioSkipped, ContainerError, Media, VideoCodecId, VideoTrack,
+    self, AudioCodecId, AudioSkipped, ContainerError, Media, VideoCodecId, VideoTrack,
 };
 use fastcord_video::frame::{FrameLease, FramePool};
 use fastcord_video::{CodecError, DecodedFrame, VideoDecoder};
 
 use crate::playback::{self, Status};
 
+const AAC_UNSUPPORTED: &str = "This AAC audio cannot be decoded here; playing without sound.";
+const OTHER_UNSUPPORTED: &str = "This audio format is not supported; playing without sound.";
 /// Longest the worker sleeps while waiting for the next picture to fall due.
 const MAX_SLEEP: Duration = Duration::from_millis(100);
 /// How long a follower waits for the audio thread to act on a command.
@@ -175,32 +178,29 @@ impl MediaPlayer {
         file.rewind().map_err(|_| StartError::Damaged)?;
         let media = Arc::new(container::open(&mut BufReader::new(file))?);
         let mut notice = media.audio_skipped.map(|skipped| match skipped {
-            AudioSkipped::Aac => "AAC audio is not supported here; playing without sound.",
-            AudioSkipped::Other => "This audio format is not supported; playing without sound.",
+            AudioSkipped::Aac => AAC_UNSUPPORTED,
+            AudioSkipped::Other => OTHER_UNSUPPORTED,
         });
         let reader = || {
             File::open(path)
                 .map(BufReader::new)
                 .map_err(|_| StartError::Damaged)
         };
-        // Audio: an Opus track in 20 ms packets, otherwise silence of the media's length.
+        // Audio: an Opus track in 20 ms packets, an AAC-LC track transcoded to them, otherwise
+        // silence of the media's length.
         let mut audio = None;
         if media.audio.is_some() && output.is_some() {
-            let mut source = ContainerAudio {
-                media: Arc::clone(&media),
-                reader: reader()?,
-                next: 0,
-                buffer: Vec::new(),
-            };
-            if source.first_packet_is_playable() {
-                audio = Some(FilePlayer::start_source(source, output).map_err(
-                    |error| match error {
-                        PlayerError::Device => StartError::Device,
-                        PlayerError::File(_) => StartError::Damaged,
-                    },
-                )?);
-            } else {
-                notice = Some("This audio format is not supported; playing without sound.");
+            match ContainerAudio::open(&media, reader()?) {
+                Ok(source) => {
+                    audio =
+                        Some(FilePlayer::start_source(source, output).map_err(
+                            |error| match error {
+                                PlayerError::Device => StartError::Device,
+                                PlayerError::File(_) => StartError::Damaged,
+                            },
+                        )?);
+                }
+                Err(text) => notice = Some(text),
             }
         }
         let audio = match audio {
@@ -307,28 +307,75 @@ fn read_head(file: &mut File, head: &mut [u8; 8]) -> Result<usize, StartError> {
     Ok(done)
 }
 
-/// The Opus track of a container as a [`PacketSource`].
+/// The audio track of a container as a [`PacketSource`]: Opus packets as stored, AAC-LC
+/// frames decoded and re-encoded by an [`AacTranscoder`].
 struct ContainerAudio {
     media: Arc<Media>,
     reader: BufReader<File>,
     next: usize,
     buffer: Vec<u8>,
+    aac: Option<AacTranscoder>,
 }
 
 impl ContainerAudio {
-    fn track(&self) -> &container::AudioTrack {
-        self.media
-            .audio
-            .as_ref()
-            .expect("an audio source has a track")
+    /// The source for `media`'s audio track, or the line to show when it cannot be played
+    /// (the first packet is not 20 ms Opus, or the first AAC frame does not decode).
+    fn open(media: &Arc<Media>, reader: BufReader<File>) -> Result<Self, &'static str> {
+        let track = media.audio.as_ref().ok_or(OTHER_UNSUPPORTED)?;
+        let aac = match track.codec {
+            AudioCodecId::Opus => None,
+            AudioCodecId::Aac => {
+                Some(AacTranscoder::new(&track.config, track.rate).map_err(|_| AAC_UNSUPPORTED)?)
+            }
+        };
+        let mut source = Self {
+            media: Arc::clone(media),
+            reader,
+            next: 0,
+            buffer: Vec::new(),
+            aac,
+        };
+        if source.aac.is_some() {
+            let first = source.read_at(0).map_err(|_| AAC_UNSUPPORTED)?;
+            let decoded = first.is_some_and(|_| {
+                let frame = std::mem::take(&mut source.buffer);
+                let ok = source
+                    .aac
+                    .as_mut()
+                    .is_some_and(|aac| aac.push(&frame, false));
+                source.buffer = frame;
+                ok
+            });
+            if !decoded {
+                return Err(AAC_UNSUPPORTED);
+            }
+            source.restart(0);
+        } else if !matches!(source.opus_at(0), Ok(Some(_))) {
+            return Err(OTHER_UNSUPPORTED);
+        }
+        Ok(source)
     }
 
-    fn packet_at(&mut self, index: usize) -> Result<Option<EncodedPacket>, PlayerFailure> {
-        let Some(sample) = self.track().samples.get(index).copied() else {
+    /// Loads the stored bytes of sample `index` into `buffer`; `None` past the end.
+    fn read_at(&mut self, index: usize) -> Result<Option<()>, PlayerFailure> {
+        let Some(sample) = self
+            .media
+            .audio
+            .as_ref()
+            .and_then(|track| track.samples.get(index))
+            .copied()
+        else {
             return Ok(None);
         };
         container::read_sample(&mut self.reader, &sample, &mut self.buffer)
             .map_err(|_| PlayerFailure::Damaged)?;
+        Ok(Some(()))
+    }
+
+    fn opus_at(&mut self, index: usize) -> Result<Option<EncodedPacket>, PlayerFailure> {
+        if self.read_at(index)?.is_none() {
+            return Ok(None);
+        }
         if packet_samples(&self.buffer) != Some(fastcord_audio::codec::FRAME_SAMPLES) {
             return Err(PlayerFailure::Unsupported);
         }
@@ -337,9 +384,20 @@ impl ContainerAudio {
             .map_err(|_| PlayerFailure::Unsupported)
     }
 
-    /// Whether the track's packets are 20 ms Opus, as the player assumes.
-    fn first_packet_is_playable(&mut self) -> bool {
-        matches!(self.packet_at(0), Ok(Some(_)))
+    /// Positions the stream at sample `index`. AAC decodes the frame before it first, to
+    /// prime the overlap-add, and drops that audio.
+    fn restart(&mut self, index: usize) {
+        self.next = index;
+        let Some(aac) = self.aac.as_mut() else {
+            return;
+        };
+        aac.reset();
+        if let Some(prime) = index.checked_sub(1)
+            && self.read_at(prime).is_ok_and(|read| read.is_some())
+            && let Some(aac) = self.aac.as_mut()
+        {
+            aac.push(&self.buffer, true);
+        }
     }
 }
 
@@ -349,15 +407,35 @@ impl PacketSource for ContainerAudio {
     }
 
     fn next_packet(&mut self) -> Result<Option<EncodedPacket>, PlayerFailure> {
-        let packet = self.packet_at(self.next)?;
-        if packet.is_some() {
-            self.next += 1;
+        if self.aac.is_none() {
+            let packet = self.opus_at(self.next)?;
+            if packet.is_some() {
+                self.next += 1;
+            }
+            return Ok(packet);
         }
-        Ok(packet)
+        // One AAC frame yields about 21 ms of audio; pop everything before reading more.
+        loop {
+            if let Some(packet) = self.aac.as_mut().and_then(AacTranscoder::pop) {
+                return Ok(Some(packet));
+            }
+            if self.read_at(self.next)?.is_none() {
+                return Ok(None);
+            }
+            self.next += 1;
+            if let Some(aac) = self.aac.as_mut() {
+                aac.push(&self.buffer, false);
+            }
+        }
     }
 
     fn seek_ms(&mut self, ms: u64) -> Result<(), PlayerFailure> {
-        self.next = self.track().index_at(ms);
+        let index = self
+            .media
+            .audio
+            .as_ref()
+            .map_or(0, |track| track.index_at(ms));
+        self.restart(index);
         Ok(())
     }
 }
@@ -632,6 +710,7 @@ mod tests {
     use super::*;
 
     const WEBM: &[u8] = include_bytes!("../../../fixtures/video/container-av1-opus.webm");
+    const MP4_AAC_LC: &[u8] = include_bytes!("../../../fixtures/video/container-h264-aac-lc.mp4");
     const MP4_AAC: &[u8] = include_bytes!("../../../fixtures/video/container-h264-aac.mp4");
 
     /// A fixture written to a private temporary file, removed on drop.
@@ -708,10 +787,10 @@ mod tests {
     }
 
     #[test]
-    fn h264_with_aac_plays_silently_and_says_so() {
-        let file = TempFile::new("aac.mp4", MP4_AAC);
+    fn h264_with_aac_plays_on_the_silent_clock_without_an_output() {
+        let file = TempFile::new("aac.mp4", MP4_AAC_LC);
         let player = MediaPlayer::start_with(&file.0, None, software()).unwrap();
-        assert!(player.notice().is_some_and(|text| text.contains("AAC")));
+        assert!(player.notice().is_none());
         wait_for(|| player.presented() >= 1);
         wait_for(|| player.snapshot().state == PlayerState::Ended);
         assert!(!player.video_failed());
@@ -762,24 +841,19 @@ mod tests {
         );
     }
 
-    fn audio_source(bytes: &[u8], name: &str) -> (TempFile, ContainerAudio) {
+    fn audio_source(bytes: &[u8], name: &str) -> (TempFile, Result<ContainerAudio, &'static str>) {
         let file = TempFile::new(name, bytes);
         let media =
             Arc::new(container::open(&mut BufReader::new(File::open(&file.0).unwrap())).unwrap());
-        let source = ContainerAudio {
-            media,
-            reader: BufReader::new(File::open(&file.0).unwrap()),
-            next: 0,
-            buffer: Vec::new(),
-        };
+        let source = ContainerAudio::open(&media, BufReader::new(File::open(&file.0).unwrap()));
         (file, source)
     }
 
     #[test]
     fn the_opus_track_is_served_as_packets_and_seeks_to_a_packet() {
-        let (_file, mut source) = audio_source(WEBM, "audio.webm");
+        let (_file, source) = audio_source(WEBM, "audio.webm");
+        let mut source = source.unwrap();
         assert_eq!(source.duration_ms(), Some(120));
-        assert!(source.first_packet_is_playable());
         let ids: Vec<u8> = std::iter::from_fn(|| source.next_packet().unwrap())
             .map(|packet| packet.as_bytes()[3])
             .collect();
@@ -797,11 +871,92 @@ mod tests {
                 bytes[at] = 0xF0;
             }
         }
-        let (_file, mut source) = audio_source(&bytes, "ten-ms.webm");
-        assert!(!source.first_packet_is_playable());
-        assert_eq!(
-            source.next_packet().unwrap_err(),
-            PlayerFailure::Unsupported
+        let (_file, source) = audio_source(&bytes, "ten-ms.webm");
+        assert_eq!(source.err(), Some(OTHER_UNSUPPORTED));
+    }
+
+    /// Power of `samples` (one channel of `stride`-interleaved audio) at `hz`, relative to
+    /// the signal's own power.
+    fn tone_share(samples: &[f32], stride: usize, channel: usize, hz: f32) -> f32 {
+        let (mut re, mut im, mut total) = (0.0f32, 0.0f32, 0.0f32);
+        for (i, frame) in samples.chunks_exact(stride).enumerate() {
+            let x = frame[channel];
+            let phase = 2.0 * std::f32::consts::PI * hz * i as f32 / 48_000.0;
+            re += x * phase.cos();
+            im += x * phase.sin();
+            total += x * x;
+        }
+        let n = (samples.len() / stride) as f32;
+        2.0 * (re * re + im * im) / (n * total.max(1e-9))
+    }
+
+    fn decode_all(source: &mut ContainerAudio) -> Vec<f32> {
+        let mut decoder = fastcord_audio::VoiceDecoder::new().unwrap();
+        let mut pcm = Vec::new();
+        let mut out = vec![0.0; fastcord_audio::codec::MAX_FRAME_SAMPLES * 2];
+        while let Some(packet) = source.next_packet().unwrap() {
+            let frames = decoder.decode(packet.as_bytes(), &mut out).unwrap();
+            pcm.extend_from_slice(&out[..frames * 2]);
+        }
+        pcm
+    }
+
+    #[test]
+    fn a_real_aac_lc_track_is_decoded_to_the_tone_it_holds() {
+        let (_file, source) = audio_source(MP4_AAC_LC, "lc.mp4");
+        let mut source = source.unwrap();
+        let pcm = decode_all(&mut source);
+        // 21 frames of 1024 samples at 44.1 kHz resampled to 48 kHz, in 20 ms packets.
+        assert!(pcm.len() / 2 >= 22_000, "{} frames", pcm.len() / 2);
+        // Skip the codec start-up and look at the steady middle: left is 440 Hz, right 880 Hz.
+        let middle = &pcm[2 * 6_000..2 * 18_000];
+        assert!(tone_share(middle, 2, 0, 440.0) > 0.9);
+        assert!(tone_share(middle, 2, 1, 880.0) > 0.9);
+        assert!(tone_share(middle, 2, 0, 880.0) < 0.05);
+    }
+
+    #[test]
+    fn seeking_aac_restarts_at_a_frame_and_still_decodes_the_tone() {
+        let (_file, source) = audio_source(MP4_AAC_LC, "lc-seek.mp4");
+        let mut source = source.unwrap();
+        assert!(source.next_packet().unwrap().is_some());
+        source.seek_ms(250).unwrap();
+        assert_eq!(source.next, 11);
+        let pcm = decode_all(&mut source);
+        // Frames 11..=20 remain: about 240 ms.
+        assert!(
+            (10_000..13_000).contains(&(pcm.len() / 2)),
+            "{}",
+            pcm.len() / 2
+        );
+        assert!(tone_share(&pcm[2 * 2_000..], 2, 0, 440.0) > 0.9);
+        source.seek_ms(0).unwrap();
+        assert!(source.next_packet().unwrap().is_some());
+    }
+
+    #[test]
+    fn aac_frames_that_do_not_decode_leave_the_video_silent_with_a_note() {
+        // The older fixture has a valid configuration but payloads that are not AAC.
+        let (_file, source) = audio_source(MP4_AAC, "fake-aac.mp4");
+        assert_eq!(source.err(), Some(AAC_UNSUPPORTED));
+    }
+
+    #[test]
+    fn a_damaged_aac_frame_in_the_middle_becomes_silence_not_a_failure() {
+        let mut bytes = MP4_AAC_LC.to_vec();
+        let (_file, source) = audio_source(&bytes, "lc-ok.mp4");
+        let frames_ok = decode_all(&mut source.unwrap()).len();
+        // Overwrite audio frame 10 with 0xFF bytes.
+        let media = container::open(&mut std::io::Cursor::new(&bytes)).unwrap();
+        let frame = media.audio.unwrap().samples[10];
+        let at = frame.offset as usize;
+        bytes[at..at + frame.size as usize].fill(0xFF);
+        let (_file, source) = audio_source(&bytes, "lc-bad.mp4");
+        let frames_bad = decode_all(&mut source.unwrap()).len();
+        // The damaged frame is replaced by silence of its length (within one packet).
+        assert!(
+            frames_ok.abs_diff(frames_bad) <= 2 * 960,
+            "{frames_ok} {frames_bad}"
         );
     }
 }
