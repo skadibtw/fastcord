@@ -2124,6 +2124,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tar",
+ "tract-onnx",
  "windows 0.62.2",
  "windows-core 0.62.2",
 ]

@@ -1,0 +1,23 @@
+{
+  "name": "MediaPipe selfie segmenter",
+  "license": "Apache-2.0",
+  "license_evidence": "The model card (Tingbo Hou, Siargey Pisarchyk, Karthik Raveendran; Google; 2021-05-06, 'MediaPipe Selfie Segmentation') states 'Licensed under Apache License, Version 2.0'. The MediaPipe repository is Apache-2.0.",
+  "model_card": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Selfie%20Segmentation.pdf",
+  "model_card_sha256": "ef2e8d350891ba71699ac1e079658e697fc8d48c0f9253922990e907ecdade60",
+  "source": "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+  "source_file": "selfie_segmenter.tflite",
+  "source_sha256": "191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b",
+  "source_bytes": 249537,
+  "source_origin": "keras2tflite_selfiesegmentation_mlkit-256x256-2021_01_19-v1215",
+  "downloaded": "2026-10-20",
+  "input": "float32 RGB in 0..1, 256x256 (NCHW here, NHWC in the TFLite original)",
+  "output": "float32 person probability 0..1, 256x256",
+  "converter": "convert_selfie_segmenter.py",
+  "converter_requirements": "python 3.14, tflite 2.18.0, onnx 1.23.2, numpy",
+  "onnx_file": "selfie_segmenter.onnx",
+  "onnx_sha256": "71a51a5643d0da49cab74e469c43539281ba2b373bb62dc08bb176f4273bfc35",
+  "onnx_bytes": 437436,
+  "conversion_notes": "Weights are copied unchanged (float16 widened to float32); layout NCHW; HARD_SWISH is HardSigmoid(1/6, 0.5) times its input; the MediaPipe custom Convolution2DTransposeBias is ConvTranspose. Output agrees with the original run in TensorFlow Lite (ai-edge-litert) to 4e-5 on structured inputs; the Rust test tract_agrees_with_the_tensorflow_lite_reference pins reference values.",
+  "runtime": "tract-onnx 0.19.16, already linked for DeepFilterNet",
+  "recipe": "../../src/effect/segment.rs"
+}

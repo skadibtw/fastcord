@@ -20,12 +20,27 @@ pub struct Selection {
     pub label: String,
 }
 
-/// The saved camera: its stable ID (`None` is the first camera) and the label it
-/// had, for display when it is not connected (issue #84).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The saved camera choices: its stable ID (`None` is the first camera) and the
+/// label it had, for display when it is not connected (issue #84), plus the
+/// background effect and whether the self-view is mirrored (issue #85). None of
+/// them turns the camera on.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CameraSelection {
     pub id: Option<String>,
     pub label: String,
+    pub effect: fastcord_video::effect::Effect,
+    pub mirror: bool,
+}
+
+impl Default for CameraSelection {
+    fn default() -> Self {
+        Self {
+            id: None,
+            label: String::new(),
+            effect: fastcord_video::effect::Effect::Off,
+            mirror: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -309,9 +324,19 @@ fn camera_selection(value: &Value) -> Option<CameraSelection> {
         Value::String(id) if !id.is_empty() && id.len() <= 512 => Some(id.clone()),
         _ => return None,
     };
+    // Older files predate effects and mirroring; an unknown effect name (from
+    // a newer build) means no effect.
+    let effect = value
+        .get("effect")
+        .and_then(Value::as_str)
+        .and_then(fastcord_video::effect::Effect::from_persisted)
+        .unwrap_or_default();
+    let mirror = value.get("mirror").and_then(Value::as_bool).unwrap_or(true);
     (label.len() <= 256).then(|| CameraSelection {
         id,
         label: label.to_owned(),
+        effect,
+        mirror,
     })
 }
 
@@ -327,7 +352,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label}}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -418,6 +443,7 @@ mod tests {
             camera: CameraSelection {
                 id: Some("usb#cam".to_owned()),
                 label: "Desk camera".to_owned(),
+                ..CameraSelection::default()
             },
         };
         save_to(&path, &prefs).unwrap();
@@ -481,10 +507,13 @@ mod tests {
     }
     #[test]
     fn the_camera_choice_persists_is_bounded_and_older_files_mean_the_first_camera() {
+        use fastcord_video::effect::{Effect, Preset};
         let prefs = Preferences {
             camera: CameraSelection {
                 id: Some("usb#vid_046d&pid_0825#6&1".to_owned()),
                 label: "Logitech C270".to_owned(),
+                effect: Effect::Preset(Preset::Mint),
+                mirror: false,
             },
             ..Preferences::default()
         };
@@ -505,6 +534,19 @@ mod tests {
                 decode(text.as_bytes()).unwrap().camera,
                 CameraSelection::default()
             );
+        }
+        // Older camera entries predate effects: no effect, mirrored self-view;
+        // an effect name from the future is also no effect.
+        for entry in [
+            r#"{"id":null,"label":""}"#,
+            r#"{"id":null,"label":"","effect":"hologram"}"#,
+            r#"{"id":null,"label":"","effect":3}"#,
+        ] {
+            let text = format!(
+                r#"{{"input":{{"id":null,"label":""}},"output":{{"id":null,"label":""}},"camera":{entry}}}"#
+            );
+            let camera = decode(text.as_bytes()).unwrap().camera;
+            assert_eq!((camera.effect, camera.mirror), (Effect::Off, true));
         }
         // The camera is a choice of device only: nothing here can turn it on.
         assert!(

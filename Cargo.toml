@@ -71,6 +71,8 @@ softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "
 tiny-skia = { version = "0.11.4", default-features = false, features = ["std", "simd"] }
 time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
 tar = { version = "0.4", default-features = false }
+# The ONNX runtime DeepFilterNet already pulls in; the camera background model uses it too (ADR 0010).
+tract-onnx = "=0.19.16"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 tao = { version = "0.37", default-features = false, features = ["rwh_06"] }
 wry = { version = "0.57", default-features = false, features = ["os-webview"] }

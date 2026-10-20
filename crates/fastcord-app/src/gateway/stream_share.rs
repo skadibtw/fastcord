@@ -135,6 +135,8 @@ fn end_text(end: &ShareEnd) -> String {
         ShareEnd::Capture(error) => format!("Screen capture stopped: {error}."),
         ShareEnd::Encoder(detail) => format!("Video encoding failed: {detail}."),
         ShareEnd::SinkClosed => "The stream connection closed.".to_owned(),
+        // Only a camera has an effect stage.
+        ShareEnd::Effect(detail) => format!("The picture effect failed: {detail}."),
     }
 }
 

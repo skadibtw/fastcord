@@ -122,6 +122,14 @@ impl Rig {
     }
 
     fn with_preview(config: ShareConfig, preview: Option<PreviewSink>) -> Self {
+        Self::build(config, preview, None)
+    }
+
+    fn build(
+        config: ShareConfig,
+        preview: Option<PreviewSink>,
+        effect: Option<crate::effect::EffectHandle>,
+    ) -> Self {
         let shared = Arc::new(Shared::new(&config));
         let log = Arc::new(Mutex::new(Log::default()));
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -155,7 +163,7 @@ impl Rig {
         let record = Arc::clone(&events);
         let observer: ShareObserver = Arc::new(move |event| record.lock().push(event));
         Self {
-            pipeline: Pipeline::new(Arc::clone(&shared), config, open, observer, preview),
+            pipeline: Pipeline::new(Arc::clone(&shared), config, open, observer, preview, effect),
             control: ShareControl {
                 shared: Arc::clone(&shared),
             },
@@ -240,6 +248,37 @@ fn the_preview_sees_every_picture_even_while_nothing_is_sent() {
     assert_eq!(rig.sent.lock().len(), 1);
     assert_eq!(ShareConfig::CAMERA_720P30.bitrate, 1_500_000);
     ShareConfig::CAMERA_720P30.validate().unwrap();
+}
+
+#[test]
+fn the_effect_runs_before_the_preview_and_the_encoder_and_switches_off_in_place() {
+    use crate::effect::{Effect, EffectHandle, Preset};
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    let preview: PreviewSink = Box::new(move |sample| {
+        record.lock().push(sample.planes().0[0]);
+    });
+    let handle = EffectHandle::new(Effect::Preset(Preset::Slate));
+    let mut rig = Rig::build(
+        ShareConfig::CAMERA_720P30,
+        Some(preview),
+        Some(handle.clone()),
+    );
+    rig.attach();
+    rig.control.set_negotiated(true);
+    // No mask exists yet, so the whole picture is the preset: the room is
+    // never shown before the model is ready.
+    rig.picture(640, 360, 0);
+    handle.set(Effect::Off);
+    rig.picture(640, 360, 33);
+    assert_eq!(seen.lock()[1], 0x80, "off: the camera picture itself");
+    assert_ne!(
+        seen.lock()[0],
+        0x80,
+        "on: the processed picture is previewed"
+    );
+    assert_eq!(rig.sent.lock().len(), 2, "and encoded without a restart");
+    assert_eq!(rig.log.lock().opened.len(), 1);
 }
 
 #[test]

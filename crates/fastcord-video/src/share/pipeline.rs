@@ -13,6 +13,7 @@ use super::{
 use crate::codec::{
     BackendKind, BackendPreference, CodecError, EncodedFrame, EncoderConfig, VideoEncoder,
 };
+use crate::effect::{EffectHandle, Stage};
 use crate::frame::Nv12;
 
 /// A keyframe the share asks of itself after a refused unit is at most this
@@ -36,6 +37,10 @@ pub(super) struct Pipeline {
     open: OpenEncoder,
     observer: ShareObserver,
     preview: Option<PreviewSink>,
+    /// The camera's background effect, applied before preview and encoding.
+    effect: Option<Stage>,
+    /// The effect's output picture, reused.
+    effected: Vec<u8>,
     encoder: Option<Running>,
     /// The backends the next open may use: the configured one, narrowed to
     /// software after a hardware encoder failed while running.
@@ -63,6 +68,7 @@ impl Pipeline {
         open: OpenEncoder,
         observer: ShareObserver,
         preview: Option<PreviewSink>,
+        effect: Option<EffectHandle>,
     ) -> Self {
         Self {
             shared,
@@ -71,6 +77,8 @@ impl Pipeline {
             open,
             observer,
             preview,
+            effect: effect.map(Stage::new),
+            effected: Vec::new(),
             encoder: None,
             base: None,
             last_timestamp: None,
@@ -90,6 +98,44 @@ impl Pipeline {
         if self.ended {
             return Flow::Stop;
         }
+        // The effect runs first, so the self-view and the stream always show
+        // the same picture. If it cannot run, nothing unprotected is sent.
+        let mut effected = std::mem::take(&mut self.effected);
+        let stride = match self
+            .effect
+            .as_mut()
+            .map(|stage| stage.apply(sample, &mut effected))
+        {
+            Some(Err(detail)) => {
+                self.effected = effected;
+                self.end(ShareEnd::Effect(detail));
+                return Flow::Stop;
+            }
+            Some(Ok(Some(stride))) => Some(stride),
+            _ => None,
+        };
+        let flow = match stride.map(|stride| {
+            VideoSample::nv12(
+                sample.width(),
+                sample.height(),
+                stride,
+                &effected,
+                sample.timestamp,
+            )
+        }) {
+            Some(Ok(processed)) => self.deliver(&processed, now),
+            Some(Err(error)) => {
+                self.end(ShareEnd::Effect(error.to_string()));
+                Flow::Stop
+            }
+            None => self.deliver(sample, now),
+        };
+        self.effected = effected;
+        flow
+    }
+
+    /// One picture, after the effect: the preview sees it, then the encoder.
+    fn deliver(&mut self, sample: &VideoSample<'_>, now: Instant) -> Flow {
         if let Some(preview) = self.preview.as_mut() {
             preview(sample);
         }

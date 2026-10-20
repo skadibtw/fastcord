@@ -11,6 +11,7 @@ repository.workspace = true
 fastcord-platform.workspace = true
 openh264.workspace = true
 parking_lot.workspace = true
+tract-onnx.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # `#[implement]` (the Media Foundation event callback) expands to

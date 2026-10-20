@@ -24,6 +24,7 @@ pub mod vaapi;
 pub mod av1;
 pub mod codec;
 pub mod container;
+pub mod effect;
 pub mod frame;
 pub mod h264;
 #[cfg(windows)]

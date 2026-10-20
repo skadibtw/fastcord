@@ -620,6 +620,10 @@ Implemented by `fastcord-media` (`VideoOptions::camera`, `MediaSender::set_video
 - Limits: at most six remote camera streams are received at once (the reassembly buffer is 4 MiB each; the received-frame queue is eight frames, at most 16 MiB); a connection remembers at most 16 users' announced streams.
 - **Unverified assumptions:** that the user-account voice gateway accepts a `video` layer in Identify on a call (as on a share), assigns SSRCs in READY for it and expects the opcode-12 declare/announce/stop sequence above; that an official client's `self_video` and layer state agree with ours; whether the camera RTP needs content-type or other header extensions; that the same payload types (103/104 H.264, 101/102 AV1) apply on a call; which codec the server selects when an official client has the camera on (U4); simulcast: only the single layer is sent and received.
 
+## Camera backgrounds (#85)
+
+No wire change. The effect is applied to the NV12 picture before it is encoded, so Discord receives an ordinary 720p30 H.264 camera layer exactly as in #84; a blurred or replaced background is not signalled to the server or other participants, and there is no request, event or stored state about it. Effect and mirror choices exist only in the local settings file.
+
 ## Reporting messages, users and servers (#81)
 
 A report is a submission to Discord, so it is an explicit user action with a review step and is never automatic and never retried. Exactly one `POST` is sent, from the review step's Submit button, at `UserWrite` priority; opening the panel only reads the menu (`UserRead`). A 401 stops the account; logout, account change or Close (not while sending) drops the panel and aborts a menu read. Wire shapes are from community documentation of the official client and are **unverified** against a live account (`docs/TESTING.md`).

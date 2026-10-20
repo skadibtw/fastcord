@@ -41,6 +41,7 @@ use fastcord_platform::capture::{
 use parking_lot::Mutex;
 
 use crate::codec::{BackendPreference, EncodedFrame, EncoderConfig, VideoEncoder};
+use crate::effect::EffectHandle;
 use crate::select::{Attempt, OpenError};
 use pipeline::Pipeline;
 
@@ -216,6 +217,9 @@ pub enum ShareEnd {
     Encoder(String),
     /// The transport closed.
     SinkClosed,
+    /// The background effect could not run, so nothing was sent (a camera
+    /// never falls back to the unprotected picture); the text is secret-free.
+    Effect(String),
 }
 
 impl fmt::Display for ShareEnd {
@@ -225,6 +229,7 @@ impl fmt::Display for ShareEnd {
             Self::Capture(error) => error.fmt(f),
             Self::Encoder(detail) => write!(f, "video encoding failed: {detail}"),
             Self::SinkClosed => f.write_str("the stream connection closed"),
+            Self::Effect(detail) => write!(f, "the camera background effect failed: {detail}"),
         }
     }
 }
@@ -455,20 +460,29 @@ impl ShareWorker {
         observer: ShareObserver,
         open: OpenEncoder,
     ) -> Result<Self, ShareError> {
-        Self::launch(config, observer, open, None, |options, handler| {
+        Self::launch(config, observer, open, None, None, |options, handler| {
             fastcord_platform::capture::start(source, options, handler)
         })
     }
 
     /// Captures the camera with stable ID `device` (`None`: the first one)
-    /// with the platform's encoders. `preview` sees every picture.
+    /// with the platform's encoders. `effect` is applied to every picture
+    /// before `preview` sees it and before it is encoded (issue #85).
     pub fn start_camera(
         device: Option<&str>,
         config: ShareConfig,
         observer: ShareObserver,
         preview: Option<PreviewSink>,
+        effect: EffectHandle,
     ) -> Result<Self, ShareError> {
-        Self::start_camera_with(device, config, observer, preview, platform_encoder())
+        Self::start_camera_with(
+            device,
+            config,
+            observer,
+            preview,
+            effect,
+            platform_encoder(),
+        )
     }
 
     /// As [`start_camera`](Self::start_camera), with explicit encoders.
@@ -477,11 +491,17 @@ impl ShareWorker {
         config: ShareConfig,
         observer: ShareObserver,
         preview: Option<PreviewSink>,
+        effect: EffectHandle,
         open: OpenEncoder,
     ) -> Result<Self, ShareError> {
-        Self::launch(config, observer, open, preview, |options, handler| {
-            fastcord_platform::capture::start_camera(device, options, handler)
-        })
+        Self::launch(
+            config,
+            observer,
+            open,
+            preview,
+            Some(effect),
+            |options, handler| fastcord_platform::capture::start_camera(device, options, handler),
+        )
     }
 
     fn launch(
@@ -489,6 +509,7 @@ impl ShareWorker {
         observer: ShareObserver,
         open: OpenEncoder,
         preview: Option<PreviewSink>,
+        effect: Option<EffectHandle>,
         start: impl FnOnce(
             StartOptions,
             Box<dyn FnOnce() -> Pipeline + Send>,
@@ -504,7 +525,9 @@ impl ShareWorker {
                 conversion: config.conversion,
                 observer: Some(state_observer),
             },
-            Box::new(move || Pipeline::new(handler_shared, config, open, observer, preview)),
+            Box::new(move || {
+                Pipeline::new(handler_shared, config, open, observer, preview, effect)
+            }),
         )
         .map_err(ShareError::Capture)?;
         let _ = shared.controller.set(session.controller());

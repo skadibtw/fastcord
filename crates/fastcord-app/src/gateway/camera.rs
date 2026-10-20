@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use fastcord_media::video::{ReceivedVideo, SendOptions, VideoOptions};
@@ -22,6 +23,7 @@ use fastcord_media::{MediaSender, VoiceEvent};
 use fastcord_model::Snowflake;
 use fastcord_platform::capture::{CaptureError, camera::CameraDevice};
 use fastcord_video::DecodedFrame;
+use fastcord_video::effect::{Effect, EffectHandle, compose};
 use fastcord_video::frame::{ColorDescription, FramePool, Nv12};
 use fastcord_video::share::{
     EncoderReport, PreviewSink, ShareConfig, ShareControl, ShareEnd, ShareError, ShareEvent,
@@ -102,6 +104,11 @@ pub struct CameraControls {
     pub wanted: bool,
     /// The saved device (its stable ID); `None` is the first camera.
     pub device: Option<String>,
+    /// The background effect (issue #85). Changing it never restarts the
+    /// camera or the call.
+    pub effect: Effect,
+    /// The self-view is mirrored. Only the local preview: what is sent never is.
+    pub mirror: bool,
     /// Counts device choices, so choosing the same camera again restarts it.
     pub generation: u64,
     pub status: CameraStatus,
@@ -260,6 +267,9 @@ fn end_text(end: &ShareEnd) -> String {
         ShareEnd::SinkClosed => {
             "The call connection closed, so the camera was turned off.".to_owned()
         }
+        ShareEnd::Effect(detail) => format!(
+            "The background effect could not run ({detail}), so the camera was turned off instead of showing your room. Choose No effect to use the camera plainly."
+        ),
     }
 }
 
@@ -279,10 +289,34 @@ pub fn describe(controls: &CameraControls) -> String {
     match &controls.status {
         CameraStatus::Off => String::new(),
         CameraStatus::Starting => "Starting your camera…".to_owned(),
-        CameraStatus::Live if controls.detail.is_empty() => "Camera on".to_owned(),
-        CameraStatus::Live => format!("Camera on · {}", controls.detail),
+        CameraStatus::Live if controls.detail.is_empty() => {
+            format!("Camera on{}", effect_suffix(controls.effect))
+        }
+        CameraStatus::Live => format!(
+            "Camera on · {}{}",
+            controls.detail,
+            effect_suffix(controls.effect)
+        ),
         CameraStatus::Failed(text) => text.clone(),
     }
+}
+
+fn effect_suffix(effect: Effect) -> String {
+    match effect {
+        Effect::Off => String::new(),
+        other => format!(" · {}", other.label()),
+    }
+}
+
+/// The caption of the self-view: it says it is a preview and whether it is
+/// mirrored, because others see the picture the other way round.
+pub fn preview_caption(controls: &CameraControls) -> String {
+    let side = if controls.mirror {
+        "mirrored; others see it unmirrored"
+    } else {
+        "as others see it"
+    };
+    format!("You · preview ({side}){}", effect_suffix(controls.effect))
 }
 
 /// A camera that is capturing.
@@ -291,6 +325,8 @@ struct Running {
     _worker: ShareWorker,
     control: ShareControl,
     generation: u64,
+    effect: EffectHandle,
+    mirror: Arc<AtomicBool>,
 }
 
 /// All the video of one call, owned by the call task.
@@ -364,7 +400,17 @@ impl CallVideo {
                 self.start_camera(wanted);
             }
             (None, true) => self.start_camera(wanted),
-            _ => {}
+            // The same camera: only the effect or the mirror may have changed,
+            // and the capture thread picks them up on its next picture.
+            (Some(_), true) => {
+                if let Some(running) = &self.running {
+                    running.effect.set(wanted.effect);
+                    running
+                        .mirror
+                        .store(wanted.mirror, std::sync::atomic::Ordering::Release);
+                }
+            }
+            (None, false) => {}
         }
     }
 
@@ -381,11 +427,14 @@ impl CallVideo {
         };
         let preview = Session::new("camera:preview".to_owned());
         self.tiles.set_preview(Some(preview.clone()));
+        let effect = EffectHandle::new(wanted.effect);
+        let mirror = Arc::new(AtomicBool::new(wanted.mirror));
         match ShareWorker::start_camera(
             wanted.device.as_deref(),
             share_config(),
             observer,
-            Some(preview_sink(preview)),
+            Some(preview_sink(preview, Arc::clone(&mirror))),
+            effect.clone(),
         ) {
             Ok(worker) => {
                 let control = worker.control();
@@ -396,6 +445,8 @@ impl CallVideo {
                     _worker: worker,
                     control,
                     generation: wanted.generation,
+                    effect,
+                    mirror,
                 });
                 self.publish(|camera| {
                     camera.status = CameraStatus::Starting;
@@ -610,9 +661,10 @@ fn status_sink(session: &Arc<Session>) -> StatusSink {
 /// Hands the capture's own pictures to the preview tile, at most 15 a second
 /// and only while the tile is on screen: the self-view is the capture itself,
 /// never a decode of what was sent.
-fn preview_sink(session: Arc<Session>) -> PreviewSink {
+fn preview_sink(session: Arc<Session>, mirror: Arc<AtomicBool>) -> PreviewSink {
     let mut pool = FramePool::new(crate::render::frame_format());
     let mut last: Option<Instant> = None;
+    let mut mirrored: Vec<u8> = Vec::new();
     Box::new(move |sample| {
         use std::sync::atomic::Ordering;
         if !session.active.load(Ordering::Acquire) || !session.visible.load(Ordering::Acquire) {
@@ -623,14 +675,39 @@ fn preview_sink(session: Arc<Session>) -> PreviewSink {
             return;
         }
         let (luma, chroma) = sample.planes();
-        let Ok(image) = Nv12::new(
-            sample.width(),
-            sample.height(),
-            luma,
-            sample.stride(),
-            chroma,
-            sample.stride(),
-        ) else {
+        let flipped = mirror.load(Ordering::Acquire).then(|| {
+            let planes = compose::Planes {
+                width: sample.width() as usize,
+                height: sample.height() as usize,
+                y: luma,
+                y_stride: sample.stride(),
+                uv: chroma,
+                uv_stride: sample.stride(),
+            };
+            compose::mirror(&planes, &mut mirrored)
+        });
+        let image = match flipped {
+            Some(stride) => {
+                let (luma, chroma) = mirrored.split_at(stride * sample.height() as usize);
+                Nv12::new(
+                    sample.width(),
+                    sample.height(),
+                    luma,
+                    stride,
+                    chroma,
+                    stride,
+                )
+            }
+            None => Nv12::new(
+                sample.width(),
+                sample.height(),
+                luma,
+                sample.stride(),
+                chroma,
+                sample.stride(),
+            ),
+        };
+        let Ok(image) = image else {
             return;
         };
         last = Some(now);
@@ -902,12 +979,37 @@ mod tests {
     }
 
     #[test]
+    fn the_preview_says_it_is_a_preview_and_names_the_effect() {
+        use fastcord_video::effect::Preset;
+        let mut controls = CameraControls {
+            mirror: true,
+            ..CameraControls::default()
+        };
+        let mirrored = preview_caption(&controls);
+        assert!(mirrored.contains("preview") && mirrored.contains("mirrored"));
+        controls.mirror = false;
+        controls.effect = Effect::Preset(Preset::Dusk);
+        let plain = preview_caption(&controls);
+        assert!(
+            plain.contains("as others see it") && plain.contains("Dusk"),
+            "{plain}"
+        );
+        controls.status = CameraStatus::Live;
+        assert_eq!(describe(&controls), "Camera on · Background: Dusk");
+        controls.effect = Effect::Off;
+        assert_eq!(describe(&controls), "Camera on");
+        // A failed effect stops the camera with an explanation, never silently.
+        assert!(end_text(&ShareEnd::Effect("x".into())).contains("instead of showing your room"));
+    }
+
+    #[test]
     fn the_picker_keeps_a_missing_saved_camera_and_never_matches_by_label() {
         use crate::audio_devices::CameraSelection;
         let mut list = CameraList::default();
         let saved = CameraSelection {
             id: Some("usb-1".to_owned()),
             label: "Desk camera".to_owned(),
+            ..CameraSelection::default()
         };
         // Before the first probe the saved camera is shown without a verdict.
         let choices = list.choices(&saved);

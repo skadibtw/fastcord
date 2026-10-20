@@ -15,7 +15,7 @@ mod voice_audio;
 
 pub use camera::{
     CameraChoice, CameraControls, CameraList, CameraStatus, CameraTiles,
-    can_send as can_send_camera, describe as describe_camera, list_cameras,
+    can_send as can_send_camera, describe as describe_camera, list_cameras, preview_caption,
 };
 pub use stream_share::{SharePicker, ShareView};
 pub use voice_audio::VoiceAudioState;
@@ -26,6 +26,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use fastcord_video::effect::Effect;
 
 use fastcord_discord::gateway::{
     ClientProperties, ConnectionState, Dispatch, Gateway, GatewayEvent, ReconnectReason, StopReason,
@@ -791,6 +793,45 @@ impl NavigationBridge {
                 camera.status = CameraStatus::Off;
             }
             true
+        });
+    }
+
+    /// Hands the saved camera choices to the call before the camera is turned
+    /// on: the device, the background effect and the self-view mirror. A
+    /// running camera is not restarted by this.
+    pub fn prepare_camera(&self, device: Option<String>, effect: Effect, mirror: bool) {
+        self.voice_controls.send_if_modified(|controls| {
+            let camera = &mut controls.camera;
+            if camera.wanted {
+                return false;
+            }
+            let changed = camera.device != device;
+            camera.device = device;
+            camera.effect = effect;
+            camera.mirror = mirror;
+            if changed {
+                camera.generation = camera.generation.wrapping_add(1);
+            }
+            true
+        });
+    }
+
+    /// Changes the background effect of the camera, on or off, without
+    /// restarting it.
+    pub fn set_camera_effect(&self, effect: Effect) {
+        self.voice_controls.send_if_modified(|controls| {
+            let changed = controls.camera.effect != effect;
+            controls.camera.effect = effect;
+            changed
+        });
+    }
+
+    /// Mirrors (or not) the local self-view; the sent picture is never mirrored.
+    pub fn set_camera_mirror(&self, mirror: bool) {
+        self.voice_controls.send_if_modified(|controls| {
+            let changed = controls.camera.mirror != mirror;
+            controls.camera.mirror = mirror;
+            changed
         });
     }
 

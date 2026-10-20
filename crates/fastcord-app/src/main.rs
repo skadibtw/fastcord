@@ -224,6 +224,9 @@ enum Message {
     ListCameras,
     CamerasListed(Result<Vec<fastcord_platform::capture::camera::CameraDevice>, String>),
     SelectCamera(gateway::CameraChoice),
+    /// A background effect for the camera (issue #85), in a call or not.
+    SelectCameraEffect(fastcord_video::effect::Effect),
+    SetMirrorPreview(bool),
     OpenSharePicker,
     ShareSources(Result<Vec<fastcord_platform::capture::CaptureSource>, String>),
     CloseSharePicker,
@@ -1456,6 +1459,16 @@ impl App {
                     if !on
                         || gateway.controls.voice_audio_state() == gateway::VoiceAudioState::Running
                     {
+                        if on {
+                            // The saved device, effect and mirror apply from
+                            // the first picture.
+                            let saved = &self.audio_preferences.camera;
+                            gateway.controls.prepare_camera(
+                                saved.id.clone(),
+                                saved.effect,
+                                saved.mirror,
+                            );
+                        }
                         gateway.controls.set_camera(on);
                     }
                 }
@@ -1484,7 +1497,26 @@ impl App {
                 self.audio_preferences.camera = audio_devices::CameraSelection {
                     id: choice.id,
                     label: choice.label,
+                    ..self.audio_preferences.camera.clone()
                 };
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::SelectCameraEffect(effect) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.set_camera_effect(effect);
+                }
+                self.audio_preferences.camera.effect = effect;
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::SetMirrorPreview(mirror) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.set_camera_mirror(mirror);
+                }
+                self.audio_preferences.camera.mirror = mirror;
                 if self.audio_saving.is_none() {
                     return self.save_audio_preferences();
                 }
@@ -2154,6 +2186,21 @@ impl App {
                 .text_size(12),
             );
             actions = actions.push(
+                pick_list(
+                    fastcord_video::effect::Effect::ALL,
+                    Some(saved.effect),
+                    Message::SelectCameraEffect,
+                )
+                .text_size(12),
+            );
+            actions = actions.push(
+                checkbox(saved.mirror)
+                    .label("Mirror preview")
+                    .size(14)
+                    .text_size(12)
+                    .on_toggle(Message::SetMirrorPreview),
+            );
+            actions = actions.push(
                 button(
                     text(if self.camera_list.probing {
                         "Looking for cameras…"
@@ -2203,7 +2250,10 @@ impl App {
         if let Some(preview) = tiles.preview
             && voice_controls.camera.wanted
         {
-            strip = strip.push(tile("You".to_owned(), preview));
+            strip = strip.push(tile(
+                gateway::preview_caption(&voice_controls.camera),
+                preview,
+            ));
         }
         for (user, session) in tiles.remote {
             strip = strip.push(tile(voice_controls.display_name(user), session));
