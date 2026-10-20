@@ -33,6 +33,7 @@ mod pipeline;
 pub mod recorder;
 mod resample;
 mod ring;
+mod sched;
 
 #[cfg(test)]
 mod alloc_counter;

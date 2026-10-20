@@ -5,6 +5,7 @@
 pub mod capture;
 pub mod clipboard;
 pub mod notify;
+pub mod realtime;
 pub mod shortcut;
 
 use std::collections::HashMap;

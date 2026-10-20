@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 cpal.workspace = true
+fastcord-platform.workspace = true
 deep_filter.workspace = true
 ndarray.workspace = true
 nnnoiseless.workspace = true

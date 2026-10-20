@@ -30,7 +30,8 @@ apple-native-keyring-store = { version = "1.0.2", default-features = false, feat
 base64 = "0.22"
 bytes = "1"
 bytemuck = "1"
-cpal = "0.18"
+cpal = { version = "0.18", features = ["realtime"] }
+audio_thread_priority = { version = "0.35", default-features = false }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
 davey = { version = "=0.1.4" }
 deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "978576aa8400552a4ce9730838c635aa30db5e61", default-features = false, features = ["tract", "default-model"] }

@@ -165,12 +165,15 @@ fn stats_summary(stats: Option<EngineStats>) -> String {
     match stats {
         None => String::new(),
         Some(s) => format!(
-            "This call: {} playback underruns ({} samples of silence), {} lost or late frames concealed, {} device xruns, {} microphone samples dropped.",
+            "This call: {} playback underruns ({} samples of silence), {} lost or late frames concealed, {} device xruns, {} microphone samples dropped. Real-time engine threads: {}, {} callback promotions refused, {} late wake-ups.",
             s.output_underruns,
             s.output_underrun_samples,
             s.plc_frames,
             s.device_xruns,
-            s.input_overrun_samples
+            s.input_overrun_samples,
+            s.realtime_threads,
+            s.callback_realtime_denied,
+            s.late_ticks
         ),
     }
 }

@@ -373,3 +373,11 @@ Mozilla Public License 2.0. The crates are used unmodified from crates.io; their
 available from crates.io and the repository above, and the license text is in
 `THIRD_PARTY_CRATES.md`. The AAC decoder source originates from the NihAV project and was
 relicensed for Symphonia with its author's permission.
+
+## audio_thread_priority (MPL-2.0)
+
+Real-time scheduling of audio threads (ADR 0009; used directly by `fastcord-platform` and through
+cpal's `realtime` feature) uses `audio_thread_priority` 0.35.1 (Copyright (c) Mozilla and
+contributors, https://github.com/mozilla/audio_thread_priority), licensed under the Mozilla Public
+License 2.0. The crate is used unmodified from crates.io; its source is available from crates.io
+and the repository above, and the license text is in `THIRD_PARTY_CRATES.md`.

@@ -13,6 +13,7 @@ repository.workspace = true
 test-support = []
 
 [dependencies]
+audio_thread_priority.workspace = true
 fastcord-model.workspace = true
 keyring-core.workspace = true
 parking_lot.workspace = true

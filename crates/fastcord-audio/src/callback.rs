@@ -26,6 +26,8 @@ pub(crate) struct StreamCounters {
     pub(crate) underrun_samples: AtomicU64,
     /// Device-reported buffer under/overruns.
     pub(crate) xruns: AtomicU64,
+    /// Callback threads whose real-time promotion was refused (not a stream failure).
+    pub(crate) realtime_denied: AtomicU64,
     /// First fatal stream error, as `DeviceErrorKind as u8 + 1`; 0 = none.
     fault: AtomicU8,
 }
@@ -35,7 +37,9 @@ impl StreamCounters {
     /// invalidation: the owner must close it, never accept implicit speakers.
     pub(crate) fn record_error(&self, kind: cpal::ErrorKind) {
         match kind {
-            cpal::ErrorKind::RealtimeDenied => {}
+            cpal::ErrorKind::RealtimeDenied => {
+                self.realtime_denied.fetch_add(1, Ordering::Relaxed);
+            }
             cpal::ErrorKind::Xrun => {
                 self.xruns.fetch_add(1, Ordering::Relaxed);
             }
@@ -289,6 +293,7 @@ mod tests {
         let counters = StreamCounters::default();
         counters.record_error(cpal::ErrorKind::RealtimeDenied);
         assert_eq!(counters.fault(), None);
+        assert_eq!(counters.realtime_denied.load(Ordering::Relaxed), 1);
         counters.record_error(cpal::ErrorKind::Xrun);
         assert_eq!(counters.xruns.load(Ordering::Relaxed), 1);
         assert_eq!(counters.fault(), None);

@@ -340,6 +340,8 @@ impl NoiseStatus<'_> {
                     s.plc_frames,
                     s.device_xruns,
                     s.input_overrun_samples,
+                    s.late_ticks,
+                    s.callback_realtime_denied,
                 )
             };
             if controls.audio_stats.as_ref().map(key) == Some(key(&stats)) {

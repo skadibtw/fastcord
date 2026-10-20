@@ -29,10 +29,12 @@ use crate::pipeline::{
     frames_for,
 };
 use crate::ring::sample_ring;
+use crate::sched::{Elevated, Ticker, elevated_threads};
 
 /// How often the owner thread services the rings. Rings hold 100 ms and
-/// playback targets 40 ms, so a coarse OS timer (15.6 ms on Windows) still
-/// keeps both comfortably supplied.
+/// playback targets 40 ms, so even a coarse OS timer (15.6 ms on Windows) would
+/// keep both supplied; the high-resolution tick (`sched::Ticker`) keeps lateness
+/// well inside that.
 const TICK: Duration = Duration::from_millis(5);
 /// Encoded frames buffered toward the media session (320 ms, ≤ 24 KiB).
 const CAPTURE_QUEUE: usize = 16;
@@ -214,6 +216,13 @@ pub struct EngineStats {
     pub plc_frames: u64,
     /// 20 ms frames withheld by the input-sensitivity gate.
     pub frames_gated: u64,
+    /// Engine threads (owner, High quality denoise worker) with real-time scheduling;
+    /// 0 means the OS refused it (or the platform has none) and they run at normal priority.
+    pub realtime_threads: u8,
+    /// Device callback threads whose real-time promotion the OS refused.
+    pub callback_realtime_denied: u64,
+    /// Owner-thread wake-ups more than 10 ms behind their deadline (starved or throttled).
+    pub late_ticks: u64,
 }
 
 #[derive(Default)]
@@ -221,6 +230,7 @@ struct Shared {
     input: Arc<StreamCounters>,
     output: Arc<StreamCounters>,
     capture_enabled: Arc<AtomicBool>,
+    late_ticks: std::sync::atomic::AtomicU64,
     pipeline: PipelineCounters,
     /// Echo-canceller state packed by [`pack_echo`]; 0 = none.
     echo_diagnostics: std::sync::atomic::AtomicU64,
@@ -332,6 +342,7 @@ impl AudioEngine {
         let thread = std::thread::Builder::new()
             .name("fastcord-audio".to_owned())
             .spawn(move || {
+                let _elevated = Elevated::request();
                 let io = OwnerIo {
                     stop: stop_rx,
                     captured: Some(captured_tx),
@@ -417,6 +428,9 @@ impl AudioEngine {
             decode_errors: load(&pipeline.decode_errors),
             plc_frames: load(&pipeline.plc_frames),
             frames_gated: load(&pipeline.frames_gated),
+            realtime_threads: elevated_threads(),
+            callback_realtime_denied: load(&input.realtime_denied) + load(&output.realtime_denied),
+            late_ticks: load(&self.shared.late_ticks),
         }
     }
 
@@ -559,7 +573,8 @@ fn run_owner<B: Backend>(
     let mut probe_at = std::time::Instant::now() + Duration::from_secs(1);
     // Coalesced input/output/suppression notifications bound control backpressure.
     let mut pending: [Option<EngineEvent>; 3] = [None, None, None];
-    while let Err(std_mpsc::RecvTimeoutError::Timeout) = io.stop.recv_timeout(TICK) {
+    let mut ticker = Ticker::new(TICK);
+    while ticker.wait(&io.stop, &shared.late_ticks) {
         for _ in 0..32 {
             let Ok(control) = io.controls.try_recv() else {
                 break;

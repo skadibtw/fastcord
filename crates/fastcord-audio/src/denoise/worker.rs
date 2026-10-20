@@ -55,7 +55,10 @@ impl Worker {
         let (sender, messages) = mpsc::sync_channel(QUEUE_BLOCKS + 2);
         let thread = std::thread::Builder::new()
             .name("fastcord-denoise".to_owned())
-            .spawn(move || run(&factory, &job_queue, &sender))
+            .spawn(move || {
+                let _elevated = crate::sched::Elevated::request();
+                run(&factory, &job_queue, &sender);
+            })
             .map_err(|_| DenoiseError::WorkerStopped)?;
         Ok(Self {
             jobs,

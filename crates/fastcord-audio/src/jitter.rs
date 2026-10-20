@@ -190,15 +190,30 @@ impl Speaker {
 
 /// Ceiling for the mixed output; nothing the limiter emits exceeds it.
 const LIMIT: f32 = 0.97;
-/// Time constant with which the gain recovers after limiting.
-const RELEASE_SECONDS: f32 = 0.05;
+/// Level the gain stage holds sustained peaks to. The band up to [`LIMIT`] is headroom for
+/// the soft clip that catches a transient before the gain has finished falling.
+const TARGET: f32 = 0.9;
+/// Time constant with which the gain falls once a peak needs it to (soft attack: a few
+/// milliseconds, so the gain never steps within a waveform).
+const ATTACK_SECONDS: f32 = 0.003;
+/// Time constant with which the gain recovers.
+const RELEASE_SECONDS: f32 = 0.25;
+/// Time constant of the peak follower. Peaks are remembered instead of the gain jumping
+/// per sample, so a sustained loud signal sees an almost constant gain.
+const PEAK_SECONDS: f32 = 0.25;
 
-/// Per-sample brickwall limiter: instant attack, smooth release, gain carried across blocks.
+/// Peak-following limiter: a slowly decaying peak envelope sets the target gain, which is
+/// reached with a soft attack and a long release, and a final soft clip bounds what the
+/// attack lets through. Gain and peak are carried across blocks; no allocation.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LimiterEnvelope {
     gain: f32,
-    /// Fraction of the remaining distance to unity gain recovered per interleaved sample.
+    peak: f32,
+    /// Fraction of the distance to the target covered per interleaved sample.
+    attack: f32,
     release: f32,
+    /// Per-sample multiplier of the peak follower.
+    peak_decay: f32,
 }
 
 impl Default for LimiterEnvelope {
@@ -210,28 +225,56 @@ impl Default for LimiterEnvelope {
 impl LimiterEnvelope {
     /// A limiter fed `samples_per_second` interleaved samples (48 kHz mono for the microphone).
     pub(crate) fn per_second(samples_per_second: f32) -> Self {
+        let rate = |seconds: f32| 1.0 - (-1.0 / (seconds * samples_per_second)).exp();
         Self {
             gain: 1.0,
-            release: 1.0 - (-1.0 / (RELEASE_SECONDS * samples_per_second)).exp(),
+            peak: 0.0,
+            attack: rate(ATTACK_SECONDS),
+            release: rate(RELEASE_SECONDS),
+            peak_decay: 1.0 - rate(PEAK_SECONDS),
         }
     }
 
     pub(crate) fn process(&mut self, out: &mut [f32]) {
         for sample in out {
-            self.gain += (1.0 - self.gain) * self.release;
             let magnitude = sample.abs();
-            if magnitude * self.gain > LIMIT {
-                self.gain = LIMIT / magnitude;
-            }
-            *sample *= self.gain;
+            self.peak = magnitude.max(self.peak * self.peak_decay);
+            let target = if self.peak > TARGET {
+                TARGET / self.peak
+            } else {
+                1.0
+            };
+            let speed = if target < self.gain {
+                self.attack
+            } else {
+                self.release
+            };
+            self.gain += (target - self.gain) * speed;
+            let shaped = *sample * self.gain;
+            let over = shaped.abs() - TARGET;
+            *sample = if over > 0.0 {
+                // Smoothly approaches LIMIT, never reaches it.
+                let room = LIMIT - TARGET;
+                (TARGET + room * (over / room).tanh()).copysign(shaped)
+            } else {
+                shaped
+            };
         }
     }
 
-    /// Lets the gain recover as if `elapsed` of silence had passed.
+    /// Lets the limiter recover as if `elapsed` of silence had passed.
     fn idle_for(&mut self, elapsed: Duration) {
         let samples = elapsed.as_secs_f64() * 48_000.0 * CHANNELS as f64;
+        self.peak = (f64::from(self.peak) * f64::from(self.peak_decay).powf(samples)) as f32;
+        let target = if self.peak > TARGET {
+            f64::from(TARGET / self.peak)
+        } else {
+            1.0
+        };
         let remaining = (1.0 - f64::from(self.release)).powf(samples);
-        self.gain = (1.0 - (1.0 - f64::from(self.gain)) * remaining) as f32;
+        if target > f64::from(self.gain) {
+            self.gain = (target - (target - f64::from(self.gain)) * remaining) as f32;
+        }
     }
 }
 
@@ -679,7 +722,7 @@ mod tests {
         // Once nobody is speaking, wall-clock time releases it.
         mixer.speakers.clear();
         mixer.mix(&mut out, t0 + Duration::from_millis(100));
-        mixer.mix(&mut out, t0 + Duration::from_millis(600));
+        mixer.mix(&mut out, t0 + Duration::from_millis(2_000));
         assert!(mixer.limiter.gain > 0.99, "gain {}", mixer.limiter.gain);
     }
 
@@ -931,7 +974,7 @@ mod tests {
         let end_of_loud = loud[N - 1] / 3.6;
         let start_of_quiet = quiet[0] / 0.1;
         assert!(
-            (end_of_loud - LIMIT / 3.6).abs() < 1e-3,
+            (end_of_loud - TARGET / 3.6).abs() < 1e-3,
             "loud block should end at the attacked gain, got {end_of_loud}"
         );
         let boundary_step = (start_of_quiet - end_of_loud).abs();
@@ -943,12 +986,95 @@ mod tests {
             "gain stepped by {boundary_step} at the block boundary (inner step {inner_step})"
         );
 
-        // The release returns to unity gain within a few hundred milliseconds.
+        // The release returns to unity gain within a couple of seconds.
         let mut settle = [0.1f32; N];
-        for _ in 0..30 {
+        for _ in 0..100 {
             settle.fill(0.1);
             limiter.process(&mut settle);
         }
-        assert!(settle[N - 1] / 0.1 > 0.99, "gain never released");
+        assert!(
+            settle[N - 1] / 0.1 > 0.99,
+            "gain never released within two seconds"
+        );
+    }
+
+    /// The previous limiter (instant attack, 50 ms release of the gain toward unity), kept
+    /// as the reference for the modulation test.
+    fn previous_limiter(samples: &mut [f32]) {
+        let release = 1.0 - (-1.0 / (0.05 * 96_000.0f32)).exp();
+        let mut gain = 1.0f32;
+        for sample in samples {
+            gain += (1.0 - gain) * release;
+            let magnitude = sample.abs();
+            if magnitude * gain > LIMIT {
+                gain = LIMIT / magnitude;
+            }
+            *sample *= gain;
+        }
+    }
+
+    /// Standard deviations, in dB, of the gain actually applied to the loud samples
+    /// (|x| > 0.3) of the last two seconds of `limited`, which came from `input`: over the
+    /// whole stretch, and within each 10 ms window (the fast pumping that is heard as
+    /// roughness; the slow part follows the speakers' own level).
+    fn gain_modulation_db(input: &[f32], limited: &[f32]) -> (f32, f32) {
+        const WINDOW: usize = 960;
+        let start = input.len() - 2 * 96_000;
+        let gains: Vec<Option<f32>> = input[start..]
+            .iter()
+            .zip(&limited[start..])
+            .map(|(x, y)| (x.abs() > 0.3).then(|| 20.0 * (y / x).log10()))
+            .collect();
+        let all: Vec<f32> = gains.iter().flatten().copied().collect();
+        let mean = all.iter().sum::<f32>() / all.len() as f32;
+        let total = (all.iter().map(|g| (g - mean).powi(2)).sum::<f32>() / all.len() as f32).sqrt();
+        let (mut squares, mut count) = (0.0f32, 0usize);
+        for window in gains.as_chunks::<WINDOW>().0 {
+            let loud: Vec<f32> = window.iter().flatten().copied().collect();
+            if loud.len() < 20 {
+                continue;
+            }
+            let mean = loud.iter().sum::<f32>() / loud.len() as f32;
+            squares += loud.iter().map(|g| (g - mean).powi(2)).sum::<f32>();
+            count += loud.len();
+        }
+        (total, (squares / count as f32).sqrt())
+    }
+
+    /// Four loud speakers summed (each 0.55 of full scale, so the mix reaches 2.2 and needs
+    /// about 8 dB of reduction): the old limiter's gain jumped at every peak and crept back
+    /// in between, an audible roughness; the new gain follows the slow envelope.
+    #[test]
+    fn summed_loud_speakers_see_far_less_gain_modulation_than_before() {
+        let n = 4 * 96_000;
+        let input: Vec<f32> = (0..n / 2)
+            .flat_map(|i| {
+                let t = i as f32 / 48_000.0;
+                let v: f32 = [180.0f32, 233.0, 311.0, 440.0]
+                    .iter()
+                    .map(|f| 0.55 * (std::f32::consts::TAU * f * t).sin())
+                    .sum();
+                [v, v]
+            })
+            .collect();
+        let mut old = input.clone();
+        previous_limiter(&mut old);
+        let mut new = input.clone();
+        LimiterEnvelope::default().process(&mut new);
+
+        let (before, after) = (
+            gain_modulation_db(&input, &old),
+            gain_modulation_db(&input, &new),
+        );
+        println!(
+            "gain modulation std dev (total, within 10 ms): previous {:.3} / {:.3} dB, now {:.3} / {:.3} dB",
+            before.0, before.1, after.0, after.1
+        );
+        assert!(after.0 < before.0 * 0.6, "{before:?} dB -> {after:?} dB");
+        assert!(after.1 < before.1 / 8.0, "{before:?} dB -> {after:?} dB");
+        assert!(new.iter().all(|s| s.abs() <= LIMIT));
+        // Loudness is kept: the loudest part is within 1 dB of the old ceiling.
+        let peak = new.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak > LIMIT * 0.89, "{peak}");
     }
 }

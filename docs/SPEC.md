@@ -283,7 +283,7 @@ media session -> per-SSRC encoded jitter queue
  -> output resampler -> preallocated SPSC ring -> cpal output callback
 ```
 
-Use preallocated rings with approximately 40 ms normal buffering and a hard 100 ms cap. On an output underrun emit silence and count it; on capture overrun discard the oldest stale input rather than increasing latency indefinitely. Session teardown and device replacement happen on the owner thread.
+Use preallocated rings with approximately 40 ms normal buffering and a hard 100 ms cap. On an output underrun emit silence and count it; on capture overrun discard the oldest stale input rather than increasing latency indefinitely. Session teardown and device replacement happen on the owner thread. The owner and the High quality denoise worker request real-time scheduling (`fastcord-platform::realtime`: MMCSS on Windows, Mach time-constraint policy on macOS, `SCHED_RR` on Linux) and cpal promotes the device callback threads (`realtime` feature); a refusal is never fatal and shows in `EngineStats` (`realtime_threads`, `callback_realtime_denied`). The owner ticks every 5 ms on a high-resolution sleep with fixed deadlines (not `recv_timeout`, which waits at the 15.6 ms system tick on Windows) and counts wake-ups more than 10 ms late (`late_ticks`); the engine, and so the tick, exists only during a call or a microphone test.
 On a fatal device error, close only the failed direction and its endpoint; discard queued playback packets and terminate the capture channel while leaving the healthy direction running. Bound playback packet attempts per owner pass so malformed packets cannot stall teardown. Resampling uses a 256-tap Blackman-Harris sinc filter that preserves the 20 kHz passband between 44.1 and 48 kHz, and integer device output saturates at its representable limits.
 
 ### 7.2 Jitter, mixing, and controls
@@ -291,7 +291,7 @@ On a fatal device error, close only the failed direction and its endpoint; disca
 - Per-SSRC adaptive jitter target: 40 ms initial, 20–120 ms range; estimate interarrival jitter from timestamps.
 - Reorder packets and discard duplicates/too-late packets. Use Opus in-band FEC when the next frame is available; otherwise use PLC.
 - Keep encoded queues bounded, including unknown SSRCs; release inactive decoder state after a short inactivity interval while retaining required DAVE member state.
-- Mix in f32 without clipping intermediate sums; apply a final limiter. Per-user volume is a local 0–200% gain, persisted by account/user ID, with short ramps to avoid clicks.
+- Mix in f32 without clipping intermediate sums; apply a final limiter: a 0.25 s peak follower sets the gain target (0.9), the gain falls with a 3 ms time constant and recovers over 0.25 s, and a soft clip bounds what the attack lets through at 0.97, so loud speakers summed do not pump. Per-user volume is a local 0–200% gain, persisted by account/user ID, with short ramps to avoid clicks.
 - Speaking indicators combine authoritative SSRC/user state with received voice activity/audio level; use a short release delay and no idle animation timer.
 - Microphone mute stops microphone capture/processing and audible transmission; send the protocol silence tail as required when ending a talkspurt, then speaking=false.
 - Deafen prevents playback and also mutes microphone transmission. Preserve the previous self-mute preference for undeafen. Exclude stream playback too; do not confuse deafen with stopping the other participant's stream.
