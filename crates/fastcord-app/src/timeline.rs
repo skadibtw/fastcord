@@ -453,6 +453,12 @@ pub enum Event {
     CopyId {
         message_id: Snowflake,
     },
+    /// Start reporting another person's message (a review step follows;
+    /// nothing is sent by this event).
+    Report {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
     /// Hide (`true`) or restore the link previews of a message.
     SetEmbeds {
         channel_id: Snowflake,
@@ -661,6 +667,44 @@ pub fn copy_text(snapshot: &Snapshot, channel: Snowflake, message: Snowflake) ->
         .iter()
         .find(|row| row.message.id == message)
         .map(content)
+}
+
+/// What a report says about a still-loaded message of someone else.
+pub struct ReportSubject {
+    pub author: fastcord_model::User,
+    pub excerpt: String,
+    pub voice: bool,
+}
+
+/// Longest excerpt of a reported message shown in the review.
+const REPORT_EXCERPT_CHARS: usize = 200;
+
+pub fn report_subject(
+    snapshot: &Snapshot,
+    channel: Snowflake,
+    message: Snowflake,
+) -> Option<ReportSubject> {
+    (snapshot.channel_id == Some(channel)).then_some(())?;
+    let row = snapshot
+        .rows
+        .iter()
+        .find(|row| row.message.id == message && !row.own && row.hidden.is_none())?;
+    Some(ReportSubject {
+        author: row.message.author.clone(),
+        excerpt: content(row)
+            .trim()
+            .chars()
+            .take(REPORT_EXCERPT_CHARS)
+            .collect(),
+        voice: row.message.is_voice_message(),
+    })
+}
+
+/// Whether the message is still held in the open channel; `None` when another
+/// channel is open (nothing is known then).
+pub fn is_retained(snapshot: &Snapshot, channel: Snowflake, message: Snowflake) -> Option<bool> {
+    (snapshot.channel_id == Some(channel))
+        .then(|| snapshot.rows.iter().any(|row| row.message.id == message))
 }
 
 /// What the timeline needs to show account-owned attachment and emoji assets.
@@ -1300,6 +1344,9 @@ fn message_view<'a>(
         && matches!(message.kind, 0 | 19)
         && (row.own || interaction.can_suppress_embeds)
         && (!message.embeds.is_empty() || message.embeds_suppressed());
+    // Only other people's ordinary messages (voice messages included) can be
+    // reported.
+    let show_report = idle && !row.own && matches!(message.kind, 0 | 19);
     if !idle {
         return base.into();
     }
@@ -1328,6 +1375,15 @@ fn message_view<'a>(
                     channel_id,
                     message_id,
                     suppressed: !suppressed,
+                },
+            ));
+        }
+        if show_report {
+            actions = actions.push(row_button(
+                "Report",
+                Event::Report {
+                    channel_id,
+                    message_id,
                 },
             ));
         }
@@ -2944,6 +3000,34 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::SetEmbeds { .. }))
         );
+    }
+
+    #[test]
+    fn only_other_peoples_messages_offer_a_report_and_it_names_what_is_held() {
+        let report = |n: u64| Event::Report {
+            channel_id: CHANNEL,
+            message_id: Snowflake(n),
+        };
+        let more = |n: u64| Interaction {
+            more: Some(Snowflake(n)),
+            ..Interaction::default()
+        };
+        // Never in the usual row: it is a deliberate step behind More.
+        assert!(!clickable(&mixed(), Interaction::default()).contains(&report(1)));
+        assert!(clickable(&mixed(), more(1)).contains(&report(1)));
+        assert!(!clickable(&mixed(), more(2)).contains(&report(2)), "own");
+        let snapshot = mixed();
+        let subject = report_subject(&snapshot, CHANNEL, Snowflake(1)).unwrap();
+        assert!(!subject.voice && subject.excerpt.chars().count() <= REPORT_EXCERPT_CHARS);
+        assert!(
+            report_subject(&snapshot, CHANNEL, Snowflake(2)).is_none(),
+            "own"
+        );
+        assert!(report_subject(&snapshot, CHANNEL, Snowflake(99)).is_none());
+        // Deleted or evicted: known only for the channel that is open.
+        assert_eq!(is_retained(&snapshot, CHANNEL, Snowflake(1)), Some(true));
+        assert_eq!(is_retained(&snapshot, CHANNEL, Snowflake(99)), Some(false));
+        assert_eq!(is_retained(&snapshot, Snowflake(12345), Snowflake(1)), None);
     }
 
     #[test]

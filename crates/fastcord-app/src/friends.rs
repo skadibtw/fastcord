@@ -82,6 +82,8 @@ pub enum Event {
     CloseProfile,
     /// Open the direct conversation with this user; handled by the caller.
     OpenDm(Snowflake),
+    /// Start reporting this user; handled by the caller (a review follows).
+    Report(User),
 }
 
 #[derive(Debug)]
@@ -282,7 +284,7 @@ impl State {
             }
             Event::CloseProfile => self.profile = None,
             // Stale answers from an earlier session, and the caller's own.
-            Event::Done(..) | Event::AddDone(..) | Event::OpenDm(_) => {}
+            Event::Done(..) | Event::AddDone(..) | Event::OpenDm(_) | Event::Report(_) => {}
         }
         Task::none()
     }
@@ -680,6 +682,12 @@ pub fn profile_view<'a>(
         buttons = buttons.push(small_button(
             label,
             (!busy).then_some(Event::Act(user.id, action)),
+            false,
+            false,
+        ));
+        buttons = buttons.push(small_button(
+            "Report",
+            Some(Event::Report(user.clone())),
             false,
             false,
         ));

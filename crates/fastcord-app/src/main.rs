@@ -33,6 +33,7 @@ mod profile_edit;
 mod qr;
 mod reactions;
 mod render;
+mod report;
 mod rich;
 mod safety;
 mod search;
@@ -126,6 +127,7 @@ struct App {
     group: group_dm::State,
     identity: profile_edit::State,
     safety: safety::State,
+    report: report::State,
     gif: gif::State,
     sticker: sticker::State,
     forward: forward::State,
@@ -265,6 +267,7 @@ enum Message {
     Group(group_dm::Event),
     Identity(profile_edit::Event),
     Safety(safety::Event),
+    Report(report::Event),
     Gif(gif::Event),
     Sticker(sticker::Event),
     Forward(forward::Event),
@@ -330,6 +333,7 @@ impl App {
                 group: group_dm::State::default(),
                 identity: profile_edit::State::default(),
                 safety: safety::State::default(),
+                report: report::State::default(),
                 gif: gif::State::default(),
                 sticker: sticker::State::default(),
                 forward: forward::State::default(),
@@ -887,6 +891,10 @@ impl App {
                     );
                     self.identity.sync(&gateway.navigation);
                     self.safety.sync(&gateway.navigation);
+                    self.report
+                        .sync(self.report.watched().and_then(|(channel, message)| {
+                            timeline::is_retained(&gateway.timeline, channel, message)
+                        }));
                     self.poll.sync(gateway.timeline.channel_id);
                     self.voice.sync(gateway.timeline.channel_id);
                 }
@@ -903,6 +911,7 @@ impl App {
             Message::Group(event) => return self.group_event(event),
             Message::Identity(event) => return self.identity_event(event),
             Message::Safety(event) => return self.safety_event(event),
+            Message::Report(event) => return self.report_event(event),
             Message::Gif(event) => return self.gif_event(event),
             Message::Sticker(event) => return self.sticker_event(event),
             Message::Forward(event) => return self.forward_event(event),
@@ -947,6 +956,21 @@ impl App {
                                 }
                                 .to_owned(),
                             );
+                        }
+                        friends::Event::Report(user) => {
+                            let mut subject = report::Subject::new(
+                                fastcord_discord::ReportTarget::User(user.id),
+                                "user",
+                                user.display_name(),
+                            );
+                            subject.person = Some((user.id, user.display_name().to_owned()));
+                            let _ = self
+                                .friends
+                                .update(friends::Event::CloseProfile, &session.client);
+                            return self
+                                .report
+                                .begin(subject, &session.client)
+                                .map(Message::Report);
                         }
                         event => {
                             if matches!(event, friends::Event::Open) {
@@ -1452,6 +1476,41 @@ impl App {
                                 let _ = fastcord_platform::open_url(&url);
                             }
                         }
+                        timeline::Event::Report {
+                            channel_id,
+                            message_id,
+                        } => {
+                            let Some(found) =
+                                timeline::report_subject(&gateway.timeline, channel_id, message_id)
+                            else {
+                                return Task::none();
+                            };
+                            let guild = gateway
+                                .navigation
+                                .selected_guild
+                                .filter(|_| !gateway.directs);
+                            let mut subject = report::Subject::new(
+                                fastcord_discord::ReportTarget::Message {
+                                    channel: channel_id,
+                                    message: message_id,
+                                },
+                                if found.voice {
+                                    "voice message"
+                                } else {
+                                    "message"
+                                },
+                                found.author.display_name(),
+                            );
+                            subject.excerpt = found.excerpt;
+                            subject.link =
+                                Some(message_link::format(guild, channel_id, message_id));
+                            subject.person =
+                                Some((found.author.id, found.author.display_name().to_owned()));
+                            return self
+                                .report
+                                .begin(subject, &session.client)
+                                .map(Message::Report);
+                        }
                         timeline::Event::OpenProfile(user) => {
                             return self
                                 .friends
@@ -1714,6 +1773,7 @@ impl App {
                 self.group.clear();
                 self.identity.clear();
                 self.safety.clear();
+                self.report.clear();
                 self.gif = gif::State::default();
                 self.sticker = sticker::State::default();
                 self.forward = forward::State::default();
@@ -1945,6 +2005,7 @@ impl App {
         self.group.clear();
         self.identity.clear();
         self.safety.clear();
+        self.report.clear();
         self.gif = gif::State::default();
         self.sticker = sticker::State::default();
         self.forward = forward::State::default();
@@ -2188,6 +2249,65 @@ impl App {
             ));
         }
         task.map(Message::Identity)
+    }
+
+    fn report_event(&mut self, event: report::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        // Ignore and Block after a report are their own requests.
+        let follow = match &event {
+            report::Event::Follow(action, user) => Some((*action, *user)),
+            _ => None,
+        };
+        if matches!(event, report::Event::OpenServer) {
+            let Some(guild) = gateway
+                .navigation
+                .selected_guild
+                .filter(|_| !gateway.directs)
+            else {
+                return Task::none();
+            };
+            let subject = report::Subject::new(
+                fastcord_discord::ReportTarget::Server(guild),
+                "server",
+                &gateway.navigation.selected_guild_name,
+            );
+            return self
+                .report
+                .begin(subject, &session.client)
+                .map(Message::Report);
+        }
+        // The review is judged against what the timeline holds right now.
+        self.report
+            .sync(self.report.watched().and_then(|(channel, message)| {
+                timeline::is_retained(&gateway.timeline, channel, message)
+            }));
+        let rejected = report::State::is_rejected(&event);
+        let mut task = self
+            .report
+            .update(event, &session.client)
+            .map(Message::Report);
+        if let Some((action, user)) = follow {
+            task = Task::batch([
+                task,
+                self.friends
+                    .update(friends::Event::Act(user, action), &session.client)
+                    .map(Message::Friends),
+            ]);
+        }
+        if rejected {
+            let id = gateway.id;
+            // Discord rejected the login: stop the account like any other 401.
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task
     }
 
     fn safety_event(&mut self, event: safety::Event) -> Task<Message> {
@@ -2608,6 +2728,9 @@ impl App {
             }
             if let Some(panel) = safety::view(&self.safety, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::Safety));
+            }
+            if let Some(panel) = report::view(&self.report, &gateway.navigation) {
+                banner_column = banner_column.push(panel.map(Message::Report));
             }
             if self.forward.is_open()
                 && let Some(panel) = forward::view(&self.forward, &forward_candidates(gateway))

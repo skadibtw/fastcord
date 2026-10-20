@@ -34,6 +34,7 @@ mod rate_limit;
 mod reaction;
 mod relationship;
 mod remote_auth;
+mod report;
 mod rest;
 mod route;
 mod search;
@@ -76,6 +77,10 @@ pub use profile_edit::{
 pub use reaction::{ReactionEmoji, ReactionEmojiError, ReactionUser};
 pub use relationship::{Profile, RelationshipAction, UsernameError, parse_profile, parse_username};
 pub use remote_auth::{QrLink, RemoteAuth, RemoteAuthError, RemoteAuthEvent, RemoteUser};
+pub use report::{
+    MAX_CHOICES, MAX_DEPTH, MAX_MENU_NODES, MenuNode, NodeKind, ReportError, ReportMenu,
+    ReportReceipt, ReportRequestError, ReportTarget,
+};
 pub use reqwest::{Method, StatusCode};
 pub use rest::{Priority, RestClient, RestRequest, RestResponse};
 pub use route::{MajorParameter, Route, RouteKey};

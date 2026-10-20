@@ -1,0 +1,29 @@
+{
+  "_note": "Synthetic: the server-driven report menu shape from community documentation of the official client, not captured from a live account. Labels are invented.",
+  "message": {
+    "name": "message",
+    "version": "1.0",
+    "variant": "4",
+    "root_node_id": 0,
+    "success_node_id": 90,
+    "fail_node_id": 91,
+    "nodes": {
+      "0": {"id": 0, "header": "What is wrong with this message?", "subheader": "Pick the closest match.", "is_auto_submit": false, "button": null, "children": [["Spam", 1], ["Needs a form", 2], ["Other", 3]], "elements": []},
+      "1": {"id": 1, "header": "Spam", "subheader": "Unwanted or repeated content.", "is_auto_submit": false, "button": {"type": "submit"}, "children": [], "elements": []},
+      "2": {"id": 2, "header": "Tell us more", "is_auto_submit": false, "button": {"type": "submit"}, "children": [], "elements": [{"name": "details", "type": "free_text", "data_key": "details", "should_submit_data": true}]},
+      "3": {"id": 3, "header": "Something else", "children": [[4, "Harassment"], [90, "Skip"]], "elements": []},
+      "4": {"id": 4, "header": "Harassment", "button": {"type": "done"}, "children": []},
+      "90": {"id": 90, "header": "Thanks", "button": {"type": "cancel"}, "children": []},
+      "91": {"id": 91, "header": "Failed", "children": []}
+    }
+  },
+  "hostile": {
+    "name": "message",
+    "version": "1.0",
+    "variant": "4\"; drop",
+    "root_node_id": 0,
+    "nodes": {"0": {"id": 0, "header": "x", "children": [["A", 1]]}, "1": {"id": 1, "header": "A"}}
+  },
+  "wrong_name": {"name": "user", "version": "1.0", "variant": "4", "root_node_id": 0, "nodes": {"0": {"id": 0, "header": "x"}}},
+  "no_root": {"name": "message", "version": "1.0", "variant": "4", "root_node_id": 5, "nodes": {"0": {"id": 0}}}
+}

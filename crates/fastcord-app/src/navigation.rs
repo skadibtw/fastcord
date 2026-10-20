@@ -285,11 +285,23 @@ fn sidebar<'a>(
     } else {
         snapshot.selected_guild_name.clone()
     };
+    let can_report = !directs && snapshot.selected_guild.is_some();
     let header = container(
-        text(title)
-            .size(15)
-            .font(BOLD)
-            .wrapping(text::Wrapping::None),
+        row![
+            text(title)
+                .size(15)
+                .font(BOLD)
+                .wrapping(text::Wrapping::None)
+                .width(Length::Fill),
+            button(text("Report").size(11))
+                .on_press_maybe(
+                    can_report.then_some(Message::Report(crate::report::Event::OpenServer))
+                )
+                .padding([2, 6])
+                .style(style::tool_button(false, false)),
+        ]
+        .spacing(6)
+        .align_y(alignment::Vertical::Center),
     )
     .padding([13, 16])
     .width(Length::Fill)
