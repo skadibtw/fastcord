@@ -524,3 +524,9 @@ Evidence: community documentation of `TYPING_START` and `POST /channels/{id}/typ
 ## GIF picker (#70)
 
 `GET /gifs/trending` and `GET /gifs/search?q=...` (both with `provider=tenor&locale=en-US&media_format=gif`) answer a bare array or `{"gifs":[...]}` of `{title,url,preview,gif_src,src}`; unverified against a live account. `url` (https only) is what a message carries; previews are fetched without `Authorization` through the credential-free fetcher and are the only traffic to the GIF provider. At most 24 results are kept; each request is sent once.
+
+## Stickers (#71)
+
+- Received: `sticker_items` on a message (`{id,name,format_type}`, at most 3 kept, names cut to 64 characters). `format_type` 1 PNG and 2 APNG are fetched as `https://cdn.discordapp.com/stickers/{id}.png?size=160`, 4 GIF as `https://media.discordapp.net/stickers/{id}.gif?size=160`, both without `Authorization` through the credential-free cache and shown as a static first frame. 3 (Lottie) and unknown formats are shown by name. Unverified against a live account.
+- Listing: `GET /guilds/{id}/stickers` for the viewed server only, as an array of `{id,name,format_type,available}`; stickers with `available:false` are shown but cannot be picked. Standard packs and other servers' stickers are not offered (Nitro); in DMs the picker explains this.
+- Sending: `POST /channels/{id}/messages` with `content:""`, `sticker_ids:["<id>"]`, a fresh nonce and `enforce_nonce:true`, once, never retried. It does not go through the text outbox: success is recognized when the message arrives over the Gateway; a 4xx is reported as not sent and an ambiguous failure as possibly delivered.

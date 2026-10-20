@@ -57,7 +57,7 @@ use std::sync::Arc;
 
 use fastcord_model::{
     Attachment, Embed, Message, MessageUpdate, Reaction, ReactionChange, Referenced, ReplyPreview,
-    Snowflake, User,
+    Snowflake, StickerItem, User,
 };
 
 use crate::gateway::Dispatch;
@@ -117,6 +117,12 @@ fn message_heap(message: &Message) -> usize {
             .attachments
             .iter()
             .map(attachment_heap)
+            .sum::<usize>()
+        + message.sticker_items.capacity() * size_of::<StickerItem>()
+        + message
+            .sticker_items
+            .iter()
+            .map(|sticker| sticker.name.capacity())
             .sum::<usize>()
         + message.mentions.capacity() * size_of::<User>()
         + message.mentions.iter().map(user_heap).sum::<usize>()
@@ -191,6 +197,10 @@ fn compact(message: &mut Message) {
     message.timestamp.shrink_to_fit();
     shrink_text(&mut message.edited_timestamp);
     shrink_text(&mut message.nonce);
+    message.sticker_items.shrink_to_fit();
+    for sticker in &mut message.sticker_items {
+        sticker.name.shrink_to_fit();
+    }
     message.attachments.shrink_to_fit();
     for attachment in &mut message.attachments {
         attachment.filename.shrink_to_fit();

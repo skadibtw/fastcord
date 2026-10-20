@@ -447,6 +447,11 @@ fn header_with<'a>(
                 .on_press(Message::Gif(crate::gif::Event::Toggle))
                 .style(style::tool_button(true, false)),
         );
+        line = line.push(
+            button(text("Sticker").size(13))
+                .on_press(Message::Sticker(crate::sticker::Event::Toggle))
+                .style(style::tool_button(true, false)),
+        );
     }
     container(line)
         .padding([10, 16])

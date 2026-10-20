@@ -166,6 +166,7 @@ pub struct OutgoingMessage {
     mentions: MentionPolicy,
     reply: Option<ReplyTo>,
     files: Vec<UploadedFile>,
+    sticker: Option<Snowflake>,
 }
 
 impl OutgoingMessage {
@@ -184,6 +185,7 @@ impl OutgoingMessage {
             mentions,
             reply: None,
             files: Vec::new(),
+            sticker: None,
         })
     }
 
@@ -207,7 +209,20 @@ impl OutgoingMessage {
             mentions,
             reply: None,
             files,
+            sticker: None,
         })
+    }
+
+    /// A message that carries one sticker and no text (`sticker_ids`).
+    pub fn with_sticker(sticker: Snowflake, nonce: Nonce, mentions: MentionPolicy) -> Self {
+        Self {
+            content: String::new(),
+            nonce,
+            mentions,
+            reply: None,
+            files: Vec::new(),
+            sticker: Some(sticker),
+        }
     }
 
     /// Makes the message a reply. Discord is asked to refuse it if the
@@ -238,6 +253,7 @@ impl OutgoingMessage {
                 message_id: reply.message,
                 fail_if_not_exists: true,
             }),
+            sticker_ids: self.sticker.into_iter().collect(),
             attachments: self
                 .files
                 .iter()
@@ -259,6 +275,7 @@ impl fmt::Debug for OutgoingMessage {
             .field("mentions", &self.mentions)
             .field("reply", &self.reply)
             .field("files", &self.files.len())
+            .field("sticker", &self.sticker.is_some())
             .finish()
     }
 }
@@ -273,6 +290,8 @@ struct CreateMessage<'a> {
     allowed_mentions: AllowedMentions,
     #[serde(skip_serializing_if = "Option::is_none")]
     message_reference: Option<WireReference>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sticker_ids: Vec<Snowflake>,
     /// Present exactly when files were uploaded for this message.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<WireAttachment<'a>>,
@@ -433,6 +452,20 @@ mod tests {
         assert_eq!(sent, recorded);
         // The wire nonce is a string, never a JSON integer that could lose precision.
         assert!(sent["nonce"].is_string());
+    }
+
+    #[test]
+    fn a_sticker_message_has_no_text_and_names_the_sticker() {
+        let message = OutgoingMessage::with_sticker(
+            Snowflake(77),
+            Nonce(1_290_000_000_000_000_005),
+            MentionPolicy::default(),
+        );
+        let sent = serde_json::to_value(message.body()).unwrap();
+        assert_eq!(sent["content"], "");
+        assert_eq!(sent["sticker_ids"], serde_json::json!(["77"]));
+        assert_eq!(sent["enforce_nonce"], true);
+        assert!(sent.get("attachments").is_none());
     }
 
     #[test]

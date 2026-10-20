@@ -161,6 +161,13 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub reactions: Vec<Reaction>,
+    /// Stickers sent with the message (at most [`MAX_STICKER_ITEMS`]).
+    #[serde(
+        default,
+        deserialize_with = "lenient_stickers",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub sticker_items: Vec<StickerItem>,
     /// Users this message mentions (their names resolve `<@id>`).
     #[serde(default)]
     pub mentions: Vec<User>,
@@ -190,6 +197,33 @@ pub struct Message {
     /// How a call message (type 3) ended; absent on every other type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call: Option<MessageCall>,
+}
+
+/// Longest sticker name kept; Discord allows 30 characters.
+pub const MAX_STICKER_NAME_CHARS: usize = 64;
+/// Most stickers one message keeps (Discord sends at most 3).
+pub const MAX_STICKER_ITEMS: usize = 3;
+
+/// A sticker a message carries (`sticker_items`). `format_type` is Discord's:
+/// 1 PNG, 2 APNG, 3 Lottie, 4 GIF; anything else is unknown and shown as text.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StickerItem {
+    pub id: Snowflake,
+    #[serde(default, deserialize_with = "lenient_sticker_name")]
+    pub name: String,
+    #[serde(default)]
+    pub format_type: u8,
+}
+
+fn lenient_sticker_name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let name = Option::<String>::deserialize(d)?.unwrap_or_default();
+    Ok(name.chars().take(MAX_STICKER_NAME_CHARS).collect())
+}
+
+fn lenient_stickers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<StickerItem>, D::Error> {
+    let mut items = Vec::<StickerItem>::deserialize(d)?;
+    items.truncate(MAX_STICKER_ITEMS);
+    Ok(items)
 }
 
 /// The `call` object of a call message: who joined and when it ended
@@ -548,6 +582,30 @@ impl fmt::Debug for MessageUpdate {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sticker_items_are_bounded_and_tolerate_missing_fields() {
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "id": "1", "channel_id": "2", "content": "",
+            "timestamp": "2026-10-07T12:00:00.000000+00:00",
+            "author": {"id": "3", "username": "a"},
+            "sticker_items": [
+                {"id": "10", "name": "ok", "format_type": 4},
+                {"id": "11", "name": null},
+                {"id": "12", "name": "x".repeat(500), "format_type": 1},
+                {"id": "13", "name": "over", "format_type": 1}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(message.sticker_items.len(), MAX_STICKER_ITEMS);
+        assert_eq!(message.sticker_items[0].format_type, 4);
+        assert_eq!(message.sticker_items[1].name, "");
+        assert_eq!(message.sticker_items[1].format_type, 0);
+        assert_eq!(
+            message.sticker_items[2].name.chars().count(),
+            MAX_STICKER_NAME_CHARS
+        );
+    }
+
     fn unicode(name: &str) -> Emoji {
         Emoji {
             id: None,
@@ -566,6 +624,7 @@ mod tests {
 
     fn reacted(reactions: &[(&Emoji, u32, bool)]) -> Message {
         Message {
+            sticker_items: Vec::new(),
             id: Snowflake(1),
             channel_id: Snowflake(2),
             guild_id: None,

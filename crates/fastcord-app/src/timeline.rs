@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fastcord_model::{Attachment, Emoji, Message, Snowflake};
+use fastcord_model::{Attachment, Emoji, Message, Snowflake, StickerItem};
 use iced::alignment::{Horizontal, Vertical};
 use iced::font::{Font, Weight};
 use iced::widget::{
@@ -986,6 +986,9 @@ fn message_view<'a>(
         };
         body = body.push(attachment_view(attachment, key, assets.views.get(&key)));
     }
+    for sticker in &message.sticker_items {
+        body = body.push(sticker_view(sticker, assets.avatars));
+    }
     if let Some(line) = reactions_line(row, channel_id, snapshot.can_react, assets) {
         body = body.push(line);
     }
@@ -1172,6 +1175,30 @@ fn message_view<'a>(
         });
     hover(base, overlay)
 }
+/// A sticker: its first frame at 64 px once loaded; otherwise (loading,
+/// failed, deleted, Lottie or an unknown format) its name, said honestly.
+fn sticker_view<'a>(
+    sticker: &StickerItem,
+    views: &'a HashMap<crate::avatars::AvatarKey, iced::widget::image::Handle>,
+) -> Element<'a, Event> {
+    let key = crate::avatars::AvatarKey::sticker(sticker.id, sticker.format_type);
+    if let Some(handle) = key.as_ref().and_then(|key| views.get(key)) {
+        return image(handle.clone())
+            .width(Length::Fixed(64.0))
+            .height(Length::Fixed(64.0))
+            .into();
+    }
+    let note = if key.is_none() {
+        format!(
+            "Sticker: {} (this sticker format is not shown)",
+            sticker.name
+        )
+    } else {
+        format!("Sticker: {}", sticker.name)
+    };
+    text(note).size(13).style(text::secondary).into()
+}
+
 fn attachment_view(
     attachment: &Attachment,
     key: AttachmentKey,
@@ -1284,7 +1311,7 @@ fn created_thread(message: &Message) -> Option<Snowflake> {
 
 /// What to show for a message without text or attachments.
 fn placeholder(message: &Message) -> Option<String> {
-    if !message.attachments.is_empty() {
+    if !message.attachments.is_empty() || !message.sticker_items.is_empty() {
         return None;
     }
     Some(match message.kind {
@@ -1637,6 +1664,28 @@ mod tests {
     }
 
     #[test]
+    fn stickers_show_a_picture_when_loaded_and_say_so_when_not_renderable() {
+        use crate::avatars::AvatarKey;
+        let png = StickerItem {
+            id: Snowflake(3),
+            name: "wave".to_owned(),
+            format_type: 1,
+        };
+        let lottie = StickerItem {
+            format_type: 3,
+            ..png.clone()
+        };
+        let mut views = HashMap::new();
+        let _ = sticker_view(&png, &views);
+        views.insert(
+            AvatarKey::sticker(Snowflake(3), 1).unwrap(),
+            iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]),
+        );
+        let _ = sticker_view(&png, &views);
+        let _ = sticker_view(&lottie, &views);
+    }
+
+    #[test]
     fn sizes_and_attachments_are_described() {
         assert_eq!(format_size(0), "0 B");
         assert_eq!(format_size(1023), "1023 B");
@@ -1653,6 +1702,13 @@ mod tests {
         let mut bare = (*message).clone();
         bare.attachments.clear();
         assert_eq!(placeholder(&bare).as_deref(), Some("No text content."));
+        bare.sticker_items = vec![StickerItem {
+            id: Snowflake(3),
+            name: "wave".to_owned(),
+            format_type: 3,
+        }];
+        assert_eq!(placeholder(&bare), None, "a sticker explains the row");
+        bare.sticker_items.clear();
         bare.kind = 7;
         assert_eq!(placeholder(&bare).as_deref(), Some("A member joined."));
         bare.kind = 3;

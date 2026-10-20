@@ -34,6 +34,7 @@ mod search;
 mod secret;
 mod send;
 pub mod state;
+mod sticker;
 mod thread;
 mod typing;
 mod upload;
@@ -68,6 +69,7 @@ pub use send::{
     ComposeError, MAX_CONTENT_CHARS, MentionPolicy, Nonce, NonceGenerator, OutgoingMessage,
     ReplyTo, SendError,
 };
+pub use sticker::{GUILD_STICKERS, GuildSticker};
 pub use thread::{
     ARCHIVED_PAGE_SIZE, ArchivedThreads, MAX_THREAD_NAME_CHARS, ThreadError, thread_name,
 };

@@ -1715,6 +1715,7 @@ mod tests {
                 pinned: false,
                 attachments: Vec::new(),
                 reactions: Vec::new(),
+                sticker_items: Vec::new(),
                 mentions: Vec::new(),
                 mention_roles: Vec::new(),
                 mention_everyone: false,

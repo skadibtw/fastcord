@@ -32,6 +32,11 @@ pub enum AvatarKey {
     },
     /// One of the six default avatars.
     Default(u8),
+    /// A sticker's first frame (`gif` selects the `.gif` rendition of format 4).
+    Sticker {
+        id: Snowflake,
+        gif: bool,
+    },
 }
 
 /// Hashes go into a URL and a cache identity: letters, digits and `_` only.
@@ -53,6 +58,14 @@ impl AvatarKey {
         }
     }
 
+    /// A renderable sticker (PNG, APNG, GIF); Lottie and unknown formats have none.
+    pub fn sticker(id: Snowflake, format_type: u8) -> Option<Self> {
+        matches!(format_type, 1 | 2 | 4).then_some(Self::Sticker {
+            id,
+            gif: format_type == 4,
+        })
+    }
+
     pub fn guild(id: Snowflake, icon: Option<&str>) -> Option<Self> {
         icon.filter(|hash| valid_hash(hash))
             .map(|hash| Self::Guild {
@@ -67,6 +80,10 @@ impl AvatarKey {
             Self::User { id, hash } => format!("{CDN}/avatars/{id}/{hash}.png?size=64"),
             Self::Guild { id, hash } => format!("{CDN}/icons/{id}/{hash}.png?size=64"),
             Self::Default(n) => format!("{CDN}/embed/avatars/{n}.png"),
+            Self::Sticker { id, gif: false } => format!("{CDN}/stickers/{id}.png?size=160"),
+            Self::Sticker { id, gif: true } => {
+                format!("https://media.discordapp.net/stickers/{id}.gif?size=160")
+            }
         }
     }
 
@@ -76,6 +93,7 @@ impl AvatarKey {
             Self::User { id, hash } => (2, *id, hash.as_str()),
             Self::Guild { id, hash } => (3, *id, hash.as_str()),
             Self::Default(n) => (4, Snowflake(u64::from(*n)), "default"),
+            Self::Sticker { id, .. } => (6, *id, "sticker"),
         };
         cache.avatar(kind, id, hash, &url).await.ok()
     }
@@ -218,6 +236,25 @@ mod tests {
             guild.url(),
             "https://cdn.discordapp.com/icons/7/ff00.png?size=64"
         );
+    }
+
+    #[test]
+    fn stickers_use_the_public_cdn_and_only_for_renderable_formats() {
+        let id = Snowflake(9);
+        assert_eq!(
+            AvatarKey::sticker(id, 1).unwrap().url(),
+            "https://cdn.discordapp.com/stickers/9.png?size=160"
+        );
+        assert_eq!(
+            AvatarKey::sticker(id, 2).unwrap().url(),
+            "https://cdn.discordapp.com/stickers/9.png?size=160"
+        );
+        assert_eq!(
+            AvatarKey::sticker(id, 4).unwrap().url(),
+            "https://media.discordapp.net/stickers/9.gif?size=160"
+        );
+        assert_eq!(AvatarKey::sticker(id, 3), None, "Lottie is not rendered");
+        assert_eq!(AvatarKey::sticker(id, 0), None);
     }
 
     #[test]

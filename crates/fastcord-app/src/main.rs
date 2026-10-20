@@ -27,6 +27,7 @@ mod render;
 mod rich;
 mod search;
 mod status;
+mod sticker;
 mod style;
 mod threads;
 mod timeline;
@@ -98,6 +99,7 @@ struct App {
     search: search::State,
     pins: pins::State,
     gif: gif::State,
+    sticker: sticker::State,
     friends: friends::State,
     status: status::State,
     threads: threads::State,
@@ -221,6 +223,7 @@ enum Message {
     Search(search::Event),
     Pins(pins::Event),
     Gif(gif::Event),
+    Sticker(sticker::Event),
     Friends(friends::Event),
     Status(status::Event),
     Threads(threads::Event),
@@ -277,6 +280,7 @@ impl App {
                 search: search::State::default(),
                 pins: pins::State::default(),
                 gif: gif::State::default(),
+                sticker: sticker::State::default(),
                 friends: friends::State::default(),
                 status: status::State::default(),
                 threads: threads::State::default(),
@@ -749,6 +753,9 @@ impl App {
                         .controls
                         .timeline_intent(history::Intent::JumpTo { channel, message });
                 }
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    self.sticker.sync(gateway.timeline.channel_id);
+                }
             }
             Message::ShowDirects(on) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
@@ -759,6 +766,7 @@ impl App {
             Message::Search(event) => return self.search_event(event),
             Message::Pins(event) => return self.pins_event(event),
             Message::Gif(event) => return self.gif_event(event),
+            Message::Sticker(event) => return self.sticker_event(event),
             Message::Status(event) => {
                 if let Phase::Account {
                     session, gateway, ..
@@ -1481,6 +1489,7 @@ impl App {
             Message::Logout => {
                 self.pins = pins::State::default();
                 self.gif = gif::State::default();
+                self.sticker = sticker::State::default();
                 self.threads.drop_all();
                 if let Phase::Account {
                     session, gateway, ..
@@ -1704,6 +1713,7 @@ impl App {
         self.search = search::State::default();
         self.pins = pins::State::default();
         self.gif = gif::State::default();
+        self.sticker = sticker::State::default();
         self.threads.drop_all();
         self.friends.reset();
         self.status.reset();
@@ -1792,6 +1802,34 @@ impl App {
         self.gif
             .update(event, &session.client, gateway.attachments.as_ref())
             .map(Message::Gif)
+    }
+
+    fn sticker_event(&mut self, event: sticker::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let Some(channel) = gateway.timeline.channel_id else {
+            return Task::none();
+        };
+        let context = sticker::Context {
+            guild: gateway
+                .navigation
+                .selected_guild
+                .filter(|_| !gateway.directs),
+            channel,
+            can_send: gateway.timeline.can_send,
+        };
+        self.sticker
+            .update(
+                event,
+                context,
+                &session.client,
+                gateway.attachments.as_ref(),
+            )
+            .map(Message::Sticker)
     }
 
     fn pins_event(&mut self, event: pins::Event) -> Task<Message> {
@@ -2108,6 +2146,12 @@ impl App {
             }
             if let Some(panel) = gif::view(&self.gif) {
                 banner_column = banner_column.push(panel.map(Message::Gif));
+            }
+            if let Some(channel) = gateway.timeline.channel_id
+                && self.sticker.is_open_for(channel)
+                && let Some(panel) = sticker::view(&self.sticker)
+            {
+                banner_column = banner_column.push(panel.map(Message::Sticker));
             }
             if let Some(panel) = threads::view(&self.threads) {
                 banner_column = banner_column.push(panel.map(Message::Threads));
@@ -2597,7 +2641,7 @@ fn token_edited(mut value: String) -> Message {
 }
 
 /// Avatars and icons the shown rows ask for: the user's own, the rail window,
-/// then the timeline authors newest first. Bounded.
+/// then the timeline authors and stickers newest first. Bounded.
 fn wanted_avatars(
     gateway: &gateway::GatewayPanel,
     user: &fastcord_model::User,
@@ -2609,8 +2653,17 @@ fn wanted_avatars(
         .rows
         .iter()
         .filter_map(|guild| avatars::AvatarKey::guild(guild.id, guild.icon.as_deref()));
-    let authors = gateway.timeline.rows.iter().rev().map(|row| {
-        avatars::AvatarKey::user(row.message.author.id, row.message.author.avatar.as_deref())
+    let authors = gateway.timeline.rows.iter().rev().flat_map(|row| {
+        let stickers = row
+            .message
+            .sticker_items
+            .iter()
+            .filter_map(|sticker| avatars::AvatarKey::sticker(sticker.id, sticker.format_type));
+        std::iter::once(avatars::AvatarKey::user(
+            row.message.author.id,
+            row.message.author.avatar.as_deref(),
+        ))
+        .chain(stickers)
     });
     for key in guilds.chain(authors) {
         if wanted.len() == avatars::MAX_WANTED {
