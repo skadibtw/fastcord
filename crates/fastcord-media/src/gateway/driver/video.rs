@@ -38,12 +38,16 @@ use crate::rtp::{self, RtpHeader, ext};
 use crate::ssrc::{PENDING_WINDOW, PendingSsrc, StreamKind};
 use crate::video::receive::{Assembled, ReceiveBuffer, ReceptionStats};
 use crate::video::send::{Packet, VideoSender};
-use crate::video::{ReceivedVideo, VideoCodec, VideoError, VideoFrame, VideoOptions};
+use crate::video::{
+    ReceivedVideo, VideoCodec, VideoControl, VideoError, VideoFrame, VideoInterest, VideoOptions,
+};
 use crate::video::{av1, h264};
 
-/// Remote video SSRCs followed at once. A stream connection has one owner with
-/// one layer; more than this is a server misbehaving, not a feature.
-const MAX_VIDEO_RECEIVERS: usize = 4;
+/// Remote video SSRCs followed at once: the cameras of a call that are on
+/// screen (`MAX_INTEREST_USERS`), each with its own bounded reassembly buffer.
+/// A stream connection has one owner with one layer; more than this is a
+/// server misbehaving, not a feature.
+const MAX_VIDEO_RECEIVERS: usize = crate::video::MAX_INTEREST_USERS;
 /// Users whose announced streams are remembered for Media Sink Wants.
 const MAX_REMOTE_VIDEO_USERS: usize = 16;
 /// How often a receiver report goes out while video is arriving.
@@ -154,15 +158,17 @@ pub(super) struct VideoState {
     pending: PendingSsrc<PendingVideo>,
     /// Streams the server announced per remote user (opcode 12).
     remote: HashMap<Snowflake, Vec<RemoteStream>>,
-    /// The viewer wants remote video at all.
-    wanted: bool,
+    /// Which remote video the viewer wants.
+    interest: VideoInterest,
+    /// Frames may be sent (a camera that is on; a share always).
+    sending: bool,
     wants_sent: Option<Vec<(u32, u8)>>,
     rtt: Duration,
     next_report: Option<Instant>,
 }
 
 impl VideoState {
-    pub(super) fn new(options: VideoOptions, wanted: bool) -> Self {
+    pub(super) fn new(options: VideoOptions, control: VideoControl) -> Self {
         Self {
             options,
             layer: None,
@@ -174,7 +180,8 @@ impl VideoState {
             receivers: HashMap::new(),
             pending: PendingSsrc::new(PENDING_WINDOW, PENDING_VIDEO_BYTES),
             remote: HashMap::new(),
-            wanted,
+            interest: control.interest,
+            sending: control.sending,
             wants_sent: None,
             rtt: DEFAULT_RTT,
             next_report: None,
@@ -207,16 +214,19 @@ impl VideoState {
             .clamp(Duration::from_millis(30), Duration::from_millis(100))
     }
 
-    /// The streams to ask the server for: the best active layer of each user
-    /// who streams, or none while the viewer does not want video.
+    /// The streams to ask the server for: the best active layer of each wanted
+    /// user who streams, or none while the viewer does not want video.
     fn desired_wants(&self) -> Vec<(u32, u8)> {
-        if !self.wanted {
-            return Vec::new();
-        }
+        let users = match &self.interest {
+            VideoInterest::Off => return Vec::new(),
+            VideoInterest::All => None,
+            VideoInterest::Users(users) => Some(users),
+        };
         let mut wants: Vec<(u32, u8)> = self
             .remote
-            .values()
-            .filter_map(|streams| {
+            .iter()
+            .filter(|(user, _)| users.is_none_or(|users| users.contains(user)))
+            .filter_map(|(_, streams)| {
                 streams
                     .iter()
                     .filter(|stream| stream.active)
@@ -353,6 +363,14 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 video.need_keyframe = true;
                 let codec = video.sender.as_ref().map(|sender| sender.offer.codec);
                 emit(&self.ch.events, VoiceEvent::VideoNegotiated { codec });
+                if video.options.camera
+                    && let Some(audio_ssrc) = self.udp.as_ref().map(|udp| udp.ssrc)
+                {
+                    // A camera that is off is declared like a viewer: no
+                    // video SSRC until the first frame announces the layer.
+                    let payload = wire::video_state(audio_ssrc, None);
+                    self.send_text(conn, socket, &payload).await?;
+                }
             }
             None => {
                 // A viewer states that it sends no video before it receives
@@ -421,8 +439,9 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let Some(video) = self.video.as_mut() else {
             return Ok(());
         };
-        if video.options.send.is_some() {
-            // Owners send no wants: nobody streams to them.
+        if video.options.send.is_some() && !video.options.camera {
+            // Share owners send no wants: nobody streams to them. A call
+            // participant is both.
             return Ok(());
         }
         let wants = video.desired_wants();
@@ -436,22 +455,36 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         self.send_text(conn, socket, &payload).await
     }
 
-    /// The viewer turned remote video on or off.
+    /// The application changed what it receives or whether it sends.
     pub(super) async fn on_wanted_changed(
         &mut self,
         conn: &Conn,
         socket: &mut S::Socket,
     ) -> Result<(), End> {
-        let wanted = *self.ch.wanted.borrow_and_update();
+        let control = self.ch.wanted.borrow_and_update().clone();
+        let mut stopped_layer = false;
         if let Some(video) = self.video.as_mut() {
-            video.wanted = wanted;
-            if wanted {
+            let now = Instant::now();
+            if control.interest != VideoInterest::Off && control.interest != video.interest {
                 // Video resumes mid-stream: start again at a keyframe.
-                let now = Instant::now();
                 for receiver in video.receivers.values_mut() {
                     receiver.want_keyframe(now);
                 }
             }
+            video.interest = control.interest;
+            if video.sending != control.sending {
+                video.sending = control.sending;
+                // Either way the stream restarts at a keyframe.
+                video.need_keyframe = true;
+                if control.sending {
+                    request_keyframe(&self.ch.events, video, now);
+                } else {
+                    stopped_layer = std::mem::take(&mut video.announced);
+                }
+            }
+        }
+        if stopped_layer {
+            self.announce_video(conn, socket, false).await?;
         }
         self.send_wants(conn, socket).await
     }
@@ -874,7 +907,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let Some(video) = self.video.as_ref() else {
             return Ok(());
         };
-        if video.sender.is_none() || video.paused {
+        if video.sender.is_none() || video.paused || !video.sending {
             Counters::add(&self.ch.counters.video_frames_refused, 1);
             return Ok(());
         }
@@ -1111,15 +1144,16 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 &mut self.body,
             )
         } else {
-            rtp::write_extension_block(
-                &[
-                    (ext::ABS_SEND_TIME, &send_time[..]),
-                    (ext::PLAYOUT_DELAY, &PLAYOUT_DELAY[..]),
-                    (ext::VIDEO_CONTENT_TYPE, &[CONTENT_SCREEN][..]),
-                    (ext::RTP_STREAM_ID, rid),
-                ],
-                &mut self.body,
-            )
+            // A camera carries no screenshare content type.
+            let mut elements: Vec<(u8, &[u8])> = vec![
+                (ext::ABS_SEND_TIME, &send_time[..]),
+                (ext::PLAYOUT_DELAY, &PLAYOUT_DELAY[..]),
+            ];
+            if !video.options.camera {
+                elements.push((ext::VIDEO_CONTENT_TYPE, &[CONTENT_SCREEN][..]));
+            }
+            elements.push((ext::RTP_STREAM_ID, rid));
+            rtp::write_extension_block(&elements, &mut self.body)
         };
         // Fixed IDs and short elements: this cannot fail.
         let Ok(preamble) = preamble else {

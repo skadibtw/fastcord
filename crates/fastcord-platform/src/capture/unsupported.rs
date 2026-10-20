@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use super::camera::CameraDevice;
 use super::{
     CaptureError, CaptureSource, CaptureStatus, Control, HandlerFactory, SourceId, StartOptions,
 };
@@ -40,4 +41,21 @@ pub(super) fn start(
     _handler: HandlerFactory,
 ) -> Result<Native, CaptureError> {
     Err(UNSUPPORTED)
+}
+
+const CAMERA_UNSUPPORTED: CaptureError =
+    CaptureError::Unsupported("the camera is only implemented for Windows so far");
+
+pub(super) fn list_cameras() -> Result<Vec<CameraDevice>, CaptureError> {
+    Err(CAMERA_UNSUPPORTED)
+}
+
+pub(super) fn start_camera(
+    _device: Option<String>,
+    _options: &StartOptions,
+    _control: Arc<Control>,
+    _status: CaptureStatus,
+    _handler: HandlerFactory,
+) -> Result<Native, CaptureError> {
+    Err(CAMERA_UNSUPPORTED)
 }

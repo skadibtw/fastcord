@@ -80,6 +80,13 @@ impl VoiceStateRequest {
         }
     }
 
+    /// The same request with the camera flag set: `self_video` tells Discord
+    /// and the other participants whether this account's camera is on.
+    pub const fn with_video(mut self, self_video: bool) -> Self {
+        self.self_video = self_video;
+        self
+    }
+
     /// Disconnects the account from voice in `guild_id` (or from a private
     /// call when `None`).
     pub const fn leave(guild_id: Option<Snowflake>) -> Self {
@@ -340,6 +347,11 @@ mod tests {
                 "self_deaf": false,
                 "self_video": false
             })
+        );
+        // A camera that is on is part of the same opcode-4 body.
+        assert_eq!(
+            serde_json::to_value(join.with_video(true)).unwrap()["self_video"],
+            true
         );
         let leave = VoiceStateRequest::leave(None);
         assert_eq!(

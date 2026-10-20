@@ -36,7 +36,8 @@ use tokio::task::JoinHandle;
 use crate::crypto::{TransportMode, aes_accelerated};
 use crate::session::{Generation, VoiceCredentials};
 use crate::video::{
-    MAX_FRAME_BYTES, ReceivedVideo, VideoCodec, VideoError, VideoFrame, VideoOptions,
+    MAX_FRAME_BYTES, MAX_INTEREST_USERS, ReceivedVideo, VideoCodec, VideoControl, VideoError,
+    VideoFrame, VideoInterest, VideoOptions,
 };
 pub use wire::speaking;
 
@@ -52,6 +53,9 @@ pub const AUDIO_QUEUE_PACKETS: usize = 64;
 /// [`MAX_FRAME_BYTES`], so each queue holds at most 6 MiB; what does not fit is
 /// dropped, and the stream restarts at its next keyframe.
 pub const VIDEO_QUEUE_FRAMES: usize = 3;
+/// Received video frames waiting for the consumer on a call connection, which
+/// carries up to [`MAX_INTEREST_USERS`] cameras at once (at most 16 MiB).
+pub const CALL_VIDEO_QUEUE_FRAMES: usize = 8;
 const EVENT_QUEUE: usize = 64;
 /// How long [`VoiceSession::leave`] waits for the close handshake.
 const LEAVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -233,13 +237,22 @@ pub(crate) enum MediaCommand {
     VideoKeyframe(u32),
 }
 
+/// Stores `value` and says whether it differed.
+fn replace<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        return false;
+    }
+    *slot = value;
+    true
+}
+
 /// The sending/control half of a voice connection. Never blocks.
 #[derive(Clone)]
 pub struct MediaSender {
     queue: mpsc::Sender<MediaCommand>,
     queued_audio: Arc<AtomicUsize>,
     video: mpsc::Sender<VideoFrame>,
-    wanted: Arc<watch::Sender<bool>>,
+    wanted: Arc<watch::Sender<VideoControl>>,
 }
 
 impl fmt::Debug for MediaSender {
@@ -283,7 +296,34 @@ impl MediaSender {
     /// starts wanting it; turn it off while the stream is hidden or minimized
     /// (the server then stops forwarding it) and on again to resume.
     pub fn set_video_wanted(&self, wanted: bool) {
-        self.wanted.send_replace(wanted);
+        let interest = if wanted {
+            VideoInterest::All
+        } else {
+            VideoInterest::Off
+        };
+        self.wanted
+            .send_if_modified(|control| replace(&mut control.interest, interest));
+    }
+
+    /// Asks for the best stream of only these users (a call connection: the
+    /// camera tiles that are on screen). An empty list wants nothing; more
+    /// than [`MAX_INTEREST_USERS`] is cut to the first ones.
+    pub fn set_video_users(&self, users: &[Snowflake]) {
+        let interest = if users.is_empty() {
+            VideoInterest::Off
+        } else {
+            VideoInterest::Users(users.iter().copied().take(MAX_INTEREST_USERS).collect())
+        };
+        self.wanted
+            .send_if_modified(|control| replace(&mut control.interest, interest));
+    }
+
+    /// Lets this connection's own layer send (`true`) or announces it stopped
+    /// (`false`): a camera turned on or off. Frames offered while off are
+    /// refused.
+    pub fn set_video_sending(&self, sending: bool) {
+        self.wanted
+            .send_if_modified(|control| replace(&mut control.sending, sending));
     }
 
     /// A decoder or bounded decode queue lost a frame of `ssrc`: suppress
@@ -478,16 +518,27 @@ fn start<S: transport::Signaling, N: transport::Network>(
     let (status_tx, status) = watch::channel(VoiceStatus::Connecting);
     let (events_tx, events) = mpsc::channel(EVENT_QUEUE);
     let (audio_tx, audio) = mpsc::channel(AUDIO_QUEUE_PACKETS);
-    let (video_out_tx, video) = mpsc::channel(VIDEO_QUEUE_FRAMES);
+    let call_video = options.video.as_ref().is_some_and(|video| video.camera);
+    let (video_out_tx, video) = mpsc::channel(if call_video {
+        CALL_VIDEO_QUEUE_FRAMES
+    } else {
+        VIDEO_QUEUE_FRAMES
+    });
     let (video_in_tx, video_in_rx) = mpsc::channel(VIDEO_QUEUE_FRAMES);
     // A viewer connection exists because the user chose to watch: it wants the
-    // stream from the start.
-    let (wanted_tx, wanted_rx) = watch::channel(
-        options
-            .video
-            .as_ref()
-            .is_some_and(|video| video.send.is_none()),
-    );
+    // stream from the start. An owner sends from the start. A call connection
+    // wants and sends nothing until the application says so.
+    let (wanted_tx, wanted_rx) = watch::channel(options.video.as_ref().map_or_else(
+        VideoControl::default,
+        |video| VideoControl {
+            interest: if video.send.is_none() && !video.camera {
+                VideoInterest::All
+            } else {
+                VideoInterest::Off
+            },
+            sending: video.send.is_some() && !video.camera,
+        },
+    ));
     let queued_audio = Arc::new(AtomicUsize::new(0));
     let (media_tx, media_rx) = mpsc::channel(MEDIA_QUEUE_FRAMES + 1);
     let (leave_tx, leave_rx) = oneshot::channel();

@@ -13,6 +13,7 @@
 //! 34 add Linux and macOS); elsewhere every entry point reports
 //! [`CaptureError::Unsupported`].
 
+pub mod camera;
 pub mod convert;
 #[cfg(not(windows))]
 mod unsupported;
@@ -212,8 +213,11 @@ pub enum CaptureError {
     /// The system refused to capture this source (a privacy setting, policy or
     /// protected content).
     PermissionDenied,
-    /// The window or display disappeared, or the handle was already stale.
+    /// The window or display disappeared, or the handle was already stale; a
+    /// camera that was unplugged or taken by another application.
     SourceClosed,
+    /// The chosen camera is not connected.
+    DeviceNotFound,
     SourceTooLarge {
         width: u32,
         height: u32,
@@ -240,7 +244,8 @@ impl fmt::Display for CaptureError {
             Self::PermissionDenied => f.write_str(
                 "Windows refused to capture this source (a privacy setting, a policy, or a protected window)",
             ),
-            Self::SourceClosed => f.write_str("the shared window or display closed"),
+            Self::SourceClosed => f.write_str("the captured window, display or camera closed"),
+            Self::DeviceNotFound => f.write_str("the selected camera is not connected"),
             Self::SourceTooLarge { width, height } => write!(
                 f,
                 "the source is {width}x{height}; at most 4096x2304 pixels (or 8192 on one side) can be captured"
@@ -451,6 +456,40 @@ impl CaptureSession {
 /// UI thread.
 pub fn list_sources() -> Result<Vec<CaptureSource>, CaptureError> {
     native::list_sources()
+}
+
+/// The cameras connected right now (SPEC §8.8). May block briefly; call it off
+/// the UI thread.
+pub fn list_cameras() -> Result<Vec<camera::CameraDevice>, CaptureError> {
+    native::list_cameras()
+}
+
+/// Opens the camera with stable ID `device` (`None`: the first one) and
+/// captures it on a new native thread, exactly like [`start`]: the picture is
+/// the largest mode within `options.config`, delivered as NV12 at the camera's
+/// own size (the handler sees a size change as a new picture size). Dropping
+/// the session releases the device.
+pub fn start_camera<H: FrameHandler + 'static>(
+    device: Option<&str>,
+    options: StartOptions,
+    handler: impl FnOnce() -> H + Send + 'static,
+) -> Result<CaptureSession, CaptureError> {
+    options.config.validate()?;
+    let control = Arc::new(Control::new(options.config.frame_interval()));
+    let status = CaptureStatus::new(options.observer.clone());
+    let native = native::start_camera(
+        device.map(str::to_owned),
+        &options,
+        Arc::clone(&control),
+        status.clone(),
+        Box::new(move || Box::new(handler()) as Box<dyn FrameHandler>),
+    )?;
+    let _ = control.waker.set(native.waker());
+    Ok(CaptureSession {
+        control,
+        status,
+        native,
+    })
 }
 
 /// Whether capture can work at all on this machine.

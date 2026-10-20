@@ -670,8 +670,17 @@ fn layer_ready() -> Value {
 }
 
 async fn start_owner_with(ready: Value, description: Value) -> Owner {
+    start_owner_options(
+        VideoOptions::share(SendOptions::SCREEN_720P30),
+        ready,
+        description,
+    )
+    .await
+}
+
+async fn start_owner_options(video: VideoOptions, ready: Value, description: Value) -> Owner {
     let (mut harness, signaling) = Harness::start(Options {
-        video: Some(VideoOptions::share(SendOptions::SCREEN_720P30)),
+        video: Some(video),
         video_rtp_start: Some((65_530, 450_000, 900)),
         ..options()
     });
@@ -1247,4 +1256,135 @@ async fn an_audio_only_connection_offers_and_declares_no_video() {
     harness.session.media().set_video_wanted(true);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(ws.try_recv().is_none());
+}
+
+// ---- call camera ----------------------------------------------------------
+
+async fn start_camera() -> Owner {
+    start_owner_options(
+        VideoOptions::camera(SendOptions::CAMERA_720P30),
+        layer_ready(),
+        session_description("aead_aes256_gcm_rtpsize"),
+    )
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_camera_starts_off_announces_with_its_first_frame_and_announces_again_when_turned_off() {
+    let mut rig = start_camera().await;
+    // The offer: a `video` layer, never `screen`, at the camera's limits.
+    assert_eq!(rig.identify["d"]["video"], true);
+    assert_eq!(
+        rig.identify["d"]["streams"],
+        json!([{
+            "type": "video", "rid": "100", "quality": 100,
+            "max_bitrate": 1_500_000, "max_framerate": 30,
+            "max_resolution": {"type": "fixed", "width": 1280, "height": 720}
+        }])
+    );
+    // A camera that is off is declared like a viewer: no video SSRC yet.
+    assert_eq!(
+        rig.ws.1,
+        [json!({"op": 12, "d": {
+            "audio_ssrc": SSRC, "video_ssrc": 0, "rtx_ssrc": 0, "streams": []
+        }})]
+    );
+    rig.ws.1.clear();
+    assert_eq!(
+        rig.harness.event().await,
+        VoiceEvent::VideoNegotiated {
+            codec: Some(VideoCodec::H264)
+        }
+    );
+    let [keyframe, delta, _] = access_units();
+    let media = rig.harness.session.media();
+    // Off: a frame that is offered anyway is refused and nothing is announced.
+    media.send_video(frame_of(keyframe, 0)).unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(rig.harness.session.stats().video_frames_refused, 1);
+    assert!(rig.ws.1.is_empty());
+    assert!(rig.udp.drain().iter().all(|datagram| is_ping(datagram)));
+
+    media.set_video_sending(true);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    media.send_video(frame_of(keyframe, 100)).unwrap();
+    let announced = rig.ws.recv_op(12).await;
+    assert_eq!(announced["d"]["video_ssrc"], OWN_VIDEO_SSRC);
+    assert_eq!(announced["d"]["streams"][0]["active"], true);
+    assert_eq!(announced["d"]["streams"][0]["type"], "video");
+    let packets = rig.media_packets().await;
+    for packet in &packets {
+        let ids: Vec<u8> = packet.elements.iter().map(|(id, _)| *id).collect();
+        // No screenshare content type on a camera.
+        assert_eq!(
+            ids,
+            [ext::ABS_SEND_TIME, ext::PLAYOUT_DELAY, ext::RTP_STREAM_ID]
+        );
+    }
+    let refs: Vec<&Opened> = packets.iter().collect();
+    assert_eq!(
+        rig.dave.peer.decrypt_video(ME.0, &join(&refs)).unwrap(),
+        keyframe
+    );
+
+    // Turning it off announces the layer inactive and refuses further frames.
+    media.set_video_sending(false);
+    let stopped = rig.ws.recv_op(12).await;
+    assert_eq!(stopped["d"]["streams"][0]["active"], false);
+    let refused = rig.harness.session.stats().video_frames_refused;
+    media.send_video(frame_of(delta, 133)).unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(
+        rig.harness.session.stats().video_frames_refused,
+        refused + 1
+    );
+
+    // On again: the stream restarts at a keyframe and is announced again.
+    media.set_video_sending(true);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    media.send_video(frame_of(delta, 166)).unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(
+        rig.harness.session.stats().video_frames_refused,
+        refused + 2,
+        "a delta cannot restart the stream"
+    );
+    media.send_video(frame_of(keyframe, 200)).unwrap();
+    assert_eq!(rig.ws.recv_op(12).await["d"]["streams"][0]["active"], true);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_call_connection_asks_the_server_only_for_the_cameras_on_screen() {
+    let mut rig = start_camera().await;
+    rig.ws.1.clear();
+    let bob = Snowflake(77);
+    for (user, ssrc) in [(ALICE, 6_000u32), (bob, 6_100)] {
+        rig.ws
+            .send(json!({"op": 12, "d": {
+                "user_id": user.0.to_string(), "audio_ssrc": 0,
+                "streams": [{"ssrc": ssrc, "rtx_ssrc": ssrc + 1, "rid": "100",
+                             "quality": 100, "active": true}]
+            }}))
+            .await;
+    }
+    // Announcements alone ask for nothing: no tile is showing yet.
+    assert!(rig.ws.1.is_empty());
+    let media = rig.harness.session.media();
+    media.set_video_users(&[bob]);
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"6100": 100, "any": 0}})
+    );
+    media.set_video_users(&[bob, ALICE]);
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"6000": 100, "6100": 100, "any": 0}})
+    );
+    // Hidden tiles cost nothing: the server is told to forward nothing.
+    media.set_video_users(&[]);
+    assert_eq!(rig.ws.recv_op(15).await, json!({"op": 15, "d": {"any": 0}}));
+    // Wanting a user who streams nothing asks for nothing new.
+    media.set_video_users(&[Snowflake(5)]);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert!(rig.ws.1.is_empty());
 }

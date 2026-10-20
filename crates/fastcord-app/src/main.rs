@@ -57,7 +57,8 @@ use fastcord_model::{Snowflake, VoiceStateRequest};
 use fastcord_platform::{NativeCredentialStore, StoreError};
 use gateway::{AttachmentAction, GatewayPanel, GatewayStatus};
 use iced::widget::{
-    button, center, checkbox, column, container, qr_code, row, scrollable, slider, text, text_input,
+    button, center, checkbox, column, container, pick_list, qr_code, row, scrollable, slider, text,
+    text_input,
 };
 use iced::{Color, Element, Length, Task};
 use login::{LoginError, LoginOutcome, Persistence, Session, StoreReady};
@@ -119,6 +120,8 @@ struct App {
     audio_preferences: audio_devices::Preferences,
     audio_settings: audio_devices::Settings,
     audio_saving: Option<audio_devices::Preferences>,
+    /// The camera picker; probed only when the user asks.
+    camera_list: gateway::CameraList,
     shortcuts: shortcuts::Runtime,
     window_active: bool,
     window_drawable: bool,
@@ -216,6 +219,11 @@ enum Message {
     UnwatchStream,
     ShowStream(bool),
     VideoReady(u64),
+    /// The user clicked the camera button.
+    ToggleCamera,
+    ListCameras,
+    CamerasListed(Result<Vec<fastcord_platform::capture::camera::CameraDevice>, String>),
+    SelectCamera(gateway::CameraChoice),
     OpenSharePicker,
     ShareSources(Result<Vec<fastcord_platform::capture::CaptureSource>, String>),
     CloseSharePicker,
@@ -333,6 +341,7 @@ impl App {
                 audio_preferences: audio_devices::Preferences::default(),
                 audio_settings: audio_devices::Settings::default(),
                 audio_saving: None,
+                camera_list: gateway::CameraList::default(),
                 shortcuts: shortcuts::Runtime::default(),
                 window_active: true,
                 window_drawable: true,
@@ -420,28 +429,38 @@ impl App {
     }
 
     fn synchronize_video(&self) {
-        if let Phase::Account { gateway, .. } = &self.phase
-            && let Some(session) = gateway.controls.watched()
-        {
-            session.set_visible(
-                self.window_active
-                    && self.window_drawable
-                    && gateway.watch_open
-                    && !self.audio_settings.open
-                    && gateway.attachment_viewer.is_none()
-                    && !gateway.emoji_picker.request.open,
-            );
+        if let Phase::Account { gateway, .. } = &self.phase {
+            let unobstructed = self.window_active
+                && self.window_drawable
+                && !self.audio_settings.open
+                && gateway.attachment_viewer.is_none()
+                && !gateway.emoji_picker.request.open;
+            if let Some(session) = gateway.controls.watched() {
+                session.set_visible(unobstructed && gateway.watch_open);
+            }
+            // The camera tiles sit in the voice bar, which is on screen while a
+            // call is; a hidden window or an overlay suspends their decoders.
+            gateway.controls.camera_tiles().set_shown(unobstructed);
         }
     }
 
     fn video_subscription(&self) -> iced::Subscription<Message> {
-        if let Phase::Account { gateway, .. } = &self.phase
-            && let Some(session) = gateway.controls.watched()
-        {
-            session.subscription().map(Message::VideoReady)
-        } else {
-            iced::Subscription::none()
+        let Phase::Account { gateway, .. } = &self.phase else {
+            return iced::Subscription::none();
+        };
+        let mut subscriptions = Vec::new();
+        if let Some(session) = gateway.controls.watched() {
+            subscriptions.push(session.subscription().map(Message::VideoReady));
         }
+        let tiles = gateway.controls.camera_tiles().snapshot();
+        for session in tiles
+            .preview
+            .iter()
+            .chain(tiles.remote.iter().map(|(_, session)| session))
+        {
+            subscriptions.push(session.subscription().map(Message::VideoReady));
+        }
+        iced::Subscription::batch(subscriptions)
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
@@ -1415,10 +1434,59 @@ impl App {
                 }
             }
             Message::VideoReady(id) => {
-                if let Phase::Account { gateway, .. } = &self.phase
-                    && let Some(session) = gateway.controls.watched()
-                {
-                    session.consume(id);
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    if let Some(session) = gateway.controls.watched() {
+                        session.consume(id);
+                    }
+                    let tiles = gateway.controls.camera_tiles().snapshot();
+                    for session in tiles
+                        .preview
+                        .iter()
+                        .chain(tiles.remote.iter().map(|(_, session)| session))
+                    {
+                        session.consume(id);
+                    }
+                }
+            }
+            Message::ToggleCamera => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    // The only way the camera turns on: an explicit click, in a
+                    // running call.
+                    let on = !gateway.controls.voice_controls().camera.wanted;
+                    if !on
+                        || gateway.controls.voice_audio_state() == gateway::VoiceAudioState::Running
+                    {
+                        gateway.controls.set_camera(on);
+                    }
+                }
+            }
+            Message::ListCameras => {
+                if !self.camera_list.probing {
+                    self.camera_list.probing = true;
+                    return Task::perform(gateway::list_cameras(), Message::CamerasListed);
+                }
+            }
+            Message::CamerasListed(result) => {
+                self.camera_list.probing = false;
+                self.camera_list.probed = true;
+                match result {
+                    Ok(devices) => {
+                        self.camera_list.devices = devices;
+                        self.camera_list.error = None;
+                    }
+                    Err(error) => self.camera_list.error = Some(error),
+                }
+            }
+            Message::SelectCamera(choice) => {
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.select_camera(choice.id.clone());
+                }
+                self.audio_preferences.camera = audio_devices::CameraSelection {
+                    id: choice.id,
+                    label: choice.label,
+                };
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
                 }
             }
             Message::SetSelfMute(muted) => {
@@ -2054,6 +2122,101 @@ impl App {
     }
 
     /// The overlay that lists the screens and windows that can be shared.
+    /// The camera button, the picker and the camera's status in the voice bar.
+    /// The camera turns on only by this button.
+    fn camera_controls<'a>(
+        &'a self,
+        mut actions: iced::widget::Row<'a, Message>,
+        voice_controls: &gateway::VoiceControls,
+        running: bool,
+    ) -> iced::widget::Row<'a, Message> {
+        let camera = &voice_controls.camera;
+        if gateway::can_send_camera() {
+            actions = actions.push(
+                button(
+                    text(if camera.wanted {
+                        "Camera off"
+                    } else {
+                        "Camera on"
+                    })
+                    .size(12),
+                )
+                .on_press_maybe((running || camera.wanted).then_some(Message::ToggleCamera))
+                .style(style::action_button(camera.wanted)),
+            );
+            let saved = &self.audio_preferences.camera;
+            actions = actions.push(
+                pick_list(
+                    self.camera_list.choices(saved),
+                    Some(self.camera_list.selected(saved)),
+                    Message::SelectCamera,
+                )
+                .text_size(12),
+            );
+            actions = actions.push(
+                button(
+                    text(if self.camera_list.probing {
+                        "Looking for cameras…"
+                    } else {
+                        "Find cameras"
+                    })
+                    .size(12),
+                )
+                .on_press_maybe((!self.camera_list.probing).then_some(Message::ListCameras))
+                .style(style::tool_button(false, false)),
+            );
+        }
+        let status = match &self.camera_list.error {
+            Some(error) if camera.status == gateway::CameraStatus::Off => error.clone(),
+            _ => gateway::describe_camera(camera),
+        };
+        if !status.is_empty() {
+            actions = actions.push(text(status).size(12));
+        }
+        actions
+    }
+
+    /// The camera tiles of the call: the local preview (the capture itself) and
+    /// up to six remote cameras. Hidden tiles are not decoded.
+    fn camera_tiles<'a>(
+        gateway: &'a GatewayPanel,
+        voice_controls: &gateway::VoiceControls,
+    ) -> Option<Element<'a, Message>> {
+        let tiles = gateway.controls.camera_tiles().snapshot();
+        let mut strip = row![].spacing(8);
+        let mut any = false;
+        let mut tile = |label: String, session: Arc<playback::Session>| {
+            any = true;
+            let caption = if session.failed() {
+                format!("{label} · {}", session.description())
+            } else {
+                label
+            };
+            column![
+                container(playback::view::<Message>(session))
+                    .width(Length::Fixed(192.0))
+                    .height(Length::Fixed(108.0)),
+                text(caption).size(11).width(Length::Fixed(192.0)),
+            ]
+            .spacing(2)
+        };
+        if let Some(preview) = tiles.preview
+            && voice_controls.camera.wanted
+        {
+            strip = strip.push(tile("You".to_owned(), preview));
+        }
+        for (user, session) in tiles.remote {
+            strip = strip.push(tile(voice_controls.display_name(user), session));
+        }
+        any.then(|| {
+            scrollable(strip)
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::default(),
+                ))
+                .into()
+        })
+    }
+
     fn share_picker_view(picker: &gateway::SharePicker) -> Element<'_, Message> {
         use fastcord_platform::capture::SourceKind;
         let mut content = column![
@@ -2906,6 +3069,9 @@ impl App {
                             actions = actions.push(text(share.text.clone()).size(12));
                         }
                     }
+                    if in_voice {
+                        actions = self.camera_controls(actions, &voice_controls, running);
+                    }
                     let mut bar = column![
                         scrollable(people).direction(scrollable::Direction::Horizontal(
                             scrollable::Scrollbar::default()
@@ -2915,6 +3081,9 @@ impl App {
                         )),
                     ]
                     .spacing(6);
+                    if let Some(strip) = Self::camera_tiles(gateway, &voice_controls) {
+                        bar = bar.push(strip);
+                    }
                     if self.voice_details {
                         for participant in &voice_controls.participants {
                             let user = participant.user_id;

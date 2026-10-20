@@ -38,7 +38,7 @@ use crate::rtp::{OPUS_FRAME_TICKS, OPUS_PAYLOAD_TYPE, RtpHeader, RtpSender, Sequ
 use crate::session::VoiceCredentials;
 use crate::ssrc::{PendingSsrc, SsrcMap, StreamKind, VideoStream};
 use crate::udp::{self, Datagram, MAX_DATAGRAM};
-use crate::video::{ReceivedVideo, VideoFrame, VideoOptions};
+use crate::video::{ReceivedVideo, VideoControl, VideoFrame, VideoOptions};
 use video::VideoState;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -109,7 +109,7 @@ pub(crate) struct Channels {
     pub(crate) video_out: mpsc::Sender<ReceivedVideo>,
     pub(crate) video_in: mpsc::Receiver<VideoFrame>,
     /// Whether a viewer wants the remote video (see `MediaSender`).
-    pub(crate) wanted: watch::Receiver<bool>,
+    pub(crate) wanted: watch::Receiver<VideoControl>,
 }
 
 struct Udp<L> {
@@ -228,7 +228,7 @@ pub(crate) async fn run<S: Signaling, N: Network>(
     channels: Channels,
 ) {
     let heartbeat_nonce = options.nonce_seed;
-    let wanted = *channels.wanted.borrow();
+    let wanted = channels.wanted.borrow().clone();
     let video = options
         .video
         .clone()
@@ -300,7 +300,7 @@ async fn recv_udp<L: UdpLink>(
 
 /// Resolves with whether the viewer's wanted-video flag changed; `false` once
 /// its sender is gone.
-async fn wants_changed(wanted: &mut watch::Receiver<bool>) -> bool {
+async fn wants_changed(wanted: &mut watch::Receiver<VideoControl>) -> bool {
     wanted.changed().await.is_ok()
 }
 
@@ -369,7 +369,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         self.sequences.clear();
         self.pending.clear();
         self.seq_ack = None;
-        let wanted = *self.ch.wanted.borrow();
+        let wanted = self.ch.wanted.borrow().clone();
         self.video = self
             .options
             .video

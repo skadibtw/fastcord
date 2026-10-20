@@ -1,4 +1,5 @@
-//! iced's exact wgpu version; one reusable plane pair for the single watch.
+//! iced's exact wgpu version; one reusable plane pair per presented video: the
+//! watched stream, or a call's camera tiles (at most [`MAX_VIDEOS`]).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -31,22 +32,28 @@ pub(super) struct VideoPrimitive {
     active: Arc<AtomicBool>,
 }
 
+/// Videos presented at once: the six camera tiles of a call, the local
+/// preview and a watched stream.
+const MAX_VIDEOS: usize = 8;
+
+/// The planes of one video, found again by its session's `active` flag.
 struct Textures {
     size: (u32, u32),
     y: wgpu::Texture,
     uv: wgpu::Texture,
+    colors: wgpu::Buffer,
     group: wgpu::BindGroup,
     serial: Option<u64>,
     active: Weak<AtomicBool>,
+    /// Prepared since the last `trim`.
+    used: bool,
 }
 
 pub(super) struct VideoPipeline {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    colors: wgpu::Buffer,
-    textures: Option<Textures>,
-    used: bool,
+    textures: Vec<Textures>,
 }
 
 impl shader::Pipeline for VideoPipeline {
@@ -118,34 +125,26 @@ impl shader::Pipeline for VideoPipeline {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let colors = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("fastcord video color matrix"),
-            size: 48,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         Self {
             pipeline,
             layout,
             sampler,
-            colors,
-            textures: None,
-            used: false,
+            textures: Vec::new(),
         }
     }
 
+    /// Frees the planes of a video that was not drawn since the last trim, or
+    /// whose session ended.
     fn trim(&mut self) {
-        if !self.used
-            || self.textures.as_ref().is_some_and(|textures| {
-                textures
-                    .active
-                    .upgrade()
-                    .is_none_or(|active| !active.load(Ordering::Acquire))
-            })
-        {
-            self.textures = None;
-        }
-        self.used = false;
+        self.textures.retain_mut(|textures| {
+            let live = textures
+                .active
+                .upgrade()
+                .is_some_and(|active| active.load(Ordering::Acquire));
+            let keep = live && textures.used;
+            textures.used = false;
+            keep
+        });
     }
 }
 
@@ -185,6 +184,70 @@ fn plane(
     })
 }
 
+impl Textures {
+    fn new(
+        pipeline: &VideoPipeline,
+        device: &wgpu::Device,
+        size: (u32, u32),
+        active: Weak<AtomicBool>,
+    ) -> Self {
+        let y = plane(
+            device,
+            "fastcord video Y",
+            size.0,
+            size.1,
+            wgpu::TextureFormat::R8Unorm,
+        );
+        let uv = plane(
+            device,
+            "fastcord video UV",
+            size.0.div_ceil(2),
+            size.1.div_ceil(2),
+            wgpu::TextureFormat::Rg8Unorm,
+        );
+        let colors = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fastcord video color matrix"),
+            size: 48,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let y_view = y.create_view(&Default::default());
+        let uv_view = uv.create_view(&Default::default());
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fastcord video planes"),
+            layout: &pipeline.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&y_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&uv_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: colors.as_entire_binding(),
+                },
+            ],
+        });
+        Self {
+            size,
+            y,
+            uv,
+            colors,
+            group,
+            serial: None,
+            active,
+            used: false,
+        }
+    }
+}
+
 impl shader::Primitive for VideoPrimitive {
     type Pipeline = VideoPipeline;
 
@@ -202,68 +265,32 @@ impl shader::Primitive for VideoPrimitive {
         let Some(image) = self.frame.nv12() else {
             return;
         };
-        pipeline.used = true;
         let size = (image.width(), image.height());
-        if pipeline
+        let key = Arc::downgrade(&self.active);
+        let index = match pipeline
             .textures
-            .as_ref()
-            .is_none_or(|textures| textures.size != size)
+            .iter()
+            .position(|textures| textures.active.ptr_eq(&key))
         {
-            // Release the previous resolution before allocating its replacement.
-            pipeline.textures = None;
-            let y = plane(
-                device,
-                "fastcord video Y",
-                size.0,
-                size.1,
-                wgpu::TextureFormat::R8Unorm,
-            );
-            let uv = plane(
-                device,
-                "fastcord video UV",
-                size.0.div_ceil(2),
-                size.1.div_ceil(2),
-                wgpu::TextureFormat::Rg8Unorm,
-            );
-            let y_view = y.create_view(&Default::default());
-            let uv_view = uv.create_view(&Default::default());
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("fastcord video planes"),
-                layout: &pipeline.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&y_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&uv_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: pipeline.colors.as_entire_binding(),
-                    },
-                ],
-            });
-            pipeline.textures = Some(Textures {
-                size,
-                y,
-                uv,
-                group,
-                serial: None,
-                active: Arc::downgrade(&self.active),
-            });
-        }
-        let textures = pipeline
-            .textures
-            .as_mut()
-            .expect("plane pair was allocated");
-        let same_session = textures.active.ptr_eq(&Arc::downgrade(&self.active));
-        if textures.serial == Some(self.frame.serial()) && same_session {
+            Some(index) if pipeline.textures[index].size == size => index,
+            found => {
+                match found {
+                    // Release the previous resolution before allocating its
+                    // replacement.
+                    Some(index) => {
+                        pipeline.textures.swap_remove(index);
+                    }
+                    None if pipeline.textures.len() >= MAX_VIDEOS => return,
+                    None => {}
+                }
+                let textures = Textures::new(pipeline, device, size, key);
+                pipeline.textures.push(textures);
+                pipeline.textures.len() - 1
+            }
+        };
+        let textures = &mut pipeline.textures[index];
+        textures.used = true;
+        if textures.serial == Some(self.frame.serial()) {
             return;
         }
         // The lease is tightly packed once on the worker. write_texture handles
@@ -287,17 +314,20 @@ impl shader::Primitive for VideoPrimitive {
             size.1.div_ceil(2),
         );
         queue.write_buffer(
-            &pipeline.colors,
+            &textures.colors,
             0,
             bytemuck::cast_slice(&self.frame.color().transform_rows()),
         );
         textures.serial = Some(self.frame.serial());
-        textures.active = Arc::downgrade(&self.active);
     }
 
     fn draw(&self, pipeline: &VideoPipeline, pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let key = Arc::downgrade(&self.active);
         if self.active.load(Ordering::Acquire)
-            && let Some(textures) = &pipeline.textures
+            && let Some(textures) = pipeline
+                .textures
+                .iter()
+                .find(|textures| textures.used && textures.active.ptr_eq(&key))
         {
             pass.set_pipeline(&pipeline.pipeline);
             pass.set_bind_group(0, &textures.group, &[]);

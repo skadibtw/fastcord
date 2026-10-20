@@ -149,6 +149,14 @@ impl SendOptions {
         framerate: 30,
     };
 
+    /// A camera layer (issue #84): 1280×720 at 30 fps starting at 1.5 Mbit/s.
+    pub const CAMERA_720P30: Self = Self {
+        bitrate: 1_500_000,
+        width: 1280,
+        height: 720,
+        framerate: 30,
+    };
+
     fn validate(self) -> Result<(), VideoError> {
         if !(64_000..=10_000_000).contains(&self.bitrate)
             || !(16..=4096).contains(&self.width)
@@ -168,6 +176,36 @@ pub struct VideoOptions {
     pub codecs: Vec<CodecOffer>,
     /// Owners send one screen layer; watchers offer decode only and no layer.
     pub send: Option<SendOptions>,
+    /// A call connection (issue #84): the layer is a camera (`video`, not
+    /// `screen`, and no screenshare content type), the connection receives
+    /// other participants' cameras as well as sending its own, and starts
+    /// wanting no video and sending none until the application says so.
+    pub camera: bool,
+}
+
+/// Which remote streams a connection asks the server to forward.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum VideoInterest {
+    #[default]
+    Off,
+    /// The best stream of every announced user.
+    All,
+    /// Only these users' streams (at most [`MAX_INTEREST_USERS`]).
+    Users(Vec<Snowflake>),
+}
+
+/// Users a [`VideoInterest::Users`] can name: the number of camera streams a
+/// connection receives at once.
+pub const MAX_INTEREST_USERS: usize = 6;
+
+/// What the application tells a running connection about its video: set
+/// through `MediaSender`, applied by the driver.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VideoControl {
+    pub interest: VideoInterest,
+    /// Frames may be sent. A camera connection starts with this off and
+    /// announces its layer inactive again whenever it turns off.
+    pub sending: bool,
 }
 
 impl VideoOptions {
@@ -176,6 +214,26 @@ impl VideoOptions {
         Self {
             codecs: vec![CodecOffer::h264(false, true), CodecOffer::av1()],
             send: None,
+            camera: false,
+        }
+    }
+
+    /// A call participant that may turn a camera on: H.264 encode/decode and
+    /// AV1 decode, one camera layer (issue #84).
+    pub fn camera(send: SendOptions) -> Self {
+        Self {
+            codecs: vec![CodecOffer::h264(true, true), CodecOffer::av1()],
+            send: Some(send),
+            camera: true,
+        }
+    }
+
+    /// A call participant that only receives cameras (a platform with no
+    /// camera capture yet).
+    pub fn call_watch() -> Self {
+        Self {
+            camera: true,
+            ..Self::watch()
         }
     }
 
@@ -184,6 +242,7 @@ impl VideoOptions {
         Self {
             codecs: vec![CodecOffer::h264(true, true), CodecOffer::av1()],
             send: Some(send),
+            camera: false,
         }
     }
 
@@ -340,6 +399,22 @@ mod tests {
     }
 
     #[test]
+    fn a_call_offers_a_camera_layer_or_only_receives() {
+        let camera = VideoOptions::camera(SendOptions::CAMERA_720P30);
+        camera.validate().unwrap();
+        assert!(camera.camera && camera.send.is_some());
+        assert!(camera.send_offer(VideoCodec::H264).is_some());
+        let watch = VideoOptions::call_watch();
+        watch.validate().unwrap();
+        assert!(watch.camera && watch.send.is_none());
+        // Sending without an H.264 encoder is as inconsistent as for a share.
+        let mut broken = VideoOptions::call_watch();
+        broken.send = Some(SendOptions::CAMERA_720P30);
+        assert_eq!(broken.validate(), Err(VideoError::Negotiation));
+        assert_eq!(VideoControl::default().interest, VideoInterest::Off);
+    }
+
+    #[test]
     fn inconsistent_offers_are_refused() {
         let good = CodecOffer::h264(true, true);
         let bad = |change: fn(&mut CodecOffer)| {
@@ -348,6 +423,7 @@ mod tests {
             VideoOptions {
                 codecs: vec![offer],
                 send: None,
+                camera: false,
             }
             .validate()
         };
@@ -371,6 +447,7 @@ mod tests {
         let empty = VideoOptions {
             codecs: Vec::new(),
             send: None,
+            camera: false,
         };
         assert_eq!(empty.validate(), Err(VideoError::Negotiation));
         // Sending needs an encoder.

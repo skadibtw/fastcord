@@ -308,7 +308,7 @@ pub(super) fn outcome(result: Result<(), MediaSendError>) -> SinkOutcome {
     }
 }
 
-fn sink(media: MediaSender) -> FrameSink {
+pub(super) fn sink(media: MediaSender) -> FrameSink {
     Box::new(move |unit| {
         outcome(media.send_video(VideoFrame {
             data: unit.data,

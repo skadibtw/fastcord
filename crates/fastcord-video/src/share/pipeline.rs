@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use fastcord_platform::capture::{Flow, FrameHandler, Tick, VideoSample};
 
 use super::{
-    Counters, EncoderReport, MAX_ENCODED_FRAME_BYTES, MIN_BITRATE, OpenEncoder, ShareConfig,
-    ShareEnd, ShareEvent, ShareObserver, Shared, SinkOutcome,
+    Counters, EncoderReport, MAX_ENCODED_FRAME_BYTES, MIN_BITRATE, OpenEncoder, PreviewSink,
+    ShareConfig, ShareEnd, ShareEvent, ShareObserver, Shared, SinkOutcome,
 };
 use crate::codec::{
     BackendKind, BackendPreference, CodecError, EncodedFrame, EncoderConfig, VideoEncoder,
@@ -35,6 +35,7 @@ pub(super) struct Pipeline {
     config: ShareConfig,
     open: OpenEncoder,
     observer: ShareObserver,
+    preview: Option<PreviewSink>,
     encoder: Option<Running>,
     /// The backends the next open may use: the configured one, narrowed to
     /// software after a hardware encoder failed while running.
@@ -61,6 +62,7 @@ impl Pipeline {
         config: ShareConfig,
         open: OpenEncoder,
         observer: ShareObserver,
+        preview: Option<PreviewSink>,
     ) -> Self {
         Self {
             shared,
@@ -68,6 +70,7 @@ impl Pipeline {
             config,
             open,
             observer,
+            preview,
             encoder: None,
             base: None,
             last_timestamp: None,
@@ -86,6 +89,9 @@ impl Pipeline {
     pub(super) fn picture(&mut self, sample: &VideoSample<'_>, now: Instant) -> Flow {
         if self.ended {
             return Flow::Stop;
+        }
+        if let Some(preview) = self.preview.as_mut() {
+            preview(sample);
         }
         let counters = &self.shared.counters;
         Counters::add(&counters.pictures, 1);

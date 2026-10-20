@@ -118,6 +118,10 @@ struct Rig {
 
 impl Rig {
     fn new(config: ShareConfig) -> Self {
+        Self::with_preview(config, None)
+    }
+
+    fn with_preview(config: ShareConfig, preview: Option<PreviewSink>) -> Self {
         let shared = Arc::new(Shared::new(&config));
         let log = Arc::new(Mutex::new(Log::default()));
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -151,7 +155,7 @@ impl Rig {
         let record = Arc::clone(&events);
         let observer: ShareObserver = Arc::new(move |event| record.lock().push(event));
         Self {
-            pipeline: Pipeline::new(Arc::clone(&shared), config, open, observer),
+            pipeline: Pipeline::new(Arc::clone(&shared), config, open, observer, preview),
             control: ShareControl {
                 shared: Arc::clone(&shared),
             },
@@ -213,6 +217,29 @@ impl Rig {
 
 fn config() -> ShareConfig {
     ShareConfig::SCREEN_SHARE_720P30
+}
+
+#[test]
+fn the_preview_sees_every_picture_even_while_nothing_is_sent() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    let preview: PreviewSink = Box::new(move |sample| {
+        record.lock().push((sample.width(), sample.height()));
+    });
+    let mut rig = Rig::with_preview(ShareConfig::CAMERA_720P30, Some(preview));
+    // Not attached, not negotiated: the camera preview still shows the capture.
+    rig.picture(640, 360, 0);
+    assert!(rig.log.lock().opened.is_empty());
+    rig.attach();
+    rig.control.set_negotiated(true);
+    rig.picture(640, 360, 33);
+    // Paused by the server: nothing is encoded, the preview carries on.
+    rig.control.set_active(false);
+    rig.picture(640, 360, 66);
+    assert_eq!(*seen.lock(), [(640, 360); 3]);
+    assert_eq!(rig.sent.lock().len(), 1);
+    assert_eq!(ShareConfig::CAMERA_720P30.bitrate, 1_500_000);
+    ShareConfig::CAMERA_720P30.validate().unwrap();
 }
 
 #[test]

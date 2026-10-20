@@ -20,6 +20,14 @@ pub struct Selection {
     pub label: String,
 }
 
+/// The saved camera: its stable ID (`None` is the first camera) and the label it
+/// had, for display when it is not connected (issue #84).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CameraSelection {
+    pub id: Option<String>,
+    pub label: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preferences {
     pub input: Selection,
@@ -34,6 +42,8 @@ pub struct Preferences {
     pub voice_recording: bool,
     /// Input mode, sensitivity and communication shortcuts.
     pub voice_input: crate::shortcuts::Settings,
+    /// The chosen camera. The camera itself is never saved as on.
+    pub camera: CameraSelection,
 }
 
 impl Default for Preferences {
@@ -47,6 +57,7 @@ impl Default for Preferences {
             notifications_off: false,
             voice_recording: false,
             voice_input: crate::shortcuts::Settings::default(),
+            camera: CameraSelection::default(),
         }
     }
 }
@@ -282,6 +293,25 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
             .get("voice_input")
             .map(crate::shortcuts::Settings::from_json)
             .unwrap_or_default(),
+        // Older settings predate cameras: the first camera.
+        camera: value
+            .get("camera")
+            .and_then(camera_selection)
+            .unwrap_or_default(),
+    })
+}
+
+fn camera_selection(value: &Value) -> Option<CameraSelection> {
+    let label = value.get("label")?.as_str()?;
+    let id = match value.get("id")? {
+        Value::Null => None,
+        // A Windows symbolic link is under 300 bytes.
+        Value::String(id) if !id.is_empty() && id.len() <= 512 => Some(id.clone()),
+        _ => return None,
+    };
+    (label.len() <= 256).then(|| CameraSelection {
+        id,
+        label: label.to_owned(),
     })
 }
 
@@ -297,7 +327,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json()}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label}}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -385,6 +415,10 @@ mod tests {
                 input.release_ms = 300;
                 input
             },
+            camera: CameraSelection {
+                id: Some("usb#cam".to_owned()),
+                label: "Desk camera".to_owned(),
+            },
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);
@@ -445,6 +479,41 @@ mod tests {
             Some(Preferences::default())
         );
     }
+    #[test]
+    fn the_camera_choice_persists_is_bounded_and_older_files_mean_the_first_camera() {
+        let prefs = Preferences {
+            camera: CameraSelection {
+                id: Some("usb#vid_046d&pid_0825#6&1".to_owned()),
+                label: "Logitech C270".to_owned(),
+            },
+            ..Preferences::default()
+        };
+        let restored = decode(&encode(&prefs).unwrap()).unwrap();
+        assert_eq!(restored.camera, prefs.camera);
+        let legacy = br#"{"input":{"id":null,"label":""},"output":{"id":null,"label":""}}"#;
+        assert_eq!(decode(legacy).unwrap().camera, CameraSelection::default());
+        // A malformed or oversized choice is dropped, not trusted.
+        for bad in [
+            r#""camera":{"id":"","label":"x"}"#.to_owned(),
+            format!(r#""camera":{{"id":"{}","label":"x"}}"#, "a".repeat(513)),
+            r#""camera":{"id":3,"label":"x"}"#.to_owned(),
+        ] {
+            let text = format!(
+                r#"{{"input":{{"id":null,"label":""}},"output":{{"id":null,"label":""}},{bad}}}"#
+            );
+            assert_eq!(
+                decode(text.as_bytes()).unwrap().camera,
+                CameraSelection::default()
+            );
+        }
+        // The camera is a choice of device only: nothing here can turn it on.
+        assert!(
+            !String::from_utf8(encode(&prefs).unwrap())
+                .unwrap()
+                .contains("wanted")
+        );
+    }
+
     #[test]
     fn noise_modes_persist_and_device_only_settings_default_to_light() {
         for mode in NoiseSuppression::ALL {

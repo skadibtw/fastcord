@@ -12,6 +12,7 @@
 //! Direct3D 11 FFI.
 #![allow(unsafe_code)]
 
+mod camera;
 mod gpu;
 mod runtime;
 mod sources;
@@ -22,6 +23,7 @@ mod wgc;
 #[cfg(test)]
 mod tests;
 
+pub(super) use camera::{list_cameras, start_camera};
 pub(super) use runtime::Native;
 pub(super) use sources::list_sources;
 pub(super) use wgc::{availability, start};

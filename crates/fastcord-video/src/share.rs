@@ -17,6 +17,11 @@
 //! Nothing is encoded or sent before the transport has attached its sink and
 //! reported that the server accepted H.264 from us.
 //!
+//! A camera (issue #84) is the same pipeline with a different capture source:
+//! [`ShareWorker::start_camera`] opens the chosen device, and an optional
+//! [`PreviewSink`] sees every captured picture before it is encoded, so the
+//! local preview is the capture itself and never a decode of what was sent.
+//!
 //! A source resize reopens the encoder at the new size on the capture thread; a
 //! static screen is resent about once a second so receivers keep a live stream.
 
@@ -31,7 +36,7 @@ use std::time::Duration;
 
 use fastcord_platform::capture::{
     CaptureConfig, CaptureController, CaptureError, CaptureSession, CaptureState, Conversion,
-    ConversionPath, SourceId, StartOptions, StateObserver,
+    ConversionPath, SourceId, StartOptions, StateObserver, VideoSample,
 };
 use parking_lot::Mutex;
 
@@ -61,6 +66,10 @@ pub struct ShareConfig {
     pub idle_repeat: Duration,
 }
 
+/// Sees each captured picture on the capture thread, before encoding and
+/// whether or not the share is sending; must not block or keep the borrow.
+pub type PreviewSink = Box<dyn FnMut(&VideoSample<'_>) + Send>;
+
 impl ShareConfig {
     /// SPEC §8.2: one 1280×720 layer at 30 fps starting at 2.5 Mbit/s.
     pub const SCREEN_SHARE_720P30: Self = Self {
@@ -71,6 +80,14 @@ impl ShareConfig {
         preference: BackendPreference::Auto,
         conversion: Conversion::Auto,
         idle_repeat: Duration::from_secs(1),
+    };
+
+    /// A camera layer: up to 1280×720 at 30 fps starting at 1.5 Mbit/s. The
+    /// camera delivers continuously, so the keepalive never fires.
+    pub const CAMERA_720P30: Self = Self {
+        bitrate: 1_500_000,
+        max_bitrate: 1_500_000,
+        ..Self::SCREEN_SHARE_720P30
     };
 
     fn validate(&self) -> Result<(), ShareError> {
@@ -438,18 +455,56 @@ impl ShareWorker {
         observer: ShareObserver,
         open: OpenEncoder,
     ) -> Result<Self, ShareError> {
+        Self::launch(config, observer, open, None, |options, handler| {
+            fastcord_platform::capture::start(source, options, handler)
+        })
+    }
+
+    /// Captures the camera with stable ID `device` (`None`: the first one)
+    /// with the platform's encoders. `preview` sees every picture.
+    pub fn start_camera(
+        device: Option<&str>,
+        config: ShareConfig,
+        observer: ShareObserver,
+        preview: Option<PreviewSink>,
+    ) -> Result<Self, ShareError> {
+        Self::start_camera_with(device, config, observer, preview, platform_encoder())
+    }
+
+    /// As [`start_camera`](Self::start_camera), with explicit encoders.
+    pub fn start_camera_with(
+        device: Option<&str>,
+        config: ShareConfig,
+        observer: ShareObserver,
+        preview: Option<PreviewSink>,
+        open: OpenEncoder,
+    ) -> Result<Self, ShareError> {
+        Self::launch(config, observer, open, preview, |options, handler| {
+            fastcord_platform::capture::start_camera(device, options, handler)
+        })
+    }
+
+    fn launch(
+        config: ShareConfig,
+        observer: ShareObserver,
+        open: OpenEncoder,
+        preview: Option<PreviewSink>,
+        start: impl FnOnce(
+            StartOptions,
+            Box<dyn FnOnce() -> Pipeline + Send>,
+        ) -> Result<CaptureSession, CaptureError>,
+    ) -> Result<Self, ShareError> {
         config.validate()?;
         let shared = Arc::new(Shared::new(&config));
         let state_observer = state_observer(Arc::clone(&shared), Arc::clone(&observer));
         let handler_shared = Arc::clone(&shared);
-        let session = fastcord_platform::capture::start(
-            source,
+        let session = start(
             StartOptions {
                 config: config.capture,
                 conversion: config.conversion,
                 observer: Some(state_observer),
             },
-            move || Pipeline::new(handler_shared, config, open, observer),
+            Box::new(move || Pipeline::new(handler_shared, config, open, observer, preview)),
         )
         .map_err(ShareError::Capture)?;
         let _ = shared.controller.set(session.controller());

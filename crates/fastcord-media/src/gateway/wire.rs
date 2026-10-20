@@ -373,7 +373,11 @@ pub(crate) fn identify(
         .and_then(|video| video.send)
         .map(|send| {
             vec![IdentifyStream {
-                kind: "screen",
+                kind: if video.is_some_and(|video| video.camera) {
+                    "video"
+                } else {
+                    "screen"
+                },
                 rid: SCREEN_RID,
                 quality: 100,
                 max_bitrate: send.bitrate,

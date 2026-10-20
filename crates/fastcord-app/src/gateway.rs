@@ -6,12 +6,17 @@
 //! screen shows, and is dropped, with the connection and the state it owns,
 //! when the account screen is left (which closes the Gateway session cleanly).
 
+mod camera;
 mod stream_audio;
 mod stream_share;
 mod stream_video;
 pub(crate) use stream_video::open_h264;
 mod voice_audio;
 
+pub use camera::{
+    CameraChoice, CameraControls, CameraList, CameraStatus, CameraTiles,
+    can_send as can_send_camera, describe as describe_camera, list_cameras,
+};
 pub use stream_share::{SharePicker, ShareView};
 pub use voice_audio::VoiceAudioState;
 
@@ -86,6 +91,9 @@ pub struct VoiceControls {
     pub ptt_release_ms: u16,
     /// Voice-activity threshold as `-n` dBFS; `None` is automatic (nothing is withheld).
     pub sensitivity: Option<u8>,
+    /// The camera of the current call: what the user asked for and what the call
+    /// reports back (issue #84).
+    pub camera: CameraControls,
 }
 
 /// A Go Live offer in the parent voice channel; at most 32, keys only.
@@ -738,6 +746,7 @@ pub struct NavigationBridge {
     outbox_slots: Slots,
     watched: Arc<parking_lot::Mutex<Option<Arc<crate::playback::Session>>>>,
     share_view: watch::Sender<ShareView>,
+    camera_tiles: Arc<CameraTiles>,
 }
 
 impl NavigationBridge {
@@ -759,7 +768,39 @@ impl NavigationBridge {
             outbox_slots: Slots::default(),
             watched: Arc::default(),
             share_view: watch::channel(ShareView::default()).0,
+            camera_tiles: Arc::default(),
         }
+    }
+
+    /// The tiles of the call view (the local preview and the remote cameras).
+    pub fn camera_tiles(&self) -> Arc<CameraTiles> {
+        Arc::clone(&self.camera_tiles)
+    }
+
+    /// The user turned the camera on or off. This is the only way it turns on.
+    pub fn set_camera(&self, on: bool) {
+        self.voice_controls.send_if_modified(|controls| {
+            let camera = &mut controls.camera;
+            if camera.wanted == on {
+                return false;
+            }
+            camera.wanted = on;
+            if on {
+                camera.status = CameraStatus::Starting;
+            } else if matches!(camera.status, CameraStatus::Failed(_)) {
+                camera.status = CameraStatus::Off;
+            }
+            true
+        });
+    }
+
+    /// Chooses the camera by its stable ID (`None`: the first one). A running
+    /// camera is released and the new one opened.
+    pub fn select_camera(&self, device: Option<String>) {
+        self.voice_controls.send_modify(|controls| {
+            controls.camera.device = device;
+            controls.camera.generation = controls.camera.generation.wrapping_add(1);
+        });
     }
 
     /// Current audio state for the voice controls.
@@ -850,6 +891,7 @@ impl NavigationBridge {
             controls.noise_suppression = preferences.noise_suppression;
             controls.echo_cancellation_off = !preferences.echo_cancellation;
             controls.input_gain = preferences.input_gain;
+            controls.camera.device = preferences.camera.id.clone();
         });
     }
 
@@ -1488,7 +1530,7 @@ struct Worker {
     voice_audio: watch::Receiver<VoiceAudioState>,
     voice_controls: watch::Receiver<VoiceControls>,
     commands: mpsc::Receiver<Command>,
-    voice_flags: (bool, bool),
+    voice_flags: (bool, bool, bool),
     revision: u64,
     voice_correlator: Option<JoinCorrelator>,
     voice_task: Option<tokio::task::JoinHandle<()>>,
@@ -2051,7 +2093,11 @@ impl Worker {
         self.resolve_voice_names();
         let flags = {
             let controls = self.voice_controls.borrow_and_update();
-            (controls.self_muted, controls.deafened)
+            (
+                controls.self_muted,
+                controls.deafened,
+                controls.camera.is_live(),
+            )
         };
         if flags == self.voice_flags {
             return;
@@ -2063,12 +2109,10 @@ impl Worker {
         ) && let Some(request) = *self.voice_requests.borrow()
             && let Some(channel) = request.channel_id
         {
-            gateway.voice_state().request(VoiceStateRequest::join(
-                request.guild_id,
-                channel,
-                flags.0,
-                flags.1,
-            ));
+            gateway.voice_state().request(
+                VoiceStateRequest::join(request.guild_id, channel, flags.0, flags.1)
+                    .with_video(flags.2),
+            );
         }
     }
     fn request_voice_state(&mut self, gateway: &Gateway) -> bool {
@@ -2092,7 +2136,7 @@ impl Worker {
                 correlator.leave();
             }
         }
-        self.voice_flags = (request.self_mute, request.self_deaf);
+        self.voice_flags = (request.self_mute, request.self_deaf, request.self_video);
         gateway.voice_state().request(request);
         true
     }
@@ -2353,6 +2397,7 @@ impl Worker {
                     self.bridge.voice_audio.clone(),
                     self.bridge.voice_controls.subscribe(),
                     self.bridge.voice_controls.clone(),
+                    self.bridge.camera_tiles(),
                 )));
             }
             Correlation::Ended | Correlation::Reallocating => {
@@ -2529,7 +2574,7 @@ pub fn status_stream(
         voice_audio,
         voice_controls,
         commands,
-        voice_flags: (false, false),
+        voice_flags: (false, false, false),
         revision: 0,
         voice_correlator: None,
         voice_task: None,
@@ -4124,7 +4169,7 @@ mod tests {
             voice_requests: bridge.voice_requests.subscribe(),
             voice_audio: bridge.voice_audio.subscribe(),
             voice_controls: bridge.voice_controls.subscribe(),
-            voice_flags: (false, false),
+            voice_flags: (false, false, false),
             commands: bridge.take_commands().unwrap(),
             revision: 0,
             voice_correlator: None,

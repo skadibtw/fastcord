@@ -1,10 +1,14 @@
+use super::camera::{self, CallVideo, CameraTiles};
 use super::{VoiceControls, VoiceParticipant};
 use fastcord_audio::{
     AudioEngine, AudioError, EncodedPacket, EngineChannels, EngineConfig, EngineControl,
     NoiseSuppression, NoiseSuppressionStatus, RemoteFrame,
 };
-use fastcord_media::{VoiceCredentials, VoiceEvent, VoiceMessage, VoiceStatus, connect};
+use fastcord_media::{
+    VoiceCredentials, VoiceEvent, VoiceMessage, VoiceStatus, connect, connect_with_video,
+};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -37,6 +41,7 @@ pub(super) async fn run(
     state: watch::Sender<VoiceAudioState>,
     controls: watch::Receiver<VoiceControls>,
     controls_tx: watch::Sender<VoiceControls>,
+    tiles: Arc<CameraTiles>,
 ) {
     let initial = controls.borrow().clone();
     let capture_enabled = initial.capture_enabled();
@@ -46,6 +51,7 @@ pub(super) async fn run(
         state,
         controls,
         controls_tx,
+        tiles,
         move || {
             AudioEngine::start(EngineConfig {
                 input: Some(initial.input_device),
@@ -368,9 +374,13 @@ async fn run_with(
     state: watch::Sender<VoiceAudioState>,
     mut controls: watch::Receiver<VoiceControls>,
     controls_tx: watch::Sender<VoiceControls>,
+    tiles: Arc<CameraTiles>,
     start_engine: impl FnOnce() -> EngineStart + Send + 'static,
 ) {
-    let mut session = connect(credentials);
+    // A call connection offers video (cameras) next to audio; if the offer is
+    // ever inconsistent the call is still an audio call.
+    let mut session = connect_with_video(credentials.clone(), camera::call_options())
+        .unwrap_or_else(|_| connect(credentials));
     let media = session.media();
     let started = tokio::task::spawn_blocking(start_engine).await;
     let (engine, channels) = match started {
@@ -383,6 +393,10 @@ async fn run_with(
         }
     };
     state.send_replace(VoiceAudioState::Running);
+    // Every call starts with the camera off; only the user's click turns it on.
+    let mut video = CallVideo::new(media.clone(), tiles, controls_tx.clone());
+    let mut shown = video.shown();
+    let mut camera_progress = video.progress();
     let noise_status = NoiseStatus(&controls_tx);
     let mut captured = channels.captured;
     let mut remote = channels.remote_audio;
@@ -448,13 +462,13 @@ async fn run_with(
                         });
                     }
                     Some(VoiceMessage::Event(event)) => {
+                        video.on_event(&event);
                         apply_voice_event(event, &mut participants, &mut release_at);
                         publish_participants(&controls_tx, &participants);
                     }
-                    // The parent voice connection never offers video, so none arrives;
-                    // stream sessions (their own connections) carry video, never the
-                    // audio engine's capture path.
-                    Some(VoiceMessage::Video(_)) => {}
+                    // Cameras ride on this connection; screen shares have their own.
+                    // Video never touches the audio engine's capture path.
+                    Some(VoiceMessage::Video(frame)) => video.on_frame(frame),
                     None => break,
                 }
             }
@@ -481,7 +495,9 @@ async fn run_with(
                 retry_at = sync.retry_deadline();
                 let enabled = updated.capture_enabled_with(hold.active);
                 let dialog_open = updated.diagnostics_open;
+                let camera_wanted = updated.camera.clone();
                 drop(updated);
+                video.sync(&camera_wanted);
                 if capture_enabled && !enabled {
                     let _ = media.end_speech();
                     speech_end_at = None;
@@ -493,6 +509,16 @@ async fn run_with(
                 } else if meter_at.is_none() {
                     meter_at = Some(Instant::now());
                 }
+            }
+            changed = shown.changed() => {
+                if changed.is_err() { break; }
+                let on_screen = *shown.borrow_and_update();
+                video.on_shown(on_screen);
+            }
+            changed = camera_progress.changed() => {
+                if changed.is_err() { break; }
+                camera_progress.borrow_and_update();
+                video.on_progress();
             }
             _ = wait_for_release(meter_at) => {
                 meter_at = Some(Instant::now() + METER_INTERVAL);
@@ -570,7 +596,9 @@ async fn run_with(
     release_push_to_talk(&controls_tx);
     controls_tx.send_modify(|controls| controls.push_to_mute_down = false);
 
-    // Release the audio devices before the next call can open them, then say goodbye.
+    // Release the camera and the decoders, then the audio devices, before the next call
+    // can open them, then say goodbye.
+    video.finish().await;
     drop(engine);
     drop(noise_status);
     let _ = media.end_speech();
@@ -737,6 +765,7 @@ mod tests {
                 state,
                 controls,
                 controls_tx,
+                Arc::default(),
                 || Err(AudioError::NothingToRun),
             ),
         )
