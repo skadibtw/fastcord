@@ -1,31 +1,34 @@
-//! Inline playback of Ogg Opus attachments (voice messages and `.ogg`/`.opus` audio).
+//! Inline playback of Ogg Opus audio (voice messages), and of MP4 and WebM video (issues
+//! #74 and #116): H.264 or AV1 video with Opus audio; AAC is not decoded, so such a video
+//! plays without sound and says so.
 //!
 //! The file comes through the same credential-free, byte-bounded attachment cache as Open
 //! (so signed-URL refresh, 401/403/404/429 handling and the 64 MiB ceiling are unchanged),
-//! is demuxed and paced on a dedicated thread and is played by an output-only audio engine.
-//! Nothing here decodes or touches the disk on the UI thread, and nothing starts without a
-//! click: there is no autoplay. One attachment plays at a time; starting another, leaving
-//! the channel or scrolling the message out of the built rows drops the session, which stops
-//! the thread and releases the output device. Every other audio and all video attachments
-//! stay Download/Open-only.
+//! is demuxed, decoded and paced on dedicated threads ([`crate::av_player`]) and its sound is
+//! played by an output-only audio engine. Nothing here decodes or touches the disk on the UI
+//! thread, and nothing starts without a click: there is no autoplay. One attachment plays at
+//! a time; starting another, leaving the channel or scrolling the message out of the built
+//! rows drops the session, which stops the threads and releases the output device. Every
+//! other audio and video format stays Download/Open-only.
 use std::sync::Arc;
 
-use fastcord_audio::{DeviceChoice, FilePlayer, PlayerFailure, PlayerSnapshot, PlayerState};
+use fastcord_audio::{DeviceChoice, PlayerFailure, PlayerSnapshot, PlayerState};
 use fastcord_model::{Attachment, Snowflake};
 use iced::task::Handle;
-use iced::widget::{button, row, slider, text};
+use iced::widget::{button, column, container, row, slider, text};
 use iced::{Element, Length, Task};
 
 use crate::Message;
 use crate::attachment_ui::{RestRefresh, safe_attachment_filename};
 use crate::attachments::{AttachmentError, AttachmentKey, MAX_FILE_BYTES};
+use crate::av_player::{MediaPlayer, StartError};
 use crate::gateway::GatewayPanel;
 use crate::login::Session;
 use crate::timeline::Event;
 
 /// A started player on its way to the reducer; sharing, not copying, the one player.
 #[derive(Clone)]
-pub struct PlayerHandle(Arc<FilePlayer>);
+pub struct PlayerHandle(Arc<MediaPlayer>);
 
 impl std::fmt::Debug for PlayerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -63,7 +66,7 @@ pub struct MediaSession {
     pub volume: u8,
     pub muted: bool,
     seeking: Option<u32>,
-    player: Option<Arc<FilePlayer>>,
+    player: Option<Arc<MediaPlayer>>,
     _worker: Handle,
 }
 
@@ -100,19 +103,28 @@ impl MediaSession {
         Self::new(key, worker.abort_on_drop())
     }
 
+    /// The latest-frame slot of a playing video, for the frame subscription.
+    pub fn video_session(&self) -> Option<Arc<crate::playback::Session>> {
+        self.player
+            .as_ref()
+            .and_then(|player| player.video())
+            .map(|(session, _)| session)
+    }
+
     /// Whether the position needs periodic refreshing.
     pub fn playing(&self) -> bool {
         self.phase == Phase::Active && self.snapshot.state == PlayerState::Playing
     }
 }
 
-/// Offered for Ogg Opus by name or type; the file itself decides whether it really plays.
+/// Offered for Ogg Opus, MP4 and WebM by name or type; the file itself (its container, codecs
+/// and tracks) decides whether it really plays.
 pub fn is_playable(attachment: &Attachment) -> bool {
     let named = std::path::Path::new(&attachment.filename)
         .extension()
         .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|extension| {
-            ["ogg", "opus", "oga"]
+            ["ogg", "opus", "oga", "mp4", "m4v", "mov", "webm", "mkv"]
                 .iter()
                 .any(|known| extension.eq_ignore_ascii_case(known))
         });
@@ -121,9 +133,16 @@ pub fn is_playable(attachment: &Attachment) -> bool {
         .as_deref()
         .is_some_and(|content_type| {
             let mime = content_type.split(';').next().unwrap_or_default().trim();
-            ["audio/ogg", "audio/opus"]
-                .iter()
-                .any(|known| mime.eq_ignore_ascii_case(known))
+            [
+                "audio/ogg",
+                "audio/opus",
+                "video/mp4",
+                "video/webm",
+                "video/quicktime",
+                "video/x-matroska",
+            ]
+            .iter()
+            .any(|known| mime.eq_ignore_ascii_case(known))
         });
     (named || typed) && attachment.size <= MAX_FILE_BYTES
 }
@@ -138,14 +157,38 @@ fn failure_reason(failure: PlayerFailure) -> &'static str {
     }
 }
 
+fn start_reason(error: StartError) -> &'static str {
+    match error {
+        StartError::Damaged => "This file is damaged. Use Download.",
+        StartError::UnsupportedAudio => {
+            "This audio format cannot be played here. Use Download or Open."
+        }
+        StartError::UnsupportedVideo => {
+            "This video format cannot be played here (only H.264 or AV1 in MP4 or WebM). Use Download or Open."
+        }
+        StartError::UnsupportedLayout => {
+            "This video is stored in a layout that cannot be played here. Use Download or Open."
+        }
+        StartError::TooLarge => {
+            "This media file is too large or complex to play here. Use Download."
+        }
+        StartError::Device => {
+            "The audio output could not be opened. Check the device in audio settings."
+        }
+        StartError::Decoder => {
+            "No video decoder is available for this file on this device. Use Download or Open."
+        }
+    }
+}
+
 fn fetch_reason(error: &AttachmentError) -> &'static str {
     match error {
         AttachmentError::TooLarge => {
-            "This audio is larger than the 64 MiB playback limit. Use Download."
+            "This file is larger than the 64 MiB playback limit. Use Download."
         }
         AttachmentError::WorkerStopped => "Playback was cancelled.",
         AttachmentError::CacheUnavailable => "The local attachment cache is unavailable.",
-        _ => "The audio could not be fetched. Try again.",
+        _ => "The file could not be fetched. Try again.",
     }
 }
 
@@ -196,16 +239,11 @@ pub fn play(
                 .await
                 .map_err(|error| fetch_reason(&error))?;
             // Opening the file and the device can block; neither belongs on the UI thread.
-            tokio::task::spawn_blocking(move || FilePlayer::start(&path, output))
+            tokio::task::spawn_blocking(move || MediaPlayer::start(&path, output))
                 .await
                 .map_err(|_| "Playback was cancelled.")?
                 .map(|player| PlayerHandle(Arc::new(player)))
-                .map_err(|error| match error {
-                    fastcord_audio::PlayerError::File(failure) => failure_reason(failure),
-                    fastcord_audio::PlayerError::Device => {
-                        "The audio output could not be opened. Check the device in audio settings."
-                    }
-                })
+                .map_err(start_reason)
         },
         move |result| Message::MediaReady(generation, key, result),
     )
@@ -304,6 +342,16 @@ pub fn control(gateway: &mut GatewayPanel, control: Control) {
     }
 }
 
+/// The inline picture size: at most 360 x 240 logical pixels, at most twice the video's own.
+fn video_box(width: u32, height: u32) -> (f32, f32) {
+    let (width, height) = (width.max(1) as f32, height.max(1) as f32);
+    let scale = (360.0 / width).min(240.0 / height).min(2.0);
+    (
+        (width * scale).round().max(1.0),
+        (height * scale).round().max(1.0),
+    )
+}
+
 fn clock(ms: u64) -> String {
     let seconds = ms / 1000;
     format!("{}:{:02}", seconds / 60, seconds % 60)
@@ -331,7 +379,7 @@ pub fn view(media: Option<&MediaSession>, key: AttachmentKey) -> Element<'static
     };
     match media.phase {
         Phase::Loading => row![
-            text("Loading audio…").size(12).style(text::secondary),
+            text("Loading…").size(12).style(text::secondary),
             small("Cancel", Control::Close)
         ]
         .spacing(8)
@@ -371,7 +419,7 @@ pub fn view(media: Option<&MediaSession>, key: AttachmentKey) -> Element<'static
             } else {
                 controls = controls.push(text(clock(position)).size(12).style(text::secondary));
             }
-            controls
+            let controls = controls
                 .push(small(
                     if media.muted { "Unmute" } else { "Mute" },
                     Control::ToggleMute,
@@ -384,8 +432,32 @@ pub fn view(media: Option<&MediaSession>, key: AttachmentKey) -> Element<'static
                     )
                     .width(Length::Fixed(70.0)),
                 )
-                .push(small("Close", Control::Close))
-                .into()
+                .push(small("Close", Control::Close));
+            let mut stack = column![].spacing(4);
+            if let Some((session, (width, height))) =
+                media.player.as_ref().and_then(|player| player.video())
+            {
+                let (width, height) = video_box(width, height);
+                stack = stack.push(
+                    container(crate::playback::view::<Event>(session))
+                        .width(Length::Fixed(width))
+                        .height(Length::Fixed(height)),
+                );
+            }
+            stack = stack.push(controls);
+            if let Some(player) = &media.player {
+                if player.video_failed() {
+                    stack = stack.push(
+                        text("The video could not be decoded; any sound continues.")
+                            .size(12)
+                            .style(text::secondary),
+                    );
+                }
+                if let Some(notice) = player.notice() {
+                    stack = stack.push(text(notice).size(12).style(text::secondary));
+                }
+            }
+            stack.into()
         }
     }
 }
@@ -423,19 +495,23 @@ mod tests {
     }
 
     #[test]
-    fn only_ogg_opus_candidates_within_the_cache_limit_are_offered() {
+    fn only_ogg_mp4_and_webm_candidates_within_the_cache_limit_are_offered() {
         for (name, kind) in [
             ("voice-message.ogg", Some("audio/ogg")),
             ("song.OPUS", None),
             ("clip.oga", Some("application/octet-stream")),
             ("noext", Some("audio/ogg; codecs=opus")),
+            ("clip.MP4", Some("video/mp4")),
+            ("clip.webm", Some("video/webm")),
+            ("screen.mov", None),
+            ("noext", Some("video/webm; codecs=vp9")),
         ] {
             assert!(is_playable(&attachment(name, kind, 10)), "{name}");
         }
         for (name, kind) in [
             ("song.mp3", Some("audio/mpeg")),
-            ("clip.mp4", Some("video/mp4")),
-            ("clip.webm", Some("video/webm")),
+            ("movie.avi", Some("video/x-msvideo")),
+            ("clip.exe", Some("application/x-msdownload")),
             ("a.wav", Some("audio/wav")),
             ("a.m4a", Some("audio/mp4")),
             ("a.flac", None),
@@ -466,6 +542,30 @@ mod tests {
         control(&mut gateway, Control::TogglePause);
         control(&mut gateway, Control::Close);
         assert!(gateway.media.is_none());
+    }
+
+    #[test]
+    fn the_inline_picture_keeps_its_aspect_and_stays_small() {
+        assert_eq!(video_box(1920, 1080), (360.0, 203.0));
+        assert_eq!(video_box(1080, 1920), (135.0, 240.0));
+        assert_eq!(video_box(128, 96), (256.0, 192.0));
+        assert_eq!(video_box(0, 0), (2.0, 2.0));
+    }
+
+    #[test]
+    fn every_start_failure_has_its_own_message() {
+        use std::collections::HashSet;
+        let all = [
+            StartError::Damaged,
+            StartError::UnsupportedAudio,
+            StartError::UnsupportedVideo,
+            StartError::UnsupportedLayout,
+            StartError::TooLarge,
+            StartError::Device,
+            StartError::Decoder,
+        ];
+        let reasons: HashSet<_> = all.into_iter().map(start_reason).collect();
+        assert_eq!(reasons.len(), all.len());
     }
 
     #[test]

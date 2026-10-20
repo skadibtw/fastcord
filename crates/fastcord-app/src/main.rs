@@ -3,6 +3,7 @@
 mod attachment_ui;
 mod attachments;
 mod audio_devices;
+mod av_player;
 mod avatars;
 mod captcha;
 mod changes;
@@ -224,6 +225,8 @@ enum Message {
         Result<media_ui::PlayerHandle, &'static str>,
     ),
     MediaTick,
+    /// A new picture of the playing attachment's video is ready to draw.
+    MediaFrame(u64),
     AttachmentActionFinished(
         u64,
         AttachmentKey,
@@ -323,6 +326,7 @@ impl App {
                 | Message::EmojiLoaded(..)
                 | Message::AvatarLoaded(..)
                 | Message::VideoReady(_)
+                | Message::MediaFrame(_)
         );
         if !matches!(self.phase, Phase::Account { .. }) {
             self.friends.purge();
@@ -408,7 +412,22 @@ impl App {
             self.animation_subscription(),
             self.video_subscription(),
             self.media_subscription(),
+            self.media_frame_subscription(),
         ])
+    }
+
+    /// Frame notifications exist only while an attachment with video is on screen.
+    fn media_frame_subscription(&self) -> iced::Subscription<Message> {
+        if let Phase::Account { gateway, .. } = &self.phase
+            && let Some(session) = gateway
+                .media
+                .as_ref()
+                .and_then(media_ui::MediaSession::video_session)
+        {
+            session.subscription().map(Message::MediaFrame)
+        } else {
+            iced::Subscription::none()
+        }
     }
 
     /// The position timer exists only while an attachment is audibly playing.
@@ -758,6 +777,16 @@ impl App {
             Message::MediaReady(generation, key, result) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == generation) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     media_ui::ready(gateway, key, result);
+                }
+            }
+            Message::MediaFrame(id) => {
+                if let Phase::Account { gateway, .. } = &self.phase
+                    && let Some(session) = gateway
+                        .media
+                        .as_ref()
+                        .and_then(media_ui::MediaSession::video_session)
+                {
+                    session.consume(id);
                 }
             }
             Message::MediaTick => {

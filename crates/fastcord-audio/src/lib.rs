@@ -39,6 +39,9 @@ pub use engine::{
     EngineStats,
 };
 pub use error::AudioError;
-pub use file_player::{FilePlayer, PlayerError, PlayerFailure, PlayerSnapshot, PlayerState};
+pub use file_player::{
+    FilePlayer, PacketSource, PlayerClock, PlayerError, PlayerFailure, PlayerSnapshot, PlayerState,
+    Silence,
+};
 pub use pipeline::{CapturedFrame, RemoteFrame};
 pub use resample::UnsupportedRate;

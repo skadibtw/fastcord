@@ -9,6 +9,7 @@
 mod stream_audio;
 mod stream_share;
 mod stream_video;
+pub(crate) use stream_video::open_h264;
 mod voice_audio;
 
 pub use stream_share::{SharePicker, ShareView};

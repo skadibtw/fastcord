@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "generator": "gen_container_fixture.py",
+  "files": {
+    "container-h264-opus.mp4": {
+      "bytes": 56812,
+      "sha256": "b7cf8610b92b17d8c82321a9b151c77941f1af54baa1abcfeb1658607f3105bf"
+    },
+    "container-h264-aac.mp4": {
+      "bytes": 57304,
+      "sha256": "f0579cf03cdd49fec69da897b50065fefc1ba23e4dfe309dd0cc11096d844d31"
+    },
+    "container-av1-opus.webm": {
+      "bytes": 3741,
+      "sha256": "7f1a9a253c09fdce2fbc08d5d67e36c299fc5e065a21822d72ac53dad13c3d60"
+    }
+  }
+}

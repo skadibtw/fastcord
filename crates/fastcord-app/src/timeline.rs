@@ -2423,7 +2423,7 @@ mod tests {
     }
 
     #[test]
-    fn ogg_attachments_offer_inline_playback_with_controls_that_follow_the_session() {
+    fn playable_attachments_offer_inline_playback_with_controls_that_follow_the_session() {
         use crate::media_ui::{Control, MediaSession, Phase};
         let snapshot_for = |name: &str, kind: &str| {
             let mut item = (*message(42, "")).clone();
@@ -2441,11 +2441,18 @@ mod tests {
         };
         let voice = snapshot_for("voice-message.ogg", "audio/ogg");
         assert!(clickable_media(&voice, None).contains(&play));
-        // Other audio and all video stay Download/Open-only.
+        // MP4 and WebM video get the same Play button.
+        for (name, kind) in [("a.mp4", "video/mp4"), ("a.webm", "video/webm")] {
+            assert!(
+                clickable_media(&snapshot_for(name, kind), None).contains(&play),
+                "{name}"
+            );
+        }
+        // Other audio and video formats stay Download/Open-only.
         for (name, kind) in [
             ("a.mp3", "audio/mpeg"),
-            ("a.mp4", "video/mp4"),
-            ("a.webm", "video/webm"),
+            ("a.avi", "video/x-msvideo"),
+            ("a.m4a", "audio/mp4"),
         ] {
             let found = clickable_media(&snapshot_for(name, kind), None);
             assert!(

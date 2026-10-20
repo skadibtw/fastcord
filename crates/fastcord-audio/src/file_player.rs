@@ -1,7 +1,7 @@
 //! Local Ogg Opus file playback through the audio engine's remote-speaker path.
 //!
 //! A player is one output-only [`AudioEngine`] plus one control thread. The thread demuxes
-//! [`OggOpus`] and hands 20 ms packets to the engine paced by the wall clock, never more than
+//! a [`PacketSource`] ([`OggOpus`], or a container's Opus track) and hands 20 ms packets to the engine paced by the wall clock, never more than
 //! [`LEAD`] ahead, so memory is a handful of packets whatever the file length and the engine's
 //! own jitter buffer and decoder do the rest. Audio callbacks are untouched: they only read
 //! the engine's rings. Dropping the [`FilePlayer`] stops the thread, which drops the engine.
@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::error::TrySendError;
 
+use crate::codec::EncodedPacket;
 use crate::device::{DeviceChoice, Direction};
 use crate::ogg::{OggError, OggOpus};
 use crate::pipeline::RemoteFrame;
@@ -80,6 +81,68 @@ impl PlayerState {
     }
 }
 
+/// Where a player gets its 20 ms Opus packets from.
+pub trait PacketSource: Send + 'static {
+    /// Length of the audio, when known.
+    fn duration_ms(&self) -> Option<u64>;
+    /// The next packet, or `None` at the end.
+    fn next_packet(&mut self) -> Result<Option<EncodedPacket>, PlayerFailure>;
+    /// Repositions so that the next packet starts at `ms` (to the packet).
+    fn seek_ms(&mut self, ms: u64) -> Result<(), PlayerFailure>;
+}
+
+impl<R: Read + Seek + Send + 'static> PacketSource for OggOpus<R> {
+    fn duration_ms(&self) -> Option<u64> {
+        OggOpus::duration_ms(self)
+    }
+
+    fn next_packet(&mut self) -> Result<Option<EncodedPacket>, PlayerFailure> {
+        OggOpus::next_packet(self).map_err(Into::into)
+    }
+
+    fn seek_ms(&mut self, ms: u64) -> Result<(), PlayerFailure> {
+        OggOpus::seek_ms(self, ms).map_err(Into::into)
+    }
+}
+
+/// Silent packets for a given length: the clock of a video without playable audio. Paired
+/// with no output device, the player then only paces, pauses and seeks.
+pub struct Silence {
+    duration_ms: u64,
+    position_ms: u64,
+}
+
+impl Silence {
+    pub fn new(duration_ms: u64) -> Self {
+        Self {
+            duration_ms,
+            position_ms: 0,
+        }
+    }
+}
+
+impl PacketSource for Silence {
+    fn duration_ms(&self) -> Option<u64> {
+        Some(self.duration_ms)
+    }
+
+    fn next_packet(&mut self) -> Result<Option<EncodedPacket>, PlayerFailure> {
+        if self.position_ms >= self.duration_ms {
+            return Ok(None);
+        }
+        self.position_ms += FRAME_MS;
+        // A 20 ms CELT table-of-contents byte alone: a lost frame, which decodes to silence.
+        EncodedPacket::from_slice(&[0xF8])
+            .map(Some)
+            .map_err(|_| PlayerFailure::Unsupported)
+    }
+
+    fn seek_ms(&mut self, ms: u64) -> Result<(), PlayerFailure> {
+        self.position_ms = ms.min(self.duration_ms);
+        Ok(())
+    }
+}
+
 impl From<OggError> for PlayerFailure {
     fn from(error: OggError) -> Self {
         match error {
@@ -108,12 +171,23 @@ pub enum PlayerError {
 
 #[derive(Default)]
 struct Shared {
+    /// Counts every restart of the stream (seek, resume, replay); see [`PlayerClock`].
+    epoch: AtomicU64,
     state: AtomicU8,
     position_ms: AtomicU64,
     duration_ms: AtomicU64,
 }
 
 impl Shared {
+    fn snapshot(&self) -> PlayerSnapshot {
+        let duration = self.duration_ms.load(Ordering::Acquire);
+        PlayerSnapshot {
+            state: PlayerState::from_code(self.state.load(Ordering::Acquire)),
+            position_ms: self.position_ms.load(Ordering::Acquire),
+            duration_ms: (duration != u64::MAX).then_some(duration),
+        }
+    }
+
     fn set_state(&self, state: PlayerState) {
         self.state.store(state.code(), Ordering::Release);
     }
@@ -134,6 +208,29 @@ trait Sink {
     fn gain(&mut self, gain: f32) -> bool;
     /// Whether the output device failed.
     fn failed(&mut self) -> bool;
+    /// Estimated time between handing a packet over and hearing it.
+    fn latency_ms(&self) -> u64;
+}
+
+/// No output at all: packets are paced and dropped.
+struct NullSink;
+
+impl Sink for NullSink {
+    fn offer(&mut self, _: &RemoteFrame) -> Offer {
+        Offer::Sent
+    }
+
+    fn gain(&mut self, _: f32) -> bool {
+        true
+    }
+
+    fn failed(&mut self) -> bool {
+        false
+    }
+
+    fn latency_ms(&self) -> u64 {
+        0
+    }
 }
 
 enum Offer {
@@ -166,6 +263,10 @@ impl Sink for EngineSink {
             .is_ok()
     }
 
+    fn latency_ms(&self) -> u64 {
+        LATENCY_MS
+    }
+
     fn failed(&mut self) -> bool {
         while let Ok(event) = self.events.try_recv() {
             if matches!(
@@ -179,6 +280,22 @@ impl Sink for EngineSink {
             }
         }
         false
+    }
+}
+
+/// The audible position of a player, readable from any thread (the master clock of a video).
+#[derive(Clone)]
+pub struct PlayerClock(Arc<Shared>);
+
+impl PlayerClock {
+    pub fn snapshot(&self) -> PlayerSnapshot {
+        self.0.snapshot()
+    }
+
+    /// Increases whenever the player restarts its stream (seek, resume, replay), after the new
+    /// position is published. A follower that asked for a seek waits for it to grow.
+    pub fn epoch(&self) -> u64 {
+        self.0.epoch.load(Ordering::Acquire)
     }
 }
 
@@ -203,6 +320,19 @@ impl FilePlayer {
         let file = File::open(path).map_err(|_| PlayerError::File(PlayerFailure::Damaged))?;
         let reader =
             OggOpus::open(BufReader::new(file)).map_err(|e| PlayerError::File(e.into()))?;
+        Self::start_source(reader, Some(output))
+    }
+
+    /// Starts playing `source` from the beginning. With `output` it opens that device; with
+    /// `None` nothing is heard and the player is only a clock (see [`Silence`]). Blocks while
+    /// a device opens: call it off the UI thread.
+    pub fn start_source(
+        source: impl PacketSource,
+        output: Option<DeviceChoice>,
+    ) -> Result<Self, PlayerError> {
+        let Some(output) = output else {
+            return Ok(Self::spawn(source, NullSink));
+        };
         let (engine, channels) = AudioEngine::start(EngineConfig {
             input: None,
             output: Some(output),
@@ -214,7 +344,7 @@ impl FilePlayer {
         .map_err(|_| PlayerError::Device)?;
         let remote = channels.remote_audio.ok_or(PlayerError::Device)?;
         Ok(Self::spawn(
-            reader,
+            source,
             EngineSink {
                 _engine: engine,
                 remote,
@@ -224,10 +354,7 @@ impl FilePlayer {
         ))
     }
 
-    fn spawn<R: Read + Seek + Send + 'static>(
-        reader: OggOpus<R>,
-        sink: impl Sink + Send + 'static,
-    ) -> Self {
+    fn spawn(reader: impl PacketSource, sink: impl Sink + Send + 'static) -> Self {
         let shared = Arc::new(Shared::default());
         shared
             .duration_ms
@@ -244,12 +371,12 @@ impl FilePlayer {
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
-        let duration = self.shared.duration_ms.load(Ordering::Acquire);
-        PlayerSnapshot {
-            state: PlayerState::from_code(self.shared.state.load(Ordering::Acquire)),
-            position_ms: self.shared.position_ms.load(Ordering::Acquire),
-            duration_ms: (duration != u64::MAX).then_some(duration),
-        }
+        self.shared.snapshot()
+    }
+
+    /// A handle that reads this player's position from another thread.
+    pub fn clock(&self) -> PlayerClock {
+        PlayerClock(Arc::clone(&self.shared))
     }
 
     /// Starts or resumes; from the end it starts again from the beginning.
@@ -277,8 +404,8 @@ impl FilePlayer {
 }
 
 /// The control thread. Returns when the player is dropped or has failed.
-fn run<R: Read + Seek>(
-    mut reader: OggOpus<R>,
+fn run(
+    mut reader: impl PacketSource,
     mut sink: impl Sink,
     commands: &mpsc::Receiver<Command>,
     shared: &Shared,
@@ -297,8 +424,9 @@ fn run<R: Read + Seek>(
     let mut timestamp = 0u32;
     let (mut volume, mut muted, mut applied) = (1.0f32, false, None::<f32>);
     shared.set_state(PlayerState::Playing);
+    let latency = sink.latency_ms();
     let audible = |base: u64, sent: u64| {
-        let heard = (base + sent * FRAME_MS).saturating_sub(LATENCY_MS);
+        let heard = (base + sent * FRAME_MS).saturating_sub(latency);
         duration.map_or(heard, |end| heard.min(end))
     };
     let mut wait = Duration::ZERO;
@@ -337,8 +465,8 @@ fn run<R: Read + Seek>(
             return shared.set_state(PlayerState::Failed(PlayerFailure::Device));
         }
         if let Some((at, play)) = restart {
-            if let Err(error) = reader.seek_ms(at) {
-                return shared.set_state(PlayerState::Failed(error.into()));
+            if let Err(failure) = reader.seek_ms(at) {
+                return shared.set_state(PlayerState::Failed(failure));
             }
             pending = None;
             drain_until = None;
@@ -355,6 +483,7 @@ fn run<R: Read + Seek>(
             } else {
                 PlayerState::Paused
             });
+            shared.epoch.fetch_add(1, Ordering::AcqRel);
         }
         let now = Instant::now();
         wait = IDLE_POLL;
@@ -390,11 +519,11 @@ fn run<R: Read + Seek>(
                     },
                     Ok(None) => {
                         // Let what was queued be heard before reporting the end.
-                        drain_until = Some(next_due.max(now) + Duration::from_millis(LATENCY_MS));
+                        drain_until = Some(next_due.max(now) + Duration::from_millis(latency));
                         wait = Duration::ZERO;
                         continue;
                     }
-                    Err(error) => return shared.set_state(PlayerState::Failed(error.into())),
+                    Err(failure) => return shared.set_state(PlayerState::Failed(failure)),
                 },
             };
             match sink.offer(&frame) {
@@ -461,6 +590,10 @@ mod tests {
 
         fn failed(&mut self) -> bool {
             self.fail.load(Ordering::Acquire)
+        }
+
+        fn latency_ms(&self) -> u64 {
+            LATENCY_MS
         }
     }
 
@@ -660,6 +793,9 @@ mod tests {
             fn failed(&mut self) -> bool {
                 false
             }
+            fn latency_ms(&self) -> u64 {
+                0
+            }
         }
         let token = Arc::new(());
         let reader = OggOpus::open(Cursor::new(sample(500, 9))).unwrap();
@@ -699,5 +835,22 @@ mod tests {
         let player = FilePlayer::start(&path, DeviceChoice::SystemDefault).unwrap();
         wait_for(|| player.snapshot().state == PlayerState::Ended);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_silent_clock_needs_no_device_and_counts_restarts() {
+        let player = FilePlayer::start_source(Silence::new(300), None).unwrap();
+        let clock = player.clock();
+        assert_eq!(player.snapshot().duration_ms, Some(300));
+        wait_for(|| clock.snapshot().state == PlayerState::Ended);
+        assert_eq!(clock.snapshot().position_ms, 300);
+        let before = clock.epoch();
+        player.seek(100);
+        wait_for(|| clock.epoch() > before);
+        // Seeking an ended clock keeps it paused until asked to play, then it runs on.
+        player.play();
+        wait_for(|| clock.snapshot().state == PlayerState::Ended);
+        assert_eq!(clock.snapshot().position_ms, 300);
+        assert!(clock.epoch() > before);
     }
 }

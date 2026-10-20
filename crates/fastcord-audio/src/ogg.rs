@@ -172,7 +172,7 @@ fn scan_page<R: Read + Seek>(
 
 /// Samples in the 20 ms check: the duration of one Opus packet from its table-of-contents
 /// byte (RFC 6716 §3.1), or `None` for a malformed packet.
-fn packet_samples(packet: &[u8]) -> Option<usize> {
+pub fn packet_samples(packet: &[u8]) -> Option<usize> {
     let toc = *packet.first()?;
     let config = usize::from(toc >> 3);
     let frame = match config {

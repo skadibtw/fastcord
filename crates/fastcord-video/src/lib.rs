@@ -23,6 +23,7 @@ pub mod vaapi;
 // every OS in CI (SPEC §8.2; ADR 0001).
 pub mod av1;
 pub mod codec;
+pub mod container;
 pub mod frame;
 pub mod h264;
 #[cfg(windows)]

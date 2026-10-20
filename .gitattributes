@@ -5,3 +5,5 @@
 *.nv12 binary
 *.obu binary
 *.tar.gz binary
+*.mp4 binary
+*.webm binary

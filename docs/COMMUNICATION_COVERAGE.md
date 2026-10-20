@@ -33,6 +33,7 @@ Closed issue state does not replace outstanding live/native evidence in TESTING.
 | 4 | Text | [#72: Message forwarding and snapshots](https://github.com/skadibtw/fastcord/issues/72) |
 | 5 | Text | [#73: Poll creation, voting and results](https://github.com/skadibtw/fastcord/issues/73) |
 | 6 | Media | [#74: Inline audio and video attachment player](https://github.com/skadibtw/fastcord/issues/74) |
+| 6a | Media | [#116: MP4/WebM demuxer for inline attachment playback](https://github.com/skadibtw/fastcord/issues/116) (follow-up completing the video part of #74) |
 | 7 | Media | [#75: Voice message playback and explicit recording](https://github.com/skadibtw/fastcord/issues/75) |
 | 8 | Text | [#76: Complete free message actions](https://github.com/skadibtw/fastcord/issues/76) |
 | 9 | Navigation | [#77: Unified unread and mention inbox](https://github.com/skadibtw/fastcord/issues/77) |

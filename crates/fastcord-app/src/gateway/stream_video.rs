@@ -501,21 +501,21 @@ fn open_decoder(codec: VideoCodec) -> Result<Box<dyn VideoDecoder>, CodecError> 
 }
 
 #[cfg(windows)]
-fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
+pub(crate) fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
     fastcord_video::media_foundation::open_decoder(fastcord_video::BackendPreference::Auto)
         .map(|selected| Box::new(selected.codec) as Box<dyn VideoDecoder>)
         .map_err(codec_open_error)
 }
 
 #[cfg(target_os = "macos")]
-fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
+pub(crate) fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
     fastcord_video::videotoolbox::open_decoder(fastcord_video::BackendPreference::Auto)
         .map(|selected| Box::new(selected.codec) as Box<dyn VideoDecoder>)
         .map_err(codec_open_error)
 }
 
 #[cfg(target_os = "linux")]
-fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
+pub(crate) fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
     // The VA-API hardware decoder first, the bundled OpenH264 software codec
     // when no device (or the relevant profile) exists (SPEC milestone 30).
     fastcord_video::vaapi::platform_decoder(fastcord_video::BackendPreference::Auto)
@@ -524,7 +524,7 @@ fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
+pub(crate) fn open_h264() -> Result<Box<dyn VideoDecoder>, CodecError> {
     Err(CodecError::PlatformUnavailable(
         "H.264 decoding on this platform (Linux support requires M30)",
     ))

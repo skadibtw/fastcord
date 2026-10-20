@@ -176,6 +176,11 @@ impl Session {
         self.latest.lock().frame.clone()
     }
 
+    /// Whether the decoder reported a failure and no picture is available.
+    pub fn failed(&self) -> bool {
+        matches!(self.latest.lock().status, Status::Failed(_))
+    }
+
     pub fn description(&self) -> String {
         let latest = self.latest.lock();
         if let Some(error) = &latest.frame_error {
