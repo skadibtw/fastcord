@@ -30,6 +30,8 @@ pub struct Preferences {
     pub notifications_off: bool,
     /// Experimental voice-message recording is offered (off until the user turns it on).
     pub voice_recording: bool,
+    /// Input mode, sensitivity and communication shortcuts.
+    pub voice_input: crate::shortcuts::Settings,
 }
 
 impl Default for Preferences {
@@ -41,6 +43,7 @@ impl Default for Preferences {
             echo_cancellation: true,
             notifications_off: false,
             voice_recording: false,
+            voice_input: crate::shortcuts::Settings::default(),
         }
     }
 }
@@ -176,6 +179,7 @@ pub fn view<'a>(
     output_error: Option<fastcord_audio::DeviceErrorKind>,
     noise_status: Option<NoiseSuppressionStatus>,
     stats: Option<EngineStats>,
+    voice_input: Element<'a, crate::Message>,
 ) -> Element<'a, crate::Message> {
     let (inputs, input) = options(&settings.inputs, &prefs.input);
     let (outputs, output) = options(&settings.outputs, &prefs.output);
@@ -195,6 +199,7 @@ pub fn view<'a>(
         text(noise_summary(prefs.noise_suppression, noise_status)),
         text(noise_status.and_then(|status| status.error).map_or_else(String::new, |error| error.to_string())),
         text("Light (RNNoise) is the default and uses little CPU. High quality (DeepFilterNet 3) removes keyboard and background voices better, but adds about 30 ms of delay and uses more CPU and memory; it loads only while selected and is released when you switch away. Microphone only; never applied to shared or system audio."),
+        voice_input,
         checkbox(prefs.echo_cancellation).label("Echo cancellation").on_toggle(crate::Message::EchoCancellationChanged),
         text("Removes what your speakers play from your microphone, so others do not hear themselves. It needs a few seconds of speech to adapt, works best with the microphone and speakers in a fixed position, and is not needed with a headset."),
         checkbox(!prefs.notifications_off).label("Desktop notifications for DMs and mentions while the window is not active").on_toggle(crate::Message::NotificationsToggled),
@@ -257,6 +262,11 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
         },
         notifications_off: value.get("notifications_off").and_then(Value::as_bool) == Some(true),
         voice_recording: value.get("voice_recording").and_then(Value::as_bool) == Some(true),
+        // Older settings predate voice input: voice activity, no shortcuts.
+        voice_input: value
+            .get("voice_input")
+            .map(crate::shortcuts::Settings::from_json)
+            .unwrap_or_default(),
     })
 }
 
@@ -272,7 +282,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json()}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -350,6 +360,12 @@ mod tests {
             echo_cancellation: false,
             notifications_off: true,
             voice_recording: true,
+            voice_input: {
+                let mut input = crate::shortcuts::Settings::default();
+                input.mode = crate::shortcuts::InputMode::PushToTalk;
+                input.release_ms = 300;
+                input
+            },
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);

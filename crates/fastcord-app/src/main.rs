@@ -37,6 +37,7 @@ mod report;
 mod rich;
 mod safety;
 mod search;
+mod shortcuts;
 mod status;
 mod sticker;
 mod style;
@@ -117,6 +118,7 @@ struct App {
     audio_preferences: audio_devices::Preferences,
     audio_settings: audio_devices::Settings,
     audio_saving: Option<audio_devices::Preferences>,
+    shortcuts: shortcuts::Runtime,
     window_active: bool,
     window_drawable: bool,
     /// The per-person volume sliders are open.
@@ -288,6 +290,9 @@ enum Message {
     EmojiTick(std::time::Instant),
     AvatarLoaded(u64, avatars::AvatarKey, Option<attachments::DecodedImage>),
     WindowActive(bool),
+    VoiceInput(shortcuts::Event),
+    ShortcutKey(shortcuts::KeyInput),
+    GlobalShortcut(shortcuts::GlobalEvent),
     WindowSize(iced::Size),
     /// Direct messages (true) or a server's channels in the sidebar.
     ShowDirects(bool),
@@ -324,6 +329,7 @@ impl App {
                 audio_preferences: audio_devices::Preferences::default(),
                 audio_settings: audio_devices::Settings::default(),
                 audio_saving: None,
+                shortcuts: shortcuts::Runtime::default(),
                 window_active: true,
                 window_drawable: true,
                 voice_details: false,
@@ -454,7 +460,151 @@ impl App {
             self.media_subscription(),
             self.voice_subscription(),
             self.media_frame_subscription(),
+            self.shortcut_subscription(),
         ])
+    }
+
+    /// Whether a call is connecting or running, the only time shortcuts are heard.
+    fn call_active(&self) -> bool {
+        matches!(&self.phase, Phase::Account { gateway, .. } if gateway.controls.voice_audio_state() != gateway::VoiceAudioState::Idle)
+    }
+
+    /// Key listeners exist only while a call has bindings (or a binding is being
+    /// recorded): window keys for the window scope, one OS listener for the global one.
+    fn shortcut_subscription(&self) -> iced::Subscription<Message> {
+        let input = &self.audio_preferences.voice_input;
+        let wanted = shortcuts::wanted(input, self.call_active());
+        let mut parts = Vec::new();
+        if (wanted && input.scope == shortcuts::Scope::Window) || self.shortcuts.wants_keys() {
+            parts.push(
+                iced::event::listen_with(|event, _, _| match event {
+                    iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        physical_key,
+                        modifiers,
+                        ..
+                    }) => shortcuts::key_input(physical_key, modifiers, true),
+                    iced::Event::Keyboard(iced::keyboard::Event::KeyReleased {
+                        physical_key,
+                        modifiers,
+                        ..
+                    }) => shortcuts::key_input(physical_key, modifiers, false),
+                    _ => None,
+                })
+                .map(Message::ShortcutKey),
+            );
+        }
+        if wanted && input.scope == shortcuts::Scope::Global {
+            parts.push(
+                iced::Subscription::run_with(
+                    shortcuts::ListenerSpec(input.list()),
+                    shortcuts::listener,
+                )
+                .map(Message::GlobalShortcut),
+            );
+        }
+        iced::Subscription::batch(parts)
+    }
+
+    /// Releases every held hold-key at once (no release delay): bindings changed, the
+    /// scope changed, or the listener went away.
+    fn release_held_shortcuts(&mut self) {
+        if let Phase::Account { gateway, .. } = &self.phase {
+            gateway.controls.cancel_ptt();
+            gateway.controls.set_push_to_mute(false);
+        }
+    }
+
+    fn apply_shortcuts(&mut self, actions: Vec<shortcuts::Do>) -> Task<Message> {
+        use shortcuts::{Action, Do};
+        let mut follow = Vec::new();
+        for action in actions {
+            match action {
+                Do::Hold(kind, down) => {
+                    if let Phase::Account { gateway, .. } = &self.phase {
+                        match kind {
+                            Action::PushToTalk => gateway.controls.set_ptt(down),
+                            Action::PushToMute => gateway.controls.set_push_to_mute(down),
+                            _ => {}
+                        }
+                    }
+                }
+                Do::Cancel(kind) => {
+                    if let Phase::Account { gateway, .. } = &self.phase {
+                        match kind {
+                            Action::PushToTalk => gateway.controls.cancel_ptt(),
+                            Action::PushToMute => gateway.controls.set_push_to_mute(false),
+                            _ => {}
+                        }
+                    }
+                }
+                Do::Toggle(kind) => {
+                    if let Phase::Account { gateway, .. } = &self.phase
+                        && gateway.controls.voice_audio_state() == gateway::VoiceAudioState::Running
+                    {
+                        let controls = gateway.controls.voice_controls();
+                        follow.push(match kind {
+                            Action::ToggleMute => Message::SetSelfMute(!controls.self_muted),
+                            _ => Message::SetDeafen(!controls.deafened),
+                        });
+                    }
+                }
+                Do::Recorded(kind, binding) => {
+                    match self.audio_preferences.voice_input.assign(kind, binding) {
+                        Ok(()) => {
+                            self.shortcuts.notice = None;
+                            follow.push(Message::VoiceInput(shortcuts::Event::Saved));
+                        }
+                        Err(other) => {
+                            self.shortcuts.notice = Some(format!(
+                                "{} is already used by {}. Choose another key.",
+                                binding.label(),
+                                other.label()
+                            ));
+                        }
+                    }
+                }
+                Do::RecordCancelled => self.shortcuts.notice = None,
+            }
+        }
+        Task::batch(follow.into_iter().map(|message| self.handle(message)))
+    }
+
+    fn voice_input_event(&mut self, event: shortcuts::Event) -> Task<Message> {
+        use shortcuts::Event;
+        let input = &mut self.audio_preferences.voice_input;
+        match event {
+            Event::Mode(mode) => input.mode = mode,
+            Event::ReleaseMs(ms) => input.release_ms = ms.min(shortcuts::MAX_RELEASE_MS),
+            Event::Automatic(true) => input.sensitivity = None,
+            Event::Automatic(false) => input.sensitivity = Some(shortcuts::DEFAULT_SENSITIVITY),
+            Event::Sensitivity(level) => input.sensitivity = Some(level),
+            Event::Scope(scope) => input.scope = scope,
+            Event::Clear(action) => input.clear(action),
+            Event::Record(action) => {
+                self.shortcuts.recording = Some(action);
+                self.shortcuts.notice = None;
+                self.release_held_shortcuts();
+                return Task::none();
+            }
+            Event::CancelRecord => {
+                let _ = self.shortcuts.cancel_record();
+                return Task::none();
+            }
+            Event::Saved => {}
+        }
+        if matches!(event, Event::Scope(_) | Event::Clear(_) | Event::Saved) {
+            self.release_held_shortcuts();
+        }
+        self.shortcuts.rebuild(&self.audio_preferences.voice_input);
+        if let Phase::Account { gateway, .. } = &self.phase {
+            gateway
+                .controls
+                .set_voice_input(&self.audio_preferences.voice_input);
+        }
+        if self.audio_saving.is_none() {
+            return self.save_audio_preferences();
+        }
+        Task::none()
     }
 
     /// Frame notifications exist only while an attachment with video is on screen.
@@ -505,7 +655,37 @@ impl App {
             Message::Initialized(preferences, store) => {
                 notify::set_enabled(!preferences.notifications_off);
                 self.audio_preferences = preferences;
+                self.shortcuts.rebuild(&self.audio_preferences.voice_input);
                 return self.handle(Message::StoreReady(store));
+            }
+            Message::VoiceInput(event) => return self.voice_input_event(event),
+            Message::ShortcutKey(input) => {
+                if input.down && input.code == "Escape" && self.shortcuts.recording.is_some() {
+                    let cancelled = self.shortcuts.cancel_record().into_iter().collect();
+                    return self.apply_shortcuts(cancelled);
+                }
+                let scope = self.audio_preferences.voice_input.scope;
+                let actions = self.shortcuts.window_key(scope, &input);
+                return self.apply_shortcuts(actions);
+            }
+            Message::GlobalShortcut(event) => {
+                use shortcuts::GlobalEvent;
+                match event {
+                    GlobalEvent::Started => {
+                        self.shortcuts.global_running = true;
+                        self.shortcuts.global_error = None;
+                    }
+                    GlobalEvent::Failed(error) => {
+                        self.shortcuts.global_running = false;
+                        self.shortcuts.global_error = Some(error);
+                    }
+                    GlobalEvent::Lost => self.release_held_shortcuts(),
+                    GlobalEvent::Event(event) => {
+                        if let Some(action) = self.shortcuts.global(event) {
+                            return self.apply_shortcuts(vec![action]);
+                        }
+                    }
+                }
             }
             Message::OpenAudioSettings | Message::RefreshAudioDevices => {
                 self.audio_settings.open = true;
@@ -1005,8 +1185,15 @@ impl App {
                                     == fastcord_discord::state::navigation::ChannelKind::Voice
                                 && row.enabled
                         });
+                    let vad_forbidden = gateway
+                        .navigation
+                        .channels
+                        .rows
+                        .iter()
+                        .any(|row| row.id == channel && !row.permissions.use_vad);
                     gateway.controls.select_channel(guild, channel);
                     if join {
+                        gateway.controls.set_vad_forbidden(vad_forbidden);
                         gateway.voice_guild = Some(guild);
                         gateway.voice_call = None;
                         let controls = gateway.controls.voice_controls();
@@ -1032,6 +1219,7 @@ impl App {
                         // One parent voice connection: this request replaces a
                         // guild voice join (the correlator moves away from it).
                         gateway.voice_guild = None;
+                        gateway.controls.set_vad_forbidden(false);
                         gateway.voice_call = Some(channel);
                         let controls = gateway.controls.voice_controls();
                         gateway
@@ -1298,6 +1486,11 @@ impl App {
                 self.window_active = active;
                 self.sync_viewing();
                 notify::set_active(active);
+                if !active {
+                    let scope = self.audio_preferences.voice_input.scope;
+                    let released = self.shortcuts.window_lost_focus(scope);
+                    return self.apply_shortcuts(released);
+                }
             }
             Message::WindowSize(size) => {
                 self.window_drawable = size.width > 0.0 && size.height > 0.0;
@@ -1990,6 +2183,8 @@ impl App {
         controls.set_account_id(session.user.id);
         controls.set_volume_settings(voice_settings::load(session.user.id));
         controls.set_audio_devices(&self.audio_preferences);
+        controls.set_voice_input(&self.audio_preferences.voice_input);
+        self.shortcuts.rebuild(&self.audio_preferences.voice_input);
         let stream = gateway::status_stream(
             session.client.clone(),
             session.token(),
@@ -2447,18 +2642,20 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         if self.audio_settings.open {
-            let (input_error, output_error, noise_status, audio_stats) = match &self.phase {
-                Phase::Account { gateway, .. } => {
-                    let controls = gateway.controls.voice_controls();
-                    (
-                        controls.input_error,
-                        controls.output_error,
-                        controls.noise_status,
-                        controls.audio_stats,
-                    )
-                }
-                _ => (None, None, None, None),
-            };
+            let (input_error, output_error, noise_status, audio_stats, vad_forbidden) =
+                match &self.phase {
+                    Phase::Account { gateway, .. } => {
+                        let controls = gateway.controls.voice_controls();
+                        (
+                            controls.input_error,
+                            controls.output_error,
+                            controls.noise_status,
+                            controls.audio_stats,
+                            controls.vad_forbidden,
+                        )
+                    }
+                    _ => (None, None, None, None, false),
+                };
             // The dialog is taller than the default window: scroll instead of hiding Close.
             return center(scrollable(
                 column![
@@ -2469,6 +2666,12 @@ impl App {
                         output_error,
                         noise_status,
                         audio_stats,
+                        shortcuts::view(
+                            &self.audio_preferences.voice_input,
+                            &self.shortcuts,
+                            vad_forbidden,
+                            self.call_active(),
+                        ),
                     ),
                     text(self.notice.as_deref().unwrap_or("")),
                 ]

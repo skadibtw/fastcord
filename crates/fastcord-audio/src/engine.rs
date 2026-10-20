@@ -135,6 +135,9 @@ pub enum EngineControl {
     OutputEnabled(bool),
     /// Linear gain for one remote RTP SSRC. Values are clamped to 0–2.
     RemoteGain { ssrc: u32, gain: f32 },
+    /// Input sensitivity: `Some(n)` withholds frames quieter than `-n` dBFS (clamped to
+    /// 1-100, with a 200 ms hangover and 3 dB hysteresis); `None` transmits everything.
+    InputSensitivity(Option<u8>),
     /// Select a microphone denoiser without reopening either device.
     NoiseSuppression(NoiseSuppression),
     /// Turn acoustic echo cancellation on or off without reopening either device.
@@ -182,6 +185,8 @@ pub struct EngineStats {
     pub decode_errors: u64,
     /// Remote 20 ms frames recovered from FEC or concealed because a packet was lost or late.
     pub plc_frames: u64,
+    /// 20 ms frames withheld by the input-sensitivity gate.
+    pub frames_gated: u64,
 }
 
 #[derive(Default)]
@@ -372,6 +377,7 @@ impl AudioEngine {
             packets_decoded: load(&pipeline.packets_decoded),
             decode_errors: load(&pipeline.decode_errors),
             plc_frames: load(&pipeline.plc_frames),
+            frames_gated: load(&pipeline.frames_gated),
         }
     }
 
@@ -550,6 +556,10 @@ fn run_owner<B: Backend>(
                     }
                 }
                 EngineControl::EchoCancellation(enabled) => echo_enabled = enabled,
+                EngineControl::InputSensitivity(level) => shared
+                    .pipeline
+                    .gate_below_full_scale
+                    .store(level.map_or(0, |n| n.clamp(1, 100)), Ordering::Relaxed),
                 EngineControl::SelectDevice { direction, choice } => {
                     if direction == Direction::Input {
                         if let Some(denoiser) = &mut denoiser {

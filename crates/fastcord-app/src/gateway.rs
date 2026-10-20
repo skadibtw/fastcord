@@ -64,6 +64,21 @@ pub struct VoiceControls {
     pub echo_cancellation_off: bool,
     /// Playback underrun/concealment counters of the running engine; `None` outside a call.
     pub audio_stats: Option<fastcord_audio::EngineStats>,
+    /// How the microphone is opened to the call (the saved preference).
+    pub input_mode: InputMode,
+    /// The channel withholds "use voice activity", so push-to-talk is forced.
+    pub vad_forbidden: bool,
+    /// The push-to-talk key is held now.
+    pub ptt_down: bool,
+    /// Counts forced releases (focus, listener, device or session loss); the call worker
+    /// drops a held push-to-talk at once, with no release delay, when it changes.
+    pub ptt_cancel: u64,
+    /// The push-to-mute key is held now.
+    pub push_to_mute_down: bool,
+    /// How long push-to-talk keeps transmitting after the key is released.
+    pub ptt_release_ms: u16,
+    /// Voice-activity threshold as `-n` dBFS; `None` is automatic (nothing is withheld).
+    pub sensitivity: Option<u8>,
 }
 
 /// A Go Live offer in the parent voice channel; at most 32, keys only.
@@ -85,8 +100,35 @@ impl VoiceControls {
             .map_or_else(|| format!("User {}", user.0 % 10_000), |(_, n)| n.clone())
     }
 
+    /// The mode in force: a channel without "use voice activity" always needs push-to-talk.
+    pub fn effective_mode(&self) -> InputMode {
+        if self.vad_forbidden {
+            InputMode::PushToTalk
+        } else {
+            self.input_mode
+        }
+    }
+
+    /// The one microphone gate. A server mute, self mute, deafen or held push-to-mute
+    /// always closes it; push-to-talk mode additionally needs `ptt_active` (the key
+    /// held, or inside its release delay).
+    pub fn capture_enabled_with(&self, ptt_active: bool) -> bool {
+        !self.server_muted
+            && !self.self_muted
+            && !self.deafened
+            && !self.push_to_mute_down
+            && (self.effective_mode() == InputMode::VoiceActivity || ptt_active)
+    }
+
     pub fn capture_enabled(&self) -> bool {
-        !self.self_muted && !self.deafened && !self.server_muted
+        self.capture_enabled_with(self.ptt_down)
+    }
+
+    /// The sensitivity threshold in force: only voice activity is gated by level.
+    pub fn effective_sensitivity(&self) -> Option<u8> {
+        (self.effective_mode() == InputMode::VoiceActivity)
+            .then_some(self.sensitivity)
+            .flatten()
     }
 
     pub fn output_enabled(&self) -> bool {
@@ -113,6 +155,7 @@ use crate::composer::{Candidate, CandidateKind, Composer};
 use crate::history::{Completed, History, Intent};
 use crate::outbox::{OpId, Reply, Slots};
 use crate::rich;
+use crate::shortcuts::InputMode;
 use crate::timeline;
 use crate::timeline::AttachmentView;
 use crate::variable_list::{Measurement, Viewport};
@@ -717,6 +760,38 @@ impl NavigationBridge {
     pub fn set_self_muted(&self, self_muted: bool) {
         self.voice_controls
             .send_modify(|controls| controls.self_muted = self_muted);
+    }
+
+    pub fn set_voice_input(&self, settings: &crate::shortcuts::Settings) {
+        self.voice_controls.send_modify(|controls| {
+            controls.input_mode = settings.mode;
+            controls.ptt_release_ms = settings.release_ms;
+            controls.sensitivity = settings.sensitivity;
+        });
+    }
+
+    pub fn set_vad_forbidden(&self, forbidden: bool) {
+        self.voice_controls
+            .send_modify(|controls| controls.vad_forbidden = forbidden);
+    }
+
+    pub fn set_ptt(&self, down: bool) {
+        self.voice_controls
+            .send_if_modified(|controls| std::mem::replace(&mut controls.ptt_down, down) != down);
+    }
+
+    /// Releases push-to-talk immediately, without its release delay.
+    pub fn cancel_ptt(&self) {
+        self.voice_controls.send_modify(|controls| {
+            controls.ptt_down = false;
+            controls.ptt_cancel = controls.ptt_cancel.wrapping_add(1);
+        });
+    }
+
+    pub fn set_push_to_mute(&self, down: bool) {
+        self.voice_controls.send_if_modified(|controls| {
+            std::mem::replace(&mut controls.push_to_mute_down, down) != down
+        });
     }
 
     pub fn set_deafened(&self, deafened: bool) {
@@ -4468,6 +4543,65 @@ mod tests {
         assert_eq!(describe_delay(Duration::from_millis(750)), "1 second");
         assert_eq!(describe_delay(Duration::from_secs(32)), "32 seconds");
     }
+    /// The transmit gate: every restriction wins over push-to-talk and voice activity.
+    #[test]
+    fn transmit_gate_truth_table() {
+        use crate::shortcuts::InputMode::{PushToTalk, VoiceActivity};
+        for mode in [VoiceActivity, PushToTalk] {
+            for (self_muted, deafened, server_muted, push_to_mute, vad_forbidden, ptt) in (0..64u8)
+                .map(|bits| {
+                    (
+                        bits & 1 != 0,
+                        bits & 2 != 0,
+                        bits & 4 != 0,
+                        bits & 8 != 0,
+                        bits & 16 != 0,
+                        bits & 32 != 0,
+                    )
+                })
+            {
+                let controls = VoiceControls {
+                    input_mode: mode,
+                    self_muted,
+                    deafened,
+                    server_muted,
+                    push_to_mute_down: push_to_mute,
+                    vad_forbidden,
+                    ..VoiceControls::default()
+                };
+                let restricted = self_muted || deafened || server_muted || push_to_mute;
+                let needs_key = mode == PushToTalk || vad_forbidden;
+                assert_eq!(
+                    controls.capture_enabled_with(ptt),
+                    !restricted && (!needs_key || ptt),
+                    "{mode:?} mute={self_muted} deaf={deafened} server={server_muted} ptm={push_to_mute} novad={vad_forbidden} ptt={ptt}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sensitivity_applies_only_to_voice_activity() {
+        let mut controls = VoiceControls {
+            sensitivity: Some(45),
+            ..VoiceControls::default()
+        };
+        assert_eq!(controls.effective_sensitivity(), Some(45));
+        controls.vad_forbidden = true;
+        assert_eq!(controls.effective_sensitivity(), None);
+    }
+
+    #[test]
+    fn cancelling_push_to_talk_releases_the_key_and_counts() {
+        let bridge = NavigationBridge::new();
+        bridge.set_ptt(true);
+        assert!(bridge.voice_controls().ptt_down);
+        bridge.cancel_ptt();
+        let controls = bridge.voice_controls();
+        assert!(!controls.ptt_down);
+        assert_eq!(controls.ptt_cancel, 1);
+    }
+
     #[test]
     fn mute_and_deafen_precedence_preserves_self_mute() {
         let mut controls = VoiceControls::default();

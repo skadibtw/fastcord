@@ -81,6 +81,7 @@ struct EngineSync {
     output_device: (fastcord_audio::DeviceChoice, u64),
     noise_suppression: (NoiseSuppression, u64),
     echo_cancellation: bool,
+    sensitivity: Option<u8>,
 }
 
 impl EngineSync {
@@ -96,13 +97,16 @@ impl EngineSync {
             noise_suppression: (NoiseSuppression::Light, 0),
             // The engine starts with the preference it was configured with.
             echo_cancellation: true,
+            // The engine starts with no level gate.
+            sensitivity: None,
         }
     }
 
-    /// Sends whatever differs from what the engine already has.
-    fn apply(&mut self, controls: &VoiceControls) {
+    /// Sends whatever differs from what the engine already has. `ptt_active` is the
+    /// push-to-talk hold including its release delay.
+    fn apply(&mut self, controls: &VoiceControls, ptt_active: bool) {
         self.retry = false;
-        let capture = controls.capture_enabled();
+        let capture = controls.capture_enabled_with(ptt_active);
         if self.capture != Some(capture) {
             if self
                 .controls
@@ -167,6 +171,18 @@ impl EngineSync {
                 self.retry = true;
             }
         }
+        let sensitivity = controls.effective_sensitivity();
+        if self.sensitivity != sensitivity {
+            if self
+                .controls
+                .try_send(EngineControl::InputSensitivity(sensitivity))
+                .is_ok()
+            {
+                self.sensitivity = sensitivity;
+            } else {
+                self.retry = true;
+            }
+        }
         let echo = !controls.echo_cancellation_off;
         if self.echo_cancellation != echo {
             if self
@@ -207,6 +223,66 @@ impl EngineSync {
 
     fn retry_deadline(&self) -> Option<Instant> {
         self.retry.then(|| Instant::now() + CONTROL_RETRY)
+    }
+}
+
+/// How long after the last sent frame the speech burst is ended (five 20 ms frames),
+/// so a gate that stops frames also sends "speaking off".
+const SPEECH_IDLE: Duration = Duration::from_millis(100);
+
+/// Push-to-talk as the call worker sees it: the key, extended by the release delay, and
+/// dropped at once on a cancel (focus, listener, device or session loss).
+#[derive(Debug, Default)]
+struct PttHold {
+    active: bool,
+    release_at: Option<Instant>,
+    cancel_seen: u64,
+    /// A cancel arrived while the key was still held; it must be released and pressed
+    /// again before it transmits, so a lost device never resumes by itself.
+    blocked: bool,
+}
+
+impl PttHold {
+    /// Follows the shared key state. Returns whether the active state changed.
+    fn update(&mut self, controls: &VoiceControls, now: Instant) -> bool {
+        let before = self.active;
+        if controls.ptt_cancel != self.cancel_seen {
+            self.cancel_seen = controls.ptt_cancel;
+            self.cancel(controls.ptt_down);
+        } else if controls.ptt_down {
+            if !self.blocked {
+                self.active = true;
+                self.release_at = None;
+            }
+        } else {
+            self.blocked = false;
+            if self.active && self.release_at.is_none() {
+                let delay = Duration::from_millis(u64::from(controls.ptt_release_ms));
+                if delay.is_zero() {
+                    self.active = false;
+                } else {
+                    self.release_at = Some(now + delay);
+                }
+            }
+        }
+        self.active != before
+    }
+
+    /// Drops the hold now. `still_down` keeps it off until the key is released.
+    fn cancel(&mut self, still_down: bool) {
+        self.active = false;
+        self.release_at = None;
+        self.blocked = still_down;
+    }
+
+    /// Ends the release delay once it has run out. Returns whether it did.
+    fn expire(&mut self, now: Instant) -> bool {
+        if self.release_at.is_some_and(|at| at <= now) {
+            self.active = false;
+            self.release_at = None;
+            return true;
+        }
+        false
     }
 }
 
@@ -275,10 +351,14 @@ async fn run_with(
     let mut sync = EngineSync::new(channels.controls);
     let mut events = channels.events;
     let mut status = session.watch_status();
+    let mut hold = PttHold::default();
+    let mut speech_end_at: Option<Instant> = None;
     let mut capture_enabled = {
         let initial = controls.borrow_and_update();
-        sync.apply(&initial);
-        initial.capture_enabled()
+        hold.cancel_seen = initial.ptt_cancel;
+        hold.update(&initial, Instant::now());
+        sync.apply(&initial, hold.active);
+        initial.capture_enabled_with(hold.active)
     };
     let mut retry_at = sync.retry_deadline();
     let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
@@ -295,6 +375,7 @@ async fn run_with(
                 };
                 if capture_enabled {
                     let _ = media.send_opus(frame.packet.as_bytes().to_vec());
+                    speech_end_at = Some(Instant::now() + SPEECH_IDLE);
                 }
             }
             message = session.next_message() => {
@@ -355,18 +436,38 @@ async fn run_with(
             changed = controls.changed() => {
                 if changed.is_err() { break; }
                 let updated = controls.borrow_and_update();
-                sync.apply(&updated);
+                hold.update(&updated, Instant::now());
+                sync.apply(&updated, hold.active);
                 retry_at = sync.retry_deadline();
-                let enabled = updated.capture_enabled();
+                let enabled = updated.capture_enabled_with(hold.active);
                 drop(updated);
                 if capture_enabled && !enabled {
                     let _ = media.end_speech();
+                    speech_end_at = None;
                 }
                 capture_enabled = enabled;
             }
+            _ = wait_for_release(hold.release_at) => {
+                if hold.expire(Instant::now()) {
+                    let updated = controls.borrow();
+                    sync.apply(&updated, hold.active);
+                    retry_at = sync.retry_deadline();
+                    let enabled = updated.capture_enabled_with(hold.active);
+                    drop(updated);
+                    if capture_enabled && !enabled {
+                        let _ = media.end_speech();
+                        speech_end_at = None;
+                    }
+                    capture_enabled = enabled;
+                }
+            }
+            _ = wait_for_release(speech_end_at) => {
+                speech_end_at = None;
+                let _ = media.end_speech();
+            }
             _ = stats_tick.tick() => noise_status.publish_stats(engine.stats()),
             _ = wait_for_release(retry_at) => {
-                sync.apply(&controls.borrow());
+                sync.apply(&controls.borrow(), hold.active);
                 retry_at = sync.retry_deadline();
             }
             event = events.recv() => {
@@ -380,6 +481,7 @@ async fn run_with(
                             fastcord_audio::Direction::Input => {
                                 captured = None;
                                 let _ = media.end_speech();
+                                release_push_to_talk(&controls_tx);
                             }
                             fastcord_audio::Direction::Output => remote = None,
                         }
@@ -392,6 +494,7 @@ async fn run_with(
                         match direction {
                             fastcord_audio::Direction::Input => {
                                 let _ = media.end_speech();
+                                release_push_to_talk(&controls_tx);
                                 captured = new_capture;
                             }
                             fastcord_audio::Direction::Output => remote = remote_audio,
@@ -412,6 +515,9 @@ async fn run_with(
     participants.clear();
     release_at.clear();
     publish_participants(&controls_tx, &participants);
+    // No key state outlives the call: the next one starts with nothing held.
+    release_push_to_talk(&controls_tx);
+    controls_tx.send_modify(|controls| controls.push_to_mute_down = false);
 
     // Release the audio devices before the next call can open them, then say goodbye.
     drop(engine);
@@ -520,6 +626,15 @@ pub(super) fn publish_participants(
     if controls.borrow().participants != next {
         controls.send_modify(|controls| controls.participants = next);
     }
+}
+
+/// Drops a held push-to-talk at once (device lost or replaced, call over). The key has
+/// to be released and pressed again before it transmits.
+fn release_push_to_talk(controls: &watch::Sender<VoiceControls>) {
+    controls.send_modify(|controls| {
+        controls.ptt_down = false;
+        controls.ptt_cancel = controls.ptt_cancel.wrapping_add(1);
+    });
 }
 
 async fn wait_for_release(deadline: Option<Instant>) {
@@ -734,7 +849,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(2);
         let mut sync = EngineSync::new(tx);
         let mut controls = controls_with_participant(4, 40);
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         // Capture and output fit; the gain does not and must be retried, not dropped.
         assert!(sync.retry);
         assert!(matches!(
@@ -745,7 +860,7 @@ mod tests {
             rx.try_recv(),
             Ok(EngineControl::OutputEnabled(true))
         ));
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert!(!sync.retry);
         assert!(matches!(
             rx.try_recv(),
@@ -753,17 +868,17 @@ mod tests {
         ));
         // Nothing changed: nothing is sent, however many times the controls are applied
         // or packets of that SSRC arrive.
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         sync.gain(40, 100);
         assert!(rx.try_recv().is_err());
         // A deafen toggle that finds the queue full is retried instead of lost.
         sync.gain(41, 100);
         sync.gain(42, 100);
         controls.deafened = true;
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert!(sync.retry);
         while rx.try_recv().is_ok() {}
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert!(!sync.retry);
         let mut sent = Vec::new();
         while let Ok(control) = rx.try_recv() {
@@ -784,17 +899,17 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(2);
         let mut sync = EngineSync::new(tx);
         let mut controls = VoiceControls::default();
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         controls.input_device = fastcord_audio::DeviceChoice::Device(
             fastcord_audio::DeviceKey::from_persisted("mic").unwrap(),
         );
         controls.output_device = fastcord_audio::DeviceChoice::Device(
             fastcord_audio::DeviceKey::from_persisted("headset").unwrap(),
         );
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert!(sync.retry);
         while rx.try_recv().is_ok() {}
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert!(!sync.retry);
         assert!(matches!(
             rx.try_recv(),
@@ -810,10 +925,10 @@ mod tests {
                 ..
             })
         ));
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert!(rx.try_recv().is_err());
         controls.output_generation += 1;
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert!(matches!(
             rx.try_recv(),
             Ok(EngineControl::SelectDevice {
@@ -829,25 +944,104 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(2);
         let mut sync = EngineSync::new(tx);
         let mut controls = VoiceControls::default();
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         controls.noise_suppression = NoiseSuppression::HighQuality;
         controls.noise_generation = 1;
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert!(sync.retry);
         while rx.try_recv().is_ok() {}
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert!(!sync.retry);
         assert_eq!(
             rx.try_recv().unwrap(),
             EngineControl::NoiseSuppression(NoiseSuppression::HighQuality)
         );
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert!(rx.try_recv().is_err());
         controls.noise_generation += 1;
-        sync.apply(&controls);
+        sync.apply(&controls, controls.ptt_down);
         assert_eq!(
             rx.try_recv().unwrap(),
             EngineControl::NoiseSuppression(NoiseSuppression::HighQuality)
         );
+    }
+
+    fn ptt_controls(down: bool, release_ms: u16, cancel: u64) -> VoiceControls {
+        VoiceControls {
+            input_mode: crate::shortcuts::InputMode::PushToTalk,
+            ptt_down: down,
+            ptt_release_ms: release_ms,
+            ptt_cancel: cancel,
+            ..VoiceControls::default()
+        }
+    }
+
+    #[test]
+    fn push_to_talk_holds_through_the_release_delay_then_stops() {
+        let now = Instant::now();
+        let mut hold = PttHold::default();
+        assert!(hold.update(&ptt_controls(true, 300, 0), now));
+        assert!(!hold.update(&ptt_controls(false, 300, 0), now));
+        assert!(hold.active, "still inside the release delay");
+        assert!(!hold.expire(now + Duration::from_millis(299)));
+        assert!(hold.expire(now + Duration::from_millis(300)));
+        assert!(!hold.active);
+        // Pressing again inside the delay cancels the pending release.
+        hold.update(&ptt_controls(true, 300, 0), now);
+        hold.update(&ptt_controls(false, 300, 0), now);
+        hold.update(&ptt_controls(true, 300, 0), now);
+        assert!(!hold.expire(now + Duration::from_secs(5)));
+        assert!(hold.active);
+        // No delay releases immediately.
+        assert!(hold.update(&ptt_controls(false, 0, 0), now));
+        assert!(!hold.active);
+    }
+
+    #[test]
+    fn a_cancel_drops_push_to_talk_at_once_and_needs_a_new_press() {
+        let now = Instant::now();
+        let mut hold = PttHold::default();
+        hold.update(&ptt_controls(true, 500, 0), now);
+        assert!(
+            hold.update(&ptt_controls(false, 500, 1), now),
+            "no delay on cancel"
+        );
+        assert!(!hold.active && hold.release_at.is_none());
+        // A cancel while the key is still reported down stays off until it is released.
+        hold.update(&ptt_controls(true, 500, 1), now);
+        assert!(hold.active);
+        hold.update(&ptt_controls(true, 500, 2), now);
+        assert!(!hold.active);
+        hold.update(&ptt_controls(true, 500, 2), now);
+        assert!(!hold.active, "blocked until released");
+        hold.update(&ptt_controls(false, 500, 2), now);
+        hold.update(&ptt_controls(true, 500, 2), now);
+        assert!(hold.active);
+    }
+
+    #[test]
+    fn the_engine_follows_the_one_gate_and_the_sensitivity() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut sync = EngineSync::new(tx);
+        let mut controls = ptt_controls(false, 0, 0);
+        sync.apply(&controls, false);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineControl::CaptureEnabled(false))
+        ));
+        while rx.try_recv().is_ok() {}
+        sync.apply(&controls, true);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineControl::CaptureEnabled(true))
+        ));
+        // The level gate is for voice activity only.
+        controls.sensitivity = Some(40);
+        sync.apply(&controls, true);
+        assert!(rx.try_recv().is_err());
+        controls.input_mode = crate::shortcuts::InputMode::VoiceActivity;
+        sync.apply(&controls, false);
+        let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(sent.contains(&EngineControl::InputSensitivity(Some(40))));
     }
 }

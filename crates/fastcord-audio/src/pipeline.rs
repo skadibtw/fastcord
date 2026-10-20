@@ -9,7 +9,7 @@
 //!
 //! All buffers are sized when a stream opens; steady-state processing does
 //! not allocate.
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crate::channels::{downmix_to_mono, stereo_to_device};
 use crate::codec::{
@@ -62,6 +62,48 @@ pub(crate) struct PipelineCounters {
     pub(crate) decode_errors: AtomicU64,
     /// 20 ms remote frames recovered from FEC or concealed (lost or late packets).
     pub(crate) plc_frames: AtomicU64,
+    /// Input sensitivity: 0 transmits everything, otherwise frames quieter than
+    /// `-n` dBFS are not sent (see [`VoiceGate`]).
+    pub(crate) gate_below_full_scale: AtomicU8,
+    /// 20 ms frames the sensitivity gate kept back.
+    pub(crate) frames_gated: AtomicU64,
+}
+
+/// Frames the gate stays open after the level last reached the threshold (200 ms).
+const GATE_HANG_FRAMES: u8 = 10;
+/// Level that keeps an open gate open, below the threshold that opens it.
+const GATE_HYSTERESIS_DB: f32 = 3.0;
+
+/// Voice-activity gate on 20 ms frames: opens at the threshold, closes only after the
+/// level stayed below threshold minus the hysteresis for [`GATE_HANG_FRAMES`]. Pure
+/// arithmetic on the owner thread; no allocation.
+#[derive(Default)]
+pub(crate) struct VoiceGate {
+    open: bool,
+    hang: u8,
+}
+
+impl VoiceGate {
+    /// Whether `frame` is sent. `below_full_scale == 0` disables the gate.
+    pub(crate) fn admit(&mut self, frame: &[f32], below_full_scale: u8) -> bool {
+        if below_full_scale == 0 {
+            self.open = false;
+            return true;
+        }
+        let mean_square = frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32;
+        let level = 10.0 * mean_square.max(1e-12).log10();
+        let threshold = -f32::from(below_full_scale);
+        if level >= threshold {
+            self.open = true;
+            self.hang = GATE_HANG_FRAMES;
+        } else if self.open && level >= threshold - GATE_HYSTERESIS_DB {
+            self.hang = GATE_HANG_FRAMES;
+        } else if self.open {
+            self.hang -= 1;
+            self.open = self.hang > 0;
+        }
+        self.open
+    }
 }
 
 /// Frames of `ms` milliseconds at `rate`, at least one.
@@ -77,6 +119,7 @@ struct FrameEncoder {
     filled: usize,
     encoder: VoiceEncoder,
     sequence: u64,
+    gate: VoiceGate,
 }
 
 impl FrameEncoder {
@@ -101,6 +144,14 @@ impl FrameEncoder {
             return;
         }
         self.filled = 0;
+        if !self.gate.admit(
+            &self.frame[..],
+            counters.gate_below_full_scale.load(Ordering::Relaxed),
+        ) {
+            counters.frames_gated.fetch_add(1, Ordering::Relaxed);
+            self.sequence += 1;
+            return;
+        }
         let mut packet = EncodedPacket::empty();
         match self.encoder.encode_mono(&self.frame, &mut packet) {
             Ok(()) => {
@@ -148,6 +199,7 @@ impl CapturePipeline {
                 filled: 0,
                 encoder: VoiceEncoder::new(bitrate)?,
                 sequence: 0,
+                gate: VoiceGate::default(),
             },
             ring,
         })
@@ -160,6 +212,7 @@ impl CapturePipeline {
         self.block_filled = 0;
         self.frames.frame.fill(0.0);
         self.frames.filled = 0;
+        self.frames.gate = VoiceGate::default();
         self.converter.reset();
     }
 
@@ -403,6 +456,40 @@ mod tests {
         let (producer, consumer) = sample_ring(channels, frames_for(rate, RING_LIMIT_MS));
         let pipeline = PlaybackPipeline::new(format(rate, channels), producer).unwrap();
         (consumer, pipeline)
+    }
+
+    #[test]
+    fn voice_gate_opens_at_threshold_holds_then_closes() {
+        let mut gate = VoiceGate::default();
+        let loud = [0.1_f32; 960]; // -20 dBFS
+        let quiet = [0.001_f32; 960]; // -60 dBFS
+        let edge = [0.0089_f32; 960]; // about -41 dBFS: inside the hysteresis band of -40
+        assert!(!gate.admit(&quiet, 40), "below threshold stays closed");
+        assert!(gate.admit(&loud, 40));
+        for _ in 0..GATE_HANG_FRAMES - 1 {
+            assert!(gate.admit(&quiet, 40), "hangover keeps the tail");
+        }
+        assert!(!gate.admit(&quiet, 40), "closes after the hangover");
+        assert!(gate.admit(&loud, 40));
+        for _ in 0..3 * GATE_HANG_FRAMES {
+            assert!(gate.admit(&edge, 40), "hysteresis band keeps it open");
+        }
+        assert!(gate.admit(&quiet, 0), "0 disables the gate");
+    }
+
+    #[test]
+    fn sensitivity_gate_withholds_quiet_frames_and_keeps_the_clock() {
+        let (mut ring, mut pipeline) = capture(48_000, 1);
+        let counters = PipelineCounters::default();
+        counters.gate_below_full_scale.store(40, Ordering::Relaxed);
+        let mut denoiser = denoiser(NoiseSuppression::Off);
+        let mut sent = Vec::new();
+        for level in [0.001_f32, 0.001, 0.2, 0.2] {
+            ring.push_overwrite(std::iter::repeat_n(level, 960));
+            pipeline.run(&counters, &mut denoiser, None, &mut |f| sent.push(f));
+        }
+        assert_eq!(counters.frames_gated.load(Ordering::Relaxed), 2);
+        assert_eq!(sent.iter().map(|f| f.sequence).collect::<Vec<_>>(), [2, 3]);
     }
 
     #[test]

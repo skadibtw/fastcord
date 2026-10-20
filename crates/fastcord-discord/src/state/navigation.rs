@@ -109,6 +109,8 @@ pub struct PermissionSummary {
     pub use_external_emojis: bool,
     pub connect: bool,
     pub speak: bool,
+    /// Voice activity may open the microphone; without it the channel requires push-to-talk.
+    pub use_vad: bool,
     pub create_threads: bool,
     pub manage_threads: bool,
 }
@@ -124,6 +126,7 @@ impl From<Permissions> for PermissionSummary {
             use_external_emojis: permissions.contains(Permissions::USE_EXTERNAL_EMOJIS),
             connect: permissions.contains(Permissions::CONNECT),
             speak: permissions.contains(Permissions::SPEAK),
+            use_vad: permissions.contains(Permissions::USE_VAD),
             create_threads: permissions.contains(Permissions::CREATE_PUBLIC_THREADS),
             manage_threads: permissions.contains(Permissions::MANAGE_THREADS),
         }
