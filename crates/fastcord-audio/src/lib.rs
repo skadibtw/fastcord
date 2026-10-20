@@ -7,6 +7,8 @@
 //! - [`denoise`]: microphone-only noise suppression (Off, Light, High quality) behind one
 //!   [`Denoiser`] trait.
 //! - `echo`: acoustic echo cancellation of the microphone against the played mix.
+//! - [`level`]: microphone gain, automatic gain and level diagnostics; [`mic_test`]: a
+//!   record-and-play-back microphone test that never reaches a call.
 //! - [`audit`]: the callback marker used by allocation instrumentation.
 //!
 //! Device callbacks only convert samples and move them through preallocated
@@ -24,6 +26,8 @@ mod engine;
 mod error;
 pub mod file_player;
 mod jitter;
+pub mod level;
+pub mod mic_test;
 pub mod ogg;
 mod pipeline;
 pub mod recorder;
@@ -45,6 +49,8 @@ pub use file_player::{
     FilePlayer, PacketSource, PlayerClock, PlayerError, PlayerFailure, PlayerSnapshot, PlayerState,
     Silence,
 };
+pub use level::{EchoDiagnostics, InputDiagnostics, InputGain, MAX_GAIN_DB, MIN_GAIN_DB};
+pub use mic_test::{MicTest, MicTestFailure, MicTestMode, MicTestPhase, MicTestSnapshot};
 pub use pipeline::{CapturedFrame, RemoteFrame};
 pub use recorder::{RecorderSnapshot, Recording, RecordingFailure, VoiceRecorder};
 pub use resample::UnsupportedRate;

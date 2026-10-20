@@ -19,6 +19,20 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+#[cfg(test)]
+mod quality;
+/// Partitions whose gradient constraint is applied per step (more cost no gain: measured).
+const CONSTRAINED_PER_STEP: usize = 1;
+/// The residual-echo estimate is this multiple of <error, estimate> (Speex MDF's factor 3:
+/// the correlation under-reads echo spread over taps the estimate has not learned yet).
+const SHARE_GAIN: f32 = 3.0;
+/// Weight of the estimate in the microphone (<microphone, estimate> / |estimate|^2) below
+/// which the filter is judged wrong, rising to [`MISMATCH_SHARE`] of the adaptation range at
+/// [`MISMATCH_FULL`].
+const MISMATCH_START: f32 = 0.85;
+const MISMATCH_FULL: f32 = 0.35;
+const MISMATCH_SHARE: f32 = 0.6;
+
 use crate::codec::SAMPLE_RATE;
 use crate::resample::RateConverter;
 
@@ -36,6 +50,9 @@ const FAR_LIMIT: usize = LEAD + 4_800;
 /// Mean-square level (about -60 dBFS) below which the reference carries no information.
 const FAR_ACTIVE: f32 = 1e-6;
 const REGULARIZATION: f32 = 1e-2;
+/// Adaptation step range: the floor keeps tracking the room, the ceiling is the NLMS limit.
+const MU_MIN: f32 = 0.03;
+const MU_MAX: f32 = 0.9;
 
 struct Fft {
     cos: [f32; FFT / 2],
@@ -130,13 +147,24 @@ pub(crate) struct EchoCanceller {
     // Smoothed energies for the double-talk decision.
     s_near: f32,
     s_echo: f32,
+    /// Smoothed <error, estimate>: the echo the filter missed, which the estimate predicts.
+    s_residual: f32,
+    /// Smoothed <microphone, estimate>: equals the estimate's energy when it is right.
     s_cross: f32,
     s_error: f32,
-    /// Smoothed correlation of the residual with the echo estimate: residual echo, not speech.
-    s_residual: f32,
+    /// Microphone and residual energy, smoothed over about a second of far-end speech only,
+    /// for the reduction shown in diagnostics.
+    d_near: f32,
+    d_error: f32,
+    /// The filter explains the microphone (diagnostics only; it no longer gates adaptation).
     converged: bool,
-    frozen_steps: u32,
+    /// Steps of faster adaptation left after [`EchoCanceller::path_changed`].
+    boost_steps: u32,
 }
+
+/// Fast adaptation after the reference and microphone streams were re-aligned by chance:
+/// 400 steps of 5 ms.
+const BOOST_STEPS: u32 = 400;
 
 impl EchoCanceller {
     pub(crate) fn new() -> Self {
@@ -158,17 +186,54 @@ impl EchoCanceller {
             far: VecDeque::with_capacity(FAR_LIMIT + FRAME),
             s_near: 0.0,
             s_echo: 0.0,
+            s_residual: 0.0,
             s_cross: 0.0,
             s_error: 0.0,
-            s_residual: 0.0,
+            d_near: 0.0,
+            d_error: 0.0,
             converged: false,
-            frozen_steps: 0,
+            boost_steps: 0,
         }
     }
 
     /// Drops queued reference without forgetting the filter (microphone muted).
     pub(crate) fn clear_far(&mut self) {
         self.far.clear();
+    }
+
+    /// The microphone stream restarted (unmute, push-to-talk), so the reference pairing moved
+    /// by up to a device period relative to what the filter learned. Forget the "converged"
+    /// verdict (which would hold adaptation for two seconds) and adapt fast for a second.
+    pub(crate) fn path_changed(&mut self) {
+        self.converged = false;
+        self.boost_steps = BOOST_STEPS;
+    }
+
+    /// What the filter has found, for the diagnostics view. Scans the filter once; call it
+    /// at a few hertz at most.
+    pub(crate) fn diagnostics(&self) -> crate::level::EchoDiagnostics {
+        let mut strongest = (0usize, 0.0f32);
+        for partition in 0..PARTITIONS {
+            let base = partition * BINS;
+            let energy: f32 = (base..base + BINS)
+                .map(|k| self.wr[k] * self.wr[k] + self.wi[k] * self.wi[k])
+                .sum();
+            if energy > strongest.1 {
+                strongest = (partition, energy);
+            }
+        }
+        let found = strongest.1 > 1e-4;
+        let lag = (strongest.0 * HOP + HOP / 2 + LEAD) * 1000 / SAMPLE_RATE as usize;
+        let reduction = if self.d_near > 1e-9 && self.d_error > 0.0 {
+            (10.0 * (self.d_near / self.d_error.max(1e-12)).log10()).clamp(0.0, 60.0)
+        } else {
+            0.0
+        };
+        crate::level::EchoDiagnostics {
+            reduction_tenths_db: (reduction * 10.0).round() as i16,
+            delay_ms: if found { lag as u16 } else { 0 },
+            converged: self.converged,
+        }
     }
 
     pub(crate) fn push_far(&mut self, samples: &[f32]) {
@@ -235,7 +300,7 @@ impl EchoCanceller {
         expand(&mut self.re, &mut self.im);
         self.fft.transform(&mut self.re, &mut self.im, true);
 
-        let (mut p_near, mut p_echo, mut p_cross, mut p_error, mut p_residual) =
+        let (mut p_near, mut p_echo, mut p_residual, mut p_cross, mut p_error) =
             (0.0, 0.0, 0.0, 0.0, 0.0);
         let mut error = [0.0; HOP];
         for i in 0..HOP {
@@ -243,9 +308,9 @@ impl EchoCanceller {
             error[i] = near[i] - echo;
             p_near += near[i] * near[i];
             p_echo += echo * echo;
+            p_residual += error[i] * echo;
             p_cross += near[i] * echo;
             p_error += error[i] * error[i];
-            p_residual += error[i] * echo;
         }
         // Never louder than the microphone (diverged filter, double talk).
         // ponytail: hard per-step switch, a cross-fade if it is ever audible.
@@ -253,38 +318,51 @@ impl EchoCanceller {
         out.copy_from_slice(if diverged { near } else { &error });
 
         let far_active = self.window.iter().map(|s| s * s).sum::<f32>() / FFT as f32 > FAR_ACTIVE;
-        const SMOOTH: f32 = 0.9;
-        self.s_near = SMOOTH * self.s_near + (1.0 - SMOOTH) * p_near;
-        self.s_echo = SMOOTH * self.s_echo + (1.0 - SMOOTH) * p_echo;
-        self.s_cross = SMOOTH * self.s_cross + (1.0 - SMOOTH) * p_cross;
-        self.s_error = SMOOTH * self.s_error + (1.0 - SMOOTH) * p_error;
-        self.s_residual = SMOOTH * self.s_residual + (1.0 - SMOOTH) * p_residual;
-        let dominant = self.s_echo > 1e-9
-            && self.s_cross > 0.0
-            && self.s_cross * self.s_cross > 0.8 * self.s_near * self.s_echo;
-        if dominant && self.s_error < 0.25 * self.s_near {
-            self.converged = true;
-            self.frozen_steps = 0;
-        }
-        let mu = if !far_active {
-            0.0
-        } else if dominant && self.converged {
-            // Cancelling well: adapt in proportion to how much of what is left is still echo
-            // (correlated with the estimate) rather than a near-end talker.
-            let echoed = self.s_residual.max(0.0).powi(2) / (self.s_error * self.s_echo + 1e-12);
-            0.8 * echoed.sqrt().clamp(0.05, 1.0)
-        } else if dominant {
-            0.8
-        } else if self.converged {
-            // Double talk (or an echo path change): hold, but not forever.
-            self.frozen_steps += 1;
-            if self.frozen_steps > 400 {
+        // The statistics follow far-end speech only, so a pause keeps what was learned (they
+        // would otherwise decay to "nothing known" and the next onset would adapt wildly).
+        let mut mu = 0.0;
+        if far_active {
+            const SMOOTH: f32 = 0.9;
+            self.s_near = SMOOTH * self.s_near + (1.0 - SMOOTH) * p_near;
+            self.s_echo = SMOOTH * self.s_echo + (1.0 - SMOOTH) * p_echo;
+            self.s_residual = SMOOTH * self.s_residual + (1.0 - SMOOTH) * p_residual;
+            self.s_cross = SMOOTH * self.s_cross + (1.0 - SMOOTH) * p_cross;
+            self.s_error = SMOOTH * self.s_error + (1.0 - SMOOTH) * p_error;
+            const DIAGNOSTIC_SMOOTH: f32 = 0.995;
+            self.d_near = DIAGNOSTIC_SMOOTH * self.d_near + (1.0 - DIAGNOSTIC_SMOOTH) * p_near;
+            self.d_error = DIAGNOSTIC_SMOOTH * self.d_error + (1.0 - DIAGNOSTIC_SMOOTH) * p_error;
+
+            // The error is the echo the filter missed plus whatever the near end adds. The
+            // missed echo is correlated with the estimate (estimate = a x echo leaves
+            // (1 - a) x echo, so <error, estimate>^2 / |estimate|^2 is its energy); the near
+            // end is not. Adapt in proportion to the missed echo's share of the error: fast
+            // while the filter is wrong (start, path change), slow while a talker is heard.
+            let mut missed_share = if self.s_echo < 1e-3 * self.s_near {
+                1.0 // nothing learned yet
+            } else {
+                (SHARE_GAIN * self.s_residual.max(0.0) / (self.s_error + 1e-12)).clamp(0.0, 1.0)
+            };
+            // A filter that is simply wrong (the reference moved: an underrun, an unmute, a
+            // device change) leaves an estimate that does not even appear in the microphone,
+            // and the correlation above then reads "no echo". The estimate of a working
+            // filter appears in the microphone with weight 1 even beside a talker.
+            if self.s_echo > 0.02 * self.s_near {
+                let weight = self.s_cross / self.s_echo;
+                let mismatch =
+                    ((MISMATCH_START - weight) / (MISMATCH_START - MISMATCH_FULL)).clamp(0.0, 1.0);
+                missed_share = missed_share.max(MISMATCH_SHARE * mismatch);
+            }
+            mu = MU_MIN + (MU_MAX - MU_MIN) * missed_share;
+            if self.s_error < 0.25 * self.s_near {
+                self.converged = true;
+            } else if self.s_error > 0.7 * self.s_near {
                 self.converged = false;
             }
-            0.0
-        } else {
-            0.15
-        };
+        }
+        if self.boost_steps > 0 && far_active {
+            self.boost_steps -= 1;
+            mu = mu.max(0.5);
+        }
         if mu > 0.0 {
             self.adapt(&error, mu);
         }
@@ -313,18 +391,20 @@ impl EchoCanceller {
                 self.wi[w + k] += gain * (xr * self.im[k] - xi * self.re[k]);
             }
         }
-        // Gradient constraint (keep each partition `HOP` taps long), one partition per step.
-        let w = self.next_constrained * BINS;
-        self.next_constrained = (self.next_constrained + 1) % PARTITIONS;
-        self.re[..BINS].copy_from_slice(&self.wr[w..w + BINS]);
-        self.im[..BINS].copy_from_slice(&self.wi[w..w + BINS]);
-        expand(&mut self.re, &mut self.im);
-        self.fft.transform(&mut self.re, &mut self.im, true);
-        self.re[HOP..].fill(0.0);
-        self.im.fill(0.0);
-        self.fft.transform(&mut self.re, &mut self.im, false);
-        self.wr[w..w + BINS].copy_from_slice(&self.re[..BINS]);
-        self.wi[w..w + BINS].copy_from_slice(&self.im[..BINS]);
+        // Gradient constraint (keep each partition `HOP` taps long), a few partitions per step.
+        for _ in 0..CONSTRAINED_PER_STEP {
+            let w = self.next_constrained * BINS;
+            self.next_constrained = (self.next_constrained + 1) % PARTITIONS;
+            self.re[..BINS].copy_from_slice(&self.wr[w..w + BINS]);
+            self.im[..BINS].copy_from_slice(&self.wi[w..w + BINS]);
+            expand(&mut self.re, &mut self.im);
+            self.fft.transform(&mut self.re, &mut self.im, true);
+            self.re[HOP..].fill(0.0);
+            self.im.fill(0.0);
+            self.fft.transform(&mut self.re, &mut self.im, false);
+            self.wr[w..w + BINS].copy_from_slice(&self.re[..BINS]);
+            self.wi[w..w + BINS].copy_from_slice(&self.im[..BINS]);
+        }
     }
 }
 
@@ -485,6 +565,7 @@ mod tests {
         let out = run(&mut aec, &far, &near);
         let tail = len - 48_000 * 2..;
         let erle = db(energy(&near[tail.clone()]), energy(&out[tail]));
+        println!("synthetic path: ERLE {erle:.1} dB over the last 2 s of 8 s");
         assert!(erle >= 25.0, "ERLE {erle:.1} dB");
     }
 
@@ -513,6 +594,7 @@ mod tests {
             .collect();
         let kept = db(energy(&talker[talk.clone()]), energy(&removed));
         let echo_gain = db(energy(&echo[talk.clone()]), energy(&removed));
+        println!("double talk: near kept {kept:.1} dB, echo reduced {echo_gain:.1} dB");
         assert!(kept >= 8.0, "near speech distorted: {kept:.1} dB");
         assert!(
             echo_gain >= 10.0,
@@ -521,7 +603,82 @@ mod tests {
 
         let after = len - 48_000 * 2..;
         let erle = db(energy(&near[after.clone()]), energy(&out[after]));
+        println!("after double talk: ERLE {erle:.1} dB");
         assert!(erle >= 20.0, "no recovery after double talk: {erle:.1} dB");
+    }
+
+    /// ERLE per second of `out` against `near`.
+    fn erle_per_second(near: &[f32], out: &[f32]) -> Vec<f64> {
+        near.chunks(48_000)
+            .zip(out.chunks(48_000))
+            .map(|(n, o)| db(energy(n), energy(o)))
+            .collect()
+    }
+
+    /// After a mute or push-to-talk pause the microphone stream restarts and its pairing with
+    /// the played reference moves by up to a device period. `path_changed` brings the echo
+    /// back down quickly instead of holding adaptation for two seconds.
+    #[test]
+    fn echo_recovers_quickly_after_the_streams_are_realigned() {
+        let seconds = 12;
+        let len = 48_000 * seconds;
+        let far = Noise(31).speech(len, 0.5);
+        let near = convolve(&far, &echo_path(8));
+        let converge = 48_000 * 6;
+        let shift = 384; // 8 ms: the pairing moved by 1.6 partitions
+        let mut recovered = [0.0; 2];
+        for (slot, notify) in recovered.iter_mut().zip([false, true]) {
+            let mut aec = EchoCanceller::new();
+            let mut out = run(&mut aec, &far[..converge], &near[..converge]);
+            // Muted gap: the queued reference is dropped; the stream resumes 8 ms later.
+            aec.clear_far();
+            if notify {
+                aec.path_changed();
+            }
+            let mut late_far = vec![0.0; shift];
+            late_far.extend_from_slice(&far[converge..len - shift]);
+            out.extend(run(&mut aec, &late_far, &near[converge..len - shift]));
+            let erle = erle_per_second(&near[converge..len - shift], &out[converge..]);
+            println!("path_changed {notify}: ERLE per second after the gap {erle:.1?}");
+            // Mean ERLE of the fourth and fifth second after the gap.
+            *slot = (erle[3] + erle[4]) / 2.0;
+        }
+        assert!(
+            recovered[1] >= 15.0,
+            "no recovery with path_changed: {:.1} dB",
+            recovered[1]
+        );
+        assert!(
+            recovered[1] > recovered[0] + 10.0,
+            "path_changed {:.1} dB vs without {:.1} dB",
+            recovered[1],
+            recovered[0]
+        );
+    }
+
+    #[test]
+    fn diagnostics_report_the_echo_delay_and_reduction() {
+        let len = 48_000 * 8;
+        let far = Noise(41).speech(len, 0.5);
+        let near = convolve(&far, &echo_path(3));
+        let mut aec = EchoCanceller::new();
+        assert_eq!(aec.diagnostics().delay_ms, 0, "nothing learned yet");
+        run(&mut aec, &far, &near);
+        let found = aec.diagnostics();
+        // 40 ms bulk delay in the path, plus the 20 ms standing lead the engine always keeps
+        // on the reference (this test feeds the canceller without it, so the report is
+        // 60 ms), to within a few partitions.
+        assert!(
+            (50..=70).contains(&found.delay_ms),
+            "delay {} ms",
+            found.delay_ms
+        );
+        assert!(found.converged);
+        assert!(
+            found.reduction_tenths_db >= 200,
+            "reduction {} dB",
+            f32::from(found.reduction_tenths_db) / 10.0
+        );
     }
 
     #[test]

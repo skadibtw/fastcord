@@ -69,7 +69,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Strict reader for the exact canonical layout [`synth::wav_bytes`] writes: 44-byte header,
 /// PCM, mono, 16-bit, 48 kHz, `data` chunk last and exactly filling the file.
-pub(super) fn parse_wav(bytes: &[u8]) -> Result<Vec<i16>, String> {
+pub(crate) fn parse_wav(bytes: &[u8]) -> Result<Vec<i16>, String> {
     if bytes.len() < 44 || !bytes.len().is_multiple_of(2) {
         return Err(format!("unexpected length {}", bytes.len()));
     }
@@ -110,7 +110,7 @@ fn to_f64(pcm: &[i16]) -> Vec<f64> {
     pcm.iter().map(|&s| f64::from(s) / 32_768.0).collect()
 }
 
-pub(super) fn to_f32(pcm: &[i16]) -> Vec<f32> {
+pub(crate) fn to_f32(pcm: &[i16]) -> Vec<f32> {
     pcm.iter().map(|&s| f32::from(s) / 32_768.0).collect()
 }
 

@@ -22,9 +22,9 @@ pub(crate) mod fake;
 mod measure;
 mod microphone;
 #[cfg(test)]
-mod quality;
+pub(crate) mod quality;
 #[cfg(test)]
-mod synth;
+pub(crate) mod synth;
 #[cfg(test)]
 mod tests;
 mod worker;

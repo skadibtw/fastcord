@@ -20,6 +20,7 @@ mod inbox;
 mod login;
 mod media_ui;
 mod message_link;
+mod mic_panel;
 mod navigation;
 mod notify;
 mod outbox;
@@ -135,6 +136,8 @@ struct App {
     forward: forward::State,
     poll: poll_create::State,
     voice: voice_record::State,
+    /// Microphone gain, level meter and checks in the audio settings.
+    mic_panel: mic_panel::State,
     friends: friends::State,
     status: status::State,
     threads: threads::State,
@@ -275,6 +278,7 @@ enum Message {
     Forward(forward::Event),
     Poll(poll_create::Event),
     Voice(voice_record::Event),
+    MicPanel(mic_panel::Event),
     VoiceRecordingToggled(bool),
     Friends(friends::Event),
     Status(status::Event),
@@ -345,6 +349,7 @@ impl App {
                 forward: forward::State::default(),
                 poll: poll_create::State::default(),
                 voice: voice_record::State::default(),
+                mic_panel: mic_panel::State::default(),
                 friends: friends::State::default(),
                 status: status::State::default(),
                 threads: threads::State::default(),
@@ -459,6 +464,7 @@ impl App {
             self.video_subscription(),
             self.media_subscription(),
             self.voice_subscription(),
+            self.mic_subscription(),
             self.media_frame_subscription(),
             self.shortcut_subscription(),
         ])
@@ -631,6 +637,16 @@ impl App {
         }
     }
 
+    /// The 10 Hz level timer exists only while the audio dialog is open.
+    fn mic_subscription(&self) -> iced::Subscription<Message> {
+        if self.audio_settings.open {
+            iced::time::every(std::time::Duration::from_millis(100))
+                .map(|_| Message::MicPanel(mic_panel::Event::Tick))
+        } else {
+            iced::Subscription::none()
+        }
+    }
+
     /// The position timer exists only while an attachment is audibly playing.
     fn media_subscription(&self) -> iced::Subscription<Message> {
         if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.media.as_ref().is_some_and(media_ui::MediaSession::playing))
@@ -689,12 +705,22 @@ impl App {
             }
             Message::OpenAudioSettings | Message::RefreshAudioDevices => {
                 self.audio_settings.open = true;
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.set_diagnostics_open(true);
+                }
                 if !self.audio_settings.probing {
                     self.audio_settings.probing = true;
                     return Task::perform(audio_devices::enumerate(), Message::AudioDevicesListed);
                 }
             }
-            Message::CloseAudioSettings => self.audio_settings.open = false,
+            Message::CloseAudioSettings => {
+                self.audio_settings.open = false;
+                self.mic_panel.close();
+                if let Phase::Account { gateway, .. } = &self.phase {
+                    gateway.controls.set_diagnostics_open(false);
+                }
+            }
+            Message::MicPanel(event) => return self.mic_event(event),
             Message::AudioDevicesListed(result) => {
                 self.audio_settings.probing = false;
                 match result.input {
@@ -2371,6 +2397,71 @@ impl App {
         }
     }
 
+    /// Microphone gain and checks in the audio settings. A gain change applies to the call, a
+    /// running check and the saved preference at once; the file is written when the slider is
+    /// released.
+    fn mic_event(&mut self, event: mic_panel::Event) -> Task<Message> {
+        use mic_panel::Event;
+        let gain = self.audio_preferences.input_gain;
+        let changed = match event {
+            Event::Gain(db) => Some((
+                fastcord_audio::InputGain {
+                    manual_db: db,
+                    ..gain
+                }
+                .clamped(),
+                false,
+            )),
+            Event::Automatic(on) => Some((
+                fastcord_audio::InputGain {
+                    automatic: on,
+                    ..gain
+                },
+                true,
+            )),
+            Event::GainReleased => {
+                return if self.audio_saving.is_none() {
+                    self.save_audio_preferences()
+                } else {
+                    Task::none()
+                };
+            }
+            Event::Tick => {
+                let call = match &self.phase {
+                    Phase::Account { gateway, .. } => {
+                        gateway.controls.voice_controls().input_diagnostics
+                    }
+                    _ => None,
+                };
+                self.mic_panel.tick(call);
+                return Task::none();
+            }
+            _ => None,
+        };
+        if let Some((gain, save)) = changed {
+            self.audio_preferences.input_gain = gain;
+            if let Phase::Account { gateway, .. } = &self.phase {
+                gateway.controls.select_input_gain(gain);
+            }
+            self.mic_panel.set_gain(gain);
+            return if save && self.audio_saving.is_none() {
+                self.save_audio_preferences()
+            } else {
+                Task::none()
+            };
+        }
+        let context = mic_panel::Context {
+            input: self.audio_preferences.input.choice.clone(),
+            output: self.audio_preferences.output.choice.clone(),
+            noise_suppression: self.audio_preferences.noise_suppression,
+            gain,
+            in_call: self.call_active(),
+        };
+        self.mic_panel
+            .update(event, &context)
+            .map(Message::MicPanel)
+    }
+
     fn sticker_event(&mut self, event: sticker::Event) -> Task<Message> {
         let Phase::Account {
             session, gateway, ..
@@ -2666,12 +2757,25 @@ impl App {
                         output_error,
                         noise_status,
                         audio_stats,
-                        shortcuts::view(
-                            &self.audio_preferences.voice_input,
-                            &self.shortcuts,
-                            vad_forbidden,
-                            self.call_active(),
-                        ),
+                        column![
+                            shortcuts::view(
+                                &self.audio_preferences.voice_input,
+                                &self.shortcuts,
+                                vad_forbidden,
+                                self.call_active(),
+                            ),
+                            mic_panel::view(
+                                &self.mic_panel,
+                                self.audio_preferences.input_gain,
+                                self.call_active(),
+                                (self.audio_preferences.voice_input.mode
+                                    == shortcuts::InputMode::VoiceActivity)
+                                    .then_some(self.audio_preferences.voice_input.sensitivity)
+                                    .flatten(),
+                            ),
+                        ]
+                        .spacing(12)
+                        .into(),
                     ),
                     text(self.notice.as_deref().unwrap_or("")),
                 ]
@@ -3638,6 +3742,35 @@ mod tests {
             restored.noise_generation.wrapping_add(2)
         );
         assert_eq!(app.audio_preferences.noise_suppression, Light);
+    }
+
+    #[test]
+    fn the_audio_dialog_switches_the_level_meter_on_and_off_and_gain_reaches_the_call() {
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let diagnostics = |app: &App| match &app.phase {
+            Phase::Account { gateway, .. } => gateway.controls.voice_controls().diagnostics_open,
+            _ => panic!("not logged in"),
+        };
+        assert!(!diagnostics(&app), "closed: nothing is measured");
+        // The 10 Hz timer exists only while the dialog is open.
+        let _ = app.update(Message::OpenAudioSettings);
+        assert!(diagnostics(&app));
+        let _ = app.update(Message::MicPanel(mic_panel::Event::Gain(9)));
+        let _ = app.update(Message::MicPanel(mic_panel::Event::Automatic(true)));
+        let wanted = fastcord_audio::InputGain {
+            manual_db: 9,
+            automatic: true,
+        };
+        assert_eq!(app.audio_preferences.input_gain, wanted);
+        let Phase::Account { gateway, .. } = &app.phase else {
+            panic!("not logged in");
+        };
+        assert_eq!(gateway.controls.voice_controls().input_gain, wanted);
+        let _ = app.view();
+        let _ = app.update(Message::CloseAudioSettings);
+        assert!(!diagnostics(&app));
+        assert!(!app.mic_panel.running());
     }
 
     #[test]

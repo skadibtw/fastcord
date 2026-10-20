@@ -96,6 +96,25 @@ fn load_format(slot: &std::sync::atomic::AtomicU64) -> Option<DeviceFormat> {
     })
 }
 
+const ECHO_VALID: u64 = 1 << 63;
+
+fn pack_echo(echo: Option<crate::EchoDiagnostics>) -> u64 {
+    echo.map_or(0, |e| {
+        ECHO_VALID
+            | u64::from(e.reduction_tenths_db as u16)
+            | (u64::from(e.delay_ms) << 16)
+            | (u64::from(e.converged) << 32)
+    })
+}
+
+fn unpack_echo(bits: u64) -> Option<crate::EchoDiagnostics> {
+    (bits & ECHO_VALID != 0).then_some(crate::EchoDiagnostics {
+        reduction_tenths_db: bits as u16 as i16,
+        delay_ms: (bits >> 16) as u16,
+        converged: bits & (1 << 32) != 0,
+    })
+}
+
 impl From<StreamFormat> for DeviceFormat {
     fn from(format: StreamFormat) -> Self {
         Self {
@@ -142,6 +161,12 @@ pub enum EngineControl {
     NoiseSuppression(NoiseSuppression),
     /// Turn acoustic echo cancellation on or off without reopening either device.
     EchoCancellation(bool),
+    /// Manual and automatic microphone gain, applied after noise suppression (values clamped
+    /// to [`crate::MIN_GAIN_DB`]..=[`crate::MAX_GAIN_DB`]).
+    InputGain(crate::InputGain),
+    /// Start or stop measuring the microphone level and echo-canceller state for
+    /// [`AudioEngine::input_diagnostics`]. Off, nothing is measured.
+    Diagnostics(bool),
     /// Replace only this direction, on the owner thread. IDs are bounded to 512 bytes.
     SelectDevice {
         direction: Direction,
@@ -181,6 +206,8 @@ pub struct EngineStats {
     pub encode_errors: u64,
     /// Blocks given to a non-Off denoiser; unchanged while muted or Off.
     pub denoise_blocks: u64,
+    /// 10 ms blocks given to the echo canceller; unchanged while muted or off.
+    pub echo_blocks: u64,
     pub packets_decoded: u64,
     pub decode_errors: u64,
     /// Remote 20 ms frames recovered from FEC or concealed because a packet was lost or late.
@@ -195,6 +222,8 @@ struct Shared {
     output: Arc<StreamCounters>,
     capture_enabled: Arc<AtomicBool>,
     pipeline: PipelineCounters,
+    /// Echo-canceller state packed by [`pack_echo`]; 0 = none.
+    echo_diagnostics: std::sync::atomic::AtomicU64,
     input_format: std::sync::atomic::AtomicU64,
     output_format: std::sync::atomic::AtomicU64,
     #[cfg(test)]
@@ -358,6 +387,15 @@ impl AudioEngine {
         load_format(&self.shared.output_format)
     }
 
+    /// Microphone level and echo-canceller state, as measured since diagnostics were
+    /// switched on with [`EngineControl::Diagnostics`] (all zero before that). The level
+    /// maxima cover the time since the previous call, so poll from one reader.
+    pub fn input_diagnostics(&self) -> crate::InputDiagnostics {
+        let mut diagnostics = self.shared.pipeline.take_input();
+        diagnostics.echo = unpack_echo(self.shared.echo_diagnostics.load(Ordering::Acquire));
+        diagnostics
+    }
+
     pub fn stats(&self) -> EngineStats {
         let input = &self.shared.input;
         let output = &self.shared.output;
@@ -374,6 +412,7 @@ impl AudioEngine {
             frames_dropped: load(&pipeline.frames_dropped),
             encode_errors: load(&pipeline.encode_errors),
             denoise_blocks: load(&pipeline.denoise_blocks),
+            echo_blocks: load(&pipeline.echo_blocks),
             packets_decoded: load(&pipeline.packets_decoded),
             decode_errors: load(&pipeline.decode_errors),
             plc_frames: load(&pipeline.plc_frames),
@@ -514,6 +553,8 @@ fn run_owner<B: Backend>(
     let mut output_enabled = true;
     let mut echo_enabled = config.echo_cancellation;
     let mut echo: Option<Box<EchoCanceller>> = None;
+    let mut was_capturing = capture_enabled;
+    let mut echo_diag_at = std::time::Instant::now();
     let mut gains = std::collections::HashMap::<u32, f32>::new();
     let mut probe_at = std::time::Instant::now() + Duration::from_secs(1);
     // Coalesced input/output/suppression notifications bound control backpressure.
@@ -556,6 +597,16 @@ fn run_owner<B: Backend>(
                     }
                 }
                 EngineControl::EchoCancellation(enabled) => echo_enabled = enabled,
+                EngineControl::InputGain(gain) => shared
+                    .pipeline
+                    .gain_bits
+                    .store(gain.to_bits(), Ordering::Relaxed),
+                EngineControl::Diagnostics(enabled) => {
+                    shared.pipeline.set_meter(enabled);
+                    if !enabled {
+                        shared.echo_diagnostics.store(0, Ordering::Release);
+                    }
+                }
                 EngineControl::InputSensitivity(level) => shared
                     .pipeline
                     .gate_below_full_scale
@@ -670,6 +721,23 @@ fn run_owner<B: Backend>(
                     pipeline.set_echo_reference(false);
                 }
             }
+        }
+        if capture_enabled && !was_capturing {
+            // The microphone stream restarts after a mute or push-to-talk pause: its pairing
+            // with the played reference moved by up to a device period.
+            if let Some(echo) = &mut echo {
+                echo.path_changed();
+            }
+        }
+        was_capturing = capture_enabled;
+        if shared.pipeline.meter_enabled.load(Ordering::Relaxed)
+            && std::time::Instant::now() >= echo_diag_at
+        {
+            echo_diag_at = std::time::Instant::now() + Duration::from_millis(100);
+            shared.echo_diagnostics.store(
+                pack_echo(echo.as_deref().map(EchoCanceller::diagnostics)),
+                Ordering::Release,
+            );
         }
         if let Some((_, pipeline)) = capture.as_mut() {
             if capture_enabled {
@@ -859,6 +927,8 @@ mod tests {
         output_rate: u32,
         fail_input: Option<DeviceErrorKind>,
         fail_output: Option<DeviceErrorKind>,
+        /// The microphone delivers digital silence.
+        silent_input: bool,
         manual_callbacks: bool,
         defaults: Arc<Mutex<[Option<DeviceKey>; 2]>>,
         opened: Arc<Mutex<Vec<(Direction, DeviceChoice)>>>,
@@ -1008,6 +1078,7 @@ mod tests {
             };
             let mut callback = make(format);
             let fail = self.fail_input;
+            let amplitude = if self.silent_input { 0.0 } else { 0.5 };
             let counters = Arc::clone(counters);
             let mut phase = 0u64;
             let mut buffer = vec![0i16; (rate / 100) as usize * 2];
@@ -1015,7 +1086,7 @@ mod tests {
             let stream = self.spawn(Direction::Input, move || {
                 for frame in buffer.as_chunks_mut::<2>().0 {
                     let t = phase as f32 / rate as f32;
-                    let sample = (0.5
+                    let sample = (amplitude
                         * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
                         * f32::from(i16::MAX)) as i16;
                     frame.fill(sample);
@@ -2368,5 +2439,245 @@ mod tests {
             VoiceRecorder::spawn(AudioEngine::start_with(config, move || backend)).unwrap();
         drop(recorder);
         assert_eq!(fake.live_threads.load(Ordering::SeqCst), 0);
+    }
+
+    fn wait_for_frames(engine: &AudioEngine, frames: u64) -> crate::InputDiagnostics {
+        let mut last = engine.input_diagnostics();
+        crate::denoise::fake::wait_until(|| {
+            let now = engine.input_diagnostics();
+            if now.frames >= frames {
+                last = now;
+            }
+            now.frames >= frames
+        });
+        last
+    }
+
+    #[test]
+    fn diagnostics_measure_only_while_asked_and_follow_the_gain() {
+        let fake = host(48_000, 48_000);
+        let backend = fake.clone();
+        let config = EngineConfig {
+            echo_cancellation: false,
+            noise_suppression: NoiseSuppression::Off,
+            ..EngineConfig::default()
+        };
+        let (engine, mut channels) = AudioEngine::start_with(config, move || backend).unwrap();
+        let mut captured = channels.captured.take().unwrap();
+        // Frames flow, nothing is measured.
+        crate::denoise::fake::wait_until(|| captured.try_recv().is_ok());
+        assert_eq!(engine.input_diagnostics().frames, 0);
+
+        channels
+            .controls
+            .blocking_send(EngineControl::Diagnostics(true))
+            .unwrap();
+        let level = wait_for_frames(&engine, 10);
+        // The fake microphone is a 0.5 amplitude tone: -6 dBFS peak, -9 dBFS RMS.
+        assert!((level.peak_tenths_db + 60).abs() <= 3, "{level:?}");
+        assert!((level.rms_tenths_db + 90).abs() <= 4, "{level:?}");
+        assert!(level.echo.is_none(), "echo cancellation is off");
+
+        channels
+            .controls
+            .blocking_send(EngineControl::InputGain(crate::InputGain {
+                manual_db: -6,
+                automatic: false,
+            }))
+            .unwrap();
+        crate::denoise::fake::wait_until(|| {
+            while captured.try_recv().is_ok() {}
+            let now = engine.input_diagnostics();
+            now.frames > 0 && now.gain_tenths_db == -60 && now.peak_tenths_db <= -115
+        });
+
+        channels
+            .controls
+            .blocking_send(EngineControl::Diagnostics(false))
+            .unwrap();
+        // Let the owner apply it (it ticks every 5 ms), then the count must stand still.
+        std::thread::sleep(Duration::from_millis(150));
+        let before = engine.input_diagnostics().frames;
+        std::thread::sleep(Duration::from_millis(150));
+        while captured.try_recv().is_ok() {}
+        assert_eq!(engine.input_diagnostics().frames, before);
+    }
+
+    #[test]
+    fn echo_cancellation_runs_only_while_on_and_unmuted() {
+        let fake = host(48_000, 48_000);
+        let backend = fake.clone();
+        let config = EngineConfig {
+            noise_suppression: NoiseSuppression::Off,
+            ..EngineConfig::default()
+        };
+        let (engine, channels) = AudioEngine::start_with(config, move || backend).unwrap();
+        let mut captured = channels.captured;
+        crate::denoise::fake::wait_until(|| engine.stats().echo_blocks >= 20);
+
+        channels
+            .controls
+            .blocking_send(EngineControl::CaptureEnabled(false))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let muted = engine.stats().echo_blocks;
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            engine.stats().echo_blocks,
+            muted,
+            "no echo work while muted"
+        );
+
+        channels
+            .controls
+            .blocking_send(EngineControl::CaptureEnabled(true))
+            .unwrap();
+        crate::denoise::fake::wait_until(|| engine.stats().echo_blocks >= muted + 20);
+
+        channels
+            .controls
+            .blocking_send(EngineControl::EchoCancellation(false))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        while captured.as_mut().is_some_and(|c| c.try_recv().is_ok()) {}
+        let off = engine.stats().echo_blocks;
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            engine.stats().echo_blocks,
+            off,
+            "no echo work when switched off"
+        );
+    }
+
+    #[test]
+    fn the_mic_test_records_then_plays_back_and_releases_both_devices() {
+        use crate::{InputGain, MicTest, MicTestMode, MicTestPhase};
+        let fake = host(48_000, 48_000);
+        let backend = fake.clone();
+        let config = EngineConfig {
+            echo_cancellation: false,
+            noise_suppression: NoiseSuppression::Off,
+            ..EngineConfig::default()
+        };
+        let test = MicTest::spawn(
+            AudioEngine::start_with(config, move || backend),
+            MicTestMode::RecordAndPlay,
+            InputGain::default(),
+            400,
+        )
+        .unwrap();
+        let mut loudest = i16::MIN;
+        crate::denoise::fake::wait_until(|| {
+            let snapshot = test.snapshot();
+            if snapshot.phase == MicTestPhase::Recording {
+                loudest = loudest.max(snapshot.peak_tenths_db);
+            }
+            snapshot.phase == MicTestPhase::Finished
+        });
+        assert!(
+            (loudest + 60).abs() <= 5,
+            "the meter followed the tone: {loudest}"
+        );
+        let played = fake.played.lock().clone();
+        let audible = played.iter().filter(|s| s.abs() > 0.1).count();
+        assert!(
+            audible > 2_000,
+            "only {audible} audible samples were played back"
+        );
+        drop(test);
+        assert_eq!(
+            fake.live_threads.load(Ordering::SeqCst),
+            0,
+            "devices released"
+        );
+    }
+
+    #[test]
+    fn the_level_check_listens_without_an_output_and_stops_on_drop() {
+        use crate::{InputGain, MicTest, MicTestMode, MicTestPhase};
+        let fake = host(48_000, 48_000);
+        let backend = fake.clone();
+        let config = EngineConfig {
+            output: None,
+            echo_cancellation: false,
+            noise_suppression: NoiseSuppression::Off,
+            ..EngineConfig::default()
+        };
+        let test = MicTest::spawn(
+            AudioEngine::start_with(config, move || backend),
+            MicTestMode::Level,
+            InputGain::default(),
+            400,
+        )
+        .unwrap();
+        crate::denoise::fake::wait_until(|| test.snapshot().elapsed_ms >= 200);
+        assert_eq!(
+            test.snapshot().phase,
+            MicTestPhase::Recording,
+            "keeps listening"
+        );
+        assert!(fake.played.lock().is_empty(), "a level check plays nothing");
+        // The gain follows a change made while it runs.
+        test.set_gain(InputGain {
+            manual_db: 6,
+            automatic: false,
+        });
+        crate::denoise::fake::wait_until(|| {
+            let snapshot = test.snapshot();
+            snapshot.peak_tenths_db > -30 && snapshot.peak_tenths_db < 0
+        });
+        drop(test);
+        assert_eq!(fake.live_threads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn the_mic_test_diagnoses_a_silent_microphone_and_missing_or_refused_devices() {
+        use crate::{InputGain, MicTest, MicTestFailure, MicTestMode, MicTestPhase};
+        let mut fake = host(48_000, 48_000);
+        fake.silent_input = true;
+        let backend = fake.clone();
+        let config = EngineConfig {
+            echo_cancellation: false,
+            noise_suppression: NoiseSuppression::Off,
+            ..EngineConfig::default()
+        };
+        let test = MicTest::spawn(
+            AudioEngine::start_with(config, move || backend),
+            MicTestMode::RecordAndPlay,
+            InputGain::default(),
+            300,
+        )
+        .unwrap();
+        crate::denoise::fake::wait_until(|| test.snapshot().phase != MicTestPhase::Recording);
+        assert_eq!(
+            test.snapshot().phase,
+            MicTestPhase::Failed(MicTestFailure::Silent)
+        );
+        assert!(
+            fake.played.lock().iter().all(|s| s.abs() < 0.01),
+            "nothing silent is played back"
+        );
+        drop(test);
+
+        // An input that does not exist is named before anything runs.
+        let backend = host(48_000, 48_000);
+        let config = EngineConfig {
+            input: Some(explicit("missing")),
+            echo_cancellation: false,
+            noise_suppression: NoiseSuppression::Off,
+            ..EngineConfig::default()
+        };
+        let failure = MicTest::spawn(
+            AudioEngine::start_with(config, move || backend),
+            MicTestMode::Level,
+            InputGain::default(),
+            300,
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure,
+            MicTestFailure::Input(DeviceErrorKind::Disconnected)
+        );
+        assert!(failure.to_string().starts_with("Microphone:"));
     }
 }

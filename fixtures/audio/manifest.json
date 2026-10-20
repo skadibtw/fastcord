@@ -38,6 +38,30 @@
         },
         "room_tone": { "seed": 11, "rms_dbfs": -40.0 }
       }
+    },
+    "speakerphone-far.wav": {
+      "sha256": "9807d164bb68d7cd37cea95c1d58dbab9d5586de5dc94545e242dd6b6d818308",
+      "duration_s": 10.0,
+      "description": "Far-end talker played by a call (echo-cancellation reference), speaking 0.3-5.0 s, 5.3-7.2 s and 7.5-9.7 s.",
+      "generator": {
+        "talker": { "seed": 21, "f0_hz": 118.0, "rms_dbfs": -22.0 },
+        "speech_intervals_s": [[0.3, 5.0], [5.3, 7.2], [7.5, 9.7]],
+        "regenerate": "cargo test -p fastcord-audio --locked regenerate_speakerphone_fixtures -- --ignored --nocapture"
+      }
+    },
+    "speakerphone-mic.wav": {
+      "sha256": "251083f5c326f95f1d6ce7b5c2e749f065590841a127bbaf91ed00ba346c5e29",
+      "duration_s": 10.0,
+      "description": "What a speakerphone microphone hears: speakerphone-far.wav through a compressing speaker, a 40 ms bulk delay and a decaying 100 ms room response, a near-end talker between 5.5 s and 6.9 s, and faint room tone.",
+      "generator": {
+        "near_talker": { "seed": 22, "f0_hz": 190.0, "rms_dbfs": -26.0 },
+        "near_span_s": [5.5, 6.9],
+        "echo_path": { "seed": 5, "tail_ms": 100.0, "tail_decay_ms": 20.0, "tail_amplitude": 0.08 },
+        "bulk_delay_ms": 40.0,
+        "echo_gain_db": -6.0,
+        "speaker_drive": 2.0,
+        "room_tone": { "seed": 7, "rms_dbfs": -60.0 }
+      }
     }
   }
 }

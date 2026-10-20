@@ -26,6 +26,8 @@ pub struct Preferences {
     pub output: Selection,
     pub noise_suppression: NoiseSuppression,
     pub echo_cancellation: bool,
+    /// Manual and automatic microphone gain.
+    pub input_gain: fastcord_audio::InputGain,
     /// Desktop notifications are on unless this is set (so `Default` is on).
     pub notifications_off: bool,
     /// Experimental voice-message recording is offered (off until the user turns it on).
@@ -41,6 +43,7 @@ impl Default for Preferences {
             output: Selection::default(),
             noise_suppression: NoiseSuppression::default(),
             echo_cancellation: true,
+            input_gain: fastcord_audio::InputGain::default(),
             notifications_off: false,
             voice_recording: false,
             voice_input: crate::shortcuts::Settings::default(),
@@ -188,11 +191,11 @@ pub fn view<'a>(
         text("Choose input and output independently. Explicit devices never fall back to speakers."),
         text("Microphone input"),
         pick_list(inputs, Some(input), |option| crate::Message::SelectAudioDevice(Direction::Input, option)).width(Length::Fill),
-        text(input_error.map_or_else(String::new, |error| format!("Input stopped: {error}. Select a device to retry."))),
+        text(input_error.map_or_else(String::new, |error| format!("Input stopped ({error}): {} Select a device to retry.", error.advice()))),
         text(settings.input_error.unwrap_or("")),
         text("Playback output"),
         pick_list(outputs, Some(output), |option| crate::Message::SelectAudioDevice(Direction::Output, option)).width(Length::Fill),
-        text(output_error.map_or_else(String::new, |error| format!("Output stopped: {error}. Select a device to retry."))),
+        text(output_error.map_or_else(String::new, |error| format!("Output stopped ({error}): {} Select a device to retry.", error.advice()))),
         text(settings.output_error.unwrap_or("")),
         text("Microphone noise suppression"),
         pick_list(NoiseSuppression::ALL, Some(prefs.noise_suppression), crate::Message::NoiseSuppressionChanged).width(Length::Fill),
@@ -260,6 +263,15 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
             Some(Value::Bool(enabled)) => *enabled,
             _ => return None,
         },
+        // Older settings predate gain: 0 dB, automatic gain off.
+        input_gain: fastcord_audio::InputGain {
+            manual_db: value
+                .get("input_gain_db")
+                .and_then(Value::as_i64)
+                .map_or(0, |db| db.clamp(-128, 127) as i8),
+            automatic: value.get("automatic_gain").and_then(Value::as_bool) == Some(true),
+        }
+        .clamped(),
         notifications_off: value.get("notifications_off").and_then(Value::as_bool) == Some(true),
         voice_recording: value.get("voice_recording").and_then(Value::as_bool) == Some(true),
         // Older settings predate voice input: voice activity, no shortcuts.
@@ -282,7 +294,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json()}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json()}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -358,6 +370,10 @@ mod tests {
             output: explicit("wasapi:headset", "Duplicate name"),
             noise_suppression: NoiseSuppression::HighQuality,
             echo_cancellation: false,
+            input_gain: fastcord_audio::InputGain {
+                manual_db: -7,
+                automatic: true,
+            },
             notifications_off: true,
             voice_recording: true,
             voice_input: {
@@ -377,6 +393,19 @@ mod tests {
         assert_eq!(load_from(&path), changed);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
+    #[test]
+    fn gain_persists_is_clamped_and_older_files_mean_unity() {
+        let legacy = br#"{"input":{"id":null,"label":""},"output":{"id":null,"label":""}}"#;
+        assert_eq!(
+            decode(legacy).unwrap().input_gain,
+            fastcord_audio::InputGain::default()
+        );
+        let wild = br#"{"input":{"id":null,"label":""},"output":{"id":null,"label":""},"input_gain_db":900,"automatic_gain":true}"#;
+        let gain = decode(wild).unwrap().input_gain;
+        assert_eq!(gain.manual_db, fastcord_audio::MAX_GAIN_DB);
+        assert!(gain.automatic);
+    }
+
     #[test]
     fn missing_explicit_choice_is_displayed_not_replaced_or_matched_by_label() {
         let saved = explicit("headset-a", "Headset");

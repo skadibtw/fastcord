@@ -195,7 +195,7 @@ const RELEASE_SECONDS: f32 = 0.05;
 
 /// Per-sample brickwall limiter: instant attack, smooth release, gain carried across blocks.
 #[derive(Debug, Clone, Copy)]
-struct LimiterEnvelope {
+pub(crate) struct LimiterEnvelope {
     gain: f32,
     /// Fraction of the remaining distance to unity gain recovered per interleaved sample.
     release: f32,
@@ -203,16 +203,20 @@ struct LimiterEnvelope {
 
 impl Default for LimiterEnvelope {
     fn default() -> Self {
-        let samples_per_second = 48_000.0 * CHANNELS as f32;
+        Self::per_second(48_000.0 * CHANNELS as f32)
+    }
+}
+
+impl LimiterEnvelope {
+    /// A limiter fed `samples_per_second` interleaved samples (48 kHz mono for the microphone).
+    pub(crate) fn per_second(samples_per_second: f32) -> Self {
         Self {
             gain: 1.0,
             release: 1.0 - (-1.0 / (RELEASE_SECONDS * samples_per_second)).exp(),
         }
     }
-}
 
-impl LimiterEnvelope {
-    fn process(&mut self, out: &mut [f32]) {
+    pub(crate) fn process(&mut self, out: &mut [f32]) {
         for sample in out {
             self.gain += (1.0 - self.gain) * self.release;
             let magnitude = sample.abs();

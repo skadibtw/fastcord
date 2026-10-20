@@ -36,7 +36,7 @@ const EXPERIMENTAL: &str = "Experimental: Discord documents voice-message record
 
 /// A value whose destructor may block (joining an audio thread) is dropped on a short-lived
 /// thread, never on the UI thread.
-struct Detached<T: Send + 'static>(Option<T>);
+pub(crate) struct Detached<T: Send + 'static>(pub(crate) Option<T>);
 
 impl<T: Send + 'static> Drop for Detached<T> {
     fn drop(&mut self) {

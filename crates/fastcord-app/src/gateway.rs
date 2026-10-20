@@ -64,6 +64,13 @@ pub struct VoiceControls {
     pub echo_cancellation_off: bool,
     /// Playback underrun/concealment counters of the running engine; `None` outside a call.
     pub audio_stats: Option<fastcord_audio::EngineStats>,
+    /// Manual and automatic microphone gain (the saved preference).
+    pub input_gain: fastcord_audio::InputGain,
+    /// The audio dialog is open, so the running engine measures the microphone level.
+    pub diagnostics_open: bool,
+    /// The latest microphone level and echo-canceller state; `Some` only while the dialog is
+    /// open during a call.
+    pub input_diagnostics: Option<fastcord_audio::InputDiagnostics>,
     /// How the microphone is opened to the call (the saved preference).
     pub input_mode: InputMode,
     /// The channel withholds "use voice activity", so push-to-talk is forced.
@@ -576,6 +583,15 @@ pub enum StreamIntent {
     Ping(String),
 }
 
+/// Stores `value` and says whether it differed, for `watch::Sender::send_if_modified`.
+fn replace_if_changed<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        return false;
+    }
+    *slot = value;
+    true
+}
+
 fn send_or_retain_stream_intent(
     pending: &mut Option<StreamIntent>,
     intent: StreamIntent,
@@ -833,12 +849,25 @@ impl NavigationBridge {
             controls.output_device = preferences.output.choice.clone();
             controls.noise_suppression = preferences.noise_suppression;
             controls.echo_cancellation_off = !preferences.echo_cancellation;
+            controls.input_gain = preferences.input_gain;
         });
     }
 
     pub fn select_echo_cancellation(&self, enabled: bool) {
         self.voice_controls
             .send_modify(|controls| controls.echo_cancellation_off = !enabled);
+    }
+
+    pub fn select_input_gain(&self, gain: fastcord_audio::InputGain) {
+        self.voice_controls
+            .send_if_modified(|controls| replace_if_changed(&mut controls.input_gain, gain));
+    }
+
+    /// The audio dialog opened or closed; the running call measures the microphone level only
+    /// while it is open.
+    pub fn set_diagnostics_open(&self, open: bool) {
+        self.voice_controls
+            .send_if_modified(|controls| replace_if_changed(&mut controls.diagnostics_open, open));
     }
 
     pub fn select_audio_device(

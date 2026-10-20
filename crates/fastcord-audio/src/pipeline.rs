@@ -2,14 +2,15 @@
 //!
 //! ```text
 //! capture ring (device rate, device channels)
-//!   -> downmix to mono -> resample to 48 kHz -> echo cancel -> 480-sample denoise -> 960-sample frames -> Opus
+//!   -> downmix to mono -> resample to 48 kHz -> echo cancel -> 480-sample denoise -> gain
+//!   -> 960-sample frames -> level meter -> sensitivity gate -> Opus
 //! Opus packets -> decode 48 kHz stereo -> resample to device rate
 //!   -> device channel layout -> playback ring (~40 ms target, 100 ms cap)
 //! ```
 //!
 //! All buffers are sized when a stream opens; steady-state processing does
 //! not allocate.
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::channels::{downmix_to_mono, stereo_to_device};
 use crate::codec::{
@@ -21,6 +22,7 @@ use crate::device::StreamFormat;
 use crate::echo::{EchoCanceller, ReferenceTap};
 use crate::error::AudioError;
 use crate::jitter::JitterMixer;
+use crate::level::{FLOOR_TENTHS_DB, GainStage, InputDiagnostics, InputGain, measure};
 use crate::resample::RateConverter;
 use crate::ring::{RingConsumer, RingProducer};
 
@@ -56,6 +58,8 @@ pub(crate) struct PipelineCounters {
     pub(crate) encode_errors: AtomicU64,
     /// Blocks given to a non-Off denoiser, including mode-switch priming and warm-up.
     pub(crate) denoise_blocks: AtomicU64,
+    /// Blocks given to the echo canceller; unchanged while muted or off.
+    pub(crate) echo_blocks: AtomicU64,
     /// Encoded frames dropped because the consumer was not keeping up.
     pub(crate) frames_dropped: AtomicU64,
     pub(crate) packets_decoded: AtomicU64,
@@ -67,7 +71,67 @@ pub(crate) struct PipelineCounters {
     pub(crate) gate_below_full_scale: AtomicU8,
     /// 20 ms frames the sensitivity gate kept back.
     pub(crate) frames_gated: AtomicU64,
+    /// [`InputGain::to_bits`]; 0 is 0 dB with automatic gain off.
+    pub(crate) gain_bits: AtomicU32,
+    /// A diagnostics consumer is attached: only then is the level measured.
+    pub(crate) meter_enabled: AtomicBool,
+    /// Loudest frame RMS / highest peak since the last read, as tenths of dB above the
+    /// floor (0 = silence), so `fetch_max` and a zero default are correct.
+    pub(crate) meter_rms: AtomicU32,
+    pub(crate) meter_peak: AtomicU32,
+    /// Frames measured and frames that reached full scale since diagnostics were enabled.
+    pub(crate) meter_frames: AtomicU64,
+    pub(crate) meter_clipped: AtomicU64,
+    /// Total gain in force, tenths of dB offset by 1000.
+    pub(crate) meter_gain: AtomicU32,
 }
+
+/// Offset that keeps tenths of dB unsigned in the meter atomics.
+const METER_OFFSET: i32 = -(FLOOR_TENTHS_DB as i32);
+
+impl PipelineCounters {
+    /// Switches level measurement on or off; switching on starts the counts afresh.
+    pub(crate) fn set_meter(&self, enabled: bool) {
+        if enabled && !self.meter_enabled.load(Ordering::Relaxed) {
+            self.meter_rms.store(0, Ordering::Relaxed);
+            self.meter_peak.store(0, Ordering::Relaxed);
+            self.meter_frames.store(0, Ordering::Relaxed);
+            self.meter_clipped.store(0, Ordering::Relaxed);
+            self.meter_gain
+                .store(METER_OFFSET as u32, Ordering::Relaxed);
+        }
+        self.meter_enabled.store(enabled, Ordering::Release);
+    }
+
+    fn record_frame(&self, frame: &[f32]) {
+        let (rms, peak) = measure(frame);
+        self.meter_rms
+            .fetch_max((i32::from(rms) + METER_OFFSET) as u32, Ordering::Relaxed);
+        self.meter_peak
+            .fetch_max((i32::from(peak) + METER_OFFSET) as u32, Ordering::Relaxed);
+        if frame.iter().any(|s| s.abs() >= CLIP_LEVEL) {
+            self.meter_clipped.fetch_add(1, Ordering::Relaxed);
+        }
+        self.meter_frames.fetch_add(1, Ordering::Release);
+    }
+
+    /// Level since the previous call (the maxima are consumed), without the echo part.
+    pub(crate) fn take_input(&self) -> InputDiagnostics {
+        let tenths = |value: u32| (value as i32 - METER_OFFSET) as i16;
+        InputDiagnostics {
+            frames: self.meter_frames.load(Ordering::Acquire),
+            rms_tenths_db: tenths(self.meter_rms.swap(0, Ordering::Relaxed)),
+            peak_tenths_db: tenths(self.meter_peak.swap(0, Ordering::Relaxed)),
+            clipped_frames: self.meter_clipped.load(Ordering::Relaxed),
+            gain_tenths_db: tenths(self.meter_gain.load(Ordering::Relaxed)),
+            echo: None,
+        }
+    }
+}
+
+/// A sample at or above this level (-0.45 dBFS) is at full scale or at the limiter ceiling
+/// (0.97) and counts as clipped.
+const CLIP_LEVEL: f32 = 0.95;
 
 /// Frames the gate stays open after the level last reached the threshold (200 ms).
 const GATE_HANG_FRAMES: u8 = 10;
@@ -120,6 +184,7 @@ struct FrameEncoder {
     encoder: VoiceEncoder,
     sequence: u64,
     gate: VoiceGate,
+    gain: GainStage,
 }
 
 impl FrameEncoder {
@@ -129,21 +194,32 @@ impl FrameEncoder {
         counters: &PipelineCounters,
         emit: &mut impl FnMut(CapturedFrame),
     ) {
-        for (out, &sample) in self.frame[self.filled..self.filled + BLOCK_SAMPLES]
-            .iter_mut()
-            .zip(block)
-        {
+        let slot = &mut self.frame[self.filled..self.filled + BLOCK_SAMPLES];
+        for (out, &sample) in slot.iter_mut().zip(block) {
             *out = if sample.is_finite() {
                 sample.clamp(-1.0, 1.0)
             } else {
                 0.0
             };
         }
+        let gain = self.gain.process(
+            slot,
+            InputGain::from_bits(counters.gain_bits.load(Ordering::Relaxed)),
+        );
+        if counters.meter_enabled.load(Ordering::Relaxed) {
+            let tenths = (gain * 10.0).round() as i32 + METER_OFFSET;
+            counters
+                .meter_gain
+                .store(tenths.max(0) as u32, Ordering::Relaxed);
+        }
         self.filled += BLOCK_SAMPLES;
         if self.filled < FRAME_SAMPLES {
             return;
         }
         self.filled = 0;
+        if counters.meter_enabled.load(Ordering::Relaxed) {
+            counters.record_frame(&self.frame[..]);
+        }
         if !self.gate.admit(
             &self.frame[..],
             counters.gate_below_full_scale.load(Ordering::Relaxed),
@@ -200,6 +276,7 @@ impl CapturePipeline {
                 encoder: VoiceEncoder::new(bitrate)?,
                 sequence: 0,
                 gate: VoiceGate::default(),
+                gain: GainStage::new(),
             },
             ring,
         })
@@ -251,6 +328,7 @@ impl CapturePipeline {
                     }
                     *block_filled = 0;
                     if let Some(echo) = echo.as_deref_mut() {
+                        counters.echo_blocks.fetch_add(1, Ordering::Relaxed);
                         let near = *block;
                         echo.process(&near, block);
                     }
@@ -492,6 +570,99 @@ mod tests {
         assert_eq!(sent.iter().map(|f| f.sequence).collect::<Vec<_>>(), [2, 3]);
     }
 
+    /// 100 ms of a 440 Hz tone of `amplitude` through the capture path.
+    fn run_tone(counters: &PipelineCounters, amplitude: f32) -> Vec<CapturedFrame> {
+        let (mut ring, mut pipeline) = capture(48_000, 1);
+        let tone = sine(48_000, 440.0, amplitude, 4_800);
+        ring.push_overwrite(tone.iter().copied());
+        let mut sent = Vec::new();
+        pipeline.run(
+            counters,
+            &mut denoiser(NoiseSuppression::Off),
+            None,
+            &mut |f| sent.push(f),
+        );
+        sent
+    }
+
+    #[test]
+    fn the_meter_measures_nothing_until_asked_and_reads_the_gated_signal() {
+        let counters = PipelineCounters::default();
+        run_tone(&counters, 0.1);
+        let silent = counters.take_input();
+        assert_eq!(silent.frames, 0, "off: nothing is measured");
+
+        counters.set_meter(true);
+        let sent = run_tone(&counters, 0.1);
+        assert_eq!(sent.len(), 5);
+        let level = counters.take_input();
+        assert_eq!(level.frames, 5);
+        // 0.1 amplitude: peak -20 dBFS, RMS -23 dBFS.
+        assert_eq!(level.peak_tenths_db, -200);
+        assert!((level.rms_tenths_db + 230).abs() <= 2, "{level:?}");
+        assert_eq!(level.clipped_frames, 0);
+        assert_eq!(level.gain_tenths_db, 0);
+        // The maxima are consumed; the counts are not.
+        let again = counters.take_input();
+        assert_eq!(again.rms_tenths_db, FLOOR_TENTHS_DB);
+        assert_eq!(again.frames, 5);
+
+        // The meter sees the signal after gain, which is also what the gate compares.
+        counters.gain_bits.store(
+            InputGain {
+                manual_db: 6,
+                automatic: false,
+            }
+            .to_bits(),
+            Ordering::Relaxed,
+        );
+        run_tone(&counters, 0.1);
+        let boosted = counters.take_input();
+        assert!(
+            (boosted.peak_tenths_db + 140).abs() <= 10,
+            "+6 dB: {boosted:?}"
+        );
+        assert_eq!(boosted.gain_tenths_db, 60);
+
+        // Clipping is counted and cannot pass the limiter ceiling.
+        counters.gain_bits.store(
+            InputGain {
+                manual_db: 30,
+                automatic: false,
+            }
+            .to_bits(),
+            Ordering::Relaxed,
+        );
+        run_tone(&counters, 0.5);
+        let hot = counters.take_input();
+        assert!(hot.clipped_frames > 0, "{hot:?}");
+        assert!(
+            hot.peak_tenths_db <= -2,
+            "limited below full scale: {hot:?}"
+        );
+
+        counters.set_meter(false);
+        run_tone(&counters, 0.1);
+        assert_eq!(counters.take_input().frames, hot.frames, "off again");
+    }
+
+    #[test]
+    fn the_gate_compares_the_gained_level() {
+        // A -52 dBFS tone is below a -40 dB threshold; +20 dB of gain brings it above.
+        let counters = PipelineCounters::default();
+        counters.gate_below_full_scale.store(40, Ordering::Relaxed);
+        assert!(run_tone(&counters, 0.0035).is_empty());
+        counters.gain_bits.store(
+            InputGain {
+                manual_db: 20,
+                automatic: false,
+            }
+            .to_bits(),
+            Ordering::Relaxed,
+        );
+        assert!(!run_tone(&counters, 0.0035).is_empty());
+    }
+
     #[test]
     fn muted_capture_discards_samples_without_encoding_or_inference() {
         let (mut ring, mut pipeline) = capture(48_000, 1);
@@ -719,6 +890,16 @@ mod tests {
         let mut queue = packets.into_iter();
         let mut emitted = 0;
         let mut denoiser = denoiser(NoiseSuppression::Off);
+        // The gain stage, limiter and level meter are part of the steady state.
+        counters.gain_bits.store(
+            InputGain {
+                manual_db: 9,
+                automatic: true,
+            }
+            .to_bits(),
+            Ordering::Relaxed,
+        );
+        counters.set_meter(true);
         // Warm up, then measure the same work inside a callback scope so the
         // counting allocator attributes any heap use.
         let mut step = |emitted: &mut usize| {

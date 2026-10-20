@@ -66,6 +66,8 @@ const MAX_PARTICIPANTS: usize = 128;
 const MAX_SENT_GAINS: usize = 256;
 /// How long after the last voice activity a participant stops being shown as speaking.
 const SPEAKING_RELEASE: Duration = Duration::from_millis(250);
+/// How often the microphone level is read while the audio dialog is open.
+const METER_INTERVAL: Duration = Duration::from_millis(100);
 /// When the engine's control queue was full, the unsent controls are retried after this.
 const CONTROL_RETRY: Duration = Duration::from_millis(20);
 
@@ -82,6 +84,8 @@ struct EngineSync {
     noise_suppression: (NoiseSuppression, u64),
     echo_cancellation: bool,
     sensitivity: Option<u8>,
+    input_gain: fastcord_audio::InputGain,
+    diagnostics: bool,
 }
 
 impl EngineSync {
@@ -97,8 +101,10 @@ impl EngineSync {
             noise_suppression: (NoiseSuppression::Light, 0),
             // The engine starts with the preference it was configured with.
             echo_cancellation: true,
-            // The engine starts with no level gate.
+            // The engine starts with no level gate, no gain and no measurement.
             sensitivity: None,
+            input_gain: fastcord_audio::InputGain::default(),
+            diagnostics: false,
         }
     }
 
@@ -191,6 +197,28 @@ impl EngineSync {
                 .is_ok()
             {
                 self.echo_cancellation = echo;
+            } else {
+                self.retry = true;
+            }
+        }
+        if self.input_gain != controls.input_gain {
+            if self
+                .controls
+                .try_send(EngineControl::InputGain(controls.input_gain))
+                .is_ok()
+            {
+                self.input_gain = controls.input_gain;
+            } else {
+                self.retry = true;
+            }
+        }
+        if self.diagnostics != controls.diagnostics_open {
+            if self
+                .controls
+                .try_send(EngineControl::Diagnostics(controls.diagnostics_open))
+                .is_ok()
+            {
+                self.diagnostics = controls.diagnostics_open;
             } else {
                 self.retry = true;
             }
@@ -296,6 +324,13 @@ impl NoiseStatus<'_> {
             .send_modify(|controls| controls.noise_status = Some(status));
     }
 
+    /// Publishes the microphone level, only when it changed.
+    fn publish_level(&self, diagnostics: Option<fastcord_audio::InputDiagnostics>) {
+        self.0.send_if_modified(|controls| {
+            super::replace_if_changed(&mut controls.input_diagnostics, diagnostics)
+        });
+    }
+
     /// Publishes the engine counters the dialog shows, only when one of them changed.
     fn publish_stats(&self, stats: fastcord_audio::EngineStats) {
         self.0.send_if_modified(|controls| {
@@ -321,6 +356,7 @@ impl Drop for NoiseStatus<'_> {
         self.0.send_modify(|controls| {
             controls.noise_status = None;
             controls.audio_stats = None;
+            controls.input_diagnostics = None;
         });
     }
 }
@@ -361,6 +397,8 @@ async fn run_with(
         initial.capture_enabled_with(hold.active)
     };
     let mut retry_at = sync.retry_deadline();
+    // Level polling runs only while the audio dialog is open.
+    let mut meter_at = controls.borrow().diagnostics_open.then(Instant::now);
     let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
     let mut engine_failed = false;
     let mut participants = HashMap::<Snowflake, VoiceParticipant>::new();
@@ -440,12 +478,23 @@ async fn run_with(
                 sync.apply(&updated, hold.active);
                 retry_at = sync.retry_deadline();
                 let enabled = updated.capture_enabled_with(hold.active);
+                let dialog_open = updated.diagnostics_open;
                 drop(updated);
                 if capture_enabled && !enabled {
                     let _ = media.end_speech();
                     speech_end_at = None;
                 }
                 capture_enabled = enabled;
+                if !dialog_open {
+                    meter_at = None;
+                    noise_status.publish_level(None);
+                } else if meter_at.is_none() {
+                    meter_at = Some(Instant::now());
+                }
+            }
+            _ = wait_for_release(meter_at) => {
+                meter_at = Some(Instant::now() + METER_INTERVAL);
+                noise_status.publish_level(Some(engine.input_diagnostics()));
             }
             _ = wait_for_release(hold.release_at) => {
                 if hold.expire(Instant::now()) {
@@ -1043,5 +1092,39 @@ mod tests {
         sync.apply(&controls, false);
         let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(sent.contains(&EngineControl::InputSensitivity(Some(40))));
+    }
+
+    #[test]
+    fn gain_and_the_level_meter_reach_the_engine_once_and_only_when_changed() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut sync = EngineSync::new(tx);
+        let mut controls = ptt_controls(true, 0, 0);
+        sync.apply(&controls, false);
+        let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            !sent.iter().any(|c| matches!(
+                c,
+                EngineControl::InputGain(_) | EngineControl::Diagnostics(_)
+            )),
+            "defaults are what the engine starts with: {sent:?}"
+        );
+        let gain = fastcord_audio::InputGain {
+            manual_db: 6,
+            automatic: true,
+        };
+        controls.input_gain = gain;
+        controls.diagnostics_open = true;
+        sync.apply(&controls, false);
+        let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(sent.contains(&EngineControl::InputGain(gain)));
+        assert!(sent.contains(&EngineControl::Diagnostics(true)));
+        sync.apply(&controls, false);
+        assert!(rx.try_recv().is_err(), "nothing repeats");
+        controls.diagnostics_open = false;
+        sync.apply(&controls, false);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineControl::Diagnostics(false))
+        ));
     }
 }

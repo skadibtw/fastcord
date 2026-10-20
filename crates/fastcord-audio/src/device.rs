@@ -127,6 +127,33 @@ impl std::fmt::Display for DeviceErrorKind {
     }
 }
 
+impl DeviceErrorKind {
+    /// What the user can do about it, in one sentence.
+    pub fn advice(self) -> &'static str {
+        match self {
+            Self::Disconnected => {
+                "the device was not found. Plug it in again or choose another device."
+            }
+            Self::Busy => {
+                "another application is using the device exclusively. Close it, or turn off exclusive mode for this device in the system sound settings."
+            }
+            Self::PermissionDenied => {
+                "access was denied. Allow microphone access for desktop applications in the system privacy settings (Windows: Settings > Privacy & security > Microphone; macOS: System Settings > Privacy & Security > Microphone)."
+            }
+            Self::HostUnavailable => {
+                "the system audio service is not running. Restart it or restart the computer."
+            }
+            Self::Invalidated => {
+                "the device changed its format while in use. Select it again to retry."
+            }
+            Self::Unsupported => {
+                "the device offers no format fastcord can use. Choose another device, or another sample rate in the system sound settings."
+            }
+            Self::Other => "the device failed. Select it again or choose another device.",
+        }
+    }
+}
+
 /// Lists the devices available for `direction` on the platform's default
 /// audio host. Blocking.
 pub fn list_devices(direction: Direction) -> Result<Vec<DeviceInfo>, AudioError> {
