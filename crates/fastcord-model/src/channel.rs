@@ -118,6 +118,12 @@ pub struct Channel {
     /// normalized channels always reference participants this way.
     #[serde(default)]
     pub recipient_ids: Vec<Snowflake>,
+    /// Group DM owner.
+    #[serde(default)]
+    pub owner_id: Option<Snowflake>,
+    /// Group DM icon hash.
+    #[serde(default)]
+    pub icon: Option<String>,
     #[serde(default)]
     pub last_message_id: Option<Snowflake>,
     /// Present on threads only.

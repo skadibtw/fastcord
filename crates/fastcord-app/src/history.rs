@@ -3186,6 +3186,11 @@ mod tests {
                 fastcord_discord::state::navigation::PrivateChannelSelection {
                     channel_id: channel,
                     name: "Nelly".to_owned(),
+                    group: false,
+                    custom_name: String::new(),
+                    owner: None,
+                    has_icon: false,
+                    members: Vec::new(),
                     acked: None,
                     unread: false,
                     mentions: 0,

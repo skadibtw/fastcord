@@ -87,6 +87,10 @@ fn map_overhead<K, V>(map: &HashMap<K, V>) -> usize {
     table_bytes::<K, V>(map.capacity()) - map.len() * size_of::<V>()
 }
 
+/// Most participants one conversation keeps (Discord allows ten; the margin
+/// only bounds a flood of add events).
+const MAX_GROUP_MEMBERS: usize = 64;
+
 fn compact_map<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
     // Amortize ordinary deletes; bulk eviction also compacts once at its end.
     if map.capacity() > map.len().saturating_mul(2) {
@@ -109,6 +113,7 @@ fn role_bytes(role: &Role) -> usize {
 fn channel_bytes(channel: &Channel) -> usize {
     size_of::<Channel>()
         + text(&channel.name)
+        + text(&channel.icon)
         + channel.permission_overwrites.capacity() * size_of::<PermissionOverwrite>()
         + (channel.recipients.capacity() - channel.recipients.len()) * size_of::<User>()
         + channel.recipients.iter().map(user_bytes).sum::<usize>()
@@ -1099,7 +1104,12 @@ impl Store {
                 }
             }
             Dispatch::ChannelRecipientAdd(event) => {
-                if self.private_channels.contains_key(&event.channel_id) {
+                if self.current_user != Some(event.user.id)
+                    && self
+                        .private_channels
+                        .get(&event.channel_id)
+                        .is_some_and(|c| c.recipient_ids.len() < MAX_GROUP_MEMBERS)
+                {
                     let user_id = event.user.id;
                     let user_changed = self.users.get(&user_id) != Some(&event.user);
                     if user_changed {
@@ -1416,6 +1426,12 @@ impl Store {
         let mut channel = self.normalize_channel(channel);
         if let Some(old) = self.private_channels.get(&channel.id) {
             channel.last_message_id = newest(old.last_message_id, channel.last_message_id);
+            // An update that carries no participants (a partial CHANNEL_UPDATE)
+            // must not empty the member list; removals arrive as their own event.
+            if channel.recipient_ids.is_empty() {
+                channel.recipient_ids = old.recipient_ids.clone();
+            }
+            channel.owner_id = channel.owner_id.or(old.owner_id);
         }
         let cost = channel_bytes(&channel);
         let old = self.private_channels.insert(channel.id, channel);

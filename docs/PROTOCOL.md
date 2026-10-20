@@ -586,3 +586,17 @@ Evidence: community documentation of `TYPING_START` and `POST /channels/{id}/typ
 - **Mute / unmute a conversation:** `PATCH /users/@me/guilds/{guild_id|@me}/settings` with `{"channel_overrides":{"{channel_id}":{"muted":true|false}}}` (`UserWrite`, once; `@me` for DMs and group DMs). The listed state changes only when `USER_GUILD_SETTINGS_UPDATE` arrives. No mute duration is sent.
 - Jump: opening a row selects the conversation and then uses the existing first-unread jump; a mention uses the existing `JumpTo`. A conversation that never opens ends the wait after 10 s with the usual "cannot open" notice.
 - Excluded: Nitro message bookmarks and reminders.
+
+## Group DM management (#78)
+
+Every request is sent once, on one explicit click, at `UserWrite` priority, with at most one in flight from the panel; none is retried, a 401 stops the account, and the conversation changes only when the matching Gateway event arrives (so changes made in another client converge the same way). Wire shapes are from community documentation of the official client and are unverified live.
+
+- **Add a member:** `PUT /channels/{channel}/recipients/{user}`, no body. Only a friend who is not already a member can be chosen (never a typed or discovered ID). The result is `CHANNEL_RECIPIENT_ADD`.
+- **Remove a member (owner only in the UI):** `DELETE /channels/{channel}/recipients/{user}`; `CHANNEL_RECIPIENT_REMOVE`. Needs a second confirming click.
+- **Rename:** `PATCH /channels/{channel}` `{"name":"..."}` (trimmed, at most 100 characters); an empty name sends `{"name":null}`, which restores the member-name label. `CHANNEL_UPDATE`.
+- **Icon:** `PATCH /channels/{channel}` `{"icon":"data:image/<png|jpeg|gif>;base64,..."}`, or `{"icon":null}` to remove. The file is read off the UI thread with a hard 512 KiB cap (so the base64 body stays under the 1 MiB request budget), identified by signature (not extension) and never kept. Icons are not downloaded or drawn; the panel shows only whether one is set.
+- **Transfer ownership (owner only):** `PATCH /channels/{channel}` `{"owner":"<user id>"}`; `CHANNEL_UPDATE` carries the new `owner_id`. Confirmed first. Whether Discord accepts this for a user account is unverified.
+- **Leave a group / close a DM:** `DELETE /channels/{channel}` (the group variant is confirmed first; no `silent` flag is sent from the UI). The DM or group disappears on `CHANNEL_DELETE`; a closed DM returns when opened again (`POST /users/@me/channels`, existing).
+- **State:** `Channel` gained `owner_id` and `icon`. A `CHANNEL_UPDATE` with no participants keeps the known list and one without `owner_id` keeps the known owner; `CHANNEL_RECIPIENT_ADD` is idempotent, ignores the account itself and stops at 64 participants; `CHANNEL_RECIPIENT_REMOVE` of the account removes the conversation. The selection snapshot carries the members (names capped, at most 64), owner, custom name and icon presence. Name changes (type 4), icon changes (5) and joins/leaves (1, 2) still render as the generic system lines.
+- **Failures:** 403 and 404 and 400 and 429 each get their own wording; a network error or 5xx is "may have been applied, check the list" and is never repeated automatically.
+- Not implemented: creating a group from a one-to-one DM (adding to a DM), group-icon rendering, a typed-ID add, `silent` leave.

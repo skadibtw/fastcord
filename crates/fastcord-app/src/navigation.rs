@@ -535,12 +535,20 @@ fn main_pane<'a>(
             (false, true) => Some(("Join call", Message::AcceptCall(selection.channel_id))),
             (false, false) => Some(("Call", Message::StartCall(selection.channel_id))),
         };
-        body = body.push(header(
+        body = body.push(header_with(
             format!("@ {}", selection.name),
             "",
             true,
             true,
             call,
+            vec![(
+                if selection.group {
+                    "Members"
+                } else {
+                    "Conversation"
+                },
+                Message::Group(crate::group_dm::Event::Toggle),
+            )],
         ));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));

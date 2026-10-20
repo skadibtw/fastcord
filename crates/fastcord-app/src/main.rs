@@ -14,6 +14,7 @@ mod forward;
 mod friends;
 mod gateway;
 mod gif;
+mod group_dm;
 mod history;
 mod inbox;
 mod login;
@@ -120,6 +121,7 @@ struct App {
     search: search::State,
     pins: pins::State,
     inbox: inbox::State,
+    group: group_dm::State,
     gif: gif::State,
     sticker: sticker::State,
     forward: forward::State,
@@ -256,6 +258,7 @@ enum Message {
     Search(search::Event),
     Pins(pins::Event),
     Inbox(inbox::Event),
+    Group(group_dm::Event),
     Gif(gif::Event),
     Sticker(sticker::Event),
     Forward(forward::Event),
@@ -318,6 +321,7 @@ impl App {
                 search: search::State::default(),
                 pins: pins::State::default(),
                 inbox: inbox::State::default(),
+                group: group_dm::State::default(),
                 gif: gif::State::default(),
                 sticker: sticker::State::default(),
                 forward: forward::State::default(),
@@ -866,6 +870,13 @@ impl App {
                 if let Phase::Account { gateway, .. } = &self.phase {
                     self.sticker.sync(gateway.timeline.channel_id);
                     self.forward.sync(gateway.timeline.channel_id);
+                    self.group.sync(
+                        gateway
+                            .navigation
+                            .private_selection
+                            .as_ref()
+                            .map(|selection| selection.channel_id),
+                    );
                     self.poll.sync(gateway.timeline.channel_id);
                     self.voice.sync(gateway.timeline.channel_id);
                 }
@@ -879,6 +890,7 @@ impl App {
             Message::Search(event) => return self.search_event(event),
             Message::Pins(event) => return self.pins_event(event),
             Message::Inbox(event) => return self.inbox_event(event),
+            Message::Group(event) => return self.group_event(event),
             Message::Gif(event) => return self.gif_event(event),
             Message::Sticker(event) => return self.sticker_event(event),
             Message::Forward(event) => return self.forward_event(event),
@@ -1687,6 +1699,7 @@ impl App {
             Message::Logout => {
                 self.pins = pins::State::default();
                 self.inbox.clear();
+                self.group.clear();
                 self.gif = gif::State::default();
                 self.sticker = sticker::State::default();
                 self.forward = forward::State::default();
@@ -1915,6 +1928,7 @@ impl App {
         self.search = search::State::default();
         self.pins = pins::State::default();
         self.inbox.clear();
+        self.group.clear();
         self.gif = gif::State::default();
         self.sticker = sticker::State::default();
         self.forward = forward::State::default();
@@ -2111,6 +2125,28 @@ impl App {
                 gateway.attachments.as_ref(),
             )
             .map(Message::Sticker)
+    }
+
+    fn group_event(&mut self, event: group_dm::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = group_dm::State::is_rejected(&event);
+        let task = self
+            .group
+            .update(event, &gateway.navigation, session.user.id, &session.client);
+        if rejected {
+            // Discord rejected the login: stop the account like any other 401.
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Group)
     }
 
     fn inbox_event(&mut self, event: inbox::Event) -> Task<Message> {
@@ -2496,6 +2532,9 @@ impl App {
                     voice_record::view(&self.voice, &self.voice_context(gateway, channel))
             {
                 banner_column = banner_column.push(panel.map(Message::Voice));
+            }
+            if let Some(panel) = group_dm::view(&self.group, &gateway.navigation, session.user.id) {
+                banner_column = banner_column.push(panel.map(Message::Group));
             }
             if self.forward.is_open()
                 && let Some(panel) = forward::view(&self.forward, &forward_candidates(gateway))

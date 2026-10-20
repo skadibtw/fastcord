@@ -777,6 +777,8 @@ fn large_ready() -> Ready {
                             permission_overwrites: Vec::new(),
                             recipients: Vec::new(),
                             recipient_ids: Vec::new(),
+                            owner_id: None,
+                            icon: None,
                             last_message_id: None,
                             thread_metadata: None,
                             member: None,
@@ -1455,4 +1457,72 @@ mod inbox {
             "voice without connect"
         );
     }
+}
+
+#[test]
+fn group_membership_owner_name_and_icon_converge_and_replays_are_harmless() {
+    let (mut store, mut navigation) = setup(READY);
+    let group = id(300_000_000_000_000_002);
+    assert!(navigation.select_private_channel(&store, group));
+    let me = store.current_user().unwrap().id;
+    let selection = |store: &Store, navigation: &Navigation| {
+        navigation
+            .snapshot(store, 0, 20, 0, 20)
+            .private_selection
+            .unwrap()
+    };
+    let before = selection(&store, &navigation);
+    assert!(before.group);
+
+    // Owner, name and icon arrive with CHANNEL_UPDATE; a partial update that
+    // omits the participants keeps them.
+    let members = before.members.clone();
+    let changes = apply(
+        &mut store,
+        "CHANNEL_UPDATE",
+        r#"{"id":"300000000000000002","type":3,"name":"Team","owner_id":"1234","icon":"abc"}"#,
+    );
+    assert!(changes.private_channels);
+    let after = selection(&store, &navigation);
+    assert_eq!(after.members, members);
+    assert_eq!(after.custom_name, "Team");
+    assert_eq!(after.owner, Some(id(1234)));
+    assert!(after.has_icon);
+    // An update without an owner keeps the known one (the icon hash is exact).
+    apply(
+        &mut store,
+        "CHANNEL_UPDATE",
+        r#"{"id":"300000000000000002","type":3,"name":"Team"}"#,
+    );
+    let kept = selection(&store, &navigation);
+    assert_eq!(kept.owner, Some(id(1234)));
+    assert!(!kept.has_icon);
+
+    // Add, replayed add, add of the account itself, then removal and its replay.
+    let add = r#"{"channel_id":"300000000000000002","user":{"id":"777","username":"Newcomer"}}"#;
+    assert!(apply(&mut store, "CHANNEL_RECIPIENT_ADD", add).private_channels);
+    assert!(!apply(&mut store, "CHANNEL_RECIPIENT_ADD", add).private_channels);
+    let myself =
+        format!(r#"{{"channel_id":"300000000000000002","user":{{"id":"{me}","username":"me"}}}}"#);
+    assert!(!apply(&mut store, "CHANNEL_RECIPIENT_ADD", &myself).private_channels);
+    assert!(
+        selection(&store, &navigation)
+            .members
+            .iter()
+            .any(|m| m.id == id(777))
+    );
+    let remove = r#"{"channel_id":"300000000000000002","user":{"id":"777"}}"#;
+    assert!(apply(&mut store, "CHANNEL_RECIPIENT_REMOVE", remove).private_channels);
+    assert!(!apply(&mut store, "CHANNEL_RECIPIENT_REMOVE", remove).private_channels);
+    assert_eq!(selection(&store, &navigation).members, members);
+
+    // Events for conversations the account does not hold change nothing.
+    let stray = r#"{"channel_id":"999","user":{"id":"5","username":"x"}}"#;
+    assert!(!apply(&mut store, "CHANNEL_RECIPIENT_ADD", stray).private_channels);
+
+    // Being removed closes the conversation.
+    let leave = format!(r#"{{"channel_id":"300000000000000002","user":{{"id":"{me}"}}}}"#);
+    apply(&mut store, "CHANNEL_RECIPIENT_REMOVE", &leave);
+    navigation.reconcile(&store);
+    assert!(navigation.private_selection(&store).is_none());
 }

@@ -1,0 +1,799 @@
+//! Group DM membership and conversation management (SPEC §16, issue #78).
+//!
+//! A panel over the open DM or group DM: the member list with the owner marked,
+//! add a friend, remove a member or hand over ownership (owner only), rename,
+//! set or clear the icon, leave a group, close a one-to-one DM. Every change is
+//! one explicit click and one request; at most one is in flight, none is ever
+//! retried, and the member list, name, owner and icon change only when Discord's
+//! `CHANNEL_*` events arrive, which is also how another client's changes show.
+//! Leaving, removing a member and handing over ownership ask for a second click
+//! first. Nothing here creates groups or invites anyone by itself: only friends
+//! the user picks one by one can be added.
+
+use fastcord_discord::state::navigation::{NavigationSnapshot, PrivateChannelSelection};
+use fastcord_discord::{
+    GroupEdit, GroupError, GroupRequestError, IconImage, MAX_GROUP_NAME_CHARS, MAX_ICON_BYTES,
+    NetworkFailure, RestClient, RestError, RetryableFailure,
+};
+use fastcord_model::{RelationshipKind, Snowflake};
+use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
+use iced::{Element, Length, Task};
+
+use crate::style;
+
+/// Friends listed as candidates to add.
+const MAX_CANDIDATES: usize = 100;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Add(Snowflake),
+    Remove(Snowflake),
+    Owner(Snowflake),
+    Rename,
+    Icon,
+    /// Leave a group or close a DM.
+    Leave,
+}
+
+/// A destructive action waiting for its second click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Confirm {
+    Remove(Snowflake),
+    Owner(Snowflake),
+    Leave,
+}
+
+#[derive(Clone, Debug)]
+pub enum Event {
+    Toggle,
+    Close,
+    NameInput(String),
+    Rename,
+    PickIcon,
+    /// `Ok(None)`: the dialog was cancelled.
+    IconPicked(u64, Result<Option<IconImage>, &'static str>),
+    ClearIcon,
+    Add(Snowflake),
+    AskRemove(Snowflake),
+    AskOwner(Snowflake),
+    /// Leave a group, or close a DM (which needs no confirmation).
+    Leave,
+    Confirm,
+    Cancel,
+    Done(u64, Action, Result<(), RestError>),
+}
+
+#[derive(Default)]
+pub struct State {
+    /// The conversation the panel is open for.
+    channel: Option<Snowflake>,
+    name: String,
+    busy: Option<Action>,
+    confirm: Option<Confirm>,
+    notice: Option<String>,
+    serial: u64,
+    /// Dropped (aborting the request) only on logout or account change.
+    task: Option<iced::task::Handle>,
+}
+
+fn describe(error: RestError) -> String {
+    match error {
+        RestError::AuthenticationRequired => "Your session has expired. Log in again.".to_owned(),
+        RestError::PermissionDenied => {
+            "Discord refused: you may lack permission, or the person cannot be added (for example because of blocking or privacy settings)."
+                .to_owned()
+        }
+        RestError::ResourceGone => "That conversation or person no longer exists.".to_owned(),
+        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+        }
+        RestError::Http(status) if status.as_u16() == 429 => {
+            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+        }
+        RestError::Http(status) if status.as_u16() == 400 => {
+            "Discord rejected the request (the group may be full, or the value is not allowed)."
+                .to_owned()
+        }
+        RestError::RequestBodyTooLarge => "That image is too large to send.".to_owned(),
+        RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection))
+        | RestError::Retryable(_) => {
+            "Discord did not confirm. The change may have been applied; check the list before trying again."
+                .to_owned()
+        }
+        other => format!("The request failed: {other}."),
+    }
+}
+
+fn read_icon(path: &std::path::Path) -> Result<IconImage, &'static str> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|_| "The image could not be read.")?;
+    let mut bytes = Vec::new();
+    file.take(MAX_ICON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "The image could not be read.")?;
+    IconImage::new(&bytes).map_err(|error| match error {
+        GroupError::ImageTooLarge => "The image is larger than 512 KiB.",
+        GroupError::UnsupportedImage => "Choose a PNG, JPEG or GIF image.",
+        GroupError::NameTooLong => "The name is too long.",
+    })
+}
+
+impl State {
+    #[cfg(test)]
+    fn is_open_for(&self, channel: Snowflake) -> bool {
+        self.channel == Some(channel)
+    }
+
+    #[cfg(test)]
+    fn busy(&self) -> bool {
+        self.busy.is_some()
+    }
+
+    /// Closes the panel when the open conversation changes or disappears,
+    /// unless a request is in flight (its answer must still be handled).
+    pub fn sync(&mut self, selected: Option<Snowflake>) {
+        if self.busy.is_none() && self.channel.is_some() && self.channel != selected {
+            self.clear();
+        }
+    }
+
+    /// Logout or account change: drops the panel and any request.
+    pub fn clear(&mut self) {
+        *self = Self {
+            serial: self.serial.wrapping_add(1),
+            ..Self::default()
+        };
+    }
+
+    fn start(&mut self, action: Action) {
+        self.busy = Some(action);
+        self.confirm = None;
+        self.notice = None;
+    }
+
+    /// Runs one request for the open conversation.
+    fn send(
+        &mut self,
+        action: Action,
+        channel: Snowflake,
+        client: &RestClient,
+        edit: Option<GroupEdit>,
+    ) -> Task<Event> {
+        self.start(action);
+        let serial = self.serial;
+        let client = client.clone();
+        let (task, handle) = Task::perform(
+            async move {
+                match (action, edit) {
+                    (Action::Add(user), _) => client.add_group_recipient(channel, user).await,
+                    (Action::Remove(user), _) => client.remove_group_recipient(channel, user).await,
+                    (Action::Leave, _) => client.close_private_channel(channel, false).await,
+                    (_, Some(edit)) => {
+                        client
+                            .edit_group(channel, &edit)
+                            .await
+                            .map_err(|error| match error {
+                                GroupRequestError::Rest(error) => error,
+                                GroupRequestError::Invalid(_) => RestError::InvalidJson,
+                            })
+                    }
+                    (_, None) => Err(RestError::InvalidJson),
+                }
+            },
+            move |result| Event::Done(serial, action, result),
+        )
+        .abortable();
+        self.task = Some(handle.abort_on_drop());
+        task
+    }
+
+    pub fn update(
+        &mut self,
+        event: Event,
+        navigation: &NavigationSnapshot,
+        me: Snowflake,
+        client: &RestClient,
+    ) -> Task<Event> {
+        let selection = navigation.private_selection.as_ref();
+        let owner = selection.is_some_and(|s| s.owner == Some(me));
+        match event {
+            Event::Toggle => {
+                if self.channel.is_some() {
+                    if self.busy.is_none() {
+                        self.clear();
+                    }
+                } else if let Some(selection) = selection {
+                    self.channel = Some(selection.channel_id);
+                    self.name = selection.custom_name.clone();
+                }
+            }
+            Event::Close if self.busy.is_none() => self.clear(),
+            Event::Close => {}
+            Event::NameInput(value) if self.channel.is_some() && self.busy.is_none() => {
+                self.name = value.chars().take(MAX_GROUP_NAME_CHARS + 20).collect();
+                self.notice = None;
+            }
+            Event::Cancel => self.confirm = None,
+            _ if self.busy.is_some()
+                && !matches!(event, Event::Done(..) | Event::IconPicked(..)) =>
+            {
+                // One request at a time; the answer of the first is awaited.
+                if matches!(
+                    event,
+                    Event::Add(_)
+                        | Event::AskRemove(_)
+                        | Event::AskOwner(_)
+                        | Event::Leave
+                        | Event::Confirm
+                        | Event::Rename
+                        | Event::PickIcon
+                        | Event::ClearIcon
+                ) {
+                    self.notice = Some("Wait for the previous change to finish.".to_owned());
+                }
+            }
+            Event::Rename => {
+                let (Some(channel), Some(selection)) = (self.channel, selection) else {
+                    return Task::none();
+                };
+                if !selection.group || selection.channel_id != channel {
+                    return Task::none();
+                }
+                let name = self.name.trim().to_owned();
+                if name.chars().count() > MAX_GROUP_NAME_CHARS {
+                    self.notice = Some(format!(
+                        "A group name has at most {MAX_GROUP_NAME_CHARS} characters."
+                    ));
+                } else if name == selection.custom_name {
+                    self.notice = Some("The name is unchanged.".to_owned());
+                } else {
+                    return self.send(Action::Rename, channel, client, Some(GroupEdit::Name(name)));
+                }
+            }
+            Event::PickIcon => {
+                if self.channel.is_some() && selection.is_some_and(|s| s.group) {
+                    self.start(Action::Icon);
+                    let serial = self.serial;
+                    return Task::perform(
+                        async {
+                            let Some(file) = rfd::AsyncFileDialog::new()
+                                .set_title("Group icon")
+                                .add_filter("Image", &["png", "jpg", "jpeg", "gif"])
+                                .pick_file()
+                                .await
+                            else {
+                                return Ok(None);
+                            };
+                            let path = file.path().to_owned();
+                            tokio::task::spawn_blocking(move || read_icon(&path).map(Some))
+                                .await
+                                .unwrap_or(Err("The image could not be read."))
+                        },
+                        move |result| Event::IconPicked(serial, result),
+                    );
+                }
+            }
+            Event::IconPicked(serial, result) if serial == self.serial => {
+                self.busy = None;
+                let channel = self
+                    .channel
+                    .filter(|c| selection.is_some_and(|s| s.channel_id == *c));
+                match (result, channel) {
+                    (Ok(Some(icon)), Some(channel)) => {
+                        return self.send(
+                            Action::Icon,
+                            channel,
+                            client,
+                            Some(GroupEdit::Icon(Some(icon))),
+                        );
+                    }
+                    (Err(reason), _) => self.notice = Some(reason.to_owned()),
+                    _ => {}
+                }
+            }
+            Event::ClearIcon => {
+                if let (Some(channel), Some(s)) = (self.channel, selection)
+                    && s.group
+                    && s.has_icon
+                {
+                    return self.send(Action::Icon, channel, client, Some(GroupEdit::Icon(None)));
+                }
+            }
+            Event::Add(user) => {
+                let (Some(channel), Some(s)) = (self.channel, selection) else {
+                    return Task::none();
+                };
+                let friend = navigation
+                    .relationships
+                    .iter()
+                    .any(|r| r.user.id == user && r.kind == RelationshipKind::Friend);
+                if !s.group {
+                    self.notice = Some("Only a group can have people added.".to_owned());
+                } else if !friend || user == me || s.members.iter().any(|m| m.id == user) {
+                    self.notice = Some("Pick a friend who is not in the group yet.".to_owned());
+                } else {
+                    return self.send(Action::Add(user), channel, client, None);
+                }
+            }
+            Event::AskRemove(user) => {
+                if owner && selection.is_some_and(|s| s.members.iter().any(|m| m.id == user)) {
+                    self.confirm = Some(Confirm::Remove(user));
+                    self.notice = None;
+                }
+            }
+            Event::AskOwner(user) => {
+                if owner && selection.is_some_and(|s| s.members.iter().any(|m| m.id == user)) {
+                    self.confirm = Some(Confirm::Owner(user));
+                    self.notice = None;
+                }
+            }
+            Event::Leave => {
+                let (Some(channel), Some(s)) = (self.channel, selection) else {
+                    return Task::none();
+                };
+                if s.group {
+                    self.confirm = Some(Confirm::Leave);
+                    self.notice = None;
+                } else {
+                    return self.send(Action::Leave, channel, client, None);
+                }
+            }
+            Event::Confirm => {
+                let (Some(channel), Some(s), Some(confirm)) =
+                    (self.channel, selection, self.confirm.take())
+                else {
+                    return Task::none();
+                };
+                let still_member = |user: Snowflake| s.members.iter().any(|m| m.id == user);
+                match confirm {
+                    Confirm::Leave if s.group => {
+                        return self.send(Action::Leave, channel, client, None);
+                    }
+                    Confirm::Remove(user) if owner && still_member(user) => {
+                        return self.send(Action::Remove(user), channel, client, None);
+                    }
+                    Confirm::Owner(user) if owner && still_member(user) => {
+                        return self.send(
+                            Action::Owner(user),
+                            channel,
+                            client,
+                            Some(GroupEdit::Owner(user)),
+                        );
+                    }
+                    _ => self.notice = Some("That person is no longer in the group.".to_owned()),
+                }
+            }
+            Event::Done(serial, action, result) if serial == self.serial => {
+                self.busy = None;
+                self.task = None;
+                self.notice = Some(match result {
+                    Ok(()) if action == Action::Leave => "Done.".to_owned(),
+                    Ok(()) => "Sent. The panel updates when Discord confirms.".to_owned(),
+                    Err(error) => describe(error),
+                });
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+
+    /// A 401 from this panel's request: the caller stops the account.
+    pub fn is_rejected(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::Done(_, _, Err(RestError::AuthenticationRequired))
+        )
+    }
+}
+
+pub fn view<'a>(
+    state: &'a State,
+    navigation: &'a NavigationSnapshot,
+    me: Snowflake,
+) -> Option<Element<'a, Event>> {
+    let selection: &PrivateChannelSelection = navigation.private_selection.as_ref()?;
+    if state.channel != Some(selection.channel_id) {
+        return None;
+    }
+    let idle = state.busy.is_none();
+    let owner = selection.owner == Some(me);
+    let title = if selection.group {
+        "Group"
+    } else {
+        "Conversation"
+    };
+    let mut panel = column![
+        row![
+            text(title).size(13),
+            space::horizontal(),
+            button(text("Close").size(13)).on_press_maybe(idle.then_some(Event::Close)),
+        ]
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(6);
+
+    if selection.group {
+        panel = panel.push(
+            row![
+                text_input("Group name (empty restores the default)", &state.name)
+                    .on_input_maybe(idle.then_some(Event::NameInput))
+                    .on_submit(Event::Rename),
+                button(text("Rename").size(13)).on_press_maybe(idle.then_some(Event::Rename)),
+            ]
+            .spacing(6),
+        );
+        panel = panel.push(
+            row![
+                text(if selection.has_icon {
+                    "Icon: set"
+                } else {
+                    "Icon: none"
+                })
+                .size(12)
+                .style(text::secondary),
+                button(text("Choose icon").size(13))
+                    .on_press_maybe(idle.then_some(Event::PickIcon)),
+                button(text("Remove icon").size(13))
+                    .on_press_maybe((idle && selection.has_icon).then_some(Event::ClearIcon)),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+
+    let members = selection.members.iter().map(|member| {
+        let mut line = row![
+            text(if selection.owner == Some(member.id) {
+                format!("{} (owner)", member.name)
+            } else {
+                member.name.clone()
+            })
+            .size(13)
+            .width(Length::Fill),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+        if selection.group && owner {
+            line = line
+                .push(
+                    button(text("Make owner").size(12))
+                        .on_press_maybe(idle.then_some(Event::AskOwner(member.id))),
+                )
+                .push(
+                    button(text("Remove").size(12))
+                        .on_press_maybe(idle.then_some(Event::AskRemove(member.id)))
+                        .style(button::danger),
+                );
+        }
+        line.into()
+    });
+    panel = panel.push(text(format!("Members ({})", selection.members.len() + 1)).size(12));
+    panel = panel.push(
+        scrollable(column(members).spacing(2).push(text("You").size(13)))
+            .height(Length::Fixed(110.0)),
+    );
+
+    if selection.group {
+        let friends: Vec<Element<'a, Event>> = navigation
+            .relationships
+            .iter()
+            .filter(|r| {
+                r.kind == RelationshipKind::Friend
+                    && r.user.id != me
+                    && !selection.members.iter().any(|m| m.id == r.user.id)
+            })
+            .take(MAX_CANDIDATES)
+            .map(|r| {
+                button(text(format!("Add {}", r.user.display_name())).size(12))
+                    .on_press_maybe(idle.then_some(Event::Add(r.user.id)))
+                    .style(button::secondary)
+                    .width(Length::Fill)
+                    .into()
+            })
+            .collect();
+        if !friends.is_empty() {
+            panel = panel
+                .push(text("Add a friend").size(12))
+                .push(scrollable(column(friends).spacing(2)).height(Length::Fixed(90.0)));
+        }
+    }
+
+    let leave_label = if selection.group {
+        "Leave group"
+    } else {
+        "Close conversation"
+    };
+    match state.confirm {
+        Some(confirm) => {
+            let question = match confirm {
+                Confirm::Leave => {
+                    "Leave this group? You will not get back in unless someone adds you.".to_owned()
+                }
+                Confirm::Remove(user) => {
+                    format!("Remove {} from the group?", name_of(selection, user))
+                }
+                Confirm::Owner(user) => format!(
+                    "Make {} the owner? You will no longer be able to remove people.",
+                    name_of(selection, user)
+                ),
+            };
+            panel = panel.push(
+                row![
+                    text(question)
+                        .size(13)
+                        .style(text::danger)
+                        .width(Length::Fill),
+                    button(text("Confirm").size(13))
+                        .on_press_maybe(idle.then_some(Event::Confirm))
+                        .style(button::danger),
+                    button(text("Cancel").size(13)).on_press(Event::Cancel),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        None => {
+            panel = panel.push(
+                button(text(leave_label).size(13))
+                    .on_press_maybe(idle.then_some(Event::Leave))
+                    .style(if selection.group {
+                        button::danger
+                    } else {
+                        button::secondary
+                    }),
+            );
+        }
+    }
+    if state.busy.is_some() {
+        panel = panel.push(text("Waiting for Discord…").size(12).style(text::secondary));
+    }
+    if let Some(notice) = &state.notice {
+        panel = panel.push(text(notice.as_str()).size(12).style(text::secondary));
+    }
+    Some(
+        container(panel)
+            .padding(8)
+            .width(Length::Fill)
+            .style(style::card)
+            .into(),
+    )
+}
+
+fn name_of(selection: &PrivateChannelSelection, user: Snowflake) -> String {
+    selection
+        .members
+        .iter()
+        .find(|m| m.id == user)
+        .map_or_else(|| "this person".to_owned(), |m| m.name.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fastcord_discord::state::navigation::PrivateMember;
+    use fastcord_model::{Relationship, User};
+    use std::sync::Arc;
+
+    const ME: Snowflake = Snowflake(1);
+
+    fn client() -> RestClient {
+        use fastcord_discord::UserToken;
+        use fastcord_discord::gateway::{ClientProperties, HostOs};
+        RestClient::new(
+            UserToken::new("offline-group-credential".into()),
+            ClientProperties::web(HostOs::Linux, "en-US", 1),
+        )
+        .unwrap()
+    }
+
+    fn user(id: u64) -> User {
+        User {
+            id: Snowflake(id),
+            username: format!("u{id}"),
+            global_name: None,
+            avatar: None,
+            bot: false,
+        }
+    }
+
+    fn navigation(group: bool, owner: u64) -> NavigationSnapshot {
+        NavigationSnapshot {
+            private_selection: Some(PrivateChannelSelection {
+                channel_id: Snowflake(50),
+                name: "Team".to_owned(),
+                group,
+                custom_name: "Team".to_owned(),
+                owner: Some(Snowflake(owner)),
+                has_icon: true,
+                members: vec![
+                    PrivateMember {
+                        id: Snowflake(2),
+                        name: "two".to_owned(),
+                    },
+                    PrivateMember {
+                        id: Snowflake(3),
+                        name: "three".to_owned(),
+                    },
+                ],
+                acked: None,
+                unread: false,
+                mentions: 0,
+            }),
+            relationships: Arc::from(vec![
+                Relationship {
+                    user: user(4),
+                    kind: RelationshipKind::Friend,
+                },
+                Relationship {
+                    user: user(5),
+                    kind: RelationshipKind::Blocked,
+                },
+                Relationship {
+                    user: user(2),
+                    kind: RelationshipKind::Friend,
+                },
+            ]),
+            ..NavigationSnapshot::default()
+        }
+    }
+
+    fn open(state: &mut State, nav: &NavigationSnapshot) {
+        let _ = state.update(Event::Toggle, nav, ME, &client());
+        assert!(state.is_open_for(Snowflake(50)));
+    }
+
+    #[test]
+    fn destructive_actions_send_nothing_until_confirmed() {
+        let nav = navigation(true, 1);
+        let mut state = State::default();
+        open(&mut state, &nav);
+        for ask in [
+            Event::Leave,
+            Event::AskRemove(Snowflake(2)),
+            Event::AskOwner(Snowflake(3)),
+        ] {
+            let _ = state.update(ask, &nav, ME, &client());
+            assert!(!state.busy(), "asking is not a request");
+            assert!(state.confirm.is_some());
+        }
+        // Cancel clears it; Confirm without a question does nothing.
+        let _ = state.update(Event::Cancel, &nav, ME, &client());
+        let _ = state.update(Event::Confirm, &nav, ME, &client());
+        assert!(!state.busy());
+        let _ = state.update(Event::AskRemove(Snowflake(2)), &nav, ME, &client());
+        let _ = state.update(Event::Confirm, &nav, ME, &client());
+        assert_eq!(state.busy, Some(Action::Remove(Snowflake(2))));
+    }
+
+    #[test]
+    fn one_request_at_a_time_and_a_stale_answer_is_ignored() {
+        let nav = navigation(true, 1);
+        let mut state = State::default();
+        open(&mut state, &nav);
+        let _ = state.update(Event::Add(Snowflake(4)), &nav, ME, &client());
+        assert_eq!(state.busy, Some(Action::Add(Snowflake(4))));
+        let serial = state.serial;
+        // A second click while waiting is refused, not queued.
+        let _ = state.update(Event::Add(Snowflake(4)), &nav, ME, &client());
+        assert_eq!(state.busy, Some(Action::Add(Snowflake(4))));
+        assert!(state.notice.is_some());
+        // The panel cannot be closed or moved away from under a request.
+        let _ = state.update(Event::Close, &nav, ME, &client());
+        state.sync(None);
+        assert!(state.is_open_for(Snowflake(50)));
+        // An answer of an earlier session is dropped.
+        let _ = state.update(
+            Event::Done(serial.wrapping_sub(1), Action::Add(Snowflake(4)), Ok(())),
+            &nav,
+            ME,
+            &client(),
+        );
+        assert!(state.busy());
+        let _ = state.update(
+            Event::Done(
+                serial,
+                Action::Add(Snowflake(4)),
+                Err(RestError::PermissionDenied),
+            ),
+            &nav,
+            ME,
+            &client(),
+        );
+        assert!(!state.busy());
+        assert!(state.notice.as_deref().unwrap().contains("refused"));
+        state.sync(None);
+        assert!(state.channel.is_none(), "closes once idle and deselected");
+    }
+
+    #[test]
+    fn only_the_owner_removes_or_hands_over_and_only_new_friends_are_added() {
+        let nav = navigation(true, 2);
+        let mut state = State::default();
+        open(&mut state, &nav);
+        let _ = state.update(Event::AskRemove(Snowflake(3)), &nav, ME, &client());
+        let _ = state.update(Event::AskOwner(Snowflake(3)), &nav, ME, &client());
+        assert!(state.confirm.is_none(), "not the owner");
+        for rejected in [2, 5, 1, 99] {
+            let _ = state.update(Event::Add(Snowflake(rejected)), &nav, ME, &client());
+            assert!(
+                !state.busy(),
+                "{rejected}: member, blocked, self or stranger"
+            );
+        }
+        let _ = state.update(Event::Add(Snowflake(4)), &nav, ME, &client());
+        assert!(state.busy());
+    }
+
+    #[test]
+    fn a_dm_can_only_be_closed_and_a_group_name_is_validated() {
+        let dm = navigation(false, 1);
+        let mut state = State::default();
+        open(&mut state, &dm);
+        let _ = state.update(Event::Add(Snowflake(4)), &dm, ME, &client());
+        let _ = state.update(Event::Rename, &dm, ME, &client());
+        let _ = state.update(Event::PickIcon, &dm, ME, &client());
+        assert!(!state.busy());
+        let _ = state.update(Event::Leave, &dm, ME, &client());
+        assert_eq!(state.busy, Some(Action::Leave), "closing a DM is immediate");
+
+        let group = navigation(true, 1);
+        let mut state = State::default();
+        open(&mut state, &group);
+        let _ = state.update(Event::Rename, &group, ME, &client());
+        assert!(!state.busy(), "unchanged name sends nothing");
+        let _ = state.update(Event::NameInput("x".repeat(101)), &group, ME, &client());
+        let _ = state.update(Event::Rename, &group, ME, &client());
+        assert!(!state.busy());
+        let _ = state.update(Event::NameInput("New".into()), &group, ME, &client());
+        let _ = state.update(Event::Rename, &group, ME, &client());
+        assert_eq!(state.busy, Some(Action::Rename));
+    }
+
+    #[test]
+    fn failures_are_explained_and_a_401_is_flagged_for_the_account() {
+        for (error, word) in [
+            (RestError::PermissionDenied, "refused"),
+            (RestError::ResourceGone, "no longer exists"),
+            (RestError::InvalidRateLimit, "rate limiting"),
+            (
+                RestError::Http(fastcord_discord::StatusCode::TOO_MANY_REQUESTS),
+                "rate limiting",
+            ),
+            (
+                RestError::Http(fastcord_discord::StatusCode::BAD_REQUEST),
+                "full",
+            ),
+            (
+                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)),
+                "may have been applied",
+            ),
+        ] {
+            assert!(describe(error).contains(word), "{error:?}");
+        }
+        assert!(State::is_rejected(&Event::Done(
+            0,
+            Action::Leave,
+            Err(RestError::AuthenticationRequired)
+        )));
+        assert!(!State::is_rejected(&Event::Done(0, Action::Leave, Ok(()))));
+    }
+
+    #[test]
+    fn icon_files_are_read_with_a_bound() {
+        let dir = std::env::temp_dir().join(format!("fastcord-icon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("a.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nbody").unwrap();
+        assert!(read_icon(&png).is_ok());
+        let big = dir.join("big.gif");
+        let mut bytes = b"GIF89a".to_vec();
+        bytes.resize(MAX_ICON_BYTES + 10, 0);
+        std::fs::write(&big, bytes).unwrap();
+        assert_eq!(read_icon(&big), Err("The image is larger than 512 KiB."));
+        let text = dir.join("t.png");
+        std::fs::write(&text, b"hello").unwrap();
+        assert_eq!(read_icon(&text), Err("Choose a PNG, JPEG or GIF image."));
+        assert!(read_icon(&dir.join("missing.png")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

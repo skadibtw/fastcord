@@ -182,10 +182,25 @@ pub struct PrivateChannelRow {
     pub mentions: u32,
 }
 
+/// A participant of the selected conversation, other than the account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrivateMember {
+    pub id: Snowflake,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrivateChannelSelection {
     pub channel_id: Snowflake,
     pub name: String,
+    /// A group DM (otherwise a one-to-one DM).
+    pub group: bool,
+    /// The group's own name, empty when it shows its members' names.
+    pub custom_name: String,
+    pub owner: Option<Snowflake>,
+    pub has_icon: bool,
+    /// The other participants (at most 64, names capped).
+    pub members: Vec<PrivateMember>,
     /// The account's read cursor for the conversation, if it has one.
     pub acked: Option<Snowflake>,
     pub unread: bool,
@@ -395,6 +410,25 @@ impl Navigation {
         Some(PrivateChannelSelection {
             channel_id: channel.id,
             name: private_name(store, channel),
+            group: channel.kind == fastcord_model::ChannelKind::GroupDm,
+            custom_name: channel
+                .name
+                .as_deref()
+                .map_or_else(String::new, |name| capped_name(Some(name), "")),
+            owner: channel.owner_id,
+            has_icon: channel.icon.is_some(),
+            members: channel
+                .recipient_ids
+                .iter()
+                .take(64)
+                .map(|id| PrivateMember {
+                    id: *id,
+                    name: store.user(*id).map_or_else(
+                        || id.to_string(),
+                        |user| capped_name(Some(user.display_name()), "Unknown user"),
+                    ),
+                })
+                .collect(),
             acked: store.acked(channel.id),
             unread: unread_of(store, channel).unread,
             mentions: unread_of(store, channel).mentions,
