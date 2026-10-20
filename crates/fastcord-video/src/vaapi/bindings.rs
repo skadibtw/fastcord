@@ -16199,3 +16199,19 @@ unsafe extern "C" {
     #[doc = " \\brief Returns a VA display derived from the specified DRM connection.\n\n This function returns a (possibly cached) VA display from the\n specified DRM connection @fd.\n\n @param[in]   fd      the DRM connection descriptor\n @return the VA display"]
     pub fn vaGetDisplayDRM(fd: ::std::os::raw::c_int) -> VADisplay;
 }
+
+// Types the generator's blocklist dropped while keeping the functions that
+// name them; this crate never calls those functions, so the opaque stand-ins
+// only let the file compile.
+pub type VASubpictureID = VAGenericID;
+pub type VAProtectedSessionID = VAGenericID;
+pub type VAProcFilterType = ::std::os::raw::c_uint;
+pub type VAProcHighDynamicRangeMetadataType = ::std::os::raw::c_uint;
+#[repr(C)]
+pub struct VAProcessingRateParameter {
+    _opaque: [u8; 0],
+}
+#[repr(C)]
+pub struct VAProcPipelineCaps {
+    _opaque: [u8; 0],
+}

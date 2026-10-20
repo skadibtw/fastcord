@@ -12,9 +12,7 @@
 //! device is touched, and a broken DRM discovery (`/dev/dri` unreadable)
 //! fails before any candidate exists, as [`OpenError::Discovery`].
 
-use std::path::PathBuf;
-
-use crate::codec::{BackendPreference, CodecError, EncoderConfig, VideoDecoder, VideoEncoder};
+use crate::codec::{EncoderConfig, VideoDecoder, VideoEncoder};
 use crate::openh264::{SoftwareDecoderSource, SoftwareEncoderSource};
 use crate::select::{Candidate, OpenError, Selected, select};
 use crate::vaapi::{self, HardwareSource};
@@ -88,8 +86,12 @@ pub(crate) fn open_encoder(
         preference,
         merged_encoder_candidates(hardware),
         |source| match source {
-            EncoderSource::Hardware(hardware) => Ok(Box::new(hardware.open_encoder(config)?)),
-            EncoderSource::Software(software) => Ok(Box::new(software.open(config)?)),
+            EncoderSource::Hardware(hardware) => {
+                Ok(Box::new(hardware.open_encoder(config)?) as Box<dyn VideoEncoder>)
+            }
+            EncoderSource::Software(software) => {
+                Ok(Box::new(software.open(config)?) as Box<dyn VideoEncoder>)
+            }
         },
     )
 }
@@ -104,8 +106,12 @@ pub(crate) fn open_decoder(
         preference,
         merged_decoder_candidates(hardware),
         |source| match source {
-            DecoderSource::Hardware(hardware) => Ok(Box::new(hardware.open_decoder()?)),
-            DecoderSource::Software(software) => Ok(Box::new(software.open()?)),
+            DecoderSource::Hardware(hardware) => {
+                Ok(Box::new(hardware.open_decoder()?) as Box<dyn VideoDecoder>)
+            }
+            DecoderSource::Software(software) => {
+                Ok(Box::new(software.open()?) as Box<dyn VideoDecoder>)
+            }
         },
     )
 }
@@ -113,7 +119,7 @@ pub(crate) fn open_decoder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::BackendPreference;
+    use crate::codec::{BackendKind, BackendPreference, CodecError};
     use crate::select::{Attempt, OpenError};
     use crate::vaapi::HardwareSource;
     use crate::vaapi::bindings::VAProfile_VAProfileH264ConstrainedBaseline;
@@ -202,12 +208,12 @@ mod tests {
             BackendPreference::Hardware,
             candidates,
             |source| match source {
-                EncoderSource::Hardware(_) => Err(CodecError::PlatformUnavailable(
+                EncoderSource::Hardware(_) => Err::<(), _>(CodecError::PlatformUnavailable(
                     "the VA-API device could not be opened",
                 )),
                 EncoderSource::Software(_) => {
                     // The software candidate must never be tried here.
-                    Err(CodecError::Unsupported(
+                    Err::<(), _>(CodecError::Unsupported(
                         "the software candidate was reached under hardware preference",
                     ))
                 }
@@ -228,10 +234,10 @@ mod tests {
     fn automatic_preference_reports_the_skipped_hardware_attempt() {
         let candidates = merged_encoder_candidates(vec![hardware("nonexistent renderD127", true)]);
         let error = select(BackendPreference::Auto, candidates, |source| match source {
-            EncoderSource::Hardware(_) => Err(CodecError::PlatformUnavailable(
+            EncoderSource::Hardware(_) => Err::<(), _>(CodecError::PlatformUnavailable(
                 "the VA-API device could not be opened",
             )),
-            EncoderSource::Software(_) => Err(CodecError::Unsupported(
+            EncoderSource::Software(_) => Err::<(), _>(CodecError::Unsupported(
                 "the software encoder was not opened in this test either",
             )),
         })

@@ -41,7 +41,7 @@ use crate::codec::{Backend, BackendKind, CodecError, EncodedFrame, EncoderConfig
 use crate::frame::Nv12;
 use crate::h264::{self, ParameterSets};
 
-use bindings::*;
+use super::bindings::*;
 
 /// Slot 0 of every encoder [`Surfaces`] set: the picture's source surface.
 const SOURCE_SURFACE: usize = 0;
@@ -252,7 +252,7 @@ fn sps_rbsp(geometry: &Geometry, level: u8) -> Vec<u8> {
     // Constrained-Baseline decoder.
     writer.bits(u64::from(CONSTRAINED_BASELINE_FLAGS), 8);
     writer.bits(u64::from(level), 8); // level_idc
-    writer.ue(SEQUENCE_PARAMETER_SET_ID);
+    writer.ue(u32::from(SEQUENCE_PARAMETER_SET_ID));
     writer.ue(4); // log2_max_frame_num_minus4: log2_max_frame_num = 8
     writer.ue(2); // pic_order_cnt_type: output order is decoding order
     writer.ue(1); // max_num_ref_frames
@@ -277,8 +277,8 @@ fn sps_rbsp(geometry: &Geometry, level: u8) -> Vec<u8> {
 /// The PPS RBSP for the whole session.
 fn pps_rbsp() -> Vec<u8> {
     let mut writer = BitWriter::default();
-    writer.ue(PICTURE_PARAMETER_SET_ID);
-    writer.ue(SEQUENCE_PARAMETER_SET_ID);
+    writer.ue(u32::from(PICTURE_PARAMETER_SET_ID));
+    writer.ue(u32::from(SEQUENCE_PARAMETER_SET_ID));
     writer.flag(false); // entropy_coding_mode_flag: CAVLC (Baseline)
     writer.flag(false); // bottom_field_pic_order_in_frame_present_flag
     writer.ue(0); // num_slice_groups_minus1
@@ -437,13 +437,12 @@ fn picture_buffer(
 fn slice_buffer(
     idr: bool,
     idr_pic_id: u16,
-    frame_num: u16,
+    _frame_num: u16,
     reference: Option<VAPictureH264>,
     macroblocks: (u16, u16),
 ) -> VAEncSliceParameterBufferH264 {
     // Picture-order-count type 2; the driver only codes what the picture
     // flags select.
-    let picture_order_count = 2 * i32::from(frame_num);
     let mut references = [invalid_picture(); 32];
     if let Some(reference) = reference {
         references[0] = reference;
@@ -545,7 +544,7 @@ impl Pending {
         let handle = display.handle();
         // SAFETY: the coded buffer is live in this context and the timeout is
         // a plain value; the driver fills it before the call returns.
-        let status = vaSyncBuffer(handle, self.coded.id(), super::SYNC_TIMEOUT_NS);
+        let status = unsafe { vaSyncBuffer(handle, self.coded.id(), super::SYNC_TIMEOUT_NS) };
         if status as u32 == VA_STATUS_ERROR_UNIMPLEMENTED {
             return sync_surface(display, self.recon);
         }
@@ -697,16 +696,15 @@ impl VaEncoder {
             },
         ];
         // SAFETY: `attribs` is a real two-element array for the driver to fill.
-        check(
-            "vaGetConfigAttributes",
+        check("vaGetConfigAttributes", unsafe {
             vaGetConfigAttributes(
                 display.handle(),
                 profile,
                 VAEntrypoint_VAEntrypointEncSlice,
                 attribs.as_mut_ptr(),
                 attribs.len() as i32,
-            ),
-        )?;
+            )
+        })?;
         if attribs[0].value != VA_RT_FORMAT_YUV420 {
             return Err(CodecError::Unsupported(
                 "the encoder reports a format other than 4:2:0",
@@ -787,12 +785,13 @@ impl VaEncoder {
             VABufferType_VAEncCodedBufferType,
             CODED_BUFFER_CAP,
         )?;
-        let picture = picture_buffer(idr, this_frame_num, reference, recon, frame_idx, coded.id());
+        let picture_params =
+            picture_buffer(idr, this_frame_num, reference, recon, frame_idx, coded.id());
         params.push(NativeBuffer::create(
             &self.display,
             context,
             VABufferType_VAEncPictureParameterBufferType,
-            record_bytes(&picture),
+            record_bytes(&picture_params),
         )?);
         let slice = slice_buffer(
             idr,
@@ -811,23 +810,21 @@ impl VaEncoder {
         let mut rendered: Vec<VABufferID> = params.iter().map(NativeBuffer::id).collect();
         // SAFETY: every surface and buffer id belongs to this context; the
         // source surface is the encoder's input for this picture.
-        check(
-            "vaBeginPicture",
-            vaBeginPicture(handle, context, self.surfaces.id(SOURCE_SURFACE)),
-        )?;
+        check("vaBeginPicture", unsafe {
+            vaBeginPicture(handle, context, self.surfaces.id(SOURCE_SURFACE))
+        })?;
         // SAFETY: `rendered` holds the ids of the parameter buffers created
         // above; the driver reads them through libva.
-        check(
-            "vaRenderPicture",
+        check("vaRenderPicture", unsafe {
             vaRenderPicture(
                 handle,
                 context,
                 rendered.as_mut_ptr(),
                 rendered.len() as i32,
-            ),
-        )?;
+            )
+        })?;
         // SAFETY: the picture finishes here and the driver starts processing.
-        check("vaEndPicture", vaEndPicture(handle, context))?;
+        check("vaEndPicture", unsafe { vaEndPicture(handle, context) })?;
 
         // This picture's reconstruction is the next picture's short-term
         // reference; `frame_idx` is its DPB identifier.
@@ -891,7 +888,6 @@ impl VideoEncoder for VaEncoder {
 
 #[cfg(test)]
 mod tests {
-    use super::super::bindings::*;
     use super::*;
     use crate::codec::CodecError;
     use crate::frame::ColorDescription;
@@ -967,8 +963,8 @@ mod tests {
         let mut nal = vec![PPS_NAL_HEADER];
         nal.extend(escape(&pps_rbsp()));
         let mut bits = BitReader::new(&nal[1..]);
-        assert_eq!(bits.ue().unwrap(), PICTURE_PARAMETER_SET_ID);
-        assert_eq!(bits.ue().unwrap(), SEQUENCE_PARAMETER_SET_ID);
+        assert_eq!(bits.ue().unwrap(), u32::from(PICTURE_PARAMETER_SET_ID));
+        assert_eq!(bits.ue().unwrap(), u32::from(SEQUENCE_PARAMETER_SET_ID));
         assert_eq!(bits.flag().unwrap(), false); // entropy_coding_mode_flag
         assert_eq!(bits.flag().unwrap(), false); // bottom_field_pic_order...
         assert_eq!(bits.ue().unwrap(), 0); // num_slice_groups_minus1
@@ -1059,7 +1055,7 @@ mod tests {
         let linked = VACodedBufferSegment {
             size: 1,
             bit_offset: 0,
-            next: ptr::from_ref(&second).cast(),
+            next: ptr::from_ref(&second).cast_mut().cast(),
             ..segment
         };
         assert_eq!(walk_segments(&linked).unwrap(), [7, 7, 7]);
@@ -1070,23 +1066,23 @@ mod tests {
         let (mb_width, mb_height) = Geometry::new(&CONFIG).macroblocks();
         assert_eq!((mb_width, mb_height), (80, 45));
         let reference = picture(12, 34, VA_PICTURE_H264_SHORT_TERM_REFERENCE, 40, 40);
-        let picture = picture_buffer(true, 0, None, 9, 7, 88);
-        assert_eq!(picture.CurrPic.picture_id, 9);
+        let first = picture_buffer(true, 0, None, 9, 7, 88);
+        assert_eq!(first.CurrPic.picture_id, 9);
         assert_eq!(
-            picture.CurrPic.flags,
+            first.CurrPic.flags,
             0, // a fresh reconstruction carries no reference flags
         );
-        assert_eq!(picture.frame_num, 0);
-        assert_eq!(picture.pic_init_qp, PICTURE_INIT_QP);
+        assert_eq!(first.frame_num, 0);
+        assert_eq!(first.pic_init_qp, PICTURE_INIT_QP);
         assert!(
-            picture
+            first
                 .ReferenceFrames
                 .iter()
                 .all(|slot| slot.picture_id == VA_INVALID_SURFACE as VASurfaceID)
         );
         // SAFETY: a fresh union record is being read; the bits constructor
         // set exactly the fields the checks read.
-        let flags = unsafe { picture.pic_fields.bits };
+        let flags = unsafe { first.pic_fields.bits };
         assert_eq!(flags.idr_pic_flag(), 1);
         assert_eq!(flags.reference_pic_flag(), 1);
         assert_eq!(flags.entropy_coding_mode_flag(), 0);
@@ -1118,7 +1114,7 @@ mod tests {
             slice.RefPicList0[1].flags,
             VA_PICTURE_H264_INVALID | VA_PICTURE_H264_NON_EXISTING
         );
-        let picture = picture_buffer(
+        let picture_params = picture_buffer(
             false,
             6,
             Some(picture(
@@ -1132,10 +1128,10 @@ mod tests {
             7,
             88,
         );
-        assert_eq!(picture.frame_num, 6);
-        assert_eq!(picture.ReferenceFrames[0].picture_id, 12);
+        assert_eq!(picture_params.frame_num, 6);
+        assert_eq!(picture_params.ReferenceFrames[0].picture_id, 12);
         assert!(
-            picture.ReferenceFrames[1..]
+            picture_params.ReferenceFrames[1..]
                 .iter()
                 .all(|slot| slot.picture_id == VA_INVALID_SURFACE as VASurfaceID)
         );

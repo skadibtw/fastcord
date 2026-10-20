@@ -2,7 +2,6 @@
 //! bookkeeping. The live test at the bottom needs a VA-API DRM device with an
 //! H.264 decoder; run with `cargo test -- --ignored` on Linux.
 
-use super::super::bindings::*;
 use super::super::{invalid_picture, picture};
 use super::*;
 use crate::codec::{CodecError, DecodedFrame};
@@ -143,7 +142,7 @@ impl PHeader {
         } else if let Some(lsb) = self.lsb {
             bits.bits(u64::from(lsb), 4);
         }
-        if self.slice_type % 5 == 0 {
+        if self.slice_type.is_multiple_of(5) {
             match self.override_refs {
                 Some(minus1) => {
                     bits.flag(true);
@@ -219,7 +218,8 @@ fn strips_emulation_prevention_bytes() {
 
 #[test]
 fn the_fixture_parameter_sets_parse_to_their_metadata() {
-    let nals: Vec<&[u8]> = crate::h264::nal_units(&test_vectors::ipcm_stream()).collect();
+    let stream = test_vectors::ipcm_stream();
+    let nals: Vec<&[u8]> = crate::h264::nal_units(&stream).collect();
     let sps = parse_sps_meta(nals[0]).unwrap();
     assert_eq!(
         sps,
@@ -294,7 +294,7 @@ fn crop_units_reach_the_display_window() {
             sps.display_width,
             sps.display_height
         ),
-        (2, 2, 12, 14)
+        (2, 2, 126, 94)
     );
     assert_eq!((sps.coded_width, sps.coded_height), (128, 96));
 }
@@ -363,7 +363,8 @@ fn beyond_policy_pps_units_are_rejected() {
 
 #[test]
 fn the_fixture_idr_slice_header_parses() {
-    let nals: Vec<&[u8]> = crate::h264::nal_units(&test_vectors::ipcm_stream()).collect();
+    let stream = test_vectors::ipcm_stream();
+    let nals: Vec<&[u8]> = crate::h264::nal_units(&stream).collect();
     let parameters = parameter_caches(nals[0], nals[1]);
     let (sps, pps, header) =
         parse_slice_header(nals[2], |pps_id| parameters.resolve(pps_id)).unwrap();
@@ -422,7 +423,7 @@ fn beyond_policy_slice_headers_are_rejected() {
         }
         .nal(0x41);
         assert_eq!(
-            parse_slice_header(&unit, resolve.clone()),
+            parse_slice_header(&unit, resolve),
             Err(CodecError::Unsupported(
                 "B, SP and SI slices are not supported"
             ))
@@ -485,7 +486,7 @@ fn beyond_policy_slice_headers_are_rejected() {
         ))
     );
     // CABAC initialization beyond the spec range is a bitstream error.
-    let cabac_pps = pps(true, true, false, 0, 0, false);
+    let cabac_pps = self::pps(true, true, false, 0, 0, false);
     let cabac_parameters = parameter_caches(&sps, &cabac_pps);
     let unit = PHeader {
         cabac_init: Some(3),
@@ -674,7 +675,8 @@ fn picture_records_mirror_the_sequence() {
 
 #[test]
 fn slice_records_carry_the_parsed_header() {
-    let nals: Vec<&[u8]> = crate::h264::nal_units(&test_vectors::ipcm_stream()).collect();
+    let stream = test_vectors::ipcm_stream();
+    let nals: Vec<&[u8]> = crate::h264::nal_units(&stream).collect();
     let parameters = parameter_caches(nals[0], nals[1]);
     let (_, _, header) = parse_slice_header(nals[2], |pps_id| parameters.resolve(pps_id)).unwrap();
     let mut list0 = std::array::from_fn(|_| invalid_picture());
@@ -762,7 +764,7 @@ fn slice_heads_of_one_picture_must_agree() {
 fn nal_headers_mark_the_reference_state() {
     assert!(is_reference(&[0x65])); // IDR slice, nal_ref_idc 2
     assert!(is_reference(&[0x41])); // non-IDR slice, nal_ref_idc 1
-    assert!(!is_reference(&[0x61])); // non-reference slice
+    assert!(!is_reference(&[0x01])); // non-reference slice
     assert!(!is_reference(&[0x17])); // nal_ref_idc 0, other type
 }
 

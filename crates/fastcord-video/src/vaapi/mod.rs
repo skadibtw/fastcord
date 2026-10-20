@@ -23,12 +23,19 @@
 //! synced, and `vaGetImage` copies into a mapped image handed to the caller
 //! as a borrowed [`Nv12`]. Both keep every queue byte-bounded (coded-buffer
 //! cap: [`crate::h264::MAX_ACCESS_UNIT_BYTES`]).
-#![allow(unsafe_code)]
+#![allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+// Some fields only keep native resources alive until drop; never read.
+#![allow(
+    dead_code,
+    non_upper_case_globals,
+    clippy::bool_assert_comparison,
+    clippy::too_many_arguments
+)]
 // Bindings, encoder and decoder are children of this module, so the allow
 // above covers the whole VA-API tree; `platform_h264` (a sibling of `vaapi`
 // in the crate) stays unsafe-free.
 
-mod bindings;
+pub(crate) mod bindings;
 mod decoder;
 mod encoder;
 
@@ -109,6 +116,7 @@ pub(crate) fn check(operation: &'static str, status: VAStatus) -> Result<(), Cod
 /// last field, so `vaTerminate` runs only after the codec's other resources
 /// (image, context, surfaces, config) have already been released.
 pub(crate) struct Display {
+    #[allow(dead_code)] // owns the DRM fd the display handle uses
     file: fs::File,
     handle: VADisplay,
 }
@@ -125,7 +133,7 @@ impl Display {
             })?;
         // SAFETY: `vaGetDisplayDRM` borrows the file descriptor, which stays
         // open until `self.file` is dropped (after `vaTerminate` in `Drop`).
-        let handle = vaGetDisplayDRM(file.as_raw_fd());
+        let handle = unsafe { vaGetDisplayDRM(file.as_raw_fd()) };
         if handle.is_null() {
             return Err(to_error(
                 "vaGetDisplayDRM",
@@ -135,7 +143,9 @@ impl Display {
         let (mut major, mut minor) = (0, 0);
         // SAFETY: one-time initialization of the display just acquired; the
         // out-pointers are plain locals for the driver to write.
-        check("vaInitialize", vaInitialize(handle, &mut major, &mut minor))?;
+        check("vaInitialize", unsafe {
+            vaInitialize(handle, &mut major, &mut minor)
+        })?;
         Ok(Rc::new(Self { file, handle }))
     }
 
@@ -150,12 +160,14 @@ impl Display {
     pub(crate) fn vendor(&self) -> String {
         // SAFETY: the returned pointer is owned by the display and stays
         // valid until `vaTerminate`, which happens after this read.
-        let string = vaQueryVendorString(self.handle());
+        let string = unsafe { vaQueryVendorString(self.handle()) };
         if string.is_null() {
             String::new()
         } else {
             // SAFETY: `vaQueryVendorString` contracts a NUL-terminated C string.
-            ffi::CStr::from_ptr(string).to_string_lossy().into_owned()
+            unsafe { ffi::CStr::from_ptr(string) }
+                .to_string_lossy()
+                .into_owned()
         }
     }
 }
@@ -165,7 +177,7 @@ impl Drop for Display {
         // SAFETY: initialized in `open` and terminated exactly once here;
         // other drop impls run before this one (see the struct's field order
         // at each use site) so nothing needs the display afterwards.
-        let _ = vaTerminate(self.handle);
+        let _ = unsafe { vaTerminate(self.handle) };
     }
 }
 
@@ -186,8 +198,7 @@ impl Surfaces {
         let mut ids = vec![VA_INVALID_SURFACE as VASurfaceID; count];
         // SAFETY: `ids` holds exactly `count` writable surface slots for
         // libva to fill; the attribute list is legitimately absent.
-        check(
-            "vaCreateSurfaces",
+        check("vaCreateSurfaces", unsafe {
             vaCreateSurfaces(
                 display.handle(),
                 VA_RT_FORMAT_YUV420,
@@ -197,8 +208,8 @@ impl Surfaces {
                 ids.len() as u32,
                 ptr::null_mut(),
                 0,
-            ),
-        )?;
+            )
+        })?;
         Ok(Self {
             display: Rc::clone(display),
             ids,
@@ -217,11 +228,13 @@ impl Surfaces {
 impl Drop for Surfaces {
     fn drop(&mut self) {
         // SAFETY: the surfaces exist until now and are destroyed exactly once.
-        let _ = vaDestroySurfaces(
-            self.display.handle(),
-            self.ids.as_mut_ptr(),
-            self.ids.len() as i32,
-        );
+        let _ = unsafe {
+            vaDestroySurfaces(
+                self.display.handle(),
+                self.ids.as_mut_ptr(),
+                self.ids.len() as i32,
+            )
+        };
     }
 }
 
@@ -240,8 +253,7 @@ impl ConfigId {
     ) -> Result<Self, CodecError> {
         let mut id = VA_INVALID_ID as VAConfigID;
         // SAFETY: `attribs` outlives the copied call; `id` is one writable slot.
-        check(
-            "vaCreateConfig",
+        check("vaCreateConfig", unsafe {
             vaCreateConfig(
                 display.handle(),
                 profile,
@@ -249,8 +261,8 @@ impl ConfigId {
                 attribs.as_ptr() as *mut VAConfigAttrib,
                 attribs.len() as i32,
                 &mut id,
-            ),
-        )?;
+            )
+        })?;
         Ok(Self {
             display: Rc::clone(display),
             id,
@@ -265,7 +277,7 @@ impl ConfigId {
 impl Drop for ConfigId {
     fn drop(&mut self) {
         // SAFETY: created in `create`, destroyed exactly once.
-        let _ = vaDestroyConfig(self.display.handle(), self.id);
+        let _ = unsafe { vaDestroyConfig(self.display.handle(), self.id) };
     }
 }
 
@@ -287,8 +299,7 @@ impl ContextId {
         let mut id = VA_INVALID_ID as VAContextID;
         // SAFETY: `render_targets` is an existing surface array as wide as
         // its length; `id` is one writable slot.
-        check(
-            "vaCreateContext",
+        check("vaCreateContext", unsafe {
             vaCreateContext(
                 display.handle(),
                 config_id,
@@ -298,8 +309,8 @@ impl ContextId {
                 render_targets.as_ptr() as *mut VASurfaceID,
                 render_targets.len() as i32,
                 &mut id,
-            ),
-        )?;
+            )
+        })?;
         Ok(Self {
             display: Rc::clone(display),
             id,
@@ -315,7 +326,7 @@ impl Drop for ContextId {
     fn drop(&mut self) {
         // SAFETY: created in `create`, destroyed exactly once; runs before the
         // surfaces and config it references (owner field order).
-        let _ = vaDestroyContext(self.display.handle(), self.id);
+        let _ = unsafe { vaDestroyContext(self.display.handle(), self.id) };
     }
 }
 
@@ -371,10 +382,9 @@ impl Image {
         };
         // SAFETY: `format` is a valid input record the driver reads;
         // `info` is one writable output record.
-        check(
-            "vaCreateImage",
-            vaCreateImage(display.handle(), &mut format, width, height, &mut info),
-        )?;
+        check("vaCreateImage", unsafe {
+            vaCreateImage(display.handle(), &mut format, width, height, &mut info)
+        })?;
         Ok(Self {
             display: Rc::clone(display),
             info,
@@ -396,10 +406,9 @@ impl Image {
         sink: &mut dyn FnMut(&[u8]),
     ) -> Result<(), CodecError> {
         let handle = self.display.handle();
-        check(
-            "vaGetImage",
-            vaGetImage(handle, surface, 0, 0, width, height, self.info.image_id),
-        )?;
+        check("vaGetImage", unsafe {
+            vaGetImage(handle, surface, 0, 0, width, height, self.info.image_id)
+        })?;
         Synchronized::new(handle, self.info.buf, self.info.data_size as usize).read(sink)
     }
 
@@ -429,8 +438,7 @@ impl Image {
                     .copy_from_slice(source.chroma_row(row));
             }
         })?;
-        check(
-            "vaPutImage",
+        check("vaPutImage", unsafe {
             vaPutImage(
                 handle,
                 surface,
@@ -443,8 +451,8 @@ impl Image {
                 0,
                 u32::from(self.info.width),
                 u32::from(self.info.height),
-            ),
-        )
+            )
+        })
     }
 }
 
@@ -452,7 +460,7 @@ impl Drop for Image {
     fn drop(&mut self) {
         // SAFETY: created in `create`, destroyed exactly once; the image does
         // not own the surfaces it reads.
-        let _ = vaDestroyImage(self.display.handle(), self.info.image_id);
+        let _ = unsafe { vaDestroyImage(self.display.handle(), self.info.image_id) };
     }
 }
 
@@ -507,11 +515,13 @@ impl Synchronized {
     ) -> Result<(), CodecError> {
         // SAFETY: `mapped` is one writable pointer slot; the returned pointer
         // is only dereferenced inside `read`/`write` between map and unmap.
-        check("vaMapBuffer", vaMapBuffer(display, buffer, mapped))
+        check("vaMapBuffer", unsafe {
+            vaMapBuffer(display, buffer, mapped)
+        })
     }
 
     fn unmap(display: VADisplay, buffer: VABufferID) -> Result<(), CodecError> {
-        check("vaUnmapBuffer", vaUnmapBuffer(display, buffer))
+        check("vaUnmapBuffer", unsafe { vaUnmapBuffer(display, buffer) })
     }
 }
 
@@ -534,8 +544,7 @@ impl NativeBuffer {
         let mut id = VA_INVALID_ID as VABufferID;
         // SAFETY: `data` is an existing slice the driver copies from during
         // the call; `id` is one writable slot.
-        check(
-            "vaCreateBuffer",
+        check("vaCreateBuffer", unsafe {
             vaCreateBuffer(
                 display.handle(),
                 context,
@@ -544,8 +553,8 @@ impl NativeBuffer {
                 1,
                 data.as_ptr() as *mut ffi::c_void,
                 &mut id,
-            ),
-        )?;
+            )
+        })?;
         Ok(Self {
             display: Rc::clone(display),
             id,
@@ -563,8 +572,7 @@ impl NativeBuffer {
         let mut id = VA_INVALID_ID as VABufferID;
         // SAFETY: an empty (not pre-filled) buffer creation with no input data,
         // exactly what `vaCreateBuffer` supports for driver-written buffers.
-        check(
-            "vaCreateBuffer",
+        check("vaCreateBuffer", unsafe {
             vaCreateBuffer(
                 display.handle(),
                 context,
@@ -573,8 +581,8 @@ impl NativeBuffer {
                 1,
                 ptr::null_mut(),
                 &mut id,
-            ),
-        )?;
+            )
+        })?;
         Ok(Self {
             display: Rc::clone(display),
             id,
@@ -590,7 +598,7 @@ impl Drop for NativeBuffer {
     fn drop(&mut self) {
         // SAFETY: created in `create`/`create_empty`, destroyed exactly once,
         // after the driver's `vaEndPicture` has consumed the contents.
-        let _ = vaDestroyBuffer(self.display.handle(), self.id);
+        let _ = unsafe { vaDestroyBuffer(self.display.handle(), self.id) };
     }
 }
 
@@ -601,10 +609,10 @@ impl Drop for NativeBuffer {
 pub(crate) fn sync_surface(display: &Rc<Display>, surface: VASurfaceID) -> Result<(), CodecError> {
     let handle = display.handle();
     // SAFETY: the display and surface are live; the timeout is a plain value.
-    let status = vaSyncSurface2(handle, surface, SYNC_TIMEOUT_NS);
+    let status = unsafe { vaSyncSurface2(handle, surface, SYNC_TIMEOUT_NS) };
     if status as u32 == VA_STATUS_ERROR_UNIMPLEMENTED {
         // SAFETY: as above, the legacy fully blocking variant.
-        return check("vaSyncSurface", vaSyncSurface(handle, surface));
+        return check("vaSyncSurface", unsafe { vaSyncSurface(handle, surface) });
     }
     check("vaSyncSurface2", status)
 }
@@ -736,13 +744,15 @@ fn probe_encoder(display: &Display, profile: VAProfile) -> Option<VAProfile> {
         },
     ];
     // SAFETY: `attribs` is a real two-element array the driver fills in.
-    let status = vaGetConfigAttributes(
-        display.handle(),
-        profile,
-        wanted,
-        attribs.as_mut_ptr(),
-        attribs.len() as i32,
-    );
+    let status = unsafe {
+        vaGetConfigAttributes(
+            display.handle(),
+            profile,
+            wanted,
+            attribs.as_mut_ptr(),
+            attribs.len() as i32,
+        )
+    };
     if status != VA_STATUS_SUCCESS as VAStatus {
         return None;
     }
@@ -761,7 +771,7 @@ fn probe_decoder(display: &Display, profiles: &[VAProfile]) -> bool {
 /// `vaQueryConfigEntrypoints` for `profile`, with sane bounds.
 fn entrypoints(display: &Display, profile: VAProfile) -> Vec<VAEntrypoint> {
     // SAFETY: a read-only query; the count is a driver-written scalar.
-    let maximum = vaMaxNumEntrypoints(display.handle());
+    let maximum = unsafe { vaMaxNumEntrypoints(display.handle()) };
     if maximum <= 0 {
         return Vec::new();
     }
@@ -769,7 +779,9 @@ fn entrypoints(display: &Display, profile: VAProfile) -> Vec<VAEntrypoint> {
     let mut list = vec![0 as VAEntrypoint; capacity];
     let mut count: i32 = 0;
     // SAFETY: `list` has `capacity` writable entries; `count` is one scalar.
-    let status = vaQueryConfigEntrypoints(display.handle(), profile, list.as_mut_ptr(), &mut count);
+    let status = unsafe {
+        vaQueryConfigEntrypoints(display.handle(), profile, list.as_mut_ptr(), &mut count)
+    };
     if status != VA_STATUS_SUCCESS as VAStatus {
         return Vec::new();
     }

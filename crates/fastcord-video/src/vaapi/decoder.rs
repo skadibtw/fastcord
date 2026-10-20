@@ -42,7 +42,7 @@ use crate::codec::{Backend, BackendKind, CodecError, DecodedFrame, VideoDecoder}
 use crate::frame::{ColorDescription, Nv12};
 use crate::h264::{self, ColorState};
 
-use bindings::*;
+use super::bindings::*;
 
 /// Output surfaces per picture setup: one for the picture being decoded plus
 /// one spare beyond every reference the DPB can hold.
@@ -397,7 +397,7 @@ fn parse_pps_meta(nal: &[u8]) -> Result<PpsMeta, CodecError> {
 }
 
 /// One coded slice's parsed header, grouped into the picture it belongs to.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SliceHeader {
     first_mb_in_slice: u32,
     /// `slice_type` as coded (0-9); fully-sliced pictures use 5/7.
@@ -461,7 +461,9 @@ fn parse_slice_header(
     // IDR pictures still carry (zero) `frame_num` bits before `idr_pic_id`.
     let frame_num = {
         let value = bits.bits(4 + sps.log2_max_frame_num_minus4)?;
-        bits.ue()?; // idr_pic_id: only the driver record's POC cares
+        if idr {
+            bits.ue()?; // idr_pic_id: only the driver record's POC cares
+        }
         if idr {
             // Spec 7.4.3: IDR pictures restart the numbering at zero.
             if value != 0 {
@@ -556,7 +558,7 @@ fn parse_slice_header(
         0
     };
     let slice_qp_delta = bits.se()?;
-    if !(0..=51).contains(&(i32::from(pps.pic_init_qp_minus26) + 26 + i32::from(slice_qp_delta))) {
+    if !(0..=51).contains(&(pps.pic_init_qp_minus26 + 26 + slice_qp_delta)) {
         return Err(CodecError::InvalidBitstream("a slice QP is out of range"));
     }
     let deblocking_filter = if pps.deblocking_filter_control_present_flag {
@@ -775,7 +777,7 @@ fn picture_record(
 ) -> VAPictureParameterBufferH264 {
     let mut reference_frames = std::array::from_fn(|_| invalid_picture());
     for (record, entry) in reference_frames.iter_mut().zip(references) {
-        *entry = *record;
+        *record = *entry;
     }
     VAPictureParameterBufferH264 {
         CurrPic: current,
@@ -963,7 +965,8 @@ impl ParameterCaches {
 
     /// Remembers a PPS NAL unit's bytes.
     fn remember_pps(&mut self, nal: &[u8]) {
-        let mut bits = Rbsp::new(&strip_epb(&nal[1..]));
+        let stripped = strip_epb(&nal[1..]);
+        let mut bits = Rbsp::new(&stripped);
         let id = bits.ue().unwrap_or(u32::MAX);
         if id < 256 {
             self.pps[id as usize] = Some(nal.to_owned());
@@ -1059,7 +1062,7 @@ impl VaDecoder {
 
         // Parse every slice of the picture before touching decoder state: a
         // malformed partner slice must not leave half a picture committed.
-        let mut slices = Vec::new();
+        let mut slices: Vec<(SpsMeta, PpsMeta, SliceHeader, &[u8])> = Vec::new();
         for nal in h264::nal_units(access_unit)
             .filter(|nal| matches!(h264::nal_unit_type(nal), h264::NAL_SLICE | h264::NAL_IDR))
         {
@@ -1162,26 +1165,26 @@ impl VaDecoder {
         }
 
         let handle = display.handle();
-        let rendered: Vec<VABufferID> = buffers.iter().map(NativeBuffer::id).collect();
+        let mut rendered: Vec<VABufferID> = buffers.iter().map(NativeBuffer::id).collect();
         // SAFETY: every surface and buffer id belongs to this context; the
         // target surface is this picture's decode output.
-        check(
-            "vaBeginPicture",
-            vaBeginPicture(handle, setup.context.id(), setup.surfaces.id(slot)),
-        )?;
+        check("vaBeginPicture", unsafe {
+            vaBeginPicture(handle, setup.context.id(), setup.surfaces.id(slot))
+        })?;
         // SAFETY: `rendered` holds the ids of the buffers created above; the
         // driver reads them through libva.
-        check(
-            "vaRenderPicture",
+        check("vaRenderPicture", unsafe {
             vaRenderPicture(
                 handle,
                 setup.context.id(),
                 rendered.as_mut_ptr(),
                 rendered.len() as i32,
-            ),
-        )?;
+            )
+        })?;
         // SAFETY: the picture finishes here and the driver starts decoding.
-        check("vaEndPicture", vaEndPicture(handle, setup.context.id()))?;
+        check("vaEndPicture", unsafe {
+            vaEndPicture(handle, setup.context.id())
+        })?;
 
         sync_surface(&display, setup.surfaces.id(slot))?;
         if is_ref {
@@ -1255,7 +1258,7 @@ impl VaDecoder {
 /// Whether the picture an access unit's head slice describes is a reference
 /// (its NAL header carries a nonzero `nal_ref_idc`). IDR pictures always are.
 fn is_reference(nal: &[u8]) -> bool {
-    nal.first().map_or(false, |header| (header >> 5) & 3 != 0)
+    nal.first().is_some_and(|header| (header >> 5) & 3 != 0)
 }
 
 impl VideoDecoder for VaDecoder {

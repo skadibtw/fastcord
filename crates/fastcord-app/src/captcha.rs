@@ -14,6 +14,7 @@ pub enum CaptchaError {
     /// No embedded view on this platform or the web-view runtime is missing.
     Unsupported,
     /// The window was closed before a challenge was completed.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Dismissed,
 }
 
@@ -30,6 +31,7 @@ impl std::fmt::Display for CaptchaError {
 
 /// The page that replaces the body: loads the provider script and reports the
 /// response key to the host through `window.ipc`. Values are JSON-escaped.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn widget_script(challenge: &CaptchaChallenge) -> Option<String> {
     if challenge.service != "hcaptcha" {
         return None;
