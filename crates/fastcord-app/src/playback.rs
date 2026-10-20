@@ -6,6 +6,9 @@
 
 mod gpu;
 
+/// Videos the NV12 pass can draw in one frame (plane pairs).
+pub const MAX_VIDEOS: usize = gpu::MAX_VIDEOS;
+
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

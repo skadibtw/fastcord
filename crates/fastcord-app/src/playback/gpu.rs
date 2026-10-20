@@ -34,7 +34,7 @@ pub(super) struct VideoPrimitive {
 
 /// Videos presented at once: the six camera tiles of a call, the local
 /// preview and a watched stream.
-const MAX_VIDEOS: usize = 8;
+pub(super) const MAX_VIDEOS: usize = 8;
 
 /// The planes of one video, found again by its session's `active` flag.
 struct Textures {

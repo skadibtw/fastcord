@@ -203,6 +203,9 @@ pub const MAX_INTEREST_USERS: usize = 6;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VideoControl {
     pub interest: VideoInterest,
+    /// Users whose tile is small: the lowest active layer of each is wanted
+    /// instead of the best, when the server announced more than one.
+    pub thumbnails: Vec<Snowflake>,
     /// Frames may be sent. A camera connection starts with this off and
     /// announces its layer inactive again whenever it turns off.
     pub sending: bool,

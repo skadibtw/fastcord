@@ -1388,3 +1388,46 @@ async fn a_call_connection_asks_the_server_only_for_the_cameras_on_screen() {
     tokio::time::sleep(Duration::from_millis(5)).await;
     assert!(rig.ws.1.is_empty());
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_small_tile_asks_for_the_lowest_layer_and_a_single_layer_is_unaffected() {
+    let mut rig = start_camera().await;
+    rig.ws.1.clear();
+    let bob = Snowflake(77);
+    // Bob announces two layers, ALICE one.
+    rig.ws
+        .send(json!({"op": 12, "d": {
+            "user_id": bob.0.to_string(), "audio_ssrc": 0,
+            "streams": [
+                {"ssrc": 7_000, "rtx_ssrc": 7_001, "rid": "50", "quality": 50, "active": true},
+                {"ssrc": 7_100, "rtx_ssrc": 7_101, "rid": "100", "quality": 100, "active": true}
+            ]
+        }}))
+        .await;
+    rig.ws
+        .send(json!({"op": 12, "d": {
+            "user_id": ALICE.0.to_string(), "audio_ssrc": 0,
+            "streams": [{"ssrc": 6_000, "rtx_ssrc": 6_001, "rid": "100",
+                         "quality": 100, "active": true}]
+        }}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let media = rig.harness.session.media();
+    media.set_video_users(&[bob, ALICE]);
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"6000": 100, "7100": 100, "any": 0}})
+    );
+    // Bob's tile shrinks: his lower layer replaces the best one; ALICE has only one.
+    media.set_video_thumbnails(&[bob, ALICE]);
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"6000": 100, "7000": 100, "any": 0}})
+    );
+    // Large again: the best layer returns.
+    media.set_video_thumbnails(&[]);
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"6000": 100, "7100": 100, "any": 0}})
+    );
+}

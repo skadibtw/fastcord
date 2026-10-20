@@ -318,6 +318,15 @@ impl MediaSender {
             .send_if_modified(|control| replace(&mut control.interest, interest));
     }
 
+    /// Marks the users whose tile is small (at most [`MAX_INTEREST_USERS`]):
+    /// for each, the lowest active layer the server announced is wanted
+    /// instead of the best one. A user with a single layer is unaffected.
+    pub fn set_video_thumbnails(&self, users: &[Snowflake]) {
+        let users: Vec<Snowflake> = users.iter().copied().take(MAX_INTEREST_USERS).collect();
+        self.wanted
+            .send_if_modified(|control| replace(&mut control.thumbnails, users));
+    }
+
     /// Lets this connection's own layer send (`true`) or announces it stopped
     /// (`false`): a camera turned on or off. Frames offered while off are
     /// refused.
@@ -537,6 +546,7 @@ fn start<S: transport::Signaling, N: transport::Network>(
                 VideoInterest::Off
             },
             sending: video.send.is_some() && !video.camera,
+            thumbnails: Vec::new(),
         },
     ));
     let queued_audio = Arc::new(AtomicUsize::new(0));

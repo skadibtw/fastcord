@@ -160,6 +160,8 @@ pub(super) struct VideoState {
     remote: HashMap<Snowflake, Vec<RemoteStream>>,
     /// Which remote video the viewer wants.
     interest: VideoInterest,
+    /// Users shown small: their lowest active layer is wanted.
+    thumbnails: Vec<Snowflake>,
     /// Frames may be sent (a camera that is on; a share always).
     sending: bool,
     wants_sent: Option<Vec<(u32, u8)>>,
@@ -181,6 +183,7 @@ impl VideoState {
             pending: PendingSsrc::new(PENDING_WINDOW, PENDING_VIDEO_BYTES),
             remote: HashMap::new(),
             interest: control.interest,
+            thumbnails: control.thumbnails,
             sending: control.sending,
             wants_sent: None,
             rtt: DEFAULT_RTT,
@@ -226,12 +229,14 @@ impl VideoState {
             .remote
             .iter()
             .filter(|(user, _)| users.is_none_or(|users| users.contains(user)))
-            .filter_map(|(_, streams)| {
-                streams
-                    .iter()
-                    .filter(|stream| stream.active)
-                    .max_by_key(|stream| stream.quality)
-                    .map(|stream| (stream.ssrc, 100))
+            .filter_map(|(user, streams)| {
+                let active = streams.iter().filter(|stream| stream.active);
+                if self.thumbnails.contains(user) {
+                    active.min_by_key(|stream| stream.quality)
+                } else {
+                    active.max_by_key(|stream| stream.quality)
+                }
+                .map(|stream| (stream.ssrc, 100))
             })
             .collect();
         wants.sort_unstable();
@@ -471,6 +476,14 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     receiver.want_keyframe(now);
                 }
             }
+            let thumbnails_changed = video.thumbnails != control.thumbnails;
+            if thumbnails_changed && video.interest != VideoInterest::Off {
+                // A different layer is a different stream: it starts at a keyframe.
+                for receiver in video.receivers.values_mut() {
+                    receiver.want_keyframe(now);
+                }
+            }
+            video.thumbnails = control.thumbnails;
             video.interest = control.interest;
             if video.sending != control.sending {
                 video.sending = control.sending;

@@ -395,7 +395,7 @@ async fn run_with(
     state.send_replace(VoiceAudioState::Running);
     // Every call starts with the camera off; only the user's click turns it on.
     let mut video = CallVideo::new(media.clone(), tiles, controls_tx.clone());
-    let mut shown = video.shown();
+    let mut tile_changes = video.changes();
     let mut camera_progress = video.progress();
     let noise_status = NoiseStatus(&controls_tx);
     let mut captured = channels.captured;
@@ -510,10 +510,10 @@ async fn run_with(
                     meter_at = Some(Instant::now());
                 }
             }
-            changed = shown.changed() => {
+            changed = tile_changes.changed() => {
                 if changed.is_err() { break; }
-                let on_screen = *shown.borrow_and_update();
-                video.on_shown(on_screen);
+                tile_changes.borrow_and_update();
+                video.on_layout();
             }
             changed = camera_progress.changed() => {
                 if changed.is_err() { break; }

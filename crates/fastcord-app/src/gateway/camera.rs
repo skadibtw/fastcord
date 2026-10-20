@@ -13,7 +13,7 @@
 //! is off again at the start of every call. A tile that is not on screen has
 //! no decoder work and its stream is not requested from the server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -114,6 +114,8 @@ pub struct CameraControls {
     pub status: CameraStatus,
     /// The encoder in use and the picture size, once known.
     pub detail: String,
+    /// Counts remote tiles added and removed, so the UI hears of them.
+    pub tiles: u64,
 }
 
 impl CameraControls {
@@ -124,9 +126,10 @@ impl CameraControls {
 
 /// The tiles of the call view: the local preview and up to [`MAX_TILES`]
 /// remote cameras, each a latest-frame slot. The call task adds and removes
-/// them; the UI reads them and says whether they are on screen.
+/// them; the UI reads them and says which are drawn (issue #86): a tile that
+/// is not drawn is not decoded and, for a camera, not requested.
 pub struct CameraTiles {
-    shown: watch::Sender<bool>,
+    changed: watch::Sender<u64>,
     inner: Mutex<Tiles>,
 }
 
@@ -134,6 +137,35 @@ pub struct CameraTiles {
 struct Tiles {
     preview: Option<Arc<Session>>,
     remote: Vec<(Snowflake, Arc<Session>)>,
+    view: TileVisibility,
+    /// Users whose tile was hidden since the call task last looked: a
+    /// hide/show pulse the task could not otherwise tell from no change.
+    pulsed: HashSet<Snowflake>,
+}
+
+/// Which tiles are drawn. A tile is drawn unless the layout excluded it, so a
+/// camera that has just appeared shows at once and the next layout pass
+/// settles it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TileVisibility {
+    /// The window is up and unobstructed.
+    pub on_screen: bool,
+    /// The layout did not draw the self-view.
+    pub preview_excluded: bool,
+    /// Cameras the layout did not draw (over the cap, or behind a full view).
+    pub excluded: Vec<Snowflake>,
+    /// Cameras drawn small: their lowest layer is wanted.
+    pub small: Vec<Snowflake>,
+}
+
+impl TileVisibility {
+    pub fn shows(&self, user: Snowflake) -> bool {
+        self.on_screen && !self.excluded.contains(&user)
+    }
+
+    fn shows_preview(&self) -> bool {
+        self.on_screen && !self.preview_excluded
+    }
 }
 
 /// What the UI draws.
@@ -146,7 +178,7 @@ pub struct TilesView {
 impl Default for CameraTiles {
     fn default() -> Self {
         Self {
-            shown: watch::channel(false).0,
+            changed: watch::channel(0).0,
             inner: Mutex::default(),
         }
     }
@@ -161,39 +193,54 @@ impl CameraTiles {
         }
     }
 
-    /// The tiles are on screen (or not): every session's visibility follows,
+    /// The tiles that are drawn (or not): every session's visibility follows,
     /// which suspends the hidden decoders, and the call task re-requests only
     /// what is showing.
-    pub fn set_shown(&self, shown: bool) {
-        if *self.shown.borrow() == shown {
+    pub fn apply(&self, view: TileVisibility) {
+        let mut tiles = self.inner.lock();
+        if tiles.view == view {
             return;
         }
-        {
-            let tiles = self.inner.lock();
-            for session in tiles
-                .preview
-                .iter()
-                .chain(tiles.remote.iter().map(|(_, session)| session))
-            {
-                session.set_visible(shown);
-            }
+        for (user, session) in &tiles.remote {
+            let shown = view.shows(*user);
+            session.set_visible(shown);
         }
-        self.shown.send_replace(shown);
+        let hidden: Vec<Snowflake> = tiles
+            .remote
+            .iter()
+            .filter(|(user, _)| tiles.view.shows(*user) && !view.shows(*user))
+            .map(|(user, _)| *user)
+            .collect();
+        tiles.pulsed.extend(hidden);
+        if let Some(preview) = &tiles.preview {
+            preview.set_visible(view.shows_preview());
+        }
+        tiles.view = view;
+        drop(tiles);
+        self.changed.send_modify(|epoch| *epoch += 1);
     }
 
-    pub(super) fn shown(&self) -> watch::Receiver<bool> {
-        self.shown.subscribe()
+    pub fn visibility(&self) -> TileVisibility {
+        self.inner.lock().view.clone()
     }
 
-    fn is_shown(&self) -> bool {
-        *self.shown.borrow()
+    /// The users whose tile was hidden since the last call.
+    pub(super) fn take_pulses(&self) -> HashSet<Snowflake> {
+        std::mem::take(&mut self.inner.lock().pulsed)
+    }
+
+    pub(super) fn changes(&self) -> watch::Receiver<u64> {
+        self.changed.subscribe()
     }
 
     fn set_preview(&self, session: Option<Arc<Session>>) {
+        let mut tiles = self.inner.lock();
         if let Some(session) = &session {
-            session.set_visible(self.is_shown());
+            session.set_visible(tiles.view.shows_preview());
         }
-        if let Some(old) = std::mem::replace(&mut self.inner.lock().preview, session) {
+        let old = std::mem::replace(&mut tiles.preview, session);
+        drop(tiles);
+        if let Some(old) = old {
             old.close();
         }
     }
@@ -208,7 +255,7 @@ impl CameraTiles {
             return None;
         }
         let session = Session::new(format!("camera:{}", user.0));
-        session.set_visible(self.is_shown());
+        session.set_visible(tiles.view.shows(user));
         tiles.remote.push((user, session.clone()));
         Some(session)
     }
@@ -218,10 +265,12 @@ impl CameraTiles {
         if let Some(index) = tiles.remote.iter().position(|(id, _)| *id == user) {
             tiles.remote.remove(index).1.close();
         }
+        tiles.pulsed.remove(&user);
     }
 
     fn clear(&self) {
         let mut tiles = self.inner.lock();
+        tiles.pulsed.clear();
         for session in tiles
             .preview
             .take()
@@ -329,13 +378,19 @@ struct Running {
     mirror: Arc<AtomicBool>,
 }
 
+/// One remote camera being decoded.
+struct Remote {
+    decoder: StreamDecoder,
+    /// Whether the decoder was last told its tile is drawn.
+    visible: bool,
+}
+
 /// All the video of one call, owned by the call task.
 pub(super) struct CallVideo {
     media: MediaSender,
     tiles: Arc<CameraTiles>,
     controls: watch::Sender<VoiceControls>,
-    decoders: HashMap<Snowflake, StreamDecoder>,
-    shown: bool,
+    decoders: HashMap<Snowflake, Remote>,
     running: Option<Running>,
     /// The server accepted H.264 from us on this connection.
     negotiated: bool,
@@ -360,7 +415,6 @@ impl CallVideo {
         });
         Self {
             media,
-            shown: tiles.is_shown(),
             tiles,
             controls,
             decoders: HashMap::new(),
@@ -371,8 +425,9 @@ impl CallVideo {
         }
     }
 
-    pub(super) fn shown(&self) -> watch::Receiver<bool> {
-        self.tiles.shown()
+    /// Wakes when the tiles drawn (or their sizes) changed.
+    pub(super) fn changes(&self) -> watch::Receiver<u64> {
+        self.tiles.changes()
     }
 
     pub(super) fn progress(&self) -> watch::Receiver<CameraProgress> {
@@ -586,10 +641,13 @@ impl CallVideo {
                 status_sink(&session),
             );
             decoder.visibility_changed();
-            self.decoders.insert(user, decoder);
+            let visible = session.visible.load(std::sync::atomic::Ordering::Acquire);
+            self.decoders.insert(user, Remote { decoder, visible });
+            // The UI draws a new tile only once it hears of it.
+            self.publish(|camera| camera.tiles += 1);
         }
-        if let Some(decoder) = self.decoders.get(&user) {
-            decoder.source_changed(ssrc);
+        if let Some(remote) = self.decoders.get(&user) {
+            remote.decoder.source_changed(ssrc);
         }
         self.update_interest();
     }
@@ -597,34 +655,51 @@ impl CallVideo {
     fn remove_remote(&mut self, user: Snowflake) {
         if self.decoders.remove(&user).is_some() {
             self.tiles.remove_remote(user);
+            self.publish(|camera| camera.tiles += 1);
             self.update_interest();
         }
     }
 
     pub(super) fn on_frame(&mut self, frame: ReceivedVideo) {
-        if let Some(decoder) = self.decoders.get_mut(&frame.user_id) {
-            decoder.push(frame);
+        if let Some(remote) = self.decoders.get_mut(&frame.user_id) {
+            remote.decoder.push(frame);
         }
     }
 
-    /// The tiles appeared on screen or left it.
-    pub(super) fn on_shown(&mut self, shown: bool) {
-        let previous = std::mem::replace(&mut self.shown, shown);
-        for decoder in self.decoders.values() {
-            decoder.visibility_notified(previous, shown);
+    /// The tiles drawn (or their sizes) changed: suspend what left the screen,
+    /// resume what came back, and ask the server for exactly what is drawn.
+    pub(super) fn on_layout(&mut self) {
+        let view = self.tiles.visibility();
+        let pulsed = self.tiles.take_pulses();
+        for (user, remote) in &mut self.decoders {
+            let shown = view.shows(*user);
+            // A hide/show pulse that was coalesced still invalidates references.
+            if shown != remote.visible || (shown && pulsed.contains(user)) {
+                remote.decoder.visibility_notified(remote.visible, shown);
+            }
+            remote.visible = shown;
         }
         self.update_interest();
     }
 
-    /// Asks the server for the cameras that are on screen, and nothing else.
+    /// Asks the server for the cameras that are drawn, and nothing else; the
+    /// small ones at their lowest layer.
     fn update_interest(&self) {
-        let mut users: Vec<Snowflake> = if self.shown {
-            self.decoders.keys().copied().collect()
-        } else {
-            Vec::new()
-        };
+        let view = self.tiles.visibility();
+        let mut users: Vec<Snowflake> = self
+            .decoders
+            .keys()
+            .copied()
+            .filter(|user| view.shows(*user))
+            .collect();
         users.sort_unstable_by_key(|user| user.0);
+        let small: Vec<Snowflake> = users
+            .iter()
+            .copied()
+            .filter(|user| view.small.contains(user))
+            .collect();
         self.media.set_video_users(&users);
+        self.media.set_video_thumbnails(&small);
     }
 
     /// The call is over: free the camera and every decoder before the voice
@@ -927,7 +1002,11 @@ mod tests {
         assert_eq!(video.decoders.len(), MAX_TILES);
         // Hidden tiles want nothing from the server (checked by the driver
         // tests); showing them is a visibility change, not new tiles.
-        video.on_shown(true);
+        tiles.apply(TileVisibility {
+            on_screen: true,
+            ..TileVisibility::default()
+        });
+        video.on_layout();
         assert_eq!(video.decoders.len(), MAX_TILES);
         // The streamer stops, another leaves the call.
         video.on_event(&source(1, 0, false));
@@ -1034,9 +1113,10 @@ mod tests {
 
     #[test]
     fn tiles_are_bounded_follow_visibility_and_close_with_the_call() {
+        use std::sync::atomic::Ordering;
         let tiles = CameraTiles::default();
         let first = tiles.add_remote(Snowflake(1)).unwrap();
-        assert!(!first.visible.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!first.visible.load(Ordering::Acquire));
         assert!(Arc::ptr_eq(
             &first,
             &tiles.add_remote(Snowflake(1)).unwrap()
@@ -1048,19 +1128,43 @@ mod tests {
             tiles.add_remote(Snowflake(99)).is_none(),
             "at most six cameras"
         );
-        let mut shown = tiles.shown();
-        tiles.set_shown(true);
-        assert!(shown.has_changed().unwrap() && *shown.borrow_and_update());
-        assert!(first.visible.load(std::sync::atomic::Ordering::Acquire));
-        // A tile added while shown is shown at once; hiding hides them all.
+        let mut changes = tiles.changes();
+        let on_screen = TileVisibility {
+            on_screen: true,
+            ..TileVisibility::default()
+        };
+        tiles.apply(on_screen.clone());
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        assert!(first.visible.load(Ordering::Acquire));
+        // The same view again changes nothing and wakes nobody.
+        tiles.apply(on_screen.clone());
+        assert!(!changes.has_changed().unwrap());
+        // A tile added while drawn is drawn at once; the layout can exclude it
+        // (the user is then neither decoded nor requested).
         tiles.remove_remote(Snowflake(1));
         let late = tiles.add_remote(Snowflake(99)).unwrap();
-        assert!(late.visible.load(std::sync::atomic::Ordering::Acquire));
-        tiles.set_shown(false);
-        assert!(!late.visible.load(std::sync::atomic::Ordering::Acquire));
+        assert!(late.visible.load(Ordering::Acquire));
+        tiles.apply(TileVisibility {
+            excluded: vec![Snowflake(99), Snowflake(2)],
+            ..on_screen.clone()
+        });
+        assert!(!late.visible.load(Ordering::Acquire));
+        let hidden = tiles.take_pulses();
+        assert!(hidden.contains(&Snowflake(99)) && hidden.contains(&Snowflake(2)));
+        assert!(tiles.take_pulses().is_empty());
+        // A hidden window hides everything.
+        tiles.apply(TileVisibility::default());
+        assert!(
+            tiles
+                .snapshot()
+                .remote
+                .iter()
+                .all(|(_, session)| !session.visible.load(Ordering::Acquire))
+        );
         assert_eq!(tiles.snapshot().remote.len(), MAX_TILES);
         tiles.clear();
         assert!(tiles.snapshot().remote.is_empty());
-        assert!(!late.active.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!late.active.load(Ordering::Acquire));
     }
 }

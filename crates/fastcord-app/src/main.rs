@@ -5,6 +5,8 @@ mod attachments;
 mod audio_devices;
 mod av_player;
 mod avatars;
+mod call_layout;
+mod call_ui;
 mod captcha;
 mod changes;
 mod composer;
@@ -125,6 +127,8 @@ struct App {
     shortcuts: shortcuts::Runtime,
     window_active: bool,
     window_drawable: bool,
+    /// The window was put in full screen by the call view's button.
+    window_fullscreen: bool,
     /// The per-person volume sliders are open.
     voice_details: bool,
     search: search::State,
@@ -216,8 +220,19 @@ enum Message {
     DeclineCall(Snowflake),
     CallSignalled(Result<(), fastcord_discord::RestError>),
     WatchStream(String),
-    UnwatchStream,
+    UnwatchStream(String),
+    /// Open or close the call view (the large layout of the call's videos).
     ShowStream(bool),
+    SetCallMode(call_layout::Mode),
+    /// Open the call view with this video large.
+    OpenTile(call_layout::TileId),
+    /// Pin a video (it becomes the large one) or unpin it.
+    PinTile(call_layout::TileId),
+    /// One video fills the call view, or the full view ends.
+    FullTile(Option<call_layout::TileId>),
+    SetHidePeople(bool),
+    /// The whole window goes full screen (or back).
+    SetWindowFullscreen(bool),
     VideoReady(u64),
     /// The user clicked the camera button.
     ToggleCamera,
@@ -348,6 +363,7 @@ impl App {
                 shortcuts: shortcuts::Runtime::default(),
                 window_active: true,
                 window_drawable: true,
+                window_fullscreen: false,
                 voice_details: false,
                 search: search::State::default(),
                 pins: pins::State::default(),
@@ -395,7 +411,19 @@ impl App {
             self.friends.purge();
             self.status.purge();
         }
-        let task = self.handle(message);
+        let mut task = self.handle(message);
+        // Window full screen belongs to the call view: without it there is no
+        // button to leave it, so it ends with the view.
+        if self.window_fullscreen
+            && !matches!(&self.phase, Phase::Account { gateway, .. } if gateway.call_view.open)
+        {
+            self.window_fullscreen = false;
+            task = Task::batch([
+                task,
+                iced::window::latest()
+                    .and_then(|id| iced::window::set_mode(id, iced::window::Mode::Windowed)),
+            ]);
+        }
         if resynchronize {
             self.synchronize_video();
             Task::batch([task, self.synchronize_emoji()])
@@ -422,7 +450,7 @@ impl App {
             self.window_active
                 && self.window_drawable
                 && !self.audio_settings.open
-                && !gateway.watch_open
+                && !gateway.call_view.open
                 && gateway.attachment_viewer.is_none(),
             gateway.emoji_picker.request.open,
             gateway.id,
@@ -438,12 +466,40 @@ impl App {
                 && !self.audio_settings.open
                 && gateway.attachment_viewer.is_none()
                 && !gateway.emoji_picker.request.open;
-            if let Some(session) = gateway.controls.watched() {
-                session.set_visible(unobstructed && gateway.watch_open);
+            // Only the videos the layout draws are decoded; the rest are
+            // suspended and, for cameras, no longer requested from the server.
+            let voice_controls = gateway.controls.voice_controls();
+            let tiles = call_layout::tiles(
+                &gateway.controls.watched(),
+                &gateway.controls.camera_tiles().snapshot(),
+                voice_controls.camera.wanted,
+            );
+            let speaking: Vec<Snowflake> = voice_controls
+                .participants
+                .iter()
+                .filter(|participant| participant.speaking)
+                .map(|participant| participant.user_id)
+                .collect();
+            let plan = gateway.call_view.plan(&call_layout::ids(&tiles), &speaking);
+            for tile in &tiles {
+                if matches!(tile.id, call_layout::TileId::Stream(_)) {
+                    tile.session
+                        .set_visible(unobstructed && plan.contains(&tile.id));
+                }
             }
-            // The camera tiles sit in the voice bar, which is on screen while a
-            // call is; a hidden window or an overlay suspends their decoders.
-            gateway.controls.camera_tiles().set_shown(unobstructed);
+            gateway
+                .controls
+                .camera_tiles()
+                .apply(gateway::TileVisibility {
+                    on_screen: unobstructed,
+                    preview_excluded: !plan.contains(&call_layout::TileId::Preview),
+                    excluded: tiles
+                        .iter()
+                        .filter_map(|tile| tile.id.camera_user())
+                        .filter(|user| !plan.contains(&call_layout::TileId::Camera(*user)))
+                        .collect(),
+                    small: plan.small_cameras(),
+                });
         }
     }
 
@@ -452,7 +508,7 @@ impl App {
             return iced::Subscription::none();
         };
         let mut subscriptions = Vec::new();
-        if let Some(session) = gateway.controls.watched() {
+        for session in gateway.controls.watched() {
             subscriptions.push(session.subscription().map(Message::VideoReady));
         }
         let tiles = gateway.controls.camera_tiles().snapshot();
@@ -1321,15 +1377,15 @@ impl App {
                         })
                         .map(|channel| call_signal(session, channel, CallSignal::StopRinging));
                 }
-                if let Phase::Account { gateway, .. } = &mut self.phase
-                    && let Some(session) = gateway.controls.watched()
-                {
-                    if !gateway.controls.unwatch_stream(session.key.clone()) {
-                        self.notice = Some(
-                            "Could not queue Stop watching; retry before leaving voice.".into(),
-                        );
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    for session in gateway.controls.watched() {
+                        if !gateway.controls.unwatch_stream(session.key.clone()) {
+                            self.notice = Some(
+                                "Could not queue Stop watching; retry before leaving voice.".into(),
+                            );
+                        }
                     }
-                    gateway.watch_open = false;
+                    gateway.call_view = call_layout::CallView::default();
                 }
                 if let Some(task) = cancel {
                     return task;
@@ -1338,23 +1394,26 @@ impl App {
             Message::WatchStream(key) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     let controls = gateway.controls.voice_controls();
-                    if gateway.controls.voice_audio_state() == gateway::VoiceAudioState::Running
-                        && controls.streams.iter().any(|offer| offer.key == key)
-                        && gateway.controls.watch_stream(key)
+                    if gateway.controls.voice_audio_state() != gateway::VoiceAudioState::Running
+                        || !controls.streams.iter().any(|offer| offer.key == key)
                     {
-                        gateway.watch_open = true;
-                        self.notice = None;
+                        self.notice = Some(
+                            "Could not watch this stream. Join its voice channel and retry.".into(),
+                        );
                     } else {
-                        self.notice = Some("Could not watch this stream. Join its voice channel, or stop the current watch and retry.".into());
+                        match gateway.controls.watch_stream(key) {
+                            Ok(()) => {
+                                gateway.call_view.open = true;
+                                self.notice = None;
+                            }
+                            Err(reason) => self.notice = Some(reason.into()),
+                        }
                     }
                 }
             }
-            Message::UnwatchStream => {
-                if let Phase::Account { gateway, .. } = &mut self.phase
-                    && let Some(session) = gateway.controls.watched()
-                {
-                    if gateway.controls.unwatch_stream(session.key.clone()) {
-                        gateway.watch_open = false;
+            Message::UnwatchStream(key) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    if gateway.controls.unwatch_stream(key) {
                         self.notice = None;
                     } else {
                         self.notice = Some("Could not queue Stop watching; retry.".into());
@@ -1363,8 +1422,58 @@ impl App {
             }
             Message::ShowStream(open) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
-                    gateway.watch_open = open && gateway.controls.watched().is_some();
+                    let any = !gateway.controls.watched().is_empty()
+                        || !gateway.controls.camera_tiles().snapshot().remote.is_empty()
+                        || gateway.controls.voice_controls().camera.wanted;
+                    gateway.call_view.open = open && any;
+                    if !open {
+                        gateway.call_view.full = None;
+                    }
                 }
+            }
+            Message::SetCallMode(mode) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.call_view.mode = mode;
+                    gateway.call_view.full = None;
+                }
+            }
+            Message::OpenTile(id) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.call_view.pinned = Some(id);
+                    gateway.call_view.mode = call_layout::Mode::Focus;
+                    gateway.call_view.full = None;
+                    gateway.call_view.open = true;
+                }
+            }
+            Message::PinTile(id) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.call_view.toggle_pin(id);
+                    gateway.call_view.full = None;
+                }
+            }
+            Message::FullTile(id) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.call_view.full = id;
+                    gateway.call_view.open |= gateway.call_view.full.is_some();
+                }
+            }
+            Message::SetHidePeople(hide) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.call_view.hide_people = hide;
+                }
+            }
+            Message::SetWindowFullscreen(on) => {
+                self.window_fullscreen = on;
+                return iced::window::latest().and_then(move |id| {
+                    iced::window::set_mode(
+                        id,
+                        if on {
+                            iced::window::Mode::Fullscreen
+                        } else {
+                            iced::window::Mode::Windowed
+                        },
+                    )
+                });
             }
             Message::OpenSharePicker => {
                 if let Phase::Account { gateway, .. } = &mut self.phase
@@ -1438,7 +1547,7 @@ impl App {
             }
             Message::VideoReady(id) => {
                 if let Phase::Account { gateway, .. } = &self.phase {
-                    if let Some(session) = gateway.controls.watched() {
+                    for session in gateway.controls.watched() {
                         session.consume(id);
                     }
                     let tiles = gateway.controls.camera_tiles().snapshot();
@@ -2223,50 +2332,6 @@ impl App {
         actions
     }
 
-    /// The camera tiles of the call: the local preview (the capture itself) and
-    /// up to six remote cameras. Hidden tiles are not decoded.
-    fn camera_tiles<'a>(
-        gateway: &'a GatewayPanel,
-        voice_controls: &gateway::VoiceControls,
-    ) -> Option<Element<'a, Message>> {
-        let tiles = gateway.controls.camera_tiles().snapshot();
-        let mut strip = row![].spacing(8);
-        let mut any = false;
-        let mut tile = |label: String, session: Arc<playback::Session>| {
-            any = true;
-            let caption = if session.failed() {
-                format!("{label} · {}", session.description())
-            } else {
-                label
-            };
-            column![
-                container(playback::view::<Message>(session))
-                    .width(Length::Fixed(192.0))
-                    .height(Length::Fixed(108.0)),
-                text(caption).size(11).width(Length::Fixed(192.0)),
-            ]
-            .spacing(2)
-        };
-        if let Some(preview) = tiles.preview
-            && voice_controls.camera.wanted
-        {
-            strip = strip.push(tile(
-                gateway::preview_caption(&voice_controls.camera),
-                preview,
-            ));
-        }
-        for (user, session) in tiles.remote {
-            strip = strip.push(tile(voice_controls.display_name(user), session));
-        }
-        any.then(|| {
-            scrollable(strip)
-                .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::default(),
-                ))
-                .into()
-        })
-    }
-
     fn share_picker_view(picker: &gateway::SharePicker) -> Element<'_, Message> {
         use fastcord_platform::capture::SourceKind;
         let mut content = column![
@@ -3012,6 +3077,15 @@ impl App {
                 None => text("").size(1).into(),
             };
             let watching = gateway.controls.watched();
+            let video_tiles = call_layout::tiles(
+                &watching,
+                &gateway.controls.camera_tiles().snapshot(),
+                voice_controls.camera.wanted,
+            );
+            let video_plan = gateway.call_view.plan(
+                &call_layout::ids(&video_tiles),
+                &call_ui::speaking(&voice_controls),
+            );
             let in_voice = voice_audio != gateway::VoiceAudioState::Idle;
             let running = voice_audio == gateway::VoiceAudioState::Running;
             let bold = iced::Font {
@@ -3020,170 +3094,183 @@ impl App {
             };
 
             // ---- the voice bar: who is in the call, Go Live ----
-            let voice_bar: Option<Element<'_, Message>> =
-                (in_voice || !voice_controls.streams.is_empty() || watching.is_some()).then(|| {
-                    let mut people = row![].spacing(8).align_y(iced::alignment::Vertical::Center);
-                    for participant in &voice_controls.participants {
-                        let user = participant.user_id;
-                        let name = voice_controls.display_name(user);
-                        people = people.push(
-                            container(
-                                row![
-                                    container(text(style::initial(&name)).size(12).font(bold))
-                                        .center(24)
-                                        .style(style::avatar(style::avatar_color(user.0))),
-                                    text(name).size(13),
-                                ]
-                                .spacing(6)
-                                .align_y(iced::alignment::Vertical::Center),
-                            )
-                            .padding([3, 8])
-                            .style(style::speaking(participant.speaking)),
-                        );
-                    }
-                    if voice_controls.participants.is_empty() {
-                        people = people.push(
-                            text(if in_voice {
-                                "Waiting for others to speak…"
-                            } else {
-                                ""
-                            })
-                            .size(12)
-                            .style(text::secondary),
-                        );
-                    }
-                    let mut actions = row![
-                        button(
-                            text(if self.voice_details {
-                                "Hide volume"
-                            } else {
-                                "Volume"
-                            })
-                            .size(12)
+            let voice_bar: Option<Element<'_, Message>> = (in_voice
+                || !voice_controls.streams.is_empty()
+                || !watching.is_empty())
+            .then(|| {
+                let mut people = row![].spacing(8).align_y(iced::alignment::Vertical::Center);
+                for participant in &voice_controls.participants {
+                    let user = participant.user_id;
+                    let name = voice_controls.display_name(user);
+                    people = people.push(
+                        container(
+                            row![
+                                container(text(style::initial(&name)).size(12).font(bold))
+                                    .center(24)
+                                    .style(style::avatar(style::avatar_color(user.0))),
+                                text(name).size(13),
+                            ]
+                            .spacing(6)
+                            .align_y(iced::alignment::Vertical::Center),
                         )
-                        .on_press(Message::ToggleVoiceDetails)
-                        .style(style::tool_button(self.voice_details, false)),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::alignment::Vertical::Center);
-                    if let Some(watching) = &watching {
-                        actions = actions
-                            .push(text(watching.description()).size(12))
-                            .push(
-                                button(text("Show stream").size(12))
-                                    .on_press(Message::ShowStream(true))
-                                    .style(style::action_button(false)),
-                            )
-                            .push(
-                                button(text("Stop watching").size(12))
-                                    .on_press(Message::UnwatchStream)
-                                    .style(style::action_button(true)),
-                            );
-                    } else {
-                        for offer in voice_controls.streams.iter() {
-                            actions = actions.push(
-                                button(
-                                    text(format!(
-                                        "Watch {}",
-                                        voice_controls.display_name(offer.owner)
-                                    ))
-                                    .size(12),
-                                )
-                                .on_press_maybe(
-                                    running.then(|| Message::WatchStream(offer.key.clone())),
-                                )
-                                .style(style::action_button(false)),
-                            );
-                        }
-                    }
-                    let share = gateway.controls.share_view();
-                    if share.active {
-                        actions = actions.push(text(share.text.clone()).size(12)).push(
-                            button(text("Stop sharing").size(12))
-                                .on_press(Message::StopShare)
+                        .padding([3, 8])
+                        .style(style::speaking(participant.speaking)),
+                    );
+                }
+                if voice_controls.participants.is_empty() {
+                    people = people.push(
+                        text(if in_voice {
+                            "Waiting for others to speak…"
+                        } else {
+                            ""
+                        })
+                        .size(12)
+                        .style(text::secondary),
+                    );
+                }
+                let mut actions = row![
+                    button(
+                        text(if self.voice_details {
+                            "Hide volume"
+                        } else {
+                            "Volume"
+                        })
+                        .size(12)
+                    )
+                    .on_press(Message::ToggleVoiceDetails)
+                    .style(style::tool_button(self.voice_details, false)),
+                ]
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center);
+                for session in &watching {
+                    let owner = call_layout::stream_owner(&session.key).map_or_else(
+                        || "stream".to_owned(),
+                        |owner| voice_controls.display_name(owner),
+                    );
+                    actions = actions
+                        .push(text(format!("{owner}: {}", session.description())).size(12))
+                        .push(
+                            button(text("Stop watching").size(12))
+                                .on_press(Message::UnwatchStream(session.key.clone()))
                                 .style(style::action_button(true)),
                         );
-                    } else if cfg!(windows) {
-                        actions = actions.push(
-                            button(text("Share screen").size(12))
-                                .on_press_maybe(
-                                    (running
-                                        && (gateway.voice_guild.is_some()
-                                            || gateway.voice_call.is_some())
-                                        && !gateway.share_picker.is_open())
-                                    .then_some(Message::OpenSharePicker),
-                                )
-                                .style(style::action_button(false)),
-                        );
-                        if !share.text.is_empty() {
-                            actions = actions.push(text(share.text.clone()).size(12));
-                        }
+                }
+                for offer in voice_controls.streams.iter() {
+                    if watching.iter().any(|session| session.key == offer.key) {
+                        continue;
                     }
-                    if in_voice {
-                        actions = self.camera_controls(actions, &voice_controls, running);
-                    }
-                    let mut bar = column![
-                        scrollable(people).direction(scrollable::Direction::Horizontal(
-                            scrollable::Scrollbar::default()
-                        )),
-                        scrollable(actions).direction(scrollable::Direction::Horizontal(
-                            scrollable::Scrollbar::default()
-                        )),
-                    ]
-                    .spacing(6);
-                    if let Some(strip) = Self::camera_tiles(gateway, &voice_controls) {
-                        bar = bar.push(strip);
-                    }
-                    if self.voice_details {
-                        for participant in &voice_controls.participants {
-                            let user = participant.user_id;
-                            let volume = voice_controls.volume_percent(user);
-                            bar = bar.push(
-                                row![
-                                    text(voice_controls.display_name(user))
-                                        .size(12)
-                                        .width(Length::Fixed(110.0)),
-                                    slider(0.0..=200.0, volume as f32, move |value| {
-                                        Message::SetParticipantVolume(user, value.round() as u16)
-                                    })
-                                    .on_release(Message::CommitParticipantVolume(user))
-                                    .width(Length::Fixed(220.0)),
-                                    button(text("0%").size(11))
-                                        .on_press(Message::PresetParticipantVolume(user, 0))
-                                        .style(style::tool_button(false, false)),
-                                    button(text("100%").size(11))
-                                        .on_press(Message::PresetParticipantVolume(user, 100))
-                                        .style(style::tool_button(false, false)),
-                                    text(format!("{volume}%")).size(12),
-                                ]
-                                .spacing(8)
-                                .align_y(iced::alignment::Vertical::Center),
-                            );
-                        }
-                        bar = bar.push(
-                            text(
-                                "Server restrictions: ".to_owned()
-                                    + if voice_controls.server_muted {
-                                        "muted. "
-                                    } else {
-                                        "none to mute. "
-                                    }
-                                    + if voice_controls.server_deafened {
-                                        "Deafened."
-                                    } else {
-                                        ""
-                                    },
+                    actions = actions.push(
+                        button(
+                            text(format!(
+                                "Watch {}",
+                                voice_controls.display_name(offer.owner)
+                            ))
+                            .size(12),
+                        )
+                        .on_press_maybe(running.then(|| Message::WatchStream(offer.key.clone())))
+                        .style(style::action_button(false)),
+                    );
+                }
+                if !video_tiles.is_empty() {
+                    actions = actions.push(
+                        button(text("Call video").size(12))
+                            .on_press(Message::ShowStream(!gateway.call_view.open))
+                            .style(style::tool_button(gateway.call_view.open, false)),
+                    );
+                }
+                let share = gateway.controls.share_view();
+                if share.active {
+                    actions = actions.push(text(share.text.clone()).size(12)).push(
+                        button(text("Stop sharing").size(12))
+                            .on_press(Message::StopShare)
+                            .style(style::action_button(true)),
+                    );
+                } else if cfg!(windows) {
+                    actions = actions.push(
+                        button(text("Share screen").size(12))
+                            .on_press_maybe(
+                                (running
+                                    && (gateway.voice_guild.is_some()
+                                        || gateway.voice_call.is_some())
+                                    && !gateway.share_picker.is_open())
+                                .then_some(Message::OpenSharePicker),
                             )
-                            .size(11)
-                            .style(text::secondary),
+                            .style(style::action_button(false)),
+                    );
+                    if !share.text.is_empty() {
+                        actions = actions.push(text(share.text.clone()).size(12));
+                    }
+                }
+                if in_voice {
+                    actions = self.camera_controls(actions, &voice_controls, running);
+                }
+                let mut bar = column![
+                    scrollable(people).direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::default()
+                    )),
+                    scrollable(actions).direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::default()
+                    )),
+                ]
+                .spacing(6);
+                if let Some(strip) = call_ui::strip(
+                    &gateway.call_view,
+                    &video_tiles,
+                    &video_plan,
+                    &voice_controls,
+                ) {
+                    bar = bar.push(strip);
+                }
+                if self.voice_details {
+                    for participant in &voice_controls.participants {
+                        let user = participant.user_id;
+                        let volume = voice_controls.volume_percent(user);
+                        bar = bar.push(
+                            row![
+                                text(voice_controls.display_name(user))
+                                    .size(12)
+                                    .width(Length::Fixed(110.0)),
+                                slider(0.0..=200.0, volume as f32, move |value| {
+                                    Message::SetParticipantVolume(user, value.round() as u16)
+                                })
+                                .on_release(Message::CommitParticipantVolume(user))
+                                .width(Length::Fixed(220.0)),
+                                button(text("0%").size(11))
+                                    .on_press(Message::PresetParticipantVolume(user, 0))
+                                    .style(style::tool_button(false, false)),
+                                button(text("100%").size(11))
+                                    .on_press(Message::PresetParticipantVolume(user, 100))
+                                    .style(style::tool_button(false, false)),
+                                text(format!("{volume}%")).size(12),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::alignment::Vertical::Center),
                         );
                     }
-                    container(bar)
-                        .padding(8)
-                        .width(Length::Fill)
-                        .style(style::card)
-                        .into()
-                });
+                    bar = bar.push(
+                        text(
+                            "Server restrictions: ".to_owned()
+                                + if voice_controls.server_muted {
+                                    "muted. "
+                                } else {
+                                    "none to mute. "
+                                }
+                                + if voice_controls.server_deafened {
+                                    "Deafened."
+                                } else {
+                                    ""
+                                },
+                        )
+                        .size(11)
+                        .style(text::secondary),
+                    );
+                }
+                container(bar)
+                    .padding(8)
+                    .width(Length::Fill)
+                    .style(style::card)
+                    .into()
+            });
 
             // ---- connection and notices above the conversation ----
             let mut notes: Vec<(String, bool)> = Vec::new();
@@ -3513,31 +3600,15 @@ impl App {
             // The larger image view covers the account screen, which stays in
             // the widget tree underneath so the timeline keeps its scroll state.
             return match &gateway.attachment_viewer {
-                None if gateway.watch_open
-                    && watching.is_some()
-                    && !gateway.emoji_picker.request.open =>
-                {
-                    let session = watching.expect("watch pane has a session");
-                    let pane = container(
-                        column![
-                            row![
-                                text(session.description()).width(Length::Fill),
-                                button("Back to messages").on_press(Message::ShowStream(false)),
-                                button("Stop watching").on_press(Message::UnwatchStream),
-                            ]
-                            .spacing(12),
-                            text(self.notice.as_deref().unwrap_or("")).size(12),
-                            playback::view::<Message>(session),
-                        ]
-                        .spacing(12),
-                    )
-                    .padding(20)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .style(|_| container::Style {
-                        background: Some(Color::from_rgb8(24, 25, 30).into()),
-                        ..Default::default()
-                    });
+                None if gateway.call_view.open && !gateway.emoji_picker.request.open => {
+                    let pane = call_ui::panel(
+                        &gateway.call_view,
+                        &video_tiles,
+                        &video_plan,
+                        &voice_controls,
+                        self.window_fullscreen,
+                        self.notice.as_deref(),
+                    );
                     iced::widget::stack![account, pane].into()
                 }
                 None if gateway.share_picker.is_open() && !gateway.emoji_picker.request.open => {
@@ -4597,8 +4668,8 @@ mod tests {
         };
         let (_, worker) = iced::Task::<()>::none().abortable();
         **gateway = GatewayPanel::new(gateway.id, worker, bridge.clone());
-        assert!(bridge.watch_stream("guild:41:127:99"));
-        let watched = bridge.watched().unwrap();
+        assert!(bridge.watch_stream("guild:41:127:99").is_ok());
+        let watched = bridge.watched().pop().unwrap();
         assert_eq!(app.video_subscription().units(), 0);
         let _ = app.update(Message::ShowStream(true));
         assert_eq!(app.video_subscription().units(), 1);
@@ -4618,10 +4689,62 @@ mod tests {
         assert_eq!(app.video_subscription().units(), 0);
         let _ = app.update(Message::WindowSize(iced::Size::new(640.0, 480.0)));
         assert_eq!(app.video_subscription().units(), 1);
-        let _ = app.update(Message::UnwatchStream);
+        let _ = app.update(Message::UnwatchStream("guild:41:127:99".into()));
         assert_eq!(app.video_subscription().units(), 0);
-        assert!(bridge.watched().is_none());
+        assert!(bridge.watched().is_empty());
         assert!(!watched.active.load(Ordering::Acquire));
         assert!(watched.frame().is_none());
+    }
+
+    #[test]
+    fn several_watched_streams_are_decoded_only_while_the_layout_draws_them() {
+        use crate::call_layout::{Mode, TileId};
+        use std::sync::atomic::Ordering;
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let bridge = gateway::NavigationBridge::new();
+        let _commands = bridge.take_commands().unwrap();
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        let (_, worker) = iced::Task::<()>::none().abortable();
+        **gateway = GatewayPanel::new(gateway.id, worker, bridge.clone());
+        let keys: Vec<String> = (1..=4).map(|n| format!("guild:41:127:{n}")).collect();
+        for key in &keys {
+            assert!(bridge.watch_stream(key.clone()).is_ok());
+        }
+        let visible = |bridge: &gateway::NavigationBridge| {
+            bridge
+                .watched()
+                .iter()
+                .filter(|session| session.visible.load(Ordering::Acquire))
+                .count()
+        };
+        // Watching alone draws nothing: the call view is closed.
+        let _ = app.update(Message::WindowActive(true));
+        assert_eq!((visible(&bridge), app.video_subscription().units()), (0, 0));
+        let _ = app.update(Message::ShowStream(true));
+        assert_eq!((visible(&bridge), app.video_subscription().units()), (4, 4));
+        // Focus: still all four (one large, three small); a full view draws one.
+        let _ = app.update(Message::SetCallMode(Mode::Focus));
+        assert_eq!(visible(&bridge), 4);
+        let _ = app.update(Message::FullTile(Some(TileId::Stream(keys[2].clone()))));
+        assert_eq!((visible(&bridge), app.video_subscription().units()), (1, 1));
+        assert!(bridge.watched()[2].visible.load(Ordering::Acquire));
+        let _ = app.update(Message::FullTile(None));
+        assert_eq!(visible(&bridge), 4);
+        // Minimizing and covering stop every decoder; one stream can leave alone.
+        let _ = app.update(Message::WindowSize(iced::Size::ZERO));
+        assert_eq!(visible(&bridge), 0);
+        let _ = app.update(Message::WindowSize(iced::Size::new(640.0, 480.0)));
+        let _ = app.update(Message::UnwatchStream(keys[0].clone()));
+        assert_eq!((bridge.watched().len(), visible(&bridge)), (3, 3));
+        // Closing the call view hides all; the sessions stay connected.
+        let _ = app.update(Message::ShowStream(false));
+        assert_eq!((bridge.watched().len(), visible(&bridge)), (3, 0));
+        for key in &keys[1..] {
+            let _ = app.update(Message::UnwatchStream(key.clone()));
+        }
+        assert!(bridge.watched().is_empty());
     }
 }

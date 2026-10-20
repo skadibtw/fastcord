@@ -81,6 +81,9 @@ async fn pump(
     let mut decoder = StreamDecoder::new(session.media(), visible, Some(sink), Arc::clone(&status));
     let mut connection = session.watch_status();
     let mut observed_visible = *visibility.borrow_and_update();
+    // A hidden stream costs nothing: the server forwards its video only while
+    // it is drawn (and again, from a keyframe, once it is).
+    session.media().set_video_wanted(observed_visible);
     decoder.visibility_changed();
     #[cfg(debug_assertions)]
     let mut report = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -101,6 +104,7 @@ async fn pump(
                     break;
                 }
                 let announced = *visibility.borrow_and_update();
+                session.media().set_video_wanted(announced);
                 decoder.visibility_notified(observed_visible, announced);
                 observed_visible = announced;
             }

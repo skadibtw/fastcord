@@ -32,7 +32,7 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 /// Frames waiting for the decoder: at 30 fps about 130 ms of delay at most.
 const MAX_QUEUED_FRAMES: usize = 4;
 /// Bytes waiting for the decoder (a frame is at most 2 MiB, so three of them).
-const MAX_QUEUED_BYTES: usize = 6 << 20;
+pub(crate) const MAX_QUEUED_BYTES: usize = 6 << 20;
 /// Keyframes that failed to decode, in a row, that are answered with a request.
 const MAX_FAILED_KEYFRAMES: u32 = 3;
 /// The RTP clock of video.

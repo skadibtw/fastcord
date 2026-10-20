@@ -10,11 +10,13 @@ mod camera;
 mod stream_audio;
 mod stream_share;
 mod stream_video;
+#[cfg(test)]
+pub(crate) use stream_video::MAX_QUEUED_BYTES as MAX_QUEUED_VIDEO_BYTES;
 pub(crate) use stream_video::open_h264;
 mod voice_audio;
 
 pub use camera::{
-    CameraChoice, CameraControls, CameraList, CameraStatus, CameraTiles,
+    CameraChoice, CameraControls, CameraList, CameraStatus, CameraTiles, TileVisibility, TilesView,
     can_send as can_send_camera, describe as describe_camera, list_cameras, preview_caption,
 };
 pub use stream_share::{SharePicker, ShareView};
@@ -746,7 +748,7 @@ pub struct NavigationBridge {
     commands: mpsc::Sender<Command>,
     command_receiver: Arc<Mutex<Option<mpsc::Receiver<Command>>>>,
     outbox_slots: Slots,
-    watched: Arc<parking_lot::Mutex<Option<Arc<crate::playback::Session>>>>,
+    watched: Arc<parking_lot::Mutex<Vec<Arc<crate::playback::Session>>>>,
     share_view: watch::Sender<ShareView>,
     camera_tiles: Arc<CameraTiles>,
 }
@@ -1010,24 +1012,32 @@ impl NavigationBridge {
         self.stream_intent(StreamIntent::Create(request))
     }
 
-    /// Watches the named Go Live stream through opcode 20.
-    pub fn watch_stream(&self, stream_key: impl Into<String>) -> bool {
+    /// Watches the named Go Live stream through opcode 20. Up to
+    /// [`MAX_WATCHED_STREAMS`](crate::call_layout::MAX_WATCHED_STREAMS) streams
+    /// are watched at once, each on a connection of its own; more is refused
+    /// with the reason, never by dropping one that is already watched.
+    pub fn watch_stream(&self, stream_key: impl Into<String>) -> Result<(), &'static str> {
         let stream_key = stream_key.into();
         if StreamKey::from_wire(&stream_key).is_none() {
-            return false;
+            return Err("That is not a stream this client can watch.");
         }
         let mut watched = self.watched.lock();
-        if watched.is_some() {
-            return false;
+        if watched.iter().any(|session| session.key == stream_key) {
+            return Err("You are already watching this stream.");
+        }
+        if watched.len() >= crate::call_layout::MAX_WATCHED_STREAMS {
+            return Err(
+                "You are watching as many streams as fastcord allows at once. Stop watching one first.",
+            );
         }
         let session = crate::playback::Session::new(stream_key.clone());
-        *watched = Some(session.clone());
+        watched.push(session.clone());
         if self.stream_intent(StreamIntent::Watch(stream_key)) {
-            true
+            Ok(())
         } else {
             session.close();
-            *watched = None;
-            false
+            watched.pop();
+            Err("Could not queue Watch; retry.")
         }
     }
 
@@ -1040,12 +1050,8 @@ impl NavigationBridge {
             return false;
         }
         let mut watched = self.watched.lock();
-        if watched
-            .as_ref()
-            .is_some_and(|session| session.key == stream_key)
-            && let Some(session) = watched.take()
-        {
-            session.close();
+        if let Some(index) = watched.iter().position(|session| session.key == stream_key) {
+            watched.remove(index).close();
         }
         true
     }
@@ -1068,12 +1074,21 @@ impl NavigationBridge {
         self.commands.try_send(Command::Stream(intent)).is_ok()
     }
 
-    pub fn watched(&self) -> Option<Arc<crate::playback::Session>> {
+    /// Every watched stream, oldest first.
+    pub fn watched(&self) -> Vec<Arc<crate::playback::Session>> {
         self.watched.lock().clone()
     }
 
+    pub fn watched_stream(&self, wire_key: &str) -> Option<Arc<crate::playback::Session>> {
+        self.watched
+            .lock()
+            .iter()
+            .find(|session| session.key == wire_key)
+            .cloned()
+    }
+
     pub fn stop_playback(&self) {
-        if let Some(session) = self.watched.lock().take() {
+        for session in self.watched.lock().drain(..) {
             session.close();
         }
     }
@@ -2160,7 +2175,7 @@ impl Worker {
         let Some(request) = *self.voice_requests.borrow_and_update() else {
             return false;
         };
-        if let Some(session) = self.bridge.watched() {
+        for session in self.bridge.watched() {
             self.stream_command(gateway, StreamIntent::Unwatch(session.key.clone()));
         }
         self.end_share(Some(gateway), ShareView::idle(), true);
@@ -2318,8 +2333,7 @@ impl Worker {
                 }
                 let presentation = self
                     .bridge
-                    .watched()
-                    .filter(|session| session.key == key.to_wire())
+                    .watched_stream(&key.to_wire())
                     // An owned stream has no receive pane yet (capture/send is
                     // M29); keep its independent RTC lifecycle without decoding.
                     .unwrap_or_else(|| crate::playback::Session::new(key.to_wire()));
@@ -2349,31 +2363,19 @@ impl Worker {
             }
             StreamCorrelation::Reallocating { key, .. } => {
                 self.stop_stream_key(&key.to_wire());
-                if let Some(session) = self
-                    .bridge
-                    .watched()
-                    .filter(|session| session.key == key.to_wire())
-                {
+                if let Some(session) = self.bridge.watched_stream(&key.to_wire()) {
                     session.status(crate::playback::Status::Connecting);
                 }
             }
             StreamCorrelation::Ended { key, .. } => {
                 self.stop_stream_key(&key.to_wire());
-                if let Some(session) = self
-                    .bridge
-                    .watched()
-                    .filter(|session| session.key == key.to_wire())
-                {
+                if let Some(session) = self.bridge.watched_stream(&key.to_wire()) {
                     session.status(crate::playback::Status::Ended);
                 }
             }
             StreamCorrelation::Invalid { key: Some(key), .. } => {
                 self.stop_stream_key(&key.to_wire());
-                if let Some(session) = self
-                    .bridge
-                    .watched()
-                    .filter(|session| session.key == key.to_wire())
-                {
+                if let Some(session) = self.bridge.watched_stream(&key.to_wire()) {
                     session.status(crate::playback::Status::Failed(
                         "The stream's RTC identity or endpoint is invalid.".into(),
                     ));
@@ -2820,7 +2822,8 @@ pub struct GatewayPanel {
     pub revealed: HashSet<(Snowflake, u16)>,
     /// The sidebar lists direct messages rather than a server's channels.
     pub directs: bool,
-    pub watch_open: bool,
+    /// How the call's videos are laid out and which one is pinned or full.
+    pub call_view: crate::call_layout::CallView,
     /// The source picker of the screen share.
     pub share_picker: SharePicker,
     _worker: Handle,
@@ -3038,7 +3041,7 @@ impl GatewayPanel {
             emoji_snapshot: Arc::default(),
             revealed: HashSet::new(),
             directs: false,
-            watch_open: false,
+            call_view: crate::call_layout::CallView::default(),
             share_picker: SharePicker::default(),
             voice_guild: None,
             voice_call: None,
@@ -3106,9 +3109,12 @@ impl GatewayPanel {
             self.media = None;
         }
         self.private.notice = consumed.private_notice;
-        if self.controls.watched().is_none() {
-            self.watch_open = false;
-        }
+        let tiles = crate::call_layout::tiles(
+            &self.controls.watched(),
+            &self.controls.camera_tiles().snapshot(),
+            self.controls.voice_controls().camera.wanted,
+        );
+        self.call_view.prune(&crate::call_layout::ids(&tiles));
         self.composer.select(self.timeline.channel_id);
         if self
             .confirm_delete
@@ -3360,7 +3366,7 @@ mod bridge_tests {
         let mut commands = bridge.take_commands().unwrap();
         let key = "guild:41:127:1";
         assert!(bridge.create_stream(StreamCreateRequest::guild(Snowflake(41), Snowflake(127),)));
-        assert!(bridge.watch_stream(key));
+        assert!(bridge.watch_stream(key).is_ok());
         assert!(bridge.pause_stream(key, true));
         assert!(bridge.ping_stream(key));
         assert!(bridge.unwatch_stream(key));
@@ -3389,32 +3395,68 @@ mod bridge_tests {
     }
 
     #[test]
-    fn watch_slot_is_single_and_full_commands_do_not_claim_an_unwatch() {
+    fn watch_slots_are_capped_and_full_commands_do_not_claim_an_unwatch() {
         use std::sync::atomic::Ordering;
         let bridge = NavigationBridge::new();
         let mut commands = bridge.take_commands().unwrap();
         for _ in 0..COMMAND_QUEUE {
             assert!(bridge.ping_stream("guild:41:127:1"));
         }
-        assert!(!bridge.watch_stream("guild:41:127:99"));
-        assert!(bridge.watched().is_none());
+        assert!(bridge.watch_stream("guild:41:127:99").is_err());
+        assert!(bridge.watched().is_empty());
         while commands.try_recv().is_ok() {}
-        assert!(bridge.watch_stream("guild:41:127:99"));
-        let session = bridge.watched().unwrap();
+        assert!(bridge.watch_stream("guild:41:127:99").is_ok());
+        let session = bridge.watched().pop().unwrap();
         session.set_visible(true);
-        assert!(!bridge.watch_stream("guild:41:127:98"));
-        for _ in 1..COMMAND_QUEUE {
+        // Watching it twice is refused, a second stream is a second slot.
+        assert!(bridge.watch_stream("guild:41:127:99").is_err());
+        assert!(bridge.watch_stream("guild:41:127:98").is_ok());
+        assert_eq!(bridge.watched().len(), 2);
+        while commands.try_recv().is_ok() {}
+        for _ in 0..COMMAND_QUEUE {
             assert!(bridge.ping_stream("guild:41:127:1"));
         }
         assert!(!bridge.unwatch_stream(session.key.clone()));
         assert!(session.active.load(Ordering::Acquire));
-        assert!(bridge.watched().is_some());
+        assert_eq!(bridge.watched().len(), 2);
         let _ = commands.try_recv().unwrap();
         assert!(bridge.unwatch_stream(session.key.clone()));
-        assert!(bridge.watched().is_none());
+        assert_eq!(bridge.watched().len(), 1);
         assert!(!session.active.load(Ordering::Acquire));
         assert!(!session.visible.load(Ordering::Acquire));
         assert!(session.frame().is_none());
+    }
+
+    #[test]
+    fn more_streams_than_the_cap_are_refused_with_a_reason_and_keep_the_old_ones() {
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        for owner in 0..crate::call_layout::MAX_WATCHED_STREAMS {
+            assert!(
+                bridge
+                    .watch_stream(format!("guild:41:127:{}", 100 + owner))
+                    .is_ok()
+            );
+            let _ = commands.try_recv().unwrap();
+        }
+        let refusal = bridge.watch_stream("guild:41:127:999").unwrap_err();
+        assert!(refusal.contains("Stop watching one first"));
+        assert!(
+            commands.try_recv().is_err(),
+            "a refused watch sends nothing"
+        );
+        let kept = bridge.watched();
+        assert_eq!(kept.len(), crate::call_layout::MAX_WATCHED_STREAMS);
+        assert!(
+            kept.iter()
+                .all(|session| session.active.load(std::sync::atomic::Ordering::Acquire))
+        );
+        bridge.stop_playback();
+        assert!(bridge.watched().is_empty());
+        assert!(
+            kept.iter()
+                .all(|session| !session.active.load(std::sync::atomic::Ordering::Acquire))
+        );
     }
     #[test]
     fn a_full_gateway_signal_queue_retains_the_accepted_app_intent_for_retry() {
