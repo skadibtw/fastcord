@@ -42,6 +42,8 @@ pub struct Chrome<'a> {
     pub voice_bar: Option<Element<'a, Message>>,
     /// The Friends screen, which replaces the conversation in direct messages.
     pub friends: Option<Element<'a, Message>>,
+    /// The unified inbox, which replaces the conversation while open.
+    pub inbox: Option<Element<'a, Message>>,
     /// The private call this account is connected to, if any.
     pub voice_call: Option<fastcord_model::Snowflake>,
 }
@@ -63,11 +65,12 @@ pub fn view<'a>(
         banner,
         voice_bar,
         friends,
+        inbox,
         voice_call,
     } = chrome;
-    let rail = rail(snapshot, directs, attachments.avatars);
+    let rail = rail(snapshot, directs, inbox.is_some(), attachments.avatars);
     let sidebar = sidebar(snapshot, private, directs, footer);
-    let main = match friends.filter(|_| directs) {
+    let main = match inbox.or(friends.filter(|_| directs)) {
         Some(friends) => friends,
         None => main_pane(
             snapshot,
@@ -83,6 +86,15 @@ pub fn view<'a>(
         ),
     };
     row![rail, sidebar, main].height(Length::Fill).into()
+}
+
+/// The rail button's label: the unread conversations and mentions it holds.
+fn inbox_label(inbox: &fastcord_discord::state::navigation::Inbox) -> String {
+    match (inbox.total, inbox.mentions) {
+        (0, _) => "Inbox".to_owned(),
+        (total, 0) => format!("Inbox\n{total}"),
+        (total, mentions) => format!("Inbox\n{total} @{mentions}"),
+    }
 }
 
 /// Up to two initials of a server name.
@@ -109,6 +121,7 @@ fn centered_label<'a>(label: impl text::IntoFragment<'a>, size: f32) -> Element<
 fn rail<'a>(
     snapshot: &'a NavigationSnapshot,
     directs: bool,
+    inbox_open: bool,
     avatars: &HashMap<AvatarKey, image::Handle>,
 ) -> Element<'a, Message> {
     let icon = |label: String,
@@ -173,6 +186,12 @@ fn rail<'a>(
                 None,
                 directs,
                 Some(Message::ShowDirects(true))
+            ),
+            icon(
+                inbox_label(&snapshot.inbox),
+                None,
+                inbox_open,
+                Some(Message::Inbox(crate::inbox::Event::Toggle))
             ),
             container(space())
                 .width(32)

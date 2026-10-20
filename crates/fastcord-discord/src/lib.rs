@@ -19,6 +19,7 @@ mod error;
 pub mod gateway;
 mod gif;
 pub mod history;
+mod inbox;
 pub mod message_store;
 mod password_auth;
 mod pins;
@@ -48,6 +49,7 @@ pub use edit::{EditedMessage, edit_response_update, is_own_message};
 pub use error::{NetworkFailure, RestError, RetryableFailure};
 pub use gateway::{ConnectionState, Gateway, GatewayEvent};
 pub use gif::{GIF_RESULTS, GifResult, MAX_GIF_QUERY_CHARS};
+pub use inbox::{MENTIONS_PAGE_SIZE, MentionFilter, MentionsPage};
 pub use password_auth::{
     CaptchaChallenge, CaptchaSolution, MAX_CREDENTIAL_BYTES, MfaChallenge, PasswordAuth,
     PasswordAuthError, PasswordLogin,

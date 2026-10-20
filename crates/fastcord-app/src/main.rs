@@ -15,6 +15,7 @@ mod friends;
 mod gateway;
 mod gif;
 mod history;
+mod inbox;
 mod login;
 mod media_ui;
 mod message_link;
@@ -45,7 +46,7 @@ mod voice_settings;
 use crate::attachments::AttachmentKey;
 use std::sync::Arc;
 
-use fastcord_discord::{CallSignal, RemoteAuthEvent, UserToken};
+use fastcord_discord::{CallSignal, RemoteAuthEvent, RestError, UserToken};
 use fastcord_model::{Snowflake, VoiceStateRequest};
 use fastcord_platform::{NativeCredentialStore, StoreError};
 use gateway::{AttachmentAction, GatewayPanel, GatewayStatus};
@@ -59,6 +60,19 @@ use zeroize::Zeroize;
 
 const MAX_PRIVATE_RECIPIENT_INPUT_BYTES: usize = 256;
 const MAX_PRIVATE_RECIPIENTS: usize = fastcord_discord::MAX_PRIVATE_RECIPIENTS;
+
+/// Lands an inbox jump in the open conversation `channel`.
+fn inbox_jump(controls: &gateway::NavigationBridge, channel: Snowflake, target: inbox::Target) {
+    match target {
+        inbox::Target::Message(message) => {
+            controls.timeline_intent(history::Intent::JumpTo { channel, message });
+        }
+        inbox::Target::Unread(Some(acked)) => {
+            controls.timeline_intent(history::Intent::FirstUnread { channel, acked });
+        }
+        inbox::Target::Unread(None) => {}
+    }
+}
 
 fn search_bar_is_empty(gateway: &GatewayPanel) -> bool {
     App::search_target(gateway).is_none()
@@ -105,6 +119,7 @@ struct App {
     voice_details: bool,
     search: search::State,
     pins: pins::State,
+    inbox: inbox::State,
     gif: gif::State,
     sticker: sticker::State,
     forward: forward::State,
@@ -240,6 +255,7 @@ enum Message {
     Composer(composer::Event),
     Search(search::Event),
     Pins(pins::Event),
+    Inbox(inbox::Event),
     Gif(gif::Event),
     Sticker(sticker::Event),
     Forward(forward::Event),
@@ -301,6 +317,7 @@ impl App {
                 voice_details: false,
                 search: search::State::default(),
                 pins: pins::State::default(),
+                inbox: inbox::State::default(),
                 gif: gif::State::default(),
                 sticker: sticker::State::default(),
                 forward: forward::State::default(),
@@ -837,8 +854,14 @@ impl App {
                         .controls
                         .timeline_intent(history::Intent::JumpTo { channel, message });
                 }
-                if self.search.take_jump_expired() {
+                if self.search.take_jump_expired() || self.inbox.take_expired() {
                     self.notice = Some("That message is in a channel you cannot open.".to_owned());
+                }
+                if let Phase::Account { gateway, .. } = &self.phase
+                    && let Some((channel, target)) =
+                        self.inbox.take_pending(gateway.timeline.channel_id)
+                {
+                    inbox_jump(&gateway.controls, channel, target);
                 }
                 if let Phase::Account { gateway, .. } = &self.phase {
                     self.sticker.sync(gateway.timeline.channel_id);
@@ -855,6 +878,7 @@ impl App {
             Message::ToggleVoiceDetails => self.voice_details = !self.voice_details,
             Message::Search(event) => return self.search_event(event),
             Message::Pins(event) => return self.pins_event(event),
+            Message::Inbox(event) => return self.inbox_event(event),
             Message::Gif(event) => return self.gif_event(event),
             Message::Sticker(event) => return self.sticker_event(event),
             Message::Forward(event) => return self.forward_event(event),
@@ -1662,6 +1686,7 @@ impl App {
             }
             Message::Logout => {
                 self.pins = pins::State::default();
+                self.inbox.clear();
                 self.gif = gif::State::default();
                 self.sticker = sticker::State::default();
                 self.forward = forward::State::default();
@@ -1889,6 +1914,7 @@ impl App {
             crate::attachments::AttachmentCache::default_root(session.user.id).ok();
         self.search = search::State::default();
         self.pins = pins::State::default();
+        self.inbox.clear();
         self.gif = gif::State::default();
         self.sticker = sticker::State::default();
         self.forward = forward::State::default();
@@ -2085,6 +2111,57 @@ impl App {
                 gateway.attachments.as_ref(),
             )
             .map(Message::Sticker)
+    }
+
+    fn inbox_event(&mut self, event: inbox::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rows = &gateway.navigation.inbox.rows;
+        match event {
+            inbox::Event::MarkRead(index) => {
+                if let Some(row) = rows.get(index) {
+                    gateway.controls.mark_read(row.guild, row.channel);
+                }
+                return Task::none();
+            }
+            inbox::Event::MarkAllRead => {
+                let all = rows.iter().map(|row| (row.guild, row.channel)).collect();
+                gateway.controls.mark_read_many(all);
+                return Task::none();
+            }
+            _ => {}
+        }
+        let rejected = matches!(
+            &event,
+            inbox::Event::Loaded(_, Err(RestError::AuthenticationRequired))
+                | inbox::Event::Muted(_, Err(RestError::AuthenticationRequired))
+        );
+        let (task, action) = self
+            .inbox
+            .update(event, &gateway.navigation.inbox, &session.client);
+        gateway.controls.inbox_rows(self.inbox.rows_wanted());
+        if let inbox::Action::Open(channel, target) = action {
+            if gateway.timeline.channel_id == Some(channel) {
+                inbox_jump(&gateway.controls, channel, target);
+            } else {
+                // Only a conversation the account can open is selected;
+                // otherwise the wait ends with a notice.
+                self.inbox.set_pending(channel, target);
+                gateway.controls.open_channel(channel);
+            }
+        }
+        if rejected {
+            // Discord rejected the login: stop the account like any other 401.
+            return self.handle(Message::Gateway(
+                gateway.id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Inbox)
     }
 
     fn pins_event(&mut self, event: pins::Event) -> Task<Message> {
@@ -2626,6 +2703,9 @@ impl App {
                     banner,
                     voice_bar,
                     voice_call: gateway.voice_call.filter(|_| in_voice),
+                    inbox: self.inbox.is_open().then(|| {
+                        inbox::view(&self.inbox, &gateway.navigation.inbox).map(Message::Inbox)
+                    }),
                     friends: self.friends.open.then(|| {
                         friends::view(
                             &self.friends,

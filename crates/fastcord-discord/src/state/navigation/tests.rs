@@ -1371,3 +1371,88 @@ fn threads_are_capped_per_guild_dropping_unjoined_and_archived_first() {
     assert_eq!(held.len(), crate::state::MAX_THREADS_PER_GUILD);
     assert!(held.contains(&9_999) && held.contains(&1_000));
 }
+
+mod inbox {
+    use super::*;
+    use crate::gateway::ReadStateEntry;
+
+    const OTHER: u64 = 9_999;
+    const NAV_GUILD: u64 = 100;
+
+    fn cursor(channel: u64, acked: u64, mentions: u32) -> ReadStateEntry {
+        ReadStateEntry {
+            channel_id: id(channel),
+            last_acked: id(acked),
+            mention_count: mentions,
+        }
+    }
+
+    fn with_cursors(entries: Vec<ReadStateEntry>) -> (Store, Navigation) {
+        let mut store = Store::new();
+        let mut ready = ready(NAV_READY);
+        ready.read.entries = entries;
+        replace(&mut store, ready);
+        let mut navigation = Navigation::default();
+        navigation.reconcile(&store);
+        (store, navigation)
+    }
+
+    fn create(store: &mut Store, channel: u64, message: u64) {
+        let raw = json!({
+            "id": message.to_string(), "channel_id": channel.to_string(),
+            "guild_id": NAV_GUILD.to_string(),
+            "author": {"id": OTHER.to_string(), "username": "other"},
+            "content": "x", "timestamp": "2026-10-16T00:00:00.000000+00:00",
+        });
+        apply(store, "MESSAGE_CREATE", &raw.to_string());
+    }
+
+    #[test]
+    fn it_lists_what_the_badges_flag_mentions_first_and_agrees_with_them() {
+        let (mut store, navigation) = with_cursors(vec![cursor(1000, 5, 2), cursor(2002, 5, 0)]);
+        create(&mut store, 2002, 50);
+        let inbox = navigation.inbox(&store, 10);
+        assert_eq!(inbox.total, 2);
+        let ids: Vec<_> = inbox.rows.iter().map(|row| row.channel).collect();
+        assert_eq!(ids, [id(1000), id(2002)], "mentions first");
+        assert_eq!(inbox.rows[0].mentions, 2);
+        assert!(!inbox.rows[0].unread, "no newer message than the cursor");
+        assert!(inbox.rows[1].unread);
+        assert_eq!(inbox.rows[1].guild, Some(id(NAV_GUILD)));
+        // The channel badges say the same.
+        for row in navigation.channel_window(&store, 0, usize::MAX).rows {
+            let listed = inbox.rows.iter().find(|r| r.channel == row.id);
+            assert_eq!(
+                listed.is_some(),
+                row.unread || row.mentions > 0,
+                "{}",
+                row.id
+            );
+        }
+        // Acknowledging empties the row on the next query.
+        store.ack_local(id(2002), id(50));
+        assert_eq!(navigation.inbox(&store, 10).total, 1);
+    }
+
+    #[test]
+    fn mutes_show_and_the_cap_and_zero_limit_hold() {
+        let (mut store, navigation) = with_cursors(vec![cursor(1000, 5, 1)]);
+        store.read.update_mutes(None, false, &[(id(1000), true)]);
+        let inbox = navigation.inbox(&store, 1);
+        assert!(inbox.rows[0].muted && inbox.rows[0].channel_muted);
+        assert_eq!(navigation.inbox(&store, 0), Inbox::default());
+        assert!(navigation.inbox(&store, usize::MAX).rows.len() <= MAX_INBOX_ROWS);
+    }
+
+    #[test]
+    fn opening_by_channel_id_selects_its_guild_and_refuses_unknown_channels() {
+        let (store, mut navigation) = with_cursors(Vec::new());
+        assert!(navigation.open_channel(&store, id(1000)));
+        assert_eq!(navigation.selected_guild(), Some(id(NAV_GUILD)));
+        assert!(!navigation.open_channel(&store, id(1)));
+        assert!(
+            !navigation.open_channel(&store, id(3003)),
+            "voice without connect"
+        );
+    }
+}

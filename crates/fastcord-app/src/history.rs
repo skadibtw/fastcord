@@ -75,6 +75,9 @@ type EmbedFuture = Pin<Box<dyn Future<Output = EmbedsDone> + Send>>;
 type UsersFuture =
     Pin<Box<dyn Future<Output = (u64, Result<Vec<ReactionUser>, RestError>)> + Send>>;
 
+/// Acknowledgements kept waiting (the inbox marks up to its row cap at once).
+const MAX_ACKS_WANTED: usize = 128;
+
 /// An acknowledgement to send: the channel's cursor to this message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Ack {
@@ -229,7 +232,9 @@ pub struct History {
     /// Read acknowledgements: one request at a time, the newest wish kept.
     acks: FuturesUnordered<AckFuture>,
     ack_inflight: Option<Ack>,
-    ack_wanted: Option<Ack>,
+    /// Acknowledgements waiting for the one in flight; one per conversation,
+    /// at most [`MAX_ACKS_WANTED`].
+    ack_wanted: VecDeque<Ack>,
     /// The last automatic acknowledgement tried, so one that fails is not
     /// repeated until a newer message is on screen.
     ack_last: Option<(Snowflake, Snowflake)>,
@@ -304,7 +309,8 @@ impl History {
         self.failed = None;
         self.notice = None;
         self.check_paging = false;
-        self.ack_wanted = None;
+        // Only the user's explicit "mark read" outlives the open conversation.
+        self.ack_wanted.retain(|ack| ack.manual);
         self.ack_last = None;
         self.first_unread = None;
         self.prune_changes();
@@ -1280,7 +1286,17 @@ impl History {
         message: Snowflake,
         manual: bool,
     ) {
-        self.ack_wanted = Some(Ack {
+        // A newer wish for the same conversation replaces the older one.
+        let was_manual = self
+            .ack_wanted
+            .iter()
+            .any(|ack| ack.channel == channel && ack.manual);
+        let manual = manual || was_manual;
+        self.ack_wanted.retain(|ack| ack.channel != channel);
+        if self.ack_wanted.len() >= MAX_ACKS_WANTED {
+            self.ack_wanted.pop_front();
+        }
+        self.ack_wanted.push_back(Ack {
             channel,
             message,
             manual,
@@ -1292,7 +1308,7 @@ impl History {
         if self.ack_inflight.is_some() {
             return;
         }
-        let Some(ack) = self.ack_wanted.take() else {
+        let Some(ack) = self.ack_wanted.pop_front() else {
             return;
         };
         self.ack_inflight = Some(ack);
@@ -2019,6 +2035,44 @@ mod tests {
             1,
             "the same newest message is not re-sent"
         );
+    }
+
+    #[test]
+    fn several_manual_acknowledgements_queue_one_per_conversation_in_order() {
+        let rest = rest();
+        let mut history = sending_history();
+        history.mark_read(&rest, Snowflake(1), Snowflake(10));
+        history.mark_read(&rest, Snowflake(2), Snowflake(20));
+        history.mark_read(&rest, Snowflake(3), Snowflake(30));
+        history.mark_read(&rest, Snowflake(2), Snowflake(25));
+        assert_eq!(history.acks.len(), 1, "one request in flight at a time");
+        let waiting: Vec<_> = history
+            .ack_wanted
+            .iter()
+            .map(|ack| (ack.channel.0, ack.message.0, ack.manual))
+            .collect();
+        assert_eq!(waiting, [(3, 30, true), (2, 25, true)]);
+        // A 401 on the first is reported and the rest are not sent in a loop.
+        assert!(history.complete(
+            &rest,
+            Completed::Ack(
+                Snowflake(1),
+                Snowflake(10),
+                Err(RestError::AuthenticationRequired)
+            )
+        ));
+        // Reading the open conversation never downgrades a waiting manual mark.
+        history.want_ack(&rest, Snowflake(2), Snowflake(26), false);
+        assert!(
+            history
+                .ack_wanted
+                .iter()
+                .any(|ack| ack.channel == Snowflake(2) && ack.manual)
+        );
+        for n in 0..(MAX_ACKS_WANTED as u64 + 10) {
+            history.mark_read(&rest, Snowflake(1000 + n), Snowflake(5));
+        }
+        assert!(history.ack_wanted.len() <= MAX_ACKS_WANTED);
     }
 
     #[test]

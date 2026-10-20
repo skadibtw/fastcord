@@ -771,6 +771,11 @@ impl Store {
         self.read.is_muted(channel, guild)
     }
 
+    /// Whether the channel itself is muted (a muted guild does not count).
+    pub fn channel_muted(&self, channel: Snowflake) -> bool {
+        self.read.channel_muted(channel)
+    }
+
     /// The account's read cursor for a channel, if it has one.
     pub fn acked(&self, channel: Snowflake) -> Option<Snowflake> {
         self.read.acked(channel)

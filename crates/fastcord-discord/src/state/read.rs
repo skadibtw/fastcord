@@ -158,6 +158,11 @@ impl ReadStates {
             || guild.is_some_and(|guild| self.muted_guilds.contains(&guild))
     }
 
+    /// Whether the channel itself (not only its guild) is muted.
+    pub fn channel_muted(&self, channel: Snowflake) -> bool {
+        self.muted_channels.contains(&channel)
+    }
+
     pub fn unread(
         &self,
         channel: Snowflake,

@@ -226,6 +226,8 @@ pub struct NavigationSnapshot {
     pub calls: std::sync::Arc<[super::CallInfo]>,
     /// Calls that ring this account, with the conversation's name.
     pub incoming_calls: Vec<IncomingCall>,
+    /// Unread and mention rows; empty unless the inbox was asked for.
+    pub inbox: Inbox,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -570,6 +572,7 @@ impl Navigation {
                 })
                 .collect(),
             presences: store.presences(),
+            inbox: Inbox::default(),
         }
     }
 
@@ -861,6 +864,9 @@ fn visible_channels<'a>(
     visible.sort_unstable_by_key(|row| row.order);
     visible
 }
+
+mod inbox;
+pub use inbox::{Inbox, InboxRow, MAX_INBOX_ROWS};
 
 #[cfg(test)]
 mod tests;

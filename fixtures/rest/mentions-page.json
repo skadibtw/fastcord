@@ -1,0 +1,16 @@
+[
+  {
+    "id": "1290000000000000031", "type": 0, "content": "hey <@2>, look at this", "channel_id": "500", "guild_id": "40",
+    "author": {"id": "3", "username": "other_fixture", "avatar": null, "discriminator": "0", "global_name": null},
+    "attachments": [], "embeds": [], "mentions": [{"id": "2", "username": "alt_fixture", "avatar": null, "discriminator": "0"}], "mention_roles": [], "pinned": false,
+    "mention_everyone": false, "tts": false, "timestamp": "2026-10-07T12:05:00.000000+00:00",
+    "edited_timestamp": null, "flags": 0, "components": []
+  },
+  {
+    "id": "1290000000000000022", "type": 0, "content": "@everyone meeting", "channel_id": "501",
+    "author": {"id": "3", "username": "other_fixture", "avatar": null, "discriminator": "0", "global_name": "Other"},
+    "attachments": [], "embeds": [], "mentions": [], "mention_roles": [], "pinned": false,
+    "mention_everyone": true, "tts": false, "timestamp": "2026-10-07T12:02:00.000000+00:00",
+    "edited_timestamp": null, "flags": 0, "components": []
+  }
+]

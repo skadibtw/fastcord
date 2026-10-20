@@ -370,6 +370,9 @@ enum SelectionIntent {
     Guild(Snowflake),
     Channel(Snowflake, Snowflake),
     PrivateChannel(Snowflake),
+    /// A conversation known by ID alone (inbox jumps): a held DM or an
+    /// openable channel of a held guild, whose guild is selected first.
+    Open(Snowflake),
     /// A thread of the guild that the store may not hold yet (just created, or
     /// read from the archive): it is entered into the store, which still
     /// decides whether the account may open it.
@@ -383,6 +386,8 @@ struct Request {
     guilds: Window,
     channels: Window,
     private_channels: Window,
+    /// Inbox rows wanted; the unread total is always computed (1).
+    inbox: usize,
     timeline: crate::history::Request,
     emoji: emoji_picker::Request,
 }
@@ -425,6 +430,9 @@ pub enum Command {
         guild: Option<Snowflake>,
         channel: Snowflake,
     },
+    /// Mark several conversations read, each up to its newest message (the
+    /// user asked); they share the one acknowledgement path.
+    MarkReadMany(Vec<(Option<Snowflake>, Snowflake)>),
     /// Stop a send that is still uploading its files.
     CancelUpload(OpId),
     /// Save new text for one of the user's messages.
@@ -543,6 +551,7 @@ impl fmt::Debug for Command {
             Self::Retry(id) => f.debug_tuple("Retry").field(id).finish(),
             Self::Discard(id) => f.debug_tuple("Discard").field(id).finish(),
             Self::CancelUpload(id) => f.debug_tuple("CancelUpload").field(id).finish(),
+            Self::MarkReadMany(rows) => f.debug_tuple("MarkReadMany").field(&rows.len()).finish(),
             Self::MarkRead { channel, .. } => f
                 .debug_struct("MarkRead")
                 .field("channel", channel)
@@ -971,6 +980,30 @@ impl NavigationBridge {
         self.commands
             .try_send(Command::MarkRead { guild, channel })
             .is_ok()
+    }
+
+    pub fn mark_read_many(&self, rows: Vec<(Option<Snowflake>, Snowflake)>) -> bool {
+        self.commands.try_send(Command::MarkReadMany(rows)).is_ok()
+    }
+
+    /// How many inbox rows the snapshot should carry (0 keeps only the total).
+    pub fn inbox_rows(&self, rows: usize) {
+        self.requests.send_if_modified(|request| {
+            if request.inbox == rows {
+                return false;
+            }
+            request.inbox = rows;
+            true
+        });
+    }
+
+    /// Opens a conversation by ID alone.
+    pub fn open_channel(&self, channel: Snowflake) {
+        self.clear_private_notice();
+        self.requests.send_modify(|request| {
+            request.revision = request.revision.wrapping_add(1);
+            request.selection = Some(SelectionIntent::Open(channel));
+        });
     }
 
     /// Tells the worker whether what the timeline shows counts as read: the
@@ -1735,6 +1768,13 @@ impl Worker {
                     history.mark_read(&self.rest, channel, last);
                 }
             }
+            Command::MarkReadMany(rows) => {
+                for (guild, channel) in rows {
+                    if let Some(last) = self.tracker.store.last_message(guild, channel) {
+                        history.mark_read(&self.rest, channel, last);
+                    }
+                }
+            }
             Command::Retry(id) => history.retry_send(&self.rest, id),
             Command::Discard(id) => history.discard_send(id),
             Command::Edit {
@@ -2234,6 +2274,11 @@ impl Worker {
                         .navigation
                         .select_private_channel(&self.tracker.store, channel);
                 }
+                Some(SelectionIntent::Open(channel)) => {
+                    self.tracker
+                        .navigation
+                        .open_channel(&self.tracker.store, channel);
+                }
                 Some(SelectionIntent::Thread(guild, thread))
                     if self.tracker.navigation.selected_guild() == Some(guild)
                         && thread.kind.is_thread()
@@ -2258,7 +2303,7 @@ impl Worker {
             .subscription_target(&self.tracker.store);
         self.tracker.store.focus(&target);
         gateway.subscriptions().update(|current| *current = target);
-        let navigation = self.tracker.navigation.snapshot_with_private(
+        let mut navigation = self.tracker.navigation.snapshot_with_private(
             &self.tracker.store,
             request.guilds.start,
             request.guilds.count,
@@ -2270,6 +2315,10 @@ impl Worker {
                     .start
                     .saturating_add(request.private_channels.count),
         );
+        navigation.inbox = self
+            .tracker
+            .navigation
+            .inbox(&self.tracker.store, request.inbox.max(1));
         self.bridge.clear_private_notice_on_selection_change(
             navigation
                 .private_selection
