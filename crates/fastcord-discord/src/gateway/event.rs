@@ -147,6 +147,9 @@ pub struct Ready {
     pub private_channels: Vec<Channel>,
     /// Friends, blocks and pending requests (at most [`MAX_RELATIONSHIPS`]).
     pub relationships: Vec<Relationship>,
+    /// Users flagged `user_ignored` whose relationship type is none of the
+    /// four kept (at most [`MAX_RELATIONSHIPS`]).
+    pub ignored: Vec<Snowflake>,
     /// Presences READY carried (at most [`MAX_PRESENCES`]); the store keeps
     /// only those of referenced users.
     pub presences: Vec<PresenceUpdate>,
@@ -176,6 +179,8 @@ pub struct PresenceUpdate {
 pub struct RelationshipUpdate {
     pub id: Snowflake,
     pub kind: Option<RelationshipKind>,
+    /// `user_ignored` when the payload carried it; omitted leaves it as it is.
+    pub ignored: Option<bool>,
 }
 
 /// One channel's read cursor from READY: the last message the account
@@ -544,6 +549,8 @@ pub enum Dispatch {
     RelationshipAdd(Box<Relationship>),
     RelationshipUpdate(RelationshipUpdate),
     RelationshipRemove(Snowflake),
+    /// `USER_SETTINGS_UPDATE`, reduced to the privacy fields this client knows.
+    UserSettingsUpdate(Box<crate::PrivacySettings>),
     /// Mute settings changed.
     UserGuildSettingsUpdate(Box<GuildMuteUpdate>),
     /// A user reacted to a message.
@@ -611,6 +618,7 @@ impl Dispatch {
             Self::RelationshipAdd(_) => "RELATIONSHIP_ADD",
             Self::RelationshipUpdate(_) => "RELATIONSHIP_UPDATE",
             Self::RelationshipRemove(_) => "RELATIONSHIP_REMOVE",
+            Self::UserSettingsUpdate(_) => "USER_SETTINGS_UPDATE",
             Self::UserGuildSettingsUpdate(_) => "USER_GUILD_SETTINGS_UPDATE",
             Self::MessageReactionAdd(_) => "MESSAGE_REACTION_ADD",
             Self::MessageReactionRemove(_) => "MESSAGE_REACTION_REMOVE",

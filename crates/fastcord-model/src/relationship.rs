@@ -26,4 +26,7 @@ impl RelationshipKind {
 pub struct Relationship {
     pub user: User,
     pub kind: RelationshipKind,
+    /// Ignored by the account (`user_ignored`): distinct from blocking, which
+    /// stays the relationship kind.
+    pub ignored: bool,
 }

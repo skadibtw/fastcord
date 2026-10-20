@@ -9,6 +9,8 @@
 //! - send a request by username: `POST /users/@me/relationships`
 //! - block: the same PUT with `{"type": 2}`
 //! - decline, cancel, remove a friend, unblock: `DELETE` of the same path
+//! - ignore / stop ignoring (issue #80; not a block, the relationship type is
+//!   untouched): `PUT` / `DELETE` of `.../relationships/{id}/ignore`
 //! - profile: `GET /users/{id}/profile` with mutual guild/friend data
 //!
 //! The wire shapes are from observed web-client traffic and are unverified
@@ -34,6 +36,9 @@ pub enum RelationshipAction {
     /// Decline an incoming request, cancel an outgoing one, remove a friend
     /// or unblock: all the same `DELETE`.
     Remove,
+    /// Hide the user's messages, notifications and calls without blocking.
+    Ignore,
+    Unignore,
 }
 
 #[derive(Serialize)]
@@ -57,6 +62,13 @@ fn action_parts(
             Some(serde_json::json!({"type": 2})),
         ),
         RelationshipAction::Remove => (Route::new(Method::DELETE, &path)?, None),
+        RelationshipAction::Ignore => (
+            Route::new(Method::PUT, &format!("{path}/ignore"))?,
+            Some(serde_json::json!({})),
+        ),
+        RelationshipAction::Unignore => {
+            (Route::new(Method::DELETE, &format!("{path}/ignore"))?, None)
+        }
     })
 }
 
@@ -218,10 +230,27 @@ mod tests {
         assert_eq!(route.key().method(), Method::DELETE);
         assert_eq!(route.url.path(), "/api/v10/users/@me/relationships/42");
         assert!(body.is_none());
+        // Ignore is its own route and never the block body.
+        let (route, body) = action_parts(RelationshipAction::Ignore, id).unwrap();
+        assert_eq!(route.key().method(), Method::PUT);
+        assert_eq!(
+            route.url.path(),
+            "/api/v10/users/@me/relationships/42/ignore"
+        );
+        assert_eq!(body.unwrap(), serde_json::json!({}));
+        let (route, body) = action_parts(RelationshipAction::Unignore, id).unwrap();
+        assert_eq!(route.key().method(), Method::DELETE);
+        assert_eq!(
+            route.url.path(),
+            "/api/v10/users/@me/relationships/42/ignore"
+        );
+        assert!(body.is_none());
         for action in [
             RelationshipAction::Befriend,
             RelationshipAction::Block,
             RelationshipAction::Remove,
+            RelationshipAction::Ignore,
+            RelationshipAction::Unignore,
         ] {
             assert!(action_request(action, id).is_ok());
         }

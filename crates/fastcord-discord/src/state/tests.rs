@@ -882,6 +882,8 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
                 owner_id: None,
                 icon: None,
                 last_message_id: Some(id(n + 1)),
+                is_message_request: None,
+                is_spam: None,
                 thread_metadata: None,
                 member: None,
             })
@@ -933,6 +935,7 @@ fn big_ready(guilds: u64, channels: u64) -> Ready {
         session_id: SessionId::new("big".to_owned()),
         read: Default::default(),
         relationships: Vec::new(),
+        ignored: Vec::new(),
         presences: Vec::new(),
         user: User {
             id: id(ME),

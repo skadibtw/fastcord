@@ -629,14 +629,17 @@ mod tests {
                 Relationship {
                     user: user(4),
                     kind: RelationshipKind::Friend,
+                    ignored: false,
                 },
                 Relationship {
                     user: user(5),
                     kind: RelationshipKind::Blocked,
+                    ignored: false,
                 },
                 Relationship {
                     user: user(2),
                     kind: RelationshipKind::Friend,
+                    ignored: false,
                 },
             ]),
             ..NavigationSnapshot::default()

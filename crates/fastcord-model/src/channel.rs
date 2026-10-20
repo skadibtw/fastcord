@@ -126,6 +126,13 @@ pub struct Channel {
     pub icon: Option<String>,
     #[serde(default)]
     pub last_message_id: Option<Snowflake>,
+    /// A direct conversation Discord holds as a message request until the
+    /// account accepts it. `None`: Discord did not say, which is not "accepted".
+    #[serde(default)]
+    pub is_message_request: Option<bool>,
+    /// The request was flagged as spam. `None`: not said.
+    #[serde(default)]
+    pub is_spam: Option<bool>,
     /// Present on threads only.
     #[serde(default)]
     pub thread_metadata: Option<ThreadMetadata>,
@@ -133,6 +140,13 @@ pub struct Channel {
     /// object itself carries nothing this client keeps).
     #[serde(default)]
     pub member: Option<ThreadMember>,
+}
+
+impl Channel {
+    /// Still a message request: not accepted, so not an ordinary conversation.
+    pub fn is_pending_request(&self) -> bool {
+        self.is_message_request == Some(true)
+    }
 }
 
 /// Archive/lock state of a thread.

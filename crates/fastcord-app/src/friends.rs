@@ -527,6 +527,8 @@ pub struct MemberContext<'a> {
     pub more_roles: usize,
     /// The custom status already in the presence table (no game detection).
     pub custom: Option<&'a str>,
+    /// The account ignores this user (distinct from blocking).
+    pub ignored: bool,
 }
 
 /// Roles drawn on a card; the rest are counted.
@@ -546,6 +548,8 @@ impl<'a> MemberContext<'a> {
                 .presences
                 .get(&user)
                 .and_then(|p| p.custom.as_deref()),
+            ignored: navigation.suppressed.get(&user)
+                == Some(&fastcord_discord::state::Suppression::Ignored),
             ..Self::default()
         };
         if directs || navigation.selected_guild.is_none() {
@@ -602,6 +606,13 @@ pub fn profile_view<'a>(
     }
     if let Some(kind) = kind {
         card = card.push(text(kind_label(kind)).size(12).style(text::secondary));
+    }
+    if context.ignored {
+        card = card.push(
+            text("Ignored: their messages, notifications and calls are hidden.")
+                .size(12)
+                .style(text::secondary),
+        );
     }
     if let Some(custom) = context.custom {
         card = card.push(text(custom).size(12));
@@ -660,6 +671,18 @@ pub fn profile_view<'a>(
         for button in actions(kind, user.id, busy) {
             buttons = buttons.push(button);
         }
+        // Ignore never changes the relationship; it is its own request.
+        let (label, action) = if context.ignored {
+            ("Stop ignoring", RelationshipAction::Unignore)
+        } else {
+            ("Ignore", RelationshipAction::Ignore)
+        };
+        buttons = buttons.push(small_button(
+            label,
+            (!busy).then_some(Event::Act(user.id, action)),
+            false,
+            false,
+        ));
     }
     buttons = buttons.push(small_button(
         "Close",
@@ -834,6 +857,7 @@ mod tests {
             .map(|(i, kind)| Relationship {
                 user: user(i as u64 + 1),
                 kind: *kind,
+                ignored: false,
             })
             .collect();
         assert_eq!(
@@ -931,5 +955,22 @@ mod member_context_tests {
         let many = MemberContext::of(Some(Snowflake(7)), &navigation, false);
         assert_eq!(many.roles.iter().flatten().count(), MAX_ROLES_SHOWN);
         assert_eq!(many.more_roles, 20 - MAX_ROLES_SHOWN);
+    }
+
+    #[test]
+    fn ignore_is_separate_from_blocking_on_the_profile_card() {
+        use fastcord_discord::state::Suppression;
+        let navigation = NavigationSnapshot {
+            suppressed: std::sync::Arc::new(std::collections::BTreeMap::from([
+                (Snowflake(5), Suppression::Ignored),
+                (Snowflake(6), Suppression::Blocked),
+            ])),
+            ..NavigationSnapshot::default()
+        };
+        let of = |id| MemberContext::of(Some(Snowflake(id)), &navigation, true).ignored;
+        assert!(of(5), "ignored");
+        assert!(!of(6), "blocked is not ignored");
+        assert!(!of(7), "unknown");
+        assert!(!MemberContext::of(None, &navigation, false).ignored);
     }
 }

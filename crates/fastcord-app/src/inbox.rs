@@ -69,6 +69,7 @@ pub enum Status {
 pub struct Mention {
     pub channel: Snowflake,
     pub message: Snowflake,
+    pub author_id: Snowflake,
     pub author: String,
     pub date: String,
     pub preview: String,
@@ -80,6 +81,7 @@ impl Mention {
         Self {
             channel: message.channel_id,
             message: message.id,
+            author_id: message.author.id,
             author: clip(message.author.display_name(), AUTHOR_CHARS),
             date: clip(&message.timestamp, 10),
             preview: clip(&message.content, PREVIEW_CHARS),
@@ -287,7 +289,11 @@ impl State {
                 }
             }
             Event::JumpMention(index) => {
-                if let Some(mention) = self.mentions.get(index) {
+                if let Some(mention) = self
+                    .mentions
+                    .get(index)
+                    .filter(|mention| !rows.suppressed.contains_key(&mention.author_id))
+                {
                     action = Action::Open(mention.channel, Target::Message(mention.message));
                     self.open = false;
                     self.reset_mentions();
@@ -321,6 +327,11 @@ impl State {
                         let last = page.items.last().map(|m| m.id);
                         let mut full = false;
                         for item in &page.items {
+                            // Ignored and blocked authors are never kept, so
+                            // neither the list nor its count can show them.
+                            if rows.suppressed.contains_key(&item.author.id) {
+                                continue;
+                            }
                             let mention = Mention::new(item);
                             if self.mentions.iter().any(|m| m.message == mention.message) {
                                 continue;
@@ -448,19 +459,21 @@ pub fn view<'a>(state: &'a State, inbox: &'a Inbox) -> Element<'a, Event> {
                 ]
                 .spacing(6),
             );
+            // A user ignored or blocked after the page loaded disappears too.
+            let visible = |mention: &Mention| !inbox.suppressed.contains_key(&mention.author_id);
+            let shown = state.mentions.iter().filter(|m| visible(m)).count();
             body = body.push(match &state.status {
                 Status::Idle => text("").size(12),
                 Status::Loading => text("Loading mentions…").size(12).color(MUTED),
                 Status::Failed(reason) => text(*reason).size(12).color(WARN),
-                Status::Done if state.mentions.is_empty() => {
-                    text("No recent mentions.").size(12).color(MUTED)
-                }
-                Status::Done => text(format!("{} mentions", state.mentions.len()))
-                    .size(12)
-                    .color(MUTED),
+                Status::Done if shown == 0 => text("No recent mentions.").size(12).color(MUTED),
+                Status::Done => text(format!("{shown} mentions")).size(12).color(MUTED),
             });
             let mut list = column![].spacing(4);
             for (index, mention) in state.mentions.iter().enumerate() {
+                if !visible(mention) {
+                    continue;
+                }
                 list = list.push(
                     button(
                         column![
@@ -531,6 +544,7 @@ mod tests {
 
     fn rows(n: usize) -> Inbox {
         Inbox {
+            suppressed: Default::default(),
             total: n,
             mentions: 0,
             rows: (0..n as u64)
@@ -622,6 +636,48 @@ mod tests {
         }
         assert!(state.mentions.len() <= MAX_MENTIONS && state.bytes <= MAX_MENTION_BYTES);
         assert!(!state.has_more, "the cap ends paging");
+    }
+
+    #[test]
+    fn mentions_by_ignored_or_blocked_users_are_never_kept_or_listed() {
+        use fastcord_discord::state::Suppression;
+        let mut inbox = rows(0);
+        inbox.suppressed = std::sync::Arc::new(std::collections::BTreeMap::from([(
+            Snowflake(3),
+            Suppression::Ignored,
+        )]));
+        let mut state = State::default();
+        step(&mut state, Event::Toggle, &inbox);
+        step(&mut state, Event::Tab(Tab::Mentions), &inbox);
+        let serial = state.serial;
+        let mut mixed = page(&[30, 20], false);
+        mixed.items[1].author.id = Snowflake(4);
+        step(&mut state, Event::Loaded(serial, Ok(mixed)), &inbox);
+        // The hidden author's mention is dropped; the cursor still advances.
+        assert_eq!(state.mentions.len(), 1);
+        assert_eq!(state.mentions[0].message, Snowflake(20));
+        assert_eq!(state.cursor, Some(Snowflake(20)));
+        // Ignoring someone after the page loaded hides it and refuses a jump.
+        let later = rows(0);
+        assert_eq!(
+            step(&mut state, Event::JumpMention(0), &later),
+            Action::Open(Snowflake(500), Target::Message(Snowflake(20)))
+        );
+        let mut state = State::default();
+        step(&mut state, Event::Toggle, &later);
+        step(&mut state, Event::Tab(Tab::Mentions), &later);
+        let serial = state.serial;
+        step(
+            &mut state,
+            Event::Loaded(serial, Ok(page(&[30], false))),
+            &later,
+        );
+        assert_eq!(state.mentions.len(), 1);
+        assert_eq!(
+            step(&mut state, Event::JumpMention(0), &inbox),
+            Action::None
+        );
+        let _ = view(&state, &inbox);
     }
 
     #[test]

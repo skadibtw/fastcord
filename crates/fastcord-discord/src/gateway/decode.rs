@@ -547,6 +547,13 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
         .filter_map(relationship_of)
         .take(MAX_RELATIONSHIPS)
         .collect();
+    let ignored = wire
+        .relationships
+        .iter()
+        .filter(|value| relationship_of(value).is_none() && ignored_flag(value) == Some(true))
+        .filter_map(|value| snowflake_of(value.get("id")?))
+        .take(MAX_RELATIONSHIPS)
+        .collect();
     let presences = wire
         .presences
         .iter()
@@ -569,6 +576,7 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
         ready: Ready {
             read,
             relationships,
+            ignored,
             presences,
             session_id: SessionId(wire.session_id),
             user: wire.user,
@@ -591,7 +599,16 @@ fn relationship_of(value: &serde_json::Value) -> Option<Relationship> {
     if user.id.0 == 0 || snowflake_of(value.get("id")?)? != user.id {
         return None;
     }
-    Some(Relationship { user, kind })
+    Some(Relationship {
+        user,
+        kind,
+        ignored: ignored_flag(value) == Some(true),
+    })
+}
+
+/// `user_ignored`, when the entry or event carries it as a boolean.
+fn ignored_flag(value: &serde_json::Value) -> Option<bool> {
+    value.get("user_ignored")?.as_bool()
 }
 
 /// `{"user": {"id"} | "user_id", "status", "activities"}`. Omitted fields stay
@@ -1078,9 +1095,18 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
                 .ok_or(Malformed)
         }),
         "RELATIONSHIP_ADD" => json::<serde_json::Value>(raw).and_then(|value| {
-            relationship_of(&value)
-                .map(|relationship| Dispatch::RelationshipAdd(Box::new(relationship)))
-                .ok_or(Malformed)
+            if let Some(relationship) = relationship_of(&value) {
+                return Ok(Dispatch::RelationshipAdd(Box::new(relationship)));
+            }
+            // A type this client does not keep still can carry an ignore.
+            match (value.get("id").and_then(snowflake_of), ignored_flag(&value)) {
+                (Some(id), Some(ignored)) => Ok(Dispatch::RelationshipUpdate(RelationshipUpdate {
+                    id,
+                    kind: None,
+                    ignored: Some(ignored),
+                })),
+                _ => Err(Malformed),
+            }
         }),
         "RELATIONSHIP_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
             Ok(Dispatch::RelationshipUpdate(RelationshipUpdate {
@@ -1089,7 +1115,18 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
                     .get("type")
                     .and_then(serde_json::Value::as_u64)
                     .and_then(RelationshipKind::from_wire),
+                ignored: ignored_flag(&value),
             }))
+        }),
+        "USER_SETTINGS_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
+            value
+                .is_object()
+                .then(|| {
+                    Dispatch::UserSettingsUpdate(Box::new(crate::PrivacySettings::from_value(
+                        &value,
+                    )))
+                })
+                .ok_or(Malformed)
         }),
         "RELATIONSHIP_REMOVE" => json::<serde_json::Value>(raw).and_then(|value| {
             snowflake_of(value.get("id").ok_or(Malformed)?)
@@ -2237,6 +2274,78 @@ mod tests {
         ] {
             assert!(matches!(decode_dispatch(name, "{}"), Decoded::Malformed));
         }
+    }
+
+    #[test]
+    fn ignore_flags_and_request_flags_decode_without_inventing_state() {
+        // READY: a kept relationship keeps its flag; an unkept type with the
+        // flag is listed apart; a flag that is not a boolean is no flag.
+        let ready = decode_ready(
+            &serde_json::json!({
+                "session_id": "s", "resume_gateway_url": "wss://gateway.discord.gg",
+                "user": {"id": "1", "username": "me"}, "guilds": [],
+                "relationships": [
+                    {"id": "5", "type": 1, "user": {"id": "5", "username": "a"}, "user_ignored": true},
+                    {"id": "6", "type": 1, "user": {"id": "6", "username": "b"}, "user_ignored": "yes"},
+                    {"id": "7", "type": 0, "user_ignored": true},
+                    {"id": "8", "type": 0}
+                ],
+                "private_channels": [
+                    {"id": "30", "type": 1, "recipient_ids": ["5"], "is_message_request": true, "is_spam": true},
+                    {"id": "31", "type": 1, "recipient_ids": ["6"]}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .ready;
+        assert_eq!(
+            ready
+                .relationships
+                .iter()
+                .map(|r| (r.user.id, r.ignored))
+                .collect::<Vec<_>>(),
+            [(Snowflake(5), true), (Snowflake(6), false)]
+        );
+        assert_eq!(ready.ignored, [Snowflake(7)]);
+        let flags: Vec<_> = ready
+            .private_channels
+            .iter()
+            .map(|c| (c.is_message_request, c.is_spam))
+            .collect();
+        // Not said is not "accepted" and not "pending".
+        assert_eq!(flags, [(Some(true), Some(true)), (None, None)]);
+        // Events: an ignore on an unkept type is an update, a plain one is not.
+        assert!(matches!(
+            decode_dispatch(
+                "RELATIONSHIP_ADD",
+                r#"{"id":"7","type":0,"user_ignored":true}"#
+            ),
+            Decoded::Event(Dispatch::RelationshipUpdate(RelationshipUpdate {
+                id: Snowflake(7),
+                kind: None,
+                ignored: Some(true)
+            }))
+        ));
+        assert!(matches!(
+            decode_dispatch("RELATIONSHIP_ADD", r#"{"id":"7","type":0}"#),
+            Decoded::Malformed
+        ));
+        assert!(matches!(
+            decode_dispatch("RELATIONSHIP_UPDATE", r#"{"id":"7","user_ignored":false}"#),
+            Decoded::Event(Dispatch::RelationshipUpdate(RelationshipUpdate {
+                ignored: Some(false),
+                ..
+            }))
+        ));
+        assert!(matches!(
+            decode_dispatch("USER_SETTINGS_UPDATE", r#"{"explicit_content_filter":2}"#),
+            Decoded::Event(Dispatch::UserSettingsUpdate(s)) if s.explicit_filter == Some(2)
+        ));
+        assert!(matches!(
+            decode_dispatch("USER_SETTINGS_UPDATE", "[]"),
+            Decoded::Malformed
+        ));
     }
 
     #[test]

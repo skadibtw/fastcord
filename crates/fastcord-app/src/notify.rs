@@ -26,6 +26,10 @@ pub struct Candidate {
     pub own: bool,
     /// The channel or its guild is muted.
     pub muted: bool,
+    /// The author is ignored or blocked, or the conversation is a message
+    /// request not yet accepted: nothing of it may surface, not even in a
+    /// coalesced summary.
+    pub suppressed: bool,
     pub author: String,
     pub text: String,
     pub has_attachment: bool,
@@ -56,6 +60,7 @@ impl Policy {
         if !enabled
             || active
             || candidate.own
+            || candidate.suppressed
             || (candidate.muted && !candidate.mentions_me)
             || !(candidate.direct || candidate.mentions_me)
             || self.seen.contains(&candidate.id)
@@ -110,7 +115,7 @@ pub fn set_active(active: bool) {
 
 /// Called by the Gateway worker for each created message; shows a toast on a
 /// short-lived thread when the policy allows one.
-pub fn on_message(message: &Message, me: Option<Snowflake>, muted: bool) {
+pub fn on_message(message: &Message, me: Option<Snowflake>, muted: bool, suppressed: bool) {
     let Some(me) = me else { return };
     if ACTIVE.load(Ordering::Relaxed) || !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -121,6 +126,7 @@ pub fn on_message(message: &Message, me: Option<Snowflake>, muted: bool) {
         mentions_me: message.mention_everyone || message.mentions.iter().any(|m| m.id == me),
         own: message.author.id == me,
         muted,
+        suppressed,
         author: message
             .author
             .global_name
@@ -152,6 +158,7 @@ mod tests {
             mentions_me: false,
             own: false,
             muted: false,
+            suppressed: false,
             author: "ann".to_owned(),
             text: "hi".to_owned(),
             has_attachment: false,
@@ -184,6 +191,22 @@ mod tests {
         let mut own = dm(4);
         own.own = true;
         assert!(decide(&mut Policy::default(), &own, t).is_none());
+    }
+
+    #[test]
+    fn a_suppressed_message_notifies_nothing_not_even_a_summary_or_a_mention() {
+        let (mut p, t) = (Policy::default(), Instant::now());
+        assert!(decide(&mut p, &dm(1), t).is_some());
+        // Inside the cool-down a suppressed message must not be counted into
+        // the "New messages" summary, and a mention does not override it.
+        let mut hidden = dm(2);
+        hidden.suppressed = true;
+        hidden.mentions_me = true;
+        assert!(decide(&mut p, &hidden, t).is_none());
+        assert!(decide(&mut p, &hidden, t + COOLDOWN).is_none());
+        assert_eq!(p.coalesced, 0);
+        assert!(p.seen.iter().all(|id| *id != Snowflake(2)));
+        assert_eq!(decide(&mut p, &dm(3), t + COOLDOWN).unwrap().body, "hi");
     }
 
     #[test]

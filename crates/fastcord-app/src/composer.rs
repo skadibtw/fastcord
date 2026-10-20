@@ -1831,6 +1831,7 @@ mod tests {
             reply: None,
             reactions: Vec::new(),
             poll_saving: false,
+            hidden: None,
         }
     }
 

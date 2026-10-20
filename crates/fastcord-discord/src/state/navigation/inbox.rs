@@ -44,6 +44,10 @@ pub struct Inbox {
     /// Mentions over all matching conversations, not only the rows kept.
     pub mentions: u32,
     pub rows: Vec<InboxRow>,
+    /// Ignored and blocked users, so the mention list can leave their
+    /// messages out (the same set every other consumer reads).
+    pub suppressed:
+        std::sync::Arc<std::collections::BTreeMap<Snowflake, crate::state::Suppression>>,
 }
 
 impl Navigation {
@@ -118,6 +122,7 @@ impl Navigation {
             total,
             mentions,
             rows,
+            suppressed: store.suppressed(),
         }
     }
 

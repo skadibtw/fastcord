@@ -34,6 +34,7 @@ mod qr;
 mod reactions;
 mod render;
 mod rich;
+mod safety;
 mod search;
 mod status;
 mod sticker;
@@ -124,6 +125,7 @@ struct App {
     inbox: inbox::State,
     group: group_dm::State,
     identity: profile_edit::State,
+    safety: safety::State,
     gif: gif::State,
     sticker: sticker::State,
     forward: forward::State,
@@ -262,6 +264,7 @@ enum Message {
     Inbox(inbox::Event),
     Group(group_dm::Event),
     Identity(profile_edit::Event),
+    Safety(safety::Event),
     Gif(gif::Event),
     Sticker(sticker::Event),
     Forward(forward::Event),
@@ -326,6 +329,7 @@ impl App {
                 inbox: inbox::State::default(),
                 group: group_dm::State::default(),
                 identity: profile_edit::State::default(),
+                safety: safety::State::default(),
                 gif: gif::State::default(),
                 sticker: sticker::State::default(),
                 forward: forward::State::default(),
@@ -882,6 +886,7 @@ impl App {
                             .map(|selection| selection.channel_id),
                     );
                     self.identity.sync(&gateway.navigation);
+                    self.safety.sync(&gateway.navigation);
                     self.poll.sync(gateway.timeline.channel_id);
                     self.voice.sync(gateway.timeline.channel_id);
                 }
@@ -897,6 +902,7 @@ impl App {
             Message::Inbox(event) => return self.inbox_event(event),
             Message::Group(event) => return self.group_event(event),
             Message::Identity(event) => return self.identity_event(event),
+            Message::Safety(event) => return self.safety_event(event),
             Message::Gif(event) => return self.gif_event(event),
             Message::Sticker(event) => return self.sticker_event(event),
             Message::Forward(event) => return self.forward_event(event),
@@ -1707,6 +1713,7 @@ impl App {
                 self.inbox.clear();
                 self.group.clear();
                 self.identity.clear();
+                self.safety.clear();
                 self.gif = gif::State::default();
                 self.sticker = sticker::State::default();
                 self.forward = forward::State::default();
@@ -1937,6 +1944,7 @@ impl App {
         self.inbox.clear();
         self.group.clear();
         self.identity.clear();
+        self.safety.clear();
         self.gif = gif::State::default();
         self.sticker = sticker::State::default();
         self.forward = forward::State::default();
@@ -2180,6 +2188,28 @@ impl App {
             ));
         }
         task.map(Message::Identity)
+    }
+
+    fn safety_event(&mut self, event: safety::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = safety::State::is_rejected(&event);
+        let task = self
+            .safety
+            .update(event, &gateway.navigation, &session.client);
+        if rejected {
+            let id = gateway.id;
+            // Discord rejected the login: stop the account like any other 401.
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Safety)
     }
 
     fn inbox_event(&mut self, event: inbox::Event) -> Task<Message> {
@@ -2576,6 +2606,9 @@ impl App {
             ) {
                 banner_column = banner_column.push(panel.map(Message::Identity));
             }
+            if let Some(panel) = safety::view(&self.safety, &gateway.navigation) {
+                banner_column = banner_column.push(panel.map(Message::Safety));
+            }
             if self.forward.is_open()
                 && let Some(panel) = forward::view(&self.forward, &forward_candidates(gateway))
             {
@@ -2745,6 +2778,18 @@ impl App {
                         button(text("Me").size(12))
                             .on_press(Message::Identity(profile_edit::Event::Toggle))
                             .style(style::tool_button(self.identity.is_open(), false)),
+                        button(
+                            text(match gateway.navigation.requests.total {
+                                0 => "Safety".to_owned(),
+                                n => format!("Safety ({n})"),
+                            })
+                            .size(12)
+                        )
+                        .on_press(Message::Safety(safety::Event::Toggle))
+                        .style(style::tool_button(
+                            self.safety.is_open() || gateway.navigation.requests.total > 0,
+                            false
+                        )),
                         button(text("Audio").size(12))
                             .on_press(Message::OpenAudioSettings)
                             .style(style::tool_button(true, false)),

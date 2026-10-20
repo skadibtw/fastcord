@@ -38,7 +38,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fastcord_model::{Attachment, Emoji, Message, Snowflake, StickerItem};
+use fastcord_discord::state::Suppression;
+use fastcord_model::{Attachment, Emoji, Message, Snowflake, StickerItem, User};
 use iced::alignment::{Horizontal, Vertical};
 use iced::font::{Font, Weight};
 use iced::widget::{
@@ -80,6 +81,9 @@ pub struct Row {
     pub reactions: Vec<Pending>,
     /// A vote or ending of the row's poll Discord has not answered yet.
     pub poll_saving: bool,
+    /// The author is ignored or blocked: `message` is then an empty stand-in
+    /// and nothing of the original reached this row.
+    pub hidden: Option<Suppression>,
 }
 
 #[cfg(test)]
@@ -93,6 +97,72 @@ impl Row {
             reply: None,
             reactions: Vec::new(),
             poll_saving: false,
+            hidden: None,
+        }
+    }
+}
+
+/// Revision bit that tells the height cache a row is a hidden stand-in.
+const HIDDEN_REVISION: u64 = 1 << 63;
+
+/// A message with only its place kept: ID, channel, time and author ID.
+fn stand_in(message: &Message) -> Message {
+    let mut hidden = message.clone();
+    hidden.author = User {
+        id: message.author.id,
+        username: String::new(),
+        global_name: None,
+        avatar: None,
+        bot: false,
+    };
+    hidden.content.clear();
+    hidden.edited_timestamp = None;
+    hidden.kind = 0;
+    hidden.flags = 0;
+    hidden.pinned = false;
+    hidden.attachments.clear();
+    hidden.reactions.clear();
+    hidden.sticker_items.clear();
+    hidden.message_snapshots.clear();
+    hidden.poll = None;
+    hidden.mentions.clear();
+    hidden.mention_roles.clear();
+    hidden.mention_everyone = false;
+    hidden.embeds.clear();
+    hidden.message_reference = None;
+    hidden.referenced_message = Default::default();
+    hidden.nonce = None;
+    hidden.call = None;
+    hidden
+}
+
+/// The one place the suppression policy meets the timeline: rows by ignored or
+/// blocked authors lose everything but their position, and replies quoting
+/// such an author lose the quote. The account's own messages are never hidden.
+pub fn hide_suppressed(
+    snapshot: &mut Snapshot,
+    suppressed: &std::collections::BTreeMap<Snowflake, Suppression>,
+) {
+    if suppressed.is_empty() {
+        return;
+    }
+    for row in &mut snapshot.rows {
+        if let Some(reply) = &mut row.reply
+            && reply.author.is_some_and(|id| suppressed.contains_key(&id))
+        {
+            reply.state = ReplyState::Hidden;
+        }
+        if row.own {
+            continue;
+        }
+        if let Some(kind) = suppressed.get(&row.message.author.id) {
+            row.message = Arc::new(stand_in(&row.message));
+            row.hidden = Some(*kind);
+            row.change = None;
+            row.reply = None;
+            row.reactions.clear();
+            row.poll_saving = false;
+            row.revision |= HIDDEN_REVISION;
         }
     }
 }
@@ -113,6 +183,8 @@ pub fn content(row: &Row) -> &str {
 pub struct ReplyLine {
     /// The message it answers: where clicking the line jumps to.
     pub target: Snowflake,
+    /// Who wrote it, when known.
+    pub author: Option<Snowflake>,
     pub state: ReplyState,
 }
 
@@ -128,6 +200,8 @@ pub enum ReplyState {
     Loading,
     /// It could not be loaded; a jump tries again.
     Unavailable,
+    /// Its author is ignored or blocked.
+    Hidden,
 }
 
 // The quoted text never reaches a log.
@@ -138,6 +212,7 @@ impl std::fmt::Debug for ReplyState {
             Self::Deleted => "Deleted",
             Self::Loading => "Loading",
             Self::Unavailable => "Unavailable",
+            Self::Hidden => "Hidden",
         })
     }
 }
@@ -951,6 +1026,18 @@ fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
     .into()
 }
 
+/// What stands in for a message by an ignored or blocked user: no name, text,
+/// time or controls.
+fn hidden_view<'a>(kind: Suppression) -> Element<'a, Event> {
+    text(match kind {
+        Suppression::Ignored => "Message from an ignored user hidden.",
+        Suppression::Blocked => "Message from a blocked user hidden.",
+    })
+    .size(12)
+    .style(text::secondary)
+    .into()
+}
+
 /// Author, time, grapheme-aware wrapped text/emoji runs, attachment lines, and
 /// the controls of the user's own messages. Original message text is unchanged.
 fn message_view<'a>(
@@ -962,6 +1049,9 @@ fn message_view<'a>(
     continues: bool,
     assets: Attachments<'a>,
 ) -> Element<'a, Event> {
+    if let Some(kind) = row.hidden {
+        return hidden_view(kind);
+    }
     let account_id = assets.account;
     let message = &*row.message;
     let message_id = message.id;
@@ -1002,12 +1092,13 @@ fn message_view<'a>(
             ReplyState::Deleted => "Original message was deleted.".to_owned(),
             ReplyState::Loading => "Loading the original message…".to_owned(),
             ReplyState::Unavailable => "Original message unavailable.".to_owned(),
+            ReplyState::Hidden => "Replying to a hidden message.".to_owned(),
         };
         let preview = text(label)
             .size(12)
             .width(Length::Fill)
             .wrapping(text::Wrapping::WordOrGlyph);
-        body = if reply.state == ReplyState::Deleted {
+        body = if matches!(reply.state, ReplyState::Deleted | ReplyState::Hidden) {
             body.push(preview.style(text::secondary))
         } else {
             body.push(
@@ -1613,6 +1704,9 @@ fn attachment_view(
 /// nothing about either that needs its own header.
 fn continues_group(before: &Row, row: &Row) -> bool {
     const WINDOW_MS: u64 = 7 * 60 * 1000;
+    if before.hidden.is_some() || row.hidden.is_some() {
+        return false;
+    }
     let (a, b) = (&*before.message, &*row.message);
     let plain = |m: &Message| matches!(m.kind, 0 | 19) && m.message_reference.is_none();
     a.author.id == b.author.id
@@ -2743,6 +2837,7 @@ mod tests {
         let line = |state| {
             Some(ReplyLine {
                 target: Snowflake(42),
+                author: None,
                 state,
             })
         };
@@ -3456,5 +3551,121 @@ mod tests {
             );
         }
         assert_eq!(emoji::reaction_asset(&unicode("\u{e000}")), None);
+    }
+
+    fn suppressed(kind: Suppression) -> std::collections::BTreeMap<Snowflake, Suppression> {
+        std::collections::BTreeMap::from([(Snowflake(2), kind)])
+    }
+
+    #[test]
+    fn rows_by_ignored_or_blocked_authors_keep_only_their_place() {
+        let mut quoting = Row::new(message(3, "quotes"), 5);
+        quoting.reply = Some(ReplyLine {
+            target: Snowflake(1),
+            author: Some(Snowflake(2)),
+            state: ReplyState::Message {
+                author: "Alt Account".into(),
+                content: "secret".into(),
+            },
+        });
+        let mut snapshot = Snapshot {
+            channel_id: Some(CHANNEL),
+            rows: vec![Row::new(message(1, "secret text"), 4), quoting],
+            ..Snapshot::default()
+        };
+        // No suppression: nothing changes.
+        hide_suppressed(&mut snapshot, &Default::default());
+        assert!(snapshot.rows.iter().all(|row| row.hidden.is_none()));
+        assert_eq!(snapshot.rows[0].message.content, "secret text");
+
+        hide_suppressed(&mut snapshot, &suppressed(Suppression::Ignored));
+        for row in &snapshot.rows {
+            assert_eq!(row.hidden, Some(Suppression::Ignored));
+            let message = &*row.message;
+            assert!(message.content.is_empty() && message.attachments.is_empty());
+            assert!(message.author.username.is_empty() && message.author.global_name.is_none());
+            // Its place stays, and the height cache is told it changed.
+            assert_eq!(row.revision & HIDDEN_REVISION, HIDDEN_REVISION);
+            assert!(row.reply.is_none());
+        }
+        assert_eq!(snapshot.rows[0].message.id, Snowflake(1));
+        // Blocking is reported as blocking.
+        let mut blocked = Snapshot {
+            rows: vec![Row::new(message(1, "x"), 1)],
+            ..Snapshot::default()
+        };
+        hide_suppressed(&mut blocked, &suppressed(Suppression::Blocked));
+        assert_eq!(blocked.rows[0].hidden, Some(Suppression::Blocked));
+    }
+
+    #[test]
+    fn the_accounts_own_messages_are_never_hidden_and_quotes_of_others_are() {
+        let mut own = Row::new(message(1, "mine"), 1);
+        own.own = true;
+        let mut other = Row::new(message(2, "from someone else"), 1);
+        other.message = {
+            let mut m = (*other.message).clone();
+            m.author.id = Snowflake(9);
+            Arc::new(m)
+        };
+        other.reply = Some(ReplyLine {
+            target: Snowflake(1),
+            author: Some(Snowflake(2)),
+            state: ReplyState::Message {
+                author: "x".into(),
+                content: "quoted".into(),
+            },
+        });
+        let mut snapshot = Snapshot {
+            rows: vec![own, other],
+            ..Snapshot::default()
+        };
+        hide_suppressed(&mut snapshot, &suppressed(Suppression::Ignored));
+        assert!(snapshot.rows[0].hidden.is_none());
+        assert_eq!(snapshot.rows[0].message.content, "mine");
+        // A reply by a visible author to a hidden author loses the quote.
+        assert!(snapshot.rows[1].hidden.is_none());
+        assert_eq!(
+            snapshot.rows[1].reply.as_ref().unwrap().state,
+            ReplyState::Hidden
+        );
+    }
+
+    #[test]
+    fn a_hidden_row_offers_no_controls_and_draws_no_original_text() {
+        let mut snapshot = Snapshot {
+            channel_id: Some(CHANNEL),
+            rows: vec![
+                Row::new(message(41, "before"), 1),
+                Row::new(message(42, "secret"), 1),
+            ],
+            window: Window {
+                range: 0..2,
+                height: 400.0,
+                at_bottom: true,
+                ..Window::default()
+            },
+            ..Snapshot::default()
+        };
+        snapshot.rows[0].message = {
+            let mut m = (*snapshot.rows[0].message).clone();
+            m.author.id = Snowflake(9);
+            Arc::new(m)
+        };
+        hide_suppressed(&mut snapshot, &suppressed(Suppression::Ignored));
+        assert!(snapshot.rows[0].hidden.is_none() && snapshot.rows[1].hidden.is_some());
+        let found = clickable(&snapshot, Interaction::default());
+        // The visible row still offers its attachment; the hidden one nothing.
+        assert!(found.iter().any(|event| matches!(event,
+            Event::LoadAttachment { message_id, .. } if *message_id == Snowflake(41))));
+        assert!(!found.iter().any(|event| match event {
+            Event::LoadAttachment { message_id, .. }
+            | Event::DownloadAttachment { message_id, .. }
+            | Event::OpenAttachment { message_id, .. } => *message_id == Snowflake(42),
+            Event::OpenProfile(user) => user.id == Snowflake(2),
+            _ => false,
+        }));
+        // Hidden rows never join a group with their neighbours.
+        assert!(!continues_group(&snapshot.rows[0], &snapshot.rows[1]));
     }
 }

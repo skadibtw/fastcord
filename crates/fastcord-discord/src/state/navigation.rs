@@ -264,6 +264,12 @@ pub struct NavigationSnapshot {
     pub incoming_calls: Vec<IncomingCall>,
     /// Unread and mention rows; empty unless the inbox was asked for.
     pub inbox: Inbox,
+    /// Message requests awaiting an explicit accept or decline.
+    pub requests: MessageRequests,
+    /// Ignored and blocked users (shared, rebuilt only when it changes).
+    pub suppressed: std::sync::Arc<std::collections::BTreeMap<Snowflake, super::Suppression>>,
+    /// Privacy settings as Gateway events set them (shared).
+    pub privacy: std::sync::Arc<crate::PrivacyLive>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -661,6 +667,9 @@ impl Navigation {
                 .filter(|call| call.ringing_me)
                 .filter_map(|call| {
                     let channel = store.private_channel(call.channel_id)?;
+                    if call_hidden(store, channel) {
+                        return None;
+                    }
                     Some(IncomingCall {
                         channel_id: call.channel_id,
                         label: private_name(store, channel),
@@ -669,6 +678,36 @@ impl Navigation {
                 .collect(),
             presences: store.presences(),
             inbox: Inbox::default(),
+            requests: self.message_requests(store),
+            suppressed: store.suppressed(),
+            privacy: store.privacy(),
+        }
+    }
+
+    /// Pending message requests, newest first, names capped.
+    fn message_requests(&self, store: &Store) -> MessageRequests {
+        let mut pending: Vec<_> = store
+            .private_channels()
+            .filter(|channel| {
+                channel.is_pending_request()
+                    && matches!(
+                        channel.kind,
+                        ModelChannelKind::Dm | ModelChannelKind::GroupDm
+                    )
+            })
+            .collect();
+        pending.sort_by_key(|channel| (std::cmp::Reverse(channel.last_message_id), channel.id));
+        MessageRequests {
+            total: pending.len(),
+            rows: pending
+                .into_iter()
+                .take(MAX_REQUEST_ROWS)
+                .map(|channel| RequestRow {
+                    channel: channel.id,
+                    label: private_name(store, channel),
+                    spam: channel.is_spam == Some(true),
+                })
+                .collect(),
         }
     }
 
@@ -731,11 +770,46 @@ fn capped_name(value: Option<&str>, fallback: &str) -> String {
     value[..end].to_owned()
 }
 
+/// An ordinary direct or group conversation. A message request is not one
+/// until the account accepts it: it is neither listed nor selectable, so
+/// nothing opens, reads or acknowledges it by accident.
 fn is_private_conversation(channel: &Channel) -> bool {
     matches!(
         channel.kind,
         ModelChannelKind::Dm | ModelChannelKind::GroupDm
     ) && channel.guild_id.is_none()
+        && !channel.is_pending_request()
+}
+
+/// Message requests listed at most.
+pub const MAX_REQUEST_ROWS: usize = 100;
+
+/// One pending message request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestRow {
+    pub channel: Snowflake,
+    pub label: String,
+    /// Discord flagged it as spam.
+    pub spam: bool,
+}
+
+/// Pending message requests, newest first. `total` counts all of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessageRequests {
+    pub total: usize,
+    pub rows: Vec<RequestRow>,
+}
+
+/// A call that must not ring: its one-to-one conversation is with a
+/// suppressed user, or it is a message request. A group call keeps ringing,
+/// since the ring does not say who started it.
+fn call_hidden(store: &Store, channel: &Channel) -> bool {
+    channel.is_pending_request()
+        || (channel.kind == ModelChannelKind::Dm
+            && channel
+                .recipient_ids
+                .iter()
+                .any(|id| store.suppression(*id).is_some()))
 }
 
 fn private_name(store: &Store, channel: &Channel) -> String {

@@ -27,6 +27,7 @@ mod password_auth;
 mod pins;
 mod poll;
 mod presence;
+mod privacy;
 mod private_channel;
 mod profile_edit;
 mod rate_limit;
@@ -63,6 +64,10 @@ pub use password_auth::{
 pub use pins::{PINS_PAGE_SIZE, PinnedMessage, PinsPage};
 pub use poll::{POLL_MAX_HOURS, PollDraft, PollError};
 pub use presence::StatusChange;
+pub use privacy::{
+    FriendSources, MAX_RESTRICTED_GUILDS, PREVIEW_MESSAGES, PrivacyEdit, PrivacyError, PrivacyLive,
+    PrivacyRequestError, PrivacySettings,
+};
 pub use private_channel::{MAX_PRIVATE_RECIPIENTS, PrivateChannelError};
 pub use profile_edit::{
     AccountEdit, AvatarImage, Connection, MAX_BIO_CHARS, MAX_DISPLAY_NAME_CHARS, MAX_NICK_CHARS,

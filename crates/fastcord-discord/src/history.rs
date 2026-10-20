@@ -51,7 +51,11 @@ fn history_route(channel: Snowflake, cursor: HistoryCursor) -> Result<Route, Res
     page_route(channel, cursor, limit)
 }
 
-fn page_route(channel: Snowflake, cursor: HistoryCursor, limit: usize) -> Result<Route, RestError> {
+pub(crate) fn page_route(
+    channel: Snowflake,
+    cursor: HistoryCursor,
+    limit: usize,
+) -> Result<Route, RestError> {
     let path = match cursor {
         HistoryCursor::Latest => format!("/channels/{channel}/messages?limit={limit}"),
         HistoryCursor::Before(id) => {

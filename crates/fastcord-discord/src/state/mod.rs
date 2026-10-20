@@ -34,7 +34,10 @@ mod read;
 #[cfg(test)]
 mod regressions;
 mod relationships;
+#[cfg(test)]
+mod safety_tests;
 pub use calls::{CallInfo, MAX_CALL_USERS, MAX_CALLS};
+pub use relationships::Suppression;
 #[cfg(test)]
 mod tests;
 
@@ -557,6 +560,8 @@ pub struct Changes {
     pub presence: bool,
     /// The account's own user object changed.
     pub account: bool,
+    /// A known privacy setting changed.
+    pub privacy: bool,
 }
 
 impl Changes {
@@ -580,6 +585,7 @@ pub struct Store {
     private_channels: HashMap<Snowflake, Channel>,
     private_bytes: usize,
     relationships: relationships::Relationships,
+    privacy: std::sync::Arc<crate::PrivacyLive>,
     calls: calls::Calls,
     presences: presences::Presences,
     focus: Focus,
@@ -624,6 +630,7 @@ impl Store {
             private_channels: HashMap::new(),
             private_bytes: 0,
             relationships: relationships::Relationships::default(),
+            privacy: Default::default(),
             calls: calls::Calls::default(),
             presences: presences::Presences::default(),
             focus: Focus::default(),
@@ -686,6 +693,26 @@ impl Store {
     /// Live private calls, sorted by channel.
     pub fn calls(&self) -> std::sync::Arc<[CallInfo]> {
         self.calls.rows()
+    }
+
+    /// Whether the user's messages, mentions, notifications and calls are
+    /// withheld, and why. The one rule every consumer reads; the account's own
+    /// ID is never suppressed.
+    pub fn suppression(&self, id: Snowflake) -> Option<Suppression> {
+        if self.current_user == Some(id) {
+            return None;
+        }
+        self.relationships.suppression(id)
+    }
+
+    /// Privacy settings as Gateway events set them since READY.
+    pub fn privacy(&self) -> std::sync::Arc<crate::PrivacyLive> {
+        std::sync::Arc::clone(&self.privacy)
+    }
+
+    /// Every suppressed user, shared and rebuilt only when it changes.
+    pub fn suppressed(&self) -> std::sync::Arc<std::collections::BTreeMap<Snowflake, Suppression>> {
+        self.relationships.suppressed()
     }
 
     pub fn relationship(&self, id: Snowflake) -> Option<fastcord_model::RelationshipKind> {
@@ -1023,6 +1050,11 @@ impl Store {
             Dispatch::RelationshipRemove(id) => {
                 changes.relationships = self.relationships.remove(id);
             }
+            Dispatch::UserSettingsUpdate(update) => {
+                if std::sync::Arc::make_mut(&mut self.privacy).apply(&update) {
+                    changes.privacy = true;
+                }
+            }
             Dispatch::UserGuildSettingsUpdate(update) => {
                 if self
                     .read
@@ -1232,7 +1264,10 @@ impl Store {
         self.private_channels = HashMap::new();
         self.private_bytes = 0;
         self.read.replace(ready.read.entries, ready.read.mutes);
-        self.relationships.replace(ready.relationships);
+        self.relationships
+            .replace(ready.relationships, ready.ignored);
+        std::sync::Arc::make_mut(&mut self.privacy).reset();
+        changes.privacy = true;
         self.calls.reset(Some(ready.user.id));
         changes.calls = true;
         self.presences.clear();
@@ -1447,6 +1482,10 @@ impl Store {
                 channel.recipient_ids = old.recipient_ids.clone();
             }
             channel.owner_id = channel.owner_id.or(old.owner_id);
+            // A request stays a request until Discord says otherwise: an update
+            // that omits the flags must not quietly accept it.
+            channel.is_message_request = channel.is_message_request.or(old.is_message_request);
+            channel.is_spam = channel.is_spam.or(old.is_spam);
         }
         let cost = channel_bytes(&channel);
         let old = self.private_channels.insert(channel.id, channel);

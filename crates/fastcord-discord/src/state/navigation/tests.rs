@@ -744,6 +744,7 @@ fn large_ready() -> Ready {
         session_id: SessionId::new("large-navigation-fixture".to_owned()),
         read: Default::default(),
         relationships: Vec::new(),
+        ignored: Vec::new(),
         presences: Vec::new(),
         user,
         users: Vec::new(),
@@ -780,6 +781,8 @@ fn large_ready() -> Ready {
                             owner_id: None,
                             icon: None,
                             last_message_id: None,
+                            is_message_request: None,
+                            is_spam: None,
                             thread_metadata: None,
                             member: None,
                         })

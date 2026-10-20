@@ -1,0 +1,23 @@
+{
+  "_note": "Synthetic: shapes from community documentation of the user settings object, not captured from a live account.",
+  "full": {
+    "friend_source_flags": {"all": false, "mutual_friends": true, "mutual_guilds": true},
+    "default_guilds_restricted": true,
+    "restricted_guilds": ["7", "9"],
+    "explicit_content_filter": 1,
+    "theme": "dark"
+  },
+  "empty": {},
+  "odd": {
+    "friend_source_flags": {"all": true},
+    "default_guilds_restricted": "yes",
+    "restricted_guilds": [7],
+    "explicit_content_filter": 300
+  },
+  "patch_default": {"default_guilds_restricted": false},
+  "patch_several": {
+    "friend_source_flags": {"all": false, "mutual_friends": true, "mutual_guilds": false},
+    "restricted_guilds": ["7"],
+    "explicit_content_filter": 2
+  }
+}

@@ -287,10 +287,18 @@ impl Tracker {
                 } = &dispatch
                 {
                     let muted = self.store.is_muted(message.channel_id, message.guild_id);
+                    // One rule for every consumer: ignored/blocked authors and
+                    // message requests never raise a toast.
+                    let suppressed = self.store.suppression(message.author.id).is_some()
+                        || self
+                            .store
+                            .private_channel(message.channel_id)
+                            .is_some_and(Channel::is_pending_request);
                     crate::notify::on_message(
                         message,
                         self.store.current_user().map(|u| u.id),
                         muted,
+                        suppressed,
                     );
                 }
                 let changes = self.store.apply(dispatch);
@@ -343,6 +351,7 @@ impl Tracker {
         self.typing
             .users(self.clock.now(), channel)
             .into_iter()
+            .filter(|id| self.store.suppression(*id).is_none())
             .map(|id| {
                 self.store
                     .user(id)
@@ -2331,6 +2340,7 @@ impl Worker {
             .history
             .refresh(&self.rest, &navigation, &request.timeline);
         let mut timeline = self.tracker.history.snapshot();
+        timeline::hide_suppressed(&mut timeline, &navigation.suppressed);
         timeline.typing = self.tracker.typing_names(timeline.channel_id);
         timeline.names = mention_names(&self.tracker.store, navigation.selected_guild, &timeline);
         timeline.candidates =
@@ -3971,6 +3981,8 @@ mod tests {
             owner_id: None,
             icon: None,
             last_message_id: None,
+            is_message_request: None,
+            is_spam: None,
             thread_metadata: None,
             member: None,
         };
@@ -3981,6 +3993,7 @@ mod tests {
                 user: user(),
                 read: Default::default(),
                 relationships: Vec::new(),
+                ignored: Vec::new(),
                 presences: Vec::new(),
                 users: vec![user()],
                 guilds: (0..guilds as u64).map(guild).collect(),
@@ -4042,6 +4055,8 @@ mod tests {
             owner_id: None,
             icon: None,
             last_message_id: None,
+            is_message_request: None,
+            is_spam: None,
             thread_metadata: None,
             member: None,
         }
@@ -4310,6 +4325,30 @@ mod tests {
         tracker.apply_typing(&Dispatch::Resumed);
         assert!(tracker.typing_names(Some(channel)).is_empty());
         assert!(tracker.typing.next_expiry().is_none(), "no timer when idle");
+    }
+
+    #[test]
+    fn typing_of_an_ignored_user_is_not_shown_and_returns_when_ignoring_stops() {
+        let mut tracker = Tracker::default();
+        let channel = Snowflake(7);
+        tracker.apply_typing(&Dispatch::TypingStart(
+            fastcord_discord::gateway::TypingStart {
+                channel_id: channel,
+                user_id: Snowflake(9),
+            },
+        ));
+        let ignore = |ignored| GatewayEvent::Dispatch {
+            sequence: 1,
+            event: Dispatch::RelationshipUpdate(fastcord_discord::gateway::RelationshipUpdate {
+                id: Snowflake(9),
+                kind: None,
+                ignored: Some(ignored),
+            }),
+        };
+        let _ = tracker.apply(ignore(true));
+        assert!(tracker.typing_names(Some(channel)).is_empty());
+        let _ = tracker.apply(ignore(false));
+        assert_eq!(tracker.typing_names(Some(channel)), ["Someone"]);
     }
 
     #[test]

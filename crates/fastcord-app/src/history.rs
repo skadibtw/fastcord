@@ -87,7 +87,11 @@ struct Ack {
 }
 
 enum ReferenceState {
-    Preview { author: String, content: String },
+    Preview {
+        author_id: Snowflake,
+        author: String,
+        content: String,
+    },
     Deleted,
     Unavailable,
 }
@@ -1674,6 +1678,7 @@ impl History {
                 self.remember_reference(
                     target,
                     ReferenceState::Preview {
+                        author_id: message.author.id,
                         author: reply_author(message.author.display_name()),
                         content: reply_content(&message.content),
                     },
@@ -1699,24 +1704,34 @@ impl History {
 
     fn reply_line(&self, channel: Snowflake, message: &Message) -> Option<ReplyLine> {
         let target = message.replied_to()?;
+        let mut author_id = None;
         let state = if matches!(self.reference_state(target), Some(ReferenceState::Deleted)) {
             ReplyState::Deleted
         } else {
             match &message.referenced_message {
                 Referenced::Deleted => ReplyState::Deleted,
-                Referenced::Message(preview) if preview.id == target => ReplyState::Message {
-                    author: reply_author(preview.author.display_name()),
-                    content: reply_content(&preview.content),
-                },
+                Referenced::Message(preview) if preview.id == target => {
+                    author_id = Some(preview.author.id);
+                    ReplyState::Message {
+                        author: reply_author(preview.author.display_name()),
+                        content: reply_content(&preview.content),
+                    }
+                }
                 _ => {
                     if let Some(referenced) = self.store.get(channel, target) {
+                        author_id = Some(referenced.author.id);
                         ReplyState::Message {
                             author: reply_author(referenced.author.display_name()),
                             content: reply_content(&referenced.content),
                         }
                     } else {
                         match self.reference_state(target) {
-                            Some(ReferenceState::Preview { author, content }) => {
+                            Some(ReferenceState::Preview {
+                                author_id: id,
+                                author,
+                                content,
+                            }) => {
+                                author_id = Some(*id);
                                 ReplyState::Message {
                                     author: author.clone(),
                                     content: content.clone(),
@@ -1738,7 +1753,11 @@ impl History {
                 }
             }
         };
-        Some(ReplyLine { target, state })
+        Some(ReplyLine {
+            target,
+            author: author_id,
+            state,
+        })
     }
 
     /// The bounded read model: only the built window's messages, trimmed to
@@ -1799,6 +1818,7 @@ impl History {
                 let reactions = self.reactions.of(channel, message.id);
                 let poll_saving = self.polls.busy(channel, message.id);
                 Row {
+                    hidden: None,
                     poll_saving,
                     message,
                     revision,
@@ -2216,6 +2236,10 @@ mod tests {
             ReplyState::Message { author, content }
                 if author == "author5" && content == "fixture message 9000"
         ));
+        // Whose message a quote shows is kept, so a suppressed author's quote
+        // can be withheld; a deleted original has no author to name.
+        assert!(row(first_reply).reply.as_ref().unwrap().author.is_some());
+        assert!(row(second_reply).reply.as_ref().unwrap().author.is_none());
         assert_eq!(
             row(second_reply).reply.as_ref().unwrap().state,
             ReplyState::Deleted
@@ -3651,6 +3675,7 @@ mod tests {
                 session_id: fastcord_discord::gateway::SessionId::new("fixture-session".to_owned()),
                 read: Default::default(),
                 relationships: Vec::new(),
+                ignored: Vec::new(),
                 presences: Vec::new(),
                 user: User {
                     id: SELF,
