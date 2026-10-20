@@ -535,7 +535,7 @@ impl History {
                 self.notice = Some(EMPTY_EDIT);
                 return;
             }
-            Err(ComposeError::TooLong) => {
+            Err(ComposeError::TooLong | ComposeError::VoiceMessageAlone) => {
                 self.notice = Some(LONG_EDIT);
                 return;
             }
@@ -2693,6 +2693,8 @@ mod tests {
             content_type: Some("image/png".to_owned()),
             width: Some(64),
             height: Some(64),
+            duration_secs: None,
+            waveform: None,
         }
     }
 

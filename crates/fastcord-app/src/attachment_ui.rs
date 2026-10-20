@@ -599,6 +599,8 @@ mod tests {
             content_type: content_type.map(str::to_owned),
             width: None,
             height: None,
+            duration_secs: None,
+            waveform: None,
         }
     }
 

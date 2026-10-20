@@ -189,6 +189,84 @@ pub fn packet_samples(packet: &[u8]) -> Option<usize> {
     Some(frame * frames)
 }
 
+fn push_page(
+    out: &mut Vec<u8>,
+    flags: u8,
+    granule: u64,
+    sequence: u32,
+    lacing: &[u8],
+    body: &[u8],
+) {
+    let start = out.len();
+    out.extend_from_slice(b"OggS");
+    out.extend_from_slice(&[0, flags]);
+    out.extend_from_slice(&granule.to_le_bytes());
+    out.extend_from_slice(&WRITER_SERIAL.to_le_bytes());
+    out.extend_from_slice(&sequence.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.push(lacing.len() as u8);
+    out.extend_from_slice(lacing);
+    out.extend_from_slice(body);
+    let checksum = crc(&[&out[start..]]);
+    out[start + 22..start + 26].copy_from_slice(&checksum.to_le_bytes());
+}
+
+const WRITER_SERIAL: u32 = 0x6663_6f72;
+/// libopus's 48 kHz encoder lookahead; the reader does not trim it.
+const WRITER_PRE_SKIP: u16 = 312;
+
+/// A mono Ogg Opus file holding `packets` (each exactly 20 ms, at most [`MAX_PACKET_BYTES`]),
+/// in the same shape [`OggOpus`] reads: `OpusHead`, `OpusTags`, then audio pages whose granule
+/// positions count 48 kHz samples after the pre-skip; the last page ends the stream. An
+/// oversized or empty packet list is `None`.
+pub fn write_ogg_opus(packets: &[impl AsRef<[u8]>]) -> Option<Vec<u8>> {
+    if packets.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut head = b"OpusHead".to_vec();
+    head.extend_from_slice(&[1, 1]);
+    head.extend_from_slice(&WRITER_PRE_SKIP.to_le_bytes());
+    head.extend_from_slice(&48_000u32.to_le_bytes());
+    head.extend_from_slice(&[0, 0, 0]);
+    push_page(&mut out, FLAG_BEGIN, 0, 0, &[head.len() as u8], &head);
+    let mut tags = b"OpusTags".to_vec();
+    tags.extend_from_slice(&8u32.to_le_bytes());
+    tags.extend_from_slice(b"fastcord");
+    tags.extend_from_slice(&0u32.to_le_bytes());
+    push_page(&mut out, 0, 0, 1, &[tags.len() as u8], &tags);
+    let mut sequence = 2;
+    let mut done = 0u64;
+    let mut index = 0;
+    while index < packets.len() {
+        let (mut lacing, mut body) = (Vec::new(), Vec::new());
+        let first = index;
+        while let Some(packet) = packets.get(index) {
+            let bytes = packet.as_ref();
+            if bytes.len() > MAX_PACKET_BYTES {
+                return None;
+            }
+            let segments = bytes.len() / 255 + 1;
+            if lacing.len() + segments > 255 {
+                break;
+            }
+            lacing.extend(std::iter::repeat_n(255u8, segments - 1));
+            lacing.push((bytes.len() % 255) as u8);
+            body.extend_from_slice(bytes);
+            index += 1;
+        }
+        if index == first {
+            return None;
+        }
+        done += (index - first) as u64 * FRAME_SAMPLES as u64;
+        let flags = if index == packets.len() { FLAG_END } else { 0 };
+        let granule = u64::from(WRITER_PRE_SKIP) + done;
+        push_page(&mut out, flags, granule, sequence, &lacing, &body);
+        sequence += 1;
+    }
+    Some(out)
+}
+
 /// An Ogg Opus stream positioned at an audio packet.
 pub struct OggOpus<R> {
     r: R,
@@ -634,5 +712,23 @@ mod tests {
         assert_eq!(packet_samples(&[0xFB, 2]), Some(1920));
         assert_eq!(packet_samples(&[0xFB]), None);
         assert_eq!(packet_samples(&[]), None);
+    }
+
+    #[test]
+    fn written_files_read_back_with_every_packet_across_page_boundaries() {
+        // 300 packets overflow one page's 255 lacing values; a 600-byte one takes 3.
+        let packets: Vec<Vec<u8>> = (0..300u16)
+            .map(|id| packet(id, if id == 7 { 600 } else { 20 }))
+            .collect();
+        let bytes = write_ogg_opus(&packets).unwrap();
+        let mut reader = OggOpus::open(Cursor::new(bytes)).unwrap();
+        assert_eq!(reader.duration_ms(), Some(300 * 20));
+        for (id, expected) in packets.iter().enumerate() {
+            let got = reader.next_packet().unwrap().unwrap();
+            assert_eq!(got.as_bytes(), &expected[..], "packet {id}");
+        }
+        assert!(reader.next_packet().unwrap().is_none());
+        assert!(write_ogg_opus(&Vec::<Vec<u8>>::new()).is_none());
+        assert!(write_ogg_opus(&[vec![0u8; MAX_PACKET_BYTES + 1]]).is_none());
     }
 }

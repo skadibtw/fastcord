@@ -22,6 +22,9 @@ use serde::Serialize;
 use crate::error::RetryableFailure;
 use crate::poll::PollDraft;
 use crate::upload::UploadedFile;
+
+/// `IS_VOICE_MESSAGE` in a new message's `flags`.
+const VOICE_MESSAGE_FLAG: u32 = 1 << 13;
 use crate::{Clock, Method, NetworkFailure, Priority, RestClient, RestError, RestRequest, Route};
 
 /// Longest message the composer lets a send reach Discord with: Discord's
@@ -146,6 +149,8 @@ pub enum ComposeError {
     Empty,
     /// Longer than [`MAX_CONTENT_CHARS`].
     TooLong,
+    /// A voice message has no text and no other file.
+    VoiceMessageAlone,
 }
 
 impl fmt::Display for ComposeError {
@@ -153,6 +158,7 @@ impl fmt::Display for ComposeError {
         f.write_str(match self {
             Self::Empty => "a message needs some text",
             Self::TooLong => "the message is too long for Discord",
+            Self::VoiceMessageAlone => "a voice message cannot carry text or other files",
         })
     }
 }
@@ -207,6 +213,11 @@ impl OutgoingMessage {
         }
         if content.chars().count() > MAX_CONTENT_CHARS {
             return Err(ComposeError::TooLong);
+        }
+        if files.iter().any(|file| file.voice.is_some())
+            && (files.len() != 1 || !content.is_empty())
+        {
+            return Err(ComposeError::VoiceMessageAlone);
         }
         Ok(Self {
             content: content.to_owned(),
@@ -281,7 +292,11 @@ impl OutgoingMessage {
             nonce: self.nonce,
             enforce_nonce: true,
             tts: false,
-            flags: 0,
+            flags: if self.files.iter().any(|file| file.voice.is_some()) {
+                VOICE_MESSAGE_FLAG
+            } else {
+                0
+            },
             allowed_mentions: AllowedMentions {
                 parse: self.mentions.parse(),
                 replied_user: self.reply.map(|reply| reply.mention_author),
@@ -312,6 +327,11 @@ impl OutgoingMessage {
                     id: file.id.to_string(),
                     filename: &file.filename,
                     uploaded_filename: &file.uploaded_filename,
+                    duration_secs: file
+                        .voice
+                        .as_ref()
+                        .map(|voice| voice.duration_ms as f64 / 1000.0),
+                    waveform: file.voice.as_ref().map(|voice| voice.waveform.as_str()),
                 })
                 .collect(),
         }
@@ -339,7 +359,7 @@ struct CreateMessage<'a> {
     nonce: Nonce,
     enforce_nonce: bool,
     tts: bool,
-    flags: u8,
+    flags: u32,
     allowed_mentions: AllowedMentions,
     #[serde(skip_serializing_if = "Option::is_none")]
     message_reference: Option<WireReference>,
@@ -357,6 +377,11 @@ struct WireAttachment<'a> {
     id: String,
     filename: &'a str,
     uploaded_filename: &'a str,
+    /// Voice messages only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waveform: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -597,6 +622,7 @@ mod tests {
             id: 0,
             filename: "photo.png".to_owned(),
             uploaded_filename: "token/photo.png".to_owned(),
+            voice: None,
         };
         assert_eq!(
             OutgoingMessage::with_files("  ", Vec::new(), Nonce(1), MentionPolicy::default()).err(),
@@ -624,6 +650,74 @@ mod tests {
                 .is_none()
         );
         assert!(!format!("{message:?}").contains("token/photo.png"));
+    }
+
+    #[test]
+    fn a_voice_message_carries_the_flag_duration_and_waveform_and_nothing_else() {
+        let voice = |name: &str| UploadedFile {
+            id: 0,
+            filename: name.to_owned(),
+            uploaded_filename: "token/voice-message.ogg".to_owned(),
+            voice: Some(crate::upload::VoiceMeta {
+                duration_ms: 2500,
+                waveform: "AAEC".to_owned(),
+            }),
+        };
+        let message = OutgoingMessage::with_files(
+            "",
+            vec![voice("voice-message.ogg")],
+            Nonce(5),
+            MentionPolicy::default(),
+        )
+        .unwrap();
+        let sent = serde_json::to_value(message.body()).unwrap();
+        assert_eq!(sent["flags"], 8192);
+        assert_eq!(sent["content"], "");
+        assert_eq!(
+            sent["attachments"],
+            serde_json::json!([{
+                "id": "0", "filename": "voice-message.ogg",
+                "uploaded_filename": "token/voice-message.ogg",
+                "duration_secs": 2.5, "waveform": "AAEC"
+            }])
+        );
+        // Text or a second file would make it an ordinary message: refused, never downgraded.
+        assert_eq!(
+            OutgoingMessage::with_files(
+                "hi",
+                vec![voice("voice-message.ogg")],
+                Nonce(5),
+                MentionPolicy::default()
+            )
+            .err(),
+            Some(ComposeError::VoiceMessageAlone)
+        );
+        assert_eq!(
+            OutgoingMessage::with_files(
+                "",
+                vec![voice("a.ogg"), voice("b.ogg")],
+                Nonce(5),
+                MentionPolicy::default()
+            )
+            .err(),
+            Some(ComposeError::VoiceMessageAlone)
+        );
+        // Ordinary uploads keep flags 0 and never mention voice fields.
+        let plain = UploadedFile {
+            id: 0,
+            filename: "a.ogg".to_owned(),
+            uploaded_filename: "t/a.ogg".to_owned(),
+            voice: None,
+        };
+        let sent = serde_json::to_value(
+            OutgoingMessage::with_files("", vec![plain], Nonce(6), MentionPolicy::default())
+                .unwrap()
+                .body(),
+        )
+        .unwrap();
+        assert_eq!(sent["flags"], 0);
+        assert!(sent["attachments"][0].get("waveform").is_none());
+        assert!(!format!("{message:?}").contains("AAEC"));
     }
 
     #[test]

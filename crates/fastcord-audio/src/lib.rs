@@ -26,6 +26,7 @@ pub mod file_player;
 mod jitter;
 pub mod ogg;
 mod pipeline;
+pub mod recorder;
 mod resample;
 mod ring;
 
@@ -45,4 +46,5 @@ pub use file_player::{
     Silence,
 };
 pub use pipeline::{CapturedFrame, RemoteFrame};
+pub use recorder::{RecorderSnapshot, Recording, RecordingFailure, VoiceRecorder};
 pub use resample::UnsupportedRate;

@@ -41,7 +41,7 @@ mod typing;
 mod upload;
 mod ws;
 
-pub use attachment::RefreshedAttachmentUrl;
+pub use attachment::{RefreshedAttachmentUrl, decode_waveform};
 pub use call::CallSignal;
 pub use clock::{Clock, MonotonicClock};
 pub use edit::{EditedMessage, edit_response_update, is_own_message};

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use fastcord_audio::{DeviceChoice, PlayerFailure, PlayerSnapshot, PlayerState};
 use fastcord_model::{Attachment, Snowflake};
 use iced::task::Handle;
-use iced::widget::{button, column, container, row, slider, text};
+use iced::widget::{button, column, container, row, slider, space, text};
 use iced::{Element, Length, Task};
 
 use crate::Message;
@@ -357,8 +357,89 @@ fn clock(ms: u64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-/// The Play button, loading line, or player controls for one attachment.
-pub fn view(media: Option<&MediaSession>, key: AttachmentKey) -> Element<'static, Event> {
+/// Most bars a voice message's waveform is drawn with.
+const WAVEFORM_BARS: usize = 64;
+
+/// The loudness bars (0-255) of an attachment's `waveform`, the loudest sample of each group
+/// when there are more than [`WAVEFORM_BARS`]; empty without valid metadata.
+pub fn waveform_bars(waveform: Option<&str>) -> Vec<u8> {
+    group_bars(
+        waveform
+            .map(fastcord_discord::decode_waveform)
+            .unwrap_or_default(),
+    )
+}
+
+/// [`waveform_bars`] for samples already decoded.
+pub fn group_bars(samples: Vec<u8>) -> Vec<u8> {
+    if samples.len() <= WAVEFORM_BARS {
+        return samples;
+    }
+    (0..WAVEFORM_BARS)
+        .map(|bar| {
+            let from = bar * samples.len() / WAVEFORM_BARS;
+            let to = ((bar + 1) * samples.len() / WAVEFORM_BARS).max(from + 1);
+            samples[from..to.min(samples.len())]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// A voice message's length, from the sender's metadata.
+fn metadata_duration_ms(attachment: &Attachment) -> Option<u64> {
+    attachment
+        .duration_secs
+        .map(|secs| (secs.max(0.0) * 1000.0) as u64)
+}
+
+/// Loudness bars; the share `progress` of them (0-1) is drawn as already played.
+pub fn waveform_view<M: 'static>(bars: &[u8], progress: f32) -> Element<'static, M> {
+    let played = (progress.clamp(0.0, 1.0) * bars.len() as f32).round() as usize;
+    row(bars.iter().enumerate().map(|(index, &level)| {
+        container(space())
+            .width(3)
+            .height(4.0 + f32::from(level) / 255.0 * 20.0)
+            .style(move |theme: &iced::Theme| {
+                let palette = theme.extended_palette();
+                container::Style {
+                    background: Some(
+                        if index < played {
+                            palette.primary.strong.color
+                        } else {
+                            palette.background.strong.color
+                        }
+                        .into(),
+                    ),
+                    border: iced::Border {
+                        radius: 1.5.into(),
+                        ..iced::Border::default()
+                    },
+                    ..container::Style::default()
+                }
+            })
+            .into()
+    }))
+    .spacing(1)
+    .align_y(iced::Alignment::Center)
+    .height(24)
+    .into()
+}
+
+/// The Play button, loading line, or player controls for one attachment. `voice` is whether
+/// Discord flagged the message as a voice message; a waveform or length in the attachment's
+/// own metadata makes it one too.
+pub fn view(
+    media: Option<&MediaSession>,
+    key: AttachmentKey,
+    attachment: &Attachment,
+    voice: bool,
+) -> Element<'static, Event> {
+    let bars = waveform_bars(attachment.waveform.as_deref());
+    let voice = voice || !bars.is_empty() || attachment.duration_secs.is_some();
+    let length = metadata_duration_ms(attachment);
     let ids = (key.channel, key.message, key.attachment);
     let play = |label: &'static str| {
         button(text(label).size(13))
@@ -375,7 +456,22 @@ pub fn view(media: Option<&MediaSession>, key: AttachmentKey) -> Element<'static
             .on_press(Event::Media(control))
     };
     let Some(media) = media.filter(|media| media.key == key) else {
-        return play("Play").into();
+        if !voice {
+            return play("Play").into();
+        }
+        let mut line = row![play("Play")]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+        if !bars.is_empty() {
+            line = line.push(waveform_view(&bars, 0.0));
+        }
+        return line
+            .push(
+                text(length.map_or_else(|| "Voice message".to_owned(), clock))
+                    .size(12)
+                    .style(text::secondary),
+            )
+            .into();
     };
     match media.phase {
         Phase::Loading => row![
@@ -434,6 +530,11 @@ pub fn view(media: Option<&MediaSession>, key: AttachmentKey) -> Element<'static
                 )
                 .push(small("Close", Control::Close));
             let mut stack = column![].spacing(4);
+            if voice && !bars.is_empty() {
+                let total = snapshot.duration_ms.or(length).filter(|total| *total > 0);
+                let progress = total.map_or(0.0, |total| position as f32 / total as f32);
+                stack = stack.push(waveform_view(&bars, progress));
+            }
             if let Some((session, (width, height))) =
                 media.player.as_ref().and_then(|player| player.video())
             {
@@ -477,6 +578,8 @@ mod tests {
             content_type: content_type.map(str::to_owned),
             width: None,
             height: None,
+            duration_secs: None,
+            waveform: None,
         }
     }
 
@@ -574,5 +677,48 @@ mod tests {
         assert_eq!(clock(59_999), "0:59");
         assert_eq!(clock(61_000), "1:01");
         assert_eq!(clock(3_600_000), "60:00");
+    }
+
+    #[test]
+    fn voice_waveforms_become_at_most_sixty_four_bars_and_the_play_row_appears() {
+        // Standard base64 with padding, written out so the app needs no encoder.
+        let encode = |bytes: &[u8]| {
+            const SET: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::new();
+            for chunk in bytes.chunks(3) {
+                let n = chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+                for i in 0..4 {
+                    out.push(if i <= chunk.len() {
+                        char::from(SET[(n >> (18 - 6 * i) & 63) as usize])
+                    } else {
+                        '='
+                    });
+                }
+            }
+            out
+        };
+        assert!(waveform_bars(None).is_empty());
+        assert!(waveform_bars(Some("###")).is_empty());
+        assert_eq!(waveform_bars(Some(&encode(&[1, 2, 3]))), vec![1, 2, 3]);
+        let full: Vec<u8> = (0..=255).collect();
+        let bars = waveform_bars(Some(&encode(&full)));
+        assert_eq!(bars.len(), 64);
+        assert_eq!(bars[63], 255);
+        assert!(bars.windows(2).all(|pair| pair[0] <= pair[1]));
+        let mut voice = attachment("voice-message.ogg", Some("audio/ogg"), 10);
+        voice.duration_secs = Some(3.5);
+        voice.waveform = Some(encode(&full));
+        // Idle, loading and active voice rows all build (the metadata is only presentation).
+        let _ = view(None, key(), &voice, true);
+        let mut media = MediaSession::for_test(key());
+        let _ = view(Some(&media), key(), &voice, true);
+        media.phase = Phase::Failed("no");
+        let _ = view(Some(&media), key(), &voice, false);
+        assert_eq!(metadata_duration_ms(&voice), Some(3500));
+        assert_eq!(metadata_duration_ms(&attachment("a.ogg", None, 1)), None);
     }
 }

@@ -38,6 +38,7 @@ mod threads;
 mod timeline;
 mod variable_list;
 mod virtual_list;
+mod voice_record;
 mod voice_settings;
 
 use crate::attachments::AttachmentKey;
@@ -107,6 +108,7 @@ struct App {
     sticker: sticker::State,
     forward: forward::State,
     poll: poll_create::State,
+    voice: voice_record::State,
     friends: friends::State,
     status: status::State,
     threads: threads::State,
@@ -241,6 +243,8 @@ enum Message {
     Sticker(sticker::Event),
     Forward(forward::Event),
     Poll(poll_create::Event),
+    Voice(voice_record::Event),
+    VoiceRecordingToggled(bool),
     Friends(friends::Event),
     Status(status::Event),
     Threads(threads::Event),
@@ -300,6 +304,7 @@ impl App {
                 sticker: sticker::State::default(),
                 forward: forward::State::default(),
                 poll: poll_create::State::default(),
+                voice: voice_record::State::default(),
                 friends: friends::State::default(),
                 status: status::State::default(),
                 threads: threads::State::default(),
@@ -307,6 +312,7 @@ impl App {
             Task::perform(
                 async {
                     paste::purge_stale();
+                    voice_record::purge_stale();
                     let preferences = audio_devices::load().await;
                     (preferences, login::initialize_store().await)
                 },
@@ -412,6 +418,7 @@ impl App {
             self.animation_subscription(),
             self.video_subscription(),
             self.media_subscription(),
+            self.voice_subscription(),
             self.media_frame_subscription(),
         ])
     }
@@ -425,6 +432,16 @@ impl App {
                 .and_then(media_ui::MediaSession::video_session)
         {
             session.subscription().map(Message::MediaFrame)
+        } else {
+            iced::Subscription::none()
+        }
+    }
+
+    /// The timer exists only while a voice message is being recorded or previewed.
+    fn voice_subscription(&self) -> iced::Subscription<Message> {
+        if self.voice.ticking() {
+            iced::time::every(std::time::Duration::from_millis(100))
+                .map(|_| Message::Voice(voice_record::Event::Tick))
         } else {
             iced::Subscription::none()
         }
@@ -823,6 +840,7 @@ impl App {
                     self.sticker.sync(gateway.timeline.channel_id);
                     self.forward.sync(gateway.timeline.channel_id);
                     self.poll.sync(gateway.timeline.channel_id);
+                    self.voice.sync(gateway.timeline.channel_id);
                 }
             }
             Message::ShowDirects(on) => {
@@ -837,6 +855,16 @@ impl App {
             Message::Sticker(event) => return self.sticker_event(event),
             Message::Forward(event) => return self.forward_event(event),
             Message::Poll(event) => return self.poll_event(event),
+            Message::Voice(event) => return self.voice_event(event),
+            Message::VoiceRecordingToggled(on) => {
+                self.audio_preferences.voice_recording = on;
+                if !on {
+                    self.voice.reset();
+                }
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
             Message::Status(event) => {
                 if let Phase::Account {
                     session, gateway, ..
@@ -1598,6 +1626,7 @@ impl App {
                 self.sticker = sticker::State::default();
                 self.forward = forward::State::default();
                 self.poll = poll_create::State::default();
+                self.voice.reset();
                 self.threads.drop_all();
                 if let Phase::Account {
                     session, gateway, ..
@@ -1824,6 +1853,7 @@ impl App {
         self.sticker = sticker::State::default();
         self.forward = forward::State::default();
         self.poll = poll_create::State::default();
+        self.voice.reset();
         self.threads.drop_all();
         self.friends.reset();
         self.status.reset();
@@ -1944,6 +1974,49 @@ impl App {
         self.poll
             .update(event, context, &session.client)
             .map(Message::Poll)
+    }
+
+    /// The voice-message panel. A recording the user sent goes through the ordinary outbox as a
+    /// text-free message with one file, so its upload, progress, cancel, retry and ambiguity
+    /// handling are those of any attachment.
+    fn voice_event(&mut self, event: voice_record::Event) -> Task<Message> {
+        let Phase::Account { gateway, .. } = &self.phase else {
+            return Task::none();
+        };
+        let Some(channel) = gateway.timeline.channel_id else {
+            return Task::none();
+        };
+        let context = self.voice_context(gateway, channel);
+        let (task, file) = self.voice.update(event, &context);
+        if let Some(file) = file {
+            if gateway.controls.send_message_with_files(
+                channel,
+                String::new(),
+                vec![file],
+                false,
+                None,
+            ) {
+                self.voice.sent();
+            } else {
+                self.notice = Some("The message could not be queued. Try again.".to_owned());
+            }
+        }
+        task.map(Message::Voice)
+    }
+
+    fn voice_context(
+        &self,
+        gateway: &gateway::GatewayPanel,
+        channel: Snowflake,
+    ) -> voice_record::Context {
+        voice_record::Context {
+            channel,
+            can_send: gateway.timeline.can_send,
+            enabled: self.audio_preferences.voice_recording,
+            input: self.audio_preferences.input.choice.clone(),
+            output: self.audio_preferences.output.choice.clone(),
+            noise_suppression: self.audio_preferences.noise_suppression,
+        }
     }
 
     fn sticker_event(&mut self, event: sticker::Event) -> Task<Message> {
@@ -2300,6 +2373,12 @@ impl App {
                 && let Some(panel) = poll_create::view(&self.poll)
             {
                 banner_column = banner_column.push(panel.map(Message::Poll));
+            }
+            if let Some(channel) = gateway.timeline.channel_id
+                && let Some(panel) =
+                    voice_record::view(&self.voice, &self.voice_context(gateway, channel))
+            {
+                banner_column = banner_column.push(panel.map(Message::Voice));
             }
             if self.forward.is_open()
                 && let Some(panel) = forward::view(&self.forward, &forward_candidates(gateway))

@@ -266,6 +266,7 @@ fn compose_reason(error: ComposeError) -> &'static str {
     match error {
         ComposeError::Empty => "A message needs some text.",
         ComposeError::TooLong => "The message is too long for Discord.",
+        ComposeError::VoiceMessageAlone => "A voice message cannot carry text or other files.",
     }
 }
 

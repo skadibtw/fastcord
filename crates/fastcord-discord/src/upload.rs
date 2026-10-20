@@ -133,6 +133,16 @@ pub struct UploadFile {
     /// Set for a file this program made (a pasted image): it is deleted when
     /// the last copy of this value is dropped.
     temporary: Option<Arc<TempFile>>,
+    /// Set for a recorded voice message: it is sent with the voice-message flag.
+    voice: Option<VoiceMeta>,
+}
+
+/// What a voice-message attachment carries besides its audio.
+#[derive(Clone, PartialEq, Eq)]
+pub struct VoiceMeta {
+    pub duration_ms: u64,
+    /// Base64 of the 0-255 loudness samples.
+    pub waveform: String,
 }
 
 #[derive(PartialEq, Eq)]
@@ -176,6 +186,7 @@ impl UploadFile {
             size: metadata.len(),
             modified: metadata.modified().ok(),
             temporary: None,
+            voice: None,
         })
     }
 
@@ -186,6 +197,20 @@ impl UploadFile {
         let mut file = Self::inspect(path)?;
         file.temporary = Some(guard);
         Ok(file)
+    }
+
+    /// Marks this file as a voice message (flag, duration and waveform).
+    pub fn into_voice_message(mut self, duration_ms: u64, waveform: &[u8]) -> Self {
+        use base64::Engine;
+        self.voice = Some(VoiceMeta {
+            duration_ms,
+            waveform: base64::engine::general_purpose::STANDARD.encode(waveform),
+        });
+        self
+    }
+
+    pub fn is_voice_message(&self) -> bool {
+        self.voice.is_some()
     }
 
     pub fn filename(&self) -> &str {
@@ -245,6 +270,7 @@ pub struct UploadedFile {
     pub(crate) id: u32,
     pub(crate) filename: String,
     pub(crate) uploaded_filename: String,
+    pub(crate) voice: Option<VoiceMeta>,
 }
 
 impl fmt::Debug for UploadedFile {
@@ -486,6 +512,7 @@ impl<C: Clock> RestClient<C> {
                 id: index as u32,
                 filename: file.filename.clone(),
                 uploaded_filename: slot.upload_filename,
+                voice: file.voice.clone(),
             });
         }
         Ok(uploaded)

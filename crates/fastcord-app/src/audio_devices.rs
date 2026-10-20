@@ -28,6 +28,8 @@ pub struct Preferences {
     pub echo_cancellation: bool,
     /// Desktop notifications are on unless this is set (so `Default` is on).
     pub notifications_off: bool,
+    /// Experimental voice-message recording is offered (off until the user turns it on).
+    pub voice_recording: bool,
 }
 
 impl Default for Preferences {
@@ -38,6 +40,7 @@ impl Default for Preferences {
             noise_suppression: NoiseSuppression::default(),
             echo_cancellation: true,
             notifications_off: false,
+            voice_recording: false,
         }
     }
 }
@@ -195,6 +198,8 @@ pub fn view<'a>(
         checkbox(prefs.echo_cancellation).label("Echo cancellation").on_toggle(crate::Message::EchoCancellationChanged),
         text("Removes what your speakers play from your microphone, so others do not hear themselves. It needs a few seconds of speech to adapt, works best with the microphone and speakers in a fixed position, and is not needed with a headset."),
         checkbox(!prefs.notifications_off).label("Desktop notifications for DMs and mentions while the window is not active").on_toggle(crate::Message::NotificationsToggled),
+        checkbox(prefs.voice_recording).label("Voice message recording (experimental)").on_toggle(crate::Message::VoiceRecordingToggled),
+        text("Adds a Record voice message button to text channels: record, preview, then send. Discord documents voice-message recording for its mobile apps only, so whether it is accepted from this client is unverified. The microphone is open only while recording."),
         text(stats_summary(stats)),
         text(if settings.probing { "Looking for audio devices…" } else { "System default follows the OS only when selected. Refresh lists after plugging a device in." }),
         row![button("Refresh devices").on_press_maybe((!settings.probing).then_some(crate::Message::RefreshAudioDevices)), button("Close").on_press(crate::Message::CloseAudioSettings)].spacing(12),
@@ -251,6 +256,7 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
             _ => return None,
         },
         notifications_off: value.get("notifications_off").and_then(Value::as_bool) == Some(true),
+        voice_recording: value.get("voice_recording").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -266,7 +272,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "notifications_off": prefs.notifications_off}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -343,6 +349,7 @@ mod tests {
             noise_suppression: NoiseSuppression::HighQuality,
             echo_cancellation: false,
             notifications_off: true,
+            voice_recording: true,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);

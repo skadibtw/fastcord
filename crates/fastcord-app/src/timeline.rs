@@ -1047,6 +1047,7 @@ fn message_view<'a>(
             key,
             assets.views.get(&key),
             assets.media,
+            message.is_voice_message(),
         ));
     }
     for sticker in &message.sticker_items {
@@ -1400,6 +1401,7 @@ fn forwarded_view<'a>(
             key,
             assets.views.get(&key),
             assets.media,
+            false,
         ));
     }
     for sticker in &snapshot.sticker_items {
@@ -1456,6 +1458,7 @@ fn attachment_view(
     key: AttachmentKey,
     state: Option<&AttachmentView>,
     media: Option<&crate::media_ui::MediaSession>,
+    voice_message: bool,
 ) -> Element<'static, Event> {
     let ids = (key.channel, key.message, key.attachment);
     let mut content = column![
@@ -1492,7 +1495,7 @@ fn attachment_view(
         None => {}
     }
     if crate::media_ui::is_playable(attachment) {
-        content = content.push(crate::media_ui::view(media, key));
+        content = content.push(crate::media_ui::view(media, key, attachment, voice_message));
     }
     let mut actions = row![].spacing(4);
     if is_previewable_image(attachment) {

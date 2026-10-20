@@ -23,7 +23,7 @@ pub const MAX_REACTIONS: usize = 32;
 /// request path: far above any Unicode sequence or custom emoji name.
 pub const MAX_REACTION_EMOJI_NAME_BYTES: usize = 64;
 
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub id: Snowflake,
     pub filename: String,
@@ -38,6 +38,35 @@ pub struct Attachment {
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
+    /// Voice message length in seconds, as the sender reported it.
+    #[serde(default, deserialize_with = "bounded_duration")]
+    pub duration_secs: Option<f32>,
+    /// Voice message loudness envelope: base64 of at most [`MAX_WAVEFORM_CHARS`] characters.
+    /// Dropped when longer, so a hostile value cannot grow the message cache.
+    #[serde(default, deserialize_with = "bounded_waveform")]
+    pub waveform: Option<String>,
+}
+
+/// Longest base64 `waveform` kept (Discord sends 256 samples, about 344 characters).
+pub const MAX_WAVEFORM_CHARS: usize = 512;
+
+/// `IS_VOICE_MESSAGE` in a message's `flags`.
+pub const VOICE_MESSAGE_FLAG: u64 = 1 << 13;
+
+/// Never NaN or infinite, so comparing attachments stays reflexive (`Eq` below).
+fn bounded_duration<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
+    let value = Option::<f64>::deserialize(d)?;
+    Ok(value
+        .filter(|secs| secs.is_finite() && (0.0..=86_400.0).contains(secs))
+        .map(|secs| secs as f32))
+}
+
+// `duration_secs` is finite whenever it comes from the wire (see `bounded_duration`).
+impl Eq for Attachment {}
+
+fn bounded_waveform<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let value = Option::<String>::deserialize(d)?;
+    Ok(value.filter(|text| text.len() <= MAX_WAVEFORM_CHARS))
 }
 
 impl fmt::Debug for Attachment {
@@ -581,6 +610,11 @@ impl Message {
         (self.message_reference.as_ref()?.kind == FORWARD_REFERENCE)
             .then(|| self.message_snapshots.first().map(|s| &s.message))
             .flatten()
+    }
+
+    /// Whether Discord marked this as a voice message.
+    pub fn is_voice_message(&self) -> bool {
+        self.flags & VOICE_MESSAGE_FLAG != 0
     }
 
     /// An attachment of this message or of the snapshot it forwards.
@@ -1283,5 +1317,30 @@ mod tests {
         assert_ne!(after, before);
         after.reactions.clear();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn voice_message_metadata_is_read_and_hostile_values_are_dropped() {
+        let wire = |extra: serde_json::Value| -> Attachment {
+            let mut value = serde_json::json!({
+                "id": "1", "filename": "voice-message.ogg", "size": 10, "url": "https://x"
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(value).unwrap()
+        };
+        let ok = wire(serde_json::json!({"duration_secs": 3.25, "waveform": "AAEC"}));
+        assert_eq!(
+            (ok.duration_secs, ok.waveform.as_deref()),
+            (Some(3.25), Some("AAEC"))
+        );
+        let long = "A".repeat(MAX_WAVEFORM_CHARS + 1);
+        let hostile = wire(serde_json::json!({"duration_secs": -1.0, "waveform": long}));
+        assert_eq!((hostile.duration_secs, hostile.waveform), (None, None));
+        let huge = wire(serde_json::json!({"duration_secs": 1e30}));
+        assert_eq!(huge.duration_secs, None);
+        assert_eq!(wire(serde_json::json!({})).waveform, None);
     }
 }

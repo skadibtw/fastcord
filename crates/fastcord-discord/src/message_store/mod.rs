@@ -97,6 +97,7 @@ fn attachment_heap(attachment: &Attachment) -> usize {
         + attachment.url.capacity()
         + text(&attachment.proxy_url)
         + text(&attachment.content_type)
+        + text(&attachment.waveform)
 }
 
 fn user_heap(user: &User) -> usize {
@@ -235,6 +236,7 @@ fn compact_snapshot(snapshot: &mut SnapshotMessage) {
         attachment.url.shrink_to_fit();
         shrink_text(&mut attachment.proxy_url);
         shrink_text(&mut attachment.content_type);
+        shrink_text(&mut attachment.waveform);
     }
     snapshot.mentions.shrink_to_fit();
     for user in &mut snapshot.mentions {
@@ -263,6 +265,7 @@ fn compact(message: &mut Message) {
         attachment.url.shrink_to_fit();
         shrink_text(&mut attachment.proxy_url);
         shrink_text(&mut attachment.content_type);
+        shrink_text(&mut attachment.waveform);
     }
     message.mentions.shrink_to_fit();
     for user in &mut message.mentions {

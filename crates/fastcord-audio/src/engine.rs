@@ -2322,4 +2322,41 @@ mod tests {
         assert!(wanted > 0.01, "tone not heard on the device");
         assert!(wanted > 10.0 * off, "tone not dominant");
     }
+
+    #[test]
+    fn a_recording_is_a_playable_ogg_and_releases_the_microphone() {
+        use crate::ogg::OggOpus;
+        use crate::recorder::VoiceRecorder;
+        let fake = host(48_000, 48_000);
+        let backend = fake.clone();
+        let config = EngineConfig {
+            output: None,
+            echo_cancellation: false,
+            ..EngineConfig::default()
+        };
+        let recorder =
+            VoiceRecorder::spawn(AudioEngine::start_with(config, move || backend)).unwrap();
+        crate::denoise::fake::wait_until(|| recorder.snapshot().elapsed_ms >= 600);
+        assert!(recorder.snapshot().level > 0);
+        let recording = recorder.finish().unwrap();
+        assert_eq!(
+            fake.live_threads.load(Ordering::SeqCst),
+            0,
+            "microphone released"
+        );
+        assert_eq!(recording.waveform.len(), 256);
+        assert!(recording.waveform.iter().any(|&v| v > 0));
+        let ogg = OggOpus::open(std::io::Cursor::new(recording.ogg)).unwrap();
+        assert_eq!(ogg.duration_ms(), Some(recording.duration_ms));
+        // Cancelling (dropping) before any audio also releases it.
+        let backend = fake.clone();
+        let config = EngineConfig {
+            output: None,
+            ..EngineConfig::default()
+        };
+        let recorder =
+            VoiceRecorder::spawn(AudioEngine::start_with(config, move || backend)).unwrap();
+        drop(recorder);
+        assert_eq!(fake.live_threads.load(Ordering::SeqCst), 0);
+    }
 }

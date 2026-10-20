@@ -25,9 +25,10 @@ pub use embed::{
 pub use guild::{Guild, GuildEmoji, GuildMember, Role};
 pub use message::{
     Attachment, Emoji, FORWARD_REFERENCE, MAX_MESSAGE_SNAPSHOTS, MAX_REACTION_EMOJI_NAME_BYTES,
-    MAX_REACTIONS, MAX_STICKER_ITEMS, MAX_STICKER_NAME_CHARS, Message, MessageCall,
-    MessageReference, MessageSnapshot, MessageUpdate, REPLY_KIND, REPLY_PREVIEW_CHARS, Reaction,
-    ReactionChange, Referenced, ReplyPreview, SnapshotMessage, StickerItem,
+    MAX_REACTIONS, MAX_STICKER_ITEMS, MAX_STICKER_NAME_CHARS, MAX_WAVEFORM_CHARS, Message,
+    MessageCall, MessageReference, MessageSnapshot, MessageUpdate, REPLY_KIND, REPLY_PREVIEW_CHARS,
+    Reaction, ReactionChange, Referenced, ReplyPreview, SnapshotMessage, StickerItem,
+    VOICE_MESSAGE_FLAG,
 };
 pub use permissions::{
     GuildScope, MemberScope, OverwriteKind, PermissionOverwrite, Permissions, channel_permissions,

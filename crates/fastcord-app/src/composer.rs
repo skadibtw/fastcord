@@ -1850,6 +1850,8 @@ mod tests {
                 content_type: None,
                 width: None,
                 height: None,
+                duration_secs: None,
+                waveform: None,
             });
         let snapshot = showing(vec![sent(7, "text", true, None), with_file]);
         let mut composer = composer_in(A);

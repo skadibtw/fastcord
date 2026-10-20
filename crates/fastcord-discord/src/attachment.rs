@@ -24,6 +24,17 @@ impl fmt::Debug for RefreshedAttachmentUrl {
     }
 }
 
+/// The loudness samples (0-255) of a voice message's base64 `waveform`; empty when it is not
+/// valid base64. At most 512 are returned, whatever the input.
+pub fn decode_waveform(waveform: &str) -> Vec<u8> {
+    use base64::Engine;
+    let mut samples = base64::engine::general_purpose::STANDARD
+        .decode(waveform)
+        .unwrap_or_default();
+    samples.truncate(512);
+    samples
+}
+
 #[derive(Serialize)]
 pub(crate) struct RefreshRequest<'a> {
     pub attachment_urls: &'a [String],
@@ -81,5 +92,12 @@ mod tests {
         );
         let debug = format!("{:?}", response.refreshed_urls[0]);
         assert!(!debug.contains("marker"));
+    }
+
+    #[test]
+    fn waveforms_decode_and_garbage_is_empty() {
+        assert_eq!(decode_waveform("AAEC/w=="), vec![0, 1, 2, 255]);
+        assert!(decode_waveform("not base64!").is_empty());
+        assert_eq!(decode_waveform(&"AAAA".repeat(400)).len(), 512);
     }
 }
