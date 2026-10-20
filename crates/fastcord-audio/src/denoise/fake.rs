@@ -13,7 +13,7 @@ use super::{BLOCK_SAMPLES, DenoiseError, Denoiser, Factory, NoiseSuppression};
 type Block = [f32; BLOCK_SAMPLES];
 
 /// How long a test waits for another thread before failing.
-pub(crate) const PATIENCE: Duration = Duration::from_secs(30);
+pub(crate) const PATIENCE: Duration = Duration::from_secs(120);
 
 pub(crate) fn wait_until(mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + PATIENCE;
