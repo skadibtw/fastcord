@@ -1,0 +1,5 @@
+[
+  {"type": "github", "id": "123", "name": "alt-fixture", "visibility": 1, "verified": true, "show_activity": false},
+  {"type": "steam", "id": "7656", "name": "alt", "visibility": 0},
+  {"type": "weird", "id": "a/b?c", "name": "x", "visibility": true}
+]

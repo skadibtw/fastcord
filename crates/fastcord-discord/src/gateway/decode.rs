@@ -1164,6 +1164,7 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "GUILD_MEMBER_UPDATE" => {
             decode_member_event(raw).map(|m| Dispatch::GuildMemberUpdate(Box::new(m)))
         }
+        "USER_UPDATE" => json::<WireUser>(raw).map(|u| Dispatch::UserUpdate(Box::new(u.into()))),
         "GUILD_MEMBER_REMOVE" => decode_member_remove(raw).map(Dispatch::GuildMemberRemove),
         "GUILD_ROLE_CREATE" => {
             json::<GuildRoleEvent>(raw).map(|r| Dispatch::GuildRoleCreate(Box::new(r)))

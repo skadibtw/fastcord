@@ -587,6 +587,19 @@ Evidence: community documentation of `TYPING_START` and `POST /channels/{id}/typ
 - Jump: opening a row selects the conversation and then uses the existing first-unread jump; a mention uses the existing `JumpTo`. A conversation that never opens ends the wait after 10 s with the usual "cannot open" notice.
 - Excluded: Nitro message bookmarks and reminders.
 
+## Free profile editing (#79)
+
+Each request is sent once, on one explicit click, at `UserWrite` priority, with at most one in flight from the panel; none is retried, a 401 stops the account, and the display changes only from Gateway events. Wire shapes are from community documentation of the official client and are unverified live.
+
+- **Display name:** `PATCH /users/@me` `{"global_name":"..."}` (trimmed, at most 32 characters); empty sends `null`. The answer is parsed as the user object but the display follows `USER_UPDATE`.
+- **Avatar:** `PATCH /users/@me` `{"avatar":"data:image/<png|jpeg>;base64,..."}` or `{"avatar":null}`. The same bounded helper as group icons (`image_data`: signature check, 512 KiB cap, base64 inside the 1 MiB request budget) but GIF is refused, since an animated avatar needs Nitro. Server-reported eligibility stays authoritative.
+- **Bio and pronouns:** `PATCH /users/@me/profile` with only the changed fields (`bio` at most 190, `pronouns` at most 40 characters). Current values come from one `GET /users/{me}/profile` when the panel opens; without it the fields are read-only.
+- **Own nickname:** `PATCH /guilds/{guild}/members/@me` `{"nick":"..."|null}` (at most 32, for the selected server); the nickname shown is from `GUILD_MEMBER_UPDATE`, which also drives voice participant names.
+- **Connections:** `GET /users/@me/connections` when the user clicks Load (at most 32 kept, names capped); `PATCH /users/@me/connections/{type}/{id}` `{"visibility":true|false}`. `type` and `id` must be `[A-Za-z0-9_.-]` or the row is read-only. The new state is shown from the success answer (no event exists for it).
+- **`USER_UPDATE`:** applied only when it carries the account's own ID, as a whole-object replace (a replay is silent). It sets `Changes::account` and the snapshot's `current_user`.
+- **Contextual identity:** no new request. `NavigationSnapshot` carries `members` (held members of the selected guild, at most 1024, nickname clipped to 128 bytes, role IDs) and `guild_roles` (at most 250, highest position first, `@everyone` omitted), rebuilt only with the snapshot. Message authors show `members[author].nick`, else `global_name`, else `username` (empty in DMs); the profile card shows the nickname, the roles of a held member and the presence table's custom status. A member that is not held is not described. Role colours are not in the model and are not drawn. The message `member` field is still not ingested.
+- **Not done by design:** username change (needs the password and possibly 2FA/CAPTCHA, shown as a pointer to the official client), banner, animated avatar, theme colors, effects, per-server profile cosmetics. A 400 is explained as a limit or verification only the official client can complete; the typed values are kept.
+
 ## Group DM management (#78)
 
 Every request is sent once, on one explicit click, at `UserWrite` priority, with at most one in flight from the panel; none is retried, a 401 stops the account, and the conversation changes only when the matching Gateway event arrives (so changes made in another client converge the same way). Wire shapes are from community documentation of the official client and are unverified live.

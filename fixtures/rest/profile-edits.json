@@ -1,0 +1,10 @@
+{
+  "display_name": {"global_name": "Alt"},
+  "display_name_clear": {"global_name": null},
+  "avatar": {"avatar": "data:image/png;base64,iVBORw0KGgp4eXo="},
+  "avatar_clear": {"avatar": null},
+  "profile": {"bio": "Hi", "pronouns": "they/them"},
+  "profile_bio_only": {"bio": ""},
+  "nick": {"nick": "Nell"},
+  "nick_clear": {"nick": null}
+}

@@ -20,6 +20,7 @@ pub mod gateway;
 mod gif;
 mod group_dm;
 pub mod history;
+mod image_data;
 mod inbox;
 pub mod message_store;
 mod password_auth;
@@ -27,6 +28,7 @@ mod pins;
 mod poll;
 mod presence;
 mod private_channel;
+mod profile_edit;
 mod rate_limit;
 mod reaction;
 mod relationship;
@@ -62,6 +64,10 @@ pub use pins::{PINS_PAGE_SIZE, PinnedMessage, PinsPage};
 pub use poll::{POLL_MAX_HOURS, PollDraft, PollError};
 pub use presence::StatusChange;
 pub use private_channel::{MAX_PRIVATE_RECIPIENTS, PrivateChannelError};
+pub use profile_edit::{
+    AccountEdit, AvatarImage, Connection, MAX_BIO_CHARS, MAX_DISPLAY_NAME_CHARS, MAX_NICK_CHARS,
+    MAX_PRONOUNS_CHARS, ProfileError, ProfileRequestError, ProfileText, parse_connections,
+};
 pub use reaction::{ReactionEmoji, ReactionEmojiError, ReactionUser};
 pub use relationship::{Profile, RelationshipAction, UsernameError, parse_profile, parse_username};
 pub use remote_auth::{QrLink, RemoteAuth, RemoteAuthError, RemoteAuthEvent, RemoteUser};

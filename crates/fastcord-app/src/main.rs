@@ -29,6 +29,7 @@ mod pins;
 mod playback;
 mod poll_create;
 mod polls;
+mod profile_edit;
 mod qr;
 mod reactions;
 mod render;
@@ -122,6 +123,7 @@ struct App {
     pins: pins::State,
     inbox: inbox::State,
     group: group_dm::State,
+    identity: profile_edit::State,
     gif: gif::State,
     sticker: sticker::State,
     forward: forward::State,
@@ -259,6 +261,7 @@ enum Message {
     Pins(pins::Event),
     Inbox(inbox::Event),
     Group(group_dm::Event),
+    Identity(profile_edit::Event),
     Gif(gif::Event),
     Sticker(sticker::Event),
     Forward(forward::Event),
@@ -322,6 +325,7 @@ impl App {
                 pins: pins::State::default(),
                 inbox: inbox::State::default(),
                 group: group_dm::State::default(),
+                identity: profile_edit::State::default(),
                 gif: gif::State::default(),
                 sticker: sticker::State::default(),
                 forward: forward::State::default(),
@@ -379,7 +383,7 @@ impl App {
         gateway
             .controls
             .emoji_request(&gateway.emoji_picker.request);
-        let wanted = wanted_avatars(gateway, &session.user);
+        let wanted = wanted_avatars(gateway, own_user(gateway, session));
         let avatars = gateway
             .avatars
             .synchronize(wanted, gateway.id, gateway.attachments.as_ref());
@@ -877,6 +881,7 @@ impl App {
                             .as_ref()
                             .map(|selection| selection.channel_id),
                     );
+                    self.identity.sync(&gateway.navigation);
                     self.poll.sync(gateway.timeline.channel_id);
                     self.voice.sync(gateway.timeline.channel_id);
                 }
@@ -891,6 +896,7 @@ impl App {
             Message::Pins(event) => return self.pins_event(event),
             Message::Inbox(event) => return self.inbox_event(event),
             Message::Group(event) => return self.group_event(event),
+            Message::Identity(event) => return self.identity_event(event),
             Message::Gif(event) => return self.gif_event(event),
             Message::Sticker(event) => return self.sticker_event(event),
             Message::Forward(event) => return self.forward_event(event),
@@ -1700,6 +1706,7 @@ impl App {
                 self.pins = pins::State::default();
                 self.inbox.clear();
                 self.group.clear();
+                self.identity.clear();
                 self.gif = gif::State::default();
                 self.sticker = sticker::State::default();
                 self.forward = forward::State::default();
@@ -1929,6 +1936,7 @@ impl App {
         self.pins = pins::State::default();
         self.inbox.clear();
         self.group.clear();
+        self.identity.clear();
         self.gif = gif::State::default();
         self.sticker = sticker::State::default();
         self.forward = forward::State::default();
@@ -2147,6 +2155,31 @@ impl App {
             ));
         }
         task.map(Message::Group)
+    }
+
+    fn identity_event(&mut self, event: profile_edit::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = profile_edit::State::is_rejected(&event);
+        let task = self.identity.update(
+            event,
+            &gateway.navigation,
+            own_user(gateway, session),
+            &session.client,
+        );
+        if rejected {
+            let id = gateway.id;
+            // Discord rejected the login: stop the account like any other 401.
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Identity)
     }
 
     fn inbox_event(&mut self, event: inbox::Event) -> Task<Message> {
@@ -2536,6 +2569,13 @@ impl App {
             if let Some(panel) = group_dm::view(&self.group, &gateway.navigation, session.user.id) {
                 banner_column = banner_column.push(panel.map(Message::Group));
             }
+            if let Some(panel) = profile_edit::view(
+                &self.identity,
+                &gateway.navigation,
+                own_user(gateway, session),
+            ) {
+                banner_column = banner_column.push(panel.map(Message::Identity));
+            }
             if self.forward.is_open()
                 && let Some(panel) = forward::view(&self.forward, &forward_candidates(gateway))
             {
@@ -2581,7 +2621,8 @@ impl App {
             let banner: Option<Element<'_, Message>> = Some(banner_column.into());
 
             // ---- the user's panel at the foot of the sidebar ----
-            let display = session.user.display_name().to_owned();
+            let me = own_user(gateway, session);
+            let display = me.display_name().to_owned();
             let own = gateway.navigation.presences.get(&session.user.id);
             let own_status = self.status.status(own);
             let mut foot = column![];
@@ -2638,10 +2679,7 @@ impl App {
                     row![
                         avatars::view(
                             &gateway.avatars.views,
-                            &avatars::AvatarKey::user(
-                                session.user.id,
-                                session.user.avatar.as_deref(),
-                            ),
+                            &avatars::AvatarKey::user(me.id, me.avatar.as_deref(),),
                             32.0,
                             || container(text(style::initial(&display)).size(14).font(bold))
                                 .center(32)
@@ -2704,6 +2742,9 @@ impl App {
                             !voice_controls.deafened,
                             voice_controls.deafened
                         )),
+                        button(text("Me").size(12))
+                            .on_press(Message::Identity(profile_edit::Event::Toggle))
+                            .style(style::tool_button(self.identity.is_open(), false)),
                         button(text("Audio").size(12))
                             .on_press(Message::OpenAudioSettings)
                             .style(style::tool_button(true, false)),
@@ -2734,6 +2775,11 @@ impl App {
                     emojis: &gateway.emoji.views,
                     avatars: &gateway.avatars.views,
                     revealed: &gateway.revealed,
+                    members: if gateway.directs {
+                        &NO_MEMBERS
+                    } else {
+                        &gateway.navigation.members
+                    },
                 },
                 voice_audio,
                 navigation::Chrome {
@@ -2761,6 +2807,11 @@ impl App {
                 &self.friends,
                 &gateway.navigation.relationships,
                 session.user.id,
+                friends::MemberContext::of(
+                    self.friends.profile_user(),
+                    &gateway.navigation,
+                    gateway.directs,
+                ),
             ) {
                 Some(popup) => iced::widget::stack![account, popup.map(Message::Friends)].into(),
                 None => account.into(),
@@ -3061,6 +3112,27 @@ fn forward_candidates(gateway: &gateway::GatewayPanel) -> Vec<forward::Candidate
         .chain(conversations)
         .take(forward::MAX_CANDIDATES)
         .collect()
+}
+
+static NO_MEMBERS: std::sync::LazyLock<
+    std::collections::HashMap<
+        fastcord_model::Snowflake,
+        fastcord_discord::state::navigation::MemberView,
+    >,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The account as the Gateway last reported it (display name and avatar
+/// change through `USER_UPDATE`); the login's copy until the first READY.
+fn own_user<'a>(
+    gateway: &'a gateway::GatewayPanel,
+    session: &'a login::Session,
+) -> &'a fastcord_model::User {
+    gateway
+        .navigation
+        .current_user
+        .as_ref()
+        .filter(|user| user.id == session.user.id)
+        .unwrap_or(&session.user)
 }
 
 /// Avatars and icons the shown rows ask for: the user's own, the rail window,

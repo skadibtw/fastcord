@@ -25,6 +25,18 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use super::{GuildEntry, Store, Unread};
 use crate::gateway::SubscriptionTarget;
 
+/// Held members copied into one snapshot, and roles listed with them.
+pub const MAX_SNAPSHOT_MEMBERS: usize = 1024;
+pub const MAX_SNAPSHOT_ROLES: usize = 250;
+const MAX_NICK_BYTES: usize = 128;
+
+/// What a message author or profile card needs of a held guild member.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemberView {
+    pub nick: Option<String>,
+    pub roles: Vec<Snowflake>,
+}
+
 /// Absolute response row cap, independent of a caller's requested viewport.
 pub const MAX_WINDOW_ROWS: usize = 128;
 /// UTF-8 byte cap for each name copied into a read model.
@@ -230,6 +242,15 @@ pub struct NavigationSnapshot {
     pub selected_guild: Option<Snowflake>,
     /// The selected guild's name, empty when none is selected.
     pub selected_guild_name: String,
+    /// The account's own nickname in the selected guild, if it has one.
+    pub own_nick: Option<String>,
+    /// The account's own user object as the Gateway last reported it.
+    pub current_user: Option<fastcord_model::User>,
+    /// Held members of the selected guild (at most [`MAX_SNAPSHOT_MEMBERS`]),
+    /// for server nicknames and profile roles. Empty outside a guild.
+    pub members: std::collections::HashMap<Snowflake, MemberView>,
+    /// The selected guild's roles, highest first, without `@everyone`.
+    pub guild_roles: Vec<(Snowflake, String)>,
     pub selection: Option<ChannelSelection>,
     /// Available guild lacks authoritative own-member/role/owner data.
     pub permissions_pending: bool,
@@ -588,6 +609,47 @@ impl Navigation {
                 .map_or_else(String::new, |guild| {
                     capped_name(Some(guild.name()), "Unnamed guild")
                 }),
+            current_user: store.current_user().cloned(),
+            members: selected_guild
+                .and_then(|id| store.guild(id))
+                .map(|guild| {
+                    guild
+                        .members()
+                        .take(MAX_SNAPSHOT_MEMBERS)
+                        .map(|m| {
+                            (
+                                m.user_id,
+                                MemberView {
+                                    nick: m
+                                        .nick
+                                        .as_deref()
+                                        .filter(|n| !n.is_empty())
+                                        .map(|n| clip_bytes(n, MAX_NICK_BYTES)),
+                                    roles: m.roles.clone(),
+                                },
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            guild_roles: selected_guild
+                .and_then(|id| store.guild(id).map(|g| (id, g)))
+                .map(|(id, guild)| {
+                    let mut roles: Vec<_> =
+                        guild.roles().iter().filter(|role| role.id != id).collect();
+                    roles.sort_by_key(|role| std::cmp::Reverse(role.position));
+                    roles
+                        .into_iter()
+                        .take(MAX_SNAPSHOT_ROLES)
+                        .map(|role| (role.id, capped_name(Some(&role.name), "Role")))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            own_nick: selected_guild
+                .and_then(|id| store.guild(id))
+                .zip(store.current_user())
+                .and_then(|(guild, me)| guild.member(me.id))
+                .and_then(|member| member.nick.clone()),
             selected_guild,
             selection: self.selection(store),
             permissions_pending,
@@ -650,6 +712,14 @@ fn known_guild(store: &Store, id: Snowflake) -> bool {
 /// What a channel row shows.
 fn unread_of(store: &Store, channel: &Channel) -> Unread {
     store.unread(channel.id, channel.guild_id, channel.last_message_id)
+}
+
+fn clip_bytes(value: &str, limit: usize) -> String {
+    let mut end = value.len().min(limit);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 fn capped_name(value: Option<&str>, fallback: &str) -> String {

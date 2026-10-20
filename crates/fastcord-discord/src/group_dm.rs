@@ -5,16 +5,16 @@
 //! `CHANNEL_UPDATE`, `CHANNEL_RECIPIENT_*` or `CHANNEL_DELETE` arrives.
 //! Unverified against a live account (`docs/TESTING.md`).
 
-use base64::Engine;
 use fastcord_model::Snowflake;
 use reqwest::Method;
 
+use crate::image_data::{ImageError, MAX_IMAGE_BYTES, data_uri};
 use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route};
 
 /// Longest group name Discord accepts.
 pub const MAX_GROUP_NAME_CHARS: usize = 100;
 /// Largest icon image read. The base64 form must fit the 1 MiB request budget.
-pub const MAX_ICON_BYTES: usize = 512 * 1024;
+pub const MAX_ICON_BYTES: usize = MAX_IMAGE_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupError {
@@ -38,20 +38,12 @@ impl IconImage {
     /// Accepts a PNG, JPEG or GIF of at most [`MAX_ICON_BYTES`], judged by its
     /// signature rather than its file name.
     pub fn new(bytes: &[u8]) -> Result<Self, GroupError> {
-        let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            "image/png"
-        } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-            "image/jpeg"
-        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-            "image/gif"
-        } else {
-            return Err(GroupError::UnsupportedImage);
-        };
-        if bytes.len() > MAX_ICON_BYTES {
-            return Err(GroupError::ImageTooLarge);
-        }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-        Ok(Self(format!("data:{mime};base64,{encoded}")))
+        data_uri(bytes, true)
+            .map(Self)
+            .map_err(|error| match error {
+                ImageError::Unsupported => GroupError::UnsupportedImage,
+                ImageError::TooLarge => GroupError::ImageTooLarge,
+            })
     }
 }
 

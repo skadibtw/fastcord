@@ -573,6 +573,8 @@ pub enum Dispatch {
     GuildMemberAdd(Box<GuildMemberEvent>),
     GuildMemberUpdate(Box<GuildMemberEvent>),
     GuildMemberRemove(GuildMemberRemove),
+    /// The account's own user object changed (display name, avatar, ...).
+    UserUpdate(Box<User>),
     GuildRoleCreate(Box<GuildRoleEvent>),
     GuildRoleUpdate(Box<GuildRoleEvent>),
     GuildRoleDelete(GuildRoleDelete),
@@ -633,6 +635,7 @@ impl Dispatch {
             Self::GuildMemberAdd(_) => "GUILD_MEMBER_ADD",
             Self::GuildMemberUpdate(_) => "GUILD_MEMBER_UPDATE",
             Self::GuildMemberRemove(_) => "GUILD_MEMBER_REMOVE",
+            Self::UserUpdate(_) => "USER_UPDATE",
             Self::GuildRoleCreate(_) => "GUILD_ROLE_CREATE",
             Self::GuildRoleUpdate(_) => "GUILD_ROLE_UPDATE",
             Self::GuildRoleDelete(_) => "GUILD_ROLE_DELETE",

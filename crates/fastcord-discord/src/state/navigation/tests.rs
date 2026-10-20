@@ -882,7 +882,10 @@ fn large_store_windows_names_offsets_and_remembered_selections_are_bounded() {
     assert!(navigation.selected_guild().is_none());
     assert_eq!(
         navigation.snapshot(&store, 0, 128, 0, 128),
-        NavigationSnapshot::default()
+        NavigationSnapshot {
+            current_user: store.current_user().cloned(),
+            ..NavigationSnapshot::default()
+        }
     );
     assert_eq!(store.bytes(), store.recount());
 }
@@ -1525,4 +1528,40 @@ fn group_membership_owner_name_and_icon_converge_and_replays_are_harmless() {
     apply(&mut store, "CHANNEL_RECIPIENT_REMOVE", &leave);
     navigation.reconcile(&store);
     assert!(navigation.private_selection(&store).is_none());
+}
+
+#[test]
+fn own_nick_members_and_roles_follow_the_selected_guild_and_member_events() {
+    let (mut store, mut navigation) = setup(NAV_READY);
+    assert!(navigation.select_guild(&store, id(100)));
+    let snapshot = navigation.snapshot(&store, 0, 128, 0, 128);
+    assert_eq!(snapshot.own_nick, None);
+    // @everyone is not listed; the rest are highest position first.
+    assert_eq!(
+        snapshot.guild_roles,
+        [
+            (id(102), "Allowed".to_owned()),
+            (id(101), "Voice".to_owned())
+        ]
+    );
+    assert_eq!(snapshot.members[&id(1)].roles, [id(101), id(102)]);
+    assert_eq!(snapshot.members[&id(1)].nick, None);
+
+    let set = r#"{"guild_id":"100","user":{"id":"1"},"nick":"Nell"}"#;
+    apply(&mut store, "GUILD_MEMBER_UPDATE", set);
+    apply(&mut store, "GUILD_MEMBER_UPDATE", set); // replay
+    let snapshot = navigation.snapshot(&store, 0, 128, 0, 128);
+    assert_eq!(snapshot.own_nick.as_deref(), Some("Nell"));
+    assert_eq!(snapshot.members[&id(1)].nick.as_deref(), Some("Nell"));
+    assert_eq!(snapshot.members[&id(1)].roles, [id(101), id(102)]);
+
+    // An explicit null clears it; an empty nickname is no nickname.
+    apply(
+        &mut store,
+        "GUILD_MEMBER_UPDATE",
+        r#"{"guild_id":"100","user":{"id":"1"},"nick":null}"#,
+    );
+    let snapshot = navigation.snapshot(&store, 0, 128, 0, 128);
+    assert_eq!(snapshot.own_nick, None);
+    assert_eq!(snapshot.members[&id(1)].nick, None);
 }

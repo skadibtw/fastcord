@@ -148,6 +148,11 @@ fn username_failure(error: UsernameError) -> &'static str {
 }
 
 impl State {
+    /// Whose profile card is open.
+    pub fn profile_user(&self) -> Option<Snowflake> {
+        self.profile.as_ref().map(|view| view.user.id)
+    }
+
     /// Forgets everything about the previous account or session.
     pub fn reset(&mut self) {
         *self = Self {
@@ -512,11 +517,64 @@ pub fn view<'a>(
         .into()
 }
 
+/// What the open server and the presence table add to a profile card.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemberContext<'a> {
+    pub server: Option<&'a str>,
+    pub nick: Option<&'a str>,
+    /// The member's roles in the open server, highest first.
+    pub roles: [Option<&'a str>; MAX_ROLES_SHOWN],
+    pub more_roles: usize,
+    /// The custom status already in the presence table (no game detection).
+    pub custom: Option<&'a str>,
+}
+
+/// Roles drawn on a card; the rest are counted.
+pub const MAX_ROLES_SHOWN: usize = 12;
+
+impl<'a> MemberContext<'a> {
+    pub fn of(
+        user: Option<Snowflake>,
+        navigation: &'a fastcord_discord::state::navigation::NavigationSnapshot,
+        directs: bool,
+    ) -> Self {
+        let Some(user) = user else {
+            return Self::default();
+        };
+        let mut context = Self {
+            custom: navigation
+                .presences
+                .get(&user)
+                .and_then(|p| p.custom.as_deref()),
+            ..Self::default()
+        };
+        if directs || navigation.selected_guild.is_none() {
+            return context;
+        }
+        // A member not held is simply not described: roles are never guessed.
+        if let Some(member) = navigation.members.get(&user) {
+            context.server = Some(navigation.selected_guild_name.as_str());
+            context.nick = member.nick.as_deref();
+            let mut names = navigation
+                .guild_roles
+                .iter()
+                .filter(|(id, _)| member.roles.contains(id))
+                .map(|(_, name)| name.as_str());
+            for slot in &mut context.roles {
+                *slot = names.next();
+            }
+            context.more_roles = names.count();
+        }
+        context
+    }
+}
+
 /// The profile popup over the screen, while one is open.
 pub fn profile_view<'a>(
     state: &'a State,
     relationships: &'a [Relationship],
     me: Snowflake,
+    context: MemberContext<'a>,
 ) -> Option<Element<'a, Event>> {
     let view = state.profile.as_ref()?;
     let user = &view.user;
@@ -544,6 +602,30 @@ pub fn profile_view<'a>(
     }
     if let Some(kind) = kind {
         card = card.push(text(kind_label(kind)).size(12).style(text::secondary));
+    }
+    if let Some(custom) = context.custom {
+        card = card.push(text(custom).size(12));
+    }
+    if let (Some(server), true) = (
+        context.server,
+        context.roles[0].is_some() || context.nick.is_some(),
+    ) {
+        if let Some(nick) = context.nick {
+            card = card.push(text(format!("Nickname in {server}: {nick}")).size(12));
+        }
+        if context.roles[0].is_some() {
+            let mut line = context
+                .roles
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if context.more_roles > 0 {
+                line.push_str(&format!(" and {} more", context.more_roles));
+            }
+            card = card.push(text(format!("Roles in {server}: {line}")).size(12));
+        }
     }
     match &view.state {
         ProfileState::Loading => {
@@ -796,7 +878,58 @@ mod tests {
             let _ = view(&state, &rows, &online);
         }
         let _ = state.update(Event::Profile(user(1)), &client);
-        assert!(profile_view(&state, &rows, Snowflake(1)).is_some());
-        assert!(profile_view(&state, &rows, Snowflake(99)).is_some());
+        assert!(profile_view(&state, &rows, Snowflake(1), MemberContext::default()).is_some());
+        assert!(profile_view(&state, &rows, Snowflake(99), MemberContext::default()).is_some());
+    }
+}
+
+#[cfg(test)]
+mod member_context_tests {
+    use super::*;
+    use fastcord_discord::state::navigation::{MemberView, NavigationSnapshot};
+
+    #[test]
+    fn roles_and_nick_show_only_for_a_held_member_of_the_open_server() {
+        let mut navigation = NavigationSnapshot {
+            selected_guild: Some(Snowflake(100)),
+            selected_guild_name: "Home".into(),
+            guild_roles: vec![
+                (Snowflake(3), "Mod".into()),
+                (Snowflake(2), "Fan".into()),
+                (Snowflake(1), "Other".into()),
+            ],
+            ..NavigationSnapshot::default()
+        };
+        navigation.members.insert(
+            Snowflake(7),
+            MemberView {
+                nick: Some("Bee".into()),
+                roles: vec![Snowflake(2), Snowflake(3)],
+            },
+        );
+        let held = MemberContext::of(Some(Snowflake(7)), &navigation, false);
+        assert_eq!(held.server, Some("Home"));
+        assert_eq!(held.nick, Some("Bee"));
+        assert_eq!(held.roles[..3], [Some("Mod"), Some("Fan"), None]);
+        assert_eq!(held.more_roles, 0);
+        // Not held, in a DM, or no card: nothing is guessed.
+        assert!(
+            MemberContext::of(Some(Snowflake(8)), &navigation, false)
+                .server
+                .is_none()
+        );
+        assert!(
+            MemberContext::of(Some(Snowflake(7)), &navigation, true)
+                .server
+                .is_none()
+        );
+        assert!(MemberContext::of(None, &navigation, false).roles[0].is_none());
+        // Many roles are counted, not all drawn.
+        navigation.guild_roles = (1..=20).map(|i| (Snowflake(i), format!("r{i}"))).collect();
+        navigation.members.get_mut(&Snowflake(7)).unwrap().roles =
+            (1..=20).map(Snowflake).collect();
+        let many = MemberContext::of(Some(Snowflake(7)), &navigation, false);
+        assert_eq!(many.roles.iter().flatten().count(), MAX_ROLES_SHOWN);
+        assert_eq!(many.more_roles, 20 - MAX_ROLES_SHOWN);
     }
 }

@@ -104,14 +104,20 @@ fn describe(error: RestError) -> String {
     }
 }
 
-fn read_icon(path: &std::path::Path) -> Result<IconImage, &'static str> {
+/// Reads at most one byte more than the image limit, so an oversized file is
+/// detected without being loaded whole. Blocking: call from a worker.
+pub(crate) fn read_image_bytes(path: &std::path::Path) -> Result<Vec<u8>, &'static str> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|_| "The image could not be read.")?;
     let mut bytes = Vec::new();
     file.take(MAX_ICON_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "The image could not be read.")?;
-    IconImage::new(&bytes).map_err(|error| match error {
+    Ok(bytes)
+}
+
+fn read_icon(path: &std::path::Path) -> Result<IconImage, &'static str> {
+    IconImage::new(&read_image_bytes(path)?).map_err(|error| match error {
         GroupError::ImageTooLarge => "The image is larger than 512 KiB.",
         GroupError::UnsupportedImage => "Choose a PNG, JPEG or GIF image.",
         GroupError::NameTooLong => "The name is too long.",

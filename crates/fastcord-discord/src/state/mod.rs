@@ -269,6 +269,11 @@ impl GuildEntry {
         self.members.get(&user).map(|slot| &slot.member)
     }
 
+    /// The members currently held (a subset of the guild, never all of it).
+    pub fn members(&self) -> impl Iterator<Item = &GuildMember> {
+        self.members.values().map(|slot| &slot.member)
+    }
+
     pub fn members_held(&self) -> usize {
         self.members.len()
     }
@@ -550,6 +555,8 @@ pub struct Changes {
     pub calls: bool,
     /// A referenced user's presence changed.
     pub presence: bool,
+    /// The account's own user object changed.
+    pub account: bool,
 }
 
 impl Changes {
@@ -1147,6 +1154,14 @@ impl Store {
             Dispatch::MemberListUpdate(update) => self.member_list_update(*update, &mut changes),
             Dispatch::GuildMemberAdd(event) => self.member_event(*event, true, &mut changes),
             Dispatch::GuildMemberUpdate(event) => self.member_event(*event, false, &mut changes),
+            Dispatch::UserUpdate(user) => {
+                // Only the account's own object arrives here, and it is whole:
+                // replace it. A replay changes nothing.
+                if self.current_user == Some(user.id) && self.users.get(&user.id) != Some(&*user) {
+                    self.put_user(*user);
+                    changes.account = true;
+                }
+            }
             Dispatch::GuildMemberRemove(removed) => {
                 let known = self.with_guild(removed.guild_id, |entry| {
                     entry.take_member(removed.user_id);

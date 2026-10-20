@@ -598,6 +598,18 @@ pub struct Attachments<'a> {
     pub emojis: &'a HashMap<emoji::Asset, emoji::View>,
     pub avatars: &'a HashMap<crate::avatars::AvatarKey, iced::widget::image::Handle>,
     pub revealed: &'a std::collections::HashSet<(Snowflake, u16)>,
+    /// Held members of the open server, for nicknames (empty in a DM).
+    pub members: &'a HashMap<Snowflake, fastcord_discord::state::navigation::MemberView>,
+}
+
+/// The name a message author is shown under: server nickname, else the
+/// display name, else the username (the order voice participants use).
+fn author_name<'a>(message: &'a Message, assets: Attachments<'a>) -> &'a str {
+    assets
+        .members
+        .get(&message.author.id)
+        .and_then(|member| member.nick.as_deref())
+        .unwrap_or_else(|| message.author.display_name())
 }
 
 pub fn view<'a>(
@@ -955,7 +967,7 @@ fn message_view<'a>(
     let message_id = message.id;
     let state = row_state(row, interaction);
     let mut header = row![
-        button(text(message.author.display_name()).font(BOLD).size(15))
+        button(text(author_name(message, assets)).font(BOLD).size(15))
             .padding(0)
             .style(style::plain_button)
             .on_press_with(|| Event::OpenProfile(message.author.clone())),
@@ -1152,7 +1164,7 @@ fn message_view<'a>(
     let gutter: Element<'a, Event> = if continues {
         container(text("")).width(40).into()
     } else {
-        let name = message.author.display_name();
+        let name = author_name(message, assets);
         let key =
             crate::avatars::AvatarKey::user(message.author.id, message.author.avatar.as_deref());
         button(crate::avatars::view(assets.avatars, &key, 40.0, || {
@@ -1798,6 +1810,9 @@ mod tests {
         static AVATARS: std::sync::LazyLock<
             HashMap<crate::avatars::AvatarKey, iced::widget::image::Handle>,
         > = std::sync::LazyLock::new(HashMap::new);
+        static MEMBERS: std::sync::LazyLock<
+            HashMap<Snowflake, fastcord_discord::state::navigation::MemberView>,
+        > = std::sync::LazyLock::new(HashMap::new);
         Attachments {
             account: Snowflake(1),
             views,
@@ -1805,7 +1820,40 @@ mod tests {
             emojis: &EMOJI,
             avatars: &AVATARS,
             revealed: &REVEALED,
+            members: &MEMBERS,
         }
+    }
+
+    #[test]
+    fn authors_are_named_nickname_then_display_name_then_username() {
+        let mut message: Message = serde_json::from_str(
+            r#"{"id":"5","channel_id":"1","author":{"id":"2","username":"bee","global_name":"Bee"},"content":"x","timestamp":"2026-10-20T10:00:00.000000+00:00"}"#,
+        )
+        .unwrap();
+        let views = no_views();
+        let mut members = HashMap::new();
+        fn with<'a>(
+            members: &'a HashMap<Snowflake, fastcord_discord::state::navigation::MemberView>,
+            views: &'a HashMap<AttachmentKey, AttachmentView>,
+        ) -> Attachments<'a> {
+            Attachments {
+                members,
+                ..assets(views)
+            }
+        }
+        assert_eq!(author_name(&message, with(&members, views)), "Bee");
+        members.insert(
+            Snowflake(2),
+            fastcord_discord::state::navigation::MemberView {
+                nick: Some("Queen".into()),
+                roles: Vec::new(),
+            },
+        );
+        assert_eq!(author_name(&message, with(&members, views)), "Queen");
+        // A member without a nickname falls back, and so does a bare username.
+        members.get_mut(&Snowflake(2)).unwrap().nick = None;
+        message.author.global_name = None;
+        assert_eq!(author_name(&message, with(&members, views)), "bee");
     }
 
     fn attachment_key(message: u64) -> AttachmentKey {

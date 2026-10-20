@@ -229,3 +229,42 @@ fn permission_metadata_changes_release_stale_rows_before_replacement_sync() {
         "everyone"
     );
 }
+
+#[test]
+fn user_update_replaces_only_the_accounts_own_user_and_a_replay_is_silent() {
+    const ME: &str = r#"{"id":"175928847299117063","username":"alt_fixture","global_name":"Renamed","avatar":"abc"}"#;
+    let mut store = store();
+    let changes = store.apply(GatewayEvent::Dispatch {
+        sequence: 2,
+        event: decode_fixture("USER_UPDATE", ME),
+    });
+    assert!(changes.account);
+    let me = store.current_user().unwrap();
+    assert_eq!(me.display_name(), "Renamed");
+    assert_eq!(me.avatar.as_deref(), Some("abc"));
+    assert_eq!(store.bytes(), store.recount());
+    // A replay changes nothing.
+    let changes = store.apply(GatewayEvent::Dispatch {
+        sequence: 3,
+        event: decode_fixture("USER_UPDATE", ME),
+    });
+    assert!(!changes.account && changes.is_empty());
+    // Another account's object is never taken for the account's own.
+    let before = store.user(USER).cloned();
+    let changes = store.apply(GatewayEvent::Dispatch {
+        sequence: 4,
+        event: decode_fixture(
+            "USER_UPDATE",
+            &format!(r#"{{"id":"{USER}","username":"intruder"}}"#),
+        ),
+    });
+    assert!(changes.is_empty());
+    assert_eq!(store.user(USER).cloned(), before);
+    // The avatar can be removed again.
+    apply(
+        &mut store,
+        "USER_UPDATE",
+        r#"{"id":"175928847299117063","username":"alt_fixture","global_name":null,"avatar":null}"#,
+    );
+    assert_eq!(store.current_user().unwrap().display_name(), "alt_fixture");
+}
