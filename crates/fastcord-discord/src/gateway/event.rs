@@ -294,6 +294,18 @@ pub struct MessageReactionRemoveAll {
     pub guild_id: Option<Snowflake>,
 }
 
+/// MESSAGE_POLL_VOTE_ADD or MESSAGE_POLL_VOTE_REMOVE: one user's vote for one
+/// answer of a poll was added or taken back.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct MessagePollVote {
+    pub user_id: Snowflake,
+    pub channel_id: Snowflake,
+    pub message_id: Snowflake,
+    #[serde(default)]
+    pub guild_id: Option<Snowflake>,
+    pub answer_id: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 pub struct GuildEmojisUpdate {
     pub guild_id: Snowflake,
@@ -540,6 +552,10 @@ pub enum Dispatch {
     MessageReactionRemove(Box<MessageReaction>),
     MessageReactionRemoveAll(MessageReactionRemoveAll),
     MessageReactionRemoveEmoji(Box<MessageReactionRemoveEmoji>),
+    /// A user voted for a poll answer.
+    MessagePollVoteAdd(MessagePollVote),
+    /// A user withdrew a vote for a poll answer.
+    MessagePollVoteRemove(MessagePollVote),
     GuildCreate(Box<GuildCreate>),
     GuildUpdate(Box<GuildUpdate>),
     GuildEmojisUpdate(Box<GuildEmojisUpdate>),
@@ -598,6 +614,8 @@ impl Dispatch {
             Self::MessageReactionRemove(_) => "MESSAGE_REACTION_REMOVE",
             Self::MessageReactionRemoveAll(_) => "MESSAGE_REACTION_REMOVE_ALL",
             Self::MessageReactionRemoveEmoji(_) => "MESSAGE_REACTION_REMOVE_EMOJI",
+            Self::MessagePollVoteAdd(_) => "MESSAGE_POLL_VOTE_ADD",
+            Self::MessagePollVoteRemove(_) => "MESSAGE_POLL_VOTE_REMOVE",
             Self::GuildCreate(_) => "GUILD_CREATE",
             Self::GuildUpdate(_) => "GUILD_UPDATE",
             Self::GuildEmojisUpdate(_) => "GUILD_EMOJIS_UPDATE",

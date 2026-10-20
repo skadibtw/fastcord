@@ -1,0 +1,6 @@
+{
+  "users": [
+    {"id": "2", "username": "alt", "global_name": "Alt Account", "avatar": null, "discriminator": "0"},
+    {"id": "3", "username": "other_fixture", "global_name": null, "avatar": null, "discriminator": "0"}
+  ]
+}

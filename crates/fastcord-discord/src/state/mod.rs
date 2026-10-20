@@ -1022,7 +1022,9 @@ impl Store {
             | Dispatch::MessageReactionAdd(_)
             | Dispatch::MessageReactionRemove(_)
             | Dispatch::MessageReactionRemoveAll(_)
-            | Dispatch::MessageReactionRemoveEmoji(_) => {}
+            | Dispatch::MessageReactionRemoveEmoji(_)
+            | Dispatch::MessagePollVoteAdd(_)
+            | Dispatch::MessagePollVoteRemove(_) => {}
             Dispatch::GuildCreate(created) => self.guild_create(*created, &mut changes),
             Dispatch::GuildUpdate(updated) => self.guild_update(*updated, &mut changes),
             Dispatch::GuildEmojisUpdate(update) => {

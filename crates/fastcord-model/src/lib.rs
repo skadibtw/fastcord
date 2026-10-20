@@ -9,6 +9,7 @@ mod guild;
 pub mod markup;
 mod message;
 mod permissions;
+mod poll;
 mod presence;
 mod relationship;
 mod snowflake;
@@ -31,6 +32,10 @@ pub use message::{
 pub use permissions::{
     GuildScope, MemberScope, OverwriteKind, PermissionOverwrite, Permissions, channel_permissions,
     guild_permissions,
+};
+pub use poll::{
+    AnswerCount, MAX_POLL_ANSWER_CHARS, MAX_POLL_ANSWERS, MAX_POLL_QUESTION_CHARS, Poll,
+    PollAnswer, PollMedia, PollResults, parse_unix_ms,
 };
 pub use presence::{MAX_CUSTOM_STATUS_CHARS, Presence, Status};
 pub use relationship::{Relationship, RelationshipKind};

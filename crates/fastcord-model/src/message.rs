@@ -3,6 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Embed;
+use crate::Poll;
 use crate::embed::lenient_embeds;
 use crate::wire::{double_option, lenient_nonce};
 use crate::{Snowflake, User};
@@ -212,6 +213,7 @@ impl SnapshotMessage {
             reactions: Vec::new(),
             message_reference: None,
             message_snapshots: Vec::new(),
+            poll: None,
             referenced_message: Referenced::Unknown,
             nonce: None,
             call: None,
@@ -269,6 +271,9 @@ pub struct Message {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub message_snapshots: Vec<MessageSnapshot>,
+    /// The poll this message carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll: Option<Box<Poll>>,
     /// Users this message mentions (their names resolve `<@id>`).
     #[serde(default)]
     pub mentions: Vec<User>,
@@ -453,6 +458,9 @@ pub struct MessageUpdate {
     pub mention_everyone: Option<bool>,
     #[serde(default, deserialize_with = "lenient_some_embeds")]
     pub embeds: Option<Vec<Embed>>,
+    /// A poll's new state (votes, or its end).
+    #[serde(default)]
+    pub poll: Option<Box<Poll>>,
 }
 
 fn lenient_some_embeds<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<Embed>>, D::Error> {
@@ -460,6 +468,24 @@ fn lenient_some_embeds<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<Emb
 }
 
 impl MessageUpdate {
+    /// An update that carries only a poll's new state.
+    pub fn poll_only(id: Snowflake, channel_id: Snowflake, poll: Poll) -> Self {
+        Self {
+            id,
+            channel_id,
+            content: None,
+            edited_timestamp: None,
+            flags: None,
+            pinned: None,
+            attachments: None,
+            mentions: None,
+            mention_roles: None,
+            mention_everyone: None,
+            embeds: None,
+            poll: Some(Box::new(poll)),
+        }
+    }
+
     /// Whether the update carries any field this client models. An update
     /// without one (an embed unfurl) can never change a message.
     pub fn has_fields(&self) -> bool {
@@ -474,6 +500,7 @@ impl MessageUpdate {
             // An empty list is an unfurl that shows nothing or a removal; the
             // latter still applies to a cached message through `alters`.
             || self.embeds.as_ref().is_some_and(|e| !e.is_empty())
+            || self.poll.is_some()
     }
 
     /// Whether [`Message::apply`] would change `message`. An update that only
@@ -503,6 +530,12 @@ impl MessageUpdate {
                 .mention_everyone
                 .is_some_and(|v| v != message.mention_everyone)
             || self.embeds.as_ref().is_some_and(|v| *v != message.embeds)
+            || self.poll.as_deref().is_some_and(|newer| {
+                message
+                    .poll
+                    .as_deref()
+                    .is_some_and(|held| !(held.finalized() && !newer.finalized()) && held != newer)
+            })
     }
 }
 
@@ -536,6 +569,9 @@ impl Message {
         }
         if let Some(embeds) = update.embeds {
             self.embeds = embeds;
+        }
+        if let (Some(newer), Some(held)) = (update.poll, self.poll.as_mut()) {
+            held.replace(*newer);
         }
     }
 
@@ -800,6 +836,7 @@ mod tests {
         Message {
             sticker_items: Vec::new(),
             message_snapshots: Vec::new(),
+            poll: None,
             id: Snowflake(1),
             channel_id: Snowflake(2),
             guild_id: None,

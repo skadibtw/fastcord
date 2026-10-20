@@ -1,0 +1,35 @@
+{
+  "id": "1290000000000000020",
+  "channel_id": "500",
+  "guild_id": "100",
+  "author": {"id": "2", "username": "alt", "global_name": "Alt Account", "avatar": null, "discriminator": "0"},
+  "content": "",
+  "timestamp": "2026-10-20T12:00:00.000000+00:00",
+  "edited_timestamp": null,
+  "type": 0,
+  "flags": 0,
+  "pinned": false,
+  "tts": false,
+  "mention_everyone": false,
+  "mentions": [],
+  "embeds": [],
+  "attachments": [],
+  "poll": {
+    "question": {"text": "Lunch?"},
+    "answers": [
+      {"answer_id": 1, "poll_media": {"text": "Pizza", "emoji": {"id": null, "name": "🍕"}}},
+      {"answer_id": 2, "poll_media": {"text": "Soup"}},
+      {"answer_id": 3, "poll_media": {"text": "Salad"}}
+    ],
+    "expiry": "2026-10-21T12:00:00.000000+00:00",
+    "allow_multiselect": false,
+    "layout_type": 1,
+    "results": {
+      "is_finalized": false,
+      "answer_counts": [
+        {"id": 1, "count": 2, "me_voted": true},
+        {"id": 2, "count": 1, "me_voted": false}
+      ]
+    }
+  }
+}

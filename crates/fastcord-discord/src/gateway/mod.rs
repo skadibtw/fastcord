@@ -45,11 +45,11 @@ pub use event::{
     ChannelUnread, ConnectionState, Dispatch, GatewayEvent, GroupId, GuildCreate, GuildDelete,
     GuildEmojisUpdate, GuildMemberEvent, GuildMemberRemove, GuildMuteUpdate, GuildRoleDelete,
     GuildRoleEvent, GuildUpdate, ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate,
-    MessageAck, MessageDelete, MessageDeleteBulk, MessageReaction, MessageReactionRemoveAll,
-    MessageReactionRemoveEmoji, MuteSettings, PassiveUpdate, ReadStateEntry, Ready, ReadyRead,
-    ReadySupplemental, ReconnectReason, RelationshipUpdate, SessionId, StopReason,
-    SupplementalGuild, ThreadListSync, ThreadMemberUpdate, ThreadMembersUpdate, TypingStart,
-    VoiceStateUpdate,
+    MessageAck, MessageDelete, MessageDeleteBulk, MessagePollVote, MessageReaction,
+    MessageReactionRemoveAll, MessageReactionRemoveEmoji, MuteSettings, PassiveUpdate,
+    ReadStateEntry, Ready, ReadyRead, ReadySupplemental, ReconnectReason, RelationshipUpdate,
+    SessionId, StopReason, SupplementalGuild, ThreadListSync, ThreadMemberUpdate,
+    ThreadMembersUpdate, TypingStart, VoiceStateUpdate,
 };
 pub use event::{MAX_PRESENCES, MAX_RELATIONSHIPS, PresenceUpdate};
 pub(crate) use profile::CLIENT_FINGERPRINT;

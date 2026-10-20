@@ -1107,6 +1107,8 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         }
         "MESSAGE_REACTION_REMOVE_EMOJI" => decode_reaction_emoji_removed(raw)
             .map(|r| Dispatch::MessageReactionRemoveEmoji(Box::new(r))),
+        "MESSAGE_POLL_VOTE_ADD" => json(raw).map(Dispatch::MessagePollVoteAdd),
+        "MESSAGE_POLL_VOTE_REMOVE" => json(raw).map(Dispatch::MessagePollVoteRemove),
         "GUILD_CREATE" => decode_guild_create(raw).map(|g| Dispatch::GuildCreate(Box::new(g))),
         "GUILD_UPDATE" => decode_guild_update(raw).map(|g| Dispatch::GuildUpdate(Box::new(g))),
         "GUILD_EMOJIS_UPDATE" => json::<super::GuildEmojisUpdate>(raw)
@@ -1198,6 +1200,7 @@ pub(crate) fn is_ready_family(name: &str) -> bool {
 mod tests {
     use fastcord_model::ChannelKind;
 
+    use super::super::event::MessagePollVote;
     use super::*;
 
     const READY: &str = include_str!("../../../../fixtures/gateway/ready.json");
@@ -2294,6 +2297,43 @@ mod tests {
         for raw in ["{}", r#"{"user":{"id":"0"}}"#, r#"{"user":{}}"#] {
             assert!(
                 matches!(decode_dispatch("PRESENCE_UPDATE", raw), Decoded::Malformed),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn poll_vote_events_decode_their_fixtures_and_reject_what_cannot_be_applied() {
+        let add = include_str!("../../../../fixtures/gateway/message_poll_vote_add.json");
+        let remove = include_str!("../../../../fixtures/gateway/message_poll_vote_remove.json");
+        let vote = MessagePollVote {
+            user_id: Snowflake(3),
+            channel_id: Snowflake(500),
+            message_id: Snowflake(1_290_000_000_000_000_020),
+            guild_id: Some(Snowflake(100)),
+            answer_id: 2,
+        };
+        let Dispatch::MessagePollVoteAdd(added) = reaction_event("MESSAGE_POLL_VOTE_ADD", add)
+        else {
+            panic!("not a vote add");
+        };
+        assert_eq!(added, vote);
+        let Dispatch::MessagePollVoteRemove(removed) =
+            reaction_event("MESSAGE_POLL_VOTE_REMOVE", remove)
+        else {
+            panic!("not a vote remove");
+        };
+        assert_eq!(removed, vote);
+        for raw in [
+            r#"{"user_id":"3","channel_id":"500","message_id":"9"}"#,
+            r#"{"user_id":"3","channel_id":"500","message_id":"9","answer_id":-1}"#,
+            r#"{"user_id":"3","channel_id":"500","message_id":"9","answer_id":"x"}"#,
+        ] {
+            assert!(
+                matches!(
+                    decode_dispatch("MESSAGE_POLL_VOTE_ADD", raw),
+                    Decoded::Malformed
+                ),
                 "{raw}"
             );
         }

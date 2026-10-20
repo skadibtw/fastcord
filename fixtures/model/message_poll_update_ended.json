@@ -1,0 +1,24 @@
+{
+  "id": "1290000000000000020",
+  "channel_id": "500",
+  "guild_id": "100",
+  "poll": {
+    "question": {"text": "Lunch?"},
+    "answers": [
+      {"answer_id": 1, "poll_media": {"text": "Pizza", "emoji": {"id": null, "name": "🍕"}}},
+      {"answer_id": 2, "poll_media": {"text": "Soup"}},
+      {"answer_id": 3, "poll_media": {"text": "Salad"}}
+    ],
+    "expiry": "2026-10-21T12:00:00.000000+00:00",
+    "allow_multiselect": false,
+    "layout_type": 1,
+    "results": {
+      "is_finalized": true,
+      "answer_counts": [
+        {"id": 1, "count": 5, "me_voted": true},
+        {"id": 2, "count": 1, "me_voted": false},
+        {"id": 3, "count": 0, "me_voted": false}
+      ]
+    }
+  }
+}

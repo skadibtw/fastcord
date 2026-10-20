@@ -22,6 +22,8 @@ mod password;
 mod paste;
 mod pins;
 mod playback;
+mod poll_create;
+mod polls;
 mod qr;
 mod reactions;
 mod render;
@@ -102,6 +104,7 @@ struct App {
     gif: gif::State,
     sticker: sticker::State,
     forward: forward::State,
+    poll: poll_create::State,
     friends: friends::State,
     status: status::State,
     threads: threads::State,
@@ -227,6 +230,7 @@ enum Message {
     Gif(gif::Event),
     Sticker(sticker::Event),
     Forward(forward::Event),
+    Poll(poll_create::Event),
     Friends(friends::Event),
     Status(status::Event),
     Threads(threads::Event),
@@ -285,6 +289,7 @@ impl App {
                 gif: gif::State::default(),
                 sticker: sticker::State::default(),
                 forward: forward::State::default(),
+                poll: poll_create::State::default(),
                 friends: friends::State::default(),
                 status: status::State::default(),
                 threads: threads::State::default(),
@@ -760,6 +765,7 @@ impl App {
                 if let Phase::Account { gateway, .. } = &self.phase {
                     self.sticker.sync(gateway.timeline.channel_id);
                     self.forward.sync(gateway.timeline.channel_id);
+                    self.poll.sync(gateway.timeline.channel_id);
                 }
             }
             Message::ShowDirects(on) => {
@@ -773,6 +779,7 @@ impl App {
             Message::Gif(event) => return self.gif_event(event),
             Message::Sticker(event) => return self.sticker_event(event),
             Message::Forward(event) => return self.forward_event(event),
+            Message::Poll(event) => return self.poll_event(event),
             Message::Status(event) => {
                 if let Phase::Account {
                     session, gateway, ..
@@ -1426,6 +1433,9 @@ impl App {
                         | timeline::Event::ToggleReaction { .. }
                         | timeline::Event::InspectReaction { .. }
                         | timeline::Event::CloseReactionUsers
+                        | timeline::Event::PollVote { .. }
+                        | timeline::Event::PollEnd { .. }
+                        | timeline::Event::PollVoters { .. }
                         | timeline::Event::React { .. }) => {
                             if gateway.message_action(action) {
                                 return iced::widget::operation::focus(composer::EDITOR_ID);
@@ -1515,7 +1525,7 @@ impl App {
                 self.gif = gif::State::default();
                 self.sticker = sticker::State::default();
                 self.forward = forward::State::default();
-                self.forward = forward::State::default();
+                self.poll = poll_create::State::default();
                 self.threads.drop_all();
                 if let Phase::Account {
                     session, gateway, ..
@@ -1741,6 +1751,7 @@ impl App {
         self.gif = gif::State::default();
         self.sticker = sticker::State::default();
         self.forward = forward::State::default();
+        self.poll = poll_create::State::default();
         self.threads.drop_all();
         self.friends.reset();
         self.status.reset();
@@ -1842,6 +1853,25 @@ impl App {
         self.forward
             .update(event, &candidates, &session.client)
             .map(Message::Forward)
+    }
+
+    fn poll_event(&mut self, event: poll_create::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let Some(channel) = gateway.timeline.channel_id else {
+            return Task::none();
+        };
+        let context = poll_create::Context {
+            channel,
+            can_send: gateway.timeline.can_send,
+        };
+        self.poll
+            .update(event, context, &session.client)
+            .map(Message::Poll)
     }
 
     fn sticker_event(&mut self, event: sticker::Event) -> Task<Message> {
@@ -2192,6 +2222,12 @@ impl App {
                 && let Some(panel) = sticker::view(&self.sticker)
             {
                 banner_column = banner_column.push(panel.map(Message::Sticker));
+            }
+            if let Some(channel) = gateway.timeline.channel_id
+                && self.poll.is_open_for(channel)
+                && let Some(panel) = poll_create::view(&self.poll)
+            {
+                banner_column = banner_column.push(panel.map(Message::Poll));
             }
             if self.forward.is_open()
                 && let Some(panel) = forward::view(&self.forward, &forward_candidates(gateway))

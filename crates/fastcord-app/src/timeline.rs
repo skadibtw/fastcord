@@ -78,6 +78,8 @@ pub struct Row {
     pub reply: Option<ReplyLine>,
     /// The user's reaction requests Discord has not answered yet.
     pub reactions: Vec<Pending>,
+    /// A vote or ending of the row's poll Discord has not answered yet.
+    pub poll_saving: bool,
 }
 
 #[cfg(test)]
@@ -90,6 +92,7 @@ impl Row {
             change: None,
             reply: None,
             reactions: Vec::new(),
+            poll_saving: false,
         }
     }
 }
@@ -145,6 +148,8 @@ impl std::fmt::Debug for ReplyState {
 pub struct ReactionUsers {
     pub message: Snowflake,
     pub emoji: Emoji,
+    /// The answer a poll's voters are listed for (then `emoji` is unused).
+    pub poll_answer: Option<String>,
     pub state: UsersState,
 }
 
@@ -450,6 +455,24 @@ pub enum Event {
         emoji: Emoji,
     },
     CloseReactionUsers,
+    /// A poll answer was clicked: toggle it in the user's votes. The worker
+    /// decides what the whole selection becomes from the store.
+    PollVote {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        answer_id: u32,
+    },
+    /// End the user's own poll now.
+    PollEnd {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    /// Show who voted for an answer.
+    PollVoters {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        answer_id: u32,
+    },
     /// A link in a message or embed was clicked; the target is http(s) only.
     OpenLink(String),
     /// A spoiler was clicked: uncover it.
@@ -837,6 +860,10 @@ fn describe_emoji(emoji: &Emoji) -> String {
 /// The names of those who reacted with one emoji, under the row asked about.
 fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
     let detail: Element<'_, Event> = match &users.state {
+        UsersState::Loading if users.poll_answer.is_some() => text("Loading voters…")
+            .size(12)
+            .style(text::secondary)
+            .into(),
         UsersState::Loading => text("Loading who reacted…")
             .size(12)
             .style(text::secondary)
@@ -861,9 +888,12 @@ fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
     container(
         column![
             row![
-                text(format!("Reacted with {}", describe_emoji(&users.emoji)))
-                    .font(BOLD)
-                    .size(12),
+                text(match &users.poll_answer {
+                    Some(answer) => format!("Voted for {answer}"),
+                    None => format!("Reacted with {}", describe_emoji(&users.emoji)),
+                })
+                .font(BOLD)
+                .size(12),
                 row_button("Close", Event::CloseReactionUsers),
             ]
             .spacing(8)
@@ -991,6 +1021,9 @@ fn message_view<'a>(
     }
     for embed in rich::embeds(message, channel_id, row.revision, cx) {
         body = body.push(embed);
+    }
+    if let Some(poll) = message.poll.as_deref() {
+        body = body.push(poll_view(row, poll, channel_id));
     }
     for attachment in &message.attachments {
         let key = AttachmentKey {
@@ -1209,6 +1242,115 @@ fn message_view<'a>(
         });
     hover(base, overlay)
 }
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+/// A poll: its question, one button per answer with the votes it has and
+/// whether the account chose it, and a line saying whether it is still open.
+/// The layout does not depend on the clock: an ended poll only disables its
+/// buttons, so a row's measured height stays valid when voting closes.
+fn poll_view<'a>(
+    row: &'a Row,
+    poll: &'a fastcord_model::Poll,
+    channel_id: Snowflake,
+) -> Element<'a, Event> {
+    let message_id = row.message.id;
+    let ended = poll.ended(now_ms());
+    let can_vote = !ended && !row.poll_saving;
+    let total = poll.total_votes();
+    let mut body = column![
+        text(poll.question.text.as_str())
+            .font(BOLD)
+            .size(15)
+            .wrapping(text::Wrapping::WordOrGlyph),
+        text(if ended {
+            "Final results"
+        } else if poll.allow_multiselect {
+            "Select one or more answers"
+        } else {
+            "Select one answer"
+        })
+        .size(12)
+        .style(text::secondary),
+    ]
+    .spacing(4);
+    for answer in &poll.answers {
+        let (count, mine) = poll.count(answer.answer_id);
+        let percent = (u64::from(count) * 100).checked_div(total).unwrap_or(0);
+        let label = format!(
+            "{} {}",
+            if mine { "[x]" } else { "[ ]" },
+            answer.poll_media.text
+        );
+        let choose = button(text(label).size(13).wrapping(text::Wrapping::WordOrGlyph))
+            .width(Length::Fill)
+            .padding([3, 8])
+            .on_press_maybe(can_vote.then_some(Event::PollVote {
+                channel_id,
+                message_id,
+                answer_id: answer.answer_id,
+            }))
+            .style(if mine {
+                button::primary
+            } else {
+                button::secondary
+            });
+        let mut line = row![choose, text(format!("{count} ({percent}%)")).size(12)]
+            .spacing(8)
+            .align_y(Vertical::Center);
+        if count > 0 {
+            line = line.push(
+                button(text("Voters").size(12))
+                    .on_press(Event::PollVoters {
+                        channel_id,
+                        message_id,
+                        answer_id: answer.answer_id,
+                    })
+                    .padding([2, 8])
+                    .style(button::secondary),
+            );
+        }
+        body = body.push(line);
+    }
+    let status = if ended {
+        "Poll ended".to_owned()
+    } else {
+        match poll.expiry.as_deref() {
+            Some(expiry) => format!("Ends {}", format_timestamp(expiry)),
+            None => "No end time".to_owned(),
+        }
+    };
+    let mut footer = row![
+        text(format!(
+            "{total} {} · {status}",
+            if total == 1 { "vote" } else { "votes" }
+        ))
+        .size(12)
+        .style(text::secondary)
+    ]
+    .spacing(8)
+    .align_y(Vertical::Center);
+    if row.poll_saving {
+        footer = footer.push(text("Saving…").size(12).style(text::secondary));
+    } else if row.own && !ended {
+        footer = footer.push(row_button(
+            "End poll",
+            Event::PollEnd {
+                channel_id,
+                message_id,
+            },
+        ));
+    }
+    container(body.push(footer))
+        .max_width(480)
+        .padding(6)
+        .style(container::rounded_box)
+        .into()
+}
+
 /// A forwarded message: labelled, drawn only from the frozen snapshot (never
 /// from the original, so edits or deletion there change nothing here) and
 /// without naming where it came from.
@@ -1404,6 +1546,7 @@ fn placeholder(message: &Message) -> Option<String> {
     if !message.attachments.is_empty()
         || !message.sticker_items.is_empty()
         || message.forwarded().is_some()
+        || message.poll.is_some()
     {
         return None;
     }
@@ -2007,6 +2150,90 @@ mod tests {
         ] {
             assert!(found.contains(&event), "{event:?} in {found:?}");
         }
+    }
+
+    fn poll_row(finalized: bool, expiry: &str, own: bool, saving: bool) -> Row {
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "id": "42",
+            "channel_id": "500",
+            "author": {"id": "2", "username": "alt"},
+            "content": "",
+            "timestamp": "2026-10-07T12:00:00.000000+00:00",
+            "poll": {
+                "question": {"text": "Lunch?"},
+                "answers": [
+                    {"answer_id": 1, "poll_media": {"text": "Pizza"}},
+                    {"answer_id": 2, "poll_media": {"text": "Soup"}}
+                ],
+                "expiry": expiry,
+                "results": {"is_finalized": finalized, "answer_counts": [
+                    {"id": 1, "count": 3, "me_voted": true}
+                ]}
+            }
+        }))
+        .unwrap();
+        let mut row = Row::new(Arc::new(message), 1);
+        row.own = own;
+        row.poll_saving = saving;
+        row
+    }
+
+    fn poll_events(row: Row) -> Vec<Event> {
+        let mut snapshot = one_row(42);
+        snapshot.rows = vec![row];
+        snapshot.window.range = 0..1;
+        clickable(&snapshot, Interaction::default())
+    }
+
+    #[test]
+    fn an_open_poll_offers_votes_voters_and_ending_only_to_its_owner() {
+        let vote = |answer_id| Event::PollVote {
+            channel_id: CHANNEL,
+            message_id: Snowflake(42),
+            answer_id,
+        };
+        let end = Event::PollEnd {
+            channel_id: CHANNEL,
+            message_id: Snowflake(42),
+        };
+        let voters = |answer_id| Event::PollVoters {
+            channel_id: CHANNEL,
+            message_id: Snowflake(42),
+            answer_id,
+        };
+        let theirs = poll_events(poll_row(false, "2999-01-01T00:00:00Z", false, false));
+        assert!(
+            theirs.contains(&vote(1)) && theirs.contains(&vote(2)),
+            "{theirs:?}"
+        );
+        assert!(
+            theirs.contains(&voters(1)),
+            "an answer with votes lists them"
+        );
+        assert!(!theirs.contains(&voters(2)), "an empty answer has no list");
+        assert!(!theirs.contains(&end));
+        let mine = poll_events(poll_row(false, "2999-01-01T00:00:00Z", true, false));
+        assert!(mine.contains(&end), "{mine:?}");
+        // While a request is unanswered nothing more can be asked of the poll.
+        let saving = poll_events(poll_row(false, "2999-01-01T00:00:00Z", true, true));
+        assert!(
+            !saving.contains(&vote(1)) && !saving.contains(&end),
+            "{saving:?}"
+        );
+        // An ended poll (finalized, or past its time) only shows results.
+        for row in [
+            poll_row(true, "2999-01-01T00:00:00Z", true, false),
+            poll_row(false, "2000-01-01T00:00:00Z", true, false),
+        ] {
+            let ended = poll_events(row);
+            assert!(
+                !ended.contains(&vote(1)) && !ended.contains(&end),
+                "{ended:?}"
+            );
+            assert!(ended.contains(&voters(1)));
+        }
+        // A poll message has no "no text" placeholder.
+        assert!(placeholder(&poll_row(false, "", false, false).message).is_none());
     }
 
     fn forwarded_row(message_id: u64) -> Row {
@@ -2816,6 +3043,7 @@ mod tests {
             Some(ReactionUsers {
                 message: Snowflake(42),
                 emoji: unicode(THUMBS),
+                poll_answer: None,
                 state,
             })
         };
@@ -2848,6 +3076,7 @@ mod tests {
             ReactionUsers {
                 message: Snowflake(42),
                 emoji: unicode(THUMBS),
+                poll_answer: None,
                 state: UsersState::Loaded {
                     names: vec!["Alice Private".to_owned()],
                     more: false

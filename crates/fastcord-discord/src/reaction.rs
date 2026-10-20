@@ -148,8 +148,8 @@ impl From<WireUser> for ReactionUser {
 /// Decodes the array of users, keeping at most `limit` of them. Elements past
 /// the limit are skipped without being decoded, so a response with more users
 /// than asked for never becomes a longer list.
-struct UserList {
-    limit: usize,
+pub(crate) struct UserList {
+    pub(crate) limit: usize,
 }
 
 impl<'de> DeserializeSeed<'de> for UserList {

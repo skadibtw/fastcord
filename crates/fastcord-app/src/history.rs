@@ -7,6 +7,8 @@
 //! Sends, and edits and deletions of the user's own messages, start only from
 //! explicit commands and are checked here against the store, never against
 //! what a possibly stale UI showed.
+mod poll;
+
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -27,8 +29,10 @@ use iced::futures::StreamExt;
 use iced::futures::future::{AbortHandle, Abortable};
 use iced::futures::stream::FuturesUnordered;
 
+use self::poll::PollDone;
 use crate::changes::{self, ChangeKind, ChangeRequest, Changes};
 use crate::outbox::{Finished, MAX_REPLY_AUTHOR_CHARS, OpId, Outbox, Reply, SendFailure, Slots};
+use crate::polls::Polls;
 use crate::reactions::{self, Action, Reactions};
 use crate::timeline::{ReactionUsers, ReplyLine, ReplyState, Row, Snapshot, UsersState};
 use crate::variable_list::{Item, Measurement, VariableList, Viewport};
@@ -64,6 +68,7 @@ type ChangeFuture = Pin<Box<dyn Future<Output = ChangeDone> + Send>>;
 type AckFuture =
     Pin<Box<dyn Future<Output = (Snowflake, Snowflake, Result<(), RestError>)> + Send>>;
 type ReactionFuture = Pin<Box<dyn Future<Output = ReactionDone> + Send>>;
+type PollFuture = Pin<Box<dyn Future<Output = PollDone> + Send>>;
 type UsersFuture =
     Pin<Box<dyn Future<Output = (u64, Result<Vec<ReactionUser>, RestError>)> + Send>>;
 
@@ -121,6 +126,8 @@ struct Inspection {
     channel: Snowflake,
     message: Snowflake,
     emoji: Emoji,
+    /// For a poll answer's voters: the answer's text.
+    poll_answer: Option<String>,
     state: UsersState,
 }
 
@@ -135,6 +142,7 @@ pub enum Completed {
     Change(ChangeDone),
     Reaction(ReactionDone),
     ReactionUsers(u64, Result<Vec<ReactionUser>, RestError>),
+    Poll(PollDone),
 }
 
 /// An explicit user action from the timeline.
@@ -240,6 +248,9 @@ pub struct History {
     /// Reactions of the user that Discord has not answered yet.
     reactions: Reactions,
     reaction_requests: FuturesUnordered<ReactionFuture>,
+    /// Poll votes and endings the user asked for that Discord has not answered.
+    polls: Polls,
+    poll_requests: FuturesUnordered<PollFuture>,
     /// The "who reacted" list the user asked for, and the one request
     /// loading it.
     inspection: Option<Inspection>,
@@ -755,6 +766,7 @@ impl History {
             channel,
             message,
             emoji,
+            poll_answer: None,
             state: UsersState::Loading,
         });
         let rest = rest.clone();
@@ -803,7 +815,11 @@ impl History {
                 false
             }
             Err(error) => {
-                inspection.state = UsersState::Failed(reactions::users_failure(error));
+                inspection.state = UsersState::Failed(if inspection.poll_answer.is_some() {
+                    crate::polls::voters_failure(error)
+                } else {
+                    reactions::users_failure(error)
+                });
                 error == RestError::AuthenticationRequired
             }
         }
@@ -1428,6 +1444,12 @@ impl History {
                 None => std::future::pending().await,
             }
         };
+        let poll = async {
+            match self.poll_requests.next().await {
+                Some(done) => done,
+                None => std::future::pending().await,
+            }
+        };
         let users = async {
             match &mut self.users_pending {
                 Some(future) => future.await,
@@ -1441,6 +1463,7 @@ impl History {
             (channel, message, result) = ack => Completed::Ack(channel, message, result),
             done = change => Completed::Change(done),
             done = reaction => Completed::Reaction(done),
+            done = poll => Completed::Poll(done),
             (serial, result) = users => Completed::ReactionUsers(serial, result),
         }
     }
@@ -1457,6 +1480,7 @@ impl History {
             Completed::Change(done) => self.finish_change(done),
             Completed::Reaction(done) => self.finish_reaction(done),
             Completed::ReactionUsers(serial, result) => self.finish_reaction_users(serial, result),
+            Completed::Poll(done) => self.finish_poll(done),
         }
     }
 
@@ -1712,7 +1736,9 @@ impl History {
                 let change = self.changes.of(channel, message.id);
                 let reply = self.reply_line(channel, &message);
                 let reactions = self.reactions.of(channel, message.id);
+                let poll_saving = self.polls.busy(channel, message.id);
                 Row {
+                    poll_saving,
                     message,
                     revision,
                     own,
@@ -1749,6 +1775,7 @@ impl History {
             reaction_users: self.inspection.as_ref().map(|inspection| ReactionUsers {
                 message: inspection.message,
                 emoji: inspection.emoji.clone(),
+                poll_answer: inspection.poll_answer.clone(),
                 state: inspection.state.clone(),
             }),
         }
@@ -1805,6 +1832,7 @@ mod tests {
             reactions: Vec::new(),
             sticker_items: Vec::new(),
             message_snapshots: Vec::new(),
+            poll: None,
             mentions: Vec::new(),
             mention_roles: Vec::new(),
             mention_everyone: false,
@@ -2297,6 +2325,7 @@ mod tests {
             mention_roles: None,
             mention_everyone: None,
             embeds: None,
+            poll: None,
         })));
         assert!(history.dirty());
         let snapshot = history.snapshot();
@@ -2703,6 +2732,7 @@ mod tests {
             mention_roles: None,
             mention_everyone: None,
             embeds: None,
+            poll: None,
         }))
     }
 
@@ -3658,5 +3688,334 @@ mod tests {
         assert_eq!(history.reactions.len(), 0);
         assert_eq!(history.store.messages_held(), 0);
         assert_eq!(history.store.tracked_bytes(), history.store.recount());
+    }
+
+    // ----- polls -----
+
+    use super::poll::PollAnswered;
+    use crate::polls::{self, Kind};
+    use fastcord_discord::gateway::MessagePollVote;
+
+    fn poll_json(finalized: bool, multi: bool) -> fastcord_model::Poll {
+        serde_json::from_value(serde_json::json!({
+            "question": {"text": "Lunch?"},
+            "answers": [
+                {"answer_id": 1, "poll_media": {"text": "Pizza"}},
+                {"answer_id": 2, "poll_media": {"text": "Soup"}},
+                {"answer_id": 3, "poll_media": {"text": "Salad"}}
+            ],
+            "expiry": "2999-01-01T00:00:00.000000+00:00",
+            "allow_multiselect": multi,
+            "results": {"is_finalized": finalized, "answer_counts": [
+                {"id": 1, "count": 2, "me_voted": true},
+                {"id": 2, "count": 1, "me_voted": false}
+            ]}
+        }))
+        .unwrap()
+    }
+
+    /// An open channel holding message `NEWEST + 1` with a poll. `own` makes
+    /// it the account's; the account voted for answer 1.
+    fn polling_history(own: bool, finalized: bool, multi: bool) -> (History, Snowflake) {
+        let mut history = sending_history();
+        history.store.set_user(SELF);
+        let mut message = message_with(NEWEST + 1, String::new());
+        message.author.id = if own { SELF } else { Snowflake(7) };
+        message.poll = Some(Box::new(poll_json(finalized, multi)));
+        history.apply(&Dispatch::MessageCreate(Box::new(message)));
+        history.refresh(&rest(), &navigation_reacting(true), &Request::default());
+        (history, Snowflake(NEWEST + 1))
+    }
+
+    fn votes(history: &History, id: Snowflake) -> Vec<(u32, bool)> {
+        let message = held(history, id);
+        let poll = message.poll.as_deref().unwrap();
+        [1, 2, 3].map(|answer| poll.count(answer)).to_vec()
+    }
+
+    fn poll_answered(
+        id: Snowflake,
+        kind: Kind,
+        result: Result<PollAnswered, RestError>,
+    ) -> Completed {
+        Completed::Poll(PollDone {
+            channel: CHANNEL,
+            message: id,
+            kind,
+            result,
+        })
+    }
+
+    fn take_polls(history: &mut History) -> usize {
+        std::mem::take(&mut history.poll_requests).len()
+    }
+
+    fn poll_row(history: &mut History, id: Snowflake) -> Row {
+        history.refresh(&rest(), &navigation_reacting(true), &Request::default());
+        history
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.message.id == id)
+            .unwrap()
+    }
+
+    fn gateway_vote(id: Snowflake, user: Snowflake, answer: u32, add: bool) -> Dispatch {
+        let vote = MessagePollVote {
+            user_id: user,
+            channel_id: CHANNEL,
+            message_id: id,
+            guild_id: None,
+            answer_id: answer,
+        };
+        if add {
+            Dispatch::MessagePollVoteAdd(vote)
+        } else {
+            Dispatch::MessagePollVoteRemove(vote)
+        }
+    }
+
+    #[test]
+    fn a_vote_asks_once_overlays_the_row_and_the_answer_then_the_echo_change_the_store_once() {
+        let rest = rest();
+        let (mut history, id) = polling_history(false, false, false);
+        let before = history.store.revision(CHANNEL, id).unwrap();
+        // Single choice: choosing soup replaces pizza, as one request.
+        history.vote_poll(&rest, CHANNEL, id, 2);
+        assert_eq!(history.poll_requests.len(), 1);
+        assert!(poll_row(&mut history, id).poll_saving);
+        assert_eq!(votes(&history, id)[..2], [(2, true), (1, false)]);
+        assert_eq!(history.store.revision(CHANNEL, id), Some(before));
+        // A second click while it is saving asks nothing.
+        history.vote_poll(&rest, CHANNEL, id, 3);
+        assert_eq!(history.snapshot().notice, Some(polls::BUSY));
+        assert_eq!(history.poll_requests.len(), 1);
+
+        assert!(!history.complete(
+            &rest,
+            poll_answered(id, Kind::Vote(vec![2]), Ok(PollAnswered::Voted))
+        ));
+        assert_eq!(votes(&history, id), [(1, false), (2, true), (0, false)]);
+        assert!(!poll_row(&mut history, id).poll_saving);
+        // The Gateway's echo of the same two changes is no change at all.
+        let after = history.store.revision(CHANNEL, id).unwrap();
+        history.apply(&gateway_vote(id, SELF, 1, false));
+        history.apply(&gateway_vote(id, SELF, 2, true));
+        assert_eq!(history.store.revision(CHANNEL, id), Some(after));
+        assert_eq!(history.store.tracked_bytes(), history.store.recount());
+        assert_eq!(take_polls(&mut history), 1, "one request per click");
+
+        // Clicking the chosen answer withdraws the vote.
+        history.vote_poll(&rest, CHANNEL, id, 2);
+        history.complete(
+            &rest,
+            poll_answered(id, Kind::Vote(vec![]), Ok(PollAnswered::Voted)),
+        );
+        assert_eq!(votes(&history, id), [(1, false), (1, false), (0, false)]);
+    }
+
+    #[test]
+    fn a_multiple_choice_poll_sets_the_whole_selection_each_time() {
+        let rest = rest();
+        let (mut history, id) = polling_history(false, false, true);
+        history.vote_poll(&rest, CHANNEL, id, 3);
+        assert!(history.polls.busy(CHANNEL, id));
+        assert_eq!(history.poll_requests.len(), 1);
+        // Pizza stays chosen next to salad: the request carries both.
+        history.complete(
+            &rest,
+            poll_answered(id, Kind::Vote(vec![1, 3]), Ok(PollAnswered::Voted)),
+        );
+        assert_eq!(votes(&history, id), [(2, true), (1, false), (1, true)]);
+        // Applying the same selection again (a retry, a replayed answer) is a no-op.
+        let revision = history.store.revision(CHANNEL, id);
+        history.complete(
+            &rest,
+            poll_answered(id, Kind::Vote(vec![1, 3]), Ok(PollAnswered::Voted)),
+        );
+        assert_eq!(history.store.revision(CHANNEL, id), revision);
+    }
+
+    #[test]
+    fn the_gateway_first_shows_the_vote_once_and_other_voters_keep_counting() {
+        let rest = rest();
+        let (mut history, id) = polling_history(false, false, false);
+        history.vote_poll(&rest, CHANNEL, id, 2);
+        history.apply(&gateway_vote(id, SELF, 1, false));
+        history.apply(&gateway_vote(id, SELF, 2, true));
+        history.apply(&gateway_vote(id, Snowflake(9), 2, true));
+        assert_eq!(votes(&history, id), [(1, false), (3, true), (0, false)]);
+        assert!(poll_row(&mut history, id).poll_saving, "still saving");
+        let revision = history.store.revision(CHANNEL, id);
+        history.complete(
+            &rest,
+            poll_answered(id, Kind::Vote(vec![2]), Ok(PollAnswered::Voted)),
+        );
+        assert_eq!(history.store.revision(CHANNEL, id), revision);
+        assert_eq!(votes(&history, id)[1], (3, true));
+    }
+
+    #[test]
+    fn requests_are_checked_against_the_store_not_the_ui() {
+        let rest = rest();
+        let (mut history, id) = polling_history(false, false, false);
+        history.vote_poll(&rest, Snowflake(1), id, 1);
+        assert_eq!(history.snapshot().notice, Some(NOT_OPEN));
+        history.vote_poll(&rest, CHANNEL, Snowflake(5), 1);
+        assert_eq!(history.snapshot().notice, Some(NOT_LOADED));
+        history.vote_poll(&rest, CHANNEL, id, 9);
+        assert_eq!(
+            history.snapshot().notice,
+            Some("That answer is not part of the poll.")
+        );
+        // A message without a poll.
+        history.apply(&Dispatch::MessageCreate(Box::new(message_with(
+            NEWEST + 2,
+            "plain".into(),
+        ))));
+        history.vote_poll(&rest, CHANNEL, Snowflake(NEWEST + 2), 1);
+        assert_eq!(history.snapshot().notice, Some(polls::NO_POLL));
+        assert_eq!(take_polls(&mut history), 0, "nothing was asked");
+        // An ended poll takes no votes.
+        let (mut ended, id) = polling_history(false, true, false);
+        ended.vote_poll(&rest, CHANNEL, id, 2);
+        assert_eq!(ended.snapshot().notice, Some(polls::ENDED));
+        assert_eq!(take_polls(&mut ended), 0);
+        // Neither does one whose time has passed, though nothing finalized it.
+        let (mut expired, id) = polling_history(false, false, false);
+        let mut past = poll_json(false, false);
+        past.expiry = Some("2000-01-01T00:00:00.000000+00:00".into());
+        expired.apply(&Dispatch::MessageUpdate(Box::new(
+            MessageUpdate::poll_only(id, CHANNEL, past),
+        )));
+        expired.vote_poll(&rest, CHANNEL, id, 2);
+        assert_eq!(expired.snapshot().notice, Some(polls::ENDED));
+        assert_eq!(take_polls(&mut expired), 0);
+    }
+
+    #[test]
+    fn a_failed_vote_changes_nothing_is_said_once_and_never_repeated() {
+        let rest = rest();
+        let (mut history, id) = polling_history(false, false, false);
+        let before = votes(&history, id);
+        for (error, text) in [
+            (RestError::PermissionDenied, "Discord did not allow voting"),
+            (RestError::ResourceGone, "no longer available"),
+            (
+                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout)),
+                "may have been applied",
+            ),
+            (RestError::InvalidRateLimit, "rate limiting"),
+        ] {
+            history.vote_poll(&rest, CHANNEL, id, 2);
+            assert!(!history.complete(&rest, poll_answered(id, Kind::Vote(vec![2]), Err(error))));
+            assert!(history.snapshot().notice.is_some_and(|n| n.contains(text)));
+            assert_eq!(votes(&history, id), before);
+            assert!(!poll_row(&mut history, id).poll_saving);
+        }
+        assert_eq!(
+            take_polls(&mut history),
+            4,
+            "one request per click, no retry"
+        );
+        history.vote_poll(&rest, CHANNEL, id, 2);
+        assert!(history.complete(
+            &rest,
+            poll_answered(
+                id,
+                Kind::Vote(vec![2]),
+                Err(RestError::AuthenticationRequired)
+            )
+        ));
+    }
+
+    #[test]
+    fn only_the_owner_ends_a_poll_once_and_the_end_is_not_reopened() {
+        let rest = rest();
+        let (mut history, id) = polling_history(false, false, false);
+        history.end_poll(&rest, CHANNEL, id);
+        assert_eq!(history.snapshot().notice, Some(polls::NOT_YOURS));
+        assert_eq!(take_polls(&mut history), 0);
+
+        let (mut history, id) = polling_history(true, false, false);
+        assert!(poll_row(&mut history, id).own);
+        history.end_poll(&rest, CHANNEL, id);
+        history.end_poll(&rest, CHANNEL, id);
+        assert_eq!(history.snapshot().notice, Some(polls::BUSY));
+        assert_eq!(history.poll_requests.len(), 1);
+        // Discord answers with the message; even a copy that lags in
+        // `is_finalized` ends the poll locally.
+        let mut answer = (*held(&history, id)).clone();
+        answer.poll = Some(Box::new(poll_json(false, false)));
+        assert!(!history.complete(
+            &rest,
+            poll_answered(id, Kind::End, Ok(PollAnswered::Ended(Box::new(answer))))
+        ));
+        assert!(held(&history, id).poll.as_deref().unwrap().finalized());
+        // An older, open copy arriving later (stale update) does not reopen it.
+        let revision = history.store.revision(CHANNEL, id);
+        history.apply(&Dispatch::MessageUpdate(Box::new(
+            MessageUpdate::poll_only(id, CHANNEL, poll_json(false, false)),
+        )));
+        assert!(held(&history, id).poll.as_deref().unwrap().finalized());
+        assert_eq!(history.store.revision(CHANNEL, id), revision);
+        // And it cannot be ended again.
+        history.end_poll(&rest, CHANNEL, id);
+        assert_eq!(history.snapshot().notice, Some(polls::ENDED));
+        // A refusal is said and changes nothing.
+        let (mut history, id) = polling_history(true, false, false);
+        history.end_poll(&rest, CHANNEL, id);
+        history.complete(
+            &rest,
+            poll_answered(id, Kind::End, Err(RestError::PermissionDenied)),
+        );
+        assert!(
+            history
+                .snapshot()
+                .notice
+                .is_some_and(|n| n.contains("ending"))
+        );
+        assert!(!held(&history, id).poll.as_deref().unwrap().finalized());
+    }
+
+    #[test]
+    fn voters_are_loaded_only_when_asked_and_a_stale_answer_is_dropped() {
+        let rest = rest();
+        let (mut history, id) = polling_history(false, false, false);
+        assert!(history.snapshot().reaction_users.is_none());
+        history.poll_voters(&rest, CHANNEL, id, 9);
+        assert!(history.users_pending.is_none(), "no such answer");
+        history.poll_voters(&rest, CHANNEL, id, 1);
+        let shown = history.snapshot().reaction_users.unwrap();
+        assert_eq!(shown.poll_answer.as_deref(), Some("Pizza"));
+        assert_eq!(shown.state, UsersState::Loading);
+        let first = history.inspection.as_ref().unwrap().serial;
+        history.poll_voters(&rest, CHANNEL, id, 2);
+        history.complete(&rest, Completed::ReactionUsers(first, Ok(people(2))));
+        assert_eq!(
+            history.snapshot().reaction_users.unwrap().state,
+            UsersState::Loading,
+            "the replaced list's answer is dropped"
+        );
+        let second = history.inspection.as_ref().unwrap().serial;
+        history.complete(
+            &rest,
+            Completed::ReactionUsers(second, Ok(people(polls::MAX_VOTERS + 1))),
+        );
+        let UsersState::Loaded { names, more } = history.snapshot().reaction_users.unwrap().state
+        else {
+            panic!("not loaded");
+        };
+        assert_eq!((names.len(), more), (polls::MAX_VOTERS, true));
+        history.poll_voters(&rest, CHANNEL, id, 1);
+        let failed = history.inspection.as_ref().unwrap().serial;
+        history.complete(
+            &rest,
+            Completed::ReactionUsers(failed, Err(RestError::PermissionDenied)),
+        );
+        let UsersState::Failed(reason) = history.snapshot().reaction_users.unwrap().state else {
+            panic!("not failed");
+        };
+        assert_eq!(reason, polls::voters_failure(RestError::PermissionDenied));
     }
 }

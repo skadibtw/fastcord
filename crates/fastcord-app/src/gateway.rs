@@ -465,6 +465,23 @@ pub enum Command {
         emoji: Emoji,
     },
     CloseReactionUsers,
+    /// A poll answer was clicked: toggle it in the user's votes.
+    PollVote {
+        channel: Snowflake,
+        message: Snowflake,
+        answer: u32,
+    },
+    /// End the user's own poll.
+    PollEnd {
+        channel: Snowflake,
+        message: Snowflake,
+    },
+    /// Show who voted for a poll answer (the user asked).
+    PollVoters {
+        channel: Snowflake,
+        message: Snowflake,
+        answer: u32,
+    },
     /// The user is composing in this channel (the worker throttles and validates).
     Typing(Snowflake),
     OpenPrivate(Vec<Snowflake>),
@@ -563,6 +580,31 @@ impl fmt::Debug for Command {
                 .field("message", message)
                 .finish_non_exhaustive(),
             Self::CloseReactionUsers => f.write_str("CloseReactionUsers"),
+            Self::PollVote {
+                channel,
+                message,
+                answer,
+            } => f
+                .debug_struct("PollVote")
+                .field("channel", channel)
+                .field("message", message)
+                .field("answer", answer)
+                .finish(),
+            Self::PollEnd { channel, message } => f
+                .debug_struct("PollEnd")
+                .field("channel", channel)
+                .field("message", message)
+                .finish(),
+            Self::PollVoters {
+                channel,
+                message,
+                answer,
+            } => f
+                .debug_struct("PollVoters")
+                .field("channel", channel)
+                .field("message", message)
+                .field("answer", answer)
+                .finish(),
             Self::Typing(channel) => f.debug_tuple("Typing").field(channel).finish(),
             Self::OpenPrivate(_) => f.write_str("OpenPrivate([selected recipients])"),
             Self::Stream(intent) => f.debug_tuple("Stream").field(intent).finish(),
@@ -995,6 +1037,35 @@ impl NavigationBridge {
 
     pub fn close_reaction_users(&self) -> bool {
         self.commands.try_send(Command::CloseReactionUsers).is_ok()
+    }
+
+    /// Queues a click on a poll answer.
+    pub fn poll_vote(&self, channel: Snowflake, message: Snowflake, answer: u32) -> bool {
+        self.commands
+            .try_send(Command::PollVote {
+                channel,
+                message,
+                answer,
+            })
+            .is_ok()
+    }
+
+    /// Queues the user's request to end their own poll.
+    pub fn poll_end(&self, channel: Snowflake, message: Snowflake) -> bool {
+        self.commands
+            .try_send(Command::PollEnd { channel, message })
+            .is_ok()
+    }
+
+    /// Queues the user's request to see who voted for an answer.
+    pub fn poll_voters(&self, channel: Snowflake, message: Snowflake, answer: u32) -> bool {
+        self.commands
+            .try_send(Command::PollVoters {
+                channel,
+                message,
+                answer,
+            })
+            .is_ok()
     }
 
     fn publish(
@@ -1649,6 +1720,19 @@ impl Worker {
                 emoji,
             } => history.reaction_users(&self.rest, channel, message, emoji),
             Command::CloseReactionUsers => history.close_reaction_users(),
+            Command::PollVote {
+                channel,
+                message,
+                answer,
+            } => history.vote_poll(&self.rest, channel, message, answer),
+            Command::PollEnd { channel, message } => {
+                history.end_poll(&self.rest, channel, message);
+            }
+            Command::PollVoters {
+                channel,
+                message,
+                answer,
+            } => history.poll_voters(&self.rest, channel, message, answer),
             Command::Typing(channel) => {
                 let now = self.tracker.clock.now();
                 if history.can_send_in(channel) && self.typing_send.permit(now, channel) {
@@ -2848,6 +2932,24 @@ impl GatewayPanel {
                 self.controls.reaction_users(channel_id, message_id, emoji)
             }
             Event::CloseReactionUsers => self.controls.close_reaction_users(),
+            Event::PollVote {
+                channel_id,
+                message_id,
+                answer_id,
+            } if open == Some(channel_id) => {
+                self.controls.poll_vote(channel_id, message_id, answer_id)
+            }
+            Event::PollEnd {
+                channel_id,
+                message_id,
+            } if open == Some(channel_id) => self.controls.poll_end(channel_id, message_id),
+            Event::PollVoters {
+                channel_id,
+                message_id,
+                answer_id,
+            } if open == Some(channel_id) => {
+                self.controls.poll_voters(channel_id, message_id, answer_id)
+            }
             Event::React {
                 channel_id,
                 message_id,
@@ -3224,6 +3326,60 @@ mod bridge_tests {
         assert!(!bridge.add_reaction(c, m, thumbs.clone()));
         assert!(!bridge.reaction_users(c, m, thumbs));
         assert!(!bridge.close_reaction_users());
+    }
+
+    #[test]
+    fn poll_actions_are_queued_for_the_open_channel_only_and_text_free() {
+        use timeline::Event;
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut panel = panel(&bridge);
+        let (channel_id, message_id) = (Snowflake(500), Snowflake(7));
+        panel.message_action(Event::PollVote {
+            channel_id: Snowflake(501),
+            message_id,
+            answer_id: 1,
+        });
+        panel.message_action(Event::PollEnd {
+            channel_id: Snowflake(501),
+            message_id,
+        });
+        panel.message_action(Event::PollVoters {
+            channel_id: Snowflake(501),
+            message_id,
+            answer_id: 1,
+        });
+        assert!(commands.try_recv().is_err(), "another channel asks nothing");
+        panel.message_action(Event::PollVote {
+            channel_id,
+            message_id,
+            answer_id: 2,
+        });
+        panel.message_action(Event::PollVoters {
+            channel_id,
+            message_id,
+            answer_id: 2,
+        });
+        panel.message_action(Event::PollEnd {
+            channel_id,
+            message_id,
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::PollVote { channel, message, answer })
+                if (channel, message, answer) == (channel_id, message_id, 2)
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::PollVoters { answer: 2, .. })
+        ));
+        assert!(matches!(commands.try_recv(), Ok(Command::PollEnd { .. })));
+        for _ in 0..COMMAND_QUEUE {
+            assert!(bridge.poll_vote(channel_id, message_id, 1));
+        }
+        assert!(!bridge.poll_vote(channel_id, message_id, 1));
+        assert!(!bridge.poll_end(channel_id, message_id));
+        assert!(!bridge.poll_voters(channel_id, message_id, 1));
     }
 
     #[test]

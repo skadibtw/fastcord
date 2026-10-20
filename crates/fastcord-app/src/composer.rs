@@ -1717,6 +1717,7 @@ mod tests {
                 reactions: Vec::new(),
                 sticker_items: Vec::new(),
                 message_snapshots: Vec::new(),
+                poll: None,
                 mentions: Vec::new(),
                 mention_roles: Vec::new(),
                 mention_everyone: false,
@@ -1731,6 +1732,7 @@ mod tests {
             change,
             reply: None,
             reactions: Vec::new(),
+            poll_saving: false,
         }
     }
 

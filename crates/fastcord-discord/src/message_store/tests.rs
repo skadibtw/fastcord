@@ -8,7 +8,7 @@ use fastcord_model::{Emoji, MAX_REACTIONS};
 
 use super::*;
 use crate::gateway::{
-    MessageDelete, MessageDeleteBulk, MessageReaction, MessageReactionRemoveAll,
+    MessageDelete, MessageDeleteBulk, MessagePollVote, MessageReaction, MessageReactionRemoveAll,
     MessageReactionRemoveEmoji, decode_fixture,
 };
 use crate::history::parse_page;
@@ -2148,4 +2148,139 @@ fn a_forward_snapshot_is_counted_compacted_and_survives_edits_of_other_messages(
             .content,
         "frozen text"
     );
+}
+
+const POLL_MESSAGE: &str = include_str!("../../../../fixtures/model/message_poll_create.json");
+const POLL_ENDED: &str = include_str!("../../../../fixtures/model/message_poll_update_ended.json");
+const POLL_ID: u64 = 1_290_000_000_000_000_020;
+
+fn poll_page() -> Vec<Message> {
+    let mut poll: Message = serde_json::from_str(POLL_MESSAGE).unwrap();
+    poll.channel_id = CHANNEL;
+    vec![poll]
+}
+
+fn poll_vote(user: Snowflake, answer: u32, add: bool, message: u64) -> Dispatch {
+    let vote = MessagePollVote {
+        user_id: user,
+        channel_id: CHANNEL,
+        message_id: id(message),
+        guild_id: None,
+        answer_id: answer,
+    };
+    if add {
+        Dispatch::MessagePollVoteAdd(vote)
+    } else {
+        Dispatch::MessagePollVoteRemove(vote)
+    }
+}
+
+fn poll_counts(store: &MessageStore) -> Vec<(u32, bool)> {
+    let held = store.get(CHANNEL, id(POLL_ID)).unwrap();
+    let poll = held.poll.as_deref().unwrap();
+    [1, 2, 3].map(|answer| poll.count(answer)).to_vec()
+}
+
+fn poll_store() -> MessageStore {
+    let mut store = MessageStore::new();
+    store.set_user(ME);
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    store.merge_page(token, poll_page());
+    store
+}
+
+#[test]
+fn poll_votes_change_counts_once_and_the_users_own_echo_changes_nothing() {
+    let mut store = poll_store();
+    assert_eq!(poll_counts(&store), [(2, true), (1, false), (0, false)]);
+    let before = store.revision(CHANNEL, id(POLL_ID)).unwrap();
+    // Another user votes, then withdraws: exact counts, revision bumped.
+    assert_eq!(
+        store.apply_dispatch(&poll_vote(THEM, 2, true, POLL_ID)),
+        changed(CHANNEL)
+    );
+    assert_eq!(poll_counts(&store), [(2, true), (2, false), (0, false)]);
+    assert!(store.revision(CHANNEL, id(POLL_ID)).unwrap() > before);
+    store.apply_dispatch(&poll_vote(THEM, 2, false, POLL_ID));
+    assert_eq!(poll_counts(&store), [(2, true), (1, false), (0, false)]);
+    // The account's own vote is already counted: the echo is no change.
+    let revision = store.revision(CHANNEL, id(POLL_ID)).unwrap();
+    assert_eq!(
+        store.apply_dispatch(&poll_vote(ME, 1, true, POLL_ID)),
+        unchanged(CHANNEL)
+    );
+    assert_eq!(store.revision(CHANNEL, id(POLL_ID)).unwrap(), revision);
+    // Withdrawing it, twice (a replayed event), and an unknown answer.
+    store.apply_dispatch(&poll_vote(ME, 1, false, POLL_ID));
+    assert_eq!(poll_counts(&store), [(1, false), (1, false), (0, false)]);
+    assert_eq!(
+        store.apply_dispatch(&poll_vote(ME, 1, false, POLL_ID)),
+        unchanged(CHANNEL)
+    );
+    assert_eq!(
+        store.apply_dispatch(&poll_vote(THEM, 9, true, POLL_ID)),
+        unchanged(CHANNEL)
+    );
+    check(&store);
+}
+
+#[test]
+fn a_poll_end_replaces_results_and_an_older_open_copy_never_reopens_it() {
+    let mut store = poll_store();
+    let ended = Dispatch::MessageUpdate(Box::new(serde_json::from_str(POLL_ENDED).unwrap()));
+    assert_eq!(store.apply_dispatch(&ended), changed(CHANNEL));
+    assert_eq!(poll_counts(&store), [(5, true), (1, false), (0, false)]);
+    assert!(
+        store
+            .get(CHANNEL, id(POLL_ID))
+            .unwrap()
+            .poll
+            .as_deref()
+            .unwrap()
+            .finalized()
+    );
+    // A replay of the earlier, still-open results (as a stale update) does nothing.
+    let mut open: serde_json::Value = serde_json::from_str(POLL_ENDED).unwrap();
+    open["poll"]["results"]["is_finalized"] = false.into();
+    open["poll"]["results"]["answer_counts"][0]["count"] = 1.into();
+    let stale = Dispatch::MessageUpdate(Box::new(serde_json::from_value(open).unwrap()));
+    assert_eq!(store.apply_dispatch(&stale), unchanged(CHANNEL));
+    assert_eq!(poll_counts(&store)[0], (5, true));
+    // Replaying the end itself is also no change.
+    assert_eq!(store.apply_dispatch(&ended), unchanged(CHANNEL));
+}
+
+#[test]
+fn a_vote_for_an_uncached_poll_makes_a_page_that_carries_it_stale() {
+    let mut store = MessageStore::new();
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    assert_eq!(
+        store.apply_dispatch(&poll_vote(THEM, 1, true, POLL_ID)),
+        unchanged(CHANNEL)
+    );
+    assert_eq!((store.channels_held(), store.messages_held()), (0, 0));
+    assert_eq!(store.merge_page(token, poll_page()), PageMerge::Stale);
+    // Asked again, the page arrives with current state.
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    assert_eq!(applied(store.merge_page(token, poll_page())), (1, 1, 0));
+}
+
+#[test]
+fn poll_bytes_are_counted_and_a_vote_flood_stays_bounded() {
+    let mut store = poll_store();
+    let without = {
+        let mut bare = poll_page().remove(0);
+        bare.poll = None;
+        message_bytes(&bare)
+    };
+    assert!(message_bytes(&poll_page().remove(0)) > without);
+    let held = store.tracked_bytes();
+    for n in 0..5_000u64 {
+        let user = id(1_000 + n % 7);
+        store.apply_dispatch(&poll_vote(user, 1 + (n % 3) as u32, n % 2 == 0, POLL_ID));
+        store.apply_dispatch(&poll_vote(user, 1, true, POLL_ID + 1));
+    }
+    // Votes move counters; at most the counts list grows by an entry.
+    assert!(store.tracked_bytes() <= held + 8 * size_of::<fastcord_model::AnswerCount>());
+    check(&store);
 }

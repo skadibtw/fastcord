@@ -56,11 +56,11 @@ use std::slice;
 use std::sync::Arc;
 
 use fastcord_model::{
-    Attachment, Embed, Message, MessageSnapshot, MessageUpdate, Reaction, ReactionChange,
+    Attachment, Embed, Message, MessageSnapshot, MessageUpdate, Poll, Reaction, ReactionChange,
     Referenced, ReplyPreview, SnapshotMessage, Snowflake, StickerItem, User,
 };
 
-use crate::gateway::Dispatch;
+use crate::gateway::{Dispatch, MessagePollVote};
 use crate::history::{HistoryCursor, MESSAGE_PAGE_LIMIT};
 
 /// Message bodies, cached runs, and the pending-page journal together.
@@ -160,6 +160,7 @@ fn message_heap(message: &Message) -> usize {
             .sum::<usize>()
         + message.embeds.capacity() * size_of::<Embed>()
         + message.embeds.iter().map(Embed::heap_bytes).sum::<usize>()
+        + message.poll.as_deref().map_or(0, Poll::heap_bytes)
         + message.reactions.capacity() * size_of::<Reaction>()
         + message
             .reactions
@@ -192,6 +193,7 @@ fn update_heap(update: &MessageUpdate) -> usize {
             .mention_roles
             .as_ref()
             .map_or(0, |roles| roles.capacity() * size_of::<Snowflake>())
+        + update.poll.as_deref().map_or(0, Poll::heap_bytes)
         + update.attachments.as_ref().map_or(0, |attachments| {
             attachments.capacity() * size_of::<Attachment>()
                 + attachments.iter().map(attachment_heap).sum::<usize>()
@@ -274,6 +276,9 @@ fn compact(message: &mut Message) {
     message.embeds.shrink_to_fit();
     for embed in &mut message.embeds {
         embed.compact();
+    }
+    if let Some(poll) = message.poll.as_deref_mut() {
+        poll.compact();
     }
     message.reactions.shrink_to_fit();
     for reaction in &mut message.reactions {
@@ -1276,8 +1281,40 @@ impl MessageStore {
                 removed.message_id,
                 ReactionChange::RemoveAll,
             ),
+            Dispatch::MessagePollVoteAdd(vote) => self.gateway_poll_vote(vote, true),
+            Dispatch::MessagePollVoteRemove(vote) => self.gateway_poll_vote(vote, false),
             _ => StoreChange::default(),
         }
+    }
+
+    /// A vote added or withdrawn: changes the counts of a held message's poll
+    /// only when that alters it (the echo of the account's own vote, or a
+    /// repeat, is no change). A message that is not held gets nothing, but a
+    /// page request in flight may carry its older results and is made stale.
+    fn gateway_poll_vote(&mut self, vote: &MessagePollVote, add: bool) -> StoreChange {
+        let channel = vote.channel_id;
+        let unchanged = StoreChange {
+            channel: Some(channel),
+            ..StoreChange::default()
+        };
+        let by_me = self.user == Some(vote.user_id);
+        let Some((ci, at)) = self.held(channel, vote.message_id) else {
+            self.note_touched(channel, vote.message_id);
+            return unchanged;
+        };
+        let alters = self.channels[ci].messages[at]
+            .message
+            .poll
+            .as_deref()
+            .is_some_and(|poll| poll.alters_vote(vote.answer_id, by_me, add));
+        if !alters {
+            return unchanged;
+        }
+        self.edit_held(ci, at, |message| {
+            if let Some(poll) = message.poll.as_deref_mut() {
+                poll.apply_vote(vote.answer_id, by_me, add);
+            }
+        })
     }
 
     fn gateway_create(&mut self, message: &Message) -> StoreChange {

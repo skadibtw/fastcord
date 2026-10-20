@@ -22,6 +22,7 @@ pub mod history;
 pub mod message_store;
 mod password_auth;
 mod pins;
+mod poll;
 mod presence;
 mod private_channel;
 mod rate_limit;
@@ -52,6 +53,7 @@ pub use password_auth::{
     PasswordAuthError, PasswordLogin,
 };
 pub use pins::{PINS_PAGE_SIZE, PinnedMessage, PinsPage};
+pub use poll::{POLL_MAX_HOURS, PollDraft, PollError};
 pub use presence::StatusChange;
 pub use private_channel::{MAX_PRIVATE_RECIPIENTS, PrivateChannelError};
 pub use reaction::{ReactionEmoji, ReactionEmojiError, ReactionUser};

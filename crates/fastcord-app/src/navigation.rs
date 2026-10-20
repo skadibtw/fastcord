@@ -452,6 +452,11 @@ fn header_with<'a>(
                 .on_press(Message::Sticker(crate::sticker::Event::Toggle))
                 .style(style::tool_button(true, false)),
         );
+        line = line.push(
+            button(text("Poll").size(13))
+                .on_press(Message::Poll(crate::poll_create::Event::Toggle))
+                .style(style::tool_button(true, false)),
+        );
     }
     container(line)
         .padding([10, 16])

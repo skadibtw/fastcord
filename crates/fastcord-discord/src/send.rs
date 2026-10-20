@@ -20,6 +20,7 @@ use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 
 use crate::error::RetryableFailure;
+use crate::poll::PollDraft;
 use crate::upload::UploadedFile;
 use crate::{Clock, Method, NetworkFailure, Priority, RestClient, RestError, RestRequest, Route};
 
@@ -168,6 +169,7 @@ pub struct OutgoingMessage {
     files: Vec<UploadedFile>,
     sticker: Option<Snowflake>,
     forward: Option<ForwardSource>,
+    poll: Option<PollDraft>,
 }
 
 impl OutgoingMessage {
@@ -188,6 +190,7 @@ impl OutgoingMessage {
             files: Vec::new(),
             sticker: None,
             forward: None,
+            poll: None,
         })
     }
 
@@ -213,6 +216,7 @@ impl OutgoingMessage {
             files,
             sticker: None,
             forward: None,
+            poll: None,
         })
     }
 
@@ -226,6 +230,7 @@ impl OutgoingMessage {
             files: Vec::new(),
             sticker: Some(sticker),
             forward: None,
+            poll: None,
         }
     }
 
@@ -240,6 +245,21 @@ impl OutgoingMessage {
             files: Vec::new(),
             sticker: None,
             forward: Some(source),
+            poll: None,
+        }
+    }
+
+    /// A message that carries only a poll.
+    pub fn with_poll(poll: PollDraft, nonce: Nonce) -> Self {
+        Self {
+            content: String::new(),
+            nonce,
+            mentions: MentionPolicy::default(),
+            reply: None,
+            files: Vec::new(),
+            sticker: None,
+            forward: None,
+            poll: Some(poll),
         }
     }
 
@@ -284,6 +304,7 @@ impl OutgoingMessage {
                 (None, None) => None,
             },
             sticker_ids: self.sticker.into_iter().collect(),
+            poll: self.poll.as_ref(),
             attachments: self
                 .files
                 .iter()
@@ -307,6 +328,7 @@ impl fmt::Debug for OutgoingMessage {
             .field("files", &self.files.len())
             .field("sticker", &self.sticker.is_some())
             .field("forward", &self.forward.is_some())
+            .field("poll", &self.poll.is_some())
             .finish()
     }
 }
@@ -323,6 +345,8 @@ struct CreateMessage<'a> {
     message_reference: Option<WireReference>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     sticker_ids: Vec<Snowflake>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poll: Option<&'a PollDraft>,
     /// Present exactly when files were uploaded for this message.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<WireAttachment<'a>>,
@@ -524,6 +548,33 @@ mod tests {
         };
         let sent = serde_json::to_value(OutgoingMessage::forward(dm, Nonce(1)).body()).unwrap();
         assert!(sent["message_reference"].get("guild_id").is_none());
+    }
+
+    #[test]
+    fn a_poll_message_has_no_text_and_carries_the_poll_with_the_nonce() {
+        let draft = PollDraft::new(
+            "Lunch?",
+            &["Pizza".to_owned(), "Soup".to_owned()],
+            24,
+            false,
+        )
+        .unwrap();
+        let message = OutgoingMessage::with_poll(draft, Nonce(1_290_000_000_000_000_007));
+        let sent = serde_json::to_value(message.body()).unwrap();
+        assert_eq!(sent["content"], "");
+        assert_eq!(sent["enforce_nonce"], true);
+        assert_eq!(sent["nonce"], "1290000000000000007");
+        assert_eq!(sent["poll"]["duration"], 24);
+        assert_eq!(sent["poll"]["answers"][1]["poll_media"]["text"], "Soup");
+        assert!(sent.get("sticker_ids").is_none() && sent.get("message_reference").is_none());
+        assert!(!format!("{message:?}").contains("Pizza"));
+        let plain = OutgoingMessage::new("x", Nonce(1), MentionPolicy::default()).unwrap();
+        assert!(
+            serde_json::to_value(plain.body())
+                .unwrap()
+                .get("poll")
+                .is_none()
+        );
     }
 
     #[test]
