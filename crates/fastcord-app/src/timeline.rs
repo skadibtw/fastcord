@@ -411,6 +411,14 @@ pub enum Event {
         message_id: Snowflake,
         attachment_id: Snowflake,
     },
+    /// Play an Ogg Opus attachment inline.
+    PlayAttachment {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        attachment_id: Snowflake,
+    },
+    /// Pause, seek, volume or close the attachment being played.
+    Media(crate::media_ui::Control),
     /// Save the original attachment bytes using the native save dialog.
     DownloadAttachment {
         channel_id: Snowflake,
@@ -563,6 +571,8 @@ pub fn copy_text(snapshot: &Snapshot, channel: Snowflake, message: Snowflake) ->
 pub struct Attachments<'a> {
     pub account: Snowflake,
     pub views: &'a HashMap<AttachmentKey, AttachmentView>,
+    /// The attachment being played, if any.
+    pub media: Option<&'a crate::media_ui::MediaSession>,
     pub emojis: &'a HashMap<emoji::Asset, emoji::View>,
     pub avatars: &'a HashMap<crate::avatars::AvatarKey, iced::widget::image::Handle>,
     pub revealed: &'a std::collections::HashSet<(Snowflake, u16)>,
@@ -1032,7 +1042,12 @@ fn message_view<'a>(
             message: message_id,
             attachment: attachment.id,
         };
-        body = body.push(attachment_view(attachment, key, assets.views.get(&key)));
+        body = body.push(attachment_view(
+            attachment,
+            key,
+            assets.views.get(&key),
+            assets.media,
+        ));
     }
     for sticker in &message.sticker_items {
         body = body.push(sticker_view(sticker, assets.avatars));
@@ -1380,7 +1395,12 @@ fn forwarded_view<'a>(
             message: message.id,
             attachment: attachment.id,
         };
-        body = body.push(attachment_view(attachment, key, assets.views.get(&key)));
+        body = body.push(attachment_view(
+            attachment,
+            key,
+            assets.views.get(&key),
+            assets.media,
+        ));
     }
     for sticker in &snapshot.sticker_items {
         body = body.push(sticker_view(sticker, assets.avatars));
@@ -1435,6 +1455,7 @@ fn attachment_view(
     attachment: &Attachment,
     key: AttachmentKey,
     state: Option<&AttachmentView>,
+    media: Option<&crate::media_ui::MediaSession>,
 ) -> Element<'static, Event> {
     let ids = (key.channel, key.message, key.attachment);
     let mut content = column![
@@ -1469,6 +1490,9 @@ fn attachment_view(
             content = content.push(text(*reason).size(12).style(text::secondary));
         }
         None => {}
+    }
+    if crate::media_ui::is_playable(attachment) {
+        content = content.push(crate::media_ui::view(media, key));
     }
     let mut actions = row![].spacing(4);
     if is_previewable_image(attachment) {
@@ -1722,6 +1746,7 @@ mod tests {
         Attachments {
             account: Snowflake(1),
             views,
+            media: None,
             emojis: &EMOJI,
             avatars: &AVATARS,
             revealed: &REVEALED,
@@ -2369,6 +2394,86 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, Event::OpenAttachment { .. }))
         );
+    }
+
+    fn clickable_media(
+        snapshot: &Snapshot,
+        media: Option<&crate::media_ui::MediaSession>,
+    ) -> Vec<Event> {
+        let assets = Attachments {
+            media,
+            ..assets(no_views())
+        };
+        let mut ui = Ui::new(640.0, 400.0, view(snapshot, Interaction::default(), assets));
+        ui.redraw();
+        ui.draw();
+        let mut found = Vec::new();
+        for y in (0..400).step_by(5) {
+            for x in (0..640).step_by(5) {
+                for event in ui.click(x as f32, y as f32) {
+                    if !matches!(event, Event::Viewport { .. } | Event::Measured { .. })
+                        && !found.contains(&event)
+                    {
+                        found.push(event);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn ogg_attachments_offer_inline_playback_with_controls_that_follow_the_session() {
+        use crate::media_ui::{Control, MediaSession, Phase};
+        let snapshot_for = |name: &str, kind: &str| {
+            let mut item = (*message(42, "")).clone();
+            item.attachments[0].content_type = Some(kind.to_owned());
+            item.attachments[0].filename = name.to_owned();
+            Snapshot {
+                rows: vec![Row::new(Arc::new(item), 1)],
+                ..one_row(42)
+            }
+        };
+        let play = Event::PlayAttachment {
+            channel_id: CHANNEL,
+            message_id: Snowflake(42),
+            attachment_id: Snowflake(9),
+        };
+        let voice = snapshot_for("voice-message.ogg", "audio/ogg");
+        assert!(clickable_media(&voice, None).contains(&play));
+        // Other audio and all video stay Download/Open-only.
+        for (name, kind) in [
+            ("a.mp3", "audio/mpeg"),
+            ("a.mp4", "video/mp4"),
+            ("a.webm", "video/webm"),
+        ] {
+            let found = clickable_media(&snapshot_for(name, kind), None);
+            assert!(
+                !found
+                    .iter()
+                    .any(|e| matches!(e, Event::PlayAttachment { .. } | Event::Media(_))),
+                "{name}"
+            );
+        }
+        let key = attachment_key(42);
+        let mut media = MediaSession::for_test(key);
+        let loading = clickable_media(&voice, Some(&media));
+        assert!(loading.contains(&Event::Media(Control::Close)));
+        assert!(!loading.contains(&play));
+        media.phase = Phase::Failed("x");
+        assert!(clickable_media(&voice, Some(&media)).contains(&play));
+        media.phase = Phase::Active;
+        media.snapshot.duration_ms = Some(60_000);
+        let active = clickable_media(&voice, Some(&media));
+        for control in [Control::TogglePause, Control::ToggleMute, Control::Close] {
+            assert!(active.contains(&Event::Media(control)), "{control:?}");
+        }
+        assert!(!active.contains(&play));
+        // A session for another attachment does not leak controls into this one.
+        let mut other = key;
+        other.attachment = Snowflake(10);
+        let elsewhere = MediaSession::for_test(other);
+        assert!(clickable_media(&voice, Some(&elsewhere)).contains(&play));
     }
 
     #[test]

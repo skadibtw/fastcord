@@ -538,6 +538,12 @@ Evidence: community documentation of `TYPING_START` and `POST /channels/{id}/typ
 - Optional note: sent as a separate ordinary message to the same destination only after its forward was confirmed, once, with its own nonce (the forward body itself carries no text). Whether the official client sends it this way is not established.
 - Boundaries: re-forwarding a forward is not offered; destinations are limited to the sendable channels of the open server and the sidebar conversations; at most five per action.
 
+## Inline audio playback (#74)
+
+- No new routes. The attachment is fetched exactly as for Open: the credential-free CDN client, redirects revalidated hop by hop, one refresh through `POST /attachments/refresh-urls` after a 403/404, the 64 MiB (`MAX_FILE_BYTES`) ceiling, the account-scoped disk LRU. The signed URL and the token never reach the player; it only receives a local file path. 401/403/404/429 are therefore the attachment cache's existing handling and are shown with fixed texts.
+- Container and codec: Ogg (RFC 3533) pages, CRC-32 checked, first logical stream only; `OpusHead` (RFC 7845) version 0, channel mapping family 0, 1 or 2 channels; every packet at most 1500 bytes and exactly 20 ms by its TOC (RFC 6716 section 3.1). Pre-skip is not trimmed from the start, the final granule is not used to trim the end, the output gain field is ignored. Voice messages from official clients (`audio/ogg`, `voice-message.ogg`) are expected to satisfy this; that is unverified against live attachments.
+- `waveform`/`duration_secs` voice-message fields are not used; the duration comes from the last page's granule position.
+
 ## Polls (#73)
 
 - Received: a message may carry `poll:{question:{text}, answers:[{answer_id, poll_media:{text, emoji?}}], expiry, allow_multiselect, layout_type, results:{is_finalized, answer_counts:[{id, count, me_voted}]}}`. At most 10 answers are kept (a malformed one is skipped), the question is cut at 300 and each answer at 55 characters, counts at 10 entries. Poll text is never logged. Unverified against a live account.

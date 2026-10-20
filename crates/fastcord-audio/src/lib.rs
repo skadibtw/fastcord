@@ -21,7 +21,9 @@ pub mod device;
 mod echo;
 mod engine;
 mod error;
+pub mod file_player;
 mod jitter;
+pub mod ogg;
 mod pipeline;
 mod resample;
 mod ring;
@@ -37,5 +39,6 @@ pub use engine::{
     EngineStats,
 };
 pub use error::AudioError;
+pub use file_player::{FilePlayer, PlayerError, PlayerFailure, PlayerSnapshot, PlayerState};
 pub use pipeline::{CapturedFrame, RemoteFrame};
 pub use resample::UnsupportedRate;

@@ -2533,6 +2533,8 @@ pub struct GatewayPanel {
     /// The larger view of one image, if open; dropping it cancels its decode.
     pub attachment_viewer: Option<crate::attachment_ui::AttachmentViewer>,
     pub attachment_notice: Option<&'static str>,
+    /// The inline audio attachment being played; dropping it stops the player.
+    pub media: Option<crate::media_ui::MediaSession>,
 }
 
 impl Drop for GatewayPanel {
@@ -2745,6 +2747,7 @@ impl GatewayPanel {
             attachment_ready_order: VecDeque::new(),
             attachment_viewer: None,
             attachment_notice: None,
+            media: None,
         }
     }
     pub fn with_attachment_cache(mut self, attachments: Option<AttachmentCache>) -> Self {
@@ -2787,6 +2790,14 @@ impl GatewayPanel {
             .is_some_and(|viewer| Some(viewer.key.channel) != open_channel)
         {
             self.attachment_viewer = None;
+        }
+        // Audio stops with its row: a hidden message would leave no way to pause it.
+        if self
+            .media
+            .as_ref()
+            .is_some_and(|media| !still_loaded(&media.key))
+        {
+            self.media = None;
         }
         self.private.notice = consumed.private_notice;
         if self.controls.watched().is_none() {
@@ -3660,6 +3671,7 @@ mod bridge_tests {
             key(500, 8),
             attachment,
         ));
+        panel.media = Some(crate::media_ui::MediaSession::for_test(key(500, 8)));
         // Message 8 is no longer among the built rows: its previews and workers
         // are cancelled; the modal view stays while the channel is open.
         bridge.publish(
@@ -3676,6 +3688,17 @@ mod bridge_tests {
         assert!(panel.is_attachment_loaded(&key(500, 7)));
         assert!(!panel.is_attachment_loaded(&key(500, 8)));
         assert!(panel.attachment_viewer.is_some());
+        // Audio stops with its row: with the row gone there would be no way to pause it.
+        assert!(panel.media.is_none());
+        panel.media = Some(crate::media_ui::MediaSession::for_test(key(500, 7)));
+        bridge.publish(
+            NavigationSnapshot::default(),
+            with_attachment(500, 7),
+            emoji_picker::Snapshot::default(),
+            None,
+        );
+        panel.consume();
+        assert!(panel.media.is_some(), "kept while its row is built");
         // Leaving the channel cancels everything, the viewer included.
         bridge.publish(
             NavigationSnapshot::default(),
@@ -3688,6 +3711,7 @@ mod bridge_tests {
         assert!(panel.attachment_workers.is_empty());
         assert!(panel.attachment_action_workers.is_empty());
         assert!(panel.attachment_viewer.is_none());
+        assert!(panel.media.is_none());
     }
 
     #[test]

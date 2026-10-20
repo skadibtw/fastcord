@@ -15,6 +15,7 @@ mod gateway;
 mod gif;
 mod history;
 mod login;
+mod media_ui;
 mod navigation;
 mod notify;
 mod outbox;
@@ -217,6 +218,12 @@ enum Message {
         Result<attachment_ui::LoadedPreview, &'static str>,
     ),
     AttachmentPurged(bool),
+    MediaReady(
+        u64,
+        AttachmentKey,
+        Result<media_ui::PlayerHandle, &'static str>,
+    ),
+    MediaTick,
     AttachmentActionFinished(
         u64,
         AttachmentKey,
@@ -400,7 +407,18 @@ impl App {
             activity,
             self.animation_subscription(),
             self.video_subscription(),
+            self.media_subscription(),
         ])
+    }
+
+    /// The position timer exists only while an attachment is audibly playing.
+    fn media_subscription(&self) -> iced::Subscription<Message> {
+        if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.media.as_ref().is_some_and(media_ui::MediaSession::playing))
+        {
+            iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::MediaTick)
+        } else {
+            iced::Subscription::none()
+        }
     }
 
     /// The 20 ms animation timer exists only while a visible, active emoji animates.
@@ -735,6 +753,16 @@ impl App {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.attachment_action_workers.remove(&(key, action));
                     attachment_ui::finished(gateway, outcome);
+                }
+            }
+            Message::MediaReady(generation, key, result) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == generation) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    media_ui::ready(gateway, key, result);
+                }
+            }
+            Message::MediaTick => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    media_ui::tick(gateway);
                 }
             }
             Message::CloseViewer => {
@@ -1343,6 +1371,21 @@ impl App {
                                 attachment_id,
                             );
                         }
+                        timeline::Event::PlayAttachment {
+                            channel_id,
+                            message_id,
+                            attachment_id,
+                        } => {
+                            return media_ui::play(
+                                gateway,
+                                session,
+                                self.audio_preferences.output.choice.clone(),
+                                channel_id,
+                                message_id,
+                                attachment_id,
+                            );
+                        }
+                        timeline::Event::Media(control) => media_ui::control(gateway, control),
                         timeline::Event::ViewAttachment {
                             channel_id,
                             message_id,
@@ -2423,6 +2466,7 @@ impl App {
                 timeline::Attachments {
                     account: session.user.id,
                     views: &gateway.attachment_views,
+                    media: gateway.media.as_ref(),
                     emojis: &gateway.emoji.views,
                     avatars: &gateway.avatars.views,
                     revealed: &gateway.revealed,
@@ -3446,6 +3490,37 @@ mod tests {
         };
         assert!(gateway.composer.submission(true, 0).is_some(), "text");
         assert!(commands.try_recv().is_err(), "nothing was reacted to");
+    }
+
+    #[test]
+    fn media_subscription_ticks_only_while_audio_is_playing() {
+        use fastcord_audio::PlayerState;
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        assert_eq!(app.media_subscription().units(), 0);
+        let key = AttachmentKey {
+            account: Snowflake(1),
+            channel: Snowflake(2),
+            message: Snowflake(3),
+            attachment: Snowflake(4),
+        };
+        let set = |app: &mut App, phase, state| {
+            let Phase::Account { gateway, .. } = &mut app.phase else {
+                panic!("account");
+            };
+            let mut media = media_ui::MediaSession::for_test(key);
+            media.phase = phase;
+            media.snapshot.state = state;
+            gateway.media = Some(media);
+        };
+        set(&mut app, media_ui::Phase::Loading, PlayerState::Playing);
+        assert_eq!(app.media_subscription().units(), 0);
+        set(&mut app, media_ui::Phase::Active, PlayerState::Playing);
+        assert_eq!(app.media_subscription().units(), 1);
+        set(&mut app, media_ui::Phase::Active, PlayerState::Paused);
+        assert_eq!(app.media_subscription().units(), 0);
+        set(&mut app, media_ui::Phase::Failed("x"), PlayerState::Playing);
+        assert_eq!(app.media_subscription().units(), 0);
     }
 
     #[test]
