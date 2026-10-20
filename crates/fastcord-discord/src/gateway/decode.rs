@@ -760,6 +760,38 @@ struct TypingWire {
     user_id: Snowflake,
 }
 
+#[derive(Deserialize)]
+struct SoundEffectWire {
+    channel_id: Snowflake,
+    #[serde(default)]
+    guild_id: Option<Snowflake>,
+    user_id: Snowflake,
+    #[serde(default)]
+    sound_id: Option<Snowflake>,
+    #[serde(default)]
+    sound_volume: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct SoundboardGuildWire {
+    guild_id: Snowflake,
+}
+
+/// `None` for an effect that is not a soundboard sound (an emoji burst).
+fn decode_sound_effect(raw: &str) -> Result<Option<Dispatch>, Malformed> {
+    let wire: SoundEffectWire = json(raw)?;
+    Ok(wire.sound_id.map(|sound_id| {
+        let volume = wire.sound_volume.filter(|v| v.is_finite()).unwrap_or(1.0);
+        Dispatch::VoiceChannelSound(super::event::SoundboardPlay {
+            channel_id: wire.channel_id,
+            guild_id: wire.guild_id,
+            user_id: wire.user_id,
+            sound_id,
+            volume_percent: (volume.clamp(0.0, 1.0) * 100.0).round() as u8,
+        })
+    }))
+}
+
 fn decode_supplemental(raw: &str) -> Result<ReadySupplemental, Malformed> {
     let wire: SupplementalWire = serde_json::from_str(raw).map_err(|_| Malformed)?;
     if !wire.merged_members.is_empty() && wire.merged_members.len() != wire.guilds.len() {
@@ -1212,6 +1244,19 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "GUILD_ROLE_DELETE" => json::<GuildRoleDelete>(raw).map(Dispatch::GuildRoleDelete),
         "VOICE_STATE_UPDATE" => {
             decode_voice_state(raw).map(|v| Dispatch::VoiceStateUpdate(Box::new(v)))
+        }
+        "VOICE_CHANNEL_EFFECT_SEND" => {
+            return match decode_sound_effect(raw) {
+                Ok(Some(event)) => Decoded::Event(event),
+                Ok(None) => Decoded::Unhandled,
+                Err(Malformed) => Decoded::Malformed,
+            };
+        }
+        "GUILD_SOUNDBOARD_SOUND_CREATE"
+        | "GUILD_SOUNDBOARD_SOUND_UPDATE"
+        | "GUILD_SOUNDBOARD_SOUND_DELETE"
+        | "GUILD_SOUNDBOARD_SOUNDS_UPDATE" => {
+            json::<SoundboardGuildWire>(raw).map(|wire| Dispatch::SoundboardChanged(wire.guild_id))
         }
         "CALL_CREATE" => json::<CallCreate>(raw).map(|c| Dispatch::CallCreate(Box::new(c))),
         "CALL_UPDATE" => json::<CallUpdate>(raw).map(Dispatch::CallUpdate),
@@ -2092,6 +2137,47 @@ mod tests {
             }
         );
         assert!(update.members.is_empty());
+    }
+
+    #[test]
+    fn a_soundboard_effect_decodes_and_an_emoji_effect_is_not_surfaced() {
+        let played = decode_dispatch(
+            "VOICE_CHANNEL_EFFECT_SEND",
+            r#"{"channel_id":"5","guild_id":"1","user_id":"7","sound_id":"9","sound_volume":0.25,"emoji":null}"#,
+        );
+        let Decoded::Event(Dispatch::VoiceChannelSound(play)) = played else {
+            panic!("a sound effect did not decode");
+        };
+        assert_eq!(
+            (play.channel_id, play.guild_id, play.user_id, play.sound_id),
+            (id(5), Some(id(1)), id(7), id(9))
+        );
+        assert_eq!(play.volume_percent, 25);
+        assert!(matches!(
+            decode_dispatch(
+                "VOICE_CHANNEL_EFFECT_SEND",
+                r#"{"channel_id":"5","user_id":"7","emoji":{"name":"x"},"animation_type":0}"#
+            ),
+            Decoded::Unhandled
+        ));
+        assert!(matches!(
+            decode_dispatch("VOICE_CHANNEL_EFFECT_SEND", r#"{"sound_id":"9"}"#),
+            Decoded::Malformed
+        ));
+        for name in [
+            "GUILD_SOUNDBOARD_SOUND_CREATE",
+            "GUILD_SOUNDBOARD_SOUND_UPDATE",
+            "GUILD_SOUNDBOARD_SOUND_DELETE",
+            "GUILD_SOUNDBOARD_SOUNDS_UPDATE",
+        ] {
+            assert!(
+                matches!(
+                    decode_dispatch(name, r#"{"guild_id":"3","sound_id":"4"}"#),
+                    Decoded::Event(Dispatch::SoundboardChanged(guild)) if guild == id(3)
+                ),
+                "{name}"
+            );
+        }
     }
 
     #[test]

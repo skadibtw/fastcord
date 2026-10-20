@@ -98,6 +98,26 @@ pub struct VoiceControls {
     /// The camera of the current call: what the user asked for and what the call
     /// reports back (issue #84).
     pub camera: CameraControls,
+    /// Soundboard plays heard in the current call, oldest first, at most [`SOUND_CUES`]
+    /// (issue #87). The UI plays each `seq` it has not seen; older ones are dropped.
+    pub sound_cues: Vec<SoundCue>,
+    /// Counts plays and catalog changes; every cue and change carries the value it set.
+    pub sound_seq: u64,
+    /// The latest soundboard catalog change: the server and the `sound_seq` it set.
+    pub sound_catalog_change: Option<(Snowflake, u64)>,
+}
+
+/// Most soundboard plays kept for the UI between two looks; a burst keeps the newest.
+pub const SOUND_CUES: usize = 4;
+
+/// Someone played a server sound in the call the account is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoundCue {
+    pub seq: u64,
+    pub user: Snowflake,
+    pub sound: Snowflake,
+    /// The sound's own volume, 0 to 100.
+    pub volume_percent: u8,
 }
 
 /// A Go Live offer in the parent voice channel; at most 32, keys only.
@@ -2230,6 +2250,32 @@ impl Worker {
                     let correlation = correlator.voice_state(&update.state);
                     return Some(correlation);
                 }
+            }
+            Dispatch::VoiceChannelSound(play) => {
+                let in_call = self
+                    .voice_requests
+                    .borrow()
+                    .is_some_and(|request| request.channel_id == Some(play.channel_id));
+                if in_call && self.tracker.store.suppression(play.user_id).is_none() {
+                    self.bridge.voice_controls.send_modify(|controls| {
+                        controls.sound_seq = controls.sound_seq.wrapping_add(1);
+                        if controls.sound_cues.len() >= SOUND_CUES {
+                            controls.sound_cues.remove(0);
+                        }
+                        controls.sound_cues.push(SoundCue {
+                            seq: controls.sound_seq,
+                            user: play.user_id,
+                            sound: play.sound_id,
+                            volume_percent: play.volume_percent,
+                        });
+                    });
+                }
+            }
+            Dispatch::SoundboardChanged(guild) => {
+                self.bridge.voice_controls.send_modify(|controls| {
+                    controls.sound_seq = controls.sound_seq.wrapping_add(1);
+                    controls.sound_catalog_change = Some((*guild, controls.sound_seq));
+                });
             }
             Dispatch::VoiceServerUpdate(update) => {
                 if let Some(correlator) = self.voice_correlator.as_mut() {

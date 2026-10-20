@@ -41,6 +41,7 @@ mod rich;
 mod safety;
 mod search;
 mod shortcuts;
+mod soundboard;
 mod status;
 mod sticker;
 mod style;
@@ -140,6 +141,7 @@ struct App {
     report: report::State,
     gif: gif::State,
     sticker: sticker::State,
+    soundboard: soundboard::State,
     forward: forward::State,
     poll: poll_create::State,
     voice: voice_record::State,
@@ -301,6 +303,7 @@ enum Message {
     Report(report::Event),
     Gif(gif::Event),
     Sticker(sticker::Event),
+    Soundboard(soundboard::Event),
     Forward(forward::Event),
     Poll(poll_create::Event),
     Voice(voice_record::Event),
@@ -374,6 +377,7 @@ impl App {
                 report: report::State::default(),
                 gif: gif::State::default(),
                 sticker: sticker::State::default(),
+                soundboard: soundboard::State::default(),
                 forward: forward::State::default(),
                 poll: poll_create::State::default(),
                 voice: voice_record::State::default(),
@@ -541,6 +545,7 @@ impl App {
             self.animation_subscription(),
             self.video_subscription(),
             self.media_subscription(),
+            self.soundboard_subscription(),
             self.voice_subscription(),
             self.mic_subscription(),
             self.media_frame_subscription(),
@@ -725,6 +730,16 @@ impl App {
         }
     }
 
+    /// The 250 ms timer exists only while a soundboard sound is loading or playing.
+    fn soundboard_subscription(&self) -> iced::Subscription<Message> {
+        if self.soundboard.busy() {
+            iced::time::every(std::time::Duration::from_millis(250))
+                .map(|_| Message::Soundboard(soundboard::Event::Tick))
+        } else {
+            iced::Subscription::none()
+        }
+    }
+
     /// The position timer exists only while an attachment is audibly playing.
     fn media_subscription(&self) -> iced::Subscription<Message> {
         if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.media.as_ref().is_some_and(media_ui::MediaSession::playing))
@@ -748,6 +763,7 @@ impl App {
         match message {
             Message::Initialized(preferences, store) => {
                 notify::set_enabled(!preferences.notifications_off);
+                self.soundboard.set_prefs(preferences.soundboard.clone());
                 self.audio_preferences = preferences;
                 self.shortcuts.rebuild(&self.audio_preferences.voice_input);
                 return self.handle(Message::StoreReady(store));
@@ -1182,6 +1198,7 @@ impl App {
                     self.poll.sync(gateway.timeline.channel_id);
                     self.voice.sync(gateway.timeline.channel_id);
                 }
+                return self.soundboard_follow();
             }
             Message::ShowDirects(on) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
@@ -1198,6 +1215,7 @@ impl App {
             Message::Report(event) => return self.report_event(event),
             Message::Gif(event) => return self.gif_event(event),
             Message::Sticker(event) => return self.sticker_event(event),
+            Message::Soundboard(event) => return self.soundboard_event(event),
             Message::Forward(event) => return self.forward_event(event),
             Message::Poll(event) => return self.poll_event(event),
             Message::Voice(event) => return self.voice_event(event),
@@ -2204,6 +2222,8 @@ impl App {
                 self.report.clear();
                 self.gif = gif::State::default();
                 self.sticker = sticker::State::default();
+                self.soundboard.reset();
+                self.soundboard.reset();
                 self.forward = forward::State::default();
                 self.poll = poll_create::State::default();
                 self.voice.reset();
@@ -2265,6 +2285,44 @@ impl App {
     /// The overlay that lists the screens and windows that can be shared.
     /// The camera button, the picker and the camera's status in the voice bar.
     /// The camera turns on only by this button.
+    /// The soundboard button of the voice bar: shown for a server call whose channel the
+    /// sidebar knows (its permissions come from that row). Previewing needs no permission;
+    /// playing needs `USE_SOUNDBOARD` and `SPEAK`.
+    fn soundboard_button<'a>(
+        &'a self,
+        actions: iced::widget::Row<'a, Message>,
+        gateway: &'a GatewayPanel,
+    ) -> iced::widget::Row<'a, Message> {
+        let Some((Some(guild), channel)) = gateway.controls.voice_target() else {
+            return actions;
+        };
+        let Some(permissions) = gateway
+            .navigation
+            .channels
+            .rows
+            .iter()
+            .find(|row| row.id == channel)
+            .map(|row| row.permissions)
+        else {
+            return actions;
+        };
+        let open = self.soundboard.is_open();
+        let event = if open {
+            soundboard::Event::Close
+        } else {
+            soundboard::Event::Open(soundboard::Context {
+                guild,
+                channel,
+                can_play: permissions.use_soundboard && permissions.speak,
+            })
+        };
+        actions.push(
+            button(text("Soundboard").size(12))
+                .on_press(Message::Soundboard(event))
+                .style(style::action_button(open)),
+        )
+    }
+
     fn camera_controls<'a>(
         &'a self,
         mut actions: iced::widget::Row<'a, Message>,
@@ -2740,6 +2798,95 @@ impl App {
             .map(Message::MicPanel)
     }
 
+    /// The environment a soundboard update borrows: the account, the call and the output.
+    fn soundboard_env(
+        phase: &Phase,
+        output: fastcord_audio::DeviceChoice,
+    ) -> Option<soundboard::Env<'_>> {
+        let Phase::Account {
+            session, gateway, ..
+        } = phase
+        else {
+            return None;
+        };
+        let controls = gateway.controls.voice_controls();
+        let in_call = gateway.controls.voice_audio_state() != gateway::VoiceAudioState::Idle;
+        Some(soundboard::Env {
+            client: &session.client,
+            cache: gateway.attachments.as_ref(),
+            output,
+            deafened: controls.deafened || controls.server_deafened,
+            voice: gateway.controls.voice_target().filter(|_| in_call),
+        })
+    }
+
+    /// Saves the soundboard choices when an update changed them.
+    fn save_soundboard_prefs(&mut self) -> Task<Message> {
+        match self.soundboard.take_dirty_prefs() {
+            Some(prefs) => {
+                self.audio_preferences.soundboard = prefs;
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+                Task::none()
+            }
+            None => Task::none(),
+        }
+    }
+
+    /// Follows the call after each gateway notification: sounds end with the call or a
+    /// deafen, the panel follows its channel, and new plays and catalog changes arrive.
+    fn soundboard_follow(&mut self) -> Task<Message> {
+        let output = self.audio_preferences.output.choice.clone();
+        let Some(env) = Self::soundboard_env(&self.phase, output) else {
+            return Task::none();
+        };
+        let Phase::Account { gateway, .. } = &self.phase else {
+            return Task::none();
+        };
+        let controls = gateway.controls.voice_controls();
+        self.soundboard.sync_call(env.voice, env.deafened);
+        let mut tasks = Vec::new();
+        for cue in &controls.sound_cues {
+            tasks.push(self.soundboard.update(soundboard::Event::Cue(*cue), &env));
+        }
+        if let Some(guild) = self
+            .soundboard
+            .new_catalog_change(controls.sound_catalog_change)
+        {
+            tasks.push(
+                self.soundboard
+                    .update(soundboard::Event::CatalogChanged(guild), &env),
+            );
+        }
+        let saved = self.save_soundboard_prefs();
+        Task::batch(
+            tasks
+                .into_iter()
+                .map(|task| task.map(Message::Soundboard))
+                .chain([saved]),
+        )
+    }
+
+    fn soundboard_event(&mut self, event: soundboard::Event) -> Task<Message> {
+        let output = self.audio_preferences.output.choice.clone();
+        let Some(env) = Self::soundboard_env(&self.phase, output) else {
+            return Task::none();
+        };
+        let rejected = soundboard::State::is_rejected(&event);
+        let task = self.soundboard.update(event, &env);
+        if rejected && let Phase::Account { gateway, .. } = &self.phase {
+            // Discord rejected the login: stop the account like any other 401.
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        let saved = self.save_soundboard_prefs();
+        Task::batch([task.map(Message::Soundboard), saved])
+    }
+
     fn sticker_event(&mut self, event: sticker::Event) -> Task<Message> {
         let Phase::Account {
             session, gateway, ..
@@ -3203,6 +3350,7 @@ impl App {
                 }
                 if in_voice {
                     actions = self.camera_controls(actions, &voice_controls, running);
+                    actions = self.soundboard_button(actions, gateway);
                 }
                 let mut bar = column![
                     scrollable(people).direction(scrollable::Direction::Horizontal(
@@ -3310,6 +3458,9 @@ impl App {
             }
             if let Some(panel) = gif::view(&self.gif) {
                 banner_column = banner_column.push(panel.map(Message::Gif));
+            }
+            if let Some(panel) = soundboard::view(&self.soundboard) {
+                banner_column = banner_column.push(panel.map(Message::Soundboard));
             }
             if let Some(channel) = gateway.timeline.channel_id
                 && self.sticker.is_open_for(channel)

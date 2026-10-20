@@ -34,6 +34,7 @@ pub mod recorder;
 mod resample;
 mod ring;
 mod sched;
+pub mod soundboard;
 
 #[cfg(test)]
 mod alloc_counter;

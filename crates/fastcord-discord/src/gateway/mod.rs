@@ -48,7 +48,7 @@ pub use event::{
     MessageAck, MessageDelete, MessageDeleteBulk, MessagePollVote, MessageReaction,
     MessageReactionRemoveAll, MessageReactionRemoveEmoji, MuteSettings, PassiveUpdate,
     ReadStateEntry, Ready, ReadyRead, ReadySupplemental, ReconnectReason, RelationshipUpdate,
-    SessionId, StopReason, SupplementalGuild, ThreadListSync, ThreadMemberUpdate,
+    SessionId, SoundboardPlay, StopReason, SupplementalGuild, ThreadListSync, ThreadMemberUpdate,
     ThreadMembersUpdate, TypingStart, VoiceStateUpdate,
 };
 pub use event::{MAX_PRESENCES, MAX_RELATIONSHIPS, PresenceUpdate};

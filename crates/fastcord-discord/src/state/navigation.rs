@@ -111,6 +111,8 @@ pub struct PermissionSummary {
     pub speak: bool,
     /// Voice activity may open the microphone; without it the channel requires push-to-talk.
     pub use_vad: bool,
+    /// The soundboard may be played in this voice channel.
+    pub use_soundboard: bool,
     pub create_threads: bool,
     pub manage_threads: bool,
 }
@@ -127,6 +129,7 @@ impl From<Permissions> for PermissionSummary {
             connect: permissions.contains(Permissions::CONNECT),
             speak: permissions.contains(Permissions::SPEAK),
             use_vad: permissions.contains(Permissions::USE_VAD),
+            use_soundboard: permissions.contains(Permissions::USE_SOUNDBOARD),
             create_threads: permissions.contains(Permissions::CREATE_PUBLIC_THREADS),
             manage_threads: permissions.contains(Permissions::MANAGE_THREADS),
         }

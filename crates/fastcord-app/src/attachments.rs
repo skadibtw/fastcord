@@ -138,6 +138,7 @@ const EMOJI_SIDE: u32 = 32;
 /// Avatars and icons are requested at `size=64` and never decoded larger.
 pub const AVATAR_SIDE: u32 = 64;
 const MAX_AVATAR_FILE_BYTES: u64 = 512 * 1024;
+const MAX_SOUND_FILE_BYTES: u64 = fastcord_audio::soundboard::MAX_INPUT_BYTES as u64;
 
 struct PublicEmoji;
 impl UrlRefresh for PublicEmoji {
@@ -675,6 +676,27 @@ impl AttachmentCache {
         }
         self.ensure_active()?;
         Ok(bytes.into())
+    }
+
+    /// A soundboard sound from the public CDN through the same credential-free fetcher
+    /// and disk LRU, at most [`MAX_SOUND_FILE_BYTES`]. The file is decoded by the caller
+    /// on a blocking worker. The cache identity is the sound ID; channel 1 cannot be a
+    /// real channel and so cannot collide with an attachment.
+    pub async fn soundboard_file(&self, id: Snowflake) -> Result<PathBuf, AttachmentError> {
+        let key = AttachmentKey {
+            account: self.account,
+            channel: Snowflake(1),
+            message: Snowflake(0),
+            attachment: id,
+        };
+        self.fetch_file(
+            &PublicEmoji,
+            key,
+            "sound.audio",
+            &format!("https://cdn.discordapp.com/soundboard-sounds/{id}"),
+            MAX_SOUND_FILE_BYTES,
+        )
+        .await
     }
 
     /// A public avatar or server icon (`kind` 2 = user, 3 = server icon, 4 =

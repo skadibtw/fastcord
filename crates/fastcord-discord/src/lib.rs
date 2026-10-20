@@ -40,6 +40,7 @@ mod route;
 mod search;
 mod secret;
 mod send;
+mod soundboard;
 pub mod state;
 mod sticker;
 mod thread;
@@ -93,6 +94,7 @@ pub use send::{
     ComposeError, ForwardSource, MAX_CONTENT_CHARS, MentionPolicy, Nonce, NonceGenerator,
     OutgoingMessage, ReplyTo, SendError,
 };
+pub use soundboard::{GUILD_SOUNDS, MAX_SOUND_NAME_CHARS, SoundboardSound};
 pub use sticker::{GUILD_STICKERS, GuildSticker};
 pub use thread::{
     ARCHIVED_PAGE_SIZE, ArchivedThreads, MAX_THREAD_NAME_CHARS, ThreadError, thread_name,

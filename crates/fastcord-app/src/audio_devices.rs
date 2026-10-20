@@ -59,6 +59,8 @@ pub struct Preferences {
     pub voice_input: crate::shortcuts::Settings,
     /// The chosen camera. The camera itself is never saved as on.
     pub camera: CameraSelection,
+    /// Received soundboard volume, mute and favourite sounds.
+    pub soundboard: crate::soundboard::Prefs,
 }
 
 impl Default for Preferences {
@@ -73,6 +75,7 @@ impl Default for Preferences {
             voice_recording: false,
             voice_input: crate::shortcuts::Settings::default(),
             camera: CameraSelection::default(),
+            soundboard: crate::soundboard::Prefs::default(),
         }
     }
 }
@@ -313,6 +316,11 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
             .get("camera")
             .and_then(camera_selection)
             .unwrap_or_default(),
+        // Older settings predate the soundboard: full volume, not muted, no favourites.
+        soundboard: value
+            .get("soundboard")
+            .map(crate::soundboard::Prefs::from_json)
+            .unwrap_or_default(),
     })
 }
 
@@ -352,7 +360,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json()}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -444,6 +452,11 @@ mod tests {
                 id: Some("usb#cam".to_owned()),
                 label: "Desk camera".to_owned(),
                 ..CameraSelection::default()
+            },
+            soundboard: crate::soundboard::Prefs {
+                volume: 55,
+                muted: true,
+                favorites: vec![42, 43],
             },
         };
         save_to(&path, &prefs).unwrap();

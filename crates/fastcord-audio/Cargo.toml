@@ -15,6 +15,7 @@ ndarray.workspace = true
 nnnoiseless.workspace = true
 opus2.workspace = true
 rubato.workspace = true
+symphonia-bundle-mp3.workspace = true
 symphonia-codec-aac.workspace = true
 symphonia-core.workspace = true
 tokio.workspace = true

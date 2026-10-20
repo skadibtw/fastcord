@@ -10,7 +10,7 @@ dav1d, RNNoise, the DeepFilterNet model, davey and OpenMLS) are also covered in
 offered licenses applies. A crate that publishes no license file is covered by the
 standard text of its declared license, credited to the authors in its manifest.
 
-## Crates (736)
+## Crates (737)
 
 | Crate | Version | License | Source |
 | --- | --- | --- | --- |
@@ -576,6 +576,7 @@ standard text of its declared license, credited to the authors in its manifest.
 | subtle | 2.6.1 | BSD-3-Clause | crates.io |
 | svg_fmt | 0.4.5 | MIT/Apache-2.0 | crates.io |
 | swash | 0.2.10 | Apache-2.0 OR MIT | crates.io |
+| symphonia-bundle-mp3 | 0.6.1 | MPL-2.0 | crates.io |
 | symphonia-codec-aac | 0.6.1 | MPL-2.0 | crates.io |
 | symphonia-common | 0.6.1 | MPL-2.0 | crates.io |
 | symphonia-core | 0.6.1 | MPL-2.0 | crates.io |
@@ -3495,7 +3496,7 @@ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 ```
 
-### 43. Used by: audio_thread_priority 0.35.1, symphonia-codec-aac 0.6.1, symphonia-common 0.6.1, symphonia-core 0.6.1, symphonia-metadata 0.6.1
+### 43. Used by: audio_thread_priority 0.35.1, symphonia-bundle-mp3 0.6.1, symphonia-codec-aac 0.6.1, symphonia-common 0.6.1, symphonia-core 0.6.1, symphonia-metadata 0.6.1
 
 ```text
 Mozilla Public License Version 2.0

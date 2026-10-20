@@ -221,6 +221,18 @@ pub struct TypingStart {
     pub user_id: Snowflake,
 }
 
+/// VOICE_CHANNEL_EFFECT_SEND of a soundboard sound: someone played a sound in a voice
+/// channel. Emoji effects are not surfaced. Consumed by the voice layer, not the reducer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoundboardPlay {
+    pub channel_id: Snowflake,
+    pub guild_id: Option<Snowflake>,
+    pub user_id: Snowflake,
+    pub sound_id: Snowflake,
+    /// The sound's own volume, 0 to 100.
+    pub volume_percent: u8,
+}
+
 /// USER_GUILD_SETTINGS_UPDATE, reduced to what unread markers need.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuildMuteUpdate {
@@ -586,6 +598,10 @@ pub enum Dispatch {
     GuildRoleUpdate(Box<GuildRoleEvent>),
     GuildRoleDelete(GuildRoleDelete),
     VoiceStateUpdate(Box<VoiceStateUpdate>),
+    /// A soundboard sound was played in a voice channel.
+    VoiceChannelSound(SoundboardPlay),
+    /// A server's soundboard sounds were created, edited, deleted or replaced.
+    SoundboardChanged(Snowflake),
     /// A DM or group-DM call started, with who is ringing and connected.
     CallCreate(Box<CallCreate>),
     CallUpdate(CallUpdate),
@@ -648,6 +664,8 @@ impl Dispatch {
             Self::GuildRoleUpdate(_) => "GUILD_ROLE_UPDATE",
             Self::GuildRoleDelete(_) => "GUILD_ROLE_DELETE",
             Self::VoiceStateUpdate(_) => "VOICE_STATE_UPDATE",
+            Self::VoiceChannelSound(_) => "VOICE_CHANNEL_EFFECT_SEND",
+            Self::SoundboardChanged(_) => "GUILD_SOUNDBOARD_SOUNDS_UPDATE",
             Self::CallCreate(_) => "CALL_CREATE",
             Self::CallUpdate(_) => "CALL_UPDATE",
             Self::CallDelete(_) => "CALL_DELETE",
