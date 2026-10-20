@@ -139,9 +139,7 @@ fn find_attachment(
         .iter()
         .find(|row| row.message.id == message)?
         .message
-        .attachments
-        .iter()
-        .find(|item| item.id == attachment)
+        .attachment(attachment)
         .cloned()
 }
 

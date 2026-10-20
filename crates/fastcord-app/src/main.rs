@@ -9,6 +9,7 @@ mod changes;
 mod composer;
 mod emoji;
 mod emoji_picker;
+mod forward;
 mod friends;
 mod gateway;
 mod gif;
@@ -100,6 +101,7 @@ struct App {
     pins: pins::State,
     gif: gif::State,
     sticker: sticker::State,
+    forward: forward::State,
     friends: friends::State,
     status: status::State,
     threads: threads::State,
@@ -224,6 +226,7 @@ enum Message {
     Pins(pins::Event),
     Gif(gif::Event),
     Sticker(sticker::Event),
+    Forward(forward::Event),
     Friends(friends::Event),
     Status(status::Event),
     Threads(threads::Event),
@@ -281,6 +284,7 @@ impl App {
                 pins: pins::State::default(),
                 gif: gif::State::default(),
                 sticker: sticker::State::default(),
+                forward: forward::State::default(),
                 friends: friends::State::default(),
                 status: status::State::default(),
                 threads: threads::State::default(),
@@ -755,6 +759,7 @@ impl App {
                 }
                 if let Phase::Account { gateway, .. } = &self.phase {
                     self.sticker.sync(gateway.timeline.channel_id);
+                    self.forward.sync(gateway.timeline.channel_id);
                 }
             }
             Message::ShowDirects(on) => {
@@ -767,6 +772,7 @@ impl App {
             Message::Pins(event) => return self.pins_event(event),
             Message::Gif(event) => return self.gif_event(event),
             Message::Sticker(event) => return self.sticker_event(event),
+            Message::Forward(event) => return self.forward_event(event),
             Message::Status(event) => {
                 if let Phase::Account {
                     session, gateway, ..
@@ -1245,6 +1251,24 @@ impl App {
                                 return iced::clipboard::write(source.to_owned());
                             }
                         }
+                        timeline::Event::Forward {
+                            channel_id,
+                            message_id,
+                        } => {
+                            let preview =
+                                timeline::copy_text(&gateway.timeline, channel_id, message_id)
+                                    .unwrap_or_default()
+                                    .to_owned();
+                            let source = fastcord_discord::ForwardSource {
+                                channel: channel_id,
+                                message: message_id,
+                                guild: gateway
+                                    .navigation
+                                    .selected_guild
+                                    .filter(|_| !gateway.directs),
+                            };
+                            return self.forward_event(forward::Event::Open { source, preview });
+                        }
                         timeline::Event::OpenLink(url) => {
                             if rich::safe_url(&url) {
                                 let _ = fastcord_platform::open_url(&url);
@@ -1490,6 +1514,8 @@ impl App {
                 self.pins = pins::State::default();
                 self.gif = gif::State::default();
                 self.sticker = sticker::State::default();
+                self.forward = forward::State::default();
+                self.forward = forward::State::default();
                 self.threads.drop_all();
                 if let Phase::Account {
                     session, gateway, ..
@@ -1714,6 +1740,7 @@ impl App {
         self.pins = pins::State::default();
         self.gif = gif::State::default();
         self.sticker = sticker::State::default();
+        self.forward = forward::State::default();
         self.threads.drop_all();
         self.friends.reset();
         self.status.reset();
@@ -1802,6 +1829,19 @@ impl App {
         self.gif
             .update(event, &session.client, gateway.attachments.as_ref())
             .map(Message::Gif)
+    }
+
+    fn forward_event(&mut self, event: forward::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let candidates = forward_candidates(gateway);
+        self.forward
+            .update(event, &candidates, &session.client)
+            .map(Message::Forward)
     }
 
     fn sticker_event(&mut self, event: sticker::Event) -> Task<Message> {
@@ -2152,6 +2192,11 @@ impl App {
                 && let Some(panel) = sticker::view(&self.sticker)
             {
                 banner_column = banner_column.push(panel.map(Message::Sticker));
+            }
+            if self.forward.is_open()
+                && let Some(panel) = forward::view(&self.forward, &forward_candidates(gateway))
+            {
+                banner_column = banner_column.push(panel.map(Message::Forward));
             }
             if let Some(panel) = threads::view(&self.threads) {
                 banner_column = banner_column.push(panel.map(Message::Threads));
@@ -2638,6 +2683,37 @@ fn token_edited(mut value: String) -> Message {
     } else {
         Message::TokenEdited(Arc::new(UserToken::new(value)))
     }
+}
+
+/// Places a forward may go to: the sendable channels of the open server and
+/// every conversation in the navigation windows, as they are now.
+fn forward_candidates(gateway: &gateway::GatewayPanel) -> Vec<forward::Candidate> {
+    use fastcord_discord::state::navigation::ChannelKind as Kind;
+    let channels = gateway
+        .navigation
+        .channels
+        .rows
+        .iter()
+        .filter(|row| !gateway.directs && row.enabled)
+        .filter(|row| row.permissions.view_channel && row.permissions.send_messages)
+        .filter(|row| {
+            matches!(row.kind, Kind::Text | Kind::Announcement | Kind::Thread)
+                && row
+                    .thread
+                    .as_ref()
+                    .is_none_or(|thread| !thread.archived && !thread.locked)
+        })
+        .map(|row| forward::Candidate::new(row.id, &format!("#{}", row.name)));
+    let conversations = gateway
+        .navigation
+        .private_channels
+        .rows
+        .iter()
+        .map(|row| forward::Candidate::new(row.id, &row.label));
+    channels
+        .chain(conversations)
+        .take(forward::MAX_CANDIDATES)
+        .collect()
 }
 
 /// Avatars and icons the shown rows ask for: the user's own, the rail window,

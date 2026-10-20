@@ -1804,6 +1804,7 @@ mod tests {
             attachments: Vec::new(),
             reactions: Vec::new(),
             sticker_items: Vec::new(),
+            message_snapshots: Vec::new(),
             mentions: Vec::new(),
             mention_roles: Vec::new(),
             mention_everyone: false,
@@ -1823,6 +1824,7 @@ mod tests {
         let mut reply = message(n);
         reply.kind = 19;
         reply.message_reference = Some(MessageReference {
+            kind: 0,
             message_id: Some(target),
             channel_id: Some(CHANNEL),
             guild_id: None,

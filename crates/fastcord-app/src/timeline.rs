@@ -465,6 +465,11 @@ pub enum Event {
     },
     /// A message author's name or avatar was clicked: show their profile.
     OpenProfile(fastcord_model::User),
+    /// Forward a message to destinations the user picks.
+    Forward {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
     /// Start a thread from a message.
     StartThread {
         channel_id: Snowflake,
@@ -971,6 +976,16 @@ fn message_view<'a>(
     {
         body = body.push(text(note).size(13).style(text::secondary));
     }
+    if let Some(snapshot) = message.forwarded() {
+        body = body.push(forwarded_view(
+            message,
+            snapshot,
+            channel_id,
+            row.revision,
+            cx,
+            assets,
+        ));
+    }
     if let Some(thread) = created_thread(message) {
         body = body.push(row![row_button("Open thread", Event::OpenThread(thread))]);
     }
@@ -1101,9 +1116,19 @@ fn message_view<'a>(
     let show_copy = !content.is_empty() && idle;
     let show_react = snapshot.can_react && idle;
     let show_pin = interaction.can_pin && idle;
+    // Ordinary messages and replies; re-forwarding a forward is not offered
+    // (not established for user accounts).
+    let show_forward = idle && matches!(message.kind, 0 | 19) && message.forwarded().is_none();
     // Only ordinary messages can start a thread.
     let show_thread = interaction.can_thread && idle && matches!(message.kind, 0 | 19);
-    if !show_own_actions && !show_reply && !show_copy && !show_react && !show_pin && !show_thread {
+    if !show_own_actions
+        && !show_reply
+        && !show_copy
+        && !show_react
+        && !show_pin
+        && !show_thread
+        && !show_forward
+    {
         return base.into();
     }
     // Hover controls are layered over the top right so the measured row height
@@ -1146,6 +1171,15 @@ fn message_view<'a>(
             },
         ));
     }
+    if show_forward {
+        actions = actions.push(row_button(
+            "Forward",
+            Event::Forward {
+                channel_id,
+                message_id,
+            },
+        ));
+    }
     if show_thread {
         actions = actions.push(row_button(
             "Thread",
@@ -1175,6 +1209,62 @@ fn message_view<'a>(
         });
     hover(base, overlay)
 }
+/// A forwarded message: labelled, drawn only from the frozen snapshot (never
+/// from the original, so edits or deletion there change nothing here) and
+/// without naming where it came from.
+fn forwarded_view<'a>(
+    message: &'a Message,
+    snapshot: &'a fastcord_model::SnapshotMessage,
+    channel_id: Snowflake,
+    revision: u64,
+    cx: rich::Cx<'a>,
+    assets: Attachments<'a>,
+) -> Element<'a, Event> {
+    let mut body = column![text("Forwarded").size(12).style(text::secondary)].spacing(2);
+    let parts = rich::Parts::snapshot(message, snapshot);
+    if !snapshot.content.is_empty() {
+        body = body.push(
+            rich::body(&snapshot.content, parts, channel_id, revision, cx)
+                .unwrap_or_else(|| text(snapshot.content.as_str()).into()),
+        );
+    }
+    for embed in rich::embeds(parts, channel_id, revision, cx) {
+        body = body.push(embed);
+    }
+    for attachment in &snapshot.attachments {
+        let key = AttachmentKey {
+            account: assets.account,
+            channel: channel_id,
+            message: message.id,
+            attachment: attachment.id,
+        };
+        body = body.push(attachment_view(attachment, key, assets.views.get(&key)));
+    }
+    for sticker in &snapshot.sticker_items {
+        body = body.push(sticker_view(sticker, assets.avatars));
+    }
+    if snapshot.content.is_empty()
+        && snapshot.embeds.is_empty()
+        && snapshot.attachments.is_empty()
+        && snapshot.sticker_items.is_empty()
+    {
+        body = body.push(
+            text("The forwarded message has no content to show.")
+                .size(13)
+                .style(text::secondary),
+        );
+    }
+    container(body)
+        .padding(Padding {
+            top: 2.0,
+            right: 0.0,
+            bottom: 2.0,
+            left: 10.0,
+        })
+        .style(container::bordered_box)
+        .into()
+}
+
 /// A sticker: its first frame at 64 px once loaded; otherwise (loading,
 /// failed, deleted, Lottie or an unknown format) its name, said honestly.
 fn sticker_view<'a>(
@@ -1311,7 +1401,10 @@ fn created_thread(message: &Message) -> Option<Snowflake> {
 
 /// What to show for a message without text or attachments.
 fn placeholder(message: &Message) -> Option<String> {
-    if !message.attachments.is_empty() || !message.sticker_items.is_empty() {
+    if !message.attachments.is_empty()
+        || !message.sticker_items.is_empty()
+        || message.forwarded().is_some()
+    {
         return None;
     }
     Some(match message.kind {
@@ -1916,6 +2009,53 @@ mod tests {
         }
     }
 
+    fn forwarded_row(message_id: u64) -> Row {
+        let forward: Message = serde_json::from_value(serde_json::json!({
+            "id": message_id.to_string(),
+            "channel_id": "500",
+            "author": {"id": "2", "username": "alt"},
+            "content": "",
+            "timestamp": "2026-10-07T12:00:00.000000+00:00",
+            "message_reference": {"type": 1, "message_id": "77", "channel_id": "88"},
+            "message_snapshots": [{"message": {
+                "content": "**frozen**",
+                "timestamp": "2026-10-06T12:00:00.000000+00:00",
+                "attachments": [{
+                    "id": "31", "filename": "dog.png", "size": 5,
+                    "url": "https://cdn.example/a/dog.png?ex=SIGNED"
+                }]
+            }}]
+        }))
+        .unwrap();
+        Row::new(Arc::new(forward), 1)
+    }
+
+    #[test]
+    fn a_forward_shows_its_snapshot_offers_its_media_but_not_a_second_forward() {
+        let mut snapshot = one_row(1);
+        snapshot.rows = vec![forwarded_row(42), Row::new(message(43, "plain"), 1)];
+        snapshot.window.range = 0..2;
+        let found = clickable(&snapshot, Interaction::default());
+        // The snapshot's attachment is actionable under the forwarding message.
+        assert!(
+            found.contains(&Event::LoadAttachment {
+                channel_id: CHANNEL,
+                message_id: Snowflake(42),
+                attachment_id: Snowflake(31),
+            }),
+            "{found:?}"
+        );
+        let forward = |id: u64| Event::Forward {
+            channel_id: CHANNEL,
+            message_id: Snowflake(id),
+        };
+        assert!(found.contains(&forward(43)), "{found:?}");
+        assert!(!found.contains(&forward(42)), "{found:?}");
+        assert!(placeholder(&forwarded_row(42).message).is_none());
+        // The original (77 in channel 88) is never a jump or reply target.
+        assert!(!found.iter().any(|e| matches!(e, Event::JumpTo { .. })));
+    }
+
     fn one_row(message_id: u64) -> Snapshot {
         Snapshot {
             channel_id: Some(CHANNEL),
@@ -2245,6 +2385,7 @@ mod tests {
         created.attachments.clear();
         assert_eq!(created_thread(&created), None, "no reference, no thread");
         created.message_reference = Some(fastcord_model::MessageReference {
+            kind: 0,
             message_id: None,
             channel_id: Some(Snowflake(900)),
             guild_id: None,

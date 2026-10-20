@@ -2474,12 +2474,7 @@ fn is_attachment_in(
 ) -> bool {
     timeline.channel_id == Some(key.channel)
         && timeline.rows.iter().any(|row| {
-            row.message.id == key.message
-                && row
-                    .message
-                    .attachments
-                    .iter()
-                    .any(|attachment| attachment.id == key.attachment)
+            row.message.id == key.message && row.message.attachment(key.attachment).is_some()
         })
 }
 

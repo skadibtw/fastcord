@@ -2109,3 +2109,43 @@ fn the_recorded_reaction_events_apply_through_the_store() {
     assert!(apply("MESSAGE_REACTION_REMOVE_ALL", REACTION_REMOVE_ALL).is_empty());
     check(&store);
 }
+
+#[test]
+fn a_forward_snapshot_is_counted_compacted_and_survives_edits_of_other_messages() {
+    let plain = message(1);
+    let mut forward = message(2);
+    forward.message_reference = Some(fastcord_model::MessageReference {
+        kind: 1,
+        message_id: Some(id(1)),
+        channel_id: Some(CHANNEL),
+        guild_id: None,
+    });
+    forward.message_snapshots = vec![
+        serde_json::from_value(serde_json::json!({
+            "message": {"content": "frozen text", "embeds": [], "attachments": []}
+        }))
+        .unwrap(),
+    ];
+    assert!(message_bytes(&forward) > message_bytes(&plain) + "frozen text".len());
+
+    let mut store = MessageStore::new();
+    let token = store.begin_page(CHANNEL, HistoryCursor::Latest);
+    let page = through_rest(CHANNEL, HistoryCursor::Latest, &[forward, plain]);
+    store.merge_page(token, page);
+    // Editing or deleting the original leaves the forwarded copy as it was.
+    store.apply_dispatch(&update(CHANNEL, 1, r#","content":"edited""#));
+    store.apply_dispatch(&delete(CHANNEL, 1));
+    let held = store.get(CHANNEL, id(2)).expect("forward kept");
+    assert_eq!(held.forwarded().unwrap().content, "frozen text");
+    // A later update of the forward itself does not clear the snapshot.
+    store.apply_dispatch(&update(CHANNEL, 2, r#","pinned":true"#));
+    assert_eq!(
+        store
+            .get(CHANNEL, id(2))
+            .unwrap()
+            .forwarded()
+            .unwrap()
+            .content,
+        "frozen text"
+    );
+}

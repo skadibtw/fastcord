@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use fastcord_model::markup::{self, Block, BlockKind, Kind, Span as Part, Style};
-use fastcord_model::{Embed, Message, Snowflake};
+use fastcord_model::{Embed, Message, SnapshotMessage, Snowflake, User};
 use iced::font::{self, Font, Weight};
 use iced::widget::{column, container, rich_text, row, space, span, text};
 use iced::{Background, Color, Element, Length};
@@ -98,9 +98,41 @@ pub struct Cx<'a> {
     pub emojis: &'a HashMap<Asset, View>,
 }
 
+/// What rendering reads of a message: the ordinary one or a forward's snapshot
+/// (which borrows its parent's ID, so spoiler state keys stay per row).
+#[derive(Clone, Copy)]
+pub struct Parts<'a> {
+    id: Snowflake,
+    mentions: &'a [User],
+    everyone: bool,
+    embeds: &'a [Embed],
+}
+
+impl<'a> From<&'a Message> for Parts<'a> {
+    fn from(message: &'a Message) -> Self {
+        Self {
+            id: message.id,
+            mentions: &message.mentions,
+            everyone: message.mention_everyone,
+            embeds: &message.embeds,
+        }
+    }
+}
+
+impl<'a> Parts<'a> {
+    pub fn snapshot(parent: &Message, snapshot: &'a SnapshotMessage) -> Self {
+        Self {
+            id: parent.id,
+            mentions: &snapshot.mentions,
+            everyone: false,
+            embeds: &snapshot.embeds,
+        }
+    }
+}
+
 struct Renderer<'a> {
     cx: Cx<'a>,
-    message: &'a Message,
+    message: Parts<'a>,
     channel: Snowflake,
     revision: u64,
     /// Emoji images are only shown (and reported visible) in the message
@@ -145,7 +177,7 @@ pub fn emoji_assets(content: &str) -> Vec<Asset> {
 /// caller shows it with the plain, jumbo-aware emoji path).
 pub fn body<'a>(
     content: &'a str,
-    message: &'a Message,
+    message: impl Into<Parts<'a>>,
     channel: Snowflake,
     revision: u64,
     cx: Cx<'a>,
@@ -156,7 +188,7 @@ pub fn body<'a>(
     }
     let mut renderer = Renderer {
         cx,
-        message,
+        message: message.into(),
         channel,
         revision,
         images: true,
@@ -168,20 +200,21 @@ pub fn body<'a>(
 /// Embeds below a message. They take their text from the supplied metadata
 /// only; remote images are not fetched.
 pub fn embeds<'a>(
-    message: &'a Message,
+    message: impl Into<Parts<'a>>,
     channel: Snowflake,
     revision: u64,
     cx: Cx<'a>,
 ) -> Vec<Element<'a, Event>> {
     let mut renderer = Renderer {
         cx,
-        message,
+        message: message.into(),
         channel,
         revision,
         images: false,
         ordinal: 0,
     };
-    message
+    renderer
+        .message
         .embeds
         .iter()
         .map(|embed| renderer.embed(embed))
@@ -386,7 +419,7 @@ impl<'a> Renderer<'a> {
             Kind::User(_) | Kind::Role(_) | Kind::Channel(_) => {
                 item = item.color(MENTION).background(MENTION_BG);
             }
-            Kind::Everyone | Kind::Here if message.mention_everyone => {
+            Kind::Everyone | Kind::Here if message.everyone => {
                 item = item.color(MENTION).background(MENTION_BG);
             }
             _ => {}

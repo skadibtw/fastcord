@@ -56,8 +56,8 @@ use std::slice;
 use std::sync::Arc;
 
 use fastcord_model::{
-    Attachment, Embed, Message, MessageUpdate, Reaction, ReactionChange, Referenced, ReplyPreview,
-    Snowflake, StickerItem, User,
+    Attachment, Embed, Message, MessageSnapshot, MessageUpdate, Reaction, ReactionChange,
+    Referenced, ReplyPreview, SnapshotMessage, Snowflake, StickerItem, User,
 };
 
 use crate::gateway::Dispatch;
@@ -103,6 +103,31 @@ fn user_heap(user: &User) -> usize {
     user.username.capacity() + text(&user.global_name) + text(&user.avatar)
 }
 
+/// Owned bytes of a forwarded snapshot's contents (the struct itself is counted
+/// by the capacity of the vector that holds it).
+fn snapshot_heap(snapshot: &SnapshotMessage) -> usize {
+    snapshot.content.capacity()
+        + snapshot.timestamp.capacity()
+        + text(&snapshot.edited_timestamp)
+        + snapshot.attachments.capacity() * size_of::<Attachment>()
+        + snapshot
+            .attachments
+            .iter()
+            .map(attachment_heap)
+            .sum::<usize>()
+        + snapshot.sticker_items.capacity() * size_of::<StickerItem>()
+        + snapshot
+            .sticker_items
+            .iter()
+            .map(|sticker| sticker.name.capacity())
+            .sum::<usize>()
+        + snapshot.mentions.capacity() * size_of::<User>()
+        + snapshot.mentions.iter().map(user_heap).sum::<usize>()
+        + snapshot.mention_roles.capacity() * size_of::<Snowflake>()
+        + snapshot.embeds.capacity() * size_of::<Embed>()
+        + snapshot.embeds.iter().map(Embed::heap_bytes).sum::<usize>()
+}
+
 fn message_heap(message: &Message) -> usize {
     user_heap(&message.author)
         + message.content.capacity()
@@ -127,6 +152,12 @@ fn message_heap(message: &Message) -> usize {
         + message.mentions.capacity() * size_of::<User>()
         + message.mentions.iter().map(user_heap).sum::<usize>()
         + message.mention_roles.capacity() * size_of::<Snowflake>()
+        + message.message_snapshots.capacity() * size_of::<MessageSnapshot>()
+        + message
+            .message_snapshots
+            .iter()
+            .map(|snapshot| snapshot_heap(&snapshot.message))
+            .sum::<usize>()
         + message.embeds.capacity() * size_of::<Embed>()
         + message.embeds.iter().map(Embed::heap_bytes).sum::<usize>()
         + message.reactions.capacity() * size_of::<Reaction>()
@@ -191,6 +222,29 @@ fn compact_user(user: &mut User) {
     shrink_text(&mut user.avatar);
 }
 
+fn compact_snapshot(snapshot: &mut SnapshotMessage) {
+    snapshot.content.shrink_to_fit();
+    snapshot.timestamp.shrink_to_fit();
+    shrink_text(&mut snapshot.edited_timestamp);
+    snapshot.sticker_items.shrink_to_fit();
+    snapshot.attachments.shrink_to_fit();
+    for attachment in &mut snapshot.attachments {
+        attachment.filename.shrink_to_fit();
+        attachment.url.shrink_to_fit();
+        shrink_text(&mut attachment.proxy_url);
+        shrink_text(&mut attachment.content_type);
+    }
+    snapshot.mentions.shrink_to_fit();
+    for user in &mut snapshot.mentions {
+        compact_user(user);
+    }
+    snapshot.mention_roles.shrink_to_fit();
+    snapshot.embeds.shrink_to_fit();
+    for embed in &mut snapshot.embeds {
+        embed.compact();
+    }
+}
+
 fn compact(message: &mut Message) {
     compact_user(&mut message.author);
     message.content.shrink_to_fit();
@@ -213,6 +267,10 @@ fn compact(message: &mut Message) {
         compact_user(user);
     }
     message.mention_roles.shrink_to_fit();
+    message.message_snapshots.shrink_to_fit();
+    for snapshot in &mut message.message_snapshots {
+        compact_snapshot(&mut snapshot.message);
+    }
     message.embeds.shrink_to_fit();
     for embed in &mut message.embeds {
         embed.compact();

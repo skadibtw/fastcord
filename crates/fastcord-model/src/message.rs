@@ -132,12 +132,106 @@ enum ReactionEdit<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MessageReference {
+    /// Discord's reference `type`: 0 reply/crosspost, 1 forward.
+    #[serde(rename = "type", default, skip_serializing_if = "is_default_reference")]
+    pub kind: u8,
     #[serde(default)]
     pub message_id: Option<Snowflake>,
     #[serde(default)]
     pub channel_id: Option<Snowflake>,
     #[serde(default)]
     pub guild_id: Option<Snowflake>,
+}
+
+fn is_default_reference(kind: &u8) -> bool {
+    *kind == 0
+}
+
+/// `message_reference.type` of a forward.
+pub const FORWARD_REFERENCE: u8 = 1;
+/// Most snapshots one message keeps (a forward carries exactly one).
+pub const MAX_MESSAGE_SNAPSHOTS: usize = 1;
+
+/// The frozen copy of a message a forward carries (`message_snapshots[].message`).
+/// It is Discord's own copy at the moment of forwarding: later edits or
+/// deletion of the original never reach it, and it names neither the source
+/// channel nor its author.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MessageSnapshot {
+    pub message: SnapshotMessage,
+}
+
+#[derive(Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotMessage {
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub timestamp: String,
+    #[serde(default)]
+    pub edited_timestamp: Option<String>,
+    #[serde(rename = "type", default)]
+    pub kind: u8,
+    #[serde(default)]
+    pub flags: u64,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    #[serde(default, deserialize_with = "lenient_embeds")]
+    pub embeds: Vec<Embed>,
+    #[serde(default, deserialize_with = "lenient_stickers")]
+    pub sticker_items: Vec<StickerItem>,
+    #[serde(default)]
+    pub mentions: Vec<User>,
+    #[serde(default)]
+    pub mention_roles: Vec<Snowflake>,
+}
+
+impl fmt::Debug for SnapshotMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SnapshotMessage")
+            .field("content_chars", &self.content.chars().count())
+            .field("attachments", &self.attachments.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SnapshotMessage {
+    /// This snapshot dressed as a message of `parent` (same ID, author and
+    /// channel) so the ordinary body, mention and embed renderers can draw it.
+    pub fn as_message(&self, parent: &Message) -> Message {
+        Message {
+            content: self.content.clone(),
+            timestamp: self.timestamp.clone(),
+            edited_timestamp: self.edited_timestamp.clone(),
+            kind: 0,
+            flags: self.flags,
+            attachments: self.attachments.clone(),
+            embeds: self.embeds.clone(),
+            sticker_items: self.sticker_items.clone(),
+            mentions: self.mentions.clone(),
+            mention_roles: self.mention_roles.clone(),
+            reactions: Vec::new(),
+            message_reference: None,
+            message_snapshots: Vec::new(),
+            referenced_message: Referenced::Unknown,
+            nonce: None,
+            call: None,
+            mention_everyone: false,
+            pinned: false,
+            ..parent.clone()
+        }
+    }
+}
+
+fn lenient_snapshots<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<MessageSnapshot>, D::Error> {
+    // One malformed snapshot must not discard the whole message.
+    let values = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .take(MAX_MESSAGE_SNAPSHOTS)
+        .collect())
 }
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -168,6 +262,13 @@ pub struct Message {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub sticker_items: Vec<StickerItem>,
+    /// The frozen content of a forwarded message (see [`Message::forwarded`]).
+    #[serde(
+        default,
+        deserialize_with = "lenient_snapshots",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub message_snapshots: Vec<MessageSnapshot>,
     /// Users this message mentions (their names resolve `<@id>`).
     #[serde(default)]
     pub mentions: Vec<User>,
@@ -438,6 +539,21 @@ impl Message {
         }
     }
 
+    /// The snapshot of a forwarded message: only a type-1 reference with a
+    /// snapshot counts, and the original is never looked up.
+    pub fn forwarded(&self) -> Option<&SnapshotMessage> {
+        (self.message_reference.as_ref()?.kind == FORWARD_REFERENCE)
+            .then(|| self.message_snapshots.first().map(|s| &s.message))
+            .flatten()
+    }
+
+    /// An attachment of this message or of the snapshot it forwards.
+    pub fn attachment(&self, id: Snowflake) -> Option<&Attachment> {
+        let own = self.attachments.iter();
+        let forwarded = self.forwarded().into_iter().flat_map(|s| &s.attachments);
+        own.chain(forwarded).find(|attachment| attachment.id == id)
+    }
+
     /// The message this one replies to, when it is a reply within its own
     /// channel. Replies always answer a message of the same channel; any other
     /// reference (a crosspost's source, a forward) is not a reply target.
@@ -606,6 +722,64 @@ mod tests {
         );
     }
 
+    fn forward_json(extra: serde_json::Value) -> Message {
+        let mut value = serde_json::json!({
+            "id": "1", "channel_id": "2", "content": "",
+            "timestamp": "2026-10-07T12:00:00.000000+00:00",
+            "author": {"id": "3", "username": "a"},
+            "message_reference": {"type": 1, "message_id": "10", "channel_id": "11", "guild_id": "12"},
+            "message_snapshots": [{"message": {
+                "content": "frozen", "timestamp": "2026-10-01T00:00:00.000000+00:00",
+                "type": 0, "flags": 0,
+                "attachments": [{"id": "20", "filename": "a.png", "size": 1, "url": "https://cdn.example/a.png?ex=SECRET"}],
+                "mentions": [{"id": "5", "username": "m"}]
+            }}]
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn a_forward_decodes_its_snapshot_and_a_plain_reference_is_not_one() {
+        let message = forward_json(serde_json::json!({}));
+        let snapshot = message.forwarded().expect("forward");
+        assert_eq!(snapshot.content, "frozen");
+        assert_eq!(snapshot.attachments.len(), 1);
+        assert_eq!(message.replied_to(), None, "a forward is never a reply");
+        assert!(message.attachment(Snowflake(20)).is_some());
+        assert!(message.attachment(Snowflake(21)).is_none());
+        let dressed = snapshot.as_message(&message);
+        assert_eq!(
+            (dressed.id, dressed.content.as_str()),
+            (message.id, "frozen")
+        );
+        assert!(dressed.message_snapshots.is_empty() && dressed.message_reference.is_none());
+        // The same snapshot under a reply reference (type 0) is not shown.
+        let reply = forward_json(serde_json::json!({
+            "message_reference": {"type": 0, "message_id": "10"}
+        }));
+        assert!(reply.forwarded().is_none());
+        assert!(!format!("{snapshot:?}").contains("SECRET"));
+    }
+
+    #[test]
+    fn snapshots_are_bounded_and_one_malformed_snapshot_does_not_drop_the_message() {
+        let message = forward_json(serde_json::json!({
+            "message_snapshots": [
+                {"message": "garbage"},
+                {"message": {"content": "second"}},
+                {"message": {"content": "third"}}
+            ]
+        }));
+        assert_eq!(message.message_snapshots.len(), MAX_MESSAGE_SNAPSHOTS);
+        assert_eq!(message.forwarded().unwrap().content, "second");
+        let none = forward_json(serde_json::json!({"message_snapshots": []}));
+        assert!(none.forwarded().is_none());
+    }
+
     fn unicode(name: &str) -> Emoji {
         Emoji {
             id: None,
@@ -625,6 +799,7 @@ mod tests {
     fn reacted(reactions: &[(&Emoji, u32, bool)]) -> Message {
         Message {
             sticker_items: Vec::new(),
+            message_snapshots: Vec::new(),
             id: Snowflake(1),
             channel_id: Snowflake(2),
             guild_id: None,

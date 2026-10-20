@@ -66,8 +66,8 @@ pub use search::{
 };
 pub use secret::UserToken;
 pub use send::{
-    ComposeError, MAX_CONTENT_CHARS, MentionPolicy, Nonce, NonceGenerator, OutgoingMessage,
-    ReplyTo, SendError,
+    ComposeError, ForwardSource, MAX_CONTENT_CHARS, MentionPolicy, Nonce, NonceGenerator,
+    OutgoingMessage, ReplyTo, SendError,
 };
 pub use sticker::{GUILD_STICKERS, GuildSticker};
 pub use thread::{

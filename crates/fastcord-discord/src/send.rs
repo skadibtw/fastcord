@@ -167,6 +167,7 @@ pub struct OutgoingMessage {
     reply: Option<ReplyTo>,
     files: Vec<UploadedFile>,
     sticker: Option<Snowflake>,
+    forward: Option<ForwardSource>,
 }
 
 impl OutgoingMessage {
@@ -186,6 +187,7 @@ impl OutgoingMessage {
             reply: None,
             files: Vec::new(),
             sticker: None,
+            forward: None,
         })
     }
 
@@ -210,6 +212,7 @@ impl OutgoingMessage {
             reply: None,
             files,
             sticker: None,
+            forward: None,
         })
     }
 
@@ -222,6 +225,21 @@ impl OutgoingMessage {
             reply: None,
             files: Vec::new(),
             sticker: Some(sticker),
+            forward: None,
+        }
+    }
+
+    /// A forward of `source` to the channel this is posted to: Discord makes
+    /// the snapshot, so the message carries no text or files of its own.
+    pub fn forward(source: ForwardSource, nonce: Nonce) -> Self {
+        Self {
+            content: String::new(),
+            nonce,
+            mentions: MentionPolicy::default(),
+            reply: None,
+            files: Vec::new(),
+            sticker: None,
+            forward: Some(source),
         }
     }
 
@@ -248,11 +266,23 @@ impl OutgoingMessage {
                 parse: self.mentions.parse(),
                 replied_user: self.reply.map(|reply| reply.mention_author),
             },
-            message_reference: self.reply.map(|reply| WireReference {
-                kind: 0,
-                message_id: reply.message,
-                fail_if_not_exists: true,
-            }),
+            message_reference: match (self.forward, self.reply) {
+                (Some(source), _) => Some(WireReference {
+                    kind: 1,
+                    message_id: source.message,
+                    channel_id: Some(source.channel),
+                    guild_id: source.guild,
+                    fail_if_not_exists: true,
+                }),
+                (None, Some(reply)) => Some(WireReference {
+                    kind: 0,
+                    message_id: reply.message,
+                    channel_id: None,
+                    guild_id: None,
+                    fail_if_not_exists: true,
+                }),
+                (None, None) => None,
+            },
             sticker_ids: self.sticker.into_iter().collect(),
             attachments: self
                 .files
@@ -276,6 +306,7 @@ impl fmt::Debug for OutgoingMessage {
             .field("reply", &self.reply)
             .field("files", &self.files.len())
             .field("sticker", &self.sticker.is_some())
+            .field("forward", &self.forward.is_some())
             .finish()
     }
 }
@@ -312,12 +343,26 @@ struct AllowedMentions {
     replied_user: Option<bool>,
 }
 
-/// `message_reference` of a reply: type 0 (`DEFAULT`), never a forward.
+/// The message a forward copies. The IDs are the user's own view of it and go
+/// only to Discord as the `message_reference`; nothing else about the source is
+/// sent or kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForwardSource {
+    pub channel: Snowflake,
+    pub message: Snowflake,
+    pub guild: Option<Snowflake>,
+}
+
+/// `message_reference`: type 0 (`DEFAULT`) for a reply, type 1 for a forward.
 #[derive(Serialize)]
 struct WireReference {
     #[serde(rename = "type")]
     kind: u8,
     message_id: Snowflake,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_id: Option<Snowflake>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guild_id: Option<Snowflake>,
     fail_if_not_exists: bool,
 }
 
@@ -452,6 +497,33 @@ mod tests {
         assert_eq!(sent, recorded);
         // The wire nonce is a string, never a JSON integer that could lose precision.
         assert!(sent["nonce"].is_string());
+    }
+
+    #[test]
+    fn a_forward_names_its_source_and_carries_nothing_else() {
+        let source = ForwardSource {
+            channel: Snowflake(5),
+            message: Snowflake(6),
+            guild: Some(Snowflake(7)),
+        };
+        let sent = serde_json::to_value(
+            OutgoingMessage::forward(source, Nonce(1_290_000_000_000_000_006)).body(),
+        )
+        .unwrap();
+        assert_eq!(sent["content"], "");
+        assert_eq!(sent["enforce_nonce"], true);
+        let reference = &sent["message_reference"];
+        assert_eq!(reference["type"], 1);
+        assert_eq!(reference["message_id"], "6");
+        assert_eq!(reference["channel_id"], "5");
+        assert_eq!(reference["guild_id"], "7");
+        assert!(sent.get("sticker_ids").is_none() && sent.get("attachments").is_none());
+        let dm = ForwardSource {
+            guild: None,
+            ..source
+        };
+        let sent = serde_json::to_value(OutgoingMessage::forward(dm, Nonce(1)).body()).unwrap();
+        assert!(sent["message_reference"].get("guild_id").is_none());
     }
 
     #[test]
