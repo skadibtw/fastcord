@@ -52,6 +52,8 @@ pub const MAX_WAVEFORM_CHARS: usize = 512;
 
 /// `IS_VOICE_MESSAGE` in a message's `flags`.
 pub const VOICE_MESSAGE_FLAG: u64 = 1 << 13;
+/// `SUPPRESS_EMBEDS`: link previews of the message are hidden.
+pub const SUPPRESS_EMBEDS_FLAG: u64 = 1 << 2;
 
 /// Never NaN or infinite, so comparing attachments stays reflexive (`Eq` below).
 fn bounded_duration<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
@@ -610,6 +612,11 @@ impl Message {
         (self.message_reference.as_ref()?.kind == FORWARD_REFERENCE)
             .then(|| self.message_snapshots.first().map(|s| &s.message))
             .flatten()
+    }
+
+    /// Whether the message's link previews are hidden.
+    pub fn embeds_suppressed(&self) -> bool {
+        self.flags & SUPPRESS_EMBEDS_FLAG != 0
     }
 
     /// Whether Discord marked this as a voice message.

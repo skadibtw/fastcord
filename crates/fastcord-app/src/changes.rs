@@ -86,6 +86,8 @@ struct Change {
     kind: ChangeKind,
     /// The message has attachments, so an empty edit is valid.
     allow_empty: bool,
+    /// The attachments that stay when the edit removes some.
+    keep: Option<Vec<Snowflake>>,
     state: ChangeState,
 }
 
@@ -98,7 +100,7 @@ impl Change {
         match &self.kind {
             ChangeKind::Edit(text) => EditedMessage::new(text, self.allow_empty)
                 .ok()
-                .map(ChangeRequest::Edit),
+                .map(|edit| ChangeRequest::Edit(edit.keeping(self.keep.clone()))),
             ChangeKind::Delete => Some(ChangeRequest::Delete),
         }
     }
@@ -169,6 +171,7 @@ impl Changes {
             message,
             kind,
             allow_empty,
+            keep: None,
             state: ChangeState::Saving,
         };
         match self.position(channel, message) {
@@ -182,6 +185,14 @@ impl Changes {
                 self.changes.push(change);
                 Ok(())
             }
+        }
+    }
+
+    /// Records which attachments the change being saved keeps, so a retry
+    /// removes the same ones.
+    pub fn set_keep(&mut self, channel: Snowflake, message: Snowflake, keep: Vec<Snowflake>) {
+        if let Some(at) = self.position(channel, message) {
+            self.changes[at].keep = Some(keep);
         }
     }
 
@@ -345,6 +356,15 @@ mod tests {
         // Retry asks again with the same text.
         match changes.retry(C, id) {
             Some(ChangeRequest::Edit(request)) => assert_eq!(request.content(), "new text"),
+            other => panic!("unexpected {other:?}"),
+        }
+        // A retry removes the same attachments as the first attempt.
+        changes.finish(C, id, Err("no"));
+        changes.set_keep(C, id, vec![Snowflake(4)]);
+        match changes.retry(C, id) {
+            Some(ChangeRequest::Edit(request)) => {
+                assert_eq!(request.kept(), Some([Snowflake(4)].as_slice()))
+            }
             other => panic!("unexpected {other:?}"),
         }
         assert!(changes.of(C, id).unwrap().saving());

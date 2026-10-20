@@ -25,6 +25,8 @@ use crate::upload::UploadedFile;
 
 /// `IS_VOICE_MESSAGE` in a new message's `flags`.
 const VOICE_MESSAGE_FLAG: u32 = 1 << 13;
+/// `SUPPRESS_NOTIFICATIONS` in a new message's `flags`: no push or unread ping.
+const SILENT_FLAG: u32 = 1 << 12;
 use crate::{Clock, Method, NetworkFailure, Priority, RestClient, RestError, RestRequest, Route};
 
 /// Longest message the composer lets a send reach Discord with: Discord's
@@ -165,6 +167,25 @@ impl fmt::Display for ComposeError {
 
 impl std::error::Error for ComposeError {}
 
+/// The "@silent" convention of Discord's own clients: a draft that starts with
+/// `@silent` (any case) followed by whitespace or nothing is sent without
+/// notifications and without that prefix. Returns whether it was there and the
+/// rest, untrimmed.
+pub fn strip_silent(content: &str) -> (bool, &str) {
+    let content = content.trim_start();
+    const PREFIX: &str = "@silent";
+    match content.get(..PREFIX.len()) {
+        Some(head) if head.eq_ignore_ascii_case(PREFIX) => {
+            let rest = &content[PREFIX.len()..];
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                return (true, rest);
+            }
+            (false, content)
+        }
+        _ => (false, content),
+    }
+}
+
 /// A validated message ready to send. `Debug` never prints the text.
 #[derive(Clone, PartialEq, Eq)]
 pub struct OutgoingMessage {
@@ -176,11 +197,13 @@ pub struct OutgoingMessage {
     sticker: Option<Snowflake>,
     forward: Option<ForwardSource>,
     poll: Option<PollDraft>,
+    silent: bool,
 }
 
 impl OutgoingMessage {
     /// Surrounding whitespace is trimmed, as Discord does; interior text is sent as written.
     pub fn new(content: &str, nonce: Nonce, mentions: MentionPolicy) -> Result<Self, ComposeError> {
+        let (silent, content) = strip_silent(content);
         let content = content.trim();
         if content.is_empty() {
             return Err(ComposeError::Empty);
@@ -197,6 +220,7 @@ impl OutgoingMessage {
             sticker: None,
             forward: None,
             poll: None,
+            silent,
         })
     }
 
@@ -207,6 +231,7 @@ impl OutgoingMessage {
         nonce: Nonce,
         mentions: MentionPolicy,
     ) -> Result<Self, ComposeError> {
+        let (silent, content) = strip_silent(content);
         let content = content.trim();
         if content.is_empty() && files.is_empty() {
             return Err(ComposeError::Empty);
@@ -228,6 +253,7 @@ impl OutgoingMessage {
             sticker: None,
             forward: None,
             poll: None,
+            silent,
         })
     }
 
@@ -242,6 +268,7 @@ impl OutgoingMessage {
             sticker: Some(sticker),
             forward: None,
             poll: None,
+            silent: false,
         }
     }
 
@@ -257,6 +284,7 @@ impl OutgoingMessage {
             sticker: None,
             forward: Some(source),
             poll: None,
+            silent: false,
         }
     }
 
@@ -271,6 +299,7 @@ impl OutgoingMessage {
             sticker: None,
             forward: None,
             poll: Some(poll),
+            silent: false,
         }
     }
 
@@ -296,7 +325,7 @@ impl OutgoingMessage {
                 VOICE_MESSAGE_FLAG
             } else {
                 0
-            },
+            } | if self.silent { SILENT_FLAG } else { 0 },
             allowed_mentions: AllowedMentions {
                 parse: self.mentions.parse(),
                 replied_user: self.reply.map(|reply| reply.mention_author),
@@ -332,6 +361,7 @@ impl OutgoingMessage {
                         .as_ref()
                         .map(|voice| voice.duration_ms as f64 / 1000.0),
                     waveform: file.voice.as_ref().map(|voice| voice.waveform.as_str()),
+                    description: &file.description,
                 })
                 .collect(),
         }
@@ -349,6 +379,7 @@ impl fmt::Debug for OutgoingMessage {
             .field("sticker", &self.sticker.is_some())
             .field("forward", &self.forward.is_some())
             .field("poll", &self.poll.is_some())
+            .field("silent", &self.silent)
             .finish()
     }
 }
@@ -382,6 +413,8 @@ struct WireAttachment<'a> {
     duration_secs: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     waveform: Option<&'a str>,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    description: &'a str,
 }
 
 #[derive(Serialize)]
@@ -623,6 +656,7 @@ mod tests {
             filename: "photo.png".to_owned(),
             uploaded_filename: "token/photo.png".to_owned(),
             voice: None,
+            description: String::new(),
         };
         assert_eq!(
             OutgoingMessage::with_files("  ", Vec::new(), Nonce(1), MentionPolicy::default()).err(),
@@ -653,6 +687,51 @@ mod tests {
     }
 
     #[test]
+    fn at_silent_sets_the_flag_and_is_removed_from_the_text() {
+        let body = |text: &str| {
+            let message = OutgoingMessage::new(text, Nonce(9), MentionPolicy::default()).unwrap();
+            serde_json::to_value(message.body()).unwrap()
+        };
+        let sent = body("  @SILENT  hello there");
+        assert_eq!(
+            (sent["flags"].as_u64(), sent["content"].as_str()),
+            (Some(4096), Some("hello there"))
+        );
+        // Only a leading word: not a longer word, not mid-text.
+        assert_eq!(body("@silently ok")["flags"], 0);
+        assert_eq!(body("ok @silent")["content"], "ok @silent");
+        assert_eq!(
+            body(
+                "@silent
+line"
+            )["content"],
+            "line"
+        );
+        // Nothing left: not a message.
+        assert_eq!(
+            OutgoingMessage::new("@silent", Nonce(9), MentionPolicy::default()).err(),
+            Some(ComposeError::Empty)
+        );
+        // With a file the text may be empty, and the flag still applies; a
+        // description and a spoiler name reach the attachment.
+        let file = UploadedFile {
+            id: 0,
+            filename: "SPOILER_a.png".to_owned(),
+            uploaded_filename: "t/a.png".to_owned(),
+            voice: None,
+            description: "a cat".to_owned(),
+        };
+        let message =
+            OutgoingMessage::with_files("@silent", vec![file], Nonce(9), MentionPolicy::default())
+                .unwrap();
+        let sent = serde_json::to_value(message.body()).unwrap();
+        assert_eq!(sent["flags"], 4096);
+        assert_eq!(sent["attachments"][0]["description"], "a cat");
+        assert_eq!(sent["attachments"][0]["filename"], "SPOILER_a.png");
+        assert!(!format!("{message:?}").contains("a cat"));
+    }
+
+    #[test]
     fn a_voice_message_carries_the_flag_duration_and_waveform_and_nothing_else() {
         let voice = |name: &str| UploadedFile {
             id: 0,
@@ -662,6 +741,7 @@ mod tests {
                 duration_ms: 2500,
                 waveform: "AAEC".to_owned(),
             }),
+            description: String::new(),
         };
         let message = OutgoingMessage::with_files(
             "",
@@ -708,6 +788,7 @@ mod tests {
             filename: "a.ogg".to_owned(),
             uploaded_filename: "t/a.ogg".to_owned(),
             voice: None,
+            description: String::new(),
         };
         let sent = serde_json::to_value(
             OutgoingMessage::with_files("", vec![plain], Nonce(6), MentionPolicy::default())

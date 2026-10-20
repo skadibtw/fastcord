@@ -110,6 +110,8 @@ pub struct State {
     /// Dropping this aborts the request in flight (cancellation).
     task: Option<iced::task::Handle>,
     pending_jump: Option<(Snowflake, Snowflake, Instant)>,
+    /// A pending jump gave up waiting for its channel (never opened).
+    jump_expired: bool,
 }
 
 impl Default for State {
@@ -128,6 +130,7 @@ impl Default for State {
             bytes: 0,
             task: None,
             pending_jump: None,
+            jump_expired: false,
         }
     }
 }
@@ -178,11 +181,17 @@ impl State {
         let (channel, message, since) = self.pending_jump?;
         if since.elapsed() > JUMP_PATIENCE {
             self.pending_jump = None;
+            self.jump_expired = true;
         } else if open_channel == Some(channel) {
             self.pending_jump = None;
             return Some(message);
         }
         None
+    }
+
+    /// Whether a jump gave up since this was last asked (said once).
+    pub fn take_jump_expired(&mut self) -> bool {
+        std::mem::take(&mut self.jump_expired)
     }
 
     fn cancel(&mut self) {
@@ -571,6 +580,21 @@ mod tests {
             state.take_pending_jump(Some(Snowflake(600))),
             Some(Snowflake(9))
         );
+        assert_eq!(state.take_pending_jump(Some(Snowflake(600))), None);
+        assert!(!state.take_jump_expired(), "it fired, it did not expire");
+    }
+
+    #[test]
+    fn a_jump_whose_channel_never_opens_expires_once() {
+        let mut state = State::default();
+        let Some(long_ago) = Instant::now().checked_sub(JUMP_PATIENCE + Duration::from_secs(1))
+        else {
+            return; // a clock too young to subtract from
+        };
+        state.pending_jump = Some((Snowflake(600), Snowflake(9), long_ago));
+        assert_eq!(state.take_pending_jump(Some(Snowflake(500))), None);
+        assert!(state.take_jump_expired());
+        assert!(!state.take_jump_expired(), "said once");
         assert_eq!(state.take_pending_jump(Some(Snowflake(600))), None);
     }
 }

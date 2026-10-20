@@ -135,7 +135,15 @@ pub struct UploadFile {
     temporary: Option<Arc<TempFile>>,
     /// Set for a recorded voice message: it is sent with the voice-message flag.
     voice: Option<VoiceMeta>,
+    /// Sent under a `SPOILER_` name, which is how Discord marks a spoiler.
+    spoiler: bool,
+    /// Alt text sent as the attachment's `description` (empty: none).
+    description: String,
 }
+
+/// Longest attachment description Discord accepts.
+pub const MAX_DESCRIPTION_CHARS: usize = 1024;
+const SPOILER_PREFIX: &str = "SPOILER_";
 
 /// What a voice-message attachment carries besides its audio.
 #[derive(Clone, PartialEq, Eq)]
@@ -187,6 +195,8 @@ impl UploadFile {
             modified: metadata.modified().ok(),
             temporary: None,
             voice: None,
+            spoiler: false,
+            description: String::new(),
         })
     }
 
@@ -215,6 +225,34 @@ impl UploadFile {
 
     pub fn filename(&self) -> &str {
         &self.filename
+    }
+
+    /// The name Discord is given: `SPOILER_` first when marked as a spoiler.
+    fn wire_filename(&self) -> String {
+        if self.spoiler && !self.filename.starts_with(SPOILER_PREFIX) {
+            format!("{SPOILER_PREFIX}{}", self.filename)
+        } else {
+            self.filename.clone()
+        }
+    }
+
+    pub fn spoiler(&self) -> bool {
+        self.spoiler || self.filename.starts_with(SPOILER_PREFIX)
+    }
+
+    /// Marks (or unmarks) the file as a spoiler. A file already named
+    /// `SPOILER_…` stays one.
+    pub fn set_spoiler(&mut self, spoiler: bool) {
+        self.spoiler = spoiler;
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// Sets the alt text, cut to [`MAX_DESCRIPTION_CHARS`] characters.
+    pub fn set_description(&mut self, description: &str) {
+        self.description = description.chars().take(MAX_DESCRIPTION_CHARS).collect();
     }
 
     pub fn size(&self) -> u64 {
@@ -271,6 +309,7 @@ pub struct UploadedFile {
     pub(crate) filename: String,
     pub(crate) uploaded_filename: String,
     pub(crate) voice: Option<VoiceMeta>,
+    pub(crate) description: String,
 }
 
 impl fmt::Debug for UploadedFile {
@@ -282,15 +321,15 @@ impl fmt::Debug for UploadedFile {
 }
 
 #[derive(Serialize)]
-struct SlotFile<'a> {
-    filename: &'a str,
+struct SlotFile {
+    filename: String,
     file_size: u64,
     id: String,
 }
 
 #[derive(Serialize)]
-struct SlotRequest<'a> {
-    files: Vec<SlotFile<'a>>,
+struct SlotRequest {
+    files: Vec<SlotFile>,
 }
 
 #[derive(Deserialize)]
@@ -490,7 +529,7 @@ impl<C: Clock> RestClient<C> {
                 .iter()
                 .enumerate()
                 .map(|(index, file)| SlotFile {
-                    filename: &file.filename,
+                    filename: file.wire_filename(),
                     file_size: file.size,
                     id: index.to_string(),
                 })
@@ -510,9 +549,10 @@ impl<C: Clock> RestClient<C> {
                 .await?;
             uploaded.push(UploadedFile {
                 id: index as u32,
-                filename: file.filename.clone(),
+                filename: file.wire_filename(),
                 uploaded_filename: slot.upload_filename,
                 voice: file.voice.clone(),
+                description: file.description.clone(),
             });
         }
         Ok(uploaded)
@@ -609,12 +649,32 @@ mod tests {
     }
 
     #[test]
+    fn spoiler_names_the_upload_and_description_is_bounded() {
+        let (dir, path) = temp_file("spoiler", b"abc");
+        let mut file = UploadFile::inspect(&path).unwrap();
+        assert!(!file.spoiler());
+        assert_eq!(file.wire_filename(), "photo.png");
+        file.set_spoiler(true);
+        assert!(file.spoiler());
+        assert_eq!(file.wire_filename(), "SPOILER_photo.png");
+        file.set_spoiler(false);
+        assert_eq!(file.wire_filename(), "photo.png");
+        // A name that already is a spoiler is not prefixed twice.
+        file.filename = "SPOILER_x.png".to_owned();
+        file.set_spoiler(true);
+        assert_eq!(file.wire_filename(), "SPOILER_x.png");
+        file.set_description(&"é".repeat(MAX_DESCRIPTION_CHARS + 5));
+        assert_eq!(file.description().chars().count(), MAX_DESCRIPTION_CHARS);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn slot_request_and_response_have_the_documented_shape() {
         let (dir, path) = temp_file("shape", b"abc");
         let file = UploadFile::inspect(&path).unwrap();
         let body = serde_json::to_value(SlotRequest {
             files: vec![SlotFile {
-                filename: file.filename(),
+                filename: file.filename().to_owned(),
                 file_size: file.size(),
                 id: "0".to_owned(),
             }],

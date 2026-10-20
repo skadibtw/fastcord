@@ -432,6 +432,8 @@ pub enum Command {
         channel: Snowflake,
         message: Snowflake,
         content: String,
+        /// Attachments that stay when the user removed some.
+        keep: Option<Vec<Snowflake>>,
     },
     /// Delete one of the user's messages (the user confirmed it).
     Delete {
@@ -476,6 +478,14 @@ pub enum Command {
     PollEnd {
         channel: Snowflake,
         message: Snowflake,
+    },
+    /// Hide or restore a message's link previews; `others` says the account
+    /// may do so for messages that are not its own.
+    SetEmbeds {
+        channel: Snowflake,
+        message: Snowflake,
+        suppressed: bool,
+        others: bool,
     },
     /// Show who voted for a poll answer (the user asked).
     PollVoters {
@@ -595,6 +605,17 @@ impl fmt::Debug for Command {
                 .debug_struct("PollEnd")
                 .field("channel", channel)
                 .field("message", message)
+                .finish(),
+            Self::SetEmbeds {
+                channel,
+                message,
+                suppressed,
+                ..
+            } => f
+                .debug_struct("SetEmbeds")
+                .field("channel", channel)
+                .field("message", message)
+                .field("suppressed", suppressed)
                 .finish(),
             Self::PollVoters {
                 channel,
@@ -974,12 +995,19 @@ impl NavigationBridge {
 
     /// Queues new text for one of the user's messages. Returns whether it was
     /// accepted; on `false` nothing was queued and the caller keeps the text.
-    pub fn edit_message(&self, channel: Snowflake, message: Snowflake, content: String) -> bool {
+    pub fn edit_message(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+        content: String,
+        keep: Option<Vec<Snowflake>>,
+    ) -> bool {
         self.commands
             .try_send(Command::Edit {
                 channel,
                 message,
                 content,
+                keep,
             })
             .is_ok()
     }
@@ -1055,6 +1083,24 @@ impl NavigationBridge {
     pub fn poll_end(&self, channel: Snowflake, message: Snowflake) -> bool {
         self.commands
             .try_send(Command::PollEnd { channel, message })
+            .is_ok()
+    }
+
+    /// Queues the user's request to hide or restore a message's link previews.
+    pub fn set_embeds(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+        suppressed: bool,
+        others: bool,
+    ) -> bool {
+        self.commands
+            .try_send(Command::SetEmbeds {
+                channel,
+                message,
+                suppressed,
+                others,
+            })
             .is_ok()
     }
 
@@ -1695,7 +1741,8 @@ impl Worker {
                 channel,
                 message,
                 content,
-            } => history.edit_message(&self.rest, channel, message, &content),
+                keep,
+            } => history.edit_message_keeping(&self.rest, channel, message, &content, keep),
             Command::Delete { channel, message } => {
                 history.delete_message(&self.rest, channel, message);
             }
@@ -1729,6 +1776,12 @@ impl Worker {
             Command::PollEnd { channel, message } => {
                 history.end_poll(&self.rest, channel, message);
             }
+            Command::SetEmbeds {
+                channel,
+                message,
+                suppressed,
+                others,
+            } => history.set_embeds_suppressed(&self.rest, channel, message, suppressed, others),
             Command::PollVoters {
                 channel,
                 message,
@@ -2506,6 +2559,8 @@ pub struct GatewayPanel {
     pub composer: Composer,
     /// The user's message (channel, message) whose deletion waits for confirmation.
     pub confirm_delete: Option<(Snowflake, Snowflake)>,
+    /// The (channel, message) whose secondary actions the timeline shows.
+    pub more: Option<(Snowflake, Snowflake)>,
     pub private: Box<PrivateConversationUi>,
     pub emoji: emoji::State,
     pub avatars: crate::avatars::State,
@@ -2740,6 +2795,7 @@ impl GatewayPanel {
             voice_call: None,
             composer: Composer::default(),
             confirm_delete: None,
+            more: None,
             _worker: worker.abort_on_drop(),
             attachments: None,
             attachment_views: HashMap::new(),
@@ -2811,6 +2867,12 @@ impl GatewayPanel {
         {
             self.confirm_delete = None;
         }
+        if self
+            .more
+            .is_some_and(|(channel, _)| self.timeline.channel_id != Some(channel))
+        {
+            self.more = None;
+        }
         consumed.status
     }
 
@@ -2849,6 +2911,18 @@ impl GatewayPanel {
                     .is_some_and(|s| Some(s.channel_id) == open && s.permissions.manage_messages))
     }
 
+    /// Other people's link previews can be hidden where the account has Manage
+    /// Messages in a server channel (never in a direct conversation).
+    fn can_suppress_embeds(&self) -> bool {
+        let open = self.timeline.channel_id;
+        open.is_some()
+            && self
+                .navigation
+                .selection
+                .as_ref()
+                .is_some_and(|s| Some(s.channel_id) == open && s.permissions.manage_messages)
+    }
+
     /// A public thread can be started from a message of a server text channel
     /// where the account may create them (not inside a thread).
     fn can_thread(&self) -> bool {
@@ -2876,6 +2950,11 @@ impl GatewayPanel {
                 .map(|(_, message)| message),
             can_pin: self.can_pin(),
             can_thread: self.can_thread(),
+            can_suppress_embeds: self.can_suppress_embeds(),
+            more: self
+                .more
+                .filter(|(channel, _)| self.timeline.channel_id == Some(*channel))
+                .map(|(_, message)| message),
         }
     }
 
@@ -2885,7 +2964,26 @@ impl GatewayPanel {
     pub fn message_action(&mut self, event: timeline::Event) -> bool {
         use timeline::Event;
         let open = self.timeline.channel_id;
+        if !matches!(event, Event::More(_)) {
+            self.more = None;
+        }
         let queued = match event {
+            Event::More(message) => {
+                self.more = message
+                    .zip(open)
+                    .map(|(message, channel)| (channel, message));
+                return false;
+            }
+            Event::SetEmbeds {
+                channel_id,
+                message_id,
+                suppressed,
+            } if open == Some(channel_id) => {
+                self.confirm_delete = None;
+                let others = self.can_suppress_embeds();
+                self.controls
+                    .set_embeds(channel_id, message_id, suppressed, others)
+            }
             Event::Edit {
                 channel_id,
                 message_id,
@@ -3260,7 +3358,7 @@ mod bridge_tests {
         let bridge = NavigationBridge::new();
         let mut commands = bridge.take_commands().unwrap();
         let (c, m) = (Snowflake(500), Snowflake(7));
-        assert!(bridge.edit_message(c, m, "secret words".to_owned()));
+        assert!(bridge.edit_message(c, m, "secret words".to_owned(), None));
         assert!(bridge.delete_message(c, m));
         assert!(bridge.retry_change(c, m));
         assert!(bridge.dismiss_change(c, m));
@@ -3285,7 +3383,7 @@ mod bridge_tests {
         for _ in 0..COMMAND_QUEUE {
             assert!(bridge.delete_message(c, m));
         }
-        assert!(!bridge.edit_message(c, m, "more".to_owned()));
+        assert!(!bridge.edit_message(c, m, "more".to_owned(), None));
         assert!(!bridge.delete_message(c, m));
     }
 
@@ -3750,6 +3848,7 @@ mod bridge_tests {
                 can_pin: false,
                 can_thread: false,
                 confirming: None,
+                ..Default::default()
             }
         );
     }

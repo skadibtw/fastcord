@@ -42,7 +42,7 @@ use fastcord_model::{Attachment, Emoji, Message, Snowflake, StickerItem};
 use iced::alignment::{Horizontal, Vertical};
 use iced::font::{Font, Weight};
 use iced::widget::{
-    button, column, container, hover, image, mouse_area, row, stack, text, tooltip,
+    Container, button, column, container, hover, image, mouse_area, row, stack, text, tooltip,
 };
 use iced::{Element, Length, Padding};
 
@@ -352,6 +352,11 @@ pub struct Interaction {
     pub can_pin: bool,
     /// The account may start a public thread from a message of the open channel.
     pub can_thread: bool,
+    /// The account may hide or restore other people's link previews here
+    /// (Manage Messages in a server channel).
+    pub can_suppress_embeds: bool,
+    /// The message whose secondary actions are shown instead of the usual ones.
+    pub more: Option<Snowflake>,
 }
 
 /// What the timeline asks of the worker. Each event names its channel.
@@ -364,6 +369,23 @@ pub enum Event {
         channel_id: Snowflake,
         message_id: Snowflake,
     },
+    /// Copy the message's `discord.com/channels/…` link.
+    CopyLink {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    /// Copy the message's ID.
+    CopyId {
+        message_id: Snowflake,
+    },
+    /// Hide (`true`) or restore the link previews of a message.
+    SetEmbeds {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        suppressed: bool,
+    },
+    /// Show the secondary actions of a message, or the usual ones again.
+    More(Option<Snowflake>),
     /// The widget's latest view of the viewport (coalesce to the newest).
     Viewport {
         channel_id: Snowflake,
@@ -1170,19 +1192,45 @@ fn message_view<'a>(
     let show_forward = idle && matches!(message.kind, 0 | 19) && message.forwarded().is_none();
     // Only ordinary messages can start a thread.
     let show_thread = interaction.can_thread && idle && matches!(message.kind, 0 | 19);
-    if !show_own_actions
-        && !show_reply
-        && !show_copy
-        && !show_react
-        && !show_pin
-        && !show_thread
-        && !show_forward
-    {
+    // Link previews: the author's own, or anyone's with Manage Messages.
+    let show_embeds = idle
+        && matches!(message.kind, 0 | 19)
+        && (row.own || interaction.can_suppress_embeds)
+        && (!message.embeds.is_empty() || message.embeds_suppressed());
+    if !idle {
         return base.into();
     }
     // Hover controls are layered over the top right so the measured row height
     // does not depend on whether the pointer is on it.
     let mut actions = row![].spacing(4);
+    if interaction.more == Some(message_id) {
+        actions = actions
+            .push(row_button(
+                "Copy link",
+                Event::CopyLink {
+                    channel_id,
+                    message_id,
+                },
+            ))
+            .push(row_button("Copy ID", Event::CopyId { message_id }));
+        if show_embeds {
+            let suppressed = message.embeds_suppressed();
+            actions = actions.push(row_button(
+                if suppressed {
+                    "Show embeds"
+                } else {
+                    "Hide embeds"
+                },
+                Event::SetEmbeds {
+                    channel_id,
+                    message_id,
+                    suppressed: !suppressed,
+                },
+            ));
+        }
+        actions = actions.push(row_button("Back", Event::More(None)));
+        return hover(base, actions_overlay(actions));
+    }
     if show_own_actions {
         actions = actions.push(row_button("Edit", edit)).push(row_button(
             "Delete",
@@ -1247,7 +1295,12 @@ fn message_view<'a>(
             },
         ));
     }
-    let overlay = container(actions)
+    actions = actions.push(row_button("More", Event::More(Some(message_id))));
+    hover(base, actions_overlay(actions))
+}
+
+fn actions_overlay<'a>(actions: iced::widget::Row<'a, Event>) -> Container<'a, Event> {
+    container(actions)
         .width(Length::Fill)
         .align_x(Horizontal::Right)
         .padding(Padding {
@@ -1255,8 +1308,7 @@ fn message_view<'a>(
             right: 12.0,
             bottom: 0.0,
             left: 0.0,
-        });
-    hover(base, overlay)
+        })
 }
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -2698,6 +2750,60 @@ mod tests {
     }
 
     #[test]
+    fn secondary_actions_copy_link_and_id_and_gate_link_previews() {
+        let id = |n: u64| Snowflake(n);
+        let usual = clickable(&mixed(), Interaction::default());
+        assert!(usual.contains(&Event::More(Some(id(1)))));
+        assert!(
+            !usual
+                .iter()
+                .any(|e| matches!(e, Event::CopyLink { .. } | Event::CopyId { .. }))
+        );
+
+        // A previewed message of theirs (1) and of the account's (2).
+        let embed: fastcord_model::Embed =
+            serde_json::from_value(serde_json::json!({"title": "t"})).unwrap();
+        let mut snapshot = mixed();
+        for at in [0, 1] {
+            let mut with = (*snapshot.rows[at].message).clone();
+            with.embeds.push(embed.clone());
+            snapshot.rows[at].message = Arc::new(with);
+        }
+        let more = |n: u64, can: bool| Interaction {
+            more: Some(id(n)),
+            can_suppress_embeds: can,
+            ..Interaction::default()
+        };
+        let hide = |n: u64, suppressed: bool| Event::SetEmbeds {
+            channel_id: CHANNEL,
+            message_id: id(n),
+            suppressed,
+        };
+        let found = clickable(&snapshot, more(1, false));
+        assert!(found.contains(&Event::CopyLink {
+            channel_id: CHANNEL,
+            message_id: id(1)
+        }));
+        assert!(found.contains(&Event::CopyId { message_id: id(1) }));
+        assert!(found.contains(&Event::More(None)));
+        assert!(!found.contains(&hide(1, true)), "not theirs to change");
+        assert!(clickable(&snapshot, more(1, true)).contains(&hide(1, true)));
+        assert!(clickable(&snapshot, more(2, false)).contains(&hide(2, true)));
+        // Hidden previews offer the way back, even though none are shown.
+        let mut hidden = (*snapshot.rows[1].message).clone();
+        hidden.embeds.clear();
+        hidden.flags |= fastcord_model::SUPPRESS_EMBEDS_FLAG;
+        snapshot.rows[1].message = Arc::new(hidden);
+        assert!(clickable(&snapshot, more(2, false)).contains(&hide(2, false)));
+        // A message without previews has nothing to hide.
+        assert!(
+            !clickable(&mixed(), more(2, true))
+                .iter()
+                .any(|e| matches!(e, Event::SetEmbeds { .. }))
+        );
+    }
+
+    #[test]
     fn starting_a_thread_needs_the_permission_and_an_ordinary_message() {
         let is_start = |event: &Event| matches!(event, Event::StartThread { .. });
         assert!(
@@ -2751,6 +2857,7 @@ mod tests {
                 replying: None,
                 can_pin: false,
                 can_thread: false,
+                ..Default::default()
             },
         );
         assert!(found.contains(&Event::ConfirmDelete {
@@ -2782,6 +2889,7 @@ mod tests {
             replying: None,
             can_pin: false,
             can_thread: false,
+            ..Default::default()
         };
         let edit = saving(ChangeKind::Edit(Arc::from("new")));
         assert_eq!(row_state(&edit, ui), RowState::Saving { delete: false });

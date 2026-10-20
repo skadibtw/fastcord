@@ -17,7 +17,7 @@ use fastcord_model::Snowflake;
 use iced::keyboard::{self, key};
 use iced::widget::text_editor::{Action, Binding, Content, Edit, Motion, Status};
 use iced::widget::{
-    button, checkbox, column, container, row, scrollable, space, text, text_editor,
+    button, checkbox, column, container, row, scrollable, space, text, text_editor, text_input,
 };
 use iced::{Element, Length, Padding};
 
@@ -123,6 +123,12 @@ pub enum Event {
     Attach,
     /// Take the chosen file at this position off the message.
     Detach(usize),
+    /// Keep (`true`) or remove an attachment of the message being edited.
+    KeepAttachment(usize, bool),
+    /// Mark the chosen file at this position as a spoiler, or not.
+    Spoiler(usize, bool),
+    /// Set the alt text of the chosen file at this position.
+    Describe(usize, String),
     /// Attach the image on the clipboard (read when asked, never before).
     PasteImage,
     /// Stop an upload that is in progress.
@@ -165,6 +171,8 @@ pub struct EditSubmission {
     pub channel: Snowflake,
     pub message: Snowflake,
     pub content: String,
+    /// The attachments that stay when the user removed some; `None` removes none.
+    pub keep: Option<Vec<Snowflake>>,
 }
 
 impl fmt::Debug for EditSubmission {
@@ -179,11 +187,18 @@ impl fmt::Debug for EditSubmission {
 /// A sent message whose text is in the editor, and the draft it displaced.
 struct Editing {
     message: Snowflake,
-    /// The message has attachments, so it may be saved without text.
-    allow_empty: bool,
+    /// The message's attachments and whether each stays. With one kept, the
+    /// message may be saved without text.
+    attachments: Vec<EditableAttachment>,
     draft: String,
     everyone: bool,
     replying: Option<Reply>,
+}
+
+struct EditableAttachment {
+    id: Snowflake,
+    name: String,
+    kept: bool,
 }
 
 /// Unsent text per channel: bounded in count and, through the editor's cap, in size.
@@ -501,6 +516,20 @@ impl Composer {
         self.notice = Some(reason);
     }
 
+    /// Marks a chosen file as a spoiler (sent under a `SPOILER_` name).
+    pub fn set_spoiler(&mut self, index: usize, spoiler: bool) {
+        if let Some(file) = self.files.get_mut(index) {
+            file.set_spoiler(spoiler);
+        }
+    }
+
+    /// Sets a chosen file's alt text (bounded by the file itself).
+    pub fn set_description(&mut self, index: usize, description: &str) {
+        if let Some(file) = self.files.get_mut(index) {
+            file.set_description(description);
+        }
+    }
+
     /// Takes one chosen file off the message being written.
     pub fn detach(&mut self, index: usize) {
         if index < self.files.len() {
@@ -569,7 +598,17 @@ impl Composer {
         };
         self.editing = Some(Editing {
             message,
-            allow_empty: !row.message.attachments.is_empty(),
+            attachments: row
+                .message
+                .attachments
+                .iter()
+                .take(MAX_UPLOAD_FILES)
+                .map(|attachment| EditableAttachment {
+                    id: attachment.id,
+                    name: attachment.filename.chars().take(64).collect(),
+                    kept: true,
+                })
+                .collect(),
             draft,
             everyone,
             replying,
@@ -600,7 +639,8 @@ impl Composer {
     /// unless the message keeps attachments (an empty message is a delete).
     fn edit_ready(&self) -> bool {
         self.editing.as_ref().is_some_and(|editing| {
-            (!self.blank || editing.allow_empty) && self.trimmed_chars <= MAX_CONTENT_CHARS
+            (!self.blank || editing.attachments.iter().any(|a| a.kept))
+                && self.trimmed_chars <= MAX_CONTENT_CHARS
         })
     }
 
@@ -613,7 +653,26 @@ impl Composer {
             channel: self.channel?,
             message: editing.message,
             content: self.content.text(),
+            keep: editing.attachments.iter().any(|a| !a.kept).then(|| {
+                editing
+                    .attachments
+                    .iter()
+                    .filter(|a| a.kept)
+                    .map(|a| a.id)
+                    .collect()
+            }),
         })
+    }
+
+    /// Keeps (`true`) or removes the edited message's attachment at `index`.
+    pub fn set_attachment_kept(&mut self, index: usize, kept: bool) {
+        if let Some(attachment) = self
+            .editing
+            .as_mut()
+            .and_then(|editing| editing.attachments.get_mut(index))
+        {
+            attachment.kept = kept;
+        }
     }
 
     /// An edit or delete action the worker's queue did not accept.
@@ -698,6 +757,9 @@ pub fn update(
         // The dialog is opened by the window; the files come back as `attach`.
         Event::Attach | Event::PasteImage => {}
         Event::Detach(index) => composer.detach(index),
+        Event::KeepAttachment(index, kept) => composer.set_attachment_kept(index, kept),
+        Event::Spoiler(index, spoiler) => composer.set_spoiler(index, spoiler),
+        Event::Describe(index, description) => composer.set_description(index, &description),
         Event::CancelUpload(id) => {
             if !bridge.cancel_upload(id) {
                 composer.notice = Some(BUSY);
@@ -709,7 +771,7 @@ pub fn update(
         } => composer.complete(replaced, &insertion),
         Event::Send if composer.editing.is_some() => {
             if let Some(edit) = composer.edit_submission() {
-                if bridge.edit_message(edit.channel, edit.message, edit.content) {
+                if bridge.edit_message(edit.channel, edit.message, edit.content, edit.keep) {
                     composer.cancel_edit();
                 } else {
                     composer.notice = Some(BUSY);
@@ -989,7 +1051,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         .placeholder(if editing {
             "Edited message (Enter to save, Escape to cancel)"
         } else {
-            "Message (Enter to send, Shift+Enter for a new line)"
+            "Message (Enter to send, Shift+Enter for a new line, start with @silent for no notification)"
         })
         .on_action(|action| Event::Action(Act(action)))
         .key_binding(move |press| {
@@ -1008,25 +1070,61 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         .padding(8)
         .min_height(38)
         .max_height(150);
+    if let Some(editing) = composer
+        .editing
+        .as_ref()
+        .filter(|e| !e.attachments.is_empty())
+    {
+        layout = layout.push(
+            column(
+                editing
+                    .attachments
+                    .iter()
+                    .enumerate()
+                    .map(|(index, attachment)| {
+                        checkbox(attachment.kept)
+                            .label(format!("Keep {}", attachment.name))
+                            .on_toggle(move |on| Event::KeepAttachment(index, on))
+                            .size(14)
+                            .text_size(12)
+                            .into()
+                    }),
+            )
+            .spacing(2),
+        );
+    }
     if !composer.files.is_empty() {
-        layout = layout.push(column(composer.files.iter().enumerate().map(
-            |(index, file)| {
-                row![
-                    text(format!(
-                        "{} ({})",
-                        file.filename(),
-                        crate::timeline::format_size(file.size())
-                    ))
-                    .size(12)
-                    .width(Length::Fill)
-                    .wrapping(text::Wrapping::WordOrGlyph),
-                    small_button("Remove", Event::Detach(index)),
+        layout = layout.push(
+            column(composer.files.iter().enumerate().map(|(index, file)| {
+                column![
+                    row![
+                        text(format!(
+                            "{} ({})",
+                            file.filename(),
+                            crate::timeline::format_size(file.size())
+                        ))
+                        .size(12)
+                        .width(Length::Fill)
+                        .wrapping(text::Wrapping::WordOrGlyph),
+                        checkbox(file.spoiler())
+                            .label("Spoiler")
+                            .on_toggle(move |on| Event::Spoiler(index, on))
+                            .size(14)
+                            .text_size(12),
+                        small_button("Remove", Event::Detach(index)),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::alignment::Vertical::Center),
+                    text_input("Alt text (optional)", file.description())
+                        .on_input(move |text| Event::Describe(index, text))
+                        .size(12)
+                        .padding(3),
                 ]
-                .spacing(8)
-                .align_y(iced::alignment::Vertical::Center)
+                .spacing(2)
                 .into()
-            },
-        )));
+            }))
+            .spacing(4),
+        );
     }
     let picks = composer.completions(snapshot);
     if !picks.is_empty() {
@@ -1768,9 +1866,10 @@ mod tests {
                 channel,
                 message,
                 content,
+                keep,
             } => assert_eq!(
-                (channel, message, content.as_str()),
-                (A, Snowflake(7), "original text")
+                (channel, message, content.as_str(), keep),
+                (A, Snowflake(7), "original text", None)
             ),
             other => panic!("unexpected {other:?}"),
         }
@@ -1871,6 +1970,78 @@ mod tests {
         assert!(composer.begin_edit(&snapshot, Snowflake(7)));
         paste(&mut composer, &"x".repeat(MAX_CONTENT_CHARS));
         assert!(composer.edit_submission().is_none());
+    }
+
+    #[test]
+    fn removing_attachments_while_editing_names_the_ones_that_stay() {
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let file = |id: u64| fastcord_model::Attachment {
+            id: Snowflake(id),
+            filename: format!("f{id}.txt"),
+            size: 3,
+            url: "https://cdn.example/file.txt".to_owned(),
+            proxy_url: None,
+            content_type: None,
+            width: None,
+            height: None,
+            duration_secs: None,
+            waveform: None,
+        };
+        let mut row = sent(8, "", true, None);
+        Arc::make_mut(&mut row.message).attachments = vec![file(80), file(81)];
+        let snapshot = showing(vec![row]);
+        let mut composer = composer_in(A);
+        assert!(composer.begin_edit(&snapshot, Snowflake(8)));
+        // Nothing removed: no list is sent.
+        assert_eq!(composer.edit_submission().unwrap().keep, None);
+        update(
+            &mut composer,
+            Event::KeepAttachment(0, false),
+            &snapshot,
+            &bridge,
+        );
+        assert_eq!(
+            composer.edit_submission().unwrap().keep,
+            Some(vec![Snowflake(81)])
+        );
+        // Removing the last one needs text to remain.
+        update(
+            &mut composer,
+            Event::KeepAttachment(1, false),
+            &snapshot,
+            &bridge,
+        );
+        assert!(composer.edit_submission().is_none());
+        update(&mut composer, Event::Send, &snapshot, &bridge);
+        assert!(commands.try_recv().is_err());
+        type_text(&mut composer, "caption");
+        update(&mut composer, Event::Send, &snapshot, &bridge);
+        match commands.try_recv().unwrap() {
+            crate::gateway::Command::Edit { keep, content, .. } => {
+                assert_eq!((content.as_str(), keep), ("caption", Some(Vec::new())));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spoiler_and_alt_text_belong_to_the_chosen_file_and_ignore_other_positions() {
+        let mut composer = composer_in(A);
+        let path =
+            std::env::temp_dir().join(format!("fastcord-spoiler-{}.txt", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        composer.attach(vec![path.clone()]);
+        composer.set_spoiler(0, true);
+        composer.set_description(0, "a cat");
+        composer.set_spoiler(5, true);
+        composer.set_description(5, "nobody");
+        let file = &composer.files[0];
+        assert!(file.spoiler());
+        assert_eq!(file.description(), "a cat");
+        let submission = composer.submission(true, 0).unwrap();
+        assert_eq!(submission.files[0].description(), "a cat");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

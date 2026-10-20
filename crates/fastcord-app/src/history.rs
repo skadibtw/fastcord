@@ -7,6 +7,7 @@
 //! Sends, and edits and deletions of the user's own messages, start only from
 //! explicit commands and are checked here against the store, never against
 //! what a possibly stale UI showed.
+mod embeds;
 mod poll;
 
 use std::collections::{HashMap, VecDeque};
@@ -29,6 +30,7 @@ use iced::futures::StreamExt;
 use iced::futures::future::{AbortHandle, Abortable};
 use iced::futures::stream::FuturesUnordered;
 
+use self::embeds::EmbedsDone;
 use self::poll::PollDone;
 use crate::changes::{self, ChangeKind, ChangeRequest, Changes};
 use crate::outbox::{Finished, MAX_REPLY_AUTHOR_CHARS, OpId, Outbox, Reply, SendFailure, Slots};
@@ -69,6 +71,7 @@ type AckFuture =
     Pin<Box<dyn Future<Output = (Snowflake, Snowflake, Result<(), RestError>)> + Send>>;
 type ReactionFuture = Pin<Box<dyn Future<Output = ReactionDone> + Send>>;
 type PollFuture = Pin<Box<dyn Future<Output = PollDone> + Send>>;
+type EmbedFuture = Pin<Box<dyn Future<Output = EmbedsDone> + Send>>;
 type UsersFuture =
     Pin<Box<dyn Future<Output = (u64, Result<Vec<ReactionUser>, RestError>)> + Send>>;
 
@@ -143,6 +146,7 @@ pub enum Completed {
     Reaction(ReactionDone),
     ReactionUsers(u64, Result<Vec<ReactionUser>, RestError>),
     Poll(PollDone),
+    Embeds(EmbedsDone),
 }
 
 /// An explicit user action from the timeline.
@@ -251,6 +255,9 @@ pub struct History {
     /// Poll votes and endings the user asked for that Discord has not answered.
     polls: Polls,
     poll_requests: FuturesUnordered<PollFuture>,
+    /// (channel, message) pairs whose link-preview change is unanswered.
+    embed_ops: Vec<(Snowflake, Snowflake)>,
+    embed_requests: FuturesUnordered<EmbedFuture>,
     /// The "who reacted" list the user asked for, and the one request
     /// loading it.
     inspection: Option<Inspection>,
@@ -512,12 +519,27 @@ impl History {
     /// The user's explicit edit of one of their messages. Only `content` is
     /// sent, so the message keeps its attachments. Text equal to the current
     /// text needs no request (and settles a failed edit of the message).
+    #[cfg(test)]
     pub fn edit_message(
         &mut self,
         rest: &RestClient,
         channel: Snowflake,
         message: Snowflake,
         content: &str,
+    ) {
+        self.edit_message_keeping(rest, channel, message, content, None);
+    }
+
+    /// [`edit_message`](Self::edit_message) that also removes every attachment
+    /// not in `keep` (`None`: none is removed). Ids the message does not hold
+    /// are ignored; keeping all of them is no removal.
+    pub fn edit_message_keeping(
+        &mut self,
+        rest: &RestClient,
+        channel: Snowflake,
+        message: Snowflake,
+        content: &str,
+        keep: Option<Vec<Snowflake>>,
     ) {
         self.dirty = true;
         self.notice = None;
@@ -528,7 +550,16 @@ impl History {
                 return;
             }
         };
-        let allow_empty = !held.attachments.is_empty();
+        let keep = keep
+            .map(|keep| {
+                keep.into_iter()
+                    .filter(|id| held.attachments.iter().any(|a| a.id == *id))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|keep| keep.len() < held.attachments.len());
+        let allow_empty = keep
+            .as_ref()
+            .map_or(!held.attachments.is_empty(), |keep| !keep.is_empty());
         let edit = match EditedMessage::new(content, allow_empty) {
             Ok(edit) => edit,
             Err(ComposeError::Empty) => {
@@ -540,7 +571,8 @@ impl History {
                 return;
             }
         };
-        if edit.content() == held.content {
+        let edit = edit.keeping(keep.clone());
+        if edit.content() == held.content && keep.is_none() {
             // Back to Discord's text: a failed edit of it is moot.
             let failed_edit = self
                 .changes
@@ -553,7 +585,12 @@ impl History {
         }
         let kind = ChangeKind::Edit(Arc::from(edit.content()));
         match self.changes.begin(channel, message, kind, allow_empty) {
-            Ok(()) => self.start_change(rest, channel, message, ChangeRequest::Edit(edit)),
+            Ok(()) => {
+                if let Some(keep) = keep {
+                    self.changes.set_keep(channel, message, keep);
+                }
+                self.start_change(rest, channel, message, ChangeRequest::Edit(edit));
+            }
             Err(notice) => self.notice = Some(notice),
         }
     }
@@ -1450,6 +1487,12 @@ impl History {
                 None => std::future::pending().await,
             }
         };
+        let embeds = async {
+            match self.embed_requests.next().await {
+                Some(done) => done,
+                None => std::future::pending().await,
+            }
+        };
         let users = async {
             match &mut self.users_pending {
                 Some(future) => future.await,
@@ -1464,6 +1507,7 @@ impl History {
             done = change => Completed::Change(done),
             done = reaction => Completed::Reaction(done),
             done = poll => Completed::Poll(done),
+            done = embeds => Completed::Embeds(done),
             (serial, result) = users => Completed::ReactionUsers(serial, result),
         }
     }
@@ -1481,6 +1525,7 @@ impl History {
             Completed::Reaction(done) => self.finish_reaction(done),
             Completed::ReactionUsers(serial, result) => self.finish_reaction_users(serial, result),
             Completed::Poll(done) => self.finish_poll(done),
+            Completed::Embeds(done) => self.finish_embeds(done),
         }
     }
 
@@ -4019,5 +4064,146 @@ mod tests {
             panic!("not failed");
         };
         assert_eq!(reason, polls::voters_failure(RestError::PermissionDenied));
+    }
+    fn embed() -> fastcord_model::Embed {
+        serde_json::from_value(serde_json::json!({"title": "preview"})).unwrap()
+    }
+
+    fn take_embeds(history: &mut History) -> usize {
+        std::mem::take(&mut history.embed_requests).len()
+    }
+
+    fn embeds_answered(id: Snowflake, result: Result<Box<Message>, RestError>) -> Completed {
+        Completed::Embeds(super::embeds::EmbedsDone {
+            channel: CHANNEL,
+            message: id,
+            result,
+        })
+    }
+
+    #[test]
+    fn link_previews_change_only_for_own_messages_or_with_the_permission() {
+        use super::embeds::{BUSY, NOT_ALLOWED};
+        let rest = rest();
+        let mut history = sending_history();
+        let mut mine = own(NEWEST + 1, "https://example.com", None);
+        mine.embeds.push(embed());
+        history.apply(&Dispatch::MessageCreate(mine));
+        let mut theirs = message_with(NEWEST + 2, "https://example.org".to_owned());
+        theirs.embeds.push(embed());
+        history.apply(&Dispatch::MessageCreate(Box::new(theirs)));
+        let (mine, theirs) = (Snowflake(NEWEST + 1), Snowflake(NEWEST + 2));
+
+        // Someone else's message needs the permission the caller vouches for.
+        history.set_embeds_suppressed(&rest, CHANNEL, theirs, true, false);
+        assert_eq!(history.snapshot().notice, Some(NOT_ALLOWED));
+        assert_eq!(take_embeds(&mut history), 0);
+        // Not held, and not the open channel.
+        history.set_embeds_suppressed(&rest, CHANNEL, Snowflake(1), true, true);
+        assert_eq!(history.snapshot().notice, Some(NOT_LOADED));
+        history.set_embeds_suppressed(&rest, Snowflake(778), mine, true, true);
+        assert_eq!(history.snapshot().notice, Some(NOT_OPEN));
+        assert_eq!(take_embeds(&mut history), 0);
+        // Already in the requested state: nothing to ask.
+        history.set_embeds_suppressed(&rest, CHANNEL, mine, false, false);
+        assert_eq!(take_embeds(&mut history), 0);
+
+        // One request per message, made once; the permission covers others.
+        history.set_embeds_suppressed(&rest, CHANNEL, mine, true, false);
+        history.set_embeds_suppressed(&rest, CHANNEL, mine, true, false);
+        assert_eq!(history.snapshot().notice, Some(BUSY));
+        history.set_embeds_suppressed(&rest, CHANNEL, theirs, true, true);
+        assert_eq!(history.embed_requests.len(), 2);
+        assert_eq!(history.embed_ops.len(), 2);
+    }
+
+    #[test]
+    fn a_link_preview_answer_applies_once_and_a_failure_changes_nothing() {
+        let rest = rest();
+        let mut history = sending_history();
+        let mut mine = own(NEWEST + 1, "https://example.com", None);
+        mine.embeds.push(embed());
+        history.apply(&Dispatch::MessageCreate(mine));
+        let id = Snowflake(NEWEST + 1);
+        history.set_embeds_suppressed(&rest, CHANNEL, id, true, false);
+        take_embeds(&mut history);
+
+        // Discord's answer: previews gone, flag set.
+        let mut answer = (*held(&history, id)).clone();
+        answer.embeds.clear();
+        answer.flags |= fastcord_model::SUPPRESS_EMBEDS_FLAG;
+        assert!(!history.complete(&rest, embeds_answered(id, Ok(Box::new(answer)))));
+        assert!(held(&history, id).embeds_suppressed());
+        assert!(held(&history, id).embeds.is_empty());
+        assert!(history.embed_ops.is_empty(), "the message is free again");
+
+        // A failure leaves the message as it is, says why, and stops on 401.
+        history.set_embeds_suppressed(&rest, CHANNEL, id, false, false);
+        take_embeds(&mut history);
+        assert!(!history.complete(&rest, embeds_answered(id, Err(RestError::PermissionDenied))));
+        assert!(held(&history, id).embeds_suppressed());
+        assert_eq!(
+            history.snapshot().notice,
+            Some(super::embeds::failure(RestError::PermissionDenied))
+        );
+        history.set_embeds_suppressed(&rest, CHANNEL, id, false, false);
+        take_embeds(&mut history);
+        assert!(history.complete(
+            &rest,
+            embeds_answered(id, Err(RestError::AuthenticationRequired))
+        ));
+    }
+
+    #[test]
+    fn removing_an_attachment_sends_the_ones_that_stay_and_a_retry_repeats_it() {
+        let rest = rest();
+        let (mut history, id) = with_own_message();
+        let mut second = attachment();
+        second.id = Snowflake(78);
+        let mut message = (*held(&history, id)).clone();
+        message.attachments.push(second);
+        history.apply(&Dispatch::MessageUpdate(Box::new(MessageUpdate {
+            attachments: Some(message.attachments.clone()),
+            ..gateway_edit_fields(id)
+        })));
+
+        // Text unchanged but one attachment removed is still an edit.
+        let text = held(&history, id).content.clone();
+        history.edit_message_keeping(&rest, CHANNEL, id, &text, Some(vec![Snowflake(78)]));
+        assert_eq!(take_changes(&mut history), 1);
+        assert!(row_of(&mut history, id).change.unwrap().saving());
+        let done = answered(id, ChangeResult::Edited(Err(RestError::PermissionDenied)));
+        history.complete(&rest, done);
+        history.retry_change(&rest, CHANNEL, id);
+        assert_eq!(take_changes(&mut history), 1, "retried by the user, once");
+
+        // Keeping all of them, or ids the message does not hold, removes nothing.
+        let (mut history, id) = with_own_message();
+        let text = held(&history, id).content.clone();
+        history.edit_message_keeping(&rest, CHANNEL, id, &text, Some(vec![Snowflake(77)]));
+        history.edit_message_keeping(&rest, CHANNEL, id, &text, None);
+        assert_eq!(take_changes(&mut history), 0);
+        // Removing the only attachment needs text to remain.
+        history.edit_message_keeping(&rest, CHANNEL, id, "", Some(Vec::new()));
+        assert_eq!(history.snapshot().notice, Some(EMPTY_EDIT));
+        history.edit_message_keeping(&rest, CHANNEL, id, "text", Some(Vec::new()));
+        assert_eq!(take_changes(&mut history), 1);
+    }
+
+    fn gateway_edit_fields(id: Snowflake) -> MessageUpdate {
+        MessageUpdate {
+            id,
+            channel_id: CHANNEL,
+            content: None,
+            edited_timestamp: None,
+            flags: None,
+            pinned: None,
+            attachments: None,
+            mentions: None,
+            mention_roles: None,
+            mention_everyone: None,
+            embeds: None,
+            poll: None,
+        }
     }
 }

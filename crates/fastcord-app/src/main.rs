@@ -17,6 +17,7 @@ mod gif;
 mod history;
 mod login;
 mod media_ui;
+mod message_link;
 mod navigation;
 mod notify;
 mod outbox;
@@ -836,6 +837,9 @@ impl App {
                         .controls
                         .timeline_intent(history::Intent::JumpTo { channel, message });
                 }
+                if self.search.take_jump_expired() {
+                    self.notice = Some("That message is in a channel you cannot open.".to_owned());
+                }
                 if let Phase::Account { gateway, .. } = &self.phase {
                     self.sticker.sync(gateway.timeline.channel_id);
                     self.forward.sync(gateway.timeline.channel_id);
@@ -1361,8 +1365,42 @@ impl App {
                             };
                             return self.forward_event(forward::Event::Open { source, preview });
                         }
+                        timeline::Event::CopyLink {
+                            channel_id,
+                            message_id,
+                        } => {
+                            let guild = gateway
+                                .navigation
+                                .selected_guild
+                                .filter(|_| !gateway.directs);
+                            return iced::clipboard::write(message_link::format(
+                                guild, channel_id, message_id,
+                            ));
+                        }
+                        timeline::Event::CopyId { message_id } => {
+                            return iced::clipboard::write(message_id.to_string());
+                        }
                         timeline::Event::OpenLink(url) => {
-                            if rich::safe_url(&url) {
+                            if let Some(link) = message_link::parse(&url) {
+                                if gateway.timeline.channel_id == Some(link.channel) {
+                                    gateway.controls.timeline_intent(history::Intent::JumpTo {
+                                        channel: link.channel,
+                                        message: link.message,
+                                    });
+                                } else {
+                                    // Only a channel the account can open is selected;
+                                    // otherwise the wait ends with a notice.
+                                    self.search.set_pending_jump(link.channel, link.message);
+                                    match link.guild {
+                                        Some(guild) => {
+                                            gateway.controls.select_channel(guild, link.channel);
+                                        }
+                                        None => {
+                                            gateway.controls.select_private_channel(link.channel)
+                                        }
+                                    }
+                                }
+                            } else if rich::safe_url(&url) {
                                 let _ = fastcord_platform::open_url(&url);
                             }
                         }
@@ -1535,6 +1573,8 @@ impl App {
                         | timeline::Event::CloseReactionUsers
                         | timeline::Event::PollVote { .. }
                         | timeline::Event::PollEnd { .. }
+                        | timeline::Event::SetEmbeds { .. }
+                        | timeline::Event::More(_)
                         | timeline::Event::PollVoters { .. }
                         | timeline::Event::React { .. }) => {
                             if gateway.message_action(action) {

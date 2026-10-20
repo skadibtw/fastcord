@@ -18,7 +18,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use fastcord_model::{Message, MessageUpdate, Snowflake};
+use fastcord_model::{Message, MessageUpdate, SUPPRESS_EMBEDS_FLAG, Snowflake};
 use serde::Serialize;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -45,6 +45,8 @@ pub fn is_own_message(message: &Message, user: Snowflake) -> bool {
 #[derive(Clone, PartialEq, Eq)]
 pub struct EditedMessage {
     content: String,
+    /// The attachments that stay when some are removed; `None` leaves them all.
+    keep: Option<Vec<Snowflake>>,
 }
 
 impl EditedMessage {
@@ -61,7 +63,21 @@ impl EditedMessage {
         }
         Ok(Self {
             content: content.to_owned(),
+            keep: None,
         })
+    }
+
+    /// Removes every attachment of the message not listed (`Some`). Discord
+    /// replaces the message's attachments with exactly this list, so it is
+    /// sent only when the user removed one; `None` sends no list at all.
+    pub fn keeping(mut self, keep: Option<Vec<Snowflake>>) -> Self {
+        self.keep = keep;
+        self
+    }
+
+    /// The attachments kept when some are removed.
+    pub fn kept(&self) -> Option<&[Snowflake]> {
+        self.keep.as_deref()
     }
 
     /// The text exactly as it is sent.
@@ -72,6 +88,10 @@ impl EditedMessage {
     fn body(&self) -> EditBody<'_> {
         EditBody {
             content: &self.content,
+            attachments: self
+                .keep
+                .as_ref()
+                .map(|keep| keep.iter().map(|&id| KeptAttachment { id }).collect()),
         }
     }
 }
@@ -80,15 +100,31 @@ impl fmt::Debug for EditedMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EditedMessage")
             .field("content_chars", &self.content.chars().count())
+            .field("keeps", &self.keep.as_ref().map(Vec::len))
             .finish()
     }
 }
 
-/// The whole edit body. Deliberately no `attachments`, `flags`, `embeds`, or
-/// `allowed_mentions`: omitted means unchanged.
+/// The whole edit body. Deliberately no `flags`, `embeds`, or
+/// `allowed_mentions`: omitted means unchanged. `attachments` is present only
+/// when the user removed some, and then names exactly those that stay.
 #[derive(Serialize)]
 struct EditBody<'a> {
     content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachments: Option<Vec<KeptAttachment>>,
+}
+
+#[derive(Serialize)]
+struct KeptAttachment {
+    id: Snowflake,
+}
+
+/// The embed-suppression body: `flags` with only `SUPPRESS_EMBEDS` set or clear,
+/// the one bit Discord lets a message edit change.
+#[derive(Serialize)]
+struct FlagsBody {
+    flags: u64,
 }
 
 fn message_route(
@@ -178,6 +214,28 @@ impl<C: Clock> RestClient<C> {
         parse_edited(response.body(), channel, message)
     }
 
+    /// Hides (`suppressed`) or restores the link previews of a message: the
+    /// account's own, or anyone's where it has Manage Messages. Sent once; the
+    /// same request applied twice changes nothing, so the user may retry it.
+    /// Returns the message as Discord now has it.
+    pub async fn set_embeds_suppressed(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+        suppressed: bool,
+    ) -> Result<Message, RestError> {
+        let body = FlagsBody {
+            flags: if suppressed { SUPPRESS_EMBEDS_FLAG } else { 0 },
+        };
+        let request = RestRequest::new(
+            message_route(Method::PATCH, channel, message)?,
+            Priority::UserWrite,
+        )
+        .json(&body)?;
+        let response = self.execute(request).await?;
+        parse_edited(response.body(), channel, message)
+    }
+
     /// Deletes one of the user's messages. `ResourceGone` (404) means the
     /// message no longer exists, which callers treat as deleted.
     pub async fn delete_message(
@@ -228,6 +286,44 @@ mod tests {
         ] {
             assert!(!object.contains_key(absent), "{absent}");
         }
+    }
+
+    #[test]
+    fn embed_suppression_sends_only_the_one_flag_bit() {
+        for (suppressed, flags) in [(true, 4), (false, 0)] {
+            let body = FlagsBody {
+                flags: if suppressed { SUPPRESS_EMBEDS_FLAG } else { 0 },
+            };
+            assert_eq!(
+                serde_json::to_value(body).unwrap(),
+                serde_json::json!({ "flags": flags })
+            );
+        }
+        let mut message = answer();
+        assert!(!message.embeds_suppressed());
+        message.flags |= SUPPRESS_EMBEDS_FLAG;
+        assert!(message.embeds_suppressed());
+    }
+
+    #[test]
+    fn removing_attachments_sends_exactly_the_ones_that_stay() {
+        let edit = EditedMessage::new("", true)
+            .unwrap()
+            .keeping(Some(vec![Snowflake(11), Snowflake(12)]));
+        assert_eq!(edit.kept(), Some([Snowflake(11), Snowflake(12)].as_slice()));
+        assert_eq!(
+            serde_json::to_value(edit.body()).unwrap(),
+            serde_json::json!({"content": "", "attachments": [{"id": "11"}, {"id": "12"}]})
+        );
+        assert!(format!("{edit:?}").contains("keeps: Some(2)"));
+        // No removal: no list, so every attachment stays as it is.
+        let plain = EditedMessage::new("x", true).unwrap().keeping(None);
+        assert!(
+            serde_json::to_value(plain.body())
+                .unwrap()
+                .get("attachments")
+                .is_none()
+        );
     }
 
     #[test]
@@ -356,6 +452,10 @@ mod tests {
         );
         assert_eq!(
             client.delete_message(CHANNEL, ID).await,
+            Err(RestError::AuthenticationRequired)
+        );
+        assert_eq!(
+            client.set_embeds_suppressed(CHANNEL, ID, true).await,
             Err(RestError::AuthenticationRequired)
         );
     }
