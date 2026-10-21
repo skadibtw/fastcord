@@ -1720,3 +1720,55 @@ mod voice_chat {
         assert_eq!(listed, [id(STAGE), id(VOICE_CHANNEL)]);
     }
 }
+
+#[test]
+fn voice_rows_are_followed_by_their_capped_occupants() {
+    let (mut store, navigation) = setup(READY);
+    for user in 1..=11u64 {
+        let state = fastcord_model::VoiceState {
+            guild_id: Some(id(FIRST)),
+            channel_id: Some(id(VOICE)),
+            user_id: id(user),
+            session_id: "v".to_owned(),
+            deaf: false,
+            mute: user == 1,
+            self_deaf: user == 2,
+            self_mute: false,
+            self_stream: false,
+            self_video: false,
+            suppress: false,
+        };
+        store.apply(event(Dispatch::VoiceStateUpdate(Box::new(
+            crate::gateway::VoiceStateUpdate {
+                state,
+                member: None,
+                users: vec![User {
+                    id: id(user),
+                    username: format!("user{user}"),
+                    global_name: None,
+                    avatar: None,
+                    bot: false,
+                }],
+            },
+        ))));
+    }
+    let window = navigation.channel_window(&store, 0, usize::MAX);
+    // text + voice + 8 people + "+3"
+    assert_eq!(window.total, 2 + 8 + 1);
+    assert_eq!(window.rows.len(), window.total);
+    assert!(window.rows[1].occupant.is_none());
+    assert!(matches!(
+        &window.rows[2].occupant,
+        Some(Occupant::Member { user_id, name, muted: true, deafened: false, .. })
+            if *user_id == id(1) && name == "user1"
+    ));
+    assert!(matches!(
+        &window.rows[3].occupant,
+        Some(Occupant::Member { deafened: true, .. })
+    ));
+    assert_eq!(window.rows[10].occupant, Some(Occupant::More(3)));
+    // A window in the middle of the list slices the same flat rows.
+    let part = navigation.channel_window(&store, 9, 2);
+    assert_eq!((part.offset, part.total, part.rows.len()), (9, 11, 2));
+    assert_eq!(part.rows[1].occupant, Some(Occupant::More(3)));
+}

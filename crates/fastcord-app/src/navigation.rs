@@ -2,7 +2,7 @@
 //! sidebar of channels (or direct messages) with the user's own panel at its
 //! foot, and the conversation. Presentation of compact reducer-owned
 //! navigation windows, never full state.
-use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot};
+use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot, Occupant};
 use iced::font::Weight;
 use iced::widget::{button, column, container, image, row, space, text, text_input};
 use iced::{Element, Font, Length, Padding, alignment};
@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use crate::Message;
 use crate::avatars::{self, AvatarKey};
 use crate::composer::{self, Composer};
+use crate::icons::{self, Icon};
 use crate::style;
 use crate::timeline;
 use crate::virtual_list::{self, ROW_HEIGHT};
@@ -67,7 +68,7 @@ pub fn view<'a>(
         voice_call,
     } = chrome;
     let rail = rail(snapshot, directs, inbox.is_some(), attachments.avatars);
-    let sidebar = sidebar(snapshot, private, directs, footer);
+    let sidebar = sidebar(snapshot, private, directs, footer, attachments.avatars);
     let main = match inbox.or(friends.filter(|_| directs)) {
         Some(friends) => friends,
         None => main_pane(
@@ -283,11 +284,65 @@ fn sidebar_row<'a>(
         .into()
 }
 
+/// One person (or the "+N" rest) under a voice row, at the fixed row height.
+fn occupant_row<'a>(
+    occupant: &'a Occupant,
+    avatar_views: &HashMap<AvatarKey, image::Handle>,
+) -> Element<'a, Message> {
+    let line: Element<'a, Message> = match occupant {
+        Occupant::More(more) => text(format!("+{more}"))
+            .size(12)
+            .style(text::secondary)
+            .into(),
+        Occupant::Member {
+            user_id,
+            name,
+            avatar,
+            muted,
+            deafened,
+        } => {
+            let mut line = row![
+                avatars::view(
+                    avatar_views,
+                    &AvatarKey::user(*user_id, avatar.as_deref()),
+                    22.0,
+                    || container(text(style::initial(name)).size(11).font(BOLD))
+                        .center(22)
+                        .style(style::avatar(style::avatar_color(user_id.0)))
+                        .into(),
+                ),
+                container(text(name.as_str()).size(13).wrapping(text::Wrapping::None))
+                    .width(Length::Fill)
+                    .clip(true),
+            ]
+            .spacing(8)
+            .align_y(alignment::Vertical::Center);
+            if *muted {
+                line = line.push(icons::icon(Icon::Mic { muted: true }, style::MUTED));
+            }
+            if *deafened {
+                line = line.push(icons::icon(
+                    Icon::Headphones { deafened: true },
+                    style::MUTED,
+                ));
+            }
+            line.into()
+        }
+    };
+    container(line)
+        .height(ROW_HEIGHT)
+        .padding(Padding::new(0.0).left(32.0).right(8.0))
+        .align_y(alignment::Vertical::Center)
+        .clip(true)
+        .into()
+}
+
 fn sidebar<'a>(
     snapshot: &'a NavigationSnapshot,
     private: PrivateConversation<'a>,
     directs: bool,
     footer: Element<'a, Message>,
+    avatar_views: &'a HashMap<AvatarKey, image::Handle>,
 ) -> Element<'a, Message> {
     let PrivateConversation {
         recipients,
@@ -377,6 +432,9 @@ fn sidebar<'a>(
         .into()
     } else {
         let rows = snapshot.channels.rows.iter().map(|channel| {
+            if let Some(occupant) = &channel.occupant {
+                return occupant_row(occupant, avatar_views);
+            }
             if channel.kind == ChannelKind::Category {
                 return container(
                     text(channel.name.to_uppercase())

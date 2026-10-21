@@ -4116,7 +4116,18 @@ fn wanted_avatars(
         ))
         .chain(stickers)
     });
-    for key in guilds.chain(authors) {
+    let occupants = gateway
+        .navigation
+        .channels
+        .rows
+        .iter()
+        .filter_map(|row| match &row.occupant {
+            Some(fastcord_discord::state::navigation::Occupant::Member {
+                user_id, avatar, ..
+            }) => Some(avatars::AvatarKey::user(*user_id, avatar.as_deref())),
+            _ => None,
+        });
+    for key in guilds.chain(occupants).chain(authors) {
         if wanted.len() == avatars::MAX_WANTED {
             break;
         }
@@ -4960,6 +4971,7 @@ mod tests {
             unread: false,
             mentions: 0,
             thread: None,
+            occupant: None,
         };
         let mut app = login_app();
         authenticate(&mut app, Persistence::MemoryOnly);

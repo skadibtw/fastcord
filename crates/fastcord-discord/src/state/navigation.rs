@@ -176,6 +176,23 @@ impl ThreadState {
     }
 }
 
+/// Most people listed under one voice or Stage row; the rest are one "+N" line.
+pub const MAX_VOICE_OCCUPANTS: usize = 8;
+
+/// A line under a voice or Stage row (the row has the same fixed height).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Occupant {
+    Member {
+        user_id: Snowflake,
+        /// Server nickname, else display name, capped.
+        name: String,
+        avatar: Option<String>,
+        muted: bool,
+        deafened: bool,
+    },
+    More(usize),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelRow {
     pub id: Snowflake,
@@ -192,6 +209,9 @@ pub struct ChannelRow {
     pub mentions: u32,
     /// Set for threads, which `parent_id` (a category) does not describe.
     pub thread: Option<ThreadState>,
+    /// Set on the lines that follow a voice row; every other field then
+    /// describes that voice channel and is not to be acted on.
+    pub occupant: Option<Occupant>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -530,26 +550,85 @@ impl Navigation {
             .map_or_else(Vec::new, |guild| {
                 visible_channels(store, guild, self.selected_channel)
             });
-        let total = visible.len();
+        let guild = self.selected_guild.and_then(|id| store.guild(id));
+        // Voice and Stage rows are followed by their occupants, one fixed-height
+        // line each: at most MAX_VOICE_OCCUPANTS and then one "+N" line.
+        let here = |row: &VisibleChannel<'_>| -> Vec<&fastcord_model::VoiceState> {
+            let Some(guild) = guild.filter(|_| row.kind == ChannelKind::Voice) else {
+                return Vec::new();
+            };
+            let mut here: Vec<_> = guild
+                .voice_states()
+                .filter(|state| state.channel_id == Some(row.channel.id))
+                .collect();
+            here.sort_by_key(|state| state.user_id);
+            here
+        };
+        let span = |row: &VisibleChannel<'_>| {
+            let n = here(row).len();
+            1 + n.min(MAX_VOICE_OCCUPANTS) + usize::from(n > MAX_VOICE_OCCUPANTS)
+        };
+        let spans: Vec<usize> = visible.iter().map(span).collect();
+        let total = spans.iter().sum::<usize>();
         let offset = offset.min(total);
-        let rows = visible
-            .into_iter()
-            .skip(offset)
-            .take(count.min(MAX_WINDOW_ROWS))
-            .map(|row| ChannelRow {
-                unread: unread_of(store, row.channel).unread,
-                mentions: unread_of(store, row.channel).mentions,
-                id: row.channel.id,
-                name: capped_name(row.channel.name.as_deref(), "Unnamed channel"),
-                kind: row.kind,
-                parent_id: row.parent_id,
-                thread: ThreadState::of(row.channel),
-                enabled: row.permissions.enables(row.kind),
-                selected: self.selected_channel == Some(row.channel.id)
-                    && row.permissions.enables(row.kind),
-                permissions: row.permissions,
-            })
-            .collect();
+        let take = count.min(MAX_WINDOW_ROWS);
+        let mut rows = Vec::new();
+        let mut start = 0;
+        for (row, span) in visible.iter().zip(spans) {
+            let end = start + span;
+            if end > offset && start < offset + take {
+                let channel = ChannelRow {
+                    unread: unread_of(store, row.channel).unread,
+                    mentions: unread_of(store, row.channel).mentions,
+                    id: row.channel.id,
+                    name: capped_name(row.channel.name.as_deref(), "Unnamed channel"),
+                    kind: row.kind,
+                    parent_id: row.parent_id,
+                    thread: ThreadState::of(row.channel),
+                    enabled: row.permissions.enables(row.kind),
+                    selected: self.selected_channel == Some(row.channel.id)
+                        && row.permissions.enables(row.kind),
+                    permissions: row.permissions,
+                    occupant: None,
+                };
+                let states = here(row);
+                let mut lines: Vec<Occupant> = states
+                    .iter()
+                    .take(MAX_VOICE_OCCUPANTS)
+                    .map(|state| {
+                        let user = store.user(state.user_id);
+                        let name = guild
+                            .and_then(|guild| guild.member(state.user_id))
+                            .and_then(|member| member.nick.as_deref())
+                            .filter(|nick| !nick.is_empty())
+                            .or_else(|| user.map(|user| user.display_name()));
+                        Occupant::Member {
+                            user_id: state.user_id,
+                            name: capped_name(name, "Unknown user"),
+                            avatar: user.and_then(|user| user.avatar.clone()),
+                            muted: state.mute || state.self_mute,
+                            deafened: state.deaf || state.self_deaf,
+                        }
+                    })
+                    .collect();
+                if states.len() > MAX_VOICE_OCCUPANTS {
+                    lines.push(Occupant::More(states.len() - MAX_VOICE_OCCUPANTS));
+                }
+                let all = std::iter::once(channel.clone()).chain(lines.into_iter().map(|line| {
+                    ChannelRow {
+                        occupant: Some(line),
+                        selected: false,
+                        ..channel.clone()
+                    }
+                }));
+                for (at, line) in all.enumerate() {
+                    if (offset..offset + take).contains(&(start + at)) {
+                        rows.push(line);
+                    }
+                }
+            }
+            start = end;
+        }
         Window {
             offset,
             total,

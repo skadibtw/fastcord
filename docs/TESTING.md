@@ -118,11 +118,9 @@ Release build of `eee1bb3` and then `eeaac04`. Authorized alt `skadimvp` in fast
   - `[label](<url>)` masked links and formatting inside their labels (`a773e07`).
   - Message times are now local instead of UTC, `<t:…>` timestamp markup renders, and the disabled mic and deafen buttons get honest tooltips (`44f5938`).
   - The second and third fixes are not yet re-checked live.
+  - Voice channel rows list their members (avatar, name, muted or deafened icon, at most 8 and "+N"), the call bar lists the account first and shows avatars, and the status menu closes after a choice. Not yet re-checked live.
 - **Found, still open:**
   - A message that mentions the account has no row highlight.
-  - Voice channel rows do not list their participants.
-  - The call bar does not include the account itself and shows initials instead of avatars.
-  - The status menu stays open after a choice.
   - The emoji picker is a single column of solid-blue rows.
   - Invite links have no invite card.
   - Embed thumbnails are not shown.
