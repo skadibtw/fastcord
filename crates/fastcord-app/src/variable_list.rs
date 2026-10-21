@@ -765,6 +765,10 @@ impl Geometry<'_> {
         offset >= self.max_offset() - BOTTOM_SLACK
     }
 
+    fn layout(&self) -> [f32; 3] {
+        [self.viewport, self.width, self.content]
+    }
+
     /// The built row containing `offset`, if the point is inside one.
     fn anchor_at(&self, offset: f32) -> Option<Anchor> {
         let at = self
@@ -835,6 +839,8 @@ struct Tracker {
     /// Highest request serial applied (never reset: serials are global).
     applied: u64,
     pinned: bool,
+    /// Viewport height, width and content height at the last `settle`.
+    layout: Option<[f32; 3]>,
     reported: Option<Viewport>,
     /// The worker belief a report already corrected, so a worker that has not
     /// caught up yet is not told the same thing on every redraw.
@@ -850,6 +856,7 @@ impl Default for Tracker {
             last: 0.0,
             applied: 0,
             pinned: true,
+            layout: None,
             reported: None,
             corrected: None,
             sent: Vec::new(),
@@ -905,6 +912,15 @@ impl Tracker {
         if !pinned && self.position == Some(Position::Bottom) {
             self.position = Position::at(geometry, offset, false);
         }
+        // The scrollable may move the offset itself when the layout changes under
+        // it (a resize rewraps rows): a list at the bottom stays at the bottom.
+        // Reader scrolls happen inside an event, where `settle` sees them.
+        if pinned
+            && self.position == Some(Position::Bottom)
+            && self.layout.is_some_and(|old| old != geometry.layout())
+        {
+            return self.place(geometry.max_offset(), offset);
+        }
         if (offset - self.last).abs() <= EPSILON {
             let target = self.position?.offset(geometry)?;
             return self.place(target, offset);
@@ -919,6 +935,7 @@ impl Tracker {
 
     /// Runs after the scrollable handled the event, with the offset it ended at.
     fn settle(&mut self, geometry: &Geometry<'_>, offset: f32) {
+        self.layout = Some(geometry.layout());
         if (offset - self.last).abs() > EPSILON {
             // The scrollable moved by itself: the reader scrolled, or the content
             // shrank under the offset.
@@ -1414,6 +1431,12 @@ pub(crate) mod harness {
                 self.element
                     .as_widget_mut()
                     .layout(&mut self.tree, &self.renderer, &limits);
+        }
+
+        /// The window changes size; the layout is recomputed like iced does.
+        pub fn resize(&mut self, width: f32, height: f32) {
+            self.size = core::Size::new(width, height);
+            self.relayout();
         }
 
         /// One `RedrawRequested`, returning what the widget published.
@@ -1964,6 +1987,31 @@ mod tests {
         sim.width = 640.0;
         sim.settle();
         assert_near(sim.screen_y(anchor.id), before);
+    }
+
+    #[test]
+    fn a_list_at_the_bottom_stays_there_across_width_and_height_changes() {
+        let mut sim = Sim::opened(1..=160);
+        assert!(sim.at_bottom());
+        for (width, viewport) in [
+            (480.0, 600.0),
+            (900.0, 400.0),
+            (300.0, 900.0),
+            (640.0, 600.0),
+        ] {
+            sim.width = width;
+            sim.viewport = viewport;
+            sim.settle();
+            assert!(sim.at_bottom(), "{width}x{viewport}");
+            assert!(sim.list.window().pinned, "{width}x{viewport}");
+        }
+        // Width and height changing in separate frames, without settling between.
+        sim.width = 400.0;
+        sim.update(0.0);
+        sim.viewport = 700.0;
+        sim.update(0.0);
+        sim.settle();
+        assert!(sim.at_bottom() && sim.list.window().pinned);
     }
 
     #[test]
@@ -2762,6 +2810,70 @@ mod tests {
         // An idle window publishes nothing, however often iced redraws it.
         for _ in 0..5 {
             assert!(ui.redraw().is_empty());
+        }
+    }
+
+    /// The real widget over a real model, as the app wires them: reports feed
+    /// the list, and the next view is built from its window.
+    #[test]
+    fn widget_keeps_a_list_at_the_bottom_when_the_window_is_resized() {
+        let height_at = |n: u64, width: f32| (60.0 + (n % 7) as f32 * 9.0) * 640.0 / width;
+        let mut model = VariableList::default();
+        model.set_items(&items(1..=60));
+        model.jump_latest();
+        let mut ui = Ui::new(640.0, 400.0, list(&Window::default(), None, &[]));
+        let frame = |model: &mut VariableList, ui: &mut Ui<'_, Report>, width: f32| {
+            for _ in 0..16 {
+                let window = model.window();
+                let rows: Vec<_> = (window.range.clone())
+                    .map(|at| {
+                        let n = model.slots[at].item.id.0;
+                        (n, 1, height_at(n, width))
+                    })
+                    .collect();
+                ui.show(list(&window, model.scroll_request(), &rows));
+                let reports = ui.redraw();
+                if reports.is_empty() {
+                    return;
+                }
+                for report in reports {
+                    match report {
+                        Report::Viewport(viewport) => {
+                            model.viewport(viewport);
+                        }
+                        Report::Measured(measurement) => {
+                            model.measure(measurement);
+                        }
+                    }
+                }
+            }
+            panic!("widget and model did not converge");
+        };
+        frame(&mut model, &mut ui, 640.0);
+        for (w, h) in [
+            (480.0, 400.0),
+            (900.0, 700.0),
+            (300.0, 500.0),
+            (640.0, 400.0),
+        ] {
+            ui.resize(w, h);
+            frame(&mut model, &mut ui, w);
+            let window = model.window();
+            let built: f32 = window
+                .range
+                .clone()
+                .map(|at| height_at(model.slots[at].item.id.0, w))
+                .sum();
+            let content = window.top + built + window.bottom;
+            assert!(
+                model.window().pinned && model.window().at_bottom,
+                "{w}x{h}: the model lost the bottom"
+            );
+            assert!(
+                ui.offset() >= content - h - BOTTOM_SLACK - 1.0,
+                "{w}x{h}: offset {} of {content}",
+                ui.offset()
+            );
         }
     }
 
