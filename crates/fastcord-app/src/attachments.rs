@@ -138,6 +138,7 @@ const EMOJI_SIDE: u32 = 32;
 /// Avatars and icons are requested at `size=64` and never decoded larger.
 pub const AVATAR_SIDE: u32 = 64;
 const MAX_AVATAR_FILE_BYTES: u64 = 512 * 1024;
+const MAX_EMBED_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SOUND_FILE_BYTES: u64 = fastcord_audio::soundboard::MAX_INPUT_BYTES as u64;
 
 struct PublicEmoji;
@@ -710,6 +711,40 @@ impl AttachmentCache {
         hash: &str,
         url: &str,
     ) -> Result<DecodedImage, AttachmentError> {
+        self.public_image(
+            kind,
+            id,
+            hash,
+            url,
+            MAX_AVATAR_FILE_BYTES,
+            (AVATAR_SIDE, AVATAR_SIDE),
+        )
+        .await
+    }
+
+    /// A link embed's thumbnail or image from Discord's media proxy: same
+    /// credential-free fetcher and disk LRU, at most [`MAX_EMBED_FILE_BYTES`],
+    /// decoded to fit `fit` (width, height). `hash` identifies the picture
+    /// without the signed query (kind 7).
+    pub async fn embed_image(
+        &self,
+        hash: &str,
+        url: &str,
+        fit: (u32, u32),
+    ) -> Result<DecodedImage, AttachmentError> {
+        self.public_image(7, Snowflake(0), hash, url, MAX_EMBED_FILE_BYTES, fit)
+            .await
+    }
+
+    async fn public_image(
+        &self,
+        kind: u8,
+        id: Snowflake,
+        hash: &str,
+        url: &str,
+        limit: u64,
+        fit: (u32, u32),
+    ) -> Result<DecodedImage, AttachmentError> {
         // Zero channel plus a message >= 2 cannot collide with emoji (0/1) or
         // with any real attachment.
         let digest = Sha256::digest(hash.as_bytes());
@@ -722,7 +757,7 @@ impl AttachmentCache {
             attachment: id,
         };
         let path = self
-            .fetch_file(&PublicEmoji, key, "avatar.png", url, MAX_AVATAR_FILE_BYTES)
+            .fetch_file(&PublicEmoji, key, "avatar.png", url, limit)
             .await?;
         let permit = self
             .decode_slots
@@ -733,7 +768,7 @@ impl AttachmentCache {
         self.ensure_active()?;
         let image = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            decode_thumbnail(&path, AVATAR_SIDE, AVATAR_SIDE)
+            decode_thumbnail(&path, fit.0, fit.1)
         })
         .await
         .map_err(|_| AttachmentError::WorkerStopped)??;
@@ -1787,6 +1822,35 @@ mod tests {
         assert_eq!(
             cache
                 .avatar(2, Snowflake(9), "gone", &missing)
+                .await
+                .unwrap_err(),
+            AttachmentError::Http(404)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_embed_picture_is_fetched_without_credentials_capped_and_cached() {
+        let (address, seen) = serve(respond({
+            let png = png(800, 400);
+            move |_| ok(&png)
+        }))
+        .await;
+        let root = scratch("embed");
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let url = format!("http://{address}/external/x/a.png?ex=1&hm=2");
+        let first = cache.embed_image("h", &url, (400, 300)).await.unwrap();
+        assert_eq!((first.width, first.height), (400, 200), "capped to the box");
+        cache.embed_image("h", &url, (400, 300)).await.unwrap();
+        assert_eq!(seen.lock().len(), 1, "the second read is a disk hit");
+        {
+            let head = &seen.lock()[0];
+            assert!(!head.contains("authorization") && !head.contains("cookie"));
+        }
+        let (address, _) = serve(respond(|_| status(404))).await;
+        assert_eq!(
+            cache
+                .embed_image("gone", &format!("http://{address}/x.png"), (80, 80))
                 .await
                 .unwrap_err(),
             AttachmentError::Http(404)

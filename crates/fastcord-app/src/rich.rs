@@ -2,17 +2,19 @@
 //!
 //! The source text is never rewritten: every span borrows from it (copying and
 //! editing use the original), and mentions, spoilers and links are only shown
-//! differently. Nothing here is fetched or cached; emoji images keep using the
-//! bounded emoji views and the timeline's `Occurrence` visibility reports.
+//! differently. Nothing here is fetched: emoji images keep using the bounded
+//! emoji views and the timeline's `Occurrence` visibility reports, and embed
+//! pictures come from the bounded avatar store (`embed_keys` says which).
 
 use std::collections::{HashMap, HashSet};
 
 use fastcord_model::markup::{self, Block, BlockKind, Kind, Span as Part, Style};
-use fastcord_model::{Embed, Message, SnapshotMessage, Snowflake, User};
+use fastcord_model::{Embed, EmbedMedia, Message, SnapshotMessage, Snowflake, User};
 use iced::font::{self, Font, Weight};
-use iced::widget::{column, container, rich_text, row, space, span, text};
+use iced::widget::{button, column, container, image, rich_text, row, space, span, text};
 use iced::{Background, Color, Element, Length};
 
+use crate::avatars::AvatarKey;
 use crate::emoji::{self, Asset, MAX_INLINE_ASSETS, Origin, View};
 use crate::timeline::Event;
 
@@ -96,6 +98,8 @@ pub struct Cx<'a> {
     pub names: &'a Names,
     pub revealed: &'a HashSet<(Snowflake, u16)>,
     pub emojis: &'a HashMap<Asset, View>,
+    /// Loaded embed pictures, keyed by [`embed_keys`].
+    pub pictures: &'a HashMap<AvatarKey, image::Handle>,
     /// Unix seconds, for `<t:…:R>`; read when the row is built, never ticking.
     pub now: i64,
 }
@@ -197,6 +201,47 @@ pub fn body<'a>(
         ordinal: 0,
     };
     Some(renderer.blocks(&parsed.blocks))
+}
+
+/// Largest box of an embed thumbnail and of an embed image, in pixels.
+const THUMBNAIL_BOX: (u16, u16) = (80, 80);
+const IMAGE_BOX: (u16, u16) = (400, 300);
+
+/// The size a picture of the dimensions Discord reported is shown at: inside
+/// `bx`, same aspect, never enlarged. Unreported dimensions use the box.
+fn shown(media: &EmbedMedia, bx: (u16, u16)) -> (u16, u16) {
+    let (Some(w), Some(h)) = (
+        media.width.filter(|&w| w > 0),
+        media.height.filter(|&h| h > 0),
+    ) else {
+        return bx;
+    };
+    let scale = (f64::from(bx.0) / f64::from(w))
+        .min(f64::from(bx.1) / f64::from(h))
+        .min(1.0);
+    (
+        ((f64::from(w) * scale).round() as u16).max(1),
+        ((f64::from(h) * scale).round() as u16).max(1),
+    )
+}
+
+/// The picture to fetch for one embed medium. Only Discord's media proxy copy
+/// qualifies, never the third-party original, so nothing reaches another host.
+fn picture_key(media: &EmbedMedia, thumbnail: bool) -> Option<AvatarKey> {
+    let bx = if thumbnail { THUMBNAIL_BOX } else { IMAGE_BOX };
+    AvatarKey::embed(media.proxy_url.as_deref()?, shown(media, bx))
+}
+
+/// The pictures these embeds ask for: thumbnail first, then image.
+pub fn embed_keys(embeds: &[Embed]) -> impl Iterator<Item = AvatarKey> {
+    embeds.iter().flat_map(|embed| {
+        [
+            embed.thumbnail.as_ref().and_then(|m| picture_key(m, true)),
+            embed.image.as_ref().and_then(|m| picture_key(m, false)),
+        ]
+        .into_iter()
+        .flatten()
+    })
 }
 
 /// Embeds below a message. They take their text from the supplied metadata
@@ -522,7 +567,37 @@ impl<'a> Renderer<'a> {
                 )
                 .push(self.markup(&field.value));
         }
+        let mut thumbnail = None;
         for (label, media) in [("Image", &embed.image), ("Thumbnail", &embed.thumbnail)] {
+            let is_thumbnail = label == "Thumbnail";
+            let loaded = media.as_ref().and_then(|m| {
+                let key = picture_key(m, is_thumbnail)?;
+                let handle = self.cx.pictures.get(&key)?.clone();
+                let AvatarKey::Embed { fit, .. } = key else {
+                    return None;
+                };
+                let view = image(handle)
+                    .width(f32::from(fit.0))
+                    .height(f32::from(fit.1))
+                    .content_fit(iced::ContentFit::Contain);
+                Some(match safe_url(&m.url) {
+                    true => Element::from(
+                        button(view)
+                            .padding(0)
+                            .style(button::text)
+                            .on_press(to_event(Link::Url(m.url.clone()))),
+                    ),
+                    false => view.into(),
+                })
+            });
+            if let Some(view) = loaded {
+                if is_thumbnail {
+                    thumbnail = Some(view);
+                } else {
+                    body = body.push(view);
+                }
+                continue;
+            }
             if let Some(media) = media.as_ref().filter(|m| safe_url(&m.url)) {
                 body = body.push(
                     rich_text([span(format!("{label}: {}", host(&media.url)))
@@ -542,7 +617,11 @@ impl<'a> Renderer<'a> {
                     .wrapping(text::Wrapping::WordOrGlyph),
             );
         }
-        container(body)
+        let content: Element<'a, Event> = match thumbnail {
+            Some(thumbnail) => row![body.width(Length::Fill), thumbnail].spacing(8).into(),
+            None => body.into(),
+        };
+        container(content)
             .padding(8)
             .max_width(520)
             .style(move |theme: &iced::Theme| {
@@ -638,6 +717,7 @@ let a;
             names: &names,
             revealed: &revealed,
             emojis: &emojis,
+            pictures: &HashMap::new(),
             now: 0,
         };
         assert!(body(&message.content, &message, Snowflake(20), 1, cx).is_some());
@@ -651,5 +731,74 @@ let a;
         let (roles, channels) = wanted(["<@&5> <@&5> <#7> <@9>", "plain", "`<#8>`"]);
         assert_eq!(roles, [Snowflake(5)]);
         assert_eq!(channels, [Snowflake(7)]);
+    }
+
+    fn media(json: serde_json::Value) -> EmbedMedia {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn embed_pictures_prefer_the_proxy_and_are_capped() {
+        let proxy = "https://images-ext-1.discordapp.net/external/k/https/shop.test/p.jpg";
+        let thumb = media(serde_json::json!({"url": "https://shop.test/p.jpg",
+            "proxy_url": proxy, "width": 1000, "height": 500}));
+        assert_eq!(shown(&thumb, THUMBNAIL_BOX), (80, 40));
+        assert_eq!(shown(&thumb, IMAGE_BOX), (400, 200));
+        let small = media(serde_json::json!({"url": "u", "width": 20, "height": 10}));
+        assert_eq!(shown(&small, IMAGE_BOX), (20, 10), "never enlarged");
+        assert_eq!(
+            shown(&media(serde_json::json!({"url": "u"})), IMAGE_BOX),
+            IMAGE_BOX
+        );
+        let embeds: Vec<Embed> = vec![
+            serde_json::from_value(serde_json::json!({
+                "title": "t",
+                "thumbnail": {"url": "https://shop.test/p.jpg", "proxy_url": proxy,
+                              "width": 1000, "height": 500},
+                "image": {"url": "https://shop.test/q.jpg"},
+            }))
+            .unwrap(),
+        ];
+        let keys: Vec<_> = embed_keys(&embeds).collect();
+        assert_eq!(keys.len(), 1, "no proxy copy, no fetch of the original");
+        assert_eq!(keys[0].url(), proxy);
+        assert!(matches!(keys[0], AvatarKey::Embed { fit: (80, 40), .. }));
+    }
+
+    fn nodes(tree: &iced_renderer::core::widget::Tree) -> usize {
+        1 + tree.children.iter().map(nodes).sum::<usize>()
+    }
+
+    #[test]
+    fn a_loaded_picture_replaces_the_text_line_and_a_missing_one_keeps_it() {
+        let proxy = "https://media.discordapp.net/external/k/p.jpg";
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "id": "10", "channel_id": "20", "author": {"id": "1", "username": "a"},
+            "content": "", "timestamp": "2026-10-16T00:00:00.000000+00:00",
+            "embeds": [{"title": "t", "thumbnail": {"url": "https://shop.test/p.jpg",
+                        "proxy_url": proxy, "width": 80, "height": 80}}],
+        }))
+        .unwrap();
+        let key = embed_keys(&message.embeds).next().unwrap();
+        let names = Names::default();
+        let revealed = HashSet::new();
+        let emojis = HashMap::new();
+        let count = |pictures: &HashMap<AvatarKey, image::Handle>| {
+            let cx = Cx {
+                names: &names,
+                revealed: &revealed,
+                emojis: &emojis,
+                pictures,
+                now: 0,
+            };
+            embeds(&message, Snowflake(20), 1, cx)
+                .iter()
+                .map(|element| nodes(&iced_renderer::core::widget::Tree::new(element)))
+                .sum::<usize>()
+        };
+        let fallback = count(&HashMap::new());
+        let handle = image::Handle::from_rgba(1, 1, vec![0u8, 0, 0, 255]);
+        let loaded = count(&HashMap::from([(key, handle)]));
+        assert_ne!(loaded, fallback, "the picture replaces the text line");
     }
 }

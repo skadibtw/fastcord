@@ -1,7 +1,7 @@
 //! User avatars and server icons from Discord's public CDN. The fetch, disk LRU
 //! and decode run in [`AttachmentCache::avatar`]; this module owns the small
-//! render-side store: at most [`MAX_VIEWS`] 64x64 RGBA handles (about 4 MiB),
-//! loaded only for the keys the visible rows currently ask for. A missing,
+//! render-side store: at most [`MAX_VIEWS`] handles and [`MAX_VIEW_BYTES`] of RGBA
+//! (avatars are 64x64; link embed pictures are larger), loaded only for the keys the visible rows currently ask for. A missing,
 //! failed or still-loading image leaves the letter circle in place.
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -9,18 +9,21 @@ use fastcord_model::Snowflake;
 use iced::task::Handle;
 use iced::widget::image;
 use iced::{Element, Task};
+use sha2::{Digest, Sha256};
 
 use crate::Message;
 use crate::attachments::{AttachmentCache, DecodedImage};
 
 pub const MAX_VIEWS: usize = 256;
+/// Decoded pixels the store holds, whatever the handle count.
+pub const MAX_VIEW_BYTES: usize = 24 * 1024 * 1024;
 /// Most keys asked for at once; a window of rows never needs more.
 pub const MAX_WANTED: usize = 128;
 const MAX_FAILED: usize = 512;
 const WORKERS: usize = 4;
 const CDN: &str = "https://cdn.discordapp.com";
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub enum AvatarKey {
     User {
         id: Snowflake,
@@ -37,6 +40,38 @@ pub enum AvatarKey {
         id: Snowflake,
         gif: bool,
     },
+    /// A link embed's thumbnail or image, from Discord's media proxy only.
+    /// `hash` names the picture and box without the signed query.
+    Embed {
+        hash: String,
+        url: String,
+        fit: (u16, u16),
+    },
+}
+
+/// Never prints a signed URL.
+impl std::fmt::Debug for AvatarKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Embed { hash, fit, .. } => write!(f, "Embed({hash}, {fit:?})"),
+            Self::User { id, hash } => write!(f, "User({id}, {hash})"),
+            Self::Guild { id, hash } => write!(f, "Guild({id}, {hash})"),
+            Self::Default(n) => write!(f, "Default({n})"),
+            Self::Sticker { id, gif } => write!(f, "Sticker({id}, {gif})"),
+        }
+    }
+}
+
+/// Whether `url` is a plain https Discord media-proxy or CDN address.
+fn discord_media_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    url.len() <= 2048
+        && !url.contains(|c: char| c.is_whitespace() || c.is_control())
+        && !host.contains(['@', ':'])
+        && (host.ends_with(".discordapp.net") || host.ends_with(".discordapp.com"))
 }
 
 /// Hashes go into a URL and a cache identity: letters, digits and `_` only.
@@ -74,6 +109,21 @@ impl AvatarKey {
             })
     }
 
+    /// An embed picture shown inside `fit` (width, height). Only Discord's own
+    /// proxy is fetched: the original third-party URL never is.
+    pub fn embed(proxy_url: &str, fit: (u16, u16)) -> Option<Self> {
+        if !discord_media_url(proxy_url) || fit.0 == 0 || fit.1 == 0 {
+            return None;
+        }
+        let path = proxy_url.split(['?', '#']).next().unwrap_or("");
+        let digest = Sha256::digest(format!("{path}|{}x{}", fit.0, fit.1));
+        Some(Self::Embed {
+            hash: format!("{digest:x}")[..24].to_owned(),
+            url: proxy_url.to_owned(),
+            fit,
+        })
+    }
+
     /// Animated hashes (`a_...`) get the static PNG: first frame only.
     pub fn url(&self) -> String {
         match self {
@@ -84,16 +134,22 @@ impl AvatarKey {
             Self::Sticker { id, gif: true } => {
                 format!("https://media.discordapp.net/stickers/{id}.gif?size=160")
             }
+            Self::Embed { url, .. } => url.clone(),
         }
     }
 
     async fn load(self, cache: AttachmentCache) -> Option<DecodedImage> {
         let url = self.url();
+        if let Self::Embed { hash, fit, .. } = &self {
+            let fit = (u32::from(fit.0), u32::from(fit.1));
+            return cache.embed_image(hash, &url, fit).await.ok();
+        }
         let (kind, id, hash) = match &self {
             Self::User { id, hash } => (2, *id, hash.as_str()),
             Self::Guild { id, hash } => (3, *id, hash.as_str()),
             Self::Default(n) => (4, Snowflake(u64::from(*n)), "default"),
             Self::Sticker { id, .. } => (6, *id, "sticker"),
+            Self::Embed { .. } => return None,
         };
         cache.avatar(kind, id, hash, &url).await.ok()
     }
@@ -102,7 +158,8 @@ impl AvatarKey {
 #[derive(Default)]
 pub struct State {
     pub views: HashMap<AvatarKey, image::Handle>,
-    order: VecDeque<AvatarKey>,
+    order: VecDeque<(AvatarKey, usize)>,
+    bytes: usize,
     workers: HashMap<AvatarKey, Handle>,
     failed: HashSet<AvatarKey>,
     wanted: Vec<AvatarKey>,
@@ -165,13 +222,16 @@ impl State {
         }
         match image {
             Some(image) => {
-                while self.views.len() >= MAX_VIEWS {
-                    let Some(oldest) = self.order.pop_front() else {
+                let size = image.rgba.len();
+                while self.views.len() >= MAX_VIEWS || self.bytes + size > MAX_VIEW_BYTES {
+                    let Some((oldest, freed)) = self.order.pop_front() else {
                         break;
                     };
                     self.views.remove(&oldest);
+                    self.bytes -= freed;
                 }
-                self.order.push_back(key.clone());
+                self.bytes += size;
+                self.order.push_back((key.clone(), size));
                 self.views.insert(
                     key,
                     image::Handle::from_rgba(image.width, image.height, image.rgba),
@@ -325,5 +385,70 @@ mod tests {
         let _ = state.loaded(1, key.clone(), None, None);
         assert!(!state.views.contains_key(&key));
         assert!(state.failed.contains(&key));
+    }
+
+    #[test]
+    fn embed_pictures_come_only_from_discord_and_hide_their_url() {
+        let proxy = "https://images-ext-1.discordapp.net/external/abc/https/cdn.example/a.png?ex=1&hm=secret";
+        let key = AvatarKey::embed(proxy, (80, 40)).unwrap();
+        assert_eq!(key.url(), proxy);
+        assert!(!format!("{key:?}").contains("secret"));
+        // The signature is not part of the identity; the box is.
+        let resigned = proxy.replace("hm=secret", "hm=other");
+        let (AvatarKey::Embed { hash: a, .. }, Some(AvatarKey::Embed { hash: b, .. })) =
+            (&key, AvatarKey::embed(&resigned, (80, 40)))
+        else {
+            panic!("embed keys");
+        };
+        assert_eq!(*a, b);
+        let Some(AvatarKey::Embed { hash: c, .. }) = AvatarKey::embed(proxy, (80, 80)) else {
+            panic!("embed key");
+        };
+        assert_ne!(*a, c);
+        for bad in [
+            "http://media.discordapp.net/a.png",
+            "https://example.com/a.png",
+            "https://media.discordapp.net.evil.test/a.png",
+            "https://u:p@media.discordapp.net/a.png",
+            "https://media.discordapp.net:8443/a.png",
+            "https://media.discordapp.net/a b.png",
+        ] {
+            assert_eq!(AvatarKey::embed(bad, (80, 80)), None, "{bad}");
+        }
+        assert_eq!(AvatarKey::embed(proxy, (0, 80)), None);
+    }
+
+    #[test]
+    fn pictures_are_bounded_by_bytes_and_a_failure_keeps_the_fallback() {
+        let mut state = State::default();
+        let key = |n: u64| {
+            AvatarKey::embed(
+                &format!("https://media.discordapp.net/a/{n}.png"),
+                (400, 300),
+            )
+            .unwrap()
+        };
+        let big = || DecodedImage {
+            width: 1_000,
+            height: 1_000,
+            rgba: bytes::Bytes::from(vec![0u8; 4_000_000]),
+        };
+        for n in 0..10 {
+            let _ = state.synchronize(vec![key(n)], 1, None);
+            state.workers.insert(
+                key(n),
+                Task::<Message>::none().abortable().1.abort_on_drop(),
+            );
+            let _ = state.loaded(1, key(n), Some(big()), None);
+        }
+        assert!(state.bytes <= MAX_VIEW_BYTES && state.views.len() == 6);
+        assert!(!state.views.contains_key(&key(0)) && state.views.contains_key(&key(9)));
+        let _ = state.synchronize(vec![key(50)], 1, None);
+        state.workers.insert(
+            key(50),
+            Task::<Message>::none().abortable().1.abort_on_drop(),
+        );
+        let _ = state.loaded(1, key(50), None, None);
+        assert!(!state.views.contains_key(&key(50)) && state.failed.contains(&key(50)));
     }
 }

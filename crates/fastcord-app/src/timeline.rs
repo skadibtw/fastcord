@@ -1169,6 +1169,7 @@ fn message_view<'a>(
         names: &snapshot.names,
         revealed: assets.revealed,
         emojis: assets.emojis,
+        pictures: assets.avatars,
         now: crate::localtime::now(),
     };
     if !content.is_empty() {

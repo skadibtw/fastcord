@@ -4102,6 +4102,9 @@ fn own_user<'a>(
         .unwrap_or(&session.user)
 }
 
+/// Most embed pictures asked for at once.
+const MAX_WANTED_PICTURES: usize = 16;
+
 /// Avatars and icons the shown rows ask for: the user's own, the rail window,
 /// then the timeline authors and stickers newest first. Bounded.
 fn wanted_avatars(
@@ -4143,7 +4146,29 @@ fn wanted_avatars(
         .participants
         .iter()
         .map(|p| controls.avatar_key(p.user_id));
-    for key in guilds.chain(occupants).chain(callers).chain(authors) {
+    // Embed pictures of the newest rows, a few at a time so they never crowd
+    // out the avatars.
+    let pictures = gateway
+        .timeline
+        .rows
+        .iter()
+        .rev()
+        .flat_map(|row| {
+            let forwarded = row.message.forwarded().map_or(&[][..], |s| &s.embeds[..]);
+            rich::embed_keys(&row.message.embeds).chain(rich::embed_keys(forwarded))
+        })
+        .take(MAX_WANTED_PICTURES)
+        .collect::<Vec<_>>();
+    let room = avatars::MAX_WANTED - pictures.len();
+    for key in guilds
+        .chain(occupants)
+        .chain(callers)
+        .chain(authors)
+        .chain(pictures)
+    {
+        if wanted.len() == room && !matches!(key, avatars::AvatarKey::Embed { .. }) {
+            continue;
+        }
         if wanted.len() == avatars::MAX_WANTED {
             break;
         }

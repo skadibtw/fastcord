@@ -13,6 +13,9 @@ pub const MAX_EMBED_FIELDS: usize = 25;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbedMedia {
     pub url: String,
+    /// Discord's media-proxy copy (media.discordapp.net); also signed.
+    #[serde(default)]
+    pub proxy_url: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
     #[serde(default)]
@@ -95,6 +98,9 @@ impl Embed {
         }
         for media in [&mut self.image, &mut self.thumbnail].into_iter().flatten() {
             media.url.shrink_to_fit();
+            if let Some(proxy) = &mut media.proxy_url {
+                proxy.shrink_to_fit();
+            }
         }
         self.fields.shrink_to_fit();
         for field in &mut self.fields {
@@ -106,7 +112,11 @@ impl Embed {
     /// Heap bytes held, for the message store's byte budget.
     pub fn heap_bytes(&self) -> usize {
         let text = |value: &Option<String>| value.as_ref().map_or(0, String::capacity);
-        let media = |value: &Option<EmbedMedia>| value.as_ref().map_or(0, |m| m.url.capacity());
+        let media = |value: &Option<EmbedMedia>| {
+            value.as_ref().map_or(0, |m| {
+                m.url.capacity() + m.proxy_url.as_ref().map_or(0, String::capacity)
+            })
+        };
         text(&self.title)
             + text(&self.description)
             + text(&self.url)

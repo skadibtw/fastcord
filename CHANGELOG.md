@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Link embed pictures (#54): an embed's thumbnail (at most 80 px) and image (at most 400x300) are shown instead of the `Thumbnail: host` text, for the newest rows only (at most 16 at once). Only Discord's media proxy copy (`proxy_url` on a discordapp host) is fetched, credential-free, through the avatar store: its decoded pixels are now byte-bounded (24 MiB) as well as counted, files are capped at 8 MiB, and decoding stays on the shared decode slots. The text link remains while loading or if the fetch fails.
+
 ### Fixed
 - Refused logins and sends (#112, #55): the login notice and the "Not sent" reason now say what Discord answered instead of one fixed sentence. A refused email/password login reads the nested `errors..._errors[].code` (new login location, disabled account, invalid credentials, password reset needed) and otherwise shows Discord's own short message and codes with the HTTP status; a refused send reads the JSON `code` and `message` (50013, 50001, 50007, 40002, 40003, 40004, 20016 have their own sentences; any other code is shown as "Discord refused the send: <message> (<code>)."). Only a numeric code and a control-free, 96-byte, address/token-stripped message are kept from at most 4 KiB of the body; unparsable or larger bodies fall back to the old sentences. A refused send is still "not sent" and is never retried automatically.
 - Timeline (#54): a list scrolled to the latest message stays pinned to it when the window is resized or maximized (the scrollable moves its own offset when rows rewrap; the tracker now re-places a pinned bottom whenever the viewport, width or content height changed). A reader scrolled into history keeps their row as before.
