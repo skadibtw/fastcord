@@ -175,7 +175,10 @@ fn category_groups_positions_and_id_ties_have_deterministic_order() {
     );
     let blocked = before.iter().find(|row| row.id == id(3003)).unwrap();
     assert!(blocked.permissions.view_channel);
-    assert!(!blocked.permissions.connect && !blocked.enabled);
+    assert!(
+        !blocked.permissions.connect && blocked.enabled,
+        "the chat of a voice channel opens without CONNECT"
+    );
     assert_eq!(
         before.iter().find(|row| row.id == id(2001)).unwrap().kind,
         ChannelKind::Announcement
@@ -199,7 +202,7 @@ fn category_groups_positions_and_id_ties_have_deterministic_order() {
 fn injected_hidden_disabled_category_unknown_and_foreign_ids_are_rejected() {
     let (store, mut navigation) = setup(NAV_READY);
     assert!(navigation.select_channel(&store, id(1000)));
-    for forbidden in [1002, 3001, 2200, 2000, 3003, 2501, 9999] {
+    for forbidden in [1002, 3001, 2200, 2000, 2501, 9999] {
         assert!(
             !navigation.select_channel(&store, id(forbidden)),
             "{forbidden}"
@@ -343,8 +346,9 @@ fn role_create_update_delete_fixtures_change_permissions_and_keep_ledger_exact()
                 1
             );
         } else {
-            assert!(navigation.selected_channel().is_none());
-            assert!(!navigation.select_channel(&store, id(1001)));
+            // Losing CONNECT keeps the chat but no longer allows joining.
+            assert!(navigation.select_channel(&store, id(1001)));
+            assert!(!navigation.selection(&store).unwrap().permissions.connect);
         }
     }
     let guild = store.guild(id(100)).unwrap();
@@ -455,7 +459,8 @@ fn duplicate_role_snapshot_ids_are_last_write_wins_not_stale_admin_grants() {
     navigation.reconcile(&store);
     assert_eq!(store.guild(id(100)).unwrap().roles().len(), 3);
     assert!(!navigation.select_channel(&store, id(1002)));
-    assert!(!navigation.select_channel(&store, id(3003)));
+    assert!(navigation.select_channel(&store, id(3003)));
+    assert!(!navigation.selection(&store).unwrap().permissions.connect);
 }
 
 #[test]
@@ -481,7 +486,8 @@ fn deleting_an_unknown_role_removes_orphaned_member_and_overwrite_references() {
             .permissions_pending
     );
     assert!(navigation.select_channel(&store, id(1000)));
-    assert!(!navigation.select_channel(&store, id(1001)));
+    assert!(navigation.select_channel(&store, id(1001)));
+    assert!(!navigation.selection(&store).unwrap().permissions.connect);
 }
 
 #[test]
@@ -612,8 +618,9 @@ fn omitted_null_and_explicit_empty_member_roles_are_not_conflated() {
                 .roles_known
         );
         assert!(navigation.select_channel(&store, id(1000)));
+        assert!(navigation.select_channel(&store, id(1001)));
         assert!(
-            !navigation.select_channel(&store, id(1001)),
+            !navigation.selection(&store).unwrap().permissions.connect,
             "empty roles do not grant CONNECT"
         );
         assert_eq!(
@@ -1459,8 +1466,8 @@ mod inbox {
         assert_eq!(navigation.selected_guild(), Some(id(NAV_GUILD)));
         assert!(!navigation.open_channel(&store, id(1)));
         assert!(
-            !navigation.open_channel(&store, id(3003)),
-            "voice without connect"
+            navigation.open_channel(&store, id(3003)),
+            "voice chat without connect"
         );
     }
 }
@@ -1567,4 +1574,149 @@ fn own_nick_members_and_roles_follow_the_selected_guild_and_member_events() {
     let snapshot = navigation.snapshot(&store, 0, 128, 0, 128);
     assert_eq!(snapshot.own_nick, None);
     assert_eq!(snapshot.members[&id(1)].nick, None);
+}
+
+/// Text chat in voice and Stage channels: the same channel ID and message
+/// routes as a text channel, gated on VIEW_CHANNEL (CONNECT only joins the call).
+mod voice_chat {
+    use super::*;
+    use crate::gateway::ReadStateEntry;
+    use fastcord_model::OverwriteKind;
+
+    const VOICE_CHANNEL: u64 = 1001;
+    const NO_CONNECT: u64 = 3003;
+    const STAGE: u64 = 3004;
+
+    fn with_cursors(entries: Vec<ReadStateEntry>) -> (Store, Navigation) {
+        let mut store = Store::new();
+        let mut ready = ready(NAV_READY);
+        ready.read.entries = entries;
+        replace(&mut store, ready);
+        let mut navigation = Navigation::default();
+        navigation.reconcile(&store);
+        (store, navigation)
+    }
+
+    fn create(store: &mut Store, channel: u64, message: u64, mention_me: bool) {
+        let mentions = if mention_me {
+            json!([{"id": "1", "username": "me"}])
+        } else {
+            json!([])
+        };
+        let raw = json!({
+            "id": message.to_string(), "channel_id": channel.to_string(),
+            "guild_id": "100", "mentions": mentions,
+            "author": {"id": "9999", "username": "other"},
+            "content": "x", "timestamp": "2026-10-16T00:00:00.000000+00:00",
+        });
+        apply(store, "MESSAGE_CREATE", &raw.to_string());
+    }
+
+    fn row(navigation: &Navigation, store: &Store, channel: u64) -> ChannelRow {
+        rows(navigation, store)
+            .into_iter()
+            .find(|row| row.id == id(channel))
+            .unwrap()
+    }
+
+    #[test]
+    fn chat_opens_with_view_channel_alone_and_connect_only_gates_joining() {
+        let (store, mut navigation) = setup(NAV_READY);
+        let blocked = row(&navigation, &store, NO_CONNECT);
+        assert!(blocked.enabled && !blocked.permissions.connect);
+        for channel in [VOICE_CHANNEL, NO_CONNECT, STAGE] {
+            assert!(navigation.select_channel(&store, id(channel)), "{channel}");
+            let selection = navigation.selection(&store).unwrap();
+            assert_eq!(selection.kind, ChannelKind::Voice);
+            assert!(selection.permissions.read_history && selection.permissions.send_messages);
+            let target = navigation.subscription_target(&store);
+            assert_eq!(target.selected_channel(), Some(id(channel)));
+        }
+        // A channel the account cannot view stays closed.
+        assert!(!navigation.select_channel(&store, id(1002)));
+        assert_eq!(navigation.selected_channel(), Some(id(STAGE)));
+    }
+
+    #[test]
+    fn overwrite_changes_update_sendability_without_closing_the_chat() {
+        let (mut store, mut navigation) = setup(NAV_READY);
+        assert!(navigation.select_channel(&store, id(VOICE_CHANNEL)));
+        let mut channel = store
+            .guild(id(100))
+            .unwrap()
+            .channel(id(VOICE_CHANNEL))
+            .unwrap()
+            .clone();
+        let deny = |permissions| {
+            vec![PermissionOverwrite {
+                id: id(1),
+                kind: OverwriteKind::Member,
+                allow: Permissions::NONE,
+                deny: permissions,
+            }]
+        };
+        // SEND_MESSAGES denied: readable, not sendable, still open.
+        channel.permission_overwrites = deny(Permissions::SEND_MESSAGES);
+        update_channel(&mut store, channel.clone());
+        navigation.reconcile(&store);
+        let selection = navigation.selection(&store).unwrap();
+        assert!(selection.permissions.read_history && !selection.permissions.send_messages);
+        // READ_MESSAGE_HISTORY denied as well: open but unreadable.
+        channel.permission_overwrites =
+            deny(Permissions::SEND_MESSAGES | Permissions::READ_MESSAGE_HISTORY);
+        update_channel(&mut store, channel.clone());
+        assert!(
+            !navigation
+                .selection(&store)
+                .unwrap()
+                .permissions
+                .read_history
+        );
+        // VIEW_CHANNEL denied: the chat closes.
+        channel.permission_overwrites = deny(Permissions::VIEW_CHANNEL);
+        update_channel(&mut store, channel.clone());
+        navigation.reconcile(&store);
+        assert!(navigation.selection(&store).is_none());
+        // Restored: it can be reopened with full rights.
+        channel.permission_overwrites = Vec::new();
+        update_channel(&mut store, channel);
+        assert!(navigation.select_channel(&store, id(VOICE_CHANNEL)));
+        assert!(
+            navigation
+                .selection(&store)
+                .unwrap()
+                .permissions
+                .send_messages
+        );
+    }
+
+    #[test]
+    fn messages_mark_the_voice_row_unread_and_count_mentions() {
+        let cursor = |channel, mentions| ReadStateEntry {
+            channel_id: id(channel),
+            last_acked: id(5),
+            mention_count: mentions,
+        };
+        let (mut store, navigation) =
+            with_cursors(vec![cursor(VOICE_CHANNEL, 0), cursor(STAGE, 0)]);
+        assert!(!row(&navigation, &store, VOICE_CHANNEL).unread);
+        create(&mut store, VOICE_CHANNEL, 50, false);
+        let voice = row(&navigation, &store, VOICE_CHANNEL);
+        assert!(voice.unread && voice.mentions == 0);
+        // A replay of the same event changes nothing.
+        create(&mut store, VOICE_CHANNEL, 50, false);
+        assert_eq!(row(&navigation, &store, VOICE_CHANNEL), voice);
+        create(&mut store, STAGE, 51, true);
+        let stage = row(&navigation, &store, STAGE);
+        assert!(stage.unread && stage.mentions == 1);
+        assert!(!row(&navigation, &store, NO_CONNECT).unread);
+        // The inbox lists voice chats like other conversations.
+        let listed: Vec<_> = navigation
+            .inbox(&store, 10)
+            .rows
+            .iter()
+            .map(|row| row.channel)
+            .collect();
+        assert_eq!(listed, [id(STAGE), id(VOICE_CHANNEL)]);
+    }
 }

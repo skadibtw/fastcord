@@ -141,8 +141,12 @@ impl PermissionSummary {
         self.view_channel
             && match kind {
                 ChannelKind::Category => false,
-                ChannelKind::Voice => self.connect,
-                ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Thread => true,
+                // Voice and Stage channels carry a text chat that needs no CONNECT;
+                // joining the call is gated separately on `connect`.
+                ChannelKind::Voice
+                | ChannelKind::Text
+                | ChannelKind::Announcement
+                | ChannelKind::Thread => true,
             }
     }
 }
@@ -179,7 +183,8 @@ pub struct ChannelRow {
     pub kind: ChannelKind,
     /// Visible category ID, or none for uncategorized/orphaned channels.
     pub parent_id: Option<Snowflake>,
-    /// Categories are headers; voice without CONNECT is visible but disabled.
+    /// Categories are headers. A voice channel's chat opens with VIEW_CHANNEL
+    /// alone; joining its call also needs `permissions.connect`.
     pub enabled: bool,
     pub selected: bool,
     pub permissions: PermissionSummary,

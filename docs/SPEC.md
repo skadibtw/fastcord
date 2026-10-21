@@ -458,6 +458,16 @@ The picker inserts Unicode or the correct custom token at the cursor; it does no
 
 Reactions store aggregate counts and the current user's state, not every reacting user. Handle add/remove/remove-all/remove-emoji and events for uncached messages without allocating their histories. Support normal reactions only; do not expose a nonfunctional paid burst-reaction UI. Clicking one's existing reaction removes it. Reaction-detail users load only on explicit inspection. [S5]
 
+### 8.12 Text chat in voice and Stage channels (#88)
+
+A guild voice (type 2) or Stage (type 13) channel carries a text conversation under the same channel ID, read and written through the ordinary message routes and dispatches. No new route or event.
+
+- **Opening.** Each voice or Stage row in the sidebar has a Chat button; the row itself still joins the call (`Message::JoinVoice`). Opening a chat (`Message::SelectChannel`) is the same reducer selection as for a text channel and never sends a voice request; joining, moving or leaving the call never changes the selection (tests in `main.rs` and `gateway.rs`). Nothing is fetched for rows that are merely listed: history loads when the chat is opened, like a text channel.
+- **Permissions** reuse the one computation (`PermissionContext`; the text-like implicit rules already covered voice). The chat opens with VIEW_CHANNEL alone; CONNECT gates only the join (`ChannelRow::enabled` now means "chat can be opened", `permissions.connect` "call can be joined"; a row without CONNECT is labelled "(no access)" and cannot be joined). History needs READ_MESSAGE_HISTORY, the composer SEND_MESSAGES, reactions ADD_REACTIONS. An overwrite or role change re-evaluates the open chat on the next snapshot: sendability follows at once, losing VIEW_CHANNEL closes it, and the voice connection is never touched.
+- **Read state.** `MESSAGE_CREATE` marks the row unread and counts mentions exactly as for text channels, and the unified inbox lists voice chats. Notifications use the same path.
+- **Not offered:** threads (Discord does not allow them in voice chats; the Threads button is hidden) and the Stage audience/speaker flows (#89).
+- **Limits.** Whether the official client also requires CONNECT, or a live Stage, to show the chat is unverified (see PROTOCOL).
+
 ## 10. iced UI architecture
 
 Use iced's `Application`-style builder with `update`, `view`, `Task`, and `Subscription` concepts as provided by 0.14. UI messages are typed intents/results. Long-lived gateway/media workers feed stable subscriptions; creating a view must never reconnect a socket or recreate audio state.

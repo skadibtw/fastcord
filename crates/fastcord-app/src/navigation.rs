@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use crate::Message;
 use crate::avatars::{self, AvatarKey};
 use crate::composer::{self, Composer};
-use crate::gateway::VoiceAudioState;
 use crate::style;
 use crate::timeline;
 use crate::virtual_list::{self, ROW_HEIGHT};
@@ -56,7 +55,6 @@ pub fn view<'a>(
     interaction: timeline::Interaction,
     private: PrivateConversation<'a>,
     attachments: timeline::Attachments<'a>,
-    voice_audio: VoiceAudioState,
     chrome: Chrome<'a>,
 ) -> Element<'a, Message> {
     let Chrome {
@@ -78,7 +76,6 @@ pub fn view<'a>(
             composer,
             interaction,
             attachments,
-            voice_audio,
             directs,
             banner,
             voice_bar,
@@ -226,6 +223,7 @@ fn sidebar_row<'a>(
     mention_count: u32,
     intent: Option<Message>,
     presence: Option<fastcord_model::Status>,
+    chat: Option<Message>,
 ) -> Element<'a, Message> {
     let mut line = row![
         text(label)
@@ -254,18 +252,31 @@ fn sidebar_row<'a>(
             .style(style::badge),
         );
     }
-    container(
-        button(line)
-            .on_press_maybe(intent)
-            .width(Length::Fill)
-            .height(ROW_HEIGHT - 2.0)
-            .padding([4, 8])
-            .style(style::row_button(selected, unread)),
-    )
-    .height(ROW_HEIGHT)
-    .padding([1, 8])
-    .clip(true)
-    .into()
+    let main = button(line)
+        .on_press_maybe(intent)
+        .width(Length::Fill)
+        .height(ROW_HEIGHT - 2.0)
+        .padding([4, 8])
+        .style(style::row_button(selected, unread));
+    // A voice or Stage row: the row joins the call, this opens its text chat.
+    let content: Element<'a, Message> = match chat {
+        Some(open) => row![
+            main,
+            button(text("Chat").size(11))
+                .on_press(open)
+                .height(ROW_HEIGHT - 2.0)
+                .padding([4, 6])
+                .style(style::tool_button(selected, false)),
+        ]
+        .spacing(4)
+        .into(),
+        None => main.into(),
+    };
+    container(content)
+        .height(ROW_HEIGHT)
+        .padding([1, 8])
+        .clip(true)
+        .into()
 }
 
 fn sidebar<'a>(
@@ -326,6 +337,7 @@ fn sidebar<'a>(
                     .recipient
                     .and_then(|id| snapshot.presences.get(&id))
                     .map(|p| p.status),
+                None,
             )
         });
         column![
@@ -335,6 +347,7 @@ fn sidebar<'a>(
                 false,
                 0,
                 Some(Message::Friends(crate::friends::Event::Open)),
+                None,
                 None,
             ),
             column![
@@ -383,7 +396,7 @@ fn sidebar<'a>(
             let label = format!(
                 "{prefix}{}{}",
                 channel.name,
-                if channel.kind == ChannelKind::Voice && !channel.enabled {
+                if channel.kind == ChannelKind::Voice && !channel.permissions.connect {
                     " (no access)"
                 } else if channel.thread.is_some_and(|t| t.archived) {
                     " (archived)"
@@ -391,9 +404,21 @@ fn sidebar<'a>(
                     ""
                 }
             );
-            let intent = snapshot
-                .selected_guild
-                .filter(|_| channel.enabled)
+            let voice = channel.kind == ChannelKind::Voice;
+            let guild = snapshot.selected_guild.filter(|_| channel.enabled);
+            // Voice rows join the call; their chat opens separately, so the
+            // selected chat and the connection never move each other.
+            let intent = guild
+                .filter(|_| !voice || channel.permissions.connect)
+                .map(|guild| {
+                    if voice {
+                        Message::JoinVoice(guild, channel.id)
+                    } else {
+                        Message::SelectChannel(guild, channel.id)
+                    }
+                });
+            let chat = guild
+                .filter(|_| voice)
                 .map(|guild| Message::SelectChannel(guild, channel.id));
             sidebar_row(
                 label,
@@ -402,6 +427,7 @@ fn sidebar<'a>(
                 channel.mentions,
                 intent,
                 None,
+                chat,
             )
         });
         virtual_list::view(
@@ -510,7 +536,6 @@ fn main_pane<'a>(
     composer: &'a Composer,
     interaction: timeline::Interaction,
     attachments: timeline::Attachments<'a>,
-    voice_audio: VoiceAudioState,
     directs: bool,
     banner: Option<Element<'a, Message>>,
     voice_bar: Option<Element<'a, Message>>,
@@ -601,7 +626,12 @@ fn main_pane<'a>(
     } else if let Some(selection) = &snapshot.selection {
         let permissions = selection.permissions;
         match selection.kind {
-            ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Thread => {
+            // Voice and Stage channels open their text chat here; whether the
+            // account is in the call is shown by the voice bar, not this pane.
+            ChannelKind::Text
+            | ChannelKind::Announcement
+            | ChannelKind::Thread
+            | ChannelKind::Voice => {
                 let thread = selection.thread;
                 let note = match (
                     permissions.read_history,
@@ -634,7 +664,7 @@ fn main_pane<'a>(
                         format!("\u{21B3} {}", selection.name)
                     }
                     None => {
-                        if permissions.read_history {
+                        if permissions.read_history && selection.kind != ChannelKind::Voice {
                             tools.push((
                                 "Threads",
                                 Message::Threads(crate::threads::Event::ToggleArchived(
@@ -643,7 +673,12 @@ fn main_pane<'a>(
                                 )),
                             ));
                         }
-                        format!("# {}", selection.name)
+                        let prefix = if selection.kind == ChannelKind::Voice {
+                            "\u{266A}"
+                        } else {
+                            "#"
+                        };
+                        format!("{prefix} {}", selection.name)
                     }
                 };
                 body = body.push(header_with(
@@ -670,40 +705,6 @@ fn main_pane<'a>(
                     );
                     body = conversation(body, selection.channel_id, bar);
                 }
-            }
-            ChannelKind::Voice => {
-                body = body.push(header(
-                    format!("\u{266A} {}", selection.name),
-                    if permissions.speak {
-                        ""
-                    } else {
-                        "You cannot speak here"
-                    },
-                    false,
-                    false,
-                    None,
-                ));
-                if let Some(banner) = banner {
-                    body = body.push(container(banner).padding([4, 16]));
-                }
-                if let Some(bar) = voice_bar {
-                    body = body.push(container(bar).padding([4, 16]));
-                }
-                body = body.push(
-                    container(
-                        text(match voice_audio {
-                            VoiceAudioState::Idle => "Not connected to voice.",
-                            VoiceAudioState::Connecting => "Connecting to voice…",
-                            VoiceAudioState::Running => "Connected to voice.",
-                            VoiceAudioState::EngineFailed => {
-                                "Audio could not start; the voice connection was left."
-                            }
-                        })
-                        .size(14)
-                        .style(text::secondary),
-                    )
-                    .center(Length::Fill),
-                );
             }
             ChannelKind::Category => {}
         }

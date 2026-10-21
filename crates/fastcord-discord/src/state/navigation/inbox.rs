@@ -5,8 +5,8 @@
 //! with capped names are copied; `total` counts all of them.
 //!
 //! Order: conversations with mentions first, then the newest message first.
-//! Threads are listed like channels; voice channels and categories are not
-//! conversations here. A channel the account cannot open is left out (the
+//! Threads and voice/Stage chats are listed like channels; categories are
+//! not conversations here. A channel the account cannot open is left out (the
 //! guild badge may still count it).
 
 use fastcord_model::Snowflake;
@@ -69,7 +69,7 @@ impl Navigation {
                 let Some((channel, kind, _)) = enabled_channel(store, guild, channel.id) else {
                     continue;
                 };
-                if matches!(kind, ChannelKind::Category | ChannelKind::Voice) {
+                if matches!(kind, ChannelKind::Category) {
                     continue;
                 }
                 rows.push(InboxRow {

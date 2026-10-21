@@ -1187,7 +1187,10 @@ impl History {
             .filter(|selection| {
                 matches!(
                     selection.kind,
-                    ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Thread
+                    ChannelKind::Text
+                        | ChannelKind::Announcement
+                        | ChannelKind::Thread
+                        | ChannelKind::Voice
                 ) && selection.permissions.read_history
             })
             .map(|selection| selection.channel_id)
@@ -1874,6 +1877,35 @@ mod tests {
     use fastcord_model::{Attachment, MessageReference, MessageUpdate, Reaction, User};
 
     use super::*;
+    #[test]
+    fn a_voice_channels_chat_loads_only_when_opened_and_follows_its_permissions() {
+        let rest = rest();
+        let mut history = History::default();
+        // Nothing is fetched for a voice channel merely listed in the sidebar.
+        history.refresh(&rest, &NavigationSnapshot::default(), &Request::default());
+        assert!(cursor(&history).is_none() && history.channel.is_none());
+
+        // Opening the chat fetches it, without CONNECT; the call is irrelevant here.
+        let mut open = navigation(true);
+        let selection = open.selection.as_mut().unwrap();
+        selection.kind = ChannelKind::Voice;
+        selection.permissions.connect = false;
+        history.refresh(&rest, &open, &Request::default());
+        assert_eq!(cursor(&history), Some(HistoryCursor::Latest));
+        assert_eq!(history.sendable, Some(CHANNEL));
+
+        // SEND_MESSAGES revoked while open: still readable, no longer sendable.
+        open.selection.as_mut().unwrap().permissions.send_messages = false;
+        history.refresh(&rest, &open, &Request::default());
+        assert_eq!(history.channel, Some(CHANNEL));
+        assert_eq!(history.sendable, None);
+
+        // READ_MESSAGE_HISTORY revoked: closed.
+        open.selection.as_mut().unwrap().permissions.read_history = false;
+        history.refresh(&rest, &open, &Request::default());
+        assert_eq!(history.channel, None);
+    }
+
     use crate::changes::{ChangeState, RowChange};
     use crate::outbox::OutboxState;
     use crate::variable_list::{Anchor, ScrollTarget};

@@ -3407,6 +3407,35 @@ mod bridge_tests {
     }
 
     #[test]
+    fn choosing_a_chat_and_requesting_voice_never_change_each_other() {
+        let bridge = NavigationBridge::new();
+        let requests = bridge.requests.subscribe();
+        let voice = bridge.voice_requests.subscribe();
+        bridge.select_channel(Snowflake(1), Snowflake(2));
+        assert!(
+            voice.borrow().is_none(),
+            "opening a chat sends no voice request"
+        );
+        assert!(bridge.request_voice_state(VoiceStateRequest::join(
+            Some(Snowflake(1)),
+            Snowflake(3),
+            false,
+            false
+        )));
+        assert!(matches!(
+            requests.borrow().selection,
+            Some(SelectionIntent::Channel(Snowflake(1), Snowflake(2)))
+        ));
+        let revision = requests.borrow().revision;
+        assert!(bridge.request_voice_state(VoiceStateRequest::leave(Some(Snowflake(1)))));
+        assert_eq!(
+            requests.borrow().revision,
+            revision,
+            "leaving keeps the chat"
+        );
+    }
+
+    #[test]
     fn explicit_stream_intents_reach_the_bounded_worker_queue_in_order() {
         let bridge = NavigationBridge::new();
         let mut commands = bridge.take_commands().unwrap();

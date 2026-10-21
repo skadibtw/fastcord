@@ -214,6 +214,7 @@ enum Message {
     Navigation(u64),
     SelectGuild(Snowflake),
     SelectChannel(Snowflake, Snowflake),
+    JoinVoice(Snowflake, Snowflake),
     LeaveVoice,
     /// Call a DM or group DM: join its voice and ring the others.
     StartCall(Snowflake),
@@ -1299,7 +1300,15 @@ impl App {
                 }
             }
             Message::SelectChannel(guild, channel) => {
+                // Opens a channel's messages (a voice or Stage channel's chat
+                // included); it never touches the voice connection.
                 self.threads.close();
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.controls.select_channel(guild, channel);
+                }
+            }
+            Message::JoinVoice(guild, channel) => {
+                // Joins the call only; the open chat stays as it is.
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     let join = gateway.navigation.selected_guild == Some(guild)
                         && gateway.navigation.channels.rows.iter().any(|row| {
@@ -1307,6 +1316,7 @@ impl App {
                                 && row.kind
                                     == fastcord_discord::state::navigation::ChannelKind::Voice
                                 && row.enabled
+                                && row.permissions.connect
                         });
                     let vad_forbidden = gateway
                         .navigation
@@ -1314,7 +1324,6 @@ impl App {
                         .rows
                         .iter()
                         .any(|row| row.id == channel && !row.permissions.use_vad);
-                    gateway.controls.select_channel(guild, channel);
                     if join {
                         gateway.controls.set_vad_forbidden(vad_forbidden);
                         gateway.voice_guild = Some(guild);
@@ -3738,7 +3747,6 @@ impl App {
                         &gateway.navigation.members
                     },
                 },
-                voice_audio,
                 navigation::Chrome {
                     directs: gateway.directs,
                     footer: foot.into(),
@@ -4922,5 +4930,68 @@ mod tests {
             let _ = app.update(Message::UnwatchStream(key.clone()));
         }
         assert!(bridge.watched().is_empty());
+    }
+
+    #[test]
+    fn a_voice_channels_chat_and_its_call_are_selected_independently() {
+        use fastcord_discord::state::navigation::{
+            ChannelKind, ChannelRow, NavigationSnapshot, PermissionSummary, Window,
+        };
+        let (guild, voice, other) = (Snowflake(10), Snowflake(11), Snowflake(12));
+        let row = |id, connect| ChannelRow {
+            id,
+            name: "Lounge".to_owned(),
+            kind: ChannelKind::Voice,
+            parent_id: None,
+            enabled: true,
+            selected: false,
+            permissions: PermissionSummary {
+                view_channel: true,
+                connect,
+                ..PermissionSummary::default()
+            },
+            unread: false,
+            mentions: 0,
+            thread: None,
+        };
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("not logged in");
+        };
+        gateway.navigation = Arc::new(NavigationSnapshot {
+            selected_guild: Some(guild),
+            channels: Window {
+                offset: 0,
+                total: 2,
+                rows: vec![row(voice, true), row(other, false)],
+            },
+            ..NavigationSnapshot::default()
+        });
+        let state = |app: &App| match &app.phase {
+            Phase::Account { gateway, .. } => {
+                (gateway.voice_guild, gateway.controls.voice_audio_state())
+            }
+            _ => panic!("not logged in"),
+        };
+        // Opening a chat, even of the connectable channel, never joins.
+        let _ = app.update(Message::SelectChannel(guild, voice));
+        let _ = app.update(Message::SelectChannel(guild, other));
+        assert_eq!(state(&app), (None, gateway::VoiceAudioState::Idle));
+        // Joining a call does not touch the chat selection (the intent queue
+        // holds the last SelectChannel), and a channel without CONNECT is refused.
+        let _ = app.update(Message::JoinVoice(guild, other));
+        assert_eq!(state(&app), (None, gateway::VoiceAudioState::Idle));
+        let _ = app.update(Message::JoinVoice(guild, voice));
+        assert_eq!(
+            state(&app),
+            (Some(guild), gateway::VoiceAudioState::Connecting)
+        );
+        // Switching the chat while connected neither leaves nor moves the call.
+        let _ = app.update(Message::SelectChannel(guild, other));
+        assert_eq!(
+            state(&app),
+            (Some(guild), gateway::VoiceAudioState::Connecting)
+        );
     }
 }
