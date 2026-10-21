@@ -580,6 +580,25 @@ fn read_cursors_mentions_and_mutes_follow_ready_messages_and_acks() {
 }
 
 #[test]
+fn mentions_account_covers_direct_and_everyone_but_not_plain_messages() {
+    let store = ready_with_read_state(1, 0);
+    let message = |event: GatewayEvent| match event {
+        GatewayEvent::Dispatch {
+            event: Dispatch::MessageCreate(message),
+            ..
+        } => *message,
+        _ => unreachable!(),
+    };
+    let plain = message(channel_message(GENERAL, 10, NELLY, &[]));
+    assert!(!store.mentions_account(&plain));
+    let direct = message(channel_message(GENERAL, 11, NELLY, &[ME]));
+    assert!(store.mentions_account(&direct));
+    let mut everyone = plain;
+    everyone.mention_everyone = true;
+    assert!(store.mentions_account(&everyone));
+}
+
+#[test]
 fn malformed_read_state_costs_only_the_markers() {
     let mut value: serde_json::Value = serde_json::from_str(READY).unwrap();
     value["read_state"] = serde_json::json!("surprise");

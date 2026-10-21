@@ -2578,6 +2578,10 @@ impl Worker {
             .history
             .refresh(&self.rest, &navigation, &request.timeline);
         let mut timeline = self.tracker.history.snapshot();
+        let store = &self.tracker.store;
+        for row in &mut timeline.rows {
+            row.mentions_me = store.mentions_account(&row.message);
+        }
         timeline::hide_suppressed(&mut timeline, &navigation.suppressed);
         timeline.typing = self.tracker.typing_names(timeline.channel_id);
         timeline.names = mention_names(&self.tracker.store, navigation.selected_guild, &timeline);

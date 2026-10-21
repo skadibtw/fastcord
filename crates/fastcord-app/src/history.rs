@@ -1822,6 +1822,7 @@ impl History {
                 let poll_saving = self.polls.busy(channel, message.id);
                 Row {
                     hidden: None,
+                    mentions_me: false,
                     poll_saving,
                     message,
                     revision,

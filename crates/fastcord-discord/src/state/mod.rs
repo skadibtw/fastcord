@@ -851,8 +851,23 @@ impl Store {
             }
             return;
         }
-        let mentioned = message.guild_id.is_none()
-            || message.mention_everyone
+        let mentioned = message.guild_id.is_none() || self.mentions_account(message);
+        let moved = if mentioned {
+            self.read.note_mention(channel, message.id)
+        } else {
+            self.read.would_flag(channel, message.guild_id, message.id)
+        };
+        changes.read |= moved;
+    }
+
+    /// Whether the message addresses the account: a direct mention, one of its
+    /// roles, or `@everyone`/`@here` as Discord flagged it. A plain direct
+    /// message does not count (that is only an unread-badge rule).
+    pub fn mentions_account(&self, message: &Message) -> bool {
+        let Some(me) = self.current_user else {
+            return false;
+        };
+        message.mention_everyone
             || message.mentions.iter().any(|user| user.id == me)
             || message.guild_id.is_some_and(|guild| {
                 !message.mention_roles.is_empty()
@@ -865,13 +880,7 @@ impl Store {
                                 .iter()
                                 .any(|role| member.roles.contains(role))
                         })
-            });
-        let moved = if mentioned {
-            self.read.note_mention(channel, message.id)
-        } else {
-            self.read.would_flag(channel, message.guild_id, message.id)
-        };
-        changes.read |= moved;
+            })
     }
 
     /// Whether the estimated retained state currently exceeds the budget.

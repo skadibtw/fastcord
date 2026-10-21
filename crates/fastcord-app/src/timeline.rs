@@ -81,6 +81,8 @@ pub struct Row {
     pub reactions: Vec<Pending>,
     /// A vote or ending of the row's poll Discord has not answered yet.
     pub poll_saving: bool,
+    /// The message mentions the account (set by the worker from the store).
+    pub mentions_me: bool,
     /// The author is ignored or blocked: `message` is then an empty stand-in
     /// and nothing of the original reached this row.
     pub hidden: Option<Suppression>,
@@ -97,6 +99,7 @@ impl Row {
             reply: None,
             reactions: Vec::new(),
             poll_saving: false,
+            mentions_me: false,
             hidden: None,
         }
     }
@@ -1320,14 +1323,30 @@ fn message_view<'a>(
     if continues && message.edited_timestamp.is_some() {
         body = body.push(text("(edited)").size(11).style(text::secondary));
     }
-    let base = container(row![gutter, body.width(Length::Fill)].spacing(14))
-        .width(Length::Fill)
-        .padding(Padding {
-            top: if continues { 1.0 } else { 14.0 },
-            right: 16.0,
-            bottom: 2.0,
-            left: 16.0,
-        });
+    let inner = row![gutter, body.width(Length::Fill)].spacing(14);
+    let base = if row.mentions_me {
+        // Tinted row with a gold bar on its left edge, as the official client.
+        container(
+            row![
+                container(text(""))
+                    .width(3)
+                    .height(Length::Fill)
+                    .style(style::mention_bar),
+                inner
+            ]
+            .spacing(13),
+        )
+        .style(style::mention_row)
+    } else {
+        container(inner)
+    }
+    .width(Length::Fill)
+    .padding(Padding {
+        top: if continues { 1.0 } else { 14.0 },
+        right: 16.0,
+        bottom: 2.0,
+        left: if row.mentions_me { 0.0 } else { 16.0 },
+    });
     let can_reply = snapshot.can_send && interaction.editing.is_none();
     let show_own_actions = matches!(state, RowState::Actions | RowState::Failed { .. });
     let idle = matches!(

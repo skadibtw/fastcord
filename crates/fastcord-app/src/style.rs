@@ -98,6 +98,19 @@ pub fn speaking(on: bool) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// Row of a message that mentions the account: gold tint.
+pub fn mention_row(_: &Theme) -> container::Style {
+    fill(Color {
+        a: 1.0,
+        ..Color::from_rgb(0.263, 0.243, 0.212) // #433e36
+    })
+}
+
+/// The gold bar on the left edge of such a row.
+pub fn mention_bar(_: &Theme) -> container::Style {
+    fill(YELLOW)
+}
+
 /// A red pill for mention counts.
 pub fn badge(_: &Theme) -> container::Style {
     container::Style {

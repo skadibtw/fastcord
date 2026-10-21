@@ -1794,6 +1794,7 @@ mod tests {
     fn sent(id: u64, content: &str, own: bool, change: Option<RowChange>) -> crate::timeline::Row {
         use fastcord_model::{Message, User};
         crate::timeline::Row {
+            mentions_me: false,
             message: Arc::new(Message {
                 id: Snowflake(id),
                 channel_id: A,
