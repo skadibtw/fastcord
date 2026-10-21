@@ -6,15 +6,25 @@ use std::sync::Arc;
 use fastcord_discord::state::Store;
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_model::{Emoji, GuildEmoji, Snowflake};
-use iced::widget::{button, column, container, pick_list, row, text, text_input};
-use iced::{Element, Length};
+use iced::Element;
+use iced::widget::{button, column, container, mouse_area, pick_list, row, text, text_input};
 
 use crate::Message;
 use crate::emoji::{self, Asset, Occurrence, Origin};
-use crate::virtual_list::{self, ROW_HEIGHT, Window};
+use crate::virtual_list::{self, Window};
 
 const MAX_QUERY_BYTES: usize = 128;
 const MAX_RECENT: usize = 32;
+/// Emoji per grid row and the square size of one cell. Window rows are grid
+/// rows; the worker turns them into at most `MAX_CELLS` cells.
+pub const COLUMNS: usize = 9;
+const CELL: f32 = 38.0;
+const MAX_CELLS: usize = 256;
+const VIEW_HEIGHT: f32 = 288.0;
+
+fn first_window() -> Window {
+    Window::viewport_rows(0.0, VIEW_HEIGHT, CELL)
+}
 const CATEGORIES: &[&str] = &[
     "Smileys & Emotion",
     "People & Body",
@@ -153,7 +163,7 @@ impl Default for Request {
             channel: None,
             query: String::new(),
             category: Category::All,
-            window: Window::viewport(0.0, 288.0),
+            window: first_window(),
             recent: VecDeque::new(),
         }
     }
@@ -165,6 +175,8 @@ pub struct Picker {
     /// The message the picker was opened to react to; the pick is then a
     /// reaction rather than text for the composer.
     reaction: Option<Snowflake>,
+    /// The last hovered cell: its name and skin-tone control fill the footer.
+    hover: Option<Cell>,
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +188,8 @@ pub enum Event {
     Window(Window),
     Variants(u16),
     Select(Choice),
+    /// The pointer entered a cell; shown in the footer, never re-queries.
+    Hover(Choice),
 }
 
 impl Picker {
@@ -192,7 +206,7 @@ impl Picker {
         self.reaction = Some(message);
         self.request.open = true;
         self.request.channel = Some(channel);
-        self.request.window = Window::viewport(0.0, 288.0);
+        self.request.window = first_window();
         self.request.revision = self.request.revision.wrapping_add(1);
     }
 
@@ -208,12 +222,20 @@ impl Picker {
         snapshot: &Snapshot,
     ) -> Option<Choice> {
         match event {
+            Event::Hover(choice) => {
+                self.hover = snapshot
+                    .cells
+                    .iter()
+                    .find(|cell| cell.choice == choice)
+                    .cloned();
+                return None;
+            }
             Event::Toggle => {
                 // The composer's button: a pick is text, never a reaction.
                 self.reaction = None;
                 self.request.open = !self.request.open;
                 self.request.channel = channel;
-                self.request.window = Window::viewport(0.0, 288.0);
+                self.request.window = first_window();
             }
             Event::Close => self.close(),
             Event::Search(mut query) => {
@@ -224,11 +246,11 @@ impl Picker {
                 query.truncate(end);
                 query.shrink_to_fit();
                 self.request.query = query;
-                self.request.window = Window::viewport(0.0, 288.0);
+                self.request.window = first_window();
             }
             Event::Category(category) => {
                 self.request.category = category;
-                self.request.window = Window::viewport(0.0, 288.0);
+                self.request.window = first_window();
             }
             Event::Window(window) => {
                 self.request.window = Window {
@@ -238,7 +260,7 @@ impl Picker {
             }
             Event::Variants(base) => {
                 self.request.category = Category::Variants(base);
-                self.request.window = Window::viewport(0.0, 288.0);
+                self.request.window = first_window();
             }
             Event::Select(choice) => {
                 if self.request.open
@@ -252,6 +274,7 @@ impl Picker {
                 return None;
             }
         }
+        self.hover = None;
         self.request.revision = self.request.revision.wrapping_add(1);
         None
     }
@@ -360,8 +383,13 @@ pub fn snapshot(request: &Request, store: &Store, navigation: &NavigationSnapsho
         return result;
     }
     let query = request.query.trim().trim_matches(':').to_ascii_lowercase();
-    let start = request.window.start;
-    let count = request.window.count.min(virtual_list::MAX_ROWS);
+    let start = request.window.start.saturating_mul(COLUMNS);
+    let count = request
+        .window
+        .count
+        .min(virtual_list::MAX_ROWS)
+        .saturating_mul(COLUMNS)
+        .min(MAX_CELLS);
     let matches = |text: &str| query.is_empty() || text.contains(&query);
     if request.category == Category::Recent {
         for choice in request.recent.iter().take(MAX_RECENT) {
@@ -434,6 +462,17 @@ pub fn snapshot(request: &Request, store: &Store, navigation: &NavigationSnapsho
     result
 }
 
+fn cell_style(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    button::Style {
+        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+            .then(|| palette.background.strong.color.into()),
+        text_color: palette.background.base.text,
+        border: iced::border::rounded(6),
+        ..button::Style::default()
+    }
+}
+
 pub fn view<'a>(
     picker: &'a Picker,
     snapshot: &'a Snapshot,
@@ -444,67 +483,77 @@ pub fn view<'a>(
         .chain((0..CATEGORIES.len()).map(|id| Category::Unicode(id as u8)))
         .collect::<Vec<_>>();
     let current = snapshot.revision == picker.request.revision;
-    let cells = snapshot.cells.iter().map(|cell| {
-        let choice = &cell.choice;
-        let occurrence = Occurrence {
-            origin: Origin::Picker {
-                revision: snapshot.revision,
-            },
-            asset: choice.asset(),
-        };
-        let icon = emoji::sensed(
-            container(emoji::asset_view(
-                choice.asset(),
-                choice.fallback(),
-                views,
-                24.0,
-            ))
-            .width(32)
-            .height(ROW_HEIGHT)
-            .center_x(32)
-            .center_y(ROW_HEIGHT)
-            .into(),
-            occurrence,
-            Message::EmojiVisibility,
-        );
-        let name = match &cell.guild_name {
-            Some(guild) => format!(
-                "{} · {guild}{}",
-                choice.name(),
-                if matches!(choice, Choice::Custom { animated: true, .. }) {
-                    " (animated)"
-                } else {
-                    ""
-                }
-            ),
-            None => choice.name().to_owned(),
-        };
-        let mut content = row![
-            button(row![icon, text(name).size(12).wrapping(text::Wrapping::None)].spacing(4))
-                .on_press_maybe(
-                    current.then(|| Message::EmojiPicker(Event::Select(choice.clone())))
+    let cells = snapshot.cells.chunks(COLUMNS).map(|chunk| {
+        let mut line = row![].height(CELL);
+        for cell in chunk {
+            let choice = &cell.choice;
+            let occurrence = Occurrence {
+                origin: Origin::Picker {
+                    revision: snapshot.revision,
+                },
+                asset: choice.asset(),
+            };
+            let icon = emoji::sensed(
+                container(emoji::asset_view(
+                    choice.asset(),
+                    choice.fallback(),
+                    views,
+                    26.0,
+                ))
+                .center_x(CELL)
+                .center_y(CELL)
+                .into(),
+                occurrence,
+                Message::EmojiVisibility,
+            );
+            line = line.push(
+                mouse_area(
+                    button(icon)
+                        .on_press_maybe(
+                            current.then(|| Message::EmojiPicker(Event::Select(choice.clone()))),
+                        )
+                        .style(cell_style)
+                        .padding(0)
+                        .width(CELL)
+                        .height(CELL),
                 )
-                .height(ROW_HEIGHT)
-                .width(Length::Fill)
-                .padding(0),
-        ]
-        .spacing(4);
-        if let Some(base) = cell.variants {
-            content = content.push(
-                button(text("Variants").size(11))
-                    .on_press(Message::EmojiPicker(Event::Variants(base)))
-                    .height(ROW_HEIGHT),
+                .on_enter(Message::EmojiPicker(Event::Hover(choice.clone()))),
             );
         }
-        container(content).height(ROW_HEIGHT).clip(true).into()
+        Element::from(line)
     });
+    let footer: Element<'_, Message> = match &picker.hover {
+        Some(cell) => {
+            let name = match &cell.guild_name {
+                Some(guild) => format!(":{}: · {guild}", cell.choice.name()),
+                None => format!(":{}:", cell.choice.name()),
+            };
+            let mut line = row![text(name).size(13).wrapping(text::Wrapping::None)]
+                .spacing(8)
+                .height(28)
+                .align_y(iced::Alignment::Center);
+            if let Some(base) = cell.variants {
+                line = line.push(
+                    button(text("Skin tones").size(11))
+                        .on_press(Message::EmojiPicker(Event::Variants(base)))
+                        .padding([2, 6]),
+                );
+            }
+            line.into()
+        }
+        None => text("Hover an emoji for its name.")
+            .size(13)
+            .height(28)
+            .into(),
+    };
     let body = column![
         row![text(if picker.reaction.is_some() { "React with emoji" } else { "Emoji" }).size(20), button("Close").on_press(Message::EmojiPicker(Event::Close))].spacing(12),
         text_input("Search names, aliases or emoji", &picker.request.query)
             .id("emoji-search").on_input(|query| Message::EmojiPicker(Event::Search(query))),
         pick_list(categories, Some(picker.request.category), |category| Message::EmojiPicker(Event::Category(category))),
-        container(virtual_list::view("emoji-list", snapshot.offset, snapshot.total, cells,
-            |window| Message::EmojiPicker(Event::Window(window)))).max_height(288),
+        container(virtual_list::view_rows("emoji-list", snapshot.offset / COLUMNS, snapshot.total.div_ceil(COLUMNS), cells,
+            |window| Message::EmojiPicker(Event::Window(window)), CELL)).height(VIEW_HEIGHT),
+        footer,
         text(if snapshot.total == 0 && current { "No available emoji match this search." } else { "" }).size(12),
         text(if picker.reaction.is_some() {
             "Animated and external emoji may require Nitro. Account entitlements are not assumed; a reaction Discord rejects is reported above the message box."
@@ -661,6 +710,7 @@ mod tests {
         let mut picker = Picker {
             request,
             reaction: None,
+            hover: None,
         };
         picker.inserted(Choice::Custom {
             guild: Snowflake(200),
@@ -699,7 +749,7 @@ mod tests {
     fn search_aliases_categories_and_variants_have_only_bounded_pages() {
         let (store, navigation, mut request) = fixture();
         let all = snapshot(&request, &store, &navigation);
-        assert!(all.total > 1_000 && all.cells.len() <= virtual_list::MAX_ROWS);
+        assert!(all.total > 1_000 && all.cells.len() <= MAX_CELLS);
         request.query = ":THUMBSUP:".into();
         let thumbs = snapshot(&request, &store, &navigation);
         assert_eq!(thumbs.total, 6);
@@ -715,12 +765,12 @@ mod tests {
         }));
         request.category = Category::All;
         request.window = Window {
-            start: 1_000,
+            start: 20,
             count: usize::MAX,
         };
         let page = snapshot(&request, &store, &navigation);
-        assert_eq!(page.offset, 1_000);
-        assert_eq!(page.cells.len(), virtual_list::MAX_ROWS);
+        assert_eq!(page.offset, 20 * COLUMNS);
+        assert_eq!(page.cells.len(), MAX_CELLS);
     }
 
     #[test]
@@ -729,6 +779,7 @@ mod tests {
         let mut picker = Picker {
             request,
             reaction: None,
+            hover: None,
         };
         let page = snapshot(&picker.request, &store, &navigation);
         let selected = page.cells[0].choice.clone();
@@ -785,6 +836,7 @@ mod tests {
         let picker = Picker {
             request,
             reaction: None,
+            hover: None,
         };
         let page = snapshot(&picker.request, &store, &navigation);
         let empty = HashMap::new();
@@ -815,6 +867,42 @@ mod tests {
     }
 
     #[test]
+    fn results_form_a_grid_and_a_cell_click_picks_that_emoji() {
+        let (store, navigation, request) = fixture();
+        let mut picker = Picker {
+            request,
+            reaction: None,
+            hover: None,
+        };
+        let page = snapshot(&picker.request, &store, &navigation);
+        assert_eq!(
+            page.cells.len(),
+            first_window().count * COLUMNS,
+            "a page is whole grid rows"
+        );
+        let empty = HashMap::new();
+        let mut ui =
+            crate::variable_list::harness::Ui::new(440.0, 640.0, view(&picker, &page, &empty));
+        ui.redraw();
+        // Find the cell at grid row 1, column 2 by scanning for its message.
+        let want = page.cells[COLUMNS + 2].choice.clone();
+        // Stay clear of the scrollbar on the right edge: pressing it scrolls.
+        let mut hit = false;
+        for y in (0..300).step_by(4) {
+            for x in (0..380).step_by(4) {
+                hit |= ui.click(x as f32, y as f32).iter().any(|message| {
+                    matches!(message, Message::EmojiPicker(Event::Select(c)) if *c == want)
+                });
+            }
+        }
+        assert!(hit, "clicking a grid cell publishes its emoji");
+        drop(ui);
+        picker.update(Event::Hover(want.clone()), Some(Snowflake(500)), &page);
+        assert_eq!(picker.hover.as_ref().map(|c| &c.choice), Some(&want));
+        assert_eq!(picker.request.revision, 1, "hover never re-queries");
+    }
+
+    #[test]
     fn a_picker_opened_for_a_message_picks_a_reaction_not_composer_text() {
         let (store, navigation, request) = fixture();
         let mut picker = Picker {
@@ -823,6 +911,7 @@ mod tests {
                 ..request
             },
             reaction: None,
+            hover: None,
         };
         picker.open_for_reaction(Snowflake(500), Snowflake(42));
         assert!(picker.request.open);

@@ -122,6 +122,10 @@ Release build of `eee1bb3` and then `eeaac04`. Authorized alt `skadimvp` in fast
 - **Found, still open:**
   - A message that mentions the account has no row highlight.
   - The emoji picker is a single column of solid-blue rows.
+  - Voice channel rows do not list their participants.
+  - The call bar does not include the account itself and shows initials instead of avatars.
+  - The status menu stays open after a choice.
+  - The emoji picker is a single column of solid-blue rows (now a hover-highlight grid; not yet re-checked live).
   - Invite links have no invite card.
   - Embed thumbnails are not shown.
   - Resizing the window loses the timeline's bottom anchor ("Jump to latest" appears).
