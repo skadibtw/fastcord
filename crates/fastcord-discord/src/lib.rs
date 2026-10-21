@@ -52,7 +52,7 @@ pub use attachment::{RefreshedAttachmentUrl, decode_waveform};
 pub use call::CallSignal;
 pub use clock::{Clock, MonotonicClock};
 pub use edit::{EditedMessage, edit_response_update, is_own_message};
-pub use error::{NetworkFailure, RestError, RetryableFailure};
+pub use error::{NetworkFailure, Refusal, RestError, RetryableFailure};
 pub use gateway::{ConnectionState, Gateway, GatewayEvent};
 pub use gif::{GIF_RESULTS, GifResult, MAX_GIF_QUERY_CHARS};
 pub use group_dm::{
@@ -60,8 +60,8 @@ pub use group_dm::{
 };
 pub use inbox::{MENTIONS_PAGE_SIZE, MentionFilter, MentionsPage};
 pub use password_auth::{
-    CaptchaChallenge, CaptchaSolution, MAX_CREDENTIAL_BYTES, MfaChallenge, PasswordAuth,
-    PasswordAuthError, PasswordLogin,
+    CaptchaChallenge, CaptchaSolution, LoginRefusal, MAX_CREDENTIAL_BYTES, MfaChallenge,
+    PasswordAuth, PasswordAuthError, PasswordLogin,
 };
 pub use pins::{PINS_PAGE_SIZE, PinnedMessage, PinsPage};
 pub use poll::{POLL_MAX_HOURS, PollDraft, PollError};

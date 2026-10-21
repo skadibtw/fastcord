@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fastcord_discord::{
     ComposeError, MAX_CONTENT_CHARS, MentionPolicy, NetworkFailure, Nonce, OutgoingMessage,
-    ReplyTo, RestError, RetryableFailure, SendError, UploadError, UploadFile, UploadProgress,
-    UploadedFile,
+    Refusal, ReplyTo, RestError, RetryableFailure, SendError, UploadError, UploadFile,
+    UploadProgress, UploadedFile,
 };
 use fastcord_model::{REPLY_PREVIEW_CHARS, Snowflake};
 
@@ -230,6 +230,7 @@ pub enum Finished {
 fn reason(error: SendError, reply: bool) -> &'static str {
     match error {
         SendError::NotSent(error) => match error {
+            RestError::Refused(refusal) => refusal_reason(refusal, reply),
             RestError::PermissionDenied => {
                 "Discord did not allow this message or emoji here. Check channel permissions and animated/external emoji entitlement."
             }
@@ -260,6 +261,70 @@ fn reason(error: SendError, reply: bool) -> &'static str {
             _ => "Discord's answer could not be read; the message may have been delivered.",
         },
     }
+}
+
+/// Sentences for the Discord error codes a send is known to meet.
+fn known_refusal(code: u32) -> Option<&'static str> {
+    Some(match code {
+        50013 => {
+            "Discord says you lack permission to send here (50013). Check your role and the channel's permissions."
+        }
+        50001 => "Discord says you cannot access this channel (50001).",
+        50007 => "Discord says this user cannot receive messages from you (50007).",
+        40002 => {
+            "Discord requires you to verify your account before sending (40002). Verify your e-mail or phone in an official client."
+        }
+        40003 => "You are opening direct messages too fast (40003). Wait a while and try again.",
+        40004 => "Discord has temporarily disabled sending messages for this account (40004).",
+        20016 => "Slowmode is on in this channel (20016). Wait a moment and try again.",
+        _ => return None,
+    })
+}
+
+/// Distinct dynamic reasons kept for the process lifetime; a refusal beyond
+/// this many falls back to a fixed sentence. (`OutboxState` stays `Copy`.)
+const MAX_DYNAMIC_REASONS: usize = 32;
+
+fn intern(text: String) -> Option<&'static str> {
+    static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().ok()?;
+    if let Some(known) = seen.iter().find(|known| **known == text) {
+        return Some(known);
+    }
+    if seen.len() >= MAX_DYNAMIC_REASONS {
+        return None;
+    }
+    let leaked: &'static str = Box::leak(text.into_boxed_str());
+    seen.push(leaked);
+    Some(leaked)
+}
+
+fn refusal_reason(refusal: Refusal, reply: bool) -> &'static str {
+    if let Some(text) = refusal.code.and_then(known_refusal) {
+        return text;
+    }
+    let fallback = || {
+        reason(
+            SendError::NotSent(if refusal.status.as_u16() == 403 {
+                RestError::PermissionDenied
+            } else {
+                RestError::Http(refusal.status)
+            }),
+            reply,
+        )
+    };
+    // 50035 (invalid form body) and bodies without a code keep the specific
+    // 400 wording; any other code is shown as Discord said it.
+    let Some(code) = refusal.code.filter(|code| *code != 50035) else {
+        return fallback();
+    };
+    let message = refusal.message();
+    let text = if message.is_empty() {
+        format!("Discord refused the send ({code}).")
+    } else {
+        format!("Discord refused the send: {message} ({code}).")
+    };
+    intern(text).unwrap_or_else(fallback)
 }
 
 fn compose_reason(error: ComposeError) -> &'static str {
@@ -1003,5 +1068,48 @@ mod tests {
         empty.release();
         assert_eq!(empty.used(), 0);
         assert!(empty.reserve());
+    }
+
+    fn refused(status: u16, body: &str) -> SendError {
+        let status = StatusCode::from_u16(status).unwrap();
+        SendError::from_transport(RestError::Refused(Refusal::from_body(
+            status,
+            body.as_bytes(),
+        )))
+    }
+
+    #[test]
+    fn refused_sends_say_what_discord_said_and_stay_not_sent() {
+        let text = |status, body: &str| reason(refused(status, body), false);
+        assert!(
+            text(403, r#"{"code":50013,"message":"Missing Permissions"}"#).contains("permission")
+        );
+        let verify = text(
+            403,
+            r#"{"code":40002,"message":"You need to verify your account"}"#,
+        );
+        assert!(verify.contains("verify your account") && verify.contains("40002"));
+        // Unmapped code: Discord's wording plus the code.
+        assert_eq!(
+            text(403, r#"{"code":99999,"message":"Account restricted"}"#),
+            "Discord refused the send: Account restricted (99999)."
+        );
+        // No usable body: the old fixed sentences.
+        assert!(text(403, "<html>").contains("channel permissions"));
+        assert!(text(400, r#"{"code":50035,"message":"Invalid Form Body"}"#).contains("too long"));
+        // Oversized, control characters, secret-shaped words.
+        assert!(
+            text(
+                403,
+                &format!(r#"{{"code":7,"message":"{}"}}"#, "y".repeat(9000))
+            )
+            .contains("channel permissions")
+        );
+        let dirty = text(
+            403,
+            r#"{"code":77777,"message":"x\u0007\n me@example.test"}"#,
+        );
+        assert_eq!(dirty, "Discord refused the send: x ... (77777).");
+        assert!(!refused(403, "{}").is_ambiguous());
     }
 }

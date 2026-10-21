@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::attachment::{RefreshRequest, RefreshResponse, RefreshedAttachmentUrl};
-use crate::error::status_error;
+use crate::error::{ERROR_BODY_BYTE_BUDGET, Refusal, status_error};
 use crate::gateway::{CLIENT_FINGERPRINT, ClientProperties};
 use crate::rate_limit::{RateLimiter, ResponseLimits};
 use crate::{Clock, MonotonicClock, NetworkFailure, RestError, RetryableFailure, Route, UserToken};
@@ -32,9 +32,17 @@ pub struct RestRequest {
     route: Route,
     priority: Priority,
     body: Option<Bytes>,
+    error_detail: bool,
 }
 
 impl RestRequest {
+    /// Keeps Discord's error code and short message of a 4xx refusal
+    /// (`RestError::Refused`) instead of the bare category.
+    pub fn with_error_detail(mut self) -> Self {
+        self.error_detail = true;
+        self
+    }
+
     pub fn new(route: Route, priority: Priority) -> Self {
         let priority =
             if route.key().method() == Method::GET || route.key().method() == Method::HEAD {
@@ -46,6 +54,7 @@ impl RestRequest {
             route,
             priority,
             body: None,
+            error_detail: false,
         }
     }
 
@@ -250,7 +259,13 @@ impl<C: Clock> RestClient<C> {
                 return Err(RestError::AuthenticationRequired);
             }
             let limits = ResponseLimits::from_headers(response.headers(), self.limiter.now());
-            if let Some(error) = error {
+            if let Some(mut error) = error {
+                if request.error_detail
+                    && matches!(error, RestError::PermissionDenied | RestError::Http(_))
+                    && let Ok(body) = read_body(response, ERROR_BODY_BYTE_BUDGET).await
+                {
+                    error = RestError::Refused(Refusal::from_body(status, &body));
+                }
                 reservation.complete(limits, None);
                 return Err(error);
             }

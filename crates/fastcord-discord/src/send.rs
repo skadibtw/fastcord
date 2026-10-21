@@ -491,6 +491,7 @@ impl SendError {
             // Refusals, and failures before anything was dispatched.
             | RestError::AuthenticationRequired
             | RestError::PermissionDenied
+            | RestError::Refused(_)
             | RestError::ResourceGone
             | RestError::Http(_)
             | RestError::InvalidToken
@@ -540,7 +541,11 @@ impl<C: Clock> RestClient<C> {
         message: &OutgoingMessage,
     ) -> Result<Message, SendError> {
         let request = create_route(channel)
-            .and_then(|route| RestRequest::new(route, Priority::UserWrite).json(&message.body()))
+            .and_then(|route| {
+                RestRequest::new(route, Priority::UserWrite)
+                    .with_error_detail()
+                    .json(&message.body())
+            })
             .map_err(SendError::NotSent)?;
         let response = self
             .execute(request)

@@ -86,6 +86,8 @@ Live Discord tests use the alt account only. Never commit tokens, voice tokens, 
 
 ### Windows live check (2026-10-21)
 
+Follow-up (#112, #55): refused logins and sends now show Discord's reason. Offline tests cover 403 50013, 403 40002, an unparsable 403, a 400 new-location login, INVALID_LOGIN, oversized bodies and control characters. By hand: attempt an email/password login from a new location and check the notice says to approve it by e-mail; send from a restricted account and check the reason names Discord's code.
+
 Release build of `eee1bb3` and then `eeaac04`. Authorized alt `skadimvp` in fastcord, with the maintainer's second account in the official client 1.0.9264 in the maintainer's test server. The checks were driven by an agent through screenshots.
 
 - **Passed:**

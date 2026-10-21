@@ -14,6 +14,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::UserToken;
+use crate::error::{ERROR_BODY_BYTE_BUDGET, clean};
 use crate::gateway::ClientProperties;
 use crate::rest::identity_headers;
 use crate::route::API_BASE;
@@ -30,8 +31,8 @@ pub enum PasswordAuthError {
     RateLimited,
     /// Wrong login/password (or wrong two-factor code for `mfa`).
     Rejected,
-    /// Any other refusal, e.g. new-location email verification (HTTP status only).
-    Refused(u16),
+    /// Any other refusal, e.g. new-location email verification.
+    Refused(LoginRefusal),
     Protocol,
 }
 
@@ -45,16 +46,117 @@ impl fmt::Display for PasswordAuthError {
                 f.write_str("Discord is rate limiting logins. Wait and try again.")
             }
             Self::Rejected => f.write_str("Discord rejected those credentials or that code."),
-            Self::Refused(status) => write!(
-                f,
-                "Discord refused the login (HTTP {status}); it may require verification in an official client."
-            ),
+            Self::Refused(refusal) => refusal.fmt(f),
             Self::Protocol => f.write_str("Discord sent an unexpected login response."),
         }
     }
 }
 
 impl std::error::Error for PasswordAuthError {}
+
+/// Why Discord refused a login, from its JSON error body: the HTTP status, the
+/// body's numeric `code` and `message`, and the nested `errors..._errors[]`
+/// codes. Everything is sanitized (see `error::clean`); the body is never kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginRefusal {
+    pub status: u16,
+    pub code: Option<u32>,
+    pub message: String,
+    /// Up to four `(CODE, message)` pairs, e.g. `ACCOUNT_LOGIN_VERIFICATION_EMAIL`.
+    pub reasons: Vec<(String, String)>,
+}
+
+impl LoginRefusal {
+    pub(crate) fn from_body(status: StatusCode, body: &[u8]) -> Self {
+        let value: serde_json::Value = if body.len() <= ERROR_BODY_BYTE_BUDGET {
+            serde_json::from_slice(body).unwrap_or_default()
+        } else {
+            serde_json::Value::Null
+        };
+        let mut reasons = Vec::new();
+        collect_reasons(&value["errors"], 0, &mut reasons);
+        Self {
+            status: status.as_u16(),
+            code: value["code"].as_u64().and_then(|c| u32::try_from(c).ok()),
+            message: clean(value["message"].as_str().unwrap_or("")),
+            reasons,
+        }
+    }
+
+    fn has(&self, code: &str) -> bool {
+        self.reasons.iter().any(|(c, _)| c == code)
+    }
+}
+
+fn collect_reasons(value: &serde_json::Value, depth: usize, out: &mut Vec<(String, String)>) {
+    let Some(map) = value.as_object() else {
+        return;
+    };
+    if depth > 4 {
+        return;
+    }
+    for (key, child) in map {
+        if key == "_errors" {
+            for item in child.as_array().into_iter().flatten() {
+                let code = item["code"].as_str().unwrap_or("");
+                let enum_like = !code.is_empty()
+                    && code.len() <= 64
+                    && code
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+                if enum_like && out.len() < 4 {
+                    out.push((
+                        code.to_owned(),
+                        clean(item["message"].as_str().unwrap_or("")),
+                    ));
+                }
+            }
+        } else {
+            collect_reasons(child, depth + 1, out);
+        }
+    }
+}
+
+impl fmt::Display for LoginRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let status = self.status;
+        if self.has("ACCOUNT_LOGIN_VERIFICATION_EMAIL") {
+            write!(
+                f,
+                "Discord detected a new login location (HTTP {status}). Check the account's e-mail and approve this login, then try again."
+            )
+        } else if self.has("ACCOUNT_DISABLED") || self.has("ACCOUNT_SCHEDULED_FOR_DELETION") {
+            write!(
+                f,
+                "Discord says this account is disabled (HTTP {status}). Resolve it in an official client."
+            )
+        } else if self.has("INVALID_LOGIN") || self.has("INVALID_TWO_FACTOR_CODE") {
+            write!(
+                f,
+                "Discord rejected those credentials or that code (HTTP {status})."
+            )
+        } else if self.has("ACCOUNT_COMPROMISED_RESET_PASSWORD") {
+            write!(
+                f,
+                "Discord requires a password reset for this account (HTTP {status}). Do it in an official client."
+            )
+        } else {
+            write!(f, "Discord refused the login (HTTP {status}")?;
+            if let Some(code) = self.code {
+                write!(f, ", code {code}")?;
+            }
+            f.write_str(")")?;
+            match self.reasons.first() {
+                Some((code, message)) if !message.is_empty() => {
+                    write!(f, ": {message} ({code}).")
+                }
+                Some((code, _)) => write!(f, ": {code}."),
+                None if !self.message.is_empty() => write!(f, ": {}.", self.message),
+                None => f.write_str("; it may require verification in an official client."),
+            }
+        }
+    }
+}
 
 /// A challenge to show to the person. Never solved or bypassed by this crate.
 #[derive(Clone, PartialEq, Eq)]
@@ -294,7 +396,9 @@ pub(crate) fn classify_login(
     if status == StatusCode::BAD_REQUEST && mentions_invalid_credentials(body) {
         return Err(PasswordAuthError::Rejected);
     }
-    Err(PasswordAuthError::Refused(status.as_u16()))
+    Err(PasswordAuthError::Refused(LoginRefusal::from_body(
+        status, body,
+    )))
 }
 
 fn mentions_invalid_credentials(body: &[u8]) -> bool {
@@ -346,16 +450,67 @@ mod tests {
             .unwrap_err(),
             PasswordAuthError::Rejected
         );
-        assert_eq!(
-            classify_login(StatusCode::FORBIDDEN, br#"{"message":"secret-login"}"#).unwrap_err(),
-            PasswordAuthError::Refused(403)
-        );
+        assert!(matches!(
+            classify_login(StatusCode::FORBIDDEN, b"not json").unwrap_err(),
+            PasswordAuthError::Refused(r) if r.status == 403 && r.reasons.is_empty()
+        ));
         for bad in [&b""[..], b"{}", br#"{"token":""}"#, br#"{"mfa":true}"#] {
             assert_eq!(
                 classify_login(StatusCode::OK, bad).unwrap_err(),
                 PasswordAuthError::Protocol
             );
         }
+    }
+
+    fn refusal_text(status: StatusCode, body: &[u8]) -> String {
+        classify_login(status, body).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn new_location_and_disabled_accounts_get_specific_sentences() {
+        let text = refusal_text(
+            StatusCode::BAD_REQUEST,
+            br#"{"code":50035,"message":"Invalid Form Body","errors":{"login":{"_errors":[{"code":"ACCOUNT_LOGIN_VERIFICATION_EMAIL","message":"New login location detected, please check your e-mail."}]}}}"#,
+        );
+        assert!(
+            text.contains("approve this login") && text.contains("HTTP 400"),
+            "{text}"
+        );
+        let text = refusal_text(
+            StatusCode::BAD_REQUEST,
+            br#"{"errors":{"login":{"_errors":[{"code":"ACCOUNT_DISABLED","message":"x"}]}}}"#,
+        );
+        assert!(text.contains("disabled"), "{text}");
+        // Unmapped: Discord's own wording and codes, nothing else.
+        let text = refusal_text(
+            StatusCode::BAD_REQUEST,
+            br#"{"code":1,"errors":{"login":{"_errors":[{"code":"SOMETHING_NEW","message":"Try later"}]}}}"#,
+        );
+        assert_eq!(
+            text,
+            "Discord refused the login (HTTP 400, code 1): Try later (SOMETHING_NEW)."
+        );
+    }
+
+    #[test]
+    fn hostile_bodies_are_bounded_and_not_echoed() {
+        // Oversized: ignored, status only.
+        let big = format!(r#"{{"message":"{}"}}"#, "a".repeat(10_000));
+        let text = refusal_text(StatusCode::BAD_REQUEST, big.as_bytes());
+        assert!(text.ends_with("official client."), "{text}");
+        // Control characters and secret-shaped words are removed.
+        let text = refusal_text(
+            StatusCode::FORBIDDEN,
+            br#"{"message":"bad\u0007\u001b[31m login me@example.test sk.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA end"}"#,
+        );
+        assert!(
+            !text.contains('\u{7}') && !text.contains('\u{1b}'),
+            "{text:?}"
+        );
+        assert!(
+            !text.contains("example") && !text.contains("AAAA"),
+            "{text}"
+        );
     }
 
     #[test]
