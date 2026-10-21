@@ -478,6 +478,9 @@ enum SelectionIntent {
     /// read from the archive): it is entered into the store, which still
     /// decides whether the account may open it.
     Thread(Snowflake, Box<Channel>),
+    /// A keyboard step to the next or previous channel, unread one or server.
+    /// Steps share the selection slot, so two before the worker runs collapse.
+    Step(fastcord_discord::state::navigation::Step),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -489,6 +492,8 @@ struct Request {
     private_channels: Window,
     /// Inbox rows wanted; the unread total is always computed (1).
     inbox: usize,
+    /// The quick switcher's query while it is open (`None`: closed).
+    quick: Option<String>,
     timeline: crate::history::Request,
     emoji: emoji_picker::Request,
 }
@@ -1235,6 +1240,26 @@ impl NavigationBridge {
             }
             request.inbox = rows;
             true
+        });
+    }
+
+    /// The quick switcher's query while it is open, `None` once it closes.
+    pub fn quick_query(&self, query: Option<&str>) {
+        self.requests.send_if_modified(|request| {
+            if request.quick.as_deref() == query {
+                return false;
+            }
+            request.quick = query.map(str::to_owned);
+            true
+        });
+    }
+
+    /// Steps to the next or previous channel, unread conversation or server.
+    pub fn step(&self, step: fastcord_discord::state::navigation::Step) {
+        self.clear_private_notice();
+        self.requests.send_modify(|request| {
+            request.revision = request.revision.wrapping_add(1);
+            request.selection = Some(SelectionIntent::Step(step));
         });
     }
 
@@ -2536,6 +2561,9 @@ impl Worker {
                         .navigation
                         .select_private_channel(&self.tracker.store, channel);
                 }
+                Some(SelectionIntent::Step(step)) => {
+                    self.tracker.navigation.step(&self.tracker.store, step);
+                }
                 Some(SelectionIntent::Open(channel)) => {
                     self.tracker
                         .navigation
@@ -2581,6 +2609,13 @@ impl Worker {
             .tracker
             .navigation
             .inbox(&self.tracker.store, request.inbox.max(1));
+        navigation.quick = request.quick.as_deref().map_or_else(Vec::new, |query| {
+            self.tracker.navigation.quick_switch(
+                &self.tracker.store,
+                query,
+                fastcord_discord::state::navigation::MAX_QUICK_RESULTS,
+            )
+        });
         self.bridge.clear_private_notice_on_selection_change(
             navigation
                 .private_selection
@@ -3426,6 +3461,38 @@ mod bridge_tests {
     }
 
     #[test]
+    fn switcher_queries_and_steps_are_requests_that_never_touch_voice() {
+        use fastcord_discord::state::navigation::{Step, StepScope};
+        let bridge = NavigationBridge::new();
+        let requests = bridge.requests.subscribe();
+        let voice = bridge.voice_requests.subscribe();
+        bridge.quick_query(Some("gen"));
+        assert_eq!(requests.borrow().quick.as_deref(), Some("gen"));
+        assert_eq!(requests.borrow().revision, 0, "a query is not a selection");
+        bridge.quick_query(None);
+        assert!(requests.borrow().quick.is_none());
+        // A voice or Stage channel picked in the switcher opens its chat.
+        bridge.open_channel(Snowflake(77));
+        assert!(matches!(
+            requests.borrow().selection,
+            Some(SelectionIntent::Open(Snowflake(77)))
+        ));
+        let step = Step {
+            scope: StepScope::Unread,
+            forward: false,
+        };
+        bridge.step(step);
+        assert!(matches!(
+            requests.borrow().selection,
+            Some(SelectionIntent::Step(actual)) if actual == step
+        ));
+        assert!(
+            voice.borrow().is_none(),
+            "navigation sends no voice request"
+        );
+    }
+
+    #[test]
     fn choosing_a_chat_and_requesting_voice_never_change_each_other() {
         let bridge = NavigationBridge::new();
         let requests = bridge.requests.subscribe();
@@ -4044,6 +4111,40 @@ mod bridge_tests {
         });
         panel.composer.select(Some(Snowflake(500)));
         panel
+    }
+
+    #[test]
+    fn drafts_follow_the_open_conversation_through_the_worker_snapshots() {
+        use iced::widget::text_editor::{Action, Edit};
+        let bridge = NavigationBridge::new();
+        let mut panel = panel(&bridge);
+        panel.composer.perform(Action::Edit(Edit::Paste(Arc::new(
+            "half a thought".to_owned(),
+        ))));
+        let open = |channel: u64| {
+            bridge.publish(
+                NavigationSnapshot::default(),
+                timeline::Snapshot {
+                    channel_id: Some(Snowflake(channel)),
+                    can_send: true,
+                    ..timeline::Snapshot::default()
+                },
+                emoji_picker::Snapshot::default(),
+                None,
+            );
+        };
+        // Navigation from anywhere (sidebar, search, pins, inbox, switcher)
+        // ends in the open conversation changing; the draft follows it.
+        open(600);
+        panel.consume();
+        assert!(panel.composer.submission(true, 0).is_none(), "600 is empty");
+        assert!(panel.composer.has_draft(Snowflake(500)));
+        open(500);
+        panel.consume();
+        assert_eq!(
+            panel.composer.submission(true, 0).unwrap().content,
+            "half a thought"
+        );
     }
 
     #[test]

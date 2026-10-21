@@ -1788,3 +1788,166 @@ fn voice_rows_are_followed_by_their_capped_occupants() {
     assert_eq!((part.offset, part.total, part.rows.len()), (9, 11, 2));
     assert_eq!(part.rows[1].occupant, Some(Occupant::More(3)));
 }
+
+fn quick_names(navigation: &Navigation, store: &Store, query: &str) -> Vec<String> {
+    navigation
+        .quick_switch(store, query, MAX_QUICK_RESULTS)
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect()
+}
+
+#[test]
+fn quick_switch_matches_prefix_then_substring_then_subsequence_and_marks_kinds() {
+    let (store, navigation) = setup(READY);
+    // Everything openable; the forum (unsupported kind) is not a conversation.
+    let all = quick_names(&navigation, &store, "");
+    assert_eq!(all.len(), 5, "{all:?}");
+    assert!(!all.iter().any(|n| n.contains("forum")));
+    assert_eq!(quick_names(&navigation, &store, "gen"), ["general"]);
+    assert_eq!(quick_names(&navigation, &store, "#GEN"), ["general"]);
+    assert_eq!(quick_names(&navigation, &store, "grl"), ["general"]);
+    assert_eq!(
+        quick_names(&navigation, &store, "nel")[0],
+        "Nelly",
+        "a prefix ranks first"
+    );
+    // The server name takes part as a weak match: "second lob" finds lobby.
+    assert_eq!(quick_names(&navigation, &store, "second lob")[0], "lobby");
+    assert!(quick_names(&navigation, &store, "zzz").is_empty());
+    let voice = navigation.quick_switch(&store, "voice", 10);
+    assert_eq!(voice[0].kind, QuickKind::Voice);
+    assert_eq!(voice[0].guild, Some(id(FIRST)));
+    let group = navigation.quick_switch(&store, "study", 10);
+    assert_eq!((group[0].kind, group[0].guild), (QuickKind::Group, None));
+    // A prefix beats a substring.
+    let ranked = quick_names(&navigation, &store, "o");
+    assert!(ranked[0] == "lobby" || ranked[0] == "Voice", "{ranked:?}");
+}
+
+#[test]
+fn quick_switch_is_bounded_and_rejects_a_foreign_account() {
+    let mut store = Store::new();
+    replace(&mut store, large_ready());
+    let mut navigation = Navigation::default();
+    navigation.reconcile(&store);
+    let all = navigation.quick_switch(&store, "", usize::MAX);
+    assert_eq!(all.len(), MAX_QUICK_RESULTS);
+    assert!(all.iter().all(|entry| entry.name.len() <= MAX_NAME_BYTES));
+    assert_eq!(navigation.quick_switch(&store, "", 3).len(), 3);
+    assert!(
+        Navigation::default()
+            .quick_switch(&store, "", 10)
+            .is_empty()
+    );
+}
+
+#[test]
+fn keyboard_steps_wrap_over_channels_unreads_and_servers() {
+    let (store, mut navigation) = setup(READY);
+    let step = |navigation: &mut Navigation, scope, forward| {
+        assert!(navigation.step(&store, Step { scope, forward }));
+        navigation.selected_channel()
+    };
+    // Nothing open: forward starts at the first, backward at the last.
+    assert_eq!(
+        step(&mut navigation, StepScope::Channel, true),
+        Some(id(GENERAL))
+    );
+    assert_eq!(
+        step(&mut navigation, StepScope::Channel, true),
+        Some(id(VOICE))
+    );
+    assert_eq!(
+        step(&mut navigation, StepScope::Channel, true),
+        Some(id(GENERAL))
+    );
+    assert_eq!(
+        step(&mut navigation, StepScope::Channel, false),
+        Some(id(VOICE))
+    );
+    // Servers, with each remembering its last channel.
+    assert!(navigation.step(
+        &store,
+        Step {
+            scope: StepScope::Server,
+            forward: true
+        }
+    ));
+    assert_eq!(navigation.selected_guild(), Some(id(SECOND)));
+    assert_eq!(navigation.selected_channel(), None);
+    assert_eq!(
+        step(&mut navigation, StepScope::Channel, true),
+        Some(id(LOBBY))
+    );
+    assert!(navigation.step(
+        &store,
+        Step {
+            scope: StepScope::Server,
+            forward: true
+        }
+    ));
+    assert_eq!(navigation.selected_guild(), Some(id(FIRST)));
+    assert_eq!(navigation.selected_channel(), Some(id(VOICE)));
+    // Direct messages step through the DM list.
+    assert!(navigation.select_private_channel(&store, id(300_000_000_000_000_001)));
+    assert!(navigation.step(
+        &store,
+        Step {
+            scope: StepScope::Channel,
+            forward: true
+        }
+    ));
+    assert!(navigation.private_selection(&store).is_some());
+    assert_eq!(
+        navigation.private_selection(&store).unwrap().channel_id,
+        id(300_000_000_000_000_002)
+    );
+    // Leaving the DMs by server step.
+    assert!(navigation.step(
+        &store,
+        Step {
+            scope: StepScope::Server,
+            forward: true
+        }
+    ));
+    assert!(navigation.selected_guild().is_some());
+}
+
+#[test]
+fn unread_steps_skip_read_conversations_and_report_none() {
+    let mut store = Store::new();
+    let mut r = ready(READY);
+    r.read.entries = vec![crate::gateway::ReadStateEntry {
+        channel_id: id(VOICE),
+        last_acked: id(5),
+        mention_count: 0,
+    }];
+    replace(&mut store, r);
+    let mut navigation = Navigation::default();
+    navigation.reconcile(&store);
+    assert!(navigation.select_channel(&store, id(GENERAL)));
+    let unread = Step {
+        scope: StepScope::Unread,
+        forward: true,
+    };
+    assert!(!navigation.step(&store, unread), "nothing unread");
+    assert_eq!(navigation.selected_channel(), Some(id(GENERAL)));
+    let raw = json!({
+        "id": "50", "channel_id": VOICE.to_string(), "guild_id": FIRST.to_string(),
+        "author": {"id": "7", "username": "other"},
+        "content": "x", "timestamp": "2026-10-16T00:00:00.000000+00:00",
+    });
+    apply(&mut store, "MESSAGE_CREATE", &raw.to_string());
+    assert!(navigation.step(&store, unread));
+    assert_eq!(navigation.selected_channel(), Some(id(VOICE)));
+    // Already on the only unread one: nowhere else to go.
+    assert!(!navigation.step(&store, unread));
+    let back = Step {
+        forward: false,
+        ..unread
+    };
+    assert!(navigation.select_channel(&store, id(GENERAL)));
+    assert!(navigation.step(&store, back));
+    assert_eq!(navigation.selected_channel(), Some(id(VOICE)));
+}

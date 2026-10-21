@@ -10,6 +10,7 @@ mod call_ui;
 mod captcha;
 mod changes;
 mod composer;
+mod drafts;
 mod emoji;
 mod emoji_picker;
 mod forward;
@@ -47,6 +48,7 @@ mod soundboard;
 mod status;
 mod sticker;
 mod style;
+mod switcher;
 mod threads;
 mod timeline;
 mod variable_list;
@@ -153,6 +155,11 @@ struct App {
     friends: friends::State,
     status: status::State,
     threads: threads::State,
+    /// The quick switcher and the shortcuts help.
+    switcher: switcher::State,
+    /// A keyboard or switcher navigation is on its way: when the open
+    /// conversation changes, focus returns to the composer.
+    nav_pending: bool,
 }
 
 #[derive(Debug)]
@@ -316,6 +323,8 @@ enum Message {
     Friends(friends::Event),
     Status(status::Event),
     Threads(threads::Event),
+    Switcher(switcher::Event),
+    Shortcut(switcher::Shortcut),
     EmojiPicker(emoji_picker::Event),
     EmojiVisibility(emoji::Occurrence, bool),
     EmojiLoaded(
@@ -389,6 +398,8 @@ impl App {
                 friends: friends::State::default(),
                 status: status::State::default(),
                 threads: threads::State::default(),
+                switcher: switcher::State::default(),
+                nav_pending: false,
             },
             Task::perform(
                 async {
@@ -420,6 +431,9 @@ impl App {
             self.status.purge();
         }
         let mut task = self.handle(message);
+        if let Phase::Account { gateway, .. } = &self.phase {
+            gateway.controls.quick_query(self.switcher.wanted());
+        }
         // Window full screen belongs to the call view: without it there is no
         // button to leave it, so it ends with the view.
         if self.window_fullscreen
@@ -554,7 +568,47 @@ impl App {
             self.mic_subscription(),
             self.media_frame_subscription(),
             self.shortcut_subscription(),
+            self.navigation_keys(),
         ])
+    }
+
+    /// Navigation chords (see [`switcher`]): modified keys and Escape while
+    /// signed in, plus the plain arrows only while the switcher is open, so
+    /// typing (an IME included) never produces a message.
+    fn navigation_keys(&self) -> iced::Subscription<Message> {
+        if !matches!(self.phase, Phase::Account { .. }) {
+            return iced::Subscription::none();
+        }
+        let mut parts = vec![iced::event::listen_with(|event, status, _| match event {
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key,
+                physical_key,
+                modifiers,
+                ..
+            }) => switcher::shortcut(
+                &key,
+                &physical_key,
+                modifiers,
+                matches!(status, iced::event::Status::Captured),
+            )
+            .filter(|shortcut| !matches!(shortcut, switcher::Shortcut::Move(_)))
+            .map(Message::Shortcut),
+            _ => None,
+        })];
+        if self.switcher.is_open() {
+            parts.push(iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key,
+                    physical_key,
+                    modifiers,
+                    ..
+                }) => switcher::shortcut(&key, &physical_key, modifiers, false)
+                    .filter(|shortcut| matches!(shortcut, switcher::Shortcut::Move(_)))
+                    .map(Message::Shortcut),
+                _ => None,
+            }));
+        }
+        iced::Subscription::batch(parts)
     }
 
     /// Whether a call is connecting or running, the only time shortcuts are heard.
@@ -1155,6 +1209,10 @@ impl App {
                 }
             }
             Message::Navigation(id) => {
+                let before = match &self.phase {
+                    Phase::Account { gateway, .. } => gateway.timeline.channel_id,
+                    _ => None,
+                };
                 let status = if let Phase::Account { gateway, .. } = &mut self.phase
                     && gateway.id == id
                 {
@@ -1202,7 +1260,20 @@ impl App {
                     self.poll.sync(gateway.timeline.channel_id);
                     self.voice.sync(gateway.timeline.channel_id);
                 }
-                return self.soundboard_follow();
+                // A navigation the user started (keys, switcher, sidebar) has
+                // landed: the composer takes focus back, and the sidebar shows
+                // servers or direct messages to match what opened.
+                let mut refocus = Task::none();
+                if self.nav_pending
+                    && let Phase::Account { gateway, .. } = &mut self.phase
+                    && gateway.timeline.channel_id.is_some()
+                    && gateway.timeline.channel_id != before
+                {
+                    self.nav_pending = false;
+                    gateway.directs = gateway.navigation.private_selection.is_some();
+                    refocus = iced::widget::operation::focus(composer::EDITOR_ID);
+                }
+                return Task::batch([refocus, self.soundboard_follow()]);
             }
             Message::ShowDirects(on) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
@@ -1213,6 +1284,8 @@ impl App {
             Message::Search(event) => return self.search_event(event),
             Message::Pins(event) => return self.pins_event(event),
             Message::Inbox(event) => return self.inbox_event(event),
+            Message::Switcher(event) => return self.switcher_event(event),
+            Message::Shortcut(shortcut) => return self.navigation_shortcut(shortcut),
             Message::Group(event) => return self.group_event(event),
             Message::Identity(event) => return self.identity_event(event),
             Message::Safety(event) => return self.safety_event(event),
@@ -1305,6 +1378,7 @@ impl App {
                 // Opens a channel's messages (a voice or Stage channel's chat
                 // included); it never touches the voice connection.
                 self.threads.close();
+                self.nav_pending = true;
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.controls.select_channel(guild, channel);
                 }
@@ -1700,6 +1774,7 @@ impl App {
             }
             Message::SelectPrivateChannel(channel) => {
                 self.threads.close();
+                self.nav_pending = true;
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     self.friends.close();
                     gateway.directs = true;
@@ -2227,6 +2302,12 @@ impl App {
                 }
             }
             Message::Logout => {
+                self.switcher = switcher::State::default();
+                self.nav_pending = false;
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    // Drafts live in memory only; logout forgets them at once.
+                    gateway.composer.clear();
+                }
                 self.pins = pins::State::default();
                 self.inbox.clear();
                 self.group.clear();
@@ -2975,6 +3056,105 @@ impl App {
         task.map(Message::Safety)
     }
 
+    /// Events of the quick switcher and the shortcuts help.
+    fn switcher_event(&mut self, event: switcher::Event) -> Task<Message> {
+        let Phase::Account { gateway, .. } = &mut self.phase else {
+            return Task::none();
+        };
+        match self.switcher.update(event, &gateway.navigation.quick) {
+            switcher::Action::None => Task::none(),
+            switcher::Action::Open(entry) => {
+                // Exactly a sidebar click: the conversation opens (a voice
+                // channel's chat, never its call) and its draft comes back.
+                self.threads.close();
+                self.friends.close();
+                if self.inbox.is_open() {
+                    self.inbox.clear();
+                    gateway.controls.inbox_rows(self.inbox.rows_wanted());
+                }
+                gateway.directs = entry.guild.is_none();
+                gateway.controls.open_channel(entry.channel);
+                self.nav_pending = true;
+                iced::widget::operation::focus(composer::EDITOR_ID)
+            }
+        }
+    }
+
+    /// A navigation chord (see [`switcher`]).
+    fn navigation_shortcut(&mut self, shortcut: switcher::Shortcut) -> Task<Message> {
+        use switcher::Shortcut;
+        let Phase::Account { gateway, .. } = &mut self.phase else {
+            return Task::none();
+        };
+        let composer = || iced::widget::operation::focus(composer::EDITOR_ID);
+        // While a voice binding is being recorded the chords belong to it.
+        if self.shortcuts.recording.is_some() && !matches!(shortcut, Shortcut::Escape { .. }) {
+            return Task::none();
+        }
+        match shortcut {
+            Shortcut::Switcher => {
+                self.switcher.toggle();
+                if self.switcher.is_open() {
+                    iced::widget::operation::focus(switcher::INPUT_ID)
+                } else {
+                    composer()
+                }
+            }
+            Shortcut::Help => {
+                self.switcher.toggle_help();
+                composer()
+            }
+            Shortcut::Move(delta) => {
+                if self.switcher.is_open() {
+                    self.switcher
+                        .update(switcher::Event::Move(delta), &gateway.navigation.quick);
+                }
+                Task::none()
+            }
+            Shortcut::Step(step) => {
+                if self.switcher.is_open() || self.switcher.help_open() {
+                    return Task::none();
+                }
+                self.threads.close();
+                self.friends.close();
+                if self.inbox.is_open() {
+                    self.inbox.clear();
+                    gateway.controls.inbox_rows(self.inbox.rows_wanted());
+                }
+                if step.scope == fastcord_discord::state::navigation::StepScope::Server {
+                    gateway.directs = false;
+                }
+                gateway.controls.step(step);
+                self.nav_pending = true;
+                Task::none()
+            }
+            Shortcut::Escape { captured } => {
+                if self.switcher.close() {
+                    return composer();
+                }
+                if gateway.attachment_viewer.take().is_some() {
+                    return composer();
+                }
+                if gateway.emoji_picker.request.open {
+                    gateway.emoji_picker.close();
+                    return composer();
+                }
+                // A focused composer handled Escape itself.
+                if !captured {
+                    if gateway.composer.editing().is_some() {
+                        gateway.composer.cancel_edit();
+                        return composer();
+                    }
+                    if gateway.composer.replying().is_some() {
+                        gateway.composer.cancel_reply();
+                        return composer();
+                    }
+                }
+                Task::none()
+            }
+        }
+    }
+
     fn inbox_event(&mut self, event: inbox::Event) -> Task<Message> {
         let Phase::Account {
             session, gateway, ..
@@ -3608,7 +3788,7 @@ impl App {
             };
             // The larger image view covers the account screen, which stays in
             // the widget tree underneath so the timeline keeps its scroll state.
-            return match &gateway.attachment_viewer {
+            let screen: Element<'_, Message> = match &gateway.attachment_viewer {
                 None if gateway.call_view.open && !gateway.emoji_picker.request.open => {
                     let pane = call_ui::panel(
                         &gateway.call_view,
@@ -3642,6 +3822,22 @@ impl App {
                 ]
                 .into(),
                 None => account,
+            };
+            let overlay: Option<Element<'_, Message>> = if self.switcher.is_open() {
+                Some(
+                    switcher::view(&self.switcher, &gateway.navigation.quick, |channel| {
+                        gateway.composer.has_draft(channel)
+                    })
+                    .map(Message::Switcher),
+                )
+            } else if self.switcher.help_open() {
+                Some(switcher::help_view().map(Message::Switcher))
+            } else {
+                None
+            };
+            return match overlay {
+                Some(overlay) => iced::widget::stack![screen, overlay].into(),
+                None => screen,
             };
         }
         let content: Element<'_, Message> = match &self.phase {
@@ -4493,6 +4689,84 @@ mod tests {
         // Late status from the closed connection changes nothing.
         let _ = app.update(Message::Gateway(id, GatewayStatus::Resuming));
         assert!(matches!(app.phase, Phase::Deleting { .. }));
+    }
+
+    #[test]
+    fn chords_open_overlays_and_escape_unwinds_them_before_cancelling_a_reply() {
+        use switcher::Shortcut;
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let channel = Snowflake(500);
+        let reply = outbox::Reply {
+            message: Snowflake(7),
+            author: "a".into(),
+            content: "b".into(),
+            mention_author: false,
+        };
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        gateway.composer.select(Some(channel));
+        assert!(gateway.composer.restore_send("", &[], Some(reply)));
+        let _ = app.update(Message::Shortcut(Shortcut::Switcher));
+        assert!(app.switcher.is_open());
+        let _ = app.update(Message::Shortcut(Shortcut::Help));
+        assert!(app.switcher.help_open() && !app.switcher.is_open());
+        // Escape closes the overlay first and leaves the reply alone.
+        let _ = app.update(Message::Shortcut(Shortcut::Escape { captured: false }));
+        assert!(!app.switcher.help_open());
+        let replying = |app: &App| matches!(&app.phase, Phase::Account { gateway, .. } if gateway.composer.replying().is_some());
+        assert!(replying(&app));
+        // A focused composer already handled its own Escape.
+        let _ = app.update(Message::Shortcut(Shortcut::Escape { captured: true }));
+        assert!(replying(&app));
+        let _ = app.update(Message::Shortcut(Shortcut::Escape { captured: false }));
+        assert!(!replying(&app));
+        // Plain arrows do nothing while the switcher is closed.
+        let _ = app.update(Message::Shortcut(Shortcut::Move(1)));
+        assert!(!app.switcher.is_open());
+    }
+
+    #[test]
+    fn picking_a_switcher_result_closes_it_and_awaits_the_navigation() {
+        use fastcord_discord::state::navigation::{NavigationSnapshot, QuickEntry, QuickKind};
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let entry = |id: u64, guild: Option<u64>, kind| QuickEntry {
+            channel: Snowflake(id),
+            guild: guild.map(Snowflake),
+            guild_name: String::new(),
+            name: "x".to_owned(),
+            kind,
+            unread: false,
+            mentions: 0,
+        };
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        gateway.navigation = Arc::new(NavigationSnapshot {
+            quick: vec![
+                entry(1, Some(9), QuickKind::Voice),
+                entry(2, None, QuickKind::Direct),
+            ],
+            ..NavigationSnapshot::default()
+        });
+        for (index, directs) in [(0, false), (1, true)] {
+            let _ = app.update(Message::Shortcut(switcher::Shortcut::Switcher));
+            assert!(app.switcher.is_open());
+            app.nav_pending = false;
+            let _ = app.update(Message::Switcher(switcher::Event::Pick(index)));
+            assert!(!app.switcher.is_open());
+            assert!(app.nav_pending, "focus returns once the chat is open");
+            let Phase::Account { gateway, .. } = &app.phase else {
+                panic!("account");
+            };
+            assert_eq!(gateway.directs, directs);
+            assert!(
+                gateway.controls.voice_target().is_none(),
+                "a voice row opens its chat, never the call"
+            );
+        }
     }
 
     #[test]

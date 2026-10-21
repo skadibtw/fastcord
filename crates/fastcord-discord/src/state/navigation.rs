@@ -299,6 +299,8 @@ pub struct NavigationSnapshot {
     pub incoming_calls: Vec<IncomingCall>,
     /// Unread and mention rows; empty unless the inbox was asked for.
     pub inbox: Inbox,
+    /// Quick-switcher matches; empty unless a query was asked for.
+    pub quick: Vec<QuickEntry>,
     /// Message requests awaiting an explicit accept or decline.
     pub requests: MessageRequests,
     /// Ignored and blocked users (shared, rebuilt only when it changes).
@@ -774,6 +776,7 @@ impl Navigation {
                 .collect(),
             presences: store.presences(),
             inbox: Inbox::default(),
+            quick: Vec::new(),
             requests: self.message_requests(store),
             suppressed: store.suppressed(),
             privacy: store.privacy(),
@@ -1141,6 +1144,11 @@ fn visible_channels<'a>(
 
 mod inbox;
 pub use inbox::{Inbox, InboxRow, MAX_INBOX_ROWS};
+mod quick;
+pub use quick::{
+    MAX_QUICK_QUERY_CHARS, MAX_QUICK_RESULTS, QuickEntry, QuickKind, Step, StepScope, match_score,
+    query_chars,
+};
 
 #[cfg(test)]
 mod tests;

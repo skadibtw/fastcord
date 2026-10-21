@@ -7,7 +7,6 @@
 //! snapshot's outbox and is only displayed here. Enter sends, Shift+Enter starts
 //! a new line, and nothing is ever sent without one of the two.
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +21,7 @@ use iced::widget::{
 use iced::{Element, Length, Padding};
 
 use crate::changes::RowChange;
+use crate::drafts::{Draft, DraftStore};
 use crate::gateway::NavigationBridge;
 use crate::outbox::{MAX_OUTBOX, MAX_REPLY_AUTHOR_CHARS, OpId, OutboxItem, OutboxState, Reply};
 use crate::timeline::Snapshot;
@@ -29,8 +29,6 @@ use crate::timeline::Snapshot;
 /// The editor refuses to grow past this many characters, twice the longest
 /// message Discord accepts, so a stray paste cannot build an unbounded buffer.
 pub const MAX_EDITOR_CHARS: usize = 2 * MAX_CONTENT_CHARS;
-/// Channels whose unsent draft is remembered while the user is elsewhere.
-const MAX_DRAFTS: usize = 16;
 /// Characters of an unconfirmed message shown in the strip.
 const PREVIEW_CHARS: usize = 200;
 /// Past this many characters the editor shows a length note.
@@ -144,6 +142,8 @@ pub enum Event {
     Edit(OpId),
     /// Stop editing a sent message and bring the draft back.
     CancelEdit,
+    /// Dismiss the note that older drafts were discarded.
+    DismissDropped,
 }
 
 /// A draft the user chose to send.
@@ -201,28 +201,6 @@ struct EditableAttachment {
     kept: bool,
 }
 
-/// Unsent text per channel: bounded in count and, through the editor's cap, in size.
-#[derive(Default)]
-struct Drafts {
-    entries: VecDeque<(Snowflake, String)>,
-}
-
-impl Drafts {
-    fn take(&mut self, channel: Snowflake) -> Option<String> {
-        let at = self.entries.iter().position(|(id, _)| *id == channel)?;
-        self.entries.remove(at).map(|(_, text)| text)
-    }
-
-    fn put(&mut self, channel: Snowflake, text: String) {
-        self.take(channel);
-        if text.trim().is_empty() {
-            return;
-        }
-        self.entries.push_front((channel, text));
-        self.entries.truncate(MAX_DRAFTS);
-    }
-}
-
 pub struct Composer {
     content: Content,
     channel: Option<Snowflake>,
@@ -239,7 +217,10 @@ pub struct Composer {
     /// The target and explicit replied-user notification choice.
     replying: Option<Reply>,
     notice: Option<&'static str>,
-    drafts: Drafts,
+    drafts: DraftStore,
+    /// Drafts of other conversations discarded to stay within the draft
+    /// budget since the user last dismissed the note about it.
+    dropped: usize,
     /// Editing one of the user's messages of `channel` instead of writing one.
     editing: Option<Editing>,
 }
@@ -256,7 +237,8 @@ impl Default for Composer {
             files: Vec::new(),
             replying: None,
             notice: None,
-            drafts: Drafts::default(),
+            drafts: DraftStore::default(),
+            dropped: 0,
             editing: None,
         }
     }
@@ -281,28 +263,48 @@ impl Composer {
             .flatten()
     }
 
-    /// Follows the open channel: the draft of the one being left is kept, the
-    /// one being entered is restored. The `@everyone` choice never survives a
-    /// switch, and neither does editing a message.
+    /// Follows the open channel: everything the composer holds for the one
+    /// being left (text, reply target, files, `@everyone` choice) is kept as a
+    /// draft and the entered one's is restored. Editing a sent message does not
+    /// survive a switch; that is said in the notice. Drafts the budget had to
+    /// discard are counted in `dropped` and shown until dismissed.
     pub fn select(&mut self, channel: Option<Snowflake>) {
         if self.channel == channel {
             return;
         }
+        let was_editing = self.editing.is_some();
         self.cancel_edit();
         if let Some(old) = self.channel {
-            self.drafts.put(old, self.content.text());
+            let draft = Draft {
+                text: self.content.text(),
+                files: std::mem::take(&mut self.files),
+                replying: self.replying.take(),
+                everyone: self.everyone,
+            };
+            self.dropped += self.drafts.put(old, draft);
         }
-        self.content = match channel.and_then(|id| self.drafts.take(id)) {
-            Some(text) => Content::with_text(&text),
-            None => Content::new(),
-        };
+        let draft = channel
+            .and_then(|id| self.drafts.take(id))
+            .unwrap_or_default();
+        self.content = Content::with_text(&draft.text);
         self.content.perform(Action::Move(Motion::DocumentEnd));
         self.channel = channel;
-        self.everyone = false;
-        self.files.clear();
-        self.replying = None;
-        self.notice = None;
+        self.everyone = draft.everyone;
+        self.files = draft.files;
+        self.replying = draft.replying;
+        self.notice = was_editing.then_some(EDIT_DISCARDED);
         self.recount();
+    }
+
+    /// Forgets every draft and what the composer holds (logout).
+    pub fn clear(&mut self) {
+        self.drafts.clear();
+        *self = Self::default();
+    }
+
+    /// Whether a draft is waiting for `channel` (for the quick switcher).
+    pub fn has_draft(&self, channel: Snowflake) -> bool {
+        self.drafts.contains(channel)
     }
 
     /// Applies an editor action, refusing edits that would grow the draft
@@ -754,6 +756,7 @@ pub fn update(
         Event::Everyone(allowed) => composer.set_everyone(allowed),
         Event::ReplyMention(allowed) => composer.set_reply_mention(allowed),
         Event::CancelReply => composer.cancel_reply(),
+        Event::DismissDropped => composer.dropped = 0,
         // The dialog is opened by the window; the files come back as `attach`.
         Event::Attach | Event::PasteImage => {}
         Event::Detach(index) => composer.detach(index),
@@ -842,6 +845,8 @@ fn typing_line(names: &[String]) -> Option<String> {
 }
 
 const BUSY: &str = "That is not possible right now (busy or disconnected); try again.";
+const EDIT_DISCARDED: &str =
+    "Editing was cancelled because you switched conversations; nothing was saved.";
 const EMPTY_EDIT: &str = "A message needs some text. Use Delete to remove it instead.";
 const NOT_QUEUED: &str =
     "Not sent: too many messages are waiting, or the connection has stopped. Your text is kept.";
@@ -992,10 +997,30 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
     if let Some(notice) = snapshot.notice {
         layout = layout.push(text(notice).size(12).style(text::danger));
     }
+    if composer.dropped > 0 {
+        layout = layout.push(
+            row![
+                text(format!(
+                    "{} older unsent draft{} discarded to stay within the draft limit ({} conversations, {} KiB).",
+                    composer.dropped,
+                    if composer.dropped == 1 { " was" } else { "s were" },
+                    crate::drafts::MAX_DRAFTS,
+                    crate::drafts::MAX_DRAFT_TEXT_BYTES / 1024,
+                ))
+                .size(12)
+                .style(text::danger)
+                .width(Length::Fill),
+                small_button("Dismiss", Event::DismissDropped),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center),
+        );
+    }
     if let Some(line) = typing_line(&snapshot.typing) {
         layout = layout.push(text(line).size(12).style(text::secondary));
     }
     let editing = composer.editing.is_some();
+    let replying = composer.replying.is_some();
     if let Some(reply) = &composer.replying {
         let deleted = snapshot.deleted.contains(&reply.message);
         let label = if deleted {
@@ -1062,6 +1087,9 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
                 }
                 keyboard::Key::Named(key::Named::Escape) if focused && editing => {
                     Some(Binding::Custom(Event::CancelEdit))
+                }
+                keyboard::Key::Named(key::Named::Escape) if focused && replying => {
+                    Some(Binding::Custom(Event::CancelReply))
                 }
                 _ => Binding::from_key_press(press),
             }
@@ -1487,18 +1515,88 @@ mod tests {
         composer.select(Some(A));
         composer.select(Some(B));
         assert!(composer.blank);
-        // Only the most recent few channels keep a draft.
+        // Only the most recent conversations keep a draft, and the loss is counted.
         let mut composer = Composer::default();
-        for id in 0..(MAX_DRAFTS as u64 + 10) {
+        let extra = 10u64;
+        for id in 0..(crate::drafts::MAX_DRAFTS as u64 + extra) {
             composer.select(Some(Snowflake(1_000 + id)));
             type_text(&mut composer, "keep me");
         }
         composer.select(None);
-        assert_eq!(composer.drafts.entries.len(), MAX_DRAFTS);
+        assert_eq!(composer.drafts.len(), crate::drafts::MAX_DRAFTS);
+        assert_eq!(composer.dropped as u64, extra);
         composer.select(Some(Snowflake(1_000)));
         assert!(composer.blank, "the oldest draft was dropped");
-        composer.select(Some(Snowflake(1_000 + MAX_DRAFTS as u64 + 9)));
+        composer.select(Some(Snowflake(
+            1_000 + crate::drafts::MAX_DRAFTS as u64 + extra - 1,
+        )));
         assert_eq!(composer.content.text().trim(), "keep me");
+        composer.dropped = 0;
+    }
+
+    #[test]
+    fn a_draft_keeps_its_reply_files_and_mention_choices_across_switches() {
+        let snapshot = showing(vec![sent(7, "original", false, None)]);
+        let mut composer = composer_in(A);
+        type_text(&mut composer, "@silent hi");
+        assert!(composer.begin_reply(&snapshot, Snowflake(7)));
+        composer.set_reply_mention(true);
+        composer.set_everyone(true);
+        let path = std::env::temp_dir().join(format!("fastcord-draft-{}.txt", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        composer.attach(vec![path.clone()]);
+        assert_eq!(composer.files.len(), 1);
+        composer.select(Some(B));
+        assert!(composer.blank && composer.files.is_empty());
+        assert_eq!(composer.replying(), None);
+        assert!(!composer.everyone);
+        assert!(composer.has_draft(A) && !composer.has_draft(B));
+        composer.select(Some(A));
+        assert_eq!(composer.content.text().trim(), "@silent hi");
+        assert_eq!(composer.replying(), Some(Snowflake(7)));
+        assert!(composer.replying.as_ref().unwrap().mention_author);
+        assert!(composer.everyone);
+        assert_eq!(composer.files.len(), 1);
+        assert_eq!(composer.files[0].path(), path.as_path());
+        assert!(!composer.has_draft(A), "restored drafts leave the store");
+        // A reply alone is a draft too.
+        composer.sent();
+        assert!(composer.begin_reply(&snapshot, Snowflake(7)));
+        composer.select(Some(B));
+        composer.select(Some(A));
+        assert_eq!(composer.replying(), Some(Snowflake(7)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn evicting_a_draft_is_counted_until_dismissed_and_logout_clears_all() {
+        let mut composer = Composer::default();
+        for id in 0..=crate::drafts::MAX_DRAFTS as u64 {
+            composer.select(Some(Snowflake(1_000 + id)));
+            type_text(&mut composer, "d");
+        }
+        composer.select(Some(Snowflake(5_000)));
+        assert_eq!(composer.dropped, 1, "one draft over the budget");
+        let snapshot = Snapshot::default();
+        let bridge = NavigationBridge::new();
+        update(&mut composer, Event::DismissDropped, &snapshot, &bridge);
+        assert_eq!(composer.dropped, 0);
+        composer.clear();
+        assert_eq!(composer.drafts.len(), 0);
+        assert!(composer.blank && composer.channel.is_none());
+    }
+
+    #[test]
+    fn leaving_while_editing_discards_the_edit_visibly_and_keeps_the_draft() {
+        let snapshot = showing(vec![sent(7, "original", true, None)]);
+        let mut composer = composer_in(A);
+        type_text(&mut composer, "draft");
+        assert!(composer.begin_edit(&snapshot, Snowflake(7)));
+        composer.select(Some(B));
+        assert_eq!(composer.notice, Some(EDIT_DISCARDED));
+        composer.select(Some(A));
+        assert_eq!(composer.content.text().trim(), "draft");
+        assert!(composer.notice.is_none());
     }
 
     #[test]
