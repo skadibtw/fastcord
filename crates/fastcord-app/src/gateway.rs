@@ -78,6 +78,9 @@ pub struct VoiceControls {
     pub echo_cancellation_off: bool,
     /// Playback underrun/concealment counters of the running engine; `None` outside a call.
     pub audio_stats: Option<fastcord_audio::EngineStats>,
+    /// The microphone is sending a speech burst now (the account's own
+    /// speaking ring); flips only at the start and end of a burst.
+    pub self_speaking: bool,
     /// The call connection's packet counters, kept only while the audio
     /// dialog is open (so an idle call never redraws for them).
     pub transport_stats: Option<fastcord_media::gateway::TransportStats>,

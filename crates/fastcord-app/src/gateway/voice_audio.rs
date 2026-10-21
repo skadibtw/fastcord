@@ -8,6 +8,7 @@ use fastcord_media::{
     VoiceCredentials, VoiceEvent, VoiceMessage, VoiceStatus, connect, connect_with_video,
 };
 use std::collections::HashMap;
+use std::mem::replace;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -432,6 +433,10 @@ async fn run_with(
     let mut participants = HashMap::<Snowflake, VoiceParticipant>::new();
     let mut release_at = HashMap::<Snowflake, Instant>::new();
     loop {
+        let speaking_now = speech_end_at.is_some();
+        controls_tx.send_if_modified(|controls| {
+            replace(&mut controls.self_speaking, speaking_now) != speaking_now
+        });
         let release_deadline = release_at.values().copied().min();
         tokio::select! {
             frame = receive_capture(&mut captured) => {
@@ -617,6 +622,7 @@ async fn run_with(
     drop(engine);
     drop(noise_status);
     let _ = media.end_speech();
+    controls_tx.send_if_modified(|controls| replace(&mut controls.self_speaking, false));
     session.leave().await;
     // A failed engine stays visible (the worker then leaves the Gateway voice state too).
     state.send_replace(if engine_failed {

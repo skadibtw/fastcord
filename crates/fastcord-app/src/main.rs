@@ -499,8 +499,10 @@ impl App {
 
     fn synchronize_video(&self) {
         if let Phase::Account { gateway, .. } = &self.phase {
-            let unobstructed = self.window_active
-                && self.window_drawable
+            // Focus does not matter: a stream keeps playing in a window that is
+            // visible but not focused, like the official client. Only a
+            // minimized (zero-size) window or a covering view suspends video.
+            let unobstructed = self.window_drawable
                 && !self.audio_settings.open
                 && gateway.attachment_viewer.is_none()
                 && !gateway.emoji_picker.request.open;
@@ -3742,7 +3744,10 @@ impl App {
                         running,
                     })
                 });
-            let talking = call_ui::speaking(&voice_controls);
+            let mut talking = call_ui::speaking(&voice_controls);
+            if voice_controls.self_speaking {
+                talking.push(session.user.id);
+            }
 
             // ---- connection and notices above the conversation ----
             let mut notes: Vec<(String, bool)> = Vec::new();
