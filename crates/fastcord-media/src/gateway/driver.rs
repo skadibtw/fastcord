@@ -795,11 +795,16 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             }
             op::DAVE_EXECUTE_TRANSITION => {
                 let transition: wire::DaveTransition = decode(envelope.d).ok_or_else(protocol)?;
-                self.dave
+                let dave = self
+                    .dave
                     .as_mut()
-                    .ok_or(End::Close(CloseReason::DaveUnavailable))?
-                    .execute_transition(transition.transition_id)
-                    .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                    .ok_or(End::Close(CloseReason::DaveUnavailable))?;
+                // Transition 0 already took effect when it arrived; a late
+                // execute for it is harmless.
+                if transition.transition_id != 0 || dave.transition_id().is_some() {
+                    dave.execute_transition(transition.transition_id)
+                        .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                }
                 self.set_status(self.connected_status());
             }
             op::DAVE_PREPARE_EPOCH => {
@@ -875,11 +880,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     self.recover_dave(conn, socket, transition_id).await?;
                     return Ok(());
                 }
-                self.send_text(conn, socket, &wire::dave_transition_ready(transition_id))
-                    .await?;
-                self.set_status(VoiceStatus::Rekeying {
-                    transition_id: Some(transition_id),
-                });
+                self.after_group_change(conn, socket, transition_id).await?;
             }
             wire::ServerBinary::Welcome {
                 transition_id,
@@ -894,14 +895,37 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     self.recover_dave(conn, socket, transition_id).await?;
                     return Ok(());
                 }
-                self.send_text(conn, socket, &wire::dave_transition_ready(transition_id))
-                    .await?;
-                self.set_status(VoiceStatus::Rekeying {
-                    transition_id: Some(transition_id),
-                });
+                self.after_group_change(conn, socket, transition_id).await?;
             }
             wire::ServerBinary::Unknown => {}
         }
+        Ok(())
+    }
+
+    /// A Commit or Welcome was applied. Transition 0 is a group
+    /// (re)initialization that takes effect at once: no opcode 23 is sent and
+    /// no opcode 22 follows, so sending starts now. Any other transition waits
+    /// for the server's execute.
+    async fn after_group_change(
+        &mut self,
+        conn: &mut Conn,
+        socket: &mut S::Socket,
+        transition_id: u16,
+    ) -> Result<(), End> {
+        if transition_id == 0 {
+            self.dave
+                .as_mut()
+                .ok_or(End::Close(CloseReason::DaveUnavailable))?
+                .execute_transition(0)
+                .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+            self.set_status(self.connected_status());
+            return Ok(());
+        }
+        self.send_text(conn, socket, &wire::dave_transition_ready(transition_id))
+            .await?;
+        self.set_status(VoiceStatus::Rekeying {
+            transition_id: Some(transition_id),
+        });
         Ok(())
     }
 
@@ -1234,6 +1258,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             return Err(End::Close(CloseReason::DaveUnavailable));
         };
         if !dave.is_send_ready() {
+            Counters::add(&self.ch.counters.audio_waiting_for_keys, 1);
             return Ok(());
         }
         let encrypted = dave

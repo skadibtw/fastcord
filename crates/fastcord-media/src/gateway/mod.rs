@@ -416,6 +416,8 @@ pub struct TransportStats {
     pub nack_sequences_sent: u64,
     /// Picture Loss Indications sent.
     pub keyframe_requests_sent: u64,
+    /// Opus frames not sent because DAVE had no send key yet.
+    pub audio_waiting_for_keys: u64,
 }
 
 #[derive(Default)]
@@ -436,6 +438,7 @@ pub(crate) struct Counters {
     pub(crate) retransmissions_sent: AtomicU64,
     pub(crate) nack_sequences_sent: AtomicU64,
     pub(crate) keyframe_requests_sent: AtomicU64,
+    pub(crate) audio_waiting_for_keys: AtomicU64,
 }
 
 impl Counters {
@@ -462,6 +465,7 @@ impl Counters {
             retransmissions_sent: get(&self.retransmissions_sent),
             nack_sequences_sent: get(&self.nack_sequences_sent),
             keyframe_requests_sent: get(&self.keyframe_requests_sent),
+            audio_waiting_for_keys: get(&self.audio_waiting_for_keys),
         }
     }
 }

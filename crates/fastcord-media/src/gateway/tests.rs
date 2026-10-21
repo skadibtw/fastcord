@@ -623,6 +623,75 @@ async fn driver_processes_authenticated_proposals_commits_and_encrypted_opus() {
     );
 }
 
+/// Transition 0 is an immediate group (re)initialization: the commit takes
+/// effect at once, no opcode 23 goes out, and sending works without an
+/// opcode 22 that the server never sends for it.
+#[tokio::test(start_paused = true)]
+async fn a_transition_zero_commit_takes_effect_without_an_execute() {
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    let (mut udp, _) = negotiate(&mut harness, &mut ws, &BOTH_MODES).await;
+    let channel_id = credentials("fixture.discord.media:443").channel_id.0;
+    ws.send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let mut fixture = install_test_dave_group(&harness, &mut ws).await;
+
+    let mut carol = DaveSession::new(1, CAROL.0, channel_id).unwrap();
+    let key_package =
+        KeyPackageIn::tls_deserialize_exact_bytes(&carol.create_key_package().unwrap())
+            .unwrap()
+            .validate(fixture.provider.crypto(), ProtocolVersion::Mls10)
+            .unwrap();
+    let proposal = ExternalProposal::new_add::<OpenMlsRustCrypto>(
+        key_package,
+        GroupId::from_slice(&channel_id.to_be_bytes()),
+        GroupEpoch::from(fixture.peer.epoch().unwrap()),
+        &fixture.delivery_signer,
+        SenderExtensionIndex::new(0),
+    )
+    .unwrap();
+    let proposal_payload = dave_proposal_payload(&proposal);
+    fixture
+        .peer
+        .process_proposals(0, &proposal_payload, &[ME.0, ALICE.0, CAROL.0])
+        .unwrap()
+        .unwrap();
+    ws.send(json!({"op": 11, "d": {"user_ids": [ALICE.0.to_string(), CAROL.0.to_string()]}}))
+        .await;
+    let mut proposal_frame = vec![0, 2, 27, 0];
+    proposal_frame.extend_from_slice(&proposal_payload);
+    ws.0.send(Message::binary(proposal_frame)).await.unwrap();
+    let Message::Binary(commit_welcome) = ws.0.next().await.unwrap().unwrap() else {
+        panic!("expected DAVE commit/welcome response")
+    };
+    let encoded_commit = &commit_welcome[1..];
+    let (_, welcome_remainder) = MlsMessageIn::tls_deserialize_bytes(encoded_commit).unwrap();
+    let commit = encoded_commit[..encoded_commit.len() - welcome_remainder.len()].to_vec();
+    fixture.peer.process_commit(0, &commit).unwrap();
+
+    let mut announce = vec![0, 3, 29, 0, 0];
+    announce.extend_from_slice(&commit);
+    ws.0.send(Message::binary(announce)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    harness
+        .session
+        .media()
+        .send_opus(b"after-transition-zero".to_vec())
+        .unwrap();
+    // The next client message is speaking, not a ready-for-transition.
+    assert_eq!(ws.recv_op(5).await["d"]["speaking"], 1);
+    let datagram = udp.recv().await;
+    let key = TransportKey::from_slice(&KEY).unwrap();
+    let cipher = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &key);
+    let encrypted = open_rtp(&cipher, &datagram).1;
+    assert_eq!(
+        fixture.peer.decrypt_opus(ME.0, &encrypted).unwrap(),
+        b"after-transition-zero"
+    );
+    assert_eq!(harness.session.stats().audio_waiting_for_keys, 0);
+}
+
 /// One server RTP datagram from `ssrc`.
 fn server_rtp(sender: &mut TransportCipher, ssrc: u32, sequence: u16, payload: &[u8]) -> Vec<u8> {
     let mut clear = Vec::new();

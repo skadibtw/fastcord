@@ -338,8 +338,15 @@ impl NoiseStatus<'_> {
     }
 
     /// Publishes the engine counters the dialog shows, only when one of them changed.
-    fn publish_stats(&self, stats: fastcord_audio::EngineStats) {
+    /// `transport` is `Some` only while the audio dialog is open; the
+    /// microphone counters then join the change key.
+    fn publish_stats(
+        &self,
+        stats: fastcord_audio::EngineStats,
+        transport: Option<fastcord_media::gateway::TransportStats>,
+    ) {
         self.0.send_if_modified(|controls| {
+            let shown = transport.is_some();
             let key = |s: &fastcord_audio::EngineStats| {
                 (
                     s.output_underruns,
@@ -348,12 +355,16 @@ impl NoiseStatus<'_> {
                     s.input_overrun_samples,
                     s.late_ticks,
                     s.callback_realtime_denied,
+                    shown.then_some((s.frames_encoded, s.frames_gated)),
                 )
             };
-            if controls.audio_stats.as_ref().map(key) == Some(key(&stats)) {
+            if controls.audio_stats.as_ref().map(key) == Some(key(&stats))
+                && controls.transport_stats == transport
+            {
                 return false;
             }
             controls.audio_stats = Some(stats);
+            controls.transport_stats = transport;
             true
         });
     }
@@ -364,6 +375,7 @@ impl Drop for NoiseStatus<'_> {
         self.0.send_modify(|controls| {
             controls.noise_status = None;
             controls.audio_stats = None;
+            controls.transport_stats = None;
             controls.input_diagnostics = None;
         });
     }
@@ -542,7 +554,10 @@ async fn run_with(
                 speech_end_at = None;
                 let _ = media.end_speech();
             }
-            _ = stats_tick.tick() => noise_status.publish_stats(engine.stats()),
+            _ = stats_tick.tick() => {
+                let transport = controls.borrow().diagnostics_open.then(|| session.stats());
+                noise_status.publish_stats(engine.stats(), transport);
+            }
             _ = wait_for_release(retry_at) => {
                 sync.apply(&controls.borrow(), hold.active);
                 retry_at = sync.retry_deadline();

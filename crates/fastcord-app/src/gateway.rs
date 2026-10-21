@@ -75,6 +75,9 @@ pub struct VoiceControls {
     pub echo_cancellation_off: bool,
     /// Playback underrun/concealment counters of the running engine; `None` outside a call.
     pub audio_stats: Option<fastcord_audio::EngineStats>,
+    /// The call connection's packet counters, kept only while the audio
+    /// dialog is open (so an idle call never redraws for them).
+    pub transport_stats: Option<fastcord_media::gateway::TransportStats>,
     /// Manual and automatic microphone gain (the saved preference).
     pub input_gain: fastcord_audio::InputGain,
     /// The audio dialog is open, so the running engine measures the microphone level.

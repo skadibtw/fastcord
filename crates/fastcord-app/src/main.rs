@@ -3171,7 +3171,7 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         if self.audio_settings.open {
-            let (input_error, output_error, noise_status, audio_stats, vad_forbidden) =
+            let (input_error, output_error, noise_status, audio_stats, vad_forbidden, transmit) =
                 match &self.phase {
                     Phase::Account { gateway, .. } => {
                         let controls = gateway.controls.voice_controls();
@@ -3181,9 +3181,14 @@ impl App {
                             controls.noise_status,
                             controls.audio_stats,
                             controls.vad_forbidden,
+                            audio_devices::transmit_summary(
+                                controls.audio_stats,
+                                controls.transport_stats,
+                                controls.capture_enabled(),
+                            ),
                         )
                     }
-                    _ => (None, None, None, None, false),
+                    _ => (None, None, None, None, false, String::new()),
                 };
             // The dialog is taller than the default window: scroll instead of hiding Close.
             return center(scrollable(
@@ -3195,6 +3200,7 @@ impl App {
                         output_error,
                         noise_status,
                         audio_stats,
+                        transmit,
                         column![
                             shortcuts::view(
                                 &self.audio_preferences.voice_input,

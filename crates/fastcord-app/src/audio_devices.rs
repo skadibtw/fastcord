@@ -207,6 +207,32 @@ fn stats_summary(stats: Option<EngineStats>) -> String {
     }
 }
 
+/// What the microphone sends in this call, so "nobody hears me" can be told
+/// apart: muted or push-to-talk, the sensitivity gate, or end-to-end keys.
+pub fn transmit_summary(
+    stats: Option<EngineStats>,
+    transport: Option<fastcord_media::gateway::TransportStats>,
+    capture_on: bool,
+) -> String {
+    let (Some(s), Some(t)) = (stats, transport) else {
+        return String::new();
+    };
+    let state = if !capture_on {
+        "Sending is off (muted, deafened, or push-to-talk not held)."
+    } else if t.audio_waiting_for_keys > 0 && t.rtp_sent == 0 {
+        "Sending is waiting for end-to-end encryption keys from the call."
+    } else if s.frames_encoded > 0 && s.frames_gated >= s.frames_encoded {
+        "Everything is below the input sensitivity threshold."
+    } else {
+        "Sending."
+    };
+    format!(
+        "Microphone this call: {} frames encoded, {} held by the sensitivity gate, {} packets sent, {} waiting for encryption keys. {state}",
+        s.frames_encoded, s.frames_gated, t.rtp_sent, t.audio_waiting_for_keys
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     settings: &'a Settings,
     prefs: &Preferences,
@@ -214,6 +240,7 @@ pub fn view<'a>(
     output_error: Option<fastcord_audio::DeviceErrorKind>,
     noise_status: Option<NoiseSuppressionStatus>,
     stats: Option<EngineStats>,
+    transmit: String,
     voice_input: Element<'a, crate::Message>,
 ) -> Element<'a, crate::Message> {
     let (inputs, input) = options(&settings.inputs, &prefs.input);
@@ -241,6 +268,7 @@ pub fn view<'a>(
         checkbox(prefs.voice_recording).label("Voice message recording (experimental)").on_toggle(crate::Message::VoiceRecordingToggled),
         text("Adds a Record voice message button to text channels: record, preview, then send. Discord documents voice-message recording for its mobile apps only, so whether it is accepted from this client is unverified. The microphone is open only while recording."),
         text(stats_summary(stats)),
+        text(transmit),
         text(if settings.probing { "Looking for audio devices…" } else { "System default follows the OS only when selected. Refresh lists after plugging a device in." }),
         row![button("Refresh devices").on_press_maybe((!settings.probing).then_some(crate::Message::RefreshAudioDevices)), button("Close").on_press(crate::Message::CloseAudioSettings)].spacing(12),
     ].spacing(12)).padding(24).width(Length::Fixed(650.0)).style(container::rounded_box).into()
@@ -413,6 +441,37 @@ pub async fn save(prefs: Preferences) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_transmit_line_names_why_nothing_is_heard() {
+        use fastcord_media::gateway::TransportStats;
+        let stats = |encoded, gated| EngineStats {
+            frames_encoded: encoded,
+            frames_gated: gated,
+            ..EngineStats::default()
+        };
+        let sent = |rtp_sent, waiting| TransportStats {
+            rtp_sent,
+            audio_waiting_for_keys: waiting,
+            ..TransportStats::default()
+        };
+        assert!(transmit_summary(None, Some(sent(0, 0)), true).is_empty());
+        assert!(transmit_summary(Some(stats(10, 0)), None, true).is_empty());
+        assert!(
+            transmit_summary(Some(stats(50, 0)), Some(sent(0, 0)), false)
+                .contains("Sending is off")
+        );
+        assert!(
+            transmit_summary(Some(stats(50, 0)), Some(sent(0, 50)), true)
+                .contains("encryption keys from the call")
+        );
+        assert!(
+            transmit_summary(Some(stats(50, 50)), Some(sent(0, 0)), true)
+                .contains("below the input sensitivity")
+        );
+        let ok = transmit_summary(Some(stats(50, 5)), Some(sent(45, 0)), true);
+        assert!(ok.contains("45 packets sent") && ok.ends_with("Sending."));
+    }
     fn explicit(id: &str, label: &str) -> Selection {
         Selection {
             choice: DeviceChoice::Device(DeviceKey::from_persisted(id).unwrap()),
