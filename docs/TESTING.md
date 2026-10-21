@@ -117,19 +117,17 @@ Release build of `eee1bb3` and then `eeaac04`. Authorized alt `skadimvp` in fast
   - A long voice-channel name drew under the Chat button (`eeaac04`).
   - `[label](<url>)` masked links and formatting inside their labels (`a773e07`).
   - Message times are now local instead of UTC, `<t:…>` timestamp markup renders, and the disabled mic and deafen buttons get honest tooltips (`44f5938`).
-  - The second and third fixes are not yet re-checked live.
-  - Voice channel rows list their members (avatar, name, muted or deafened icon, at most 8 and "+N"), the call bar lists the account first and shows avatars, and the status menu closes after a choice. Not yet re-checked live.
-- **Found, still open:**
-  - A message that mentions the account has no row highlight.
-  - The emoji picker is a single column of solid-blue rows.
-  - Voice channel rows do not list their participants.
-  - The call bar does not include the account itself and shows initials instead of avatars.
-  - The status menu stays open after a choice.
-  - The emoji picker is a single column of solid-blue rows (now a hover-highlight grid; not yet re-checked live).
-  - Invite links have no invite card.
-  - Embed thumbnails are not shown (now fetched from the media proxy; not yet re-checked live).
-  - Resizing the window loses the timeline's bottom anchor ("Jump to latest" appears).
-  - Errors show only a generic reason: a refused password login says only "HTTP 400", and a refused send only maps 403. Neither shows Discord's error code or message.
+  - Re-checked live on the same day with release `2ae50da`: the masked links, local times and `<t:…>` styles match the official client, and relative times round like it does ("7 days ago").
+- **Fixed after the check (agent fixes), re-checked live with release `2ae50da`, read-only:**
+  - A message that mentions the account gets a tinted row with a gold bar, for both a direct mention and a mention in another channel.
+  - Restoring and maximizing the window keeps the timeline at the latest message.
+  - The emoji picker is a 9-wide grid with a hover highlight, and hovering names the emoji in the footer.
+  - The Avito link embed shows its thumbnail at the right of the card, fetched through Discord's media proxy.
+  - The status menu closes after a choice.
+  - Joining "сквад 1" lists the account under the voice row with its avatar and a muted icon, and the row disappears on leave. The call bar now includes the account with its avatar.
+  - Only one participant was available, so the "+N" cap was not seen live.
+  - Refused logins and sends now show Discord's code and reason. This was not exercised live: the restricted alt was not used to send again.
+- **Still open:** invite links have no invite card.
 - **Account risk:**
   - About ten minutes into the session, Discord revoked the alt's token. The maintainer then received an "action on your account" notice.
   - Before the revocation, three fastcord instances had been running concurrently with the same token by mistake: the agent's application launcher starts a new process each time.
