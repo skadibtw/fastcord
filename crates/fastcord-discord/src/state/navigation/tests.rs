@@ -1734,8 +1734,8 @@ fn voice_rows_are_followed_by_their_capped_occupants() {
             mute: user == 1,
             self_deaf: user == 2,
             self_mute: false,
-            self_stream: false,
-            self_video: false,
+            self_stream: user == 3,
+            self_video: user == 4,
             suppress: false,
         };
         store.apply(event(Dispatch::VoiceStateUpdate(Box::new(
@@ -1765,6 +1765,22 @@ fn voice_rows_are_followed_by_their_capped_occupants() {
     assert!(matches!(
         &window.rows[3].occupant,
         Some(Occupant::Member { deafened: true, .. })
+    ));
+    assert!(matches!(
+        &window.rows[4].occupant,
+        Some(Occupant::Member {
+            streaming: true,
+            video: false,
+            ..
+        })
+    ));
+    assert!(matches!(
+        &window.rows[5].occupant,
+        Some(Occupant::Member {
+            streaming: false,
+            video: true,
+            ..
+        })
     ));
     assert_eq!(window.rows[10].occupant, Some(Occupant::More(3)));
     // A window in the middle of the list slices the same flat rows.

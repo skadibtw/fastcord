@@ -38,8 +38,8 @@ pub struct Chrome<'a> {
     pub footer: Element<'a, Message>,
     /// Connection and notice lines above the conversation.
     pub banner: Option<Element<'a, Message>>,
-    /// Who is in the call and Go Live controls, while there is one.
-    pub voice_bar: Option<Element<'a, Message>>,
+    /// People speaking in the call now (their occupant avatars get a ring).
+    pub speaking: Vec<fastcord_model::Snowflake>,
     /// The Friends screen, which replaces the conversation in direct messages.
     pub friends: Option<Element<'a, Message>>,
     /// The unified inbox, which replaces the conversation while open.
@@ -62,13 +62,20 @@ pub fn view<'a>(
         directs,
         footer,
         banner,
-        voice_bar,
+        speaking,
         friends,
         inbox,
         voice_call,
     } = chrome;
     let rail = rail(snapshot, directs, inbox.is_some(), attachments.avatars);
-    let sidebar = sidebar(snapshot, private, directs, footer, attachments.avatars);
+    let sidebar = sidebar(
+        snapshot,
+        private,
+        directs,
+        footer,
+        attachments.avatars,
+        speaking,
+    );
     let main = match inbox.or(friends.filter(|_| directs)) {
         Some(friends) => friends,
         None => main_pane(
@@ -79,7 +86,6 @@ pub fn view<'a>(
             attachments,
             directs,
             banner,
-            voice_bar,
             voice_call,
         ),
     };
@@ -285,10 +291,14 @@ fn sidebar_row<'a>(
 }
 
 /// One person (or the "+N" rest) under a voice row, at the fixed row height.
-fn occupant_row<'a>(
+/// A ring marks someone speaking in the call this account is in; the tags show
+/// Go Live, camera, mute and deafen. Clicking a person opens their profile.
+pub(crate) fn occupant_row<'a>(
     occupant: &'a Occupant,
+    speaking: bool,
     avatar_views: &HashMap<AvatarKey, image::Handle>,
 ) -> Element<'a, Message> {
+    const TAG: f32 = 14.0;
     let line: Element<'a, Message> = match occupant {
         Occupant::More(more) => text(format!("+{more}"))
             .size(12)
@@ -300,38 +310,68 @@ fn occupant_row<'a>(
             avatar,
             muted,
             deafened,
+            streaming,
+            video,
         } => {
-            let mut line = row![
-                avatars::view(
-                    avatar_views,
-                    &AvatarKey::user(*user_id, avatar.as_deref()),
-                    22.0,
-                    || container(text(style::initial(name)).size(11).font(BOLD))
+            let face = container(avatars::view(
+                avatar_views,
+                &AvatarKey::user(*user_id, avatar.as_deref()),
+                22.0,
+                || {
+                    container(text(style::initial(name)).size(11).font(BOLD))
                         .center(22)
                         .style(style::avatar(style::avatar_color(user_id.0)))
-                        .into(),
-                ),
+                        .into()
+                },
+            ))
+            .padding(2)
+            .style(style::avatar_ring(speaking));
+            let mut line = row![
+                face,
                 container(text(name.as_str()).size(13).wrapping(text::Wrapping::None))
                     .width(Length::Fill)
                     .clip(true),
             ]
-            .spacing(8)
+            .spacing(6)
             .align_y(alignment::Vertical::Center);
+            if *streaming {
+                line = line.push(
+                    container(text("LIVE").size(9).font(BOLD))
+                        .padding([1, 4])
+                        .style(style::live_badge),
+                );
+            }
+            if *video {
+                line = line.push(icons::sized(Icon::Camera { on: true }, style::MUTED, TAG));
+            }
             if *muted {
-                line = line.push(icons::icon(Icon::Mic { muted: true }, style::MUTED));
+                line = line.push(icons::sized(Icon::Mic { muted: true }, style::MUTED, TAG));
             }
             if *deafened {
-                line = line.push(icons::icon(
+                line = line.push(icons::sized(
                     Icon::Headphones { deafened: true },
                     style::MUTED,
+                    TAG,
                 ));
             }
-            line.into()
+            let user = fastcord_model::User {
+                id: *user_id,
+                username: name.clone(),
+                global_name: None,
+                avatar: avatar.clone(),
+                bot: false,
+            };
+            button(line)
+                .on_press(Message::Friends(crate::friends::Event::Profile(user)))
+                .width(Length::Fill)
+                .padding(0)
+                .style(style::plain_button)
+                .into()
         }
     };
     container(line)
         .height(ROW_HEIGHT)
-        .padding(Padding::new(0.0).left(32.0).right(8.0))
+        .padding(Padding::new(0.0).left(26.0).right(8.0))
         .align_y(alignment::Vertical::Center)
         .clip(true)
         .into()
@@ -343,6 +383,7 @@ fn sidebar<'a>(
     directs: bool,
     footer: Element<'a, Message>,
     avatar_views: &'a HashMap<AvatarKey, image::Handle>,
+    speaking: Vec<fastcord_model::Snowflake>,
 ) -> Element<'a, Message> {
     let PrivateConversation {
         recipients,
@@ -431,9 +472,13 @@ fn sidebar<'a>(
         ]
         .into()
     } else {
-        let rows = snapshot.channels.rows.iter().map(|channel| {
+        let rows = snapshot.channels.rows.iter().map(move |channel| {
             if let Some(occupant) = &channel.occupant {
-                return occupant_row(occupant, avatar_views);
+                let talking = matches!(
+                    occupant,
+                    Occupant::Member { user_id, .. } if speaking.contains(user_id)
+                );
+                return occupant_row(occupant, talking, avatar_views);
             }
             if channel.kind == ChannelKind::Category {
                 return container(
@@ -600,7 +645,6 @@ fn main_pane<'a>(
     attachments: timeline::Attachments<'a>,
     directs: bool,
     banner: Option<Element<'a, Message>>,
-    voice_bar: Option<Element<'a, Message>>,
     voice_call: Option<fastcord_model::Snowflake>,
 ) -> Element<'a, Message> {
     let mut body = column![].width(Length::Fill).height(Length::Fill);
@@ -651,9 +695,6 @@ fn main_pane<'a>(
         ));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
-        }
-        if let Some(bar) = voice_bar {
-            body = body.push(container(bar).padding([4, 16]));
         }
         let bar = unread_bar(
             selection.unread,
@@ -754,9 +795,6 @@ fn main_pane<'a>(
                 if let Some(banner) = banner {
                     body = body.push(container(banner).padding([4, 16]));
                 }
-                if let Some(bar) = voice_bar {
-                    body = body.push(container(bar).padding([4, 16]));
-                }
                 if permissions.read_history {
                     let bar = unread_bar(
                         selection.unread,
@@ -821,4 +859,53 @@ fn unread_bar<'a>(
         .align_y(alignment::Vertical::Center)
         .into(),
     )
+}
+
+#[cfg(test)]
+mod occupant_tests {
+    use super::*;
+    use crate::variable_list::harness::Ui;
+    use fastcord_model::Snowflake;
+
+    fn member(streaming: bool, video: bool) -> Occupant {
+        Occupant::Member {
+            user_id: Snowflake(7),
+            name: "A person with an extremely long display name indeed".into(),
+            avatar: None,
+            muted: true,
+            deafened: true,
+            streaming,
+            video,
+        }
+    }
+
+    #[test]
+    fn occupant_rows_with_every_marker_stay_in_the_sidebar_and_open_the_profile() {
+        let views = HashMap::new();
+        for (speaking, streaming, video) in [(false, false, false), (true, true, true)] {
+            let occupant = member(streaming, video);
+            let mut ui = Ui::new(
+                SIDEBAR_WIDTH,
+                ROW_HEIGHT,
+                occupant_row(&occupant, speaking, &views),
+            );
+            ui.draw();
+            let opened = ui.click(100.0, ROW_HEIGHT / 2.0);
+            assert!(
+                matches!(
+                    opened.as_slice(),
+                    [Message::Friends(crate::friends::Event::Profile(user))] if user.id == Snowflake(7)
+                ),
+                "{opened:?}"
+            );
+        }
+        let more = Occupant::More(3);
+        let mut ui = Ui::new(
+            SIDEBAR_WIDTH,
+            ROW_HEIGHT,
+            occupant_row(&more, false, &views),
+        );
+        ui.draw();
+        assert!(ui.click(100.0, ROW_HEIGHT / 2.0).is_empty());
+    }
 }

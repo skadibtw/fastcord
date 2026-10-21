@@ -189,6 +189,10 @@ pub enum Occupant {
         avatar: Option<String>,
         muted: bool,
         deafened: bool,
+        /// Streaming (Go Live) in this channel.
+        streaming: bool,
+        /// Camera on.
+        video: bool,
     },
     More(usize),
 }
@@ -608,6 +612,8 @@ impl Navigation {
                             avatar: user.and_then(|user| user.avatar.clone()),
                             muted: state.mute || state.self_mute,
                             deafened: state.deaf || state.self_deaf,
+                            streaming: state.self_stream,
+                            video: state.self_video,
                         }
                     })
                     .collect();

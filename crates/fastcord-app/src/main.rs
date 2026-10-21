@@ -62,8 +62,7 @@ use fastcord_model::{Snowflake, VoiceStateRequest};
 use fastcord_platform::{NativeCredentialStore, StoreError};
 use gateway::{AttachmentAction, GatewayPanel, GatewayStatus};
 use iced::widget::{
-    button, center, checkbox, column, container, pick_list, qr_code, row, scrollable, slider, text,
-    text_input,
+    button, center, checkbox, column, container, qr_code, row, scrollable, text, text_input,
 };
 use iced::{Color, Element, Length, Task};
 use login::{LoginError, LoginOutcome, Persistence, Session, StoreReady};
@@ -230,9 +229,9 @@ enum Message {
     UnwatchStream(String),
     /// Open or close the call view (the large layout of the call's videos).
     ShowStream(bool),
+    /// The voice panel's heading: the large call view, and the call's chat for a server call.
+    OpenCall,
     SetCallMode(call_layout::Mode),
-    /// Open the call view with this video large.
-    OpenTile(call_layout::TileId),
     /// Pin a video (it becomes the large one) or unpin it.
     PinTile(call_layout::TileId),
     /// One video fills the call view, or the full view ends.
@@ -1451,6 +1450,15 @@ impl App {
                     }
                 }
             }
+            Message::OpenCall => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    if let Some((Some(guild), channel)) = gateway.controls.voice_target() {
+                        self.threads.close();
+                        gateway.controls.select_channel(guild, channel);
+                    }
+                    gateway.call_view.open = gateway.voice_guild.or(gateway.voice_call).is_some();
+                }
+            }
             Message::ShowStream(open) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     let any = !gateway.controls.watched().is_empty()
@@ -1466,14 +1474,6 @@ impl App {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.call_view.mode = mode;
                     gateway.call_view.full = None;
-                }
-            }
-            Message::OpenTile(id) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
-                    gateway.call_view.pinned = Some(id);
-                    gateway.call_view.mode = call_layout::Mode::Focus;
-                    gateway.call_view.full = None;
-                    gateway.call_view.open = true;
                 }
             }
             Message::PinTile(id) => {
@@ -2295,30 +2295,20 @@ impl App {
         Task::none()
     }
 
-    /// The overlay that lists the screens and windows that can be shared.
-    /// The camera button, the picker and the camera's status in the voice bar.
-    /// The camera turns on only by this button.
-    /// The soundboard button of the voice bar: shown for a server call whose channel the
+    /// The soundboard button of the voice panel: shown for a server call whose channel the
     /// sidebar knows (its permissions come from that row). Previewing needs no permission;
     /// playing needs `USE_SOUNDBOARD` and `SPEAK`.
-    fn soundboard_button<'a>(
-        &'a self,
-        actions: iced::widget::Row<'a, Message>,
-        gateway: &'a GatewayPanel,
-    ) -> iced::widget::Row<'a, Message> {
-        let Some((Some(guild), channel)) = gateway.controls.voice_target() else {
-            return actions;
+    fn soundboard_toggle(&self, gateway: &GatewayPanel) -> Option<(bool, Message)> {
+        let (Some(guild), channel) = gateway.controls.voice_target()? else {
+            return None;
         };
-        let Some(permissions) = gateway
+        let permissions = gateway
             .navigation
             .channels
             .rows
             .iter()
             .find(|row| row.id == channel)
-            .map(|row| row.permissions)
-        else {
-            return actions;
-        };
+            .map(|row| row.permissions)?;
         let open = self.soundboard.is_open();
         let event = if open {
             soundboard::Event::Close
@@ -2329,78 +2319,7 @@ impl App {
                 can_play: permissions.use_soundboard && permissions.speak,
             })
         };
-        actions.push(
-            button(text("Soundboard").size(12))
-                .on_press(Message::Soundboard(event))
-                .style(style::action_button(open)),
-        )
-    }
-
-    fn camera_controls<'a>(
-        &'a self,
-        mut actions: iced::widget::Row<'a, Message>,
-        voice_controls: &gateway::VoiceControls,
-        running: bool,
-    ) -> iced::widget::Row<'a, Message> {
-        let camera = &voice_controls.camera;
-        if gateway::can_send_camera() {
-            actions = actions.push(
-                button(
-                    text(if camera.wanted {
-                        "Camera off"
-                    } else {
-                        "Camera on"
-                    })
-                    .size(12),
-                )
-                .on_press_maybe((running || camera.wanted).then_some(Message::ToggleCamera))
-                .style(style::action_button(camera.wanted)),
-            );
-            let saved = &self.audio_preferences.camera;
-            actions = actions.push(
-                pick_list(
-                    self.camera_list.choices(saved),
-                    Some(self.camera_list.selected(saved)),
-                    Message::SelectCamera,
-                )
-                .text_size(12),
-            );
-            actions = actions.push(
-                pick_list(
-                    fastcord_video::effect::Effect::ALL,
-                    Some(saved.effect),
-                    Message::SelectCameraEffect,
-                )
-                .text_size(12),
-            );
-            actions = actions.push(
-                checkbox(saved.mirror)
-                    .label("Mirror preview")
-                    .size(14)
-                    .text_size(12)
-                    .on_toggle(Message::SetMirrorPreview),
-            );
-            actions = actions.push(
-                button(
-                    text(if self.camera_list.probing {
-                        "Looking for cameras…"
-                    } else {
-                        "Find cameras"
-                    })
-                    .size(12),
-                )
-                .on_press_maybe((!self.camera_list.probing).then_some(Message::ListCameras))
-                .style(style::tool_button(false, false)),
-            );
-        }
-        let status = match &self.camera_list.error {
-            Some(error) if camera.status == gateway::CameraStatus::Off => error.clone(),
-            _ => gateway::describe_camera(camera),
-        };
-        if !status.is_empty() {
-            actions = actions.push(text(status).size(12));
-        }
-        actions
+        Some((open, Message::Soundboard(event)))
     }
 
     fn share_picker_view(picker: &gateway::SharePicker) -> Element<'_, Message> {
@@ -3259,196 +3178,106 @@ impl App {
                 ..iced::Font::DEFAULT
             };
 
-            // ---- the voice bar: who is in the call, Go Live ----
-            let voice_bar: Option<Element<'_, Message>> = (in_voice
-                || !voice_controls.streams.is_empty()
-                || !watching.is_empty())
-            .then(|| {
-                let mut people = row![].spacing(8).align_y(iced::alignment::Vertical::Center);
-                // Everyone in the call, the account first (it is never in the
-                // remote participant list).
-                let me = own_user(gateway, session);
-                let everyone = call_ui::people(me, &voice_controls, in_voice);
-                for call_ui::Person {
-                    user,
-                    name,
-                    speaking,
-                    key,
-                } in everyone
-                {
-                    people = people.push(
-                        container(
-                            row![
-                                avatars::view(&gateway.avatars.views, &key, 24.0, || {
-                                    container(text(style::initial(&name)).size(12).font(bold))
-                                        .center(24)
-                                        .style(style::avatar(style::avatar_color(user.0)))
-                                        .into()
-                                }),
-                                text(name.clone()).size(13),
-                            ]
-                            .spacing(6)
-                            .align_y(iced::alignment::Vertical::Center),
-                        )
-                        .padding([3, 8])
-                        .style(style::speaking(speaking)),
-                    );
-                }
-                if voice_controls.participants.is_empty() {
-                    people = people.push(
-                        text(if in_voice {
-                            "Waiting for others to speak…"
-                        } else {
-                            ""
-                        })
-                        .size(12)
-                        .style(text::secondary),
-                    );
-                }
-                let mut actions = row![
-                    button(
-                        text(if self.voice_details {
-                            "Hide volume"
-                        } else {
-                            "Volume"
-                        })
-                        .size(12)
-                    )
-                    .on_press(Message::ToggleVoiceDetails)
-                    .style(style::tool_button(self.voice_details, false)),
-                ]
-                .spacing(8)
-                .align_y(iced::alignment::Vertical::Center);
-                for session in &watching {
-                    let owner = call_layout::stream_owner(&session.key).map_or_else(
-                        || "stream".to_owned(),
-                        |owner| voice_controls.display_name(owner),
-                    );
-                    actions = actions
-                        .push(text(format!("{owner}: {}", session.description())).size(12))
-                        .push(
-                            button(text("Stop watching").size(12))
-                                .on_press(Message::UnwatchStream(session.key.clone()))
-                                .style(style::action_button(true)),
-                        );
-                }
-                for offer in voice_controls.streams.iter() {
-                    if watching.iter().any(|session| session.key == offer.key) {
-                        continue;
+            // ---- the voice panel and its settings, above the account footer ----
+            let share = gateway.controls.share_view();
+            let voice_panel: Option<Element<'_, Message>> = in_voice.then(|| {
+                let place = match (gateway.voice_guild, gateway.voice_call) {
+                    (Some(_), _) => {
+                        let channel = gateway.controls.voice_target().map(|(_, channel)| channel);
+                        let name = gateway
+                            .navigation
+                            .channels
+                            .rows
+                            .iter()
+                            .find(|row| Some(row.id) == channel && row.occupant.is_none())
+                            .map(|row| row.name.as_str());
+                        match (name, gateway.navigation.selected_guild_name.as_str()) {
+                            (Some(name), "") => name.to_owned(),
+                            (Some(name), guild) => format!("{name} / {guild}"),
+                            (None, _) => "Voice channel".to_owned(),
+                        }
                     }
-                    actions = actions.push(
-                        button(
-                            text(format!(
-                                "Watch {}",
-                                voice_controls.display_name(offer.owner)
-                            ))
-                            .size(12),
-                        )
-                        .on_press_maybe(running.then(|| Message::WatchStream(offer.key.clone())))
-                        .style(style::action_button(false)),
-                    );
-                }
-                if !video_tiles.is_empty() {
-                    actions = actions.push(
-                        button(text("Call video").size(12))
-                            .on_press(Message::ShowStream(!gateway.call_view.open))
-                            .style(style::tool_button(gateway.call_view.open, false)),
-                    );
-                }
-                let share = gateway.controls.share_view();
-                if share.active {
-                    actions = actions.push(text(share.text.clone()).size(12)).push(
-                        button(text("Stop sharing").size(12))
-                            .on_press(Message::StopShare)
-                            .style(style::action_button(true)),
-                    );
-                } else if cfg!(windows) {
-                    actions = actions.push(
-                        button(text("Share screen").size(12))
-                            .on_press_maybe(
-                                (running
+                    (None, Some(call)) => gateway
+                        .navigation
+                        .private_channels
+                        .rows
+                        .iter()
+                        .find(|row| row.id == call)
+                        .map_or_else(|| "Private call".to_owned(), |row| row.label.clone()),
+                    (None, None) => String::new(),
+                };
+                call_ui::bar(call_ui::Bar {
+                    state: voice_audio,
+                    place,
+                    camera: gateway::can_send_camera().then_some((
+                        voice_controls.camera.wanted,
+                        running || voice_controls.camera.wanted,
+                    )),
+                    share: cfg!(windows).then(|| {
+                        if share.active {
+                            (true, true)
+                        } else {
+                            (
+                                false,
+                                running
                                     && (gateway.voice_guild.is_some()
                                         || gateway.voice_call.is_some())
-                                    && !gateway.share_picker.is_open())
-                                .then_some(Message::OpenSharePicker),
+                                    && !gateway.share_picker.is_open(),
                             )
-                            .style(style::action_button(false)),
-                    );
-                    if !share.text.is_empty() {
-                        actions = actions.push(text(share.text.clone()).size(12));
-                    }
-                }
-                if in_voice {
-                    actions = self.camera_controls(actions, &voice_controls, running);
-                    actions = self.soundboard_button(actions, gateway);
-                }
-                let mut bar = column![
-                    scrollable(people).direction(scrollable::Direction::Horizontal(
-                        scrollable::Scrollbar::default()
-                    )),
-                    scrollable(actions).direction(scrollable::Direction::Horizontal(
-                        scrollable::Scrollbar::default()
-                    )),
-                ]
-                .spacing(6);
-                if let Some(strip) = call_ui::strip(
-                    &gateway.call_view,
-                    &video_tiles,
-                    &video_plan,
-                    &voice_controls,
-                ) {
-                    bar = bar.push(strip);
-                }
-                if self.voice_details {
-                    for participant in &voice_controls.participants {
-                        let user = participant.user_id;
-                        let volume = voice_controls.volume_percent(user);
-                        bar = bar.push(
-                            row![
-                                text(voice_controls.display_name(user))
-                                    .size(12)
-                                    .width(Length::Fixed(110.0)),
-                                slider(0.0..=200.0, volume as f32, move |value| {
-                                    Message::SetParticipantVolume(user, value.round() as u16)
-                                })
-                                .on_release(Message::CommitParticipantVolume(user))
-                                .width(Length::Fixed(220.0)),
-                                button(text("0%").size(11))
-                                    .on_press(Message::PresetParticipantVolume(user, 0))
-                                    .style(style::tool_button(false, false)),
-                                button(text("100%").size(11))
-                                    .on_press(Message::PresetParticipantVolume(user, 100))
-                                    .style(style::tool_button(false, false)),
-                                text(format!("{volume}%")).size(12),
-                            ]
-                            .spacing(8)
-                            .align_y(iced::alignment::Vertical::Center),
-                        );
-                    }
-                    bar = bar.push(
-                        text(
-                            "Server restrictions: ".to_owned()
-                                + if voice_controls.server_muted {
-                                    "muted. "
-                                } else {
-                                    "none to mute. "
-                                }
-                                + if voice_controls.server_deafened {
-                                    "Deafened."
-                                } else {
-                                    ""
-                                },
-                        )
-                        .size(11)
-                        .style(text::secondary),
-                    );
-                }
-                container(bar)
-                    .padding(8)
-                    .width(Length::Fill)
-                    .style(style::card)
-                    .into()
+                        }
+                    }),
+                    soundboard: self.soundboard_toggle(gateway),
+                    settings_open: self.voice_details,
+                    can_leave: gateway.voice_guild.or(gateway.voice_call).is_some(),
+                    share_text: share.text.clone(),
+                })
             });
+            let voice_settings: Option<Element<'_, Message>> = (in_voice && self.voice_details)
+                .then(|| {
+                    let saved = &self.audio_preferences.camera;
+                    let camera = &voice_controls.camera;
+                    call_ui::settings(call_ui::Settings {
+                        camera: gateway::can_send_camera().then(|| call_ui::CameraSettings {
+                            choices: self.camera_list.choices(saved),
+                            selected: self.camera_list.selected(saved),
+                            effect: saved.effect,
+                            mirror: saved.mirror,
+                            probing: self.camera_list.probing,
+                            status: match &self.camera_list.error {
+                                Some(error) if camera.status == gateway::CameraStatus::Off => {
+                                    error.clone()
+                                }
+                                _ => gateway::describe_camera(camera),
+                            },
+                        }),
+                        voice: &voice_controls,
+                        watching: watching
+                            .iter()
+                            .map(|session| {
+                                let owner = call_layout::stream_owner(&session.key).map_or_else(
+                                    || "stream".to_owned(),
+                                    |owner| voice_controls.display_name(owner),
+                                );
+                                (
+                                    session.key.clone(),
+                                    format!("{owner}: {}", session.description()),
+                                )
+                            })
+                            .collect(),
+                        offers: voice_controls
+                            .streams
+                            .iter()
+                            .filter(|offer| {
+                                !watching.iter().any(|session| session.key == offer.key)
+                            })
+                            .map(|offer| {
+                                (offer.key.clone(), voice_controls.display_name(offer.owner))
+                            })
+                            .collect(),
+                        running,
+                    })
+                });
+            let talking = call_ui::speaking(&voice_controls);
 
             // ---- connection and notices above the conversation ----
             let mut notes: Vec<(String, bool)> = Vec::new();
@@ -3590,39 +3419,11 @@ impl App {
                         .map(Message::Status),
                 );
             }
-            if in_voice {
-                foot = foot.push(
-                    container(
-                        row![
-                            column![
-                                text(match voice_audio {
-                                    gateway::VoiceAudioState::Connecting => "Connecting…",
-                                    gateway::VoiceAudioState::EngineFailed => "Audio failed",
-                                    _ => "Voice connected",
-                                })
-                                .size(13)
-                                .font(bold)
-                                .color(match voice_audio {
-                                    gateway::VoiceAudioState::EngineFailed => style::RED,
-                                    gateway::VoiceAudioState::Connecting => style::YELLOW,
-                                    _ => style::GREEN,
-                                }),
-                            ]
-                            .width(Length::Fill),
-                            button(text("Leave").size(12))
-                                .on_press_maybe(
-                                    gateway
-                                        .voice_guild
-                                        .or(gateway.voice_call)
-                                        .map(|_| Message::LeaveVoice),
-                                )
-                                .style(style::action_button(true)),
-                        ]
-                        .align_y(iced::alignment::Vertical::Center),
-                    )
-                    .padding([8, 10])
-                    .style(style::footer),
-                );
+            if let Some(settings) = voice_settings {
+                foot = foot.push(settings);
+            }
+            if let Some(panel) = voice_panel {
+                foot = foot.push(panel);
             }
             let requests = gateway.navigation.requests.total;
             let identity = row![
@@ -3775,7 +3576,7 @@ impl App {
                     directs: gateway.directs,
                     footer: foot.into(),
                     banner,
-                    voice_bar,
+                    speaking: talking,
                     voice_call: gateway.voice_call.filter(|_| in_voice),
                     inbox: self.inbox.is_open().then(|| {
                         inbox::view(&self.inbox, &gateway.navigation.inbox).map(Message::Inbox)
@@ -5059,5 +4860,73 @@ mod tests {
             state(&app),
             (Some(guild), gateway::VoiceAudioState::Connecting)
         );
+    }
+
+    #[test]
+    fn the_voice_panel_exists_only_in_a_call_and_sits_above_the_account_footer() {
+        use crate::variable_list::harness::Ui;
+        use fastcord_discord::state::navigation::{
+            ChannelKind, ChannelRow, NavigationSnapshot, PermissionSummary, Window,
+        };
+        use std::collections::BTreeSet;
+        let (guild, voice) = (Snowflake(10), Snowflake(11));
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("not logged in");
+        };
+        gateway.navigation = Arc::new(NavigationSnapshot {
+            selected_guild: Some(guild),
+            channels: Window {
+                offset: 0,
+                total: 1,
+                rows: vec![ChannelRow {
+                    id: voice,
+                    name: "Lounge".to_owned(),
+                    kind: ChannelKind::Voice,
+                    parent_id: None,
+                    enabled: true,
+                    selected: false,
+                    permissions: PermissionSummary {
+                        view_channel: true,
+                        connect: true,
+                        ..PermissionSummary::default()
+                    },
+                    unread: false,
+                    mentions: 0,
+                    thread: None,
+                    occupant: None,
+                }],
+            },
+            ..NavigationSnapshot::default()
+        });
+        // Clicks over the bottom of the sidebar (rail is 72 px, sidebar 240 px).
+        let bottom = |app: &App| -> BTreeSet<String> {
+            let mut ui = Ui::new(1000.0, 700.0, app.view());
+            let mut hit = BTreeSet::new();
+            for y in (440..700).step_by(4) {
+                for x in (72..312).step_by(4) {
+                    for message in ui.click(x as f32, y as f32) {
+                        let name = format!("{message:?}");
+                        hit.insert(name.split(['(', ' ']).next().unwrap().to_owned());
+                    }
+                }
+            }
+            hit
+        };
+        let idle = bottom(&app);
+        assert!(
+            !idle.contains("OpenCall") && !idle.contains("LeaveVoice"),
+            "{idle:?}"
+        );
+        // The footer's own actions are there all along.
+        assert!(idle.contains("Logout"), "{idle:?}");
+        let _ = app.update(Message::JoinVoice(guild, voice));
+        let joined = bottom(&app);
+        for name in ["OpenCall", "LeaveVoice", "ToggleVoiceDetails", "Logout"] {
+            assert!(joined.contains(name), "{name}: {joined:?}");
+        }
+        // Mute and deafen stay in the account footer, not in the voice panel.
+        assert!(joined.contains("OpenAudioSettings"), "{joined:?}");
     }
 }

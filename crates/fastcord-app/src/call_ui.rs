@@ -1,50 +1,34 @@
-//! The call's video tiles on screen (SPEC §8.10, issue #86): the compact strip
-//! in the voice bar and the large call view with its grid, focus and speaker
-//! layouts, pinning, full view and the people who have no video.
+//! The call on screen (SPEC §8.10, issues #86 and #115): the voice panel at the
+//! bottom of the sidebar with its call settings, and the large call view with
+//! its grid, focus and speaker layouts, pinning, full view and the people who
+//! have no video.
 //!
 //! Drawing only: which tiles exist and which are drawn is decided by
 //! [`CallView::plan`], and a tile that is not drawn here is not decoded.
 
 use fastcord_model::Snowflake;
-use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, text};
+use fastcord_video::effect::Effect;
+use iced::widget::{
+    button, checkbox, column, container, pick_list, row, scrollable, slider, text, tooltip,
+};
 use iced::{Element, Length};
 
 use crate::Message;
 use crate::call_layout::{CallView, Mode, Plan, Tile, TileId, TileSize, stream_owner};
-use crate::gateway::{VoiceControls, preview_caption};
+use crate::gateway::{CameraChoice, VoiceAudioState, VoiceControls, preview_caption};
+use crate::icons::{self, Action, Icon};
 use crate::{playback, style};
+
+const BOLD: iced::Font = iced::Font {
+    weight: iced::font::Weight::Bold,
+    ..iced::Font::DEFAULT
+};
+
+/// Names clip rather than wrap, so nothing grows past the 240 px sidebar.
+const NAME: text::Wrapping = text::Wrapping::None;
 
 /// People without video listed beside the tiles.
 const MAX_LISTED_PEOPLE: usize = 24;
-
-/// One chip of the voice bar.
-pub struct Person {
-    pub user: Snowflake,
-    pub name: String,
-    pub speaking: bool,
-    pub key: crate::avatars::AvatarKey,
-}
-
-/// Everyone in the call: the account itself first (the remote participant
-/// list never holds it), then the others. Nobody while there is no call.
-pub fn people(me: &fastcord_model::User, voice: &VoiceControls, in_call: bool) -> Vec<Person> {
-    let own = Person {
-        user: me.id,
-        name: me.display_name().to_owned(),
-        speaking: false,
-        key: crate::avatars::AvatarKey::user(me.id, me.avatar.as_deref()),
-    };
-    in_call
-        .then_some(own)
-        .into_iter()
-        .chain(voice.participants.iter().map(|p| Person {
-            user: p.user_id,
-            name: voice.display_name(p.user_id),
-            speaking: p.speaking,
-            key: voice.avatar_key(p.user_id),
-        }))
-        .collect()
-}
 
 /// The users speaking now.
 pub fn speaking(voice: &VoiceControls) -> Vec<Snowflake> {
@@ -124,48 +108,6 @@ fn tile<'a>(
     .height(Length::Fill)
     .style(style::speaking(speaking))
     .into()
-}
-
-/// The compact strip of the voice bar: cameras only, all small, each opening
-/// the call view on that tile. `None` while the call view is open (it draws
-/// them) or when there is nothing to draw.
-pub fn strip<'a>(
-    view: &CallView,
-    tiles: &[Tile],
-    plan: &Plan,
-    voice: &VoiceControls,
-) -> Option<Element<'a, Message>> {
-    if view.open || plan.shown.is_empty() {
-        return None;
-    }
-    let mut strip = row![].spacing(8);
-    for (id, _) in &plan.shown {
-        let Some(found) = tiles.iter().find(|tile| tile.id == *id) else {
-            continue;
-        };
-        strip = strip.push(
-            column![
-                container(playback::view::<Message>(found.session.clone()))
-                    .width(Length::Fixed(192.0))
-                    .height(Length::Fixed(108.0)),
-                button(text(label(found, voice)).size(11))
-                    .width(Length::Fixed(192.0))
-                    .on_press(Message::OpenTile(id.clone()))
-                    .style(style::plain_button),
-            ]
-            .spacing(2),
-        );
-    }
-    let mut content = column![
-        scrollable(strip).direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::default()
-        ))
-    ]
-    .spacing(4);
-    if let Some(refusal) = plan.refusal() {
-        content = content.push(text(refusal).size(11).style(text::danger));
-    }
-    Some(content.into())
 }
 
 fn grid<'a>(
@@ -320,42 +262,419 @@ pub fn panel<'a>(
         .into()
 }
 
+/// What the voice panel shows. Each button is `Some((state, enabled))` only
+/// where the control exists on this platform and for this call.
+pub struct Bar {
+    pub state: VoiceAudioState,
+    /// `channel / server`, or the name of the private call.
+    pub place: String,
+    /// Camera: (on, enabled). `None` where the camera cannot be sent.
+    pub camera: Option<(bool, bool)>,
+    /// Screen share: (sharing, enabled). `None` where capture is unsupported.
+    pub share: Option<(bool, bool)>,
+    /// Soundboard: (panel open, the message that toggles it). `None` outside
+    /// a server call whose channel is known.
+    pub soundboard: Option<(bool, Message)>,
+    pub settings_open: bool,
+    /// The call can be left.
+    pub can_leave: bool,
+    /// Progress or the last failure of the screen share.
+    pub share_text: String,
+}
+
+/// The connected panel above the account footer: state and place (opening the
+/// call view), Disconnect, and one row of icon buttons. Fits 240 px.
+pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
+    let (title, color, tip) = match bar.state {
+        VoiceAudioState::Connecting => (
+            "Connecting\u{2026}",
+            style::YELLOW,
+            "Connecting to voice. Click to open the call",
+        ),
+        VoiceAudioState::EngineFailed => (
+            "Audio failed",
+            style::RED,
+            "The audio devices could not be opened. Click to open the call",
+        ),
+        _ => (
+            "Voice Connected",
+            style::GREEN,
+            "Connected. Click to open the call",
+        ),
+    };
+    let place = if bar.place.is_empty() {
+        "Call".to_owned()
+    } else {
+        bar.place
+    };
+    let heading = tooltip(
+        button(
+            row![
+                icons::icon(Icon::Signal, color),
+                column![
+                    text(title).size(13).font(BOLD).color(color).wrapping(NAME),
+                    text(place).size(11).style(text::secondary).wrapping(NAME),
+                ]
+                .width(Length::Fill),
+            ]
+            .spacing(6)
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .on_press(Message::OpenCall)
+        .width(Length::Fill)
+        .padding(0)
+        .style(style::plain_button),
+        container(text(tip).size(11))
+            .padding([3, 6])
+            .style(container::rounded_box),
+        tooltip::Position::Top,
+    );
+    let hang_up = icons::action(Action {
+        icon: Icon::HangUp,
+        on_press: bar.can_leave.then_some(Message::LeaveVoice),
+        active: true,
+        danger: true,
+        tip: "Disconnect".to_owned(),
+        badge: 0,
+    });
+    let mut buttons = row![].spacing(4);
+    if let Some((on, enabled)) = bar.camera {
+        buttons = buttons.push(icons::action(Action {
+            icon: Icon::Camera { on },
+            on_press: enabled.then_some(Message::ToggleCamera),
+            active: on,
+            danger: false,
+            tip: if on {
+                "Turn off camera"
+            } else {
+                "Turn on camera"
+            }
+            .to_owned(),
+            badge: 0,
+        }));
+    }
+    if let Some((sharing, enabled)) = bar.share {
+        buttons = buttons.push(icons::action(Action {
+            icon: Icon::Screen { sharing },
+            on_press: enabled.then_some(if sharing {
+                Message::StopShare
+            } else {
+                Message::OpenSharePicker
+            }),
+            active: sharing,
+            danger: false,
+            tip: if sharing {
+                "Stop sharing"
+            } else {
+                "Share your screen"
+            }
+            .to_owned(),
+            badge: 0,
+        }));
+    }
+    if let Some((open, press)) = bar.soundboard {
+        buttons = buttons.push(icons::action(Action {
+            icon: Icon::Soundboard,
+            on_press: Some(press),
+            active: open,
+            danger: false,
+            tip: "Soundboard".to_owned(),
+            badge: 0,
+        }));
+    }
+    buttons = buttons.push(icons::action(Action {
+        icon: Icon::Settings,
+        on_press: Some(Message::ToggleVoiceDetails),
+        active: bar.settings_open,
+        danger: false,
+        tip: "Call settings: camera, volume, streams".to_owned(),
+        badge: 0,
+    }));
+    let mut content = column![
+        row![heading, hang_up]
+            .spacing(4)
+            .align_y(iced::alignment::Vertical::Center),
+        buttons,
+    ]
+    .spacing(6);
+    if !bar.share_text.is_empty() {
+        content = content.push(text(bar.share_text).size(11).style(text::secondary));
+    }
+    container(content)
+        .padding([8, 8])
+        .width(Length::Fill)
+        .clip(true)
+        .style(style::footer)
+        .into()
+}
+
+/// The camera part of the settings.
+pub struct CameraSettings {
+    pub choices: Vec<CameraChoice>,
+    pub selected: CameraChoice,
+    pub effect: Effect,
+    pub mirror: bool,
+    pub probing: bool,
+    /// What the camera is doing, or why the last search failed.
+    pub status: String,
+}
+
+/// Everything in the settings popover that the old call bar spread along the
+/// top: camera device, effect, mirror, Find cameras, the volume of each
+/// person, and the streams to watch.
+pub struct Settings<'a> {
+    pub camera: Option<CameraSettings>,
+    pub voice: &'a VoiceControls,
+    /// Streams being watched: (wire key, caption).
+    pub watching: Vec<(String, String)>,
+    /// Streams on offer: (wire key, owner name).
+    pub offers: Vec<(String, String)>,
+    /// Watching needs a running call.
+    pub running: bool,
+}
+
+pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
+    let heading = |label: &'static str| text(label).size(11).font(BOLD).style(text::secondary);
+    let mut content = column![].spacing(6);
+    if let Some(camera) = set.camera {
+        content = content.push(heading("CAMERA")).push(
+            pick_list(camera.choices, Some(camera.selected), Message::SelectCamera)
+                .text_size(12)
+                .width(Length::Fill),
+        );
+        content = content.push(
+            pick_list(
+                Effect::ALL,
+                Some(camera.effect),
+                Message::SelectCameraEffect,
+            )
+            .text_size(12)
+            .width(Length::Fill),
+        );
+        content = content.push(
+            checkbox(camera.mirror)
+                .label("Mirror preview")
+                .size(14)
+                .text_size(12)
+                .on_toggle(Message::SetMirrorPreview),
+        );
+        content = content.push(
+            button(
+                text(if camera.probing {
+                    "Looking for cameras\u{2026}"
+                } else {
+                    "Find cameras"
+                })
+                .size(12),
+            )
+            .on_press_maybe((!camera.probing).then_some(Message::ListCameras))
+            .style(style::tool_button(false, false)),
+        );
+        if !camera.status.is_empty() {
+            content = content.push(text(camera.status).size(11));
+        }
+    }
+    content = content.push(heading("VOLUME"));
+    if set.voice.participants.is_empty() {
+        content = content.push(
+            text("Nobody else is in the call.")
+                .size(11)
+                .style(text::secondary),
+        );
+    }
+    for participant in &set.voice.participants {
+        let user = participant.user_id;
+        let volume = set.voice.volume_percent(user);
+        content = content.push(
+            column![
+                row![
+                    container(text(set.voice.display_name(user)).size(12).wrapping(NAME))
+                        .width(Length::Fill)
+                        .clip(true),
+                    button(text("0%").size(11))
+                        .on_press(Message::PresetParticipantVolume(user, 0))
+                        .style(style::tool_button(false, false)),
+                    button(text("100%").size(11))
+                        .on_press(Message::PresetParticipantVolume(user, 100))
+                        .style(style::tool_button(false, false)),
+                    text(format!("{volume}%")).size(12),
+                ]
+                .spacing(4)
+                .align_y(iced::alignment::Vertical::Center),
+                slider(0.0..=200.0, volume as f32, move |value| {
+                    Message::SetParticipantVolume(user, value.round() as u16)
+                })
+                .on_release(Message::CommitParticipantVolume(user)),
+            ]
+            .spacing(2),
+        );
+    }
+    content = content.push(
+        text(
+            "Server restrictions: ".to_owned()
+                + if set.voice.server_muted {
+                    "muted. "
+                } else {
+                    "none to mute. "
+                }
+                + if set.voice.server_deafened {
+                    "Deafened."
+                } else {
+                    ""
+                },
+        )
+        .size(11)
+        .style(text::secondary),
+    );
+    if !set.watching.is_empty() || !set.offers.is_empty() {
+        content = content.push(heading("STREAMS"));
+    }
+    for (key, caption) in set.watching {
+        content = content.push(
+            row![
+                container(text(caption).size(12).wrapping(NAME))
+                    .width(Length::Fill)
+                    .clip(true),
+                button(text("Stop watching").size(11))
+                    .on_press(Message::UnwatchStream(key))
+                    .style(style::action_button(true)),
+            ]
+            .spacing(4)
+            .align_y(iced::alignment::Vertical::Center),
+        );
+    }
+    for (key, owner) in set.offers {
+        content = content.push(
+            button(text(format!("Watch {owner}")).size(12).wrapping(NAME))
+                .on_press_maybe(set.running.then(|| Message::WatchStream(key)))
+                .style(style::action_button(false)),
+        );
+    }
+    container(scrollable(
+        container(content).padding([8, 10]).width(Length::Fill),
+    ))
+    .max_height(320.0)
+    .width(Length::Fill)
+    .clip(true)
+    .style(style::footer)
+    .into()
+}
+
 #[cfg(test)]
-mod people_tests {
+mod tests {
     use super::*;
     use crate::gateway::VoiceParticipant;
+    use crate::variable_list::harness::Ui;
+    use std::collections::BTreeSet;
+
+    const WIDTH: f32 = crate::navigation::SIDEBAR_WIDTH;
+
+    fn bar_input(sharing: bool, enabled: bool) -> Bar {
+        Bar {
+            state: VoiceAudioState::Running,
+            place: "An extremely long voice channel name / An extremely long server name".into(),
+            camera: Some((false, enabled)),
+            share: Some((sharing, enabled)),
+            soundboard: Some((false, Message::ToggleVoiceDetails)),
+            settings_open: false,
+            can_leave: true,
+            share_text: String::new(),
+        }
+    }
+
+    /// Every message a click anywhere in the area publishes, as its debug name.
+    fn reachable(ui: &mut Ui<'_, Message>, from: i32, to: i32, height: i32) -> BTreeSet<String> {
+        let mut hit = BTreeSet::new();
+        for y in (0..height).step_by(2) {
+            for x in (from..to).step_by(2) {
+                for message in ui.click(x as f32, y as f32) {
+                    let name = format!("{message:?}");
+                    hit.insert(name.split(['(', ' ']).next().unwrap().to_owned());
+                }
+            }
+        }
+        hit
+    }
 
     #[test]
-    fn the_call_bar_lists_the_account_first_and_then_the_others() {
-        let me = fastcord_model::User {
-            id: Snowflake(1),
-            username: "me".into(),
-            global_name: None,
-            avatar: Some("abc".into()),
-            bot: false,
-        };
+    fn the_voice_panel_fits_the_sidebar_with_every_action_reachable() {
+        let mut ui = Ui::new(WIDTH, 120.0, bar(bar_input(false, true)));
+        let hit = reachable(&mut ui, 0, WIDTH as i32, 120);
+        for name in [
+            "OpenCall",
+            "LeaveVoice",
+            "ToggleCamera",
+            "OpenSharePicker",
+            "ToggleVoiceDetails",
+        ] {
+            assert!(hit.contains(name), "{name} is not reachable: {hit:?}");
+        }
+        // Nothing hangs out beyond the sidebar.
+        let mut wide = Ui::new(
+            WIDTH + 200.0,
+            120.0,
+            container(bar(bar_input(false, true))).width(WIDTH).into(),
+        );
+        assert!(reachable(&mut wide, WIDTH as i32, WIDTH as i32 + 200, 120).is_empty());
+    }
+
+    #[test]
+    fn sharing_turns_the_share_button_into_stop_and_idle_calls_disable_buttons() {
+        let mut ui = Ui::new(WIDTH, 120.0, bar(bar_input(true, true)));
+        let hit = reachable(&mut ui, 0, WIDTH as i32, 120);
+        assert!(hit.contains("StopShare") && !hit.contains("OpenSharePicker"));
+        // Connecting: camera and share are off, leaving and the settings stay.
+        let mut ui = Ui::new(WIDTH, 120.0, bar(bar_input(false, false)));
+        let hit = reachable(&mut ui, 0, WIDTH as i32, 120);
+        assert!(!hit.contains("ToggleCamera") && !hit.contains("OpenSharePicker"));
+        assert!(hit.contains("LeaveVoice") && hit.contains("ToggleVoiceDetails"));
+        let mut input = bar_input(false, true);
+        input.can_leave = false;
+        let mut ui = Ui::new(WIDTH, 120.0, bar(input));
+        assert!(!reachable(&mut ui, 0, WIDTH as i32, 120).contains("LeaveVoice"));
+    }
+
+    #[test]
+    fn settings_hold_the_controls_of_the_old_top_bar() {
         let voice = VoiceControls {
             participants: vec![VoiceParticipant {
                 user_id: Snowflake(2),
                 ssrc: None,
-                speaking: true,
+                speaking: false,
             }],
             names: vec![(Snowflake(2), "Ann".into())],
-            avatars: vec![(Snowflake(2), "def".into())],
             ..VoiceControls::default()
         };
-        let all = people(&me, &voice, true);
-        let seen: Vec<_> = all.iter().map(|p| (p.user.0, p.name.as_str())).collect();
-        assert_eq!(seen, [(1, "me"), (2, "Ann")]);
-        assert!(all[1].speaking && !all[0].speaking);
-        assert_eq!(
-            all[0].key,
-            crate::avatars::AvatarKey::user(me.id, Some("abc"))
-        );
-        assert_eq!(
-            all[1].key,
-            crate::avatars::AvatarKey::user(Snowflake(2), Some("def"))
-        );
-        assert_eq!(people(&me, &voice, false).len(), 1);
+        let first = CameraChoice {
+            id: None,
+            label: "First camera".into(),
+            missing: false,
+        };
+        let element = settings(Settings {
+            camera: Some(CameraSettings {
+                choices: vec![first.clone()],
+                selected: first,
+                effect: Effect::ALL[0],
+                mirror: true,
+                probing: false,
+                status: String::new(),
+            }),
+            voice: &voice,
+            watching: vec![("k1".into(), "Ann: live".into())],
+            offers: vec![("k2".into(), "Bob".into())],
+            running: true,
+        });
+        let mut ui = Ui::new(WIDTH, 420.0, element);
+        let hit = reachable(&mut ui, 0, WIDTH as i32, 420);
+        for name in [
+            "SetMirrorPreview",
+            "ListCameras",
+            "PresetParticipantVolume",
+            "SetParticipantVolume",
+            "UnwatchStream",
+            "WatchStream",
+        ] {
+            assert!(hit.contains(name), "{name} is not reachable: {hit:?}");
+        }
     }
 }

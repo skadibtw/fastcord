@@ -124,6 +124,32 @@ pub fn badge(_: &Theme) -> container::Style {
     }
 }
 
+/// The red "LIVE" tag of someone streaming.
+pub fn live_badge(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(RED)),
+        border: Border {
+            radius: 4.0.into(),
+            ..Border::default()
+        },
+        text_color: Some(BRIGHT),
+        ..container::Style::default()
+    }
+}
+
+/// The green ring around the avatar of someone speaking (always the same
+/// size, so rows never move).
+pub fn avatar_ring(on: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        border: Border {
+            radius: 14.0.into(),
+            width: if on { 2.0 } else { 0.0 },
+            color: GREEN,
+        },
+        ..container::Style::default()
+    }
+}
+
 fn tint(base: Color, status: button::Status, hover: Color) -> Option<Background> {
     match status {
         button::Status::Hovered | button::Status::Pressed => Some(Background::Color(hover)),
