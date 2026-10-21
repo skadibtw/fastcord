@@ -194,6 +194,21 @@ pub trait VideoEncoder {
         out: &mut Vec<EncodedFrame>,
     ) -> Result<(), CodecError>;
 
+    /// As [`encode`](VideoEncoder::encode), for a picture that is a texture on
+    /// the capture's GPU (milestone 32). Only an encoder opened for GPU input
+    /// accepts it; anything else reports `Unsupported`.
+    fn encode_gpu(
+        &mut self,
+        _frame: &fastcord_platform::capture::GpuFrame<'_>,
+        _timestamp: Duration,
+        _keyframe: bool,
+        _out: &mut Vec<EncodedFrame>,
+    ) -> Result<(), CodecError> {
+        Err(CodecError::Unsupported(
+            "this encoder does not take GPU pictures",
+        ))
+    }
+
     /// Appends all pending access units to `out`. The encoder stays usable.
     fn flush(&mut self, out: &mut Vec<EncodedFrame>) -> Result<(), CodecError>;
 

@@ -298,7 +298,7 @@ impl CameraProgress {
             ShareEvent::Capturing => self.capturing = true,
             ShareEvent::SourceSize { width, height } => self.size = Some((width, height)),
             ShareEvent::Encoder(report) => self.encoder = Some(report),
-            ShareEvent::Converting(_) => {}
+            ShareEvent::Converting(_) | ShareEvent::ZeroCopy(_) => {}
             ShareEvent::Ended(end) => self.fail(end_text(&end)),
         }
     }

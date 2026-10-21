@@ -22,8 +22,8 @@ use windows::core::IInspectable;
 
 use super::super::{
     CaptureConfig, CaptureError, CaptureState, CaptureStatus, Control, Conversion, Flow,
-    FrameHandler, HandlerFactory, MAX_NATIVE_DIMENSION, MAX_NATIVE_PIXELS, NATIVE_FRAME_COUNT,
-    SourceId, SourceKind, StartOptions, Tick,
+    FrameHandler, GpuOutcome, HandlerFactory, MAX_NATIVE_DIMENSION, MAX_NATIVE_PIXELS,
+    NATIVE_FRAME_COUNT, SourceId, SourceKind, StartOptions, Tick,
 };
 use super::gpu::{Converter, Device, surface_texture};
 use super::runtime::{
@@ -455,14 +455,31 @@ impl Capture {
         let output = self.governor.output(held.content, now);
         let handler = &mut self.handler;
         let path = self.converter.path();
-        let flow = self.converter.deliver(
-            &self.device,
-            &held.texture,
-            held.content,
-            output,
-            timestamp,
-            |sample| handler.frame(sample),
-        )?;
+        // Zero-copy first, when the handler wants it: the converted texture
+        // goes to the handler as it is. A decline falls through to the copy.
+        let gpu = if handler.wants_gpu() {
+            self.converter.deliver_gpu(
+                &self.device,
+                &held.texture,
+                held.content,
+                output,
+                timestamp,
+                |frame| handler.gpu_frame(frame),
+            )?
+        } else {
+            None
+        };
+        let flow = match gpu {
+            Some(GpuOutcome::Handled(flow)) => flow,
+            _ => self.converter.deliver(
+                &self.device,
+                &held.texture,
+                held.content,
+                output,
+                timestamp,
+                |sample| handler.frame(sample),
+            )?,
+        };
         if self.converter.path() != path {
             self.status
                 .set(CaptureState::Converting(self.converter.path()));

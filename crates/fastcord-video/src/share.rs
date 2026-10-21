@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use fastcord_platform::capture::{
     CaptureConfig, CaptureController, CaptureError, CaptureSession, CaptureState, Conversion,
-    ConversionPath, SourceId, StartOptions, StateObserver, VideoSample,
+    ConversionPath, GpuFrame, SourceId, StartOptions, StateObserver, VideoSample,
 };
 use parking_lot::Mutex;
 
@@ -63,6 +63,10 @@ pub struct ShareConfig {
     pub keyframe_interval: u32,
     pub preference: BackendPreference,
     pub conversion: Conversion,
+    /// Hand the converted picture to a hardware encoder on the capture's own
+    /// Direct3D device with no readback (milestone 32), where that works; the
+    /// copy path takes over, visibly, where it does not.
+    pub zero_copy: bool,
     /// A static screen is resent after this long without a picture.
     pub idle_repeat: Duration,
 }
@@ -80,6 +84,7 @@ impl ShareConfig {
         keyframe_interval: 150,
         preference: BackendPreference::Auto,
         conversion: Conversion::Auto,
+        zero_copy: true,
         idle_repeat: Duration::from_secs(1),
     };
 
@@ -157,6 +162,30 @@ pub struct OpenedEncoder {
 pub type OpenEncoder =
     Box<dyn FnMut(EncoderConfig, BackendPreference) -> Result<OpenedEncoder, OpenError> + Send>;
 
+/// Opens a hardware encoder that takes the pictures of a [`GpuFrame`]'s device
+/// as they are. Runs on the capture thread.
+pub type OpenGpuEncoder =
+    Box<dyn FnMut(EncoderConfig, &GpuFrame<'_>) -> Result<OpenedEncoder, OpenError> + Send>;
+
+/// The zero-copy encoder: Media Foundation hardware on the capture's device on
+/// Windows; nothing elsewhere (those platforms never produce a [`GpuFrame`]).
+pub fn platform_gpu_encoder() -> OpenGpuEncoder {
+    #[cfg(windows)]
+    {
+        Box::new(|config, frame| {
+            let selected = crate::media_foundation::open_gpu_encoder(config, frame)?;
+            Ok(OpenedEncoder {
+                encoder: Box::new(selected.codec),
+                rejected: selected.rejected,
+            })
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Box::new(|_, _| Err(OpenError::NoBackend(BackendPreference::Hardware)))
+    }
+}
+
 /// The platform's H.264 encoders: Media Foundation on Windows (hardware first,
 /// Microsoft's software transform as the fallback), VA-API hardware plus the
 /// bundled OpenH264 software codec on Linux, and VideoToolbox on macOS once
@@ -205,6 +234,15 @@ pub struct EncoderReport {
     pub fell_back: bool,
 }
 
+/// Whether pictures reach the encoder without a CPU readback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ZeroCopy {
+    /// The hardware encoder reads the converter's GPU texture directly.
+    Active,
+    /// The copy path is in use (readback and upload); the text says why.
+    Copy(String),
+}
+
 /// Why a share ended. Reported exactly once.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShareEnd {
@@ -248,6 +286,9 @@ pub enum ShareEvent {
         height: u32,
     },
     Encoder(EncoderReport),
+    /// Reported when the zero-copy path starts working and again whenever it
+    /// is abandoned for the copy path.
+    ZeroCopy(ZeroCopy),
     Ended(ShareEnd),
 }
 
@@ -261,6 +302,8 @@ pub struct ShareStats {
     /// Pictures ignored because the share was not sending (no sink yet, not
     /// negotiated, or paused by the server).
     pub idle_pictures: u64,
+    /// Pictures that stayed on the GPU (counted in `pictures` as well).
+    pub gpu_pictures: u64,
     /// Access units the encoder produced.
     pub encoded: u64,
     pub keyframes: u64,
@@ -281,6 +324,7 @@ pub struct ShareStats {
 pub(crate) struct Counters {
     pub(crate) pictures: AtomicU64,
     pub(crate) idle_pictures: AtomicU64,
+    pub(crate) gpu_pictures: AtomicU64,
     pub(crate) encoded: AtomicU64,
     pub(crate) keyframes: AtomicU64,
     pub(crate) sent: AtomicU64,
@@ -415,6 +459,7 @@ impl ShareControl {
         ShareStats {
             pictures: get(&counters.pictures),
             idle_pictures: get(&counters.idle_pictures),
+            gpu_pictures: get(&counters.gpu_pictures),
             encoded: get(&counters.encoded),
             keyframes: get(&counters.keyframes),
             sent: get(&counters.sent),
@@ -450,7 +495,13 @@ impl ShareWorker {
         config: ShareConfig,
         observer: ShareObserver,
     ) -> Result<Self, ShareError> {
-        Self::start_with(source, config, observer, platform_encoder())
+        Self::start_with_gpu(
+            source,
+            config,
+            observer,
+            platform_encoder(),
+            platform_gpu_encoder(),
+        )
     }
 
     /// As [`start`](Self::start), with explicit encoders.
@@ -460,9 +511,34 @@ impl ShareWorker {
         observer: ShareObserver,
         open: OpenEncoder,
     ) -> Result<Self, ShareError> {
-        Self::launch(config, observer, open, None, None, |options, handler| {
-            fastcord_platform::capture::start(source, options, handler)
-        })
+        Self::launch(
+            config,
+            observer,
+            open,
+            None,
+            None,
+            None,
+            |options, handler| fastcord_platform::capture::start(source, options, handler),
+        )
+    }
+
+    /// As [`start`](Self::start), with explicit encoders for both paths.
+    pub fn start_with_gpu(
+        source: SourceId,
+        config: ShareConfig,
+        observer: ShareObserver,
+        open: OpenEncoder,
+        open_gpu: OpenGpuEncoder,
+    ) -> Result<Self, ShareError> {
+        Self::launch(
+            config,
+            observer,
+            open,
+            Some(open_gpu),
+            None,
+            None,
+            |options, handler| fastcord_platform::capture::start(source, options, handler),
+        )
     }
 
     /// Captures the camera with stable ID `device` (`None`: the first one)
@@ -498,6 +574,7 @@ impl ShareWorker {
             config,
             observer,
             open,
+            None,
             preview,
             Some(effect),
             |options, handler| fastcord_platform::capture::start_camera(device, options, handler),
@@ -508,6 +585,7 @@ impl ShareWorker {
         config: ShareConfig,
         observer: ShareObserver,
         open: OpenEncoder,
+        open_gpu: Option<OpenGpuEncoder>,
         preview: Option<PreviewSink>,
         effect: Option<EffectHandle>,
         start: impl FnOnce(
@@ -526,7 +604,15 @@ impl ShareWorker {
                 observer: Some(state_observer),
             },
             Box::new(move || {
-                Pipeline::new(handler_shared, config, open, observer, preview, effect)
+                Pipeline::new(
+                    handler_shared,
+                    config,
+                    open,
+                    open_gpu,
+                    observer,
+                    preview,
+                    effect,
+                )
             }),
         )
         .map_err(ShareError::Capture)?;

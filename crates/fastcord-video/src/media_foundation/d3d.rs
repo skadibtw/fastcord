@@ -10,7 +10,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12};
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIAdapter1, IDXGIFactory1,
+    CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
 };
 use windows::Win32::Media::MediaFoundation::{IMFDXGIBuffer, IMFDXGIDeviceManager};
 use windows::core::Interface;
@@ -89,6 +89,12 @@ impl DeviceManager {
             operation: "D3D11CreateDevice",
             code: windows::Win32::Foundation::E_POINTER.0,
         })?;
+        Self::with_device(session, device)
+    }
+
+    /// Binds an existing device (the screen capture's, for zero-copy
+    /// encoding) to a new manager. The device is made multithread-protected.
+    pub(super) fn with_device(session: &Session, device: ID3D11Device) -> Result<Self, CodecError> {
         // The decoder uses the device from its own threads.
         let multithread: ID3D11Multithread = device.cast().or_platform("ID3D11Multithread")?;
         // SAFETY: COM call on a valid interface.
@@ -107,6 +113,23 @@ impl DeviceManager {
             context,
             staging: None,
         })
+    }
+
+    /// Whether `other` is the device this manager was bound to.
+    pub(super) fn is_device(&self, other: &ID3D11Device) -> bool {
+        self.device.as_raw() == other.as_raw()
+    }
+
+    /// The LUID of the adapter the device runs on.
+    pub(super) fn adapter_luid(device: &ID3D11Device) -> Result<LUID, CodecError> {
+        let dxgi: IDXGIDevice = device.cast().or_platform("ID3D11Device as IDXGIDevice")?;
+        // SAFETY: plain COM queries on valid interfaces.
+        let desc = unsafe {
+            dxgi.GetAdapter()
+                .and_then(|adapter| adapter.GetDesc())
+                .or_platform("IDXGIAdapter::GetDesc")?
+        };
+        Ok(desc.AdapterLuid)
     }
 
     /// Copies one D3D11VA NV12 output surface to a reusable CPU-readable

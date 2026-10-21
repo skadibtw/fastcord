@@ -22,7 +22,7 @@ use fastcord_model::{Snowflake, StreamCreateRequest, StreamDeleteReason, StreamK
 use fastcord_platform::capture::{CaptureConfig, CaptureError, CaptureSource, ConversionPath};
 use fastcord_video::share::{
     EncoderReport, FrameSink, ShareConfig, ShareControl, ShareEnd, ShareEvent, ShareWorker,
-    SinkOutcome,
+    SinkOutcome, ZeroCopy,
 };
 use tokio::sync::watch;
 
@@ -41,6 +41,8 @@ pub(super) fn share_config() -> ShareConfig {
         },
         bitrate: SEND.bitrate,
         max_bitrate: SEND.bitrate,
+        // FASTCORD_ZERO_COPY=0 forces the copy path (milestone 32 checks).
+        zero_copy: std::env::var_os("FASTCORD_ZERO_COPY").is_none_or(|value| value != "0"),
         ..ShareConfig::SCREEN_SHARE_720P30
     }
 }
@@ -105,6 +107,7 @@ pub(super) struct ShareProgress {
     pub(super) encoder: Option<EncoderReport>,
     /// What the share's audio captures, when audio was requested.
     pub(super) audio: Option<fastcord_platform::loopback::LoopbackScope>,
+    pub(super) zero_copy: Option<ZeroCopy>,
     pub(super) connection: Connection,
     /// The first reason the share ended, as text for the screen.
     pub(super) ended: Option<String>,
@@ -117,6 +120,7 @@ impl ShareProgress {
             ShareEvent::Converting(path) => self.converter = Some(path),
             ShareEvent::SourceSize { width, height } => self.source = Some((width, height)),
             ShareEvent::Encoder(report) => self.encoder = Some(report),
+            ShareEvent::ZeroCopy(state) => self.zero_copy = Some(state),
             ShareEvent::Ended(end) => self.fail(end_text(&end)),
         }
     }
@@ -183,6 +187,9 @@ pub(super) fn describe(title: &str, progress: &ShareProgress) -> String {
             }
             if let Some(audio) = progress.audio {
                 text.push_str(&format!(" · {}", share_audio::scope_text(audio)));
+            }
+            if let Some(ZeroCopy::Copy(reason)) = &progress.zero_copy {
+                text.push_str(&format!(" · copy path: {reason}"));
             }
             text
         }

@@ -39,6 +39,7 @@ use self::transform::Transform;
 use crate::codec::{Backend, BackendKind, BackendPreference, CodecError, EncoderConfig};
 use crate::frame::Nv12;
 use crate::select::{Candidate, OpenError, Selected, select};
+use fastcord_platform::capture::GpuFrame;
 
 /// Reported as [`Backend::api`].
 pub const API: &str = "Media Foundation";
@@ -56,7 +57,36 @@ pub fn open_encoder(
     select(preference, candidates, |(activate, backend)| {
         let session = Session::start()?;
         let transform = Transform::activate(activate)?;
-        MfEncoder::open(session, transform, backend, config)
+        MfEncoder::open(session, transform, backend, config, None)
+    })
+}
+
+/// Opens a hardware H.264 encoder that takes the Direct3D 11 textures of
+/// `frame`'s device directly (milestone 32): only encoders on the device's
+/// adapter are tried, and each is given the device through a DXGI device
+/// manager. There is no software fallback here; the caller keeps the copy path
+/// for that.
+pub fn open_gpu_encoder(
+    config: EncoderConfig,
+    frame: &GpuFrame<'_>,
+) -> Result<Selected<MfEncoder>, OpenError> {
+    config.validate().map_err(OpenError::Invalid)?;
+    let preference = BackendPreference::Hardware;
+    let session = Session::start().map_err(OpenError::Discovery)?;
+    let luid = DeviceManager::adapter_luid(frame.device()).map_err(OpenError::Discovery)?;
+    let luid = luid_value(luid);
+    let adapters = hardware_adapters().map_err(OpenError::Discovery)?;
+    let mut candidates = encoder_candidates(&session, preference).map_err(OpenError::Discovery)?;
+    candidates.retain(|candidate| {
+        encoder_adapter(&candidate.source.0, &adapters)
+            .is_none_or(|adapter| luid_value(adapter.luid) == luid)
+    });
+    select(preference, candidates, |(activate, mut backend)| {
+        let session = Session::start()?;
+        let device = DeviceManager::with_device(&session, frame.device().clone())?;
+        let transform = Transform::activate(activate)?;
+        backend.name.push_str(" (zero-copy)");
+        MfEncoder::open(session, transform, backend, config, Some(device))
     })
 }
 

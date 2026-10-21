@@ -111,6 +111,42 @@ impl Device {
     }
 }
 
+/// One converted NV12 picture still on the GPU (see
+/// [`capture::GpuFrame`](super::super::GpuFrame)).
+pub struct GpuFrame<'a> {
+    device: &'a ID3D11Device,
+    texture: &'a ID3D11Texture2D,
+    width: u32,
+    height: u32,
+    timestamp: Duration,
+}
+
+impl<'a> GpuFrame<'a> {
+    /// The capture's device, which owns [`texture`](Self::texture).
+    pub fn device(&self) -> &'a ID3D11Device {
+        self.device
+    }
+
+    /// A single-sample NV12 render-target texture of `width` x `height`. It is
+    /// reused after a few more pictures, so a consumer must be done with it
+    /// (or hold the interface) by the time the callback's encoder call returns.
+    pub fn texture(&self) -> &'a ID3D11Texture2D {
+        self.texture
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn timestamp(&self) -> Duration {
+        self.timestamp
+    }
+}
+
 /// The Direct3D texture behind a captured frame's surface.
 pub(super) fn surface_texture(surface: &IDirect3DSurface) -> Result<ID3D11Texture2D, CaptureError> {
     let access: IDirect3DDxgiInterfaceAccess = surface
@@ -263,6 +299,40 @@ impl Converter {
     }
 }
 
+impl Converter {
+    /// As [`deliver`](Self::deliver), but hands the converted texture itself to
+    /// `consume` with no readback. `None`: the CPU converter is in use (or the
+    /// video processor just failed in automatic mode), so nothing was
+    /// converted.
+    pub(super) fn deliver_gpu<R>(
+        &mut self,
+        device: &Device,
+        texture: &ID3D11Texture2D,
+        content: (u32, u32),
+        output: (u32, u32),
+        timestamp: Duration,
+        consume: impl FnOnce(&GpuFrame<'_>) -> R,
+    ) -> Result<Option<R>, CaptureError> {
+        let Inner::Gpu(gpu) = &mut self.inner else {
+            return Ok(None);
+        };
+        match gpu.blit(device, texture, content, output) {
+            Ok(target) => Ok(Some(consume(&GpuFrame {
+                device: &device.device,
+                texture: &target,
+                width: output.0,
+                height: output.1,
+                timestamp,
+            }))),
+            Err(error) if !self.fallback => Err(error),
+            Err(_) => {
+                self.inner = Inner::Cpu(Box::default());
+                Ok(None)
+            }
+        }
+    }
+}
+
 /// The NV12 layout the converter produces: the chroma plane directly after
 /// `height` luma rows, the same pitch for both.
 fn nv12_bytes(pitch: usize, height: u32) -> usize {
@@ -282,10 +352,20 @@ struct Pipeline {
     output: (u32, u32),
     enumerator: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
-    target: ID3D11Texture2D,
-    view: ID3D11VideoProcessorOutputView,
+    /// The converted pictures, used in turn.
+    targets: Vec<Target>,
+    next: usize,
     staging: ID3D11Texture2D,
 }
+
+struct Target {
+    texture: ID3D11Texture2D,
+    view: ID3D11VideoProcessorOutputView,
+}
+
+/// Output textures in rotation: one being filled, one with the consumer, one
+/// to spare. At most 1280x720 NV12 each (1.4 MB).
+const RING: usize = 3;
 
 impl Gpu {
     fn new(device: &Device) -> Result<Self, CaptureError> {
@@ -308,6 +388,8 @@ impl Gpu {
         Ok(gpu)
     }
 
+    /// Converts into the next texture of the output ring and reads it back
+    /// into the staging texture.
     fn convert(
         &mut self,
         device: &Device,
@@ -315,6 +397,23 @@ impl Gpu {
         content: (u32, u32),
         output: (u32, u32),
     ) -> Result<(), CaptureError> {
+        let target = self.blit(device, texture, content, output)?;
+        let pipeline = self.pipeline.as_ref().expect("built by blit");
+        // SAFETY: both textures are NV12 of the same size on this device.
+        unsafe { device.context.CopyResource(&pipeline.staging, &target) };
+        Ok(())
+    }
+
+    /// Scales and converts `texture` into the next texture of the output ring
+    /// and returns it. The ring (three textures) keeps the picture intact while
+    /// a consumer still reads the previous ones.
+    fn blit(
+        &mut self,
+        device: &Device,
+        texture: &ID3D11Texture2D,
+        content: (u32, u32),
+        output: (u32, u32),
+    ) -> Result<ID3D11Texture2D, CaptureError> {
         let size = texture_size(texture);
         if !self
             .pipeline
@@ -323,7 +422,10 @@ impl Gpu {
         {
             self.pipeline = Some(Pipeline::new(self, device, size, output)?);
         }
-        let pipeline = self.pipeline.as_ref().expect("built above");
+        let pipeline = self.pipeline.as_mut().expect("built above");
+        let slot = pipeline.next;
+        pipeline.next = (slot + 1) % RING;
+        let pipeline = &*pipeline;
         let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
@@ -376,7 +478,7 @@ impl Gpu {
                 .VideoProcessorSetOutputTargetRect(processor, true, Some(&target));
             let blit = self.video_context.VideoProcessorBlt(
                 processor,
-                &pipeline.view,
+                &pipeline.targets[slot].view,
                 0,
                 std::slice::from_ref(&stream),
             );
@@ -384,13 +486,7 @@ impl Gpu {
             blit
         };
         blit.capture("ID3D11VideoContext::VideoProcessorBlt")?;
-        // SAFETY: both textures are NV12 of the same size on this device.
-        unsafe {
-            device
-                .context
-                .CopyResource(&pipeline.staging, &pipeline.target)
-        };
-        Ok(())
+        Ok(pipeline.targets[slot].texture.clone())
     }
 
     /// Maps the converted picture, hands it over, and unmaps it.
@@ -452,24 +548,6 @@ impl Pipeline {
         // SAFETY: a valid enumerator; rate conversion index 0 is always valid.
         let processor = unsafe { gpu.video_device.CreateVideoProcessor(&enumerator, 0) }
             .capture("ID3D11VideoDevice::CreateVideoProcessor")?;
-        let target = create_texture(
-            device,
-            &D3D11_TEXTURE2D_DESC {
-                Width: output.0,
-                Height: output.1,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_NV12,
-                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-            },
-        )?;
         let staging = create_texture(
             device,
             &D3D11_TEXTURE2D_DESC {
@@ -494,22 +572,44 @@ impl Pipeline {
                 Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
             },
         };
-        let mut view = None;
-        // SAFETY: a valid render-target texture, enumerator, descriptor and out
-        // pointer.
-        unsafe {
-            gpu.video_device.CreateVideoProcessorOutputView(
-                &target,
-                &enumerator,
-                &output_desc,
-                Some(&mut view),
-            )
+        let mut targets = Vec::with_capacity(RING);
+        for _ in 0..RING {
+            let texture = create_texture(
+                device,
+                &D3D11_TEXTURE2D_DESC {
+                    Width: output.0,
+                    Height: output.1,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_NV12,
+                    SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                },
+            )?;
+            let mut view = None;
+            // SAFETY: a valid render-target texture, enumerator, descriptor
+            // and out pointer.
+            unsafe {
+                gpu.video_device.CreateVideoProcessorOutputView(
+                    &texture,
+                    &enumerator,
+                    &output_desc,
+                    Some(&mut view),
+                )
+            }
+            .capture("ID3D11VideoDevice::CreateVideoProcessorOutputView")?;
+            let view = view.ok_or(CaptureError::Native {
+                operation: "ID3D11VideoDevice::CreateVideoProcessorOutputView",
+                code: E_POINTER.0,
+            })?;
+            targets.push(Target { texture, view });
         }
-        .capture("ID3D11VideoDevice::CreateVideoProcessorOutputView")?;
-        let view = view.ok_or(CaptureError::Native {
-            operation: "ID3D11VideoDevice::CreateVideoProcessorOutputView",
-            code: E_POINTER.0,
-        })?;
         // SAFETY: valid processor and stream index 0; these only configure how
         // the next blit behaves. Automatic enhancement stays off: a screen
         // must not be denoised or sharpened.
@@ -540,8 +640,8 @@ impl Pipeline {
             output,
             enumerator,
             processor,
-            target,
-            view,
+            targets,
+            next: 0,
             staging,
         })
     }

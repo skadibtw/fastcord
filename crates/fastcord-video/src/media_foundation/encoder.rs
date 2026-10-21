@@ -8,19 +8,22 @@ use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFMediaType,
     IMFSample, IMFTransform, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
     MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_MPEG2_PROFILE,
-    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MFMediaType_Video, MFVideoFormat_H264,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive, eAVEncCommonRateControlMode_CBR,
-    eAVEncH264VProfile_Base, eAVEncH264VProfile_ConstrainedBase,
+    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MFMediaType_Video,
+    MFT_MESSAGE_SET_D3D_MANAGER, MFVideoFormat_H264, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_Base,
+    eAVEncH264VProfile_ConstrainedBase,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::core::{GUID, Interface};
 
+use super::d3d::DeviceManager;
 use super::runtime::{OrPlatform, Session};
 use super::transform::{InputPool, Sink, Transform};
 use super::{from_hns, pack, to_hns};
 use crate::codec::{Backend, CodecError, EncodedFrame, EncoderConfig, VideoEncoder};
 use crate::frame::Nv12;
 use crate::h264::ParameterSets;
+use fastcord_platform::capture::GpuFrame;
 
 /// A Media Foundation H.264 encoder (see [`super::open_encoder`]).
 pub struct MfEncoder {
@@ -30,6 +33,9 @@ pub struct MfEncoder {
     state: EncoderState,
     config: EncoderConfig,
     backend: Backend,
+    /// Set when the encoder takes textures of the capture device. Dropped
+    /// after the transform, before Media Foundation shuts down.
+    device: Option<DeviceManager>,
     // Declared last: Media Foundation shuts down after every object above is
     // released.
     session: Session,
@@ -48,8 +54,31 @@ impl MfEncoder {
         transform: Transform,
         backend: Backend,
         config: EncoderConfig,
+        device: Option<DeviceManager>,
     ) -> Result<Self, CodecError> {
         let mft = transform.mft();
+        if let Some(device) = &device {
+            // A transform that cannot take Direct3D 11 input must not be used
+            // for zero-copy: the copy path has the same hardware encoder.
+            // SAFETY: COM call on a valid interface.
+            let aware = transform.attributes().is_some_and(|attributes| {
+                unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }.unwrap_or(0) != 0
+            });
+            if !aware {
+                return Err(CodecError::Unsupported(
+                    "the encoder does not take Direct3D 11 textures",
+                ));
+            }
+            // SAFETY: the manager outlives the transform (`device` is dropped
+            // after `transform`).
+            unsafe {
+                mft.ProcessMessage(
+                    MFT_MESSAGE_SET_D3D_MANAGER,
+                    device.manager.as_raw() as usize,
+                )
+            }
+            .or_platform("MFT_MESSAGE_SET_D3D_MANAGER")?;
+        }
         let codec_api: ICodecAPI = mft.cast().or_platform("IMFTransform as ICodecAPI")?;
         // Rate control, latency, and B-frame settings are applied where the
         // transform supports them; the Baseline profile excludes B-frames in
@@ -106,6 +135,7 @@ impl MfEncoder {
             state: EncoderState::default(),
             config,
             backend,
+            device,
             session,
         };
         encoder.transform.start()?;
@@ -117,6 +147,34 @@ impl MfEncoder {
             let _ = encoder.state.parameter_sets.complete(header);
         }
         Ok(encoder)
+    }
+
+    /// Timestamps `sample`, forces a keyframe if asked, and feeds it.
+    fn submit(
+        &mut self,
+        sample: &IMFSample,
+        timestamp: Duration,
+        keyframe: bool,
+        out: &mut Vec<EncodedFrame>,
+    ) -> Result<(), CodecError> {
+        // SAFETY: COM calls on a valid sample.
+        unsafe {
+            sample
+                .SetSampleTime(to_hns(timestamp))
+                .and_then(|()| sample.SetSampleDuration(to_hns(self.config.frame_duration())))
+        }
+        .or_platform("IMFSample::SetSampleTime")?;
+        if keyframe {
+            set(&self.codec_api, &CODECAPI_AVEncVideoForceKeyFrame, 1u32)
+                .or_platform("CODECAPI_AVEncVideoForceKeyFrame")?;
+        }
+        self.state.submitted += 1;
+        let mut collect = Collect {
+            state: &mut self.state,
+            out,
+        };
+        self.transform
+            .push(&self.session, sample, &mut collect, false)
     }
 
     fn sequence_header(&self) -> Option<Vec<u8>> {
@@ -195,24 +253,38 @@ impl VideoEncoder for MfEncoder {
                 .sample(&self.session, frame.packed_len(), alignment, |buffer| {
                     pack(frame, buffer)
                 })?;
-        // SAFETY: COM calls on a valid sample.
-        unsafe {
-            sample
-                .SetSampleTime(to_hns(timestamp))
-                .and_then(|()| sample.SetSampleDuration(to_hns(self.config.frame_duration())))
+        self.submit(&sample, timestamp, keyframe, out)
+    }
+
+    fn encode_gpu(
+        &mut self,
+        frame: &GpuFrame<'_>,
+        timestamp: Duration,
+        keyframe: bool,
+        out: &mut Vec<EncodedFrame>,
+    ) -> Result<(), CodecError> {
+        let expected = (self.config.width, self.config.height);
+        let actual = (frame.width(), frame.height());
+        if actual != expected {
+            return Err(CodecError::FrameSize { expected, actual });
         }
-        .or_platform("IMFSample::SetSampleTime")?;
-        if keyframe {
-            set(&self.codec_api, &CODECAPI_AVEncVideoForceKeyFrame, 1u32)
-                .or_platform("CODECAPI_AVEncVideoForceKeyFrame")?;
-        }
-        self.state.submitted += 1;
-        let mut collect = Collect {
-            state: &mut self.state,
-            out,
+        let Some(device) = &self.device else {
+            return Err(CodecError::Unsupported(
+                "this encoder was not opened for GPU pictures",
+            ));
         };
-        self.transform
-            .push(&self.session, &sample, &mut collect, false)
+        if !device.is_device(frame.device()) {
+            return Err(CodecError::Unsupported(
+                "the picture is on another Direct3D device than the encoder",
+            ));
+        }
+        // A new sample per picture: it only wraps the texture, and the
+        // transform may still hold the previous one.
+        let buffer = self.session.surface_buffer(frame.texture())?;
+        let sample = self.session.sample()?;
+        // SAFETY: COM call on valid objects.
+        unsafe { sample.AddBuffer(&buffer) }.or_platform("IMFSample::AddBuffer")?;
+        self.submit(&sample, timestamp, keyframe, out)
     }
 
     fn flush(&mut self, out: &mut Vec<EncodedFrame>) -> Result<(), CodecError> {

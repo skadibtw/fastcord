@@ -16,8 +16,8 @@ use super::wgc::SizeGovernor;
 use crate::capture::convert::{Bgra, Converter, nv12_len};
 use crate::capture::{
     CaptureConfig, CaptureError, CaptureSession, CaptureState, CaptureStatus, Conversion, Flow,
-    FrameHandler, SourceId, SourceKind, StartOptions, Tick, VideoSample, availability,
-    list_sources, start,
+    FrameHandler, GpuFrame, GpuOutcome, SourceId, SourceKind, StartOptions, Tick, VideoSample,
+    availability, list_sources, start,
 };
 
 const SETTLE: Duration = Duration::from_millis(300);
@@ -587,5 +587,114 @@ fn a_static_window_is_delivered_again_on_request_with_fresh_timestamps() {
     );
     // The repeats are the same pixels: the first picture's bytes were kept.
     assert!(!pictures[0].bytes.is_empty());
+    assert!(session.stop().is_ok());
+}
+
+/// Reads zero-copy pictures back (test only) so their pixels can be checked.
+struct GpuCollector {
+    out: Arc<Mutex<Vec<Owned>>>,
+    copies: Arc<Mutex<usize>>,
+    limit: usize,
+}
+
+impl FrameHandler for GpuCollector {
+    fn frame(&mut self, _: &VideoSample<'_>) -> Flow {
+        *self.copies.lock() += 1;
+        Flow::Continue
+    }
+
+    fn wants_gpu(&self) -> bool {
+        true
+    }
+
+    fn gpu_frame(&mut self, frame: &GpuFrame<'_>) -> GpuOutcome {
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
+            D3D11_USAGE_STAGING,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: plain queries and a staging copy on the capture's device,
+        // on the capture thread, inside the callback that owns the texture.
+        unsafe {
+            frame.texture().GetDesc(&mut desc);
+            assert_eq!(desc.Format, DXGI_FORMAT_NV12);
+            assert_eq!((desc.Width, desc.Height), (frame.width(), frame.height()));
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            let mut staging = None;
+            frame
+                .device()
+                .CreateTexture2D(&desc, None, Some(&mut staging))
+                .unwrap();
+            let staging = staging.unwrap();
+            let context = frame.device().GetImmediateContext().unwrap();
+            context.CopyResource(&staging, frame.texture());
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .unwrap();
+            let stride = mapped.RowPitch as usize;
+            let bytes = std::slice::from_raw_parts(
+                mapped.pData.cast::<u8>(),
+                nv12_len(stride, desc.Height as usize),
+            )
+            .to_vec();
+            context.Unmap(&staging, 0);
+            let mut out = self.out.lock();
+            out.push(Owned {
+                width: desc.Width,
+                height: desc.Height,
+                stride,
+                bytes,
+                timestamp: frame.timestamp(),
+            });
+            GpuOutcome::Handled(if out.len() >= self.limit {
+                Flow::Stop
+            } else {
+                Flow::Continue
+            })
+        }
+    }
+
+    fn tick(&mut self) -> Tick {
+        Tick::Idle
+    }
+}
+
+#[test]
+#[ignore = "captures a real window; needs an interactive Windows desktop session"]
+fn a_window_reaches_the_handler_as_a_gpu_nv12_texture_with_the_same_colors() {
+    let window = TestWindow::open(640, 360, 120, 120);
+    let out = Arc::new(Mutex::new(Vec::new()));
+    let copies = Arc::new(Mutex::new(0));
+    let (states, options) = collecting();
+    let (handler_out, handler_copies) = (Arc::clone(&out), Arc::clone(&copies));
+    let session = start(window.id(), options, move || GpuCollector {
+        out: handler_out,
+        copies: handler_copies,
+        limit: 8,
+    })
+    .unwrap();
+    assert!(
+        wait_for(Duration::from_secs(10), || out.lock().len() >= 8),
+        "states {:?}",
+        states.lock()
+    );
+    assert_eq!(*copies.lock(), 0, "no picture took the copy path");
+    let pictures = out.lock().clone();
+    let last = pictures.last().unwrap();
+    let (x_left, x_right, y) = (last.width / 4, last.width * 3 / 4, last.height * 6 / 10);
+    assert_close(
+        mean_yuv(last, x_left, y),
+        expected_yuv(LEFT_RGB),
+        "red half",
+    );
+    assert_close(
+        mean_yuv(last, x_right, y),
+        expected_yuv(RIGHT_RGB),
+        "blue half",
+    );
     assert!(session.stop().is_ok());
 }

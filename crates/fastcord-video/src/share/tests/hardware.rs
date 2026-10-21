@@ -79,12 +79,12 @@ fn share_a_window(preference: BackendPreference) {
     .unwrap();
     let control = worker.control();
     // Nothing is encoded before the transport attaches and H.264 is negotiated.
-    std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(control.stats().encoded, 0);
     assert!(
-        control.stats().idle_pictures > 0,
+        wait_for(Duration::from_secs(10), || control.stats().idle_pictures
+            > 0),
         "pictures are captured but unused"
     );
+    assert_eq!(control.stats().encoded, 0);
     let sink = Arc::clone(&frames);
     control.attach(Box::new(move |unit| {
         let mut frames = sink.lock();

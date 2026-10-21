@@ -317,10 +317,61 @@ impl CaptureStatus {
     }
 }
 
+/// One NV12 picture that never left the GPU (milestone 32): a texture of the
+/// capture's own Direct3D 11 device, valid only during the callback that
+/// receives it. The device is multithread-protected and its commands for the
+/// picture were issued before the callback, so a consumer on the same device
+/// (the hardware encoder) needs no further synchronization. Windows only; on
+/// other systems the type exists but is never constructed.
+#[cfg(windows)]
+pub use windows::GpuFrame;
+
+/// See the Windows type.
+#[cfg(not(windows))]
+pub struct GpuFrame<'a> {
+    never: std::convert::Infallible,
+    _borrow: std::marker::PhantomData<&'a ()>,
+}
+
+#[cfg(not(windows))]
+impl GpuFrame<'_> {
+    pub fn width(&self) -> u32 {
+        match self.never {}
+    }
+
+    pub fn height(&self) -> u32 {
+        match self.never {}
+    }
+
+    pub fn timestamp(&self) -> Duration {
+        match self.never {}
+    }
+}
+
+/// What a handler did with a [`GpuFrame`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuOutcome {
+    Handled(Flow),
+    /// Not consumed: the capture delivers the same picture as a [`VideoSample`]
+    /// instead (the copy path).
+    Declined,
+}
+
 /// What a capture session delivers to, on its capture thread.
 pub trait FrameHandler {
     /// A new picture, at most one per frame interval.
     fn frame(&mut self, sample: &VideoSample<'_>) -> Flow;
+
+    /// Whether the handler would take pictures as [`GpuFrame`]s right now.
+    /// Asked before every picture; only the GPU converter can honor it.
+    fn wants_gpu(&self) -> bool {
+        false
+    }
+
+    /// A picture as a GPU texture, instead of `frame`, when `wants_gpu`.
+    fn gpu_frame(&mut self, _frame: &GpuFrame<'_>) -> GpuOutcome {
+        GpuOutcome::Declined
+    }
 
     /// Called at least every few hundred milliseconds while nothing new
     /// arrives, and promptly after [`CaptureSession::poke`]: a static screen

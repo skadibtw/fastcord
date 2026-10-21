@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use fastcord_platform::capture::{Flow, FrameHandler, Tick, VideoSample};
+use fastcord_platform::capture::{Flow, FrameHandler, GpuFrame, GpuOutcome, Tick, VideoSample};
 
 use super::{
-    Counters, EncoderReport, MAX_ENCODED_FRAME_BYTES, MIN_BITRATE, OpenEncoder, PreviewSink,
-    ShareConfig, ShareEnd, ShareEvent, ShareObserver, Shared, SinkOutcome,
+    Counters, EncoderReport, MAX_ENCODED_FRAME_BYTES, MIN_BITRATE, OpenEncoder, OpenGpuEncoder,
+    OpenedEncoder, PreviewSink, ShareConfig, ShareEnd, ShareEvent, ShareObserver, Shared,
+    SinkOutcome, ZeroCopy,
 };
 use crate::codec::{
     BackendKind, BackendPreference, CodecError, EncodedFrame, EncoderConfig, VideoEncoder,
@@ -29,12 +30,19 @@ const MIN_TIMESTAMP_STEP: Duration = Duration::from_millis(1);
 struct Running {
     encoder: Box<dyn VideoEncoder>,
     config: EncoderConfig,
+    /// Opened for GPU pictures (and only fit for them).
+    gpu: bool,
 }
 
 pub(super) struct Pipeline {
     shared: Arc<Shared>,
     config: ShareConfig,
     open: OpenEncoder,
+    open_gpu: Option<OpenGpuEncoder>,
+    /// Whether pictures may still be offered as GPU textures.
+    zero_copy: bool,
+    /// The last zero-copy state reported.
+    reported_zero_copy: Option<ZeroCopy>,
     observer: ShareObserver,
     preview: Option<PreviewSink>,
     /// The camera's background effect, applied before preview and encoding.
@@ -66,11 +74,20 @@ impl Pipeline {
         shared: Arc<Shared>,
         config: ShareConfig,
         open: OpenEncoder,
+        open_gpu: Option<OpenGpuEncoder>,
         observer: ShareObserver,
         preview: Option<PreviewSink>,
         effect: Option<EffectHandle>,
     ) -> Self {
+        // The preview and the effect read the picture bytes.
+        let zero_copy = config.zero_copy
+            && config.preference != BackendPreference::Software
+            && preview.is_none()
+            && effect.is_none();
         Self {
+            zero_copy: zero_copy && open_gpu.is_some(),
+            open_gpu,
+            reported_zero_copy: None,
             shared,
             preference: config.preference,
             config,
@@ -303,11 +320,9 @@ impl Pipeline {
 
     /// Opens an encoder for pictures of `size` unless the open one matches.
     fn ensure_encoder(&mut self, size: (u32, u32)) -> Result<(), ShareEnd> {
-        if self
-            .encoder
-            .as_ref()
-            .is_some_and(|running| (running.config.width, running.config.height) == size)
-        {
+        if self.encoder.as_ref().is_some_and(|running| {
+            (running.config.width, running.config.height) == size && !running.gpu
+        }) {
             return Ok(());
         }
         self.open_encoder(size)
@@ -325,27 +340,144 @@ impl Pipeline {
         };
         let opened = (self.open)(config, self.preference)
             .map_err(|error| ShareEnd::Encoder(error.to_string()))?;
+        self.adopt(opened, config, false);
+        Ok(())
+    }
+
+    /// Makes `opened` the running encoder and reports it.
+    fn adopt(&mut self, opened: OpenedEncoder, config: EncoderConfig, gpu: bool) {
         let backend = opened.encoder.backend().to_string();
         let counters = &self.shared.counters;
         Counters::add(&counters.opened, 1);
-        counters.width.store(size.0, Ordering::Relaxed);
-        counters.height.store(size.1, Ordering::Relaxed);
+        counters.width.store(config.width, Ordering::Relaxed);
+        counters.height.store(config.height, Ordering::Relaxed);
         counters.bitrate.store(config.bitrate, Ordering::Relaxed);
         self.encoder = Some(Running {
             encoder: opened.encoder,
             config,
+            gpu,
         });
         // The new encoder's first unit is an IDR; a request from before it
         // existed is answered by that unit.
         self.shared.keyframe.store(false, Ordering::Release);
         (self.observer)(ShareEvent::Encoder(EncoderReport {
             backend,
-            width: size.0,
-            height: size.1,
+            width: config.width,
+            height: config.height,
             bitrate: config.bitrate,
             skipped: opened.rejected.iter().map(ToString::to_string).collect(),
             fell_back: std::mem::take(&mut self.fell_back),
         }));
+    }
+
+    fn report_zero_copy(&mut self, state: ZeroCopy) {
+        if self.reported_zero_copy.as_ref() != Some(&state) {
+            self.reported_zero_copy = Some(state.clone());
+            (self.observer)(ShareEvent::ZeroCopy(state));
+        }
+    }
+
+    /// Abandons the zero-copy path for the rest of the share: the encoder
+    /// opened for textures is dropped, the copy path opens its own at the next
+    /// picture (an IDR), and the screen says why. Never ends the share.
+    fn leave_zero_copy(&mut self, reason: String) {
+        self.zero_copy = false;
+        if self.encoder.as_ref().is_some_and(|running| running.gpu) {
+            self.encoder = None;
+        }
+        self.output.clear();
+        self.shared.keyframe.store(true, Ordering::Release);
+        self.report_zero_copy(ZeroCopy::Copy(reason));
+    }
+
+    /// One picture that stayed on the GPU. Declined (and the copy path takes
+    /// this same picture) when no hardware encoder takes it or one fails.
+    fn picture_gpu(&mut self, frame: &GpuFrame<'_>, now: Instant) -> GpuOutcome {
+        if self.ended {
+            return GpuOutcome::Handled(Flow::Stop);
+        }
+        if !self.shared.armed() {
+            let counters = &self.shared.counters;
+            Counters::add(&counters.pictures, 1);
+            Counters::add(&counters.gpu_pictures, 1);
+            Counters::add(&counters.idle_pictures, 1);
+            self.was_armed = false;
+            return GpuOutcome::Handled(Flow::Continue);
+        }
+        let size = (frame.width(), frame.height());
+        if let Err(reason) = self.ensure_gpu_encoder(frame, size) {
+            self.leave_zero_copy(reason);
+            return GpuOutcome::Declined;
+        }
+        if !self.was_armed {
+            self.was_armed = true;
+            self.shared.keyframe.store(true, Ordering::Release);
+        }
+        let force = self.shared.keyframe.swap(false, Ordering::AcqRel);
+        let timestamp = self.timestamp(frame.timestamp());
+        let running = self.encoder.as_mut().expect("opened above");
+        self.output.clear();
+        if let Err(error) = running
+            .encoder
+            .encode_gpu(frame, timestamp, force, &mut self.output)
+        {
+            self.leave_zero_copy(format!("the GPU encoder failed: {error}"));
+            return GpuOutcome::Declined;
+        }
+        let counters = &self.shared.counters;
+        Counters::add(&counters.pictures, 1);
+        Counters::add(&counters.gpu_pictures, 1);
+        self.healthy = self.healthy.saturating_add(1);
+        if self.healthy >= HEALTHY_PICTURES {
+            self.failures = 0;
+        }
+        self.last_encode = Some(now);
+        match self.forward(now) {
+            Ok(()) => GpuOutcome::Handled(Flow::Continue),
+            Err(end) => {
+                self.end(end);
+                GpuOutcome::Handled(Flow::Stop)
+            }
+        }
+    }
+
+    /// Opens (or keeps) the encoder for GPU pictures of `size` and applies the
+    /// requested bitrate in place; the error is the reason to use the copy
+    /// path.
+    fn ensure_gpu_encoder(&mut self, frame: &GpuFrame<'_>, size: (u32, u32)) -> Result<(), String> {
+        let target = self.target_bitrate();
+        let reusable = self.encoder.as_ref().is_some_and(|running| {
+            running.gpu && (running.config.width, running.config.height) == size
+        });
+        if !reusable {
+            let open = self
+                .open_gpu
+                .as_mut()
+                .ok_or("no GPU encoder on this system")?;
+            self.encoder = None;
+            let config = EncoderConfig {
+                width: size.0,
+                height: size.1,
+                frame_rate: self.config.capture.frame_rate,
+                bitrate: target,
+                keyframe_interval: self.config.keyframe_interval,
+            };
+            let opened = open(config, frame).map_err(|error| error.to_string())?;
+            self.adopt(opened, config, true);
+            self.report_zero_copy(ZeroCopy::Active);
+        }
+        let running = self.encoder.as_mut().expect("opened above");
+        if running.config.bitrate != target {
+            running
+                .encoder
+                .set_bitrate(target)
+                .map_err(|error| error.to_string())?;
+            running.config.bitrate = target;
+            self.shared
+                .counters
+                .bitrate
+                .store(target, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -396,6 +528,14 @@ impl Pipeline {
 }
 
 impl FrameHandler for Pipeline {
+    fn wants_gpu(&self) -> bool {
+        self.zero_copy && !self.ended
+    }
+
+    fn gpu_frame(&mut self, frame: &GpuFrame<'_>) -> GpuOutcome {
+        self.picture_gpu(frame, Instant::now())
+    }
+
     fn frame(&mut self, sample: &VideoSample<'_>) -> Flow {
         self.picture(sample, Instant::now())
     }

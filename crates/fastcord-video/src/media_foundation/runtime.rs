@@ -11,9 +11,10 @@ use std::marker::PhantomData;
 use std::ptr;
 use std::sync::LazyLock;
 
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaType, IMFSample, MF_VERSION,
-    MFMediaType_Video, MFSTARTUP_LITE, MFT_ENUM_FLAG, MFT_REGISTER_TYPE_INFO,
+    IMF2DBuffer, IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaType, IMFSample,
+    MF_VERSION, MFMediaType_Video, MFSTARTUP_LITE, MFT_ENUM_FLAG, MFT_REGISTER_TYPE_INFO,
 };
 use windows::Win32::System::Com::{
     COINIT_DISABLE_OLE1DDE, COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -39,6 +40,8 @@ type EnumFn = unsafe extern "system" fn(
 ) -> HRESULT;
 type CreateFn = unsafe extern "system" fn(*mut *mut c_void) -> HRESULT;
 type CreateManagerFn = unsafe extern "system" fn(*mut u32, *mut *mut c_void) -> HRESULT;
+type CreateSurfaceBufferFn =
+    unsafe extern "system" fn(*const GUID, *mut c_void, u32, i32, *mut *mut c_void) -> HRESULT;
 type CreateAlignedBufferFn = unsafe extern "system" fn(u32, u32, *mut *mut c_void) -> HRESULT;
 
 /// The `mfplat.dll` exports fastcord uses.
@@ -50,6 +53,7 @@ struct Mfplat {
     create_sample: CreateFn,
     create_aligned_memory_buffer: CreateAlignedBufferFn,
     create_dxgi_device_manager: CreateManagerFn,
+    create_dxgi_surface_buffer: CreateSurfaceBufferFn,
 }
 
 static MFPLAT: LazyLock<Option<Mfplat>> = LazyLock::new(load);
@@ -96,6 +100,10 @@ fn load() -> Option<Mfplat> {
             create_dxgi_device_manager: export::<CreateManagerFn>(
                 module,
                 s!("MFCreateDXGIDeviceManager"),
+            )?,
+            create_dxgi_surface_buffer: export::<CreateSurfaceBufferFn>(
+                module,
+                s!("MFCreateDXGISurfaceBuffer"),
             )?,
         })
     }
@@ -269,6 +277,38 @@ impl Session {
             );
             created(result, raw, "MFCreateAlignedMemoryBuffer")
         }
+    }
+
+    /// A media buffer that wraps subresource 0 of a Direct3D 11 texture, with
+    /// its length set so an encoder accepts it.
+    pub(super) fn surface_buffer(
+        &self,
+        texture: &ID3D11Texture2D,
+    ) -> Result<IMFMediaBuffer, CodecError> {
+        let mut raw = ptr::null_mut();
+        // SAFETY: `texture` is a live COM object; `raw` receives an owned
+        // IMFMediaBuffer on success.
+        let buffer: IMFMediaBuffer = unsafe {
+            let result = (self.api.create_dxgi_surface_buffer)(
+                &ID3D11Texture2D::IID,
+                texture.as_raw(),
+                0,
+                0,
+                &mut raw,
+            );
+            created(result, raw, "MFCreateDXGISurfaceBuffer")?
+        };
+        // SAFETY: COM calls on the buffer just created.
+        unsafe {
+            let length = buffer
+                .cast::<IMF2DBuffer>()
+                .and_then(|flat| flat.GetContiguousLength())
+                .or_platform("IMF2DBuffer::GetContiguousLength")?;
+            buffer
+                .SetCurrentLength(length)
+                .or_platform("IMFMediaBuffer::SetCurrentLength")?;
+        }
+        Ok(buffer)
     }
 
     /// A DXGI device manager and its reset token.

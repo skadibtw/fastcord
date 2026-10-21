@@ -24,6 +24,7 @@ mod wgc;
 mod tests;
 
 pub(super) use camera::{list_cameras, start_camera};
+pub use gpu::GpuFrame;
 pub(super) use runtime::Native;
 pub(super) use sources::list_sources;
 pub(super) use wgc::{availability, start};

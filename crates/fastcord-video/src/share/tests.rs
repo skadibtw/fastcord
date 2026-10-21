@@ -6,6 +6,8 @@
 
 #[cfg(windows)]
 mod hardware;
+#[cfg(windows)]
+mod zero_copy;
 
 use std::time::{Duration, Instant};
 
@@ -163,7 +165,15 @@ impl Rig {
         let record = Arc::clone(&events);
         let observer: ShareObserver = Arc::new(move |event| record.lock().push(event));
         Self {
-            pipeline: Pipeline::new(Arc::clone(&shared), config, open, observer, preview, effect),
+            pipeline: Pipeline::new(
+                Arc::clone(&shared),
+                config,
+                open,
+                None,
+                observer,
+                preview,
+                effect,
+            ),
             control: ShareControl {
                 shared: Arc::clone(&shared),
             },
@@ -717,4 +727,53 @@ fn controls_are_safe_before_a_capture_exists_and_after_it_ended() {
     rig.control.set_bitrate(500_000);
     assert!(rig.shared.keyframe.load(Ordering::Acquire));
     assert_eq!(rig.control.stats(), ShareStats::default());
+}
+
+fn wants_gpu(config: ShareConfig, with_opener: bool, preview: bool) -> bool {
+    use fastcord_platform::capture::FrameHandler;
+    let open: OpenEncoder = Box::new(|_, preference| Err(OpenError::NoBackend(preference)));
+    let open_gpu: Option<OpenGpuEncoder> = with_opener.then(|| {
+        Box::new(|_: EncoderConfig, _: &GpuFrame<'_>| {
+            Err(OpenError::NoBackend(BackendPreference::Hardware))
+        }) as OpenGpuEncoder
+    });
+    let preview: Option<PreviewSink> =
+        preview.then(|| Box::new(|_: &VideoSample<'_>| {}) as PreviewSink);
+    let pipeline = Pipeline::new(
+        Arc::new(Shared::new(&config)),
+        config,
+        open,
+        open_gpu,
+        Arc::new(|_| {}),
+        preview,
+        None,
+    );
+    pipeline.wants_gpu()
+}
+
+#[test]
+fn pictures_are_offered_as_gpu_textures_only_when_zero_copy_can_work() {
+    let base = ShareConfig::SCREEN_SHARE_720P30;
+    assert!(base.zero_copy);
+    assert!(wants_gpu(base, true, false));
+    // No GPU encoder on this platform, the switch off, the software
+    // preference, or a preview that reads the bytes: the copy path.
+    assert!(!wants_gpu(base, false, false));
+    assert!(!wants_gpu(
+        ShareConfig {
+            zero_copy: false,
+            ..base
+        },
+        true,
+        false
+    ));
+    assert!(!wants_gpu(
+        ShareConfig {
+            preference: BackendPreference::Software,
+            ..base
+        },
+        true,
+        false
+    ));
+    assert!(!wants_gpu(base, true, true));
 }
