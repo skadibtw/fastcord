@@ -227,6 +227,12 @@ fn bar(rgb: Option<u32>) -> Color {
     })
 }
 
+/// Whether `parts[n]` is the last part of its link: a masked label can be
+/// split into several formatted parts that share one target.
+fn ends_link(parts: &[Part<'_>], n: usize) -> bool {
+    !matches!((parts[n].kind, parts.get(n + 1)), (Kind::Link(a), Some(next)) if next.kind == Kind::Link(a))
+}
+
 fn host(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
@@ -293,8 +299,9 @@ impl<'a> Renderer<'a> {
             if let Some(prefix) = prefix {
                 spans.push(span(prefix).color(SPOILER));
             }
-            for part in parts {
-                self.push_spans(&mut spans, part, part.text, size, heading);
+            for (n, part) in parts.iter().enumerate() {
+                let last = ends_link(parts, n);
+                self.push_spans(&mut spans, part, part.text, size, heading, last);
             }
             return rich_text(spans)
                 .on_link_click(to_event)
@@ -314,10 +321,11 @@ impl<'a> Renderer<'a> {
             line = line.push(text(prefix).size(size).color(SPOILER));
         }
         let emoji_size = 22.0;
-        for part in parts {
+        for (n, part) in parts.iter().enumerate() {
             if part.kind != Kind::Text || part.style.has(Style::CODE) {
                 let mut spans = Vec::new();
-                self.push_spans(&mut spans, part, part.text, size, heading);
+                let last = ends_link(parts, n);
+                self.push_spans(&mut spans, part, part.text, size, heading, last);
                 line = line.push(rich_text(spans).on_link_click(to_event).size(size));
                 continue;
             }
@@ -326,7 +334,7 @@ impl<'a> Renderer<'a> {
                     emoji::Run::Text(chunk) => {
                         for word in chunk.split_inclusive(char::is_whitespace) {
                             let mut spans = Vec::new();
-                            self.push_spans(&mut spans, part, word, size, heading);
+                            self.push_spans(&mut spans, part, word, size, heading, true);
                             line = line.push(rich_text(spans).on_link_click(to_event).size(size));
                         }
                     }
@@ -368,6 +376,7 @@ impl<'a> Renderer<'a> {
         shown: &'a str,
         size: f32,
         heading: bool,
+        last_of_link: bool,
     ) {
         let message = self.message;
         let label: std::borrow::Cow<'a, str> = match part.kind {
@@ -443,6 +452,7 @@ impl<'a> Renderer<'a> {
         out.push(item);
         // A masked link also names where it goes, so the label cannot hide it.
         if !hidden
+            && last_of_link
             && let Some(url) = target
             && part.text != url
         {
@@ -570,6 +580,17 @@ mod tests {
             host("https://user:pw@example.com:8080/x"),
             "example.com:8080"
         );
+    }
+
+    #[test]
+    fn the_host_suffix_follows_only_the_last_part_of_a_formatted_label() {
+        let parsed = markup::parse("[a **b** c](<https://x.test/p>) [d](https://y.test)");
+        let parts = &parsed.blocks[0].spans;
+        let ends: Vec<_> = (0..parts.len())
+            .filter(|&n| matches!(parts[n].kind, Kind::Link(_)) && ends_link(parts, n))
+            .map(|n| parts[n].text)
+            .collect();
+        assert_eq!(ends, [" c", "d"]);
     }
 
     #[test]

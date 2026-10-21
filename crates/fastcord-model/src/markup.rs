@@ -332,16 +332,27 @@ fn inline<'a>(line: &'a str, base: Style, depth: u8, out: &mut Vec<Span<'a>>, ct
                 }
             }
             b'[' => {
-                if let Some((label_end, url_end)) = masked(line, i) {
+                if let Some((label_end, url, close)) = masked(line, i) {
                     push_text(out, start, i, ctx);
-                    out.push(Span {
-                        text: &line[i + 1..label_end],
-                        style: base,
-                        kind: Kind::Link(&line[label_end + 2..url_end]),
-                        spoiler: None,
-                    });
+                    let from = out.len();
+                    let label = &line[i + 1..label_end];
+                    if depth < MAX_DEPTH {
+                        inline(label, base, depth + 1, out, ctx);
+                    } else {
+                        out.push(Span {
+                            text: label,
+                            style: base,
+                            kind: Kind::Text,
+                            spoiler: None,
+                        });
+                    }
+                    // Every part of the label, formatted or not, opens the
+                    // target; links and mentions inside it are plain label text.
+                    for span in &mut out[from..] {
+                        span.kind = Kind::Link(&line[url.clone()]);
+                    }
                     ctx.formatted = true;
-                    i = url_end + 1;
+                    i = close + 1;
                     start = i;
                 } else {
                     i += 1;
@@ -555,22 +566,37 @@ fn word_end(tail: &str, len: usize) -> bool {
         .is_none_or(|c| !c.is_alphanumeric() && c != '_')
 }
 
-/// `[label](http…)` at `at`: the `]` and the closing `)` positions.
-fn masked(line: &str, at: usize) -> Option<(usize, usize)> {
+/// `[label](http…)` or `[label](<http…>)` at `at`: the `]` position, the
+/// target's byte range and the position of the closing `)`.
+fn masked(line: &str, at: usize) -> Option<(usize, std::ops::Range<usize>, usize)> {
     let label_end = at + 1 + line[at + 1..].bytes().take(512).position(|b| b == b']')?;
     if label_end == at + 1 || !line[label_end..].starts_with("](") {
         return None;
     }
-    let url_start = label_end + 2;
-    let url_end = url_start
-        + line[url_start..]
-            .bytes()
-            .take(MAX_URL)
-            .position(|b| b == b')')?;
+    let mut url_start = label_end + 2;
+    let (url_end, close) = if line[url_start..].starts_with('<') {
+        url_start += 1;
+        let gt = url_start
+            + line[url_start..]
+                .bytes()
+                .take(MAX_URL + 1)
+                .position(|b| b == b'>')?;
+        if !line[gt + 1..].starts_with(')') {
+            return None;
+        }
+        (gt, gt + 1)
+    } else {
+        let end = url_start
+            + line[url_start..]
+                .bytes()
+                .take(MAX_URL)
+                .position(|b| b == b')')?;
+        (end, end)
+    };
     let url = &line[url_start..url_end];
     ((url.starts_with("https://") || url.starts_with("http://"))
         && !url.contains(char::is_whitespace))
-    .then_some((label_end, url_end))
+    .then_some((label_end, url_start..url_end, close))
 }
 
 #[cfg(test)]
@@ -748,6 +774,54 @@ mod tests {
         ] {
             assert!(spans(bad).iter().all(|s| s.kind == Kind::Text), "{bad}");
         }
+    }
+
+    fn pairs(source: &str) -> Vec<(&str, Option<&str>, bool)> {
+        spans(source)
+            .into_iter()
+            .map(|s| {
+                let url = match s.kind {
+                    Kind::Link(u) => Some(u),
+                    _ => None,
+                };
+                (s.text, url, s.style.has(Style::BOLD))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn masked_links_accept_angle_targets_and_formatted_labels() {
+        assert_eq!(
+            pairs("[a](<https://x.test/y>)"),
+            [("a", Some("https://x.test/y"), false)]
+        );
+        assert_eq!(
+            pairs("([change log](<https://d.test/c#s>))"),
+            [
+                ("(", None, false),
+                ("change log", Some("https://d.test/c#s"), false),
+                (")", None, false),
+            ]
+        );
+        assert_eq!(
+            pairs("[x **b** y](<https://x.test>)"),
+            [
+                ("x ", Some("https://x.test"), false),
+                ("b", Some("https://x.test"), true),
+                (" y", Some("https://x.test"), false),
+            ]
+        );
+        // Mentions and links inside a label are plain label text.
+        assert_eq!(
+            pairs("[<@1>](https://x.test)"),
+            [("<@1>", Some("https://x.test"), false)]
+        );
+        for bad in ["[x](<javascript:alert(1)>)", "[x](<ftp://a>)"] {
+            assert!(spans(bad).iter().all(|s| s.kind == Kind::Text), "{bad}");
+        }
+        // Unterminated: the label is not a link (a bare URL may still be).
+        let open = spans("[x](<https://a");
+        assert_eq!((open[0].text, open[0].kind), ("[x](<", Kind::Text));
     }
 
     #[test]
