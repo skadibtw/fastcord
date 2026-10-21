@@ -24,6 +24,7 @@ mod inbox;
 mod localtime;
 mod login;
 mod media_ui;
+mod member_menu;
 mod message_link;
 mod mic_panel;
 mod navigation;
@@ -154,6 +155,7 @@ struct App {
     /// Microphone gain, level meter and checks in the audio settings.
     mic_panel: mic_panel::State,
     friends: friends::State,
+    member_menu: member_menu::State,
     status: status::State,
     threads: threads::State,
     /// The quick switcher and the shortcuts help.
@@ -234,6 +236,8 @@ enum Message {
     DeclineCall(Snowflake),
     CallSignalled(Result<(), fastcord_discord::RestError>),
     WatchStream(String),
+    ActivateParticipant(Snowflake),
+    MemberMenu(member_menu::Event),
     UnwatchStream(String),
     SetStreamVolume(String, u16),
     MuteStream(String, bool),
@@ -402,6 +406,7 @@ impl App {
                 voice: voice_record::State::default(),
                 mic_panel: mic_panel::State::default(),
                 friends: friends::State::default(),
+                member_menu: member_menu::State::default(),
                 status: status::State::default(),
                 threads: threads::State::default(),
                 switcher: switcher::State::default(),
@@ -434,6 +439,7 @@ impl App {
         );
         if !matches!(self.phase, Phase::Account { .. }) {
             self.friends.purge();
+            self.member_menu.reset();
             self.status.purge();
         }
         let mut task = self.handle(message);
@@ -1339,6 +1345,14 @@ impl App {
             }
             Message::Threads(event) => return self.threads_event(event),
             Message::Friends(event) => {
+                if matches!(
+                    event,
+                    friends::Event::Profile(_)
+                        | friends::Event::OpenDm(_)
+                        | friends::Event::Report(_)
+                ) {
+                    self.member_menu.close();
+                }
                 if let Phase::Account {
                     session, gateway, ..
                 } = &mut self.phase
@@ -1384,6 +1398,7 @@ impl App {
                 }
             }
             Message::SelectGuild(guild) => {
+                self.member_menu.close();
                 self.threads.close();
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.directs = false;
@@ -1395,6 +1410,7 @@ impl App {
                 }
             }
             Message::SelectChannel(guild, channel) => {
+                self.member_menu.close();
                 // Opens a channel's messages (a voice or Stage channel's chat
                 // included); it never touches the voice connection.
                 self.threads.close();
@@ -1513,6 +1529,32 @@ impl App {
                 }
                 if let Some(task) = cancel {
                     return task;
+                }
+            }
+            Message::MemberMenu(event) => return self.member_menu_event(event),
+            Message::ActivateParticipant(user) => {
+                self.member_menu.close();
+                if let Phase::Account {
+                    gateway, session, ..
+                } = &mut self.phase
+                {
+                    if user == session.user.id {
+                        return Task::none();
+                    }
+                    let voice = gateway.controls.voice_controls();
+                    if let Some(offer) = voice.streams.iter().find(|offer| offer.owner == user) {
+                        return self.handle(Message::WatchStream(offer.key.clone()));
+                    }
+                    if voice
+                        .participants
+                        .iter()
+                        .any(|participant| participant.user_id == user)
+                    {
+                        gateway.call_view.open = true;
+                    } else {
+                        self.notice =
+                            Some("Join this person's voice channel to watch their stream.".into());
+                    }
                 }
             }
             Message::WatchStream(key) => {
@@ -2691,6 +2733,7 @@ impl App {
         self.voice.reset();
         self.threads.drop_all();
         self.friends.reset();
+        self.member_menu.reset();
         self.status.reset();
         self.phase = Phase::Account {
             session,
@@ -3083,6 +3126,111 @@ impl App {
         task.map(Message::Identity)
     }
 
+    fn member_menu_event(&mut self, event: member_menu::Event) -> Task<Message> {
+        use member_menu::Event;
+        let Phase::Account {
+            gateway, session, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        match event {
+            Event::Open(user, point) => {
+                self.member_menu.target = Some(member_menu::Target {
+                    user,
+                    point,
+                    guild: (!gateway.directs)
+                        .then_some(gateway.navigation.selected_guild)
+                        .flatten(),
+                    confirm: None,
+                });
+                self.member_menu.notice = None;
+            }
+            Event::Close => self.member_menu.close(),
+            Event::Done(serial, result) => {
+                if self.member_menu.pending == Some(serial) {
+                    self.member_menu.pending = None;
+                    self.member_menu.notice =
+                        Some(result.map_or_else(friends::failure, |()| "Done.".into()));
+                    if let Some(target) = &mut self.member_menu.target {
+                        target.confirm = None;
+                    }
+                }
+            }
+            Event::Select(action) => {
+                if self.member_menu.pending.is_some() {
+                    return Task::none();
+                }
+                let Some(target) = &mut self.member_menu.target else {
+                    return Task::none();
+                };
+                if matches!(
+                    action,
+                    fastcord_discord::MemberAction::Kick
+                        | fastcord_discord::MemberAction::Ban
+                        | fastcord_discord::MemberAction::Disconnect
+                ) {
+                    target.confirm = Some(action);
+                    return Task::none();
+                }
+                return self.begin_member_action(action);
+            }
+            Event::Confirm => {
+                if let Some(action) = self
+                    .member_menu
+                    .target
+                    .as_ref()
+                    .and_then(|target| target.confirm)
+                {
+                    return self.begin_member_action(action);
+                }
+            }
+        }
+        // The menu never loads a profile merely by opening; it stays local.
+        let _ = session;
+        Task::none()
+    }
+
+    fn begin_member_action(&mut self, action: fastcord_discord::MemberAction) -> Task<Message> {
+        let Phase::Account {
+            gateway, session, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let Some(target) = &self.member_menu.target else {
+            return Task::none();
+        };
+        let Some(guild) = target
+            .guild
+            .filter(|id| Some(*id) == gateway.navigation.selected_guild)
+        else {
+            return Task::none();
+        };
+        if self.member_menu.pending.is_some() || session.client.writes_restricted() {
+            return Task::none();
+        }
+        if !gateway
+            .navigation
+            .members
+            .get(&target.user.id)
+            .is_some_and(|member| member.moderation.allows(action))
+        {
+            self.member_menu.notice =
+                Some("This action is no longer available for this member.".into());
+            return Task::none();
+        }
+        let (bridge, user) = (gateway.controls.clone(), target.user.id);
+        self.member_menu.serial = self.member_menu.serial.wrapping_add(1);
+        let serial = self.member_menu.serial;
+        self.member_menu.pending = Some(serial);
+        self.member_menu.notice = None;
+        Task::perform(
+            async move { bridge.moderate(guild, user, action).await },
+            move |result| Message::MemberMenu(member_menu::Event::Done(serial, result)),
+        )
+    }
+
     fn report_event(&mut self, event: report::Event) -> Task<Message> {
         let Phase::Account {
             session, gateway, ..
@@ -3237,6 +3385,10 @@ impl App {
                 Task::none()
             }
             Shortcut::Escape { captured } => {
+                if self.member_menu.target.is_some() {
+                    self.member_menu.close();
+                    return Task::none();
+                }
                 if self.switcher.close() {
                     return composer();
                 }
@@ -3685,6 +3837,9 @@ impl App {
                     .style(style::card),
                 );
             }
+            if session.client.writes_restricted() {
+                banner_column = banner_column.push(text("Discord requires account verification. Sending is paused; open the official Discord client, complete its check, then reconnect fastcord.").size(13).style(text::danger));
+            }
             let banner: Option<Element<'_, Message>> = Some(banner_column.into());
 
             // ---- the user's panel at the foot of the sidebar ----
@@ -3933,6 +4088,15 @@ impl App {
                 ]
                 .into(),
                 None => account,
+            };
+            let screen = match member_menu::view(
+                &self.member_menu,
+                &gateway.navigation,
+                voice_controls.clone(),
+                session.client.writes_restricted(),
+            ) {
+                Some(menu) => iced::widget::stack![screen, menu].into(),
+                None => screen,
             };
             let overlay: Option<Element<'_, Message>> = if self.switcher.is_open() {
                 Some(

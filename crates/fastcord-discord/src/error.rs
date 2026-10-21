@@ -118,6 +118,9 @@ impl fmt::Debug for Refusal {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestError {
+    /// Discord requires account verification or a challenge. Writes stay paused
+    /// for this client; complete the check in the official client and reconnect.
+    AccountVerificationRequired,
     /// A 4xx refusal whose Discord error body was kept; only requests that
     /// opt in (`RestRequest::with_error_detail`) produce it.
     Refused(Refusal),
@@ -139,6 +142,7 @@ pub enum RestError {
 impl fmt::Display for RestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AccountVerificationRequired => f.write_str("Discord requires account verification; open the official client before reconnecting"),
             Self::AuthenticationRequired => f.write_str("authentication is required"),
             Self::Refused(r) => write!(f, "request refused ({})", r.status),
             Self::PermissionDenied => f.write_str("permission denied for this resource"),

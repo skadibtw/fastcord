@@ -74,7 +74,7 @@ fn action_parts(
 
 fn action_request(action: RelationshipAction, user: Snowflake) -> Result<RestRequest, RestError> {
     let (route, body) = action_parts(action, user)?;
-    let request = RestRequest::new(route, Priority::UserWrite);
+    let request = RestRequest::new(route, Priority::UserWrite).with_error_detail();
     match body {
         Some(body) => request.json(&body),
         None => Ok(request),
@@ -190,6 +190,7 @@ impl<C: Clock> RestClient<C> {
             Route::new(Method::POST, "/users/@me/relationships")?,
             Priority::UserWrite,
         )
+        .with_error_detail()
         .json(&UsernameBody {
             username,
             discriminator,

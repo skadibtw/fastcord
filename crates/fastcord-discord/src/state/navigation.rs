@@ -35,6 +35,7 @@ const MAX_NICK_BYTES: usize = 128;
 pub struct MemberView {
     pub nick: Option<String>,
     pub roles: Vec<Snowflake>,
+    pub moderation: crate::MemberPermissions,
 }
 
 /// Absolute response row cap, independent of a caller's requested viewport.
@@ -730,6 +731,7 @@ impl Navigation {
                                         .filter(|n| !n.is_empty())
                                         .map(|n| clip_bytes(n, MAX_NICK_BYTES)),
                                     roles: m.roles.clone(),
+                                    moderation: store.member_permissions(guild.id(), m.user_id),
                                 },
                             )
                         })
@@ -1017,6 +1019,10 @@ impl<'a> PermissionContext<'a> {
 // evaluated on demand; navigation never starts a periodic expiry poll.
 fn timeout_active(until: &str, now: OffsetDateTime) -> bool {
     OffsetDateTime::parse(until, &Rfc3339).map_or(true, |expiry| expiry > now)
+}
+
+pub(crate) fn active_timeout(until: &str) -> bool {
+    timeout_active(until, OffsetDateTime::now_utc())
 }
 
 fn enabled_channel<'a>(

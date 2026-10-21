@@ -117,6 +117,8 @@ pub struct State {
 /// What a failed relationship request tells the user to do next.
 pub fn failure(error: RestError) -> String {
     match error {
+        RestError::AccountVerificationRequired => "Discord requires an account check. Requests are paused. Open the official Discord client, complete its verification, then reconnect fastcord.".to_owned(),
+        RestError::Refused(refusal) => format!("Discord refused ({}{}): {}", refusal.status.as_u16(), refusal.code.map_or_else(String::new, |code| format!(", code {code}")), refusal.message()),
         RestError::AuthenticationRequired => "Your session has expired. Log in again.".to_owned(),
         RestError::PermissionDenied => {
             "Discord refused: the user may have blocked you or may not accept friend requests."
@@ -937,6 +939,7 @@ mod member_context_tests {
             MemberView {
                 nick: Some("Bee".into()),
                 roles: vec![Snowflake(2), Snowflake(3)],
+                ..MemberView::default()
             },
         );
         let held = MemberContext::of(Some(Snowflake(7)), &navigation, false);

@@ -1,6 +1,10 @@
 use base64::Engine;
 use std::fmt;
 use std::io::{self, Write};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -149,6 +153,7 @@ impl fmt::Debug for RestResponse {
 pub struct RestClient<C = MonotonicClock> {
     http: reqwest::Client,
     limiter: RateLimiter<C>,
+    writes_restricted: Arc<AtomicBool>,
 }
 
 impl<C> Clone for RestClient<C> {
@@ -156,6 +161,7 @@ impl<C> Clone for RestClient<C> {
         Self {
             http: self.http.clone(),
             limiter: self.limiter.clone(),
+            writes_restricted: self.writes_restricted.clone(),
         }
     }
 }
@@ -189,11 +195,40 @@ impl<C: Clock> RestClient<C> {
         Ok(Self {
             http,
             limiter: RateLimiter::new(clock),
+            writes_restricted: Arc::new(AtomicBool::new(false)),
         })
     }
 
     pub fn stop_authenticated_work(&self) {
         self.limiter.stop();
+    }
+
+    pub fn writes_restricted(&self) -> bool {
+        self.writes_restricted.load(Ordering::Acquire)
+    }
+
+    fn check_write(&self, request: &RestRequest) -> Result<(), RestError> {
+        if self.writes_restricted()
+            && !matches!(*request.route.key().method(), Method::GET | Method::HEAD)
+        {
+            Err(RestError::AccountVerificationRequired)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn observe_refusal(&self, status: StatusCode, body: &[u8]) -> bool {
+        let value: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+        let challenge = status.is_client_error()
+            && (value["code"].as_u64() == Some(40002)
+                || value.get("captcha_key").is_some_and(|key| !key.is_null())
+                || value
+                    .get("captcha_sitekey")
+                    .is_some_and(|key| !key.is_null()));
+        if challenge {
+            self.writes_restricted.store(true, Ordering::Release);
+        }
+        challenge
     }
 
     /// Lets the account coordinator tear down other authenticated workers after
@@ -240,6 +275,7 @@ impl<C: Clock> RestClient<C> {
 
     async fn execute_scheduled(&self, request: RestRequest) -> Result<RestResponse, RestError> {
         loop {
+            self.check_write(&request)?;
             let reservation = self
                 .limiter
                 .acquire(
@@ -248,6 +284,7 @@ impl<C: Clock> RestClient<C> {
                     request.queued_bytes(),
                 )
                 .await?;
+            self.check_write(&request)?;
             let response = self
                 .http
                 .execute(self.build_request(&request)?)
@@ -260,11 +297,14 @@ impl<C: Clock> RestClient<C> {
             }
             let limits = ResponseLimits::from_headers(response.headers(), self.limiter.now());
             if let Some(mut error) = error {
-                if request.error_detail
-                    && matches!(error, RestError::PermissionDenied | RestError::Http(_))
+                if status.is_client_error()
                     && let Ok(body) = read_body(response, ERROR_BODY_BYTE_BUDGET).await
                 {
-                    error = RestError::Refused(Refusal::from_body(status, &body));
+                    if self.observe_refusal(status, &body) {
+                        error = RestError::AccountVerificationRequired;
+                    } else if request.error_detail {
+                        error = RestError::Refused(Refusal::from_body(status, &body));
+                    }
                 }
                 reservation.complete(limits, None);
                 return Err(error);

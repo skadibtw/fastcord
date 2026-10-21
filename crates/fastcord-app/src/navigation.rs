@@ -292,7 +292,7 @@ fn sidebar_row<'a>(
 
 /// One person (or the "+N" rest) under a voice row, at the fixed row height.
 /// A ring marks someone speaking in the call this account is in; the tags show
-/// Go Live, camera, mute and deafen. Clicking a person opens their profile.
+/// Go Live, camera, mute and deafen. Left click watches; right click opens actions.
 pub(crate) fn occupant_row<'a>(
     occupant: &'a Occupant,
     speaking: bool,
@@ -361,12 +361,14 @@ pub(crate) fn occupant_row<'a>(
                 avatar: avatar.clone(),
                 bot: false,
             };
-            button(line)
-                .on_press(Message::Friends(crate::friends::Event::Profile(user)))
-                .width(Length::Fill)
-                .padding(0)
-                .style(style::plain_button)
-                .into()
+            crate::member_menu::area(
+                user,
+                button(line)
+                    .on_press(Message::ActivateParticipant(*user_id))
+                    .width(Length::Fill)
+                    .padding(0)
+                    .style(style::plain_button),
+            )
         }
     };
     container(line)
@@ -880,7 +882,7 @@ mod occupant_tests {
     }
 
     #[test]
-    fn occupant_rows_with_every_marker_stay_in_the_sidebar_and_open_the_profile() {
+    fn occupant_rows_watch_on_left_click_and_open_actions_only_on_right_click() {
         let views = HashMap::new();
         for (speaking, streaming, video) in [(false, false, false), (true, true, true)] {
             let occupant = member(streaming, video);
@@ -894,8 +896,13 @@ mod occupant_tests {
             assert!(
                 matches!(
                     opened.as_slice(),
-                    [Message::Friends(crate::friends::Event::Profile(user))] if user.id == Snowflake(7)
+                    [Message::ActivateParticipant(user)] if *user == Snowflake(7)
                 ),
+                "{opened:?}"
+            );
+            let opened = ui.right_click(100.0, ROW_HEIGHT / 2.0);
+            assert!(
+                matches!(opened.as_slice(), [Message::MemberMenu(crate::member_menu::Event::Open(user, _))] if user.id == Snowflake(7)),
                 "{opened:?}"
             );
         }

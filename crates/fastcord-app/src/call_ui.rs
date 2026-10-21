@@ -111,12 +111,34 @@ fn tile<'a>(
     if let TileId::Stream(key) = &id {
         content = content.push(stream_audio_controls(key, &tile.session));
     }
-    container(content)
+    let content = container(content)
         .padding(3)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(style::speaking(speaking))
-        .into()
+        .into();
+    match &id {
+        TileId::Camera(user) => crate::member_menu::area(voice_user(voice, *user), content),
+        TileId::Stream(key) => match stream_owner(key) {
+            Some(user) => crate::member_menu::area(voice_user(voice, user), content),
+            None => content,
+        },
+        TileId::Preview => content,
+    }
+}
+
+fn voice_user(voice: &VoiceControls, user: Snowflake) -> fastcord_model::User {
+    fastcord_model::User {
+        id: user,
+        username: voice.display_name(user),
+        global_name: None,
+        avatar: voice
+            .avatars
+            .iter()
+            .find(|(id, _)| *id == user)
+            .map(|(_, hash)| hash.clone()),
+        bot: false,
+    }
 }
 
 fn stream_audio_controls<'a>(key: &str, session: &playback::Session) -> Element<'a, Message> {
@@ -270,20 +292,34 @@ pub fn panel<'a>(
             }
             listed += 1;
             let name = voice.display_name(participant.user_id);
-            people = people.push(
-                container(
-                    row![
-                        container(text(style::initial(&name)).size(12))
-                            .center(24)
-                            .style(style::avatar(style::avatar_color(participant.user_id.0))),
-                        text(name).size(12),
-                    ]
-                    .spacing(6)
-                    .align_y(iced::alignment::Vertical::Center),
+            people = people.push(crate::member_menu::area(
+                voice_user(voice, participant.user_id),
+                button(
+                    container(
+                        row![
+                            container(text(style::initial(&name)).size(12))
+                                .center(24)
+                                .style(style::avatar(style::avatar_color(participant.user_id.0))),
+                            text(name).size(12),
+                            text(
+                                if voice.streams.iter().any(|s| s.owner == participant.user_id) {
+                                    "LIVE"
+                                } else {
+                                    ""
+                                }
+                            )
+                            .size(10)
+                            .color(style::RED),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::alignment::Vertical::Center),
+                    )
+                    .padding([3, 8])
+                    .style(style::speaking(participant.speaking)),
                 )
-                .padding([3, 8])
-                .style(style::speaking(participant.speaking)),
-            );
+                .on_press(Message::ActivateParticipant(participant.user_id))
+                .style(style::plain_button),
+            ));
         }
         if more > 0 {
             people = people.push(text(format!("and {more} more")).size(12));

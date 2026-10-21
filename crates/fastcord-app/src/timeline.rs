@@ -2041,6 +2041,7 @@ mod tests {
             fastcord_discord::state::navigation::MemberView {
                 nick: Some("Queen".into()),
                 roles: Vec::new(),
+                ..Default::default()
             },
         );
         assert_eq!(author_name(&message, with(&members, views)), "Queen");

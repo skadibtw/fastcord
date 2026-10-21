@@ -17,6 +17,11 @@ impl Permissions {
     pub const ALL: Self = Self(u64::MAX);
 
     pub const ADMINISTRATOR: Self = Self(1 << 3);
+    pub const KICK_MEMBERS: Self = Self(1 << 1);
+    pub const BAN_MEMBERS: Self = Self(1 << 2);
+    pub const MUTE_MEMBERS: Self = Self(1 << 22);
+    pub const DEAFEN_MEMBERS: Self = Self(1 << 23);
+    pub const MOVE_MEMBERS: Self = Self(1 << 24);
     pub const ADD_REACTIONS: Self = Self(1 << 6);
     pub const PRIORITY_SPEAKER: Self = Self(1 << 8);
     pub const STREAM: Self = Self(1 << 9);

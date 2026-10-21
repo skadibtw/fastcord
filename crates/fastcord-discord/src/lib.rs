@@ -22,6 +22,7 @@ mod group_dm;
 pub mod history;
 mod image_data;
 mod inbox;
+mod member;
 pub mod message_store;
 mod password_auth;
 mod pins;
@@ -59,6 +60,7 @@ pub use group_dm::{
     GroupEdit, GroupError, GroupRequestError, IconImage, MAX_GROUP_NAME_CHARS, MAX_ICON_BYTES,
 };
 pub use inbox::{MENTIONS_PAGE_SIZE, MentionFilter, MentionsPage};
+pub use member::{MemberAction, MemberPermissions};
 pub use password_auth::{
     CaptchaChallenge, CaptchaSolution, LoginRefusal, MAX_CREDENTIAL_BYTES, MfaChallenge,
     PasswordAuth, PasswordAuthError, PasswordLogin,

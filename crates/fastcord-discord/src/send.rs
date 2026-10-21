@@ -489,6 +489,7 @@ impl SendError {
             // Never connected: nothing was sent.
             RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection))
             // Refusals, and failures before anything was dispatched.
+            | RestError::AccountVerificationRequired
             | RestError::AuthenticationRequired
             | RestError::PermissionDenied
             | RestError::Refused(_)

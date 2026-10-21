@@ -525,6 +525,12 @@ pub struct Consumed {
 /// messages. Unlike the coalesced [`Request`], none of these may be dropped or
 /// merged, so they travel through a small bounded queue of their own.
 pub enum Command {
+    Moderate {
+        guild: Snowflake,
+        user: Snowflake,
+        action: fastcord_discord::MemberAction,
+        reply: tokio::sync::oneshot::Sender<Result<(), fastcord_discord::RestError>>,
+    },
     Send {
         channel: Snowflake,
         content: String,
@@ -661,6 +667,17 @@ fn send_or_retain_stream_intent(
 impl fmt::Debug for Command {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Moderate {
+                guild,
+                user,
+                action,
+                ..
+            } => f
+                .debug_tuple("Moderate")
+                .field(guild)
+                .field(user)
+                .field(action)
+                .finish(),
             Self::Send {
                 channel, everyone, ..
             } => f
@@ -794,6 +811,27 @@ pub struct NavigationBridge {
 }
 
 impl NavigationBridge {
+    /// One bounded command with a one-slot answer; the reducer rechecks current
+    /// permissions immediately before handing the request to the transport.
+    pub async fn moderate(
+        &self,
+        guild: Snowflake,
+        user: Snowflake,
+        action: fastcord_discord::MemberAction,
+    ) -> Result<(), fastcord_discord::RestError> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.commands
+            .try_send(Command::Moderate {
+                guild,
+                user,
+                action,
+                reply,
+            })
+            .map_err(|_| fastcord_discord::RestError::SchedulerCapacityExceeded)?;
+        answer
+            .await
+            .unwrap_or(Err(fastcord_discord::RestError::AuthenticationRequired))
+    }
     pub fn new() -> Self {
         let (requests, _) = watch::channel(Request::default());
         let (voice_requests, _) = watch::channel(None);
@@ -2033,6 +2071,26 @@ impl Worker {
     fn command(&mut self, command: Command) {
         let history = &mut self.tracker.history;
         match command {
+            Command::Moderate {
+                guild,
+                user,
+                action,
+                reply,
+            } => {
+                if !self
+                    .tracker
+                    .store
+                    .member_permissions(guild, user)
+                    .allows(action)
+                {
+                    let _ = reply.send(Err(fastcord_discord::RestError::PermissionDenied));
+                } else {
+                    let rest = self.rest.clone();
+                    tokio::spawn(async move {
+                        let _ = reply.send(rest.member_action(guild, user, action).await);
+                    });
+                }
+            }
             Command::Send {
                 channel,
                 content,
