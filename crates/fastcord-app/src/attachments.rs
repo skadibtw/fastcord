@@ -86,6 +86,8 @@ pub trait UrlRefresh: Send + Sync {
 pub struct AttachmentCache {
     account: Snowflake,
     root: Arc<PathBuf>,
+    /// Sized public images (`thumbs`): a sibling tree with its own byte bound.
+    thumbs: Arc<PathBuf>,
     http: reqwest::Client,
     decoded: Arc<Mutex<DecodedLru>>,
     fetch_slots: Arc<tokio::sync::Semaphore>,
@@ -212,6 +214,7 @@ impl AttachmentCache {
     ) -> Result<Self, AttachmentError> {
         Ok(Self {
             account,
+            thumbs: Arc::new(root.join("images").join(account.0.to_string())),
             root: Arc::new(root.join(account.0.to_string())),
             http,
             decoded: Arc::new(Mutex::new(DecodedLru::default())),
@@ -260,8 +263,10 @@ impl AttachmentCache {
             *decoded = DecodedLru::default();
         }
         let root = self.root.clone();
+        let thumbs = self.thumbs.clone();
         tokio::task::spawn_blocking(move || {
             let _lock = DISK_CACHE_LOCK.lock();
+            let _ = fs::remove_dir_all(thumbs.as_path());
             // A just-cancelled download may still be closing its file.
             for attempt in 0..5 {
                 match fs::remove_dir_all(root.as_path()) {
@@ -759,6 +764,24 @@ impl AttachmentCache {
             message: Snowflake((u64::from_le_bytes(fold) << 8) | u64::from(kind.max(2))),
             attachment: id,
         };
+        // A sized copy from an earlier run answers with one small file read:
+        // no fetch slot, no network, no decode.
+        let thumb = crate::thumbs::name(kind, id.0, hash, fit);
+        {
+            let (dir, active, name) = (self.thumbs.clone(), self.active.clone(), thumb.clone());
+            let hit = tokio::task::spawn_blocking(move || {
+                active
+                    .load(Ordering::Acquire)
+                    .then(|| crate::thumbs::read(&dir, &name))
+                    .flatten()
+            })
+            .await
+            .map_err(|_| AttachmentError::WorkerStopped)?;
+            if let Some(image) = hit {
+                self.ensure_active()?;
+                return Ok(image);
+            }
+        }
         let path = self
             .fetch_file(&PublicEmoji, key, "avatar.png", url, limit)
             .await?;
@@ -776,6 +799,15 @@ impl AttachmentCache {
         .await
         .map_err(|_| AttachmentError::WorkerStopped)??;
         self.ensure_active()?;
+        let (dir, active, stored) = (self.thumbs.clone(), self.active.clone(), image.clone());
+        // Best effort: a failed write only costs a decode next launch.
+        let _ = tokio::task::spawn_blocking(move || {
+            let _lock = DISK_CACHE_LOCK.lock();
+            if active.load(Ordering::Acquire) {
+                let _ = crate::thumbs::write(&dir, &thumb, &stored);
+            }
+        })
+        .await;
         Ok(image)
     }
 
@@ -1128,7 +1160,11 @@ fn partial_path(destination: &Path) -> Result<PathBuf, AttachmentError> {
 /// Evicts least-recently-used files, across every account's directory next to
 /// `root`, until at most `limit` bytes remain. Partial downloads count toward
 /// the total but are never evicted, and neither is `keep`.
-fn trim_disk_to(root: &Path, limit: u64, keep: Option<&Path>) -> Result<(), AttachmentError> {
+pub(crate) fn trim_disk_to(
+    root: &Path,
+    limit: u64,
+    keep: Option<&Path>,
+) -> Result<(), AttachmentError> {
     let base = root.parent().unwrap_or(root);
     let mut entries = Vec::new();
     let mut total = 0u64;
@@ -1828,6 +1864,49 @@ mod tests {
                 .await
                 .unwrap_err(),
             AttachmentError::Http(404)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_restarted_cache_shows_avatars_without_the_network_and_purge_forgets_them() {
+        let (address, seen) = serve(respond({
+            let png = png(256, 256);
+            move |_| ok(&png)
+        }))
+        .await;
+        let root = scratch("avatar-restart");
+        let url = format!("http://{address}/avatars/9/h1.png?size=64");
+        let first = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        first.avatar(2, Snowflake(9), "h1", &url).await.unwrap();
+        assert_eq!(seen.lock().len(), 1);
+        assert!(root.join("images").join("1").is_dir());
+        drop(first);
+        // New instance on the same directory; the URL is unreachable and the
+        // compressed copy is gone, so only the sized thumbnail can answer.
+        fs::remove_dir_all(root.join("1")).unwrap();
+        let second = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let hit = second
+            .avatar(2, Snowflake(9), "h1", "http://127.0.0.1:1/never")
+            .await
+            .unwrap();
+        assert_eq!((hit.width, hit.height), (AVATAR_SIDE, AVATAR_SIDE));
+        assert_eq!(seen.lock().len(), 1);
+        // A new hash is a different entry and does need the network.
+        assert!(
+            second
+                .avatar(2, Snowflake(9), "h2", "http://127.0.0.1:1/never")
+                .await
+                .is_err()
+        );
+        second.purge().await.unwrap();
+        assert!(!root.join("images").join("1").exists());
+        let third = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        assert!(
+            third
+                .avatar(2, Snowflake(9), "h1", "http://127.0.0.1:1/never")
+                .await
+                .is_err()
         );
         let _ = fs::remove_dir_all(root);
     }

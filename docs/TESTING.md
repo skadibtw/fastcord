@@ -622,3 +622,7 @@ Automated: tone length/amplitude bounds, event-to-sound mapping, deafen suppress
 - Joining a busy channel is silent for the people already there; deafened, only the toggles and leaving play.
 - A DM or mention with the window unfocused pings once with the toast; nothing while the window is focused.
 - Audio dialog: the checkbox off silences everything, the slider changes loudness, both persist after restart; the chosen output device is used. Idle: no extra threads or CPU.
+
+### Persistent avatar and server icon cache
+Automated: `thumbs::tests` (stable file names, new hash or size is a new file, restart read, corrupt file dropped, LRU eviction by bytes keeping the new entry) and `attachments::tests::a_restarted_cache_shows_avatars_without_the_network_and_purge_forgets_them` (new cache instance on the same directory answers with the network unreachable, a new hash misses, purge removes the thumbnails).
+Manual (Windows, alt account only): open a server with many members, quit fastcord, start it again: avatars and server icons are drawn as soon as the rows appear, with no letter circles first. Switch between two servers back and forth: no pop-in. `%LOCALAPPDATA%\fastcord\attachments\images\<account>` stays under 64 MiB. Forget saved login removes that folder.

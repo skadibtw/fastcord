@@ -52,6 +52,7 @@ mod sticker;
 mod style;
 mod switcher;
 mod threads;
+mod thumbs;
 mod timeline;
 mod ui_sound;
 mod variable_list;
