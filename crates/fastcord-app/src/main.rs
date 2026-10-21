@@ -5311,9 +5311,10 @@ mod tests {
         assert_eq!(app.video_subscription().units(), 0);
         let _ = app.update(Message::ShowStream(true));
         assert_eq!(app.video_subscription().units(), 1);
+        // Losing focus keeps the stream playing, like the official client.
         let _ = app.update(Message::WindowActive(false));
-        assert_eq!(app.video_subscription().units(), 0);
-        assert!(!watched.visible.load(Ordering::Acquire));
+        assert_eq!(app.video_subscription().units(), 1);
+        assert!(watched.visible.load(Ordering::Acquire));
         let _ = app.update(Message::WindowActive(true));
         assert_eq!(app.video_subscription().units(), 1);
         let _ = app.update(Message::ShowStream(false));
