@@ -18,6 +18,7 @@ mod gateway;
 mod gif;
 mod group_dm;
 mod history;
+mod icons;
 mod inbox;
 mod login;
 mod media_ui;
@@ -3594,99 +3595,123 @@ impl App {
                     .style(style::footer),
                 );
             }
-            foot = foot.push(
-                container(
-                    row![
-                        avatars::view(
-                            &gateway.avatars.views,
-                            &avatars::AvatarKey::user(me.id, me.avatar.as_deref(),),
-                            32.0,
-                            || container(text(style::initial(&display)).size(14).font(bold))
-                                .center(32)
-                                .style(style::avatar(style::avatar_color(session.user.id.0)))
-                                .into(),
-                        ),
-                        column![
-                            text(display)
-                                .size(13)
-                                .font(bold)
-                                .wrapping(text::Wrapping::None),
-                            button(
-                                row![
-                                    status::dot(own_status),
-                                    text(
-                                        self.status
-                                            .custom(own)
-                                            .or(own_status.map(status::label))
-                                            .unwrap_or("Set status")
-                                            .to_owned()
-                                    )
-                                    .size(11)
-                                    .wrapping(text::Wrapping::None),
-                                ]
-                                .spacing(5)
-                                .align_y(iced::alignment::Vertical::Center)
+            let requests = gateway.navigation.requests.total;
+            let identity = row![
+                avatars::view(
+                    &gateway.avatars.views,
+                    &avatars::AvatarKey::user(me.id, me.avatar.as_deref(),),
+                    32.0,
+                    || container(text(style::initial(&display)).size(14).font(bold))
+                        .center(32)
+                        .style(style::avatar(style::avatar_color(session.user.id.0)))
+                        .into(),
+                ),
+                column![
+                    text(display)
+                        .size(13)
+                        .font(bold)
+                        .wrapping(text::Wrapping::None),
+                    button(
+                        row![
+                            status::dot(own_status),
+                            text(
+                                self.status
+                                    .custom(own)
+                                    .or(own_status.map(status::label))
+                                    .unwrap_or("Set status")
+                                    .to_owned()
                             )
-                            .padding(0)
-                            .on_press(Message::Status(status::Event::ToggleMenu))
-                            .style(style::tool_button(false, false)),
+                            .size(11)
+                            .wrapping(text::Wrapping::None),
                         ]
-                        .width(Length::Fill),
-                        button(
-                            text(if voice_controls.self_muted {
-                                "Muted"
-                            } else {
-                                "Mic"
-                            })
-                            .size(12)
-                        )
-                        .on_press_maybe(
+                        .spacing(5)
+                        .align_y(iced::alignment::Vertical::Center)
+                    )
+                    .padding(0)
+                    .on_press(Message::Status(status::Event::ToggleMenu))
+                    .style(style::tool_button(false, false)),
+                ]
+                .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center);
+            let action = |icon, on_press, active, danger, tip: &str, badge| icons::Action {
+                icon,
+                on_press,
+                active,
+                danger,
+                tip: tip.to_owned(),
+                badge,
+            };
+            foot = foot.push(
+                container(icons::footer(
+                    identity.into(),
+                    [
+                        action(
+                            icons::Icon::Mic {
+                                muted: voice_controls.self_muted,
+                            },
                             running.then_some(Message::SetSelfMute(!voice_controls.self_muted)),
-                        )
-                        .style(style::tool_button(
                             !voice_controls.self_muted,
-                            voice_controls.self_muted
-                        )),
-                        button(
-                            text(if voice_controls.deafened {
-                                "Deaf"
+                            voice_controls.self_muted,
+                            if voice_controls.self_muted {
+                                "Microphone muted. Click to unmute"
                             } else {
-                                "Sound"
-                            })
-                            .size(12)
-                        )
-                        .on_press_maybe(
+                                "Microphone on. Click to mute"
+                            },
+                            0,
+                        ),
+                        action(
+                            icons::Icon::Headphones {
+                                deafened: voice_controls.deafened,
+                            },
                             running.then_some(Message::SetDeafen(!voice_controls.deafened)),
-                        )
-                        .style(style::tool_button(
                             !voice_controls.deafened,
-                            voice_controls.deafened
-                        )),
-                        button(text("Me").size(12))
-                            .on_press(Message::Identity(profile_edit::Event::Toggle))
-                            .style(style::tool_button(self.identity.is_open(), false)),
-                        button(
-                            text(match gateway.navigation.requests.total {
-                                0 => "Safety".to_owned(),
-                                n => format!("Safety ({n})"),
-                            })
-                            .size(12)
-                        )
-                        .on_press(Message::Safety(safety::Event::Toggle))
-                        .style(style::tool_button(
-                            self.safety.is_open() || gateway.navigation.requests.total > 0,
-                            false
-                        )),
-                        button(text("Audio").size(12))
-                            .on_press(Message::OpenAudioSettings)
-                            .style(style::tool_button(true, false)),
-                        button(text("Exit").size(12))
-                            .on_press(Message::Logout)
-                            .style(style::tool_button(false, false)),
-                    ]
-                    .spacing(2)
-                    .align_y(iced::alignment::Vertical::Center),
-                )
+                            voice_controls.deafened,
+                            if voice_controls.deafened {
+                                "Deafened. Click to hear again"
+                            } else {
+                                "Hearing. Click to deafen"
+                            },
+                            0,
+                        ),
+                        action(
+                            icons::Icon::Profile,
+                            Some(Message::Identity(profile_edit::Event::Toggle)),
+                            self.identity.is_open(),
+                            false,
+                            "Edit your profile",
+                            0,
+                        ),
+                        action(
+                            icons::Icon::Safety,
+                            Some(Message::Safety(safety::Event::Toggle)),
+                            self.safety.is_open() || requests > 0,
+                            false,
+                            &match requests {
+                                0 => "Safety and message requests".to_owned(),
+                                n => format!("Safety and message requests ({n} pending)"),
+                            },
+                            requests.try_into().unwrap_or(u32::MAX),
+                        ),
+                        action(
+                            icons::Icon::Audio,
+                            Some(Message::OpenAudioSettings),
+                            true,
+                            false,
+                            "Audio settings",
+                            0,
+                        ),
+                        action(
+                            icons::Icon::Exit,
+                            Some(Message::Logout),
+                            false,
+                            false,
+                            "Log out",
+                            0,
+                        ),
+                    ],
+                ))
                 .padding([8, 8])
                 .style(style::footer),
             );

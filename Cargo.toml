@@ -47,7 +47,7 @@ openmls_traits = { version = "=0.5.0" }
 tls_codec = { version = "=0.4.2" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
-iced = { version = "0.14", default-features = false, features = ["advanced", "image", "wgpu", "tiny-skia", "tokio", "x11", "wayland", "qr_code"] }
+iced = { version = "0.14", default-features = false, features = ["advanced", "canvas", "image", "wgpu", "tiny-skia", "tokio", "x11", "wayland", "qr_code"] }
 iced_renderer = { version = "0.14", default-features = false }
 iced_tiny_skia = { version = "0.14", default-features = false, features = ["image"] }
 keyring-core = "1.0.0"

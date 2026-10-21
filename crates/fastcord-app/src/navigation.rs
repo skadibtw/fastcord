@@ -23,7 +23,7 @@ const BOLD: Font = Font {
 /// Height of one server icon row in the rail.
 pub const RAIL_ROW: f32 = 56.0;
 const RAIL_WIDTH: f32 = 72.0;
-const SIDEBAR_WIDTH: f32 = 240.0;
+pub(crate) const SIDEBAR_WIDTH: f32 = 240.0;
 
 pub struct PrivateConversation<'a> {
     pub recipients: &'a str,
