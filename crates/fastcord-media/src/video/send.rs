@@ -23,6 +23,12 @@ pub(crate) const PACER_WINDOW: Duration = Duration::from_millis(100);
 /// One recovery/keyframe may use extra room, still below the receiver's
 /// 200 ms frame deadline. Rate and burst credit do not increase.
 const KEYFRAME_WINDOW: Duration = Duration::from_millis(180);
+/// A keyframe on an empty queue is always admitted when it can leave within
+/// this time, and the queue window stretches to its transmit time until it
+/// is out. Refusing it instead only asks the encoder for another keyframe
+/// of the same size: a refusal loop that sends nothing and keeps the encoder
+/// busy (seen live with a 2560x1440 desktop: 0 fps, video engine ~60%).
+const MAX_KEYFRAME_WINDOW: Duration = Duration::from_secs(1);
 /// The pacer drains at 2.5 times the target bitrate (the pacing multiplier
 /// libwebrtc defaults to), so a keyframe leaves in tens of milliseconds and
 /// ordinary frames leave in tens of milliseconds. Keyframes get separate,
@@ -147,7 +153,7 @@ impl Pacer {
     fn fits_keyframe(&self, bytes: usize, packets: usize) -> bool {
         self.queue.is_empty()
             && packets <= MAX_PACKETS
-            && transmit_time(bytes, self.rate) <= KEYFRAME_WINDOW
+            && transmit_time(bytes, self.rate) <= MAX_KEYFRAME_WINDOW
     }
 
     /// Queues a whole frame, or none of it. A large keyframe may extend an
@@ -163,7 +169,11 @@ impl Pacer {
             if !keyframe || !self.fits_keyframe(bytes, packets.len()) {
                 return Err(VideoError::QueueFull);
             }
-            self.window = KEYFRAME_WINDOW;
+            // Room for this keyframe and the frames that follow it while it
+            // drains, so they queue behind it instead of forcing a new one.
+            self.window = transmit_time(bytes, self.rate)
+                .max(KEYFRAME_WINDOW)
+                .saturating_add(PACER_WINDOW);
         }
         self.bytes += bytes;
         self.queue
@@ -719,7 +729,8 @@ mod tests {
         sender
             .enqueue_frame(now, Duration::ZERO, frame(100_000), true)
             .unwrap();
-        assert_eq!(sender.pacer.window, KEYFRAME_WINDOW);
+        // Room for the keyframe plus the frames that follow while it drains.
+        assert_eq!(sender.pacer.window, KEYFRAME_WINDOW + PACER_WINDOW);
         assert!(sender.pacer_bytes() <= sender.pacer.capacity());
         assert_eq!(drain(&mut sender, now).len(), 1);
         let mut at = now;
@@ -749,7 +760,42 @@ mod tests {
         assert_eq!(sender.sequence, sequence);
         assert_eq!(sender.pacer.window, PACER_WINDOW);
         drain_all(&mut sender, now).await;
-        assert!(!sender.can_accept_frame(Instant::now(), 200_000, true));
+        // More than a second at the pacing rate is still refused whole.
+        assert!(!sender.can_accept_frame(Instant::now(), 1_000_000, true));
+    }
+
+    /// The live refusal loop: a desktop keyframe larger than the normal
+    /// keyframe budget is admitted on an empty queue, and the delta frames
+    /// that follow while it drains queue behind it instead of being refused
+    /// (each refusal would ask the encoder for yet another big keyframe).
+    #[tokio::test(start_paused = true)]
+    async fn a_big_keyframe_is_admitted_and_the_frames_after_it_queue_behind_it() {
+        let now = Instant::now();
+        let mut sender = sender(now);
+        // 250 KB takes 320 ms at the pacing rate: over KEYFRAME_WINDOW.
+        assert!(sender.can_accept_frame(now, 250_000, true));
+        sender
+            .enqueue_frame(now, Duration::ZERO, frame(250_000), true)
+            .unwrap();
+        assert!(sender.pacer.window > Duration::from_millis(320));
+        let mut at = now;
+        for n in 1..=8u64 {
+            at += Duration::from_millis(33);
+            drain(&mut sender, at);
+            assert!(
+                sender.can_accept_frame(at, 6_000, false),
+                "delta {n} refused while the keyframe drains"
+            );
+            sender
+                .enqueue_frame(at, Duration::from_millis(33 * n), frame(6_000), false)
+                .unwrap();
+        }
+        while sender.next_wake().is_some() {
+            at += Duration::from_millis(1);
+            drain(&mut sender, at);
+            assert!(at - now < MAX_KEYFRAME_WINDOW);
+        }
+        assert_eq!(sender.pacer.window, PACER_WINDOW);
     }
 
     #[tokio::test(start_paused = true)]

@@ -1119,12 +1119,13 @@ async fn an_owner_pauses_resumes_and_cuts_its_rate_when_the_pacer_is_full() {
         VoiceEvent::VideoBitrate(1_000_000)
     );
 
-    // A frame too large even for an empty keyframe queue is refused whole.
-    // It must not cut bitrate: that would also shrink the next keyframe's
-    // allowance and permanently prevent recovery.
+    // A frame too large even for an empty keyframe queue (more than a second
+    // at the pacing rate) is refused whole. It must not cut bitrate: that
+    // would also shrink the next keyframe's allowance and permanently
+    // prevent recovery.
     tokio::time::sleep(Duration::from_millis(400)).await;
     let mut huge = vec![0, 0, 0, 1, 0x65];
-    huge.extend((0..200_000u32).map(|i| 0x80 | (i % 0x7F) as u8));
+    huge.extend((0..400_000u32).map(|i| 0x80 | (i % 0x7F) as u8));
     media.send_video(frame_of(&huge, 200)).unwrap();
     assert_eq!(rig.harness.event().await, VoiceEvent::KeyframeRequested);
     media.send_video(frame_of(delta, 233)).unwrap();
