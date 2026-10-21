@@ -46,6 +46,8 @@ pub struct Chrome<'a> {
     pub inbox: Option<Element<'a, Message>>,
     /// The private call this account is connected to, if any.
     pub voice_call: Option<fastcord_model::Snowflake>,
+    /// The post list of the open forum, when the open channel is one.
+    pub forum: Option<Element<'a, Message>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -66,6 +68,7 @@ pub fn view<'a>(
         friends,
         inbox,
         voice_call,
+        forum,
     } = chrome;
     let rail = rail(snapshot, directs, inbox.is_some(), attachments.avatars);
     let sidebar = sidebar(
@@ -87,6 +90,7 @@ pub fn view<'a>(
             directs,
             banner,
             voice_call,
+            forum,
         ),
     };
     row![rail, sidebar, main].height(Length::Fill).into()
@@ -500,6 +504,7 @@ fn sidebar<'a>(
                 ChannelKind::Announcement => "\u{25B6} ",
                 ChannelKind::Voice => "\u{266A} ",
                 ChannelKind::Thread => "    \u{21B3} ",
+                ChannelKind::Forum => "\u{2630} ",
                 ChannelKind::Category => "",
             };
             let label = format!(
@@ -648,6 +653,7 @@ fn main_pane<'a>(
     directs: bool,
     banner: Option<Element<'a, Message>>,
     voice_call: Option<fastcord_model::Snowflake>,
+    forum: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let mut body = column![].width(Length::Fill).height(Length::Fill);
     let conversation = |body: iced::widget::Column<'a, Message>,
@@ -753,6 +759,12 @@ fn main_pane<'a>(
                 let mut tools = Vec::new();
                 let title = match thread {
                     Some(state) => {
+                        if state.forum_post {
+                            tools.push((
+                                "Posts",
+                                Message::SelectChannel(selection.guild_id, state.parent_id),
+                            ));
+                        }
                         tools.push(if state.joined {
                             (
                                 "Leave",
@@ -806,6 +818,35 @@ fn main_pane<'a>(
                         selection.channel_id,
                     );
                     body = conversation(body, selection.channel_id, bar);
+                }
+            }
+            ChannelKind::Forum => {
+                let can_post = snapshot.forum.as_ref().is_some_and(|f| f.can_post);
+                let note = match (permissions.read_history, can_post) {
+                    (false, _) => "You can view this forum but not read its posts.",
+                    (true, false) => "You cannot post here",
+                    (true, true) => "",
+                };
+                let tools = if can_post {
+                    vec![("New post", Message::Forum(crate::forum::Event::New))]
+                } else {
+                    Vec::new()
+                };
+                body = body.push(header_with(
+                    format!("\u{2630} {}", selection.name),
+                    note,
+                    false,
+                    false,
+                    None,
+                    tools,
+                ));
+                if let Some(banner) = banner {
+                    body = body.push(container(banner).padding([4, 16]));
+                }
+                if permissions.read_history
+                    && let Some(forum) = forum
+                {
+                    body = body.push(forum);
                 }
             }
             ChannelKind::Category => {}

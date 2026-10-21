@@ -8,15 +8,22 @@
 //!   `GET /channels/{channel}/threads/archived/public?limit=25[&before=<archive_timestamp>]`
 //!   answering `{"threads", "members", "has_more"}`
 //!
+//! - a forum post (milestone 49): `POST /channels/{forum}/threads` with
+//!   `{"name", "applied_tags", "message": {"content", "allowed_mentions",
+//!   "attachments"}}`, answering the new thread; sent once, never repeated by
+//!   the transport (see [`PostError`])
+//!
 //! Active threads arrive on the Gateway (GUILD_CREATE `threads`,
 //! THREAD_LIST_SYNC, THREAD_CREATE/UPDATE/DELETE); nothing here lists them. The
 //! wire shapes are from community documentation and observed web-client
 //! traffic and are unverified against a live account (`docs/TESTING.md`).
 
-use fastcord_model::{Channel, Snowflake};
+use fastcord_model::{Channel, MAX_APPLIED_TAGS, Snowflake};
 use reqwest::Url;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use crate::send::{MAX_CONTENT_CHARS, MentionPolicy, SendError, WireAttachment, wire_attachments};
+use crate::upload::UploadedFile;
 use crate::{Clock, Method, Priority, RestClient, RestError, RestRequest, Route};
 
 /// Archived threads per page (the `limit` asked for, and the most accepted).
@@ -68,6 +75,182 @@ pub fn thread_name(input: &str) -> Result<&str, ThreadError> {
         return Err(ThreadError::InvalidName);
     }
     Ok(name)
+}
+
+/// Why a forum post is not sent, decided before any request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostInvalid {
+    /// The title is empty after trimming or longer than 100 characters.
+    Title,
+    /// No text and no file: a post needs a first message.
+    Empty,
+    TooLong,
+    /// More than five tags.
+    TooManyTags,
+    /// The forum requires a tag and none is chosen.
+    TagRequired,
+    /// A media channel requires a file in the first message.
+    FileRequired,
+}
+
+impl PostInvalid {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Title => "Give the post a title of 1 to 100 characters.",
+            Self::Empty => "Write the first message of the post or attach a file.",
+            Self::TooLong => "The first message is too long.",
+            Self::TooManyTags => "A post carries at most 5 tags.",
+            Self::TagRequired => "This forum requires at least one tag.",
+            Self::FileRequired => "This channel requires a file in every post.",
+        }
+    }
+}
+
+/// A forum post failed. `Send(NotSent)`: Discord definitely created nothing, so
+/// fixing the cause and posting again is safe. `Send(Ambiguous)`: a post may
+/// exist; the caller must not repeat the request without the user's say-so
+/// (the request has no nonce Discord could deduplicate on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostError {
+    Invalid(PostInvalid),
+    Send(SendError),
+}
+
+/// What the forum demands of a post.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PostRules {
+    pub require_tag: bool,
+    pub require_file: bool,
+}
+
+/// A validated new forum post. `Debug` never prints the text.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ForumPost {
+    name: String,
+    content: String,
+    tags: Vec<Snowflake>,
+    files: Vec<UploadedFile>,
+}
+
+impl std::fmt::Debug for ForumPost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForumPost")
+            .field("tags", &self.tags.len())
+            .field("files", &self.files.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ForumPost {
+    /// Checks everything Discord would refuse for a reason the client knows,
+    /// before any file is uploaded. `files` is the number of files to attach.
+    pub fn check(
+        name: &str,
+        content: &str,
+        tags: &[Snowflake],
+        files: usize,
+        rules: PostRules,
+    ) -> Result<(), PostInvalid> {
+        thread_name(name).map_err(|_| PostInvalid::Title)?;
+        let content = content.trim();
+        if content.chars().count() > MAX_CONTENT_CHARS {
+            return Err(PostInvalid::TooLong);
+        }
+        if content.is_empty() && files == 0 {
+            return Err(PostInvalid::Empty);
+        }
+        if rules.require_file && files == 0 {
+            return Err(PostInvalid::FileRequired);
+        }
+        let mut unique: Vec<Snowflake> = Vec::new();
+        for tag in tags {
+            if !unique.contains(tag) {
+                unique.push(*tag);
+            }
+        }
+        if unique.len() > MAX_APPLIED_TAGS {
+            return Err(PostInvalid::TooManyTags);
+        }
+        if rules.require_tag && unique.is_empty() {
+            return Err(PostInvalid::TagRequired);
+        }
+        Ok(())
+    }
+
+    /// A checked post carrying the uploaded `files`. Tags are deduplicated,
+    /// keeping the order chosen.
+    pub fn new(
+        name: &str,
+        content: &str,
+        tags: &[Snowflake],
+        files: Vec<UploadedFile>,
+        rules: PostRules,
+    ) -> Result<Self, PostInvalid> {
+        Self::check(name, content, tags, files.len(), rules)?;
+        let mut unique: Vec<Snowflake> = Vec::new();
+        for tag in tags {
+            if !unique.contains(tag) {
+                unique.push(*tag);
+            }
+        }
+        Ok(Self {
+            name: name.trim().to_owned(),
+            content: content.trim().to_owned(),
+            tags: unique,
+            files,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn body(&self) -> PostBody<'_> {
+        PostBody {
+            name: &self.name,
+            applied_tags: &self.tags,
+            message: PostMessage {
+                content: &self.content,
+                allowed_mentions: AllowedMentions {
+                    parse: MentionPolicy::default().parse(),
+                },
+                attachments: wire_attachments(&self.files),
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PostBody<'a> {
+    name: &'a str,
+    applied_tags: &'a [Snowflake],
+    message: PostMessage<'a>,
+}
+
+#[derive(Serialize)]
+struct PostMessage<'a> {
+    content: &'a str,
+    allowed_mentions: AllowedMentions,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<WireAttachment<'a>>,
+}
+
+#[derive(Serialize)]
+struct AllowedMentions {
+    parse: Vec<&'static str>,
+}
+
+fn post_route(forum: Snowflake) -> Result<Route, RestError> {
+    Route::new(Method::POST, &format!("/channels/{forum}/threads"))
+}
+
+/// The created post must be a thread of the asked forum; anything else on a
+/// success status means a post probably exists that cannot be identified.
+fn parse_post(body: &[u8], forum: Snowflake) -> Result<Channel, SendError> {
+    serde_json::from_slice::<Channel>(body)
+        .ok()
+        .filter(|post| post.kind.is_thread() && post.parent_id == Some(forum))
+        .ok_or(SendError::Ambiguous(RestError::InvalidJson))
 }
 
 fn membership_route(method: Method, thread: Snowflake) -> Result<Route, RestError> {
@@ -169,6 +352,30 @@ impl<C: Clock> RestClient<C> {
         Ok(thread)
     }
 
+    /// Starts a post in a forum or media channel. Sent exactly once; see
+    /// [`PostError`] for what a failure allows.
+    pub async fn create_forum_post(
+        &self,
+        guild: Snowflake,
+        forum: Snowflake,
+        post: &ForumPost,
+    ) -> Result<Channel, PostError> {
+        let request = post_route(forum)
+            .and_then(|route| {
+                RestRequest::new(route, Priority::UserWrite)
+                    .with_error_detail()
+                    .json(&post.body())
+            })
+            .map_err(|e| PostError::Send(SendError::NotSent(e)))?;
+        let response = self
+            .execute(request)
+            .await
+            .map_err(|e| PostError::Send(SendError::from_transport(e)))?;
+        let mut thread = parse_post(response.body(), forum).map_err(PostError::Send)?;
+        thread.guild_id.get_or_insert(guild);
+        Ok(thread)
+    }
+
     /// One page of the channel's archived public threads, newest archived
     /// first. `before` is the `archive_timestamp` of the last thread held.
     pub async fn archived_threads(
@@ -221,6 +428,84 @@ mod tests {
             path(&archived_route(PARENT, Some("2026-10-07T12:00:00.000000+00:00")).unwrap()),
             "/channels/500/threads/archived/public?limit=25&before=2026-10-07T12%3A00%3A00.000000%2B00%3A00"
         );
+    }
+
+    fn rules(require_tag: bool) -> PostRules {
+        PostRules {
+            require_tag,
+            require_file: false,
+        }
+    }
+
+    #[test]
+    fn post_request_has_the_documented_shape() {
+        assert_eq!(path(&post_route(PARENT).unwrap()), "/channels/500/threads");
+        let post = ForumPost::new(
+            "  Bug: crash  ",
+            " it crashes ",
+            &[Snowflake(7), Snowflake(8), Snowflake(7)],
+            Vec::new(),
+            rules(true),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(post.body()).unwrap(),
+            serde_json::json!({
+                "name": "Bug: crash",
+                "applied_tags": ["7", "8"],
+                "message": {"content": "it crashes", "allowed_mentions": {"parse": ["users", "roles"]}},
+            })
+        );
+        assert!(!format!("{post:?}").contains("crashes"));
+    }
+
+    #[test]
+    fn post_is_validated_before_any_request() {
+        let new = |name: &str, body: &str, tags: &[u64], rules| {
+            let tags: Vec<_> = tags.iter().map(|t| Snowflake(*t)).collect();
+            ForumPost::new(name, body, &tags, Vec::new(), rules).map(drop)
+        };
+        assert_eq!(new(" ", "x", &[], rules(false)), Err(PostInvalid::Title));
+        assert_eq!(new("t", "  ", &[], rules(false)), Err(PostInvalid::Empty));
+        assert_eq!(
+            new("t", &"x".repeat(MAX_CONTENT_CHARS + 1), &[], rules(false)),
+            Err(PostInvalid::TooLong)
+        );
+        assert_eq!(
+            new("t", "x", &[], rules(true)),
+            Err(PostInvalid::TagRequired)
+        );
+        assert_eq!(new("t", "x", &[1], rules(true)), Ok(()));
+        assert_eq!(
+            new("t", "x", &[1, 2, 3, 4, 5, 6], rules(false)),
+            Err(PostInvalid::TooManyTags)
+        );
+        assert_eq!(
+            new("t", "x", &[1, 1, 1, 1, 1, 1], rules(false)),
+            Ok(()),
+            "duplicates are one tag"
+        );
+        let media = PostRules {
+            require_tag: false,
+            require_file: true,
+        };
+        assert_eq!(new("t", "x", &[], media), Err(PostInvalid::FileRequired));
+    }
+
+    #[test]
+    fn a_created_post_must_be_a_thread_of_the_forum() {
+        let ok = br#"{"id":"9","type":11,"parent_id":"500","name":"t","applied_tags":["7"]}"#;
+        assert_eq!(parse_post(ok, PARENT).unwrap().applied_tags, [Snowflake(7)]);
+        for bad in [
+            &br#"{"id":"9","type":11,"parent_id":"501"}"#[..],
+            br#"{"id":"9","type":0,"parent_id":"500"}"#,
+            b"[]",
+        ] {
+            assert_eq!(
+                parse_post(bad, PARENT),
+                Err(SendError::Ambiguous(RestError::InvalidJson))
+            );
+        }
     }
 
     #[test]

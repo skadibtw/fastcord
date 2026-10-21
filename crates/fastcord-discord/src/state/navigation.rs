@@ -4,7 +4,7 @@
 //! IDs, never row indices; a fresh READY for the same account preserves valid IDs.
 //! Windows own at most 128 capped names, not guilds, members, or message histories.
 //! Queries perform no I/O, subscriptions request no member-list viewport, and no
-//! timer is needed. Unsupported channel kinds (forums, DMs) are not part of guild
+//! timer is needed. Unsupported channel kinds (DMs) are not part of guild
 //! navigation.
 //!
 //! Threads (milestone 48) are channels the store holds under their parent. They
@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use fastcord_model::{
-    Channel, ChannelKind as ModelChannelKind, GuildScope, MemberScope, Permissions, Snowflake,
-    channel_permissions,
+    Channel, ChannelKind as ModelChannelKind, FLAG_PINNED, FLAG_REQUIRE_TAG, GuildScope,
+    MemberScope, Permissions, Snowflake, channel_permissions,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -84,6 +84,9 @@ pub enum ChannelKind {
     Voice,
     /// A public, announcement or private thread.
     Thread,
+    /// A forum or media channel: its posts are listed in `forum` of the
+    /// snapshot, not in the sidebar.
+    Forum,
 }
 
 impl ChannelKind {
@@ -94,6 +97,7 @@ impl ChannelKind {
             ModelChannelKind::GuildAnnouncement => Some(Self::Announcement),
             ModelChannelKind::GuildVoice | ModelChannelKind::GuildStageVoice => Some(Self::Voice),
             kind if kind.is_thread() => Some(Self::Thread),
+            kind if kind.is_forum() => Some(Self::Forum),
             _ => None,
         }
     }
@@ -116,6 +120,7 @@ pub struct PermissionSummary {
     pub use_soundboard: bool,
     pub create_threads: bool,
     pub manage_threads: bool,
+    pub attach_files: bool,
 }
 
 impl From<Permissions> for PermissionSummary {
@@ -133,6 +138,7 @@ impl From<Permissions> for PermissionSummary {
             use_soundboard: permissions.contains(Permissions::USE_SOUNDBOARD),
             create_threads: permissions.contains(Permissions::CREATE_PUBLIC_THREADS),
             manage_threads: permissions.contains(Permissions::MANAGE_THREADS),
+            attach_files: permissions.contains(Permissions::ATTACH_FILES),
         }
     }
 }
@@ -147,6 +153,7 @@ impl PermissionSummary {
                 ChannelKind::Voice
                 | ChannelKind::Text
                 | ChannelKind::Announcement
+                | ChannelKind::Forum
                 | ChannelKind::Thread => true,
             }
     }
@@ -161,6 +168,8 @@ pub struct ThreadState {
     pub locked: bool,
     /// The account is a member (it follows the thread).
     pub joined: bool,
+    /// A post of a forum or media channel (set where the parent is known).
+    pub forum_post: bool,
 }
 
 impl ThreadState {
@@ -172,9 +181,81 @@ impl ThreadState {
                 archived: metadata.is_some_and(|m| m.archived),
                 locked: metadata.is_some_and(|m| m.locked),
                 joined: channel.member.is_some(),
+                forum_post: false,
             }
         })
     }
+
+    /// Like [`Self::of`], knowing whether the parent is a forum.
+    fn in_guild(guild: &GuildEntry, channel: &Channel) -> Option<Self> {
+        Self::of(channel).map(|mut state| {
+            state.forum_post = is_forum_post(guild, channel);
+            state
+        })
+    }
+}
+
+/// A thread whose parent is a forum or media channel held in `guild`.
+fn is_forum_post(guild: &GuildEntry, channel: &Channel) -> bool {
+    channel.kind.is_thread()
+        && channel
+            .parent_id
+            .and_then(|parent| guild.channel(parent))
+            .is_some_and(|parent| parent.kind.is_forum())
+}
+
+/// Posts of one forum listed at most.
+pub const MAX_FORUM_POSTS: usize = 200;
+
+/// One tag of the open forum.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagView {
+    pub id: Snowflake,
+    pub name: String,
+    pub moderated: bool,
+    pub emoji: Option<String>,
+}
+
+/// One active post of the open forum.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostRow {
+    pub id: Snowflake,
+    pub title: String,
+    pub tags: Vec<Snowflake>,
+    /// Messages after the first, as Discord counts them.
+    pub replies: u32,
+    pub owner: Option<Snowflake>,
+    /// The owner's name when the user is known, otherwise empty.
+    pub author: String,
+    /// The newest message ID (the post's own ID without replies): snowflakes
+    /// order by time.
+    pub last_activity: Snowflake,
+    pub pinned: bool,
+    pub locked: bool,
+    pub joined: bool,
+    pub unread: bool,
+    pub mentions: u32,
+}
+
+/// The open forum or media channel: tags, rules and its active posts, pinned
+/// first then newest activity first (at most [`MAX_FORUM_POSTS`]; `total`
+/// counts all). Archived posts are paged in by the app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForumView {
+    pub channel: Snowflake,
+    pub guild: Snowflake,
+    pub media: bool,
+    pub tags: Vec<TagView>,
+    pub require_tag: bool,
+    /// The forum's default sort is by creation date.
+    pub sort_creation: bool,
+    /// The account may start a post (SEND_MESSAGES in the forum).
+    pub can_post: bool,
+    pub can_attach: bool,
+    /// The account may apply moderated tags.
+    pub can_manage: bool,
+    pub posts: Vec<PostRow>,
+    pub total: usize,
 }
 
 /// Most people listed under one voice or Stage row; the rest are one "+N" line.
@@ -288,6 +369,8 @@ pub struct NavigationSnapshot {
     /// The selected guild's roles, highest first, without `@everyone`.
     pub guild_roles: Vec<(Snowflake, String)>,
     pub selection: Option<ChannelSelection>,
+    /// The selected channel, when it is a forum or media channel.
+    pub forum: Option<ForumView>,
     /// Available guild lacks authoritative own-member/role/owner data.
     pub permissions_pending: bool,
     /// Friends, blocks and pending requests (shared, rebuilt per change).
@@ -550,13 +633,13 @@ impl Navigation {
     /// category never hides a child with its own VIEW_CHANNEL; that child is
     /// uncategorized and no forbidden category name is copied.
     pub fn channel_window(&self, store: &Store, offset: usize, count: usize) -> Window<ChannelRow> {
-        let visible = self
+        let guild = self
             .selected_guild
             .filter(|_| self.account == store.current_user().map(|user| user.id))
-            .and_then(|id| store.guild(id))
-            .map_or_else(Vec::new, |guild| {
-                visible_channels(store, guild, self.selected_channel)
-            });
+            .and_then(|id| store.guild(id));
+        let visible = guild.map_or_else(Vec::new, |guild| {
+            visible_channels(store, guild, self.selected_channel)
+        });
         let guild = self.selected_guild.and_then(|id| store.guild(id));
         // Voice and Stage rows are followed by their occupants, one fixed-height
         // line each: at most MAX_VOICE_OCCUPANTS and then one "+N" line.
@@ -591,7 +674,7 @@ impl Navigation {
                     name: capped_name(row.channel.name.as_deref(), "Unnamed channel"),
                     kind: row.kind,
                     parent_id: row.parent_id,
-                    thread: ThreadState::of(row.channel),
+                    thread: guild.and_then(|guild| ThreadState::in_guild(guild, row.channel)),
                     enabled: row.permissions.enables(row.kind),
                     selected: self.selected_channel == Some(row.channel.id)
                         && row.permissions.enables(row.kind),
@@ -663,7 +746,82 @@ impl Navigation {
             name: capped_name(channel.name.as_deref(), "Unnamed channel"),
             kind,
             permissions,
-            thread: ThreadState::of(channel),
+            thread: ThreadState::in_guild(guild, channel),
+        })
+    }
+
+    /// The open forum's tags and active posts. Posts are the guild's held
+    /// threads under the forum that the account may see.
+    pub fn forum_view(&self, store: &Store) -> Option<ForumView> {
+        let selection = self.selection(store)?;
+        if selection.kind != ChannelKind::Forum {
+            return None;
+        }
+        let guild = store.guild(selection.guild_id)?;
+        let forum = guild.channel(selection.channel_id)?;
+        let context = PermissionContext::new(store, guild)?;
+        let mut posts: Vec<_> = guild
+            .channels()
+            .filter(|post| post.kind.is_thread() && post.parent_id == Some(forum.id))
+            .filter(|post| !post.thread_metadata.as_ref().is_some_and(|m| m.archived))
+            .filter(|post| context.permissions(guild, post).view_channel)
+            .collect();
+        let total = posts.len();
+        let pinned = |post: &Channel| post.flags & FLAG_PINNED != 0;
+        let activity = |post: &Channel| post.last_message_id.unwrap_or(post.id);
+        posts.sort_by_key(|post| {
+            (
+                std::cmp::Reverse(pinned(post)),
+                std::cmp::Reverse(activity(post)),
+                std::cmp::Reverse(post.id),
+            )
+        });
+        let permissions = selection.permissions;
+        Some(ForumView {
+            channel: forum.id,
+            guild: guild.id(),
+            media: forum.kind == ModelChannelKind::GuildMedia,
+            tags: forum
+                .available_tags
+                .iter()
+                .map(|tag| TagView {
+                    id: tag.id,
+                    name: capped_name(Some(&tag.name), "Tag"),
+                    moderated: tag.moderated,
+                    emoji: tag.emoji_name.as_deref().map(|e| clip_bytes(e, 32)),
+                })
+                .collect(),
+            require_tag: forum.flags & FLAG_REQUIRE_TAG != 0,
+            sort_creation: forum.default_sort_order == Some(1),
+            can_post: permissions.send_messages,
+            can_attach: permissions.attach_files,
+            can_manage: permissions.manage_threads,
+            total,
+            posts: posts
+                .into_iter()
+                .take(MAX_FORUM_POSTS)
+                .map(|post| {
+                    let unread = unread_of(store, post);
+                    let metadata = post.thread_metadata.as_ref();
+                    PostRow {
+                        id: post.id,
+                        title: capped_name(post.name.as_deref(), "Untitled post"),
+                        tags: post.applied_tags.clone(),
+                        replies: post.message_count.unwrap_or(0),
+                        owner: post.owner_id,
+                        author: post
+                            .owner_id
+                            .and_then(|id| store.user(id))
+                            .map_or_else(String::new, |u| capped_name(Some(u.display_name()), "")),
+                        last_activity: activity(post),
+                        pinned: pinned(post),
+                        locked: metadata.is_some_and(|m| m.locked),
+                        joined: post.member.is_some(),
+                        unread: unread.unread,
+                        mentions: unread.mentions,
+                    }
+                })
+                .collect(),
         })
     }
 
@@ -757,6 +915,7 @@ impl Navigation {
                 .and_then(|(guild, me)| guild.member(me.id))
                 .and_then(|member| member.nick.clone()),
             selected_guild,
+            forum: self.forum_view(store),
             selection: self.selection(store),
             permissions_pending,
             relationships: store.relationships(),
@@ -1068,9 +1227,13 @@ fn visible_channels<'a>(
             if !permissions.view_channel {
                 return None;
             }
-            // Archived threads are reached through the archive list, and stay
-            // in the sidebar only while open.
-            if ThreadState::of(channel).is_some_and(|t| t.archived) && open != Some(channel.id) {
+            // Archived threads are reached through the archive list, and forum
+            // posts through the forum's post list; both stay in the sidebar
+            // only while open.
+            if (ThreadState::of(channel).is_some_and(|t| t.archived)
+                || is_forum_post(guild, channel))
+                && open != Some(channel.id)
+            {
                 return None;
             }
             let position = channel.position.unwrap_or(0);

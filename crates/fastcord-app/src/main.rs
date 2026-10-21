@@ -13,6 +13,7 @@ mod composer;
 mod drafts;
 mod emoji;
 mod emoji_picker;
+mod forum;
 mod forward;
 mod friends;
 mod gateway;
@@ -163,6 +164,7 @@ struct App {
     /// A keyboard or switcher navigation is on its way: when the open
     /// conversation changes, focus returns to the composer.
     nav_pending: bool,
+    forum: forum::State,
 }
 
 #[derive(Debug)]
@@ -335,6 +337,7 @@ enum Message {
     Threads(threads::Event),
     Switcher(switcher::Event),
     Shortcut(switcher::Shortcut),
+    Forum(forum::Event),
     EmojiPicker(emoji_picker::Event),
     EmojiVisibility(emoji::Occurrence, bool),
     EmojiLoaded(
@@ -411,6 +414,7 @@ impl App {
                 threads: threads::State::default(),
                 switcher: switcher::State::default(),
                 nav_pending: false,
+                forum: forum::State::default(),
             },
             Task::perform(
                 async {
@@ -1344,6 +1348,7 @@ impl App {
                 }
             }
             Message::Threads(event) => return self.threads_event(event),
+            Message::Forum(event) => return self.forum_event(event),
             Message::Friends(event) => {
                 if matches!(
                     event,
@@ -2424,6 +2429,7 @@ impl App {
                 self.poll = poll_create::State::default();
                 self.voice.reset();
                 self.threads.drop_all();
+                self.forum.drop_all();
                 if let Phase::Account {
                     session, gateway, ..
                 } = &self.phase
@@ -2732,6 +2738,7 @@ impl App {
         self.poll = poll_create::State::default();
         self.voice.reset();
         self.threads.drop_all();
+        self.forum.drop_all();
         self.friends.reset();
         self.member_menu.reset();
         self.status.reset();
@@ -2767,6 +2774,24 @@ impl App {
             .permissions
             .read_history
             .then_some((Some(selection.guild_id), selection.channel_id))
+    }
+
+    fn forum_event(&mut self, event: forum::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let (task, opened) =
+            self.forum
+                .update(event, &session.client, gateway.navigation.forum.as_ref());
+        if let Some(thread) = opened
+            && let Some(guild) = thread.guild_id
+        {
+            gateway.controls.open_thread(guild, thread);
+        }
+        task.map(Message::Forum)
     }
 
     fn threads_event(&mut self, event: threads::Event) -> Task<Message> {
@@ -4021,6 +4046,15 @@ impl App {
                     banner,
                     speaking: talking,
                     voice_call: gateway.voice_call.filter(|_| in_voice),
+                    forum: gateway.navigation.forum.as_ref().map(|forum| {
+                        forum::view(
+                            &self.forum,
+                            forum,
+                            self.threads.forum_archive(forum.channel),
+                            session.user.id,
+                            localtime::now(),
+                        )
+                    }),
                     inbox: self.inbox.is_open().then(|| {
                         inbox::view(&self.inbox, &gateway.navigation.inbox).map(Message::Inbox)
                     }),

@@ -28,6 +28,9 @@ const WARN: Color = Color::from_rgb8(0xf2, 0x3f, 0x42);
 pub enum Event {
     /// Open or close the archived-thread list of a text channel.
     ToggleArchived(Snowflake, Snowflake),
+    /// The same for a forum, listed inside the forum pane (`forum_archive`)
+    /// instead of this panel.
+    ToggleForumArchived(Snowflake, Snowflake),
     MoreArchived,
     /// Open the archived thread at this index of the list.
     OpenArchived(usize),
@@ -58,6 +61,16 @@ struct Archived {
     cursor: Option<String>,
     has_more: bool,
     status: Status,
+    /// Listed by the forum pane, not by [`view`].
+    inline: bool,
+}
+
+/// The archived posts of the forum whose archive is open.
+pub struct ForumArchive<'a> {
+    pub posts: &'a [Channel],
+    pub loading: bool,
+    pub failure: Option<&'static str>,
+    pub has_more: bool,
 }
 
 struct Draft {
@@ -118,6 +131,24 @@ impl State {
         self.archived.as_ref().map(|a| a.channel)
     }
 
+    /// The archive of `forum`, when its inline list is open.
+    pub fn forum_archive(&self, forum: Snowflake) -> Option<ForumArchive<'_>> {
+        let archived = self
+            .archived
+            .as_ref()
+            .filter(|a| a.inline && a.channel == forum)?;
+        Some(ForumArchive {
+            posts: &archived.items,
+            loading: archived.status == Status::Loading,
+            failure: match archived.status {
+                Status::Failed(reason) => Some(reason),
+                _ => None,
+            },
+            has_more: archived.status == Status::Done && archived.has_more,
+        })
+    }
+
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.archived.is_none() && self.draft.is_none() && self.notice.is_none()
     }
@@ -159,7 +190,8 @@ impl State {
 
     pub fn update(&mut self, event: Event, client: &RestClient) -> Task<Event> {
         match event {
-            Event::ToggleArchived(guild, channel) => {
+            Event::ToggleArchived(guild, channel) | Event::ToggleForumArchived(guild, channel) => {
+                let inline = matches!(event, Event::ToggleForumArchived(..));
                 if self.archive_of() == Some(channel) {
                     self.close();
                 } else {
@@ -173,6 +205,7 @@ impl State {
                         cursor: None,
                         has_more: false,
                         status: Status::Loading,
+                        inline,
                     });
                     return self.load(client);
                 }
@@ -286,7 +319,8 @@ impl State {
 
 /// The archive and naming panels, when there is anything to show.
 pub fn view(state: &State) -> Option<Element<'_, Event>> {
-    if state.is_empty() {
+    let listed = state.archived.as_ref().is_some_and(|a| !a.inline);
+    if !listed && state.draft.is_none() && state.notice.is_none() {
         return None;
     }
     let mut body = column![].spacing(6);
@@ -308,7 +342,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
                 .spacing(8),
             );
     }
-    if let Some(archived) = &state.archived {
+    if let Some(archived) = state.archived.as_ref().filter(|a| !a.inline) {
         let status: Element<'_, Event> = match &archived.status {
             Status::Loading => text("Loading archived threads…")
                 .size(12)

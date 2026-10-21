@@ -119,7 +119,7 @@ impl Default for MentionPolicy {
 }
 
 impl MentionPolicy {
-    fn parse(self) -> Vec<&'static str> {
+    pub(crate) fn parse(self) -> Vec<&'static str> {
         let mut parse = Vec::with_capacity(3);
         if self.users {
             parse.push("users");
@@ -349,23 +349,26 @@ impl OutgoingMessage {
             },
             sticker_ids: self.sticker.into_iter().collect(),
             poll: self.poll.as_ref(),
-            attachments: self
-                .files
-                .iter()
-                .map(|file| WireAttachment {
-                    id: file.id.to_string(),
-                    filename: &file.filename,
-                    uploaded_filename: &file.uploaded_filename,
-                    duration_secs: file
-                        .voice
-                        .as_ref()
-                        .map(|voice| voice.duration_ms as f64 / 1000.0),
-                    waveform: file.voice.as_ref().map(|voice| voice.waveform.as_str()),
-                    description: &file.description,
-                })
-                .collect(),
+            attachments: wire_attachments(&self.files),
         }
     }
+}
+
+pub(crate) fn wire_attachments(files: &[UploadedFile]) -> Vec<WireAttachment<'_>> {
+    files
+        .iter()
+        .map(|file| WireAttachment {
+            id: file.id.to_string(),
+            filename: &file.filename,
+            uploaded_filename: &file.uploaded_filename,
+            duration_secs: file
+                .voice
+                .as_ref()
+                .map(|voice| voice.duration_ms as f64 / 1000.0),
+            waveform: file.voice.as_ref().map(|voice| voice.waveform.as_str()),
+            description: &file.description,
+        })
+        .collect()
 }
 
 impl fmt::Debug for OutgoingMessage {
@@ -404,7 +407,7 @@ struct CreateMessage<'a> {
 }
 
 #[derive(Serialize)]
-struct WireAttachment<'a> {
+pub(crate) struct WireAttachment<'a> {
     id: String,
     filename: &'a str,
     uploaded_filename: &'a str,

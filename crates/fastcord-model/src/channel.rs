@@ -69,6 +69,11 @@ impl ChannelKind {
         )
     }
 
+    /// A forum or media channel: its children are posts (threads).
+    pub const fn is_forum(self) -> bool {
+        matches!(self, Self::GuildForum | Self::GuildMedia)
+    }
+
     pub const fn is_voice(self) -> bool {
         matches!(self, Self::GuildVoice | Self::GuildStageVoice)
     }
@@ -79,6 +84,7 @@ impl ChannelKind {
             self,
             Self::GuildText | Self::GuildAnnouncement | Self::GuildVoice | Self::GuildStageVoice
         ) || self.is_thread()
+            || self.is_forum()
     }
 }
 
@@ -140,6 +146,82 @@ pub struct Channel {
     /// object itself carries nothing this client keeps).
     #[serde(default)]
     pub member: Option<ThreadMember>,
+    /// Forum and media channels: the tags a post may carry (at most
+    /// [`MAX_FORUM_TAGS`] are kept).
+    #[serde(default, deserialize_with = "tags_bounded")]
+    pub available_tags: Vec<ForumTag>,
+    /// A post: the tags it carries (at most [`MAX_APPLIED_TAGS`] are kept).
+    #[serde(default, deserialize_with = "applied_bounded")]
+    pub applied_tags: Vec<Snowflake>,
+    /// Channel flags: [`FLAG_PINNED`] on a post, [`FLAG_REQUIRE_TAG`] on a forum.
+    #[serde(default)]
+    pub flags: u64,
+    /// Messages in a thread, not counting the first one (approximate).
+    #[serde(default)]
+    pub message_count: Option<u32>,
+    /// Forum sort order: 0 latest activity, 1 creation date.
+    #[serde(default)]
+    pub default_sort_order: Option<u8>,
+}
+
+/// Most tags a forum defines.
+pub const MAX_FORUM_TAGS: usize = 20;
+/// Most tags one post carries.
+pub const MAX_APPLIED_TAGS: usize = 5;
+/// `PINNED` in a post's `flags`.
+pub const FLAG_PINNED: u64 = 1 << 1;
+/// `REQUIRE_TAG` in a forum's `flags`.
+pub const FLAG_REQUIRE_TAG: u64 = 1 << 4;
+
+/// One tag of a forum.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ForumTag {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub name: String,
+    /// Only members with Manage Threads may apply it.
+    #[serde(default)]
+    pub moderated: bool,
+    /// The unicode emoji of the tag, if it has one.
+    #[serde(default)]
+    pub emoji_name: Option<String>,
+}
+
+fn bounded<'de, D, T>(d: D, max: usize) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    struct V<T>(usize, std::marker::PhantomData<T>);
+    impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for V<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a list or null")
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Vec<T>, E> {
+            Ok(Vec::new())
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut out = Vec::new();
+            while out.len() < self.0 {
+                match seq.next_element()? {
+                    Some(item) => out.push(item),
+                    None => return Ok(out),
+                }
+            }
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(out)
+        }
+    }
+    d.deserialize_any(V(max, std::marker::PhantomData))
+}
+
+fn tags_bounded<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ForumTag>, D::Error> {
+    bounded(d, MAX_FORUM_TAGS)
+}
+
+fn applied_bounded<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Snowflake>, D::Error> {
+    bounded(d, MAX_APPLIED_TAGS)
 }
 
 impl Channel {

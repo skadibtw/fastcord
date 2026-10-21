@@ -34,7 +34,7 @@
       {"id": "2201", "type": 0, "name": "visible-child-of-hidden-category", "position": 0, "parent_id": "2200", "permission_overwrites": []},
       {"id": "3002", "type": 0, "name": "read-only", "position": 2, "permission_overwrites": [{"id": "1", "type": 1, "allow": "0", "deny": "2048"}]},
       {"id": "2400", "type": 4, "name": "Empty Visible Category", "position": 2, "permission_overwrites": []},
-      {"id": "2501", "type": 15, "name": "not-a-text-channel", "position": 0, "permission_overwrites": []},
+      {"id": "2501", "type": 14, "name": "not-a-text-channel", "position": 0, "permission_overwrites": []},
       {"id": "2502", "type": 11, "name": "thread-under-general", "position": 0, "parent_id": "1000", "permission_overwrites": []},
       {"id": "3004", "type": 13, "name": "stage-voice", "position": 4, "permission_overwrites": []}
     ]

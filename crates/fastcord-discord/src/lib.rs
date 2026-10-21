@@ -99,7 +99,8 @@ pub use send::{
 pub use soundboard::{GUILD_SOUNDS, MAX_SOUND_NAME_CHARS, SoundboardSound};
 pub use sticker::{GUILD_STICKERS, GuildSticker};
 pub use thread::{
-    ARCHIVED_PAGE_SIZE, ArchivedThreads, MAX_THREAD_NAME_CHARS, ThreadError, thread_name,
+    ARCHIVED_PAGE_SIZE, ArchivedThreads, ForumPost, MAX_THREAD_NAME_CHARS, PostError, PostInvalid,
+    PostRules, ThreadError, thread_name,
 };
 pub use typing::{TYPING_LIFETIME, TypingSend, TypingTable};
 pub use upload::{

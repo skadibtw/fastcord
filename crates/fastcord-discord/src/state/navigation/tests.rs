@@ -19,6 +19,8 @@ const OUTAGE: u64 = 41_771_983_423_143_940;
 const GENERAL: u64 = 41_771_983_423_143_938;
 const VOICE: u64 = 41_771_983_423_143_939;
 const LOBBY: u64 = 41_771_983_423_143_942;
+/// A forum channel in `ready.json` (a post list, not a text channel).
+const FORUM: u64 = 41_771_983_423_143_950;
 
 fn id(value: u64) -> Snowflake {
     Snowflake(value)
@@ -99,9 +101,13 @@ fn normalized_ready_exposes_available_guilds_and_accessible_text_voice_only() {
         [(id(FIRST), true), (id(SECOND), true), (id(OUTAGE), false)]
     );
     assert_eq!(snapshot.guilds.rows[2].name, OUTAGE.to_string());
-    assert_eq!(ids(&snapshot.channels.rows), [id(GENERAL), id(VOICE)]);
+    assert_eq!(
+        ids(&snapshot.channels.rows),
+        [id(GENERAL), id(VOICE), id(FORUM)]
+    );
     assert_eq!(snapshot.channels.rows[0].kind, ChannelKind::Text);
     assert_eq!(snapshot.channels.rows[1].kind, ChannelKind::Voice);
+    assert_eq!(snapshot.channels.rows[2].kind, ChannelKind::Forum);
     assert!(snapshot.channels.rows.iter().all(|row| row.enabled));
 
     assert!(navigation.select_channel(&store, id(VOICE)));
@@ -245,7 +251,10 @@ fn stable_ids_survive_updates_ready_reorder_and_per_guild_navigation() {
     navigation.reconcile(&store);
     assert_eq!(navigation.selected_channel(), Some(id(VOICE)));
     assert_eq!(navigation.selection(&store).unwrap().name, "Renamed voice");
-    assert_eq!(ids(&rows(&navigation, &store)), [id(VOICE), id(GENERAL)]);
+    assert_eq!(
+        ids(&rows(&navigation, &store)),
+        [id(VOICE), id(GENERAL), id(FORUM)]
+    );
 
     let mut fresh = ready(READY);
     fresh.guilds.reverse();
@@ -792,6 +801,11 @@ fn large_ready() -> Ready {
                             is_spam: None,
                             thread_metadata: None,
                             member: None,
+                            available_tags: Vec::new(),
+                            applied_tags: Vec::new(),
+                            flags: 0,
+                            message_count: None,
+                            default_sort_order: None,
                         })
                         .collect(),
                     members: vec![GuildMember {
@@ -1753,8 +1767,8 @@ fn voice_rows_are_followed_by_their_capped_occupants() {
         ))));
     }
     let window = navigation.channel_window(&store, 0, usize::MAX);
-    // text + voice + 8 people + "+3"
-    assert_eq!(window.total, 2 + 8 + 1);
+    // text + voice + forum + 8 people + "+3"
+    assert_eq!(window.total, 3 + 8 + 1);
     assert_eq!(window.rows.len(), window.total);
     assert!(window.rows[1].occupant.is_none());
     assert!(matches!(
@@ -1785,7 +1799,7 @@ fn voice_rows_are_followed_by_their_capped_occupants() {
     assert_eq!(window.rows[10].occupant, Some(Occupant::More(3)));
     // A window in the middle of the list slices the same flat rows.
     let part = navigation.channel_window(&store, 9, 2);
-    assert_eq!((part.offset, part.total, part.rows.len()), (9, 11, 2));
+    assert_eq!((part.offset, part.total, part.rows.len()), (9, 12, 2));
     assert_eq!(part.rows[1].occupant, Some(Occupant::More(3)));
 }
 
@@ -1800,10 +1814,10 @@ fn quick_names(navigation: &Navigation, store: &Store, query: &str) -> Vec<Strin
 #[test]
 fn quick_switch_matches_prefix_then_substring_then_subsequence_and_marks_kinds() {
     let (store, navigation) = setup(READY);
-    // Everything openable; the forum (unsupported kind) is not a conversation.
+    // Everything openable, the forum (a post list since M49) included.
     let all = quick_names(&navigation, &store, "");
-    assert_eq!(all.len(), 5, "{all:?}");
-    assert!(!all.iter().any(|n| n.contains("forum")));
+    assert_eq!(all.len(), 6, "{all:?}");
+    assert!(all.iter().any(|n| n.contains("forum")));
     assert_eq!(quick_names(&navigation, &store, "gen"), ["general"]);
     assert_eq!(quick_names(&navigation, &store, "#GEN"), ["general"]);
     assert_eq!(quick_names(&navigation, &store, "grl"), ["general"]);
@@ -1858,9 +1872,18 @@ fn keyboard_steps_wrap_over_channels_unreads_and_servers() {
         step(&mut navigation, StepScope::Channel, true),
         Some(id(VOICE))
     );
+    // The forum row is a stop too, like in the official client.
+    assert_eq!(
+        step(&mut navigation, StepScope::Channel, true),
+        Some(id(FORUM))
+    );
     assert_eq!(
         step(&mut navigation, StepScope::Channel, true),
         Some(id(GENERAL))
+    );
+    assert_eq!(
+        step(&mut navigation, StepScope::Channel, false),
+        Some(id(FORUM))
     );
     assert_eq!(
         step(&mut navigation, StepScope::Channel, false),
@@ -1950,4 +1973,259 @@ fn unread_steps_skip_read_conversations_and_report_none() {
     assert!(navigation.select_channel(&store, id(GENERAL)));
     assert!(navigation.step(&store, back));
     assert_eq!(navigation.selected_channel(), Some(id(VOICE)));
+}
+
+// ----- forum posts (milestone 49); every payload here is synthetic and unverified -----
+
+/// Guild 100 owned by 2; the account (1) holds role 200 with `permissions`.
+/// Channel 12 is a forum with two tags and REQUIRE_TAG, 13 a forum the account
+/// cannot see.
+fn forum_store(permissions: Permissions, threads: &[Value]) -> (Store, Navigation) {
+    let raw = json!({
+        "id": "100", "name": "G", "owner_id": "2", "member_count": 2,
+        "roles": [
+            {"id": "100", "name": "@everyone", "permissions": (Permissions::VIEW_CHANNEL
+                | Permissions::READ_MESSAGE_HISTORY).0.to_string()},
+            {"id": "200", "name": "r", "permissions": permissions.0.to_string()},
+        ],
+        "channels": [
+            {"id": "10", "type": 0, "name": "general"},
+            {"id": "12", "type": 15, "name": "help", "flags": 16, "default_sort_order": 1,
+             "available_tags": [
+                {"id": "7", "name": "bug", "moderated": false, "emoji_name": "x"},
+                {"id": "8", "name": "staff", "moderated": true}]},
+            {"id": "13", "type": 15, "name": "secret-forum", "permission_overwrites":
+                [{"id": "100", "type": 0, "allow": "0", "deny": "1024"}]},
+        ],
+        "threads": threads,
+        "members": [{"user": {"id": "1", "username": "me"}, "roles": ["200"]}],
+    });
+    let mut store = Store::new();
+    let mut start = ready(NAV_READY);
+    start.guilds.clear();
+    start.unavailable_guilds.clear();
+    replace(&mut store, start);
+    apply(&mut store, "GUILD_CREATE", &raw.to_string());
+    let mut navigation = Navigation::default();
+    navigation.reconcile(&store);
+    assert!(navigation.select_guild(&store, id(100)));
+    (store, navigation)
+}
+
+fn post(id: u64, extra: Value) -> Value {
+    thread_json(id, 11, 12, extra)
+}
+
+fn post_ids(navigation: &Navigation, store: &Store) -> Vec<u64> {
+    navigation
+        .forum_view(store)
+        .map_or_else(Vec::new, |view| view.posts.iter().map(|p| p.id.0).collect())
+}
+
+#[test]
+fn a_forum_lists_active_posts_pinned_then_newest_activity_and_not_in_the_sidebar() {
+    let (store, mut navigation) = forum_store(
+        ACCESS | Permissions::SEND_MESSAGES,
+        &[
+            post(
+                40,
+                json!({"last_message_id": "400", "message_count": 3, "owner_id": "1",
+                    "applied_tags": ["7"]}),
+            ),
+            post(41, json!({"last_message_id": "900"})),
+            post(42, json!({"thread_metadata": {"archived": true}})),
+            post(43, json!({"flags": 2})),
+            // a post under a forum the account cannot see, and one with no parent held
+            thread_json(44, 11, 13, json!({})),
+            thread_json(45, 11, 99, json!({})),
+        ],
+    );
+    // Posts are not sidebar rows; the visible forum is.
+    assert_eq!(ids(&rows(&navigation, &store)), [id(10), id(12)]);
+    assert!(navigation.select_channel(&store, id(12)));
+    let selection = navigation.selection(&store).unwrap();
+    assert_eq!(selection.kind, ChannelKind::Forum);
+    assert!(selection.permissions.send_messages);
+    let view = navigation.forum_view(&store).unwrap();
+    assert_eq!(
+        post_ids(&navigation, &store),
+        [43, 41, 40],
+        "pinned, then activity"
+    );
+    assert_eq!(view.total, 3);
+    assert!(view.require_tag && view.sort_creation && view.can_post && !view.media);
+    assert_eq!(
+        view.tags
+            .iter()
+            .map(|t| (t.id.0, t.name.as_str(), t.moderated))
+            .collect::<Vec<_>>(),
+        [(7, "bug", false), (8, "staff", true)]
+    );
+    let row = view.posts.iter().find(|p| p.id == id(40)).unwrap();
+    assert_eq!(
+        (row.replies, row.tags.clone(), row.owner),
+        (3, vec![id(7)], Some(id(1)))
+    );
+    assert!(view.posts[0].pinned);
+    // Not a forum: no view.
+    assert!(navigation.select_channel(&store, id(10)));
+    assert!(navigation.forum_view(&store).is_none());
+    // The hidden forum and its posts stay closed.
+    assert!(!navigation.select_channel(&store, id(13)));
+    assert!(!navigation.select_channel(&store, id(44)));
+    assert!(!navigation.select_channel(&store, id(45)));
+}
+
+#[test]
+fn posting_needs_send_messages_in_the_forum_and_replying_send_in_threads() {
+    let (store, mut navigation) = forum_store(ACCESS, &[post(40, json!({}))]);
+    assert!(navigation.select_channel(&store, id(12)));
+    assert!(!navigation.forum_view(&store).unwrap().can_post);
+    let (store, mut navigation) = forum_store(
+        Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY | Permissions::SEND_MESSAGES,
+        &[post(40, json!({}))],
+    );
+    assert!(navigation.select_channel(&store, id(12)));
+    assert!(navigation.forum_view(&store).unwrap().can_post);
+    assert!(navigation.select_channel(&store, id(40)));
+    assert!(
+        !navigation
+            .selection(&store)
+            .unwrap()
+            .permissions
+            .send_messages,
+        "SEND_MESSAGES does not reply in a post"
+    );
+}
+
+#[test]
+fn an_open_post_shows_under_its_forum_and_locked_or_archived_state_is_reported() {
+    let (store, mut navigation) = forum_store(
+        ACCESS,
+        &[
+            post(40, json!({})),
+            post(41, json!({"thread_metadata": {"locked": true}})),
+            post(42, json!({"thread_metadata": {"archived": true}})),
+        ],
+    );
+    assert!(navigation.select_channel(&store, id(41)));
+    let selection = navigation.selection(&store).unwrap();
+    let state = selection.thread.unwrap();
+    assert!(state.forum_post && state.locked && state.parent_id == id(12));
+    assert!(!selection.permissions.send_messages, "locked");
+    assert_eq!(ids(&rows(&navigation, &store)), [id(10), id(12), id(41)]);
+    assert!(navigation.select_channel(&store, id(42)));
+    let selection = navigation.selection(&store).unwrap();
+    assert!(selection.thread.unwrap().archived && selection.permissions.send_messages);
+    assert_eq!(ids(&rows(&navigation, &store)), [id(10), id(12), id(42)]);
+    let (store, mut navigation) = forum_store(
+        ACCESS | Permissions::MANAGE_THREADS,
+        &[post(41, json!({"thread_metadata": {"locked": true}}))],
+    );
+    assert!(navigation.select_channel(&store, id(41)));
+    assert!(
+        navigation
+            .selection(&store)
+            .unwrap()
+            .permissions
+            .send_messages
+    );
+    assert!(navigation.select_channel(&store, id(12)));
+    assert!(navigation.forum_view(&store).unwrap().can_manage);
+}
+
+#[test]
+fn forum_events_converge_including_replayed_and_stale_ones() {
+    let (mut store, mut navigation) = forum_store(ACCESS, &[post(40, json!({}))]);
+    assert!(navigation.select_channel(&store, id(12)));
+    let created = post(50, json!({"last_message_id": "500", "applied_tags": ["7"]})).to_string();
+    apply(&mut store, "THREAD_CREATE", &created);
+    apply(&mut store, "THREAD_CREATE", &created);
+    assert_eq!(
+        post_ids(&navigation, &store),
+        [50, 40],
+        "a replay adds nothing"
+    );
+    // A stale update without a newer marker never regresses the activity.
+    apply(
+        &mut store,
+        "THREAD_UPDATE",
+        &post(50, json!({"name": "renamed"})).to_string(),
+    );
+    let view = navigation.forum_view(&store).unwrap();
+    let row = view.posts.iter().find(|p| p.id == id(50)).unwrap();
+    assert_eq!(
+        (row.title.as_str(), row.last_activity),
+        ("renamed", id(500))
+    );
+    // Archiving removes the post from the active list; unarchiving restores it.
+    let archived = post(50, json!({"thread_metadata": {"archived": true}})).to_string();
+    apply(&mut store, "THREAD_UPDATE", &archived);
+    assert_eq!(post_ids(&navigation, &store), [40]);
+    apply(
+        &mut store,
+        "THREAD_UPDATE",
+        &post(50, json!({})).to_string(),
+    );
+    assert_eq!(post_ids(&navigation, &store), [50, 40]);
+    // Delete and a replayed delete.
+    let delete = r#"{"id":"50","guild_id":"100","parent_id":"12","type":11}"#;
+    apply(&mut store, "THREAD_DELETE", delete);
+    apply(&mut store, "THREAD_DELETE", delete);
+    assert_eq!(post_ids(&navigation, &store), [40]);
+    // An open post that is deleted closes.
+    assert!(navigation.select_channel(&store, id(40)));
+    apply(
+        &mut store,
+        "THREAD_DELETE",
+        r#"{"id":"40","guild_id":"100","parent_id":"12","type":11}"#,
+    );
+    navigation.reconcile(&store);
+    assert!(navigation.selection(&store).is_none());
+    assert_eq!(store.bytes(), store.recount());
+    // THREAD_LIST_SYNC for the forum replaces its posts only.
+    apply(
+        &mut store,
+        "THREAD_LIST_SYNC",
+        &json!({"guild_id": "100", "channel_ids": ["12"], "threads": [post(60, json!({}))],
+            "members": []})
+        .to_string(),
+    );
+    assert!(navigation.select_channel(&store, id(12)));
+    assert_eq!(post_ids(&navigation, &store), [60]);
+}
+
+#[test]
+fn the_post_list_is_bounded() {
+    let threads: Vec<_> = (0..MAX_FORUM_POSTS as u64 + 50)
+        .map(|n| post(1000 + n, json!({})))
+        .collect();
+    let (store, mut navigation) = forum_store(ACCESS, &threads);
+    assert!(navigation.select_channel(&store, id(12)));
+    let view = navigation.forum_view(&store).unwrap();
+    assert_eq!(view.posts.len(), MAX_FORUM_POSTS);
+    assert_eq!(view.total, MAX_FORUM_POSTS + 50);
+}
+
+#[test]
+fn forum_metadata_decodes_leniently_and_bounded() {
+    let tags: Vec<_> = (1..=30)
+        .map(|n| json!({"id": n.to_string(), "name": "t"}))
+        .collect();
+    let channel: Channel = serde_json::from_value(json!({
+        "id": "12", "type": 16, "available_tags": tags,
+        "applied_tags": ["1", "2", "3", "4", "5", "6", "7"],
+        "flags": 16, "default_sort_order": 0, "message_count": 4,
+    }))
+    .unwrap();
+    assert_eq!(channel.kind, fastcord_model::ChannelKind::GuildMedia);
+    assert_eq!(channel.available_tags.len(), fastcord_model::MAX_FORUM_TAGS);
+    assert_eq!(channel.applied_tags.len(), fastcord_model::MAX_APPLIED_TAGS);
+    let nulls: Channel = serde_json::from_value(
+        json!({"id": "12", "type": 15, "available_tags": null, "applied_tags": null}),
+    )
+    .unwrap();
+    assert!(nulls.available_tags.is_empty() && nulls.applied_tags.is_empty());
+    let plain: Channel = serde_json::from_value(json!({"id": "1", "type": 0})).unwrap();
+    assert!(plain.available_tags.is_empty() && plain.flags == 0);
 }

@@ -905,6 +905,11 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
                 is_spam: None,
                 thread_metadata: None,
                 member: None,
+                available_tags: Vec::new(),
+                applied_tags: Vec::new(),
+                flags: 0,
+                message_count: None,
+                default_sort_order: None,
             })
             .collect(),
         members: vec![GuildMember {

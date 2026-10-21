@@ -4511,6 +4511,11 @@ mod tests {
             is_spam: None,
             thread_metadata: None,
             member: None,
+            available_tags: Vec::new(),
+            applied_tags: Vec::new(),
+            flags: 0,
+            message_count: None,
+            default_sort_order: None,
         };
         GatewayEvent::Dispatch {
             sequence: 1,
@@ -4622,6 +4627,11 @@ mod tests {
             is_spam: None,
             thread_metadata: None,
             member: None,
+            available_tags: Vec::new(),
+            applied_tags: Vec::new(),
+            flags: 0,
+            message_count: None,
+            default_sort_order: None,
         }
     }
 
