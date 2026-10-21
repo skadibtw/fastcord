@@ -78,7 +78,12 @@ fn relative(unix: i64, now: i64) -> Option<String> {
     OffsetDateTime::from_unix_timestamp(unix).ok()?;
     let diff = unix.saturating_sub(now);
     let secs = diff.unsigned_abs();
-    let (minutes, hours, days) = (secs / 60, secs / 3600, secs / 86_400);
+    // Rounded like the official client: 6.7 days reads "7 days".
+    let (minutes, hours, days) = (
+        (secs + 30) / 60,
+        (secs + 1_800) / 3_600,
+        (secs + 43_200) / 86_400,
+    );
     let span = if secs < 45 {
         "a few seconds".to_owned()
     } else if secs < 90 {
@@ -146,6 +151,7 @@ mod tests {
         assert_eq!(r(-120), "2 minutes ago");
         assert_eq!(r(3 * 3600), "in 3 hours");
         assert_eq!(r(-3 * 86_400), "3 days ago");
+        assert_eq!(r(-(6 * 86_400 + 16 * 3_600)), "7 days ago");
         assert_eq!(r(61 * 86_400), "in 2 months");
         assert_eq!(r(-800 * 86_400), "2 years ago");
     }
