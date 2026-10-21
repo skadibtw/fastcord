@@ -327,13 +327,16 @@ impl AttachmentCache {
             .map_err(|_| AttachmentError::WorkerStopped)?;
         let response = self.fetch_response_refreshing(refresh, url).await?;
         let part = partial_path(destination)?;
+        // The guard exists before the open is awaited: the file appears on
+        // disk as soon as the blocking open runs, and a cancellation in that
+        // window would otherwise leave it behind for good.
+        let cleanup = TemporaryFile(Some(part.clone()));
         let file = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&part)
             .await
             .map_err(|_| AttachmentError::DestinationUnavailable)?;
-        let cleanup = TemporaryFile(Some(part.clone()));
         match self.write_part(response, file, &part, destination).await {
             Ok(()) => {
                 cleanup.keep();
