@@ -3259,22 +3259,33 @@ impl App {
                 || !watching.is_empty())
             .then(|| {
                 let mut people = row![].spacing(8).align_y(iced::alignment::Vertical::Center);
-                for participant in &voice_controls.participants {
-                    let user = participant.user_id;
-                    let name = voice_controls.display_name(user);
+                // Everyone in the call, the account first (it is never in the
+                // remote participant list).
+                let me = own_user(gateway, session);
+                let everyone = call_ui::people(me, &voice_controls, in_voice);
+                for call_ui::Person {
+                    user,
+                    name,
+                    speaking,
+                    key,
+                } in everyone
+                {
                     people = people.push(
                         container(
                             row![
-                                container(text(style::initial(&name)).size(12).font(bold))
-                                    .center(24)
-                                    .style(style::avatar(style::avatar_color(user.0))),
-                                text(name).size(13),
+                                avatars::view(&gateway.avatars.views, &key, 24.0, || {
+                                    container(text(style::initial(&name)).size(12).font(bold))
+                                        .center(24)
+                                        .style(style::avatar(style::avatar_color(user.0)))
+                                        .into()
+                                }),
+                                text(name.clone()).size(13),
                             ]
                             .spacing(6)
                             .align_y(iced::alignment::Vertical::Center),
                         )
                         .padding([3, 8])
-                        .style(style::speaking(participant.speaking)),
+                        .style(style::speaking(speaking)),
                     );
                 }
                 if voice_controls.participants.is_empty() {
@@ -4127,7 +4138,12 @@ fn wanted_avatars(
             }) => Some(avatars::AvatarKey::user(*user_id, avatar.as_deref())),
             _ => None,
         });
-    for key in guilds.chain(occupants).chain(authors) {
+    let controls = gateway.controls.voice_controls();
+    let callers = controls
+        .participants
+        .iter()
+        .map(|p| controls.avatar_key(p.user_id));
+    for key in guilds.chain(occupants).chain(callers).chain(authors) {
         if wanted.len() == avatars::MAX_WANTED {
             break;
         }

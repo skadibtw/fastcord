@@ -17,6 +17,35 @@ use crate::{playback, style};
 /// People without video listed beside the tiles.
 const MAX_LISTED_PEOPLE: usize = 24;
 
+/// One chip of the voice bar.
+pub struct Person {
+    pub user: Snowflake,
+    pub name: String,
+    pub speaking: bool,
+    pub key: crate::avatars::AvatarKey,
+}
+
+/// Everyone in the call: the account itself first (the remote participant
+/// list never holds it), then the others. Nobody while there is no call.
+pub fn people(me: &fastcord_model::User, voice: &VoiceControls, in_call: bool) -> Vec<Person> {
+    let own = Person {
+        user: me.id,
+        name: me.display_name().to_owned(),
+        speaking: false,
+        key: crate::avatars::AvatarKey::user(me.id, me.avatar.as_deref()),
+    };
+    in_call
+        .then_some(own)
+        .into_iter()
+        .chain(voice.participants.iter().map(|p| Person {
+            user: p.user_id,
+            name: voice.display_name(p.user_id),
+            speaking: p.speaking,
+            key: voice.avatar_key(p.user_id),
+        }))
+        .collect()
+}
+
 /// The users speaking now.
 pub fn speaking(voice: &VoiceControls) -> Vec<Snowflake> {
     voice
@@ -289,4 +318,44 @@ pub fn panel<'a>(
             ..Default::default()
         })
         .into()
+}
+
+#[cfg(test)]
+mod people_tests {
+    use super::*;
+    use crate::gateway::VoiceParticipant;
+
+    #[test]
+    fn the_call_bar_lists_the_account_first_and_then_the_others() {
+        let me = fastcord_model::User {
+            id: Snowflake(1),
+            username: "me".into(),
+            global_name: None,
+            avatar: Some("abc".into()),
+            bot: false,
+        };
+        let voice = VoiceControls {
+            participants: vec![VoiceParticipant {
+                user_id: Snowflake(2),
+                ssrc: None,
+                speaking: true,
+            }],
+            names: vec![(Snowflake(2), "Ann".into())],
+            avatars: vec![(Snowflake(2), "def".into())],
+            ..VoiceControls::default()
+        };
+        let all = people(&me, &voice, true);
+        let seen: Vec<_> = all.iter().map(|p| (p.user.0, p.name.as_str())).collect();
+        assert_eq!(seen, [(1, "me"), (2, "Ann")]);
+        assert!(all[1].speaking && !all[0].speaking);
+        assert_eq!(
+            all[0].key,
+            crate::avatars::AvatarKey::user(me.id, Some("abc"))
+        );
+        assert_eq!(
+            all[1].key,
+            crate::avatars::AvatarKey::user(Snowflake(2), Some("def"))
+        );
+        assert_eq!(people(&me, &voice, false).len(), 1);
+    }
 }

@@ -57,6 +57,8 @@ pub struct VoiceControls {
     /// Display names of the participants and stream owners the state store
     /// knows, at most [`MAX_VOICE_NAMES`]; resolved by the reducer's worker.
     pub names: Vec<(Snowflake, String)>,
+    /// Avatar hashes of the same users (those that have one), for the call bar.
+    pub avatars: Vec<(Snowflake, String)>,
     pub streams: Arc<[StreamOffer]>,
     pub volumes: Vec<UserVolume>,
     pub input_device: fastcord_audio::DeviceChoice,
@@ -137,6 +139,11 @@ impl VoiceControls {
             .iter()
             .find(|(id, _)| *id == user)
             .map_or_else(|| format!("User {}", user.0 % 10_000), |(_, n)| n.clone())
+    }
+
+    pub fn avatar_key(&self, user: Snowflake) -> crate::avatars::AvatarKey {
+        let hash = self.avatars.iter().find(|(id, _)| *id == user);
+        crate::avatars::AvatarKey::user(user, hash.map(|(_, hash)| hash.as_str()))
     }
 
     /// The mode in force: a channel without "use voice activity" always needs push-to-talk.
@@ -2134,6 +2141,7 @@ impl Worker {
             .and_then(|request| request.guild_id);
         let store = &self.tracker.store;
         let mut names = Vec::new();
+        let mut avatars = Vec::new();
         {
             let controls = self.voice_controls.borrow();
             let users = controls
@@ -2153,12 +2161,16 @@ impl Worker {
                 if let Some(name) = name {
                     names.push((id, name.chars().take(MAX_NAME_CHARS).collect::<String>()));
                 }
+                if let Some(hash) = store.user(id).and_then(|user| user.avatar.clone()) {
+                    avatars.push((id, hash));
+                }
             }
         }
         self.bridge.voice_controls.send_if_modified(|controls| {
-            let changed = controls.names != names;
+            let changed = controls.names != names || controls.avatars != avatars;
             if changed {
                 controls.names = names;
+                controls.avatars = avatars;
             }
             changed
         });
