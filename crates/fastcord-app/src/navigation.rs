@@ -225,12 +225,16 @@ fn sidebar_row<'a>(
     presence: Option<fastcord_model::Status>,
     chat: Option<Message>,
 ) -> Element<'a, Message> {
+    // Clipped so a long name never draws under the badge or the Chat button.
     let mut line = row![
-        text(label)
-            .size(15)
-            .font(if unread { BOLD } else { Font::DEFAULT })
-            .wrapping(text::Wrapping::None)
-            .width(Length::Fill)
+        container(
+            text(label)
+                .size(15)
+                .font(if unread { BOLD } else { Font::DEFAULT })
+                .wrapping(text::Wrapping::None)
+        )
+        .width(Length::Fill)
+        .clip(true)
     ]
     .spacing(6)
     .align_y(alignment::Vertical::Center);

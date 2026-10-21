@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Voice and Stage rows (#88): a long channel name is clipped before the Chat button instead of drawing under it (found in a live Windows check).
 - Clipped account footer (#117): the sidebar footer now has an identity row (name and status clip instead of pushing anything out) above one row of six compact original vector icons (microphone, headphones, profile, safety, audio settings, logout; canvas feature of iced, no new crates) with tooltips. Muted and deafened add a red slash to the icon, not only a color; the Safety icon carries a bounded request badge (`9+`). Messages and enabled states are unchanged. A layout/pointer regression lays the footer out at the 240 px sidebar with a very long name, status and request count.
 - Timing-sensitive audio tests (scheduler ticks, loopback tone level, DeepFilterNet hand-over) tolerate loaded shared CI runners.
 - CI on Linux and macOS: the VA-API backend (never compiled off Windows before) now builds, passes clippy and its offline tests (missing `unsafe` blocks, a slice-header parser that read `idr_pic_id` on non-IDR slices, a reversed DPB reference copy, incomplete generated bindings, mistyped tests), the Linux decoder opener no longer double-boxes, and the Windows-only CAPTCHA view code is no longer dead code elsewhere.
