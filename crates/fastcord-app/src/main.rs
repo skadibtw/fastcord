@@ -10,6 +10,7 @@ mod call_ui;
 mod captcha;
 mod changes;
 mod composer;
+mod discover;
 mod drafts;
 mod emoji;
 mod emoji_picker;
@@ -149,6 +150,7 @@ struct App {
     inbox: inbox::State,
     group: group_dm::State,
     invite: invite::State,
+    discover: discover::State,
     identity: profile_edit::State,
     safety: safety::State,
     report: report::State,
@@ -328,6 +330,7 @@ enum Message {
     Inbox(inbox::Event),
     Group(group_dm::Event),
     Invite(invite::Event),
+    Discover(discover::Event),
     Identity(profile_edit::Event),
     Safety(safety::Event),
     Report(report::Event),
@@ -407,6 +410,7 @@ impl App {
                 inbox: inbox::State::default(),
                 group: group_dm::State::default(),
                 invite: invite::State::default(),
+                discover: discover::State::default(),
                 identity: profile_edit::State::default(),
                 safety: safety::State::default(),
                 report: report::State::default(),
@@ -490,7 +494,12 @@ impl App {
         gateway
             .controls
             .emoji_request(&gateway.emoji_picker.request);
-        let wanted = wanted_avatars(gateway, own_user(gateway, session), &self.invite);
+        let wanted = wanted_avatars(
+            gateway,
+            own_user(gateway, session),
+            &self.invite,
+            &self.discover,
+        );
         let avatars = gateway
             .avatars
             .synchronize(wanted, gateway.id, gateway.attachments.as_ref());
@@ -1339,6 +1348,7 @@ impl App {
             Message::Shortcut(shortcut) => return self.navigation_shortcut(shortcut),
             Message::Group(event) => return self.group_event(event),
             Message::Invite(event) => return self.invite_event(event),
+            Message::Discover(event) => return self.discover_event(event),
             Message::Identity(event) => return self.identity_event(event),
             Message::Safety(event) => return self.safety_event(event),
             Message::Report(event) => return self.report_event(event),
@@ -2450,6 +2460,7 @@ impl App {
                 self.inbox.clear();
                 self.group.clear();
                 self.invite.clear();
+                self.discover.clear();
                 self.identity.clear();
                 self.safety.clear();
                 self.report.clear();
@@ -2762,6 +2773,7 @@ impl App {
         self.inbox.clear();
         self.group.clear();
         self.invite.clear();
+        self.discover.clear();
         self.identity.clear();
         self.safety.clear();
         self.report.clear();
@@ -3216,6 +3228,22 @@ impl App {
             ));
         }
         task.map(Message::Group)
+    }
+
+    fn discover_event(&mut self, event: discover::Event) -> Task<Message> {
+        let Phase::Account { session, .. } = &self.phase else {
+            return Task::none();
+        };
+        let rejected = discover::State::is_rejected(&event);
+        let task = self.discover.update(event, &session.client);
+        if rejected && let Phase::Account { gateway, .. } = &self.phase {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Discover)
     }
 
     fn invite_event(&mut self, event: invite::Event) -> Task<Message> {
@@ -3930,8 +3958,13 @@ impl App {
             {
                 banner_column = banner_column.push(panel.map(Message::Voice));
             }
-            if let Some(panel) = invite::view(&self.invite) {
+            if let Some(panel) = invite::view(&self.invite, localtime::now()) {
                 banner_column = banner_column.push(panel.map(Message::Invite));
+            }
+            if let Some(panel) =
+                discover::view(&self.discover, &gateway.navigation, &gateway.avatars.views)
+            {
+                banner_column = banner_column.push(panel.map(Message::Discover));
             }
             if let Some(panel) = group_dm::view(&self.group, &gateway.navigation, session.user.id) {
                 banner_column = banner_column.push(panel.map(Message::Group));
@@ -4560,6 +4593,7 @@ fn wanted_avatars(
     gateway: &gateway::GatewayPanel,
     user: &fastcord_model::User,
     invites: &invite::State,
+    discover: &discover::State,
 ) -> Vec<avatars::AvatarKey> {
     let mut wanted = vec![avatars::AvatarKey::user(user.id, user.avatar.as_deref())];
     let guilds = gateway
@@ -4615,6 +4649,7 @@ fn wanted_avatars(
     let room = avatars::MAX_WANTED - pictures.len();
     for key in guilds
         .chain(invite_icons)
+        .chain(discover.icon_keys())
         .chain(occupants)
         .chain(callers)
         .chain(authors)

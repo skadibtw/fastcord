@@ -204,6 +204,12 @@ fn rail<'a>(
                 inbox_open,
                 Some(Message::Inbox(crate::inbox::Event::Toggle))
             ),
+            icon(
+                "Ex".to_owned(),
+                None,
+                false,
+                Some(Message::Discover(crate::discover::Event::Toggle))
+            ),
             container(space())
                 .width(32)
                 .height(2)
@@ -807,7 +813,10 @@ fn main_pane<'a>(
                                 )),
                             ));
                         }
-                        if permissions.create_invite {
+                        if permissions.create_invite
+                            || permissions.manage_guild
+                            || permissions.manage_channel
+                        {
                             tools.push((
                                 "Invite",
                                 Message::Invite(crate::invite::Event::Create(

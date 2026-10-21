@@ -124,6 +124,10 @@ pub struct PermissionSummary {
     pub manage_threads: bool,
     pub attach_files: bool,
     pub create_invite: bool,
+    /// MANAGE_GUILD: may list and revoke every invite of the server.
+    pub manage_guild: bool,
+    /// MANAGE_CHANNELS: may list and revoke this channel's invites.
+    pub manage_channel: bool,
 }
 
 impl From<Permissions> for PermissionSummary {
@@ -143,6 +147,8 @@ impl From<Permissions> for PermissionSummary {
             manage_threads: permissions.contains(Permissions::MANAGE_THREADS),
             attach_files: permissions.contains(Permissions::ATTACH_FILES),
             create_invite: permissions.contains(Permissions::CREATE_INSTANT_INVITE),
+            manage_guild: permissions.contains(Permissions::MANAGE_GUILD),
+            manage_channel: permissions.contains(Permissions::MANAGE_CHANNELS),
         }
     }
 }

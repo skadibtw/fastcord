@@ -1,0 +1,16 @@
+{
+  "guilds": [
+    {
+      "id": "100",
+      "name": "Test Server",
+      "description": "A synthetic server.",
+      "icon": "iconhash",
+      "approximate_member_count": 1200,
+      "approximate_presence_count": 340
+    },
+    {"id": "101", "name": "Quiet Server", "description": null, "icon": null}
+  ],
+  "total": 2,
+  "offset": 0,
+  "limit": 24
+}

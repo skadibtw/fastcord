@@ -63,8 +63,9 @@ pub use group_dm::{
 };
 pub use inbox::{MENTIONS_PAGE_SIZE, MentionFilter, MentionsPage};
 pub use invite::{
-    CREATED_MAX_AGE_SECONDS, Invite, MAX_CODES_PER_MESSAGE, created_code, extract_codes,
-    owner_cannot_leave,
+    CREATE_AGES, CREATE_USES, CREATED_MAX_AGE_SECONDS, DISCOVERY_PAGE, DiscoveredGuild, Expiry,
+    Invite, InviteScope, MAX_CODES_PER_MESSAGE, MAX_LISTED, ManagedInvite, created_code,
+    extract_codes, owner_cannot_leave,
 };
 pub use member::{MemberAction, MemberPermissions};
 pub use password_auth::{

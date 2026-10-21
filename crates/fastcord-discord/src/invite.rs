@@ -1,6 +1,8 @@
 //! Server invitations and membership (SPEC §16, issue #90): find invite codes
 //! in message text, resolve one (`GET /invites/{code}`), join with it, create
-//! one for a channel, and leave a server. Every function sends exactly one
+//! one for a channel, list and revoke the invites of a server or channel the
+//! account may manage, browse public servers, and leave a server. Every
+//! function sends exactly one
 //! request on the user's click (the lookup on a visible card) and never
 //! retries. A join or leave that Discord asks to verify surfaces as
 //! `RestError::AccountVerificationRequired` and pauses every write; the
@@ -20,8 +22,25 @@ const MIN_CODE_BYTES: usize = 2;
 /// Names copied from an invite are cut to this many bytes.
 const MAX_NAME_BYTES: usize = 100;
 
-/// What a created link lasts: seven days, unlimited uses, not temporary.
+/// What a created link lasts by default: seven days, unlimited uses.
 pub const CREATED_MAX_AGE_SECONDS: u32 = 604_800;
+/// Lifetimes a created link may have, in seconds (0 = never) and their names.
+pub const CREATE_AGES: [(u32, &str); 7] = [
+    (1_800, "30 minutes"),
+    (3_600, "1 hour"),
+    (21_600, "6 hours"),
+    (43_200, "12 hours"),
+    (86_400, "1 day"),
+    (CREATED_MAX_AGE_SECONDS, "7 days"),
+    (0, "never"),
+];
+/// Use limits a created link may have (0 = no limit).
+pub const CREATE_USES: [u8; 7] = [0, 1, 5, 10, 25, 50, 100];
+/// Invites kept from one list; the rest are not shown.
+pub const MAX_LISTED: usize = 100;
+/// Discovered servers asked for per page (Discord accepts at most 48).
+pub const DISCOVERY_PAGE: usize = 24;
+const MAX_DESCRIPTION_BYTES: usize = 200;
 
 const HOSTS: [&str; 3] = [
     "discord.gg/",
@@ -105,15 +124,19 @@ struct WireInvite {
     expires_at: Option<String>,
 }
 
-fn cut(mut text: String) -> String {
-    if text.len() > MAX_NAME_BYTES {
-        let mut end = MAX_NAME_BYTES;
+fn cut_at(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut end = max;
         while !text.is_char_boundary(end) {
             end -= 1;
         }
         text.truncate(end);
     }
     text
+}
+
+fn cut(text: String) -> String {
+    cut_at(text, MAX_NAME_BYTES)
 }
 
 /// A resolved invite: the server it leads to and what Discord counts there.
@@ -150,6 +173,170 @@ impl Invite {
     }
 }
 
+/// When a listed invite stops working.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expiry {
+    Never,
+    /// Unix seconds.
+    At(i64),
+    /// Discord gave a lifetime but no readable start.
+    Unknown,
+}
+
+/// One invite of a server or channel list (needs MANAGE_GUILD / MANAGE_CHANNELS).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedInvite {
+    pub code: String,
+    pub channel_name: String,
+    pub inviter: String,
+    pub uses: u32,
+    /// 0 = no limit.
+    pub max_uses: u32,
+    pub expiry: Expiry,
+    pub temporary: bool,
+}
+
+#[derive(Deserialize)]
+struct WireInviter {
+    #[serde(default)]
+    username: String,
+    global_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WireManaged {
+    code: String,
+    channel: Option<WireChannel>,
+    inviter: Option<WireInviter>,
+    #[serde(default)]
+    uses: u32,
+    #[serde(default)]
+    max_uses: u32,
+    #[serde(default)]
+    max_age: u32,
+    #[serde(default)]
+    temporary: bool,
+    created_at: Option<String>,
+    expires_at: Option<String>,
+}
+
+fn unix(text: &str) -> Option<i64> {
+    time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(|at| at.unix_timestamp())
+}
+
+/// Reads a `GET /guilds/{id}/invites` or `/channels/{id}/invites` answer: at
+/// most [`MAX_LISTED`] invites, entries with an unusable code dropped. `None`
+/// for anything that is not a list.
+pub fn parse_invites(body: &[u8]) -> Option<Vec<ManagedInvite>> {
+    let wire: Vec<WireManaged> = serde_json::from_slice(body).ok()?;
+    Some(
+        wire.into_iter()
+            .filter(|w| (MIN_CODE_BYTES..=MAX_CODE_BYTES).contains(&w.code.len()))
+            .filter(|w| w.code.bytes().all(code_byte))
+            .take(MAX_LISTED)
+            .map(|w| {
+                let expiry = match (w.expires_at.as_deref().and_then(unix), w.max_age) {
+                    (Some(at), _) => Expiry::At(at),
+                    (None, 0) => Expiry::Never,
+                    (None, age) => w
+                        .created_at
+                        .as_deref()
+                        .and_then(unix)
+                        .map_or(Expiry::Unknown, |at| Expiry::At(at + i64::from(age))),
+                };
+                let inviter = w.inviter.map_or_else(String::new, |i| {
+                    i.global_name
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(i.username)
+                });
+                ManagedInvite {
+                    code: w.code,
+                    channel_name: w.channel.map(|c| cut(c.name)).unwrap_or_default(),
+                    inviter: cut(inviter),
+                    uses: w.uses,
+                    max_uses: w.max_uses,
+                    expiry,
+                    temporary: w.temporary,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// A public server of the discovery list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveredGuild {
+    pub id: Snowflake,
+    pub name: String,
+    pub description: String,
+    pub icon: Option<String>,
+    pub members: Option<u32>,
+    pub online: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct WireDiscovered {
+    id: Snowflake,
+    #[serde(default)]
+    name: String,
+    description: Option<String>,
+    icon: Option<String>,
+    approximate_member_count: Option<u32>,
+    approximate_presence_count: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireDiscovery {
+    Wrapped { guilds: Vec<WireDiscovered> },
+    Bare(Vec<WireDiscovered>),
+}
+
+/// Reads a `GET /discoverable-guilds` answer (an object with `guilds`, or a
+/// bare list); at most [`DISCOVERY_PAGE`] servers, texts capped.
+pub fn parse_discovery(body: &[u8]) -> Option<Vec<DiscoveredGuild>> {
+    let (WireDiscovery::Wrapped { guilds: wire } | WireDiscovery::Bare(wire)) =
+        serde_json::from_slice(body).ok()?;
+    Some(
+        wire.into_iter()
+            .take(DISCOVERY_PAGE)
+            .map(|g| DiscoveredGuild {
+                id: g.id,
+                name: cut(g.name),
+                description: cut_at(g.description.unwrap_or_default(), MAX_DESCRIPTION_BYTES),
+                icon: g.icon.map(cut),
+                members: g.approximate_member_count,
+                online: g.approximate_presence_count,
+            })
+            .collect(),
+    )
+}
+
+/// Where an invite list is read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InviteScope {
+    Guild(Snowflake),
+    Channel(Snowflake),
+}
+
+impl InviteScope {
+    fn route(self) -> Result<Route, RestError> {
+        match self {
+            Self::Guild(id) => Route::new(Method::GET, &format!("/guilds/{id}/invites")),
+            Self::Channel(id) => Route::new(Method::GET, &format!("/channels/{id}/invites")),
+        }
+    }
+}
+
+fn discovery_route(offset: usize) -> Result<Route, RestError> {
+    Route::new(
+        Method::GET,
+        &format!("/discoverable-guilds?offset={offset}&limit={DISCOVERY_PAGE}"),
+    )
+}
+
 /// The code of a `POST /channels/{id}/invites` response.
 pub fn created_code(body: &[u8]) -> Option<String> {
     #[derive(Deserialize)]
@@ -173,10 +360,10 @@ fn code_route(method: Method, code: &str, counts: bool) -> Result<Route, RestErr
     Route::new(method, &format!("/invites/{code}{query}"))
 }
 
-fn create_body() -> serde_json::Value {
+fn create_body(max_age: u32, max_uses: u8) -> serde_json::Value {
     serde_json::json!({
-        "max_age": CREATED_MAX_AGE_SECONDS,
-        "max_uses": 0,
+        "max_age": max_age,
+        "max_uses": max_uses,
         "temporary": false,
     })
 }
@@ -208,16 +395,50 @@ impl<C: Clock> RestClient<C> {
         Ok(Invite::from_json(response.body()))
     }
 
-    /// Creates a seven-day, unlimited-use invite for a channel.
-    pub async fn create_invite(&self, channel: Snowflake) -> Result<String, RestError> {
+    /// Creates an invite for a channel with the given lifetime in seconds
+    /// (0 = never) and use limit (0 = none), see [`CREATE_AGES`], [`CREATE_USES`].
+    pub async fn create_invite(
+        &self,
+        channel: Snowflake,
+        max_age: u32,
+        max_uses: u8,
+    ) -> Result<String, RestError> {
         let request = RestRequest::new(
             Route::new(Method::POST, &format!("/channels/{channel}/invites"))?,
             Priority::UserWrite,
         )
         .with_error_detail()
-        .json(&create_body())?;
+        .json(&create_body(max_age, max_uses))?;
         let response = self.execute(request).await?;
         created_code(response.body()).ok_or(RestError::InvalidJson)
+    }
+
+    /// The invites of a server (MANAGE_GUILD) or channel (MANAGE_CHANNELS).
+    pub async fn list_invites(&self, scope: InviteScope) -> Result<Vec<ManagedInvite>, RestError> {
+        let request = RestRequest::new(scope.route()?, Priority::UserRead).with_error_detail();
+        let response = self.execute(request).await?;
+        parse_invites(response.body()).ok_or(RestError::InvalidJson)
+    }
+
+    /// Revokes one invite (`DELETE /invites/{code}`) on an explicit click.
+    /// An unknown invite is `ResourceGone` or a 404 `Refused`.
+    pub async fn revoke_invite(&self, code: &str) -> Result<(), RestError> {
+        let request = RestRequest::new(
+            code_route(Method::DELETE, code, false)?,
+            Priority::UserWrite,
+        )
+        .with_error_detail();
+        self.execute(request).await.map(drop)
+    }
+
+    /// One page of the public server list (unverified user route).
+    pub async fn discoverable_guilds(
+        &self,
+        offset: usize,
+    ) -> Result<Vec<DiscoveredGuild>, RestError> {
+        let request = RestRequest::new(discovery_route(offset)?, Priority::UserRead);
+        let response = self.execute(request).await?;
+        parse_discovery(response.body()).ok_or(RestError::InvalidJson)
     }
 
     /// Leaves a server (`DELETE /users/@me/guilds/{id}`).
@@ -336,7 +557,11 @@ mod tests {
         let join = code_route(Method::POST, "abc123", false).unwrap();
         assert_eq!(path(&join), "/invites/abc123");
         assert_eq!(join.key().method(), &Method::POST);
-        assert_eq!(create_body(), fixture()["create_request"]);
+        assert_eq!(
+            create_body(CREATED_MAX_AGE_SECONDS, 0),
+            fixture()["create_request"]
+        );
+        assert_eq!(create_body(1_800, 5)["max_uses"], 5);
         assert_eq!(leave_body(), fixture()["leave_request"]);
         assert_eq!(
             created_code(fixture()["create_response"].to_string().as_bytes()).as_deref(),
@@ -348,6 +573,98 @@ mod tests {
         for bad in ["", "a", "../x", "a/b", "ab?x", "ab cd", long.as_str()] {
             assert!(code_route(Method::GET, bad, true).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn an_invite_list_decodes_with_expiry_names_and_bounds() {
+        let body = include_bytes!("../../../fixtures/rest/invite-list-synthetic.json");
+        let list = parse_invites(body).unwrap();
+        // The entry with a path-like code is dropped.
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].code, "abc123");
+        assert_eq!(list[0].inviter, "Alice");
+        assert_eq!(list[0].channel_name, "general");
+        assert_eq!((list[0].uses, list[0].max_uses), (3, 10));
+        // expires_at wins (2030-01-01T00:00:00Z).
+        assert_eq!(list[0].expiry, Expiry::At(1_893_456_000));
+        // No global name: the username. max_age 0 never expires. Temporary.
+        assert_eq!(list[1].inviter, "bob");
+        assert_eq!(list[1].expiry, Expiry::Never);
+        assert!(list[1].temporary);
+        // created_at + max_age; no inviter.
+        assert_eq!(list[2].expiry, Expiry::At(1_893_456_000 + 3_600));
+        assert_eq!(list[2].inviter, "");
+        assert!(parse_invites(b"{}").is_none());
+        let many: Vec<_> = (0..MAX_LISTED + 20)
+            .map(|n| serde_json::json!({"code": format!("c{n:04}")}))
+            .collect();
+        let many = parse_invites(&serde_json::to_vec(&many).unwrap()).unwrap();
+        assert_eq!(many.len(), MAX_LISTED);
+        assert_eq!(many[0].expiry, Expiry::Never);
+    }
+
+    #[test]
+    fn discovery_decodes_wrapped_and_bare_lists_within_bounds() {
+        let body = include_bytes!("../../../fixtures/rest/discovery-synthetic.json");
+        let page = parse_discovery(body).unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id, Snowflake(100));
+        assert_eq!(page[0].name, "Test Server");
+        assert_eq!(page[0].description, "A synthetic server.");
+        assert_eq!(page[0].icon.as_deref(), Some("iconhash"));
+        assert_eq!((page[0].members, page[0].online), (Some(1200), Some(340)));
+        assert_eq!(page[1].description, "");
+        assert_eq!(page[1].members, None);
+        let bare = parse_discovery(br#"[{"id":"5","name":"x"}]"#).unwrap();
+        assert_eq!(bare[0].id, Snowflake(5));
+        assert!(parse_discovery(b"{}").is_none());
+        let long = serde_json::json!([{
+            "id": "1",
+            "name": "n".repeat(500),
+            "description": "d".repeat(900),
+        }]);
+        let long = parse_discovery(long.to_string().as_bytes()).unwrap();
+        assert_eq!(long[0].name.len(), MAX_NAME_BYTES);
+        assert_eq!(long[0].description.len(), MAX_DESCRIPTION_BYTES);
+        let many: Vec<_> = (1..=DISCOVERY_PAGE as u64 + 10)
+            .map(|id| serde_json::json!({"id": id.to_string()}))
+            .collect();
+        let many = parse_discovery(&serde_json::to_vec(&many).unwrap()).unwrap();
+        assert_eq!(many.len(), DISCOVERY_PAGE);
+    }
+
+    #[test]
+    fn management_and_discovery_routes_are_fixed_shapes() {
+        assert_eq!(
+            path(&InviteScope::Guild(Snowflake(7)).route().unwrap()),
+            "/guilds/7/invites"
+        );
+        assert_eq!(
+            path(&InviteScope::Channel(Snowflake(8)).route().unwrap()),
+            "/channels/8/invites"
+        );
+        assert_eq!(
+            path(&discovery_route(48).unwrap()),
+            "/discoverable-guilds?offset=48&limit=24"
+        );
+        let revoke = code_route(Method::DELETE, "abc123", false).unwrap();
+        assert_eq!(path(&revoke), "/invites/abc123");
+        assert_eq!(revoke.key().method(), &Method::DELETE);
+        const { assert!(DISCOVERY_PAGE <= 48) };
+    }
+
+    #[test]
+    fn managing_invites_needs_manage_guild_or_manage_channels() {
+        use crate::state::navigation::PermissionSummary;
+        use fastcord_model::Permissions;
+        let none = PermissionSummary::from(Permissions::VIEW_CHANNEL);
+        assert!(!none.manage_guild && !none.manage_channel && !none.create_invite);
+        let guild = PermissionSummary::from(Permissions::MANAGE_GUILD);
+        assert!(guild.manage_guild && !guild.manage_channel);
+        let channel = PermissionSummary::from(Permissions::MANAGE_CHANNELS);
+        assert!(channel.manage_channel && !channel.manage_guild);
+        let admin = PermissionSummary::from(Permissions::ALL);
+        assert!(admin.manage_guild && admin.manage_channel && admin.create_invite);
     }
 
     #[test]

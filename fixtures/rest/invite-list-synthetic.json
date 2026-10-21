@@ -1,0 +1,33 @@
+[
+  {
+    "code": "abc123",
+    "channel": {"id": "200", "type": 0, "name": "general"},
+    "inviter": {"id": "300", "username": "alice", "global_name": "Alice"},
+    "uses": 3,
+    "max_uses": 10,
+    "max_age": 604800,
+    "temporary": false,
+    "created_at": "2029-12-25T00:00:00.000000+00:00",
+    "expires_at": "2030-01-01T00:00:00+00:00"
+  },
+  {
+    "code": "def-456",
+    "channel": {"id": "200", "type": 0, "name": "general"},
+    "inviter": {"id": "301", "username": "bob", "global_name": null},
+    "uses": 0,
+    "max_uses": 0,
+    "max_age": 0,
+    "temporary": true,
+    "created_at": "2029-12-25T00:00:00.000000+00:00"
+  },
+  {"code": "../evil", "uses": 0, "max_uses": 0, "max_age": 0, "temporary": false},
+  {
+    "code": "ghi789",
+    "channel": {"id": "201", "type": 0, "name": "rules"},
+    "uses": 1,
+    "max_uses": 1,
+    "max_age": 3600,
+    "temporary": false,
+    "created_at": "2030-01-01T00:00:00+00:00"
+  }
+]

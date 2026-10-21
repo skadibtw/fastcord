@@ -21,6 +21,7 @@ impl Permissions {
     pub const KICK_MEMBERS: Self = Self(1 << 1);
     pub const BAN_MEMBERS: Self = Self(1 << 2);
     pub const MANAGE_CHANNELS: Self = Self(1 << 4);
+    pub const MANAGE_GUILD: Self = Self(1 << 5);
     pub const REQUEST_TO_SPEAK: Self = Self(1 << 32);
     pub const MUTE_MEMBERS: Self = Self(1 << 22);
     pub const DEAFEN_MEMBERS: Self = Self(1 << 23);
