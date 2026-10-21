@@ -258,6 +258,7 @@ enum Message {
     OpenSharePicker,
     ShareSources(Result<Vec<fastcord_platform::capture::CaptureSource>, String>),
     CloseSharePicker,
+    ToggleShareAudio(bool),
     StartShare(fastcord_platform::capture::SourceId),
     StopShare,
     GuildViewport(virtual_list::Window),
@@ -1611,6 +1612,11 @@ impl App {
                     };
                 }
             }
+            Message::ToggleShareAudio(on) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.share_audio = on;
+                }
+            }
             Message::CloseSharePicker => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.share_picker = gateway::SharePicker::Closed;
@@ -1635,7 +1641,9 @@ impl App {
                             }
                             None => fastcord_model::StreamCreateRequest::call(channel),
                         };
-                        gateway.controls.start_share(source, request);
+                        let audio = gateway.share_audio
+                            && gateway::AudioOffer::current() != gateway::AudioOffer::Unavailable;
+                        gateway.controls.start_share(source, request, audio);
                         self.notice = None;
                     } else {
                         self.notice =
@@ -2403,7 +2411,7 @@ impl App {
         Some((open, Message::Soundboard(event)))
     }
 
-    fn share_picker_view(picker: &gateway::SharePicker) -> Element<'_, Message> {
+    fn share_picker_view(picker: &gateway::SharePicker, share_audio: bool) -> Element<'_, Message> {
         use fastcord_platform::capture::SourceKind;
         let mut content = column![
             row![
@@ -2440,6 +2448,26 @@ impl App {
                 }
                 if !any_window {
                     windows = windows.push(text("No shareable windows are open.").size(12));
+                }
+                let offer = gateway::AudioOffer::current();
+                if offer != gateway::AudioOffer::Unavailable {
+                    let mut audio = column![
+                        checkbox(share_audio)
+                            .label("Share audio")
+                            .on_toggle(Message::ToggleShareAudio)
+                    ]
+                    .spacing(4);
+                    audio = audio.push(text(offer.note()).size(12));
+                    if offer.warns() {
+                        audio = audio.push(
+                            text("Warning: viewers may hear your call while this is on.")
+                                .size(12)
+                                .color(iced::Color::from_rgb(0.9, 0.55, 0.1)),
+                        );
+                    }
+                    content = content.push(audio);
+                } else {
+                    content = content.push(text(offer.note()).size(12));
                 }
                 content = content
                     .push(scrollable(column![screens, windows].spacing(16)).height(Length::Fill));
@@ -3801,8 +3829,11 @@ impl App {
                     iced::widget::stack![account, pane].into()
                 }
                 None if gateway.share_picker.is_open() && !gateway.emoji_picker.request.open => {
-                    iced::widget::stack![account, Self::share_picker_view(&gateway.share_picker)]
-                        .into()
+                    iced::widget::stack![
+                        account,
+                        Self::share_picker_view(&gateway.share_picker, gateway.share_audio)
+                    ]
+                    .into()
                 }
                 Some(viewer) => {
                     iced::widget::stack![account, attachment_ui::viewer_view(viewer)].into()

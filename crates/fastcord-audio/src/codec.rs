@@ -172,6 +172,37 @@ impl VoiceEncoder {
     }
 }
 
+/// Default bitrate for shared application or system audio.
+pub const SOUNDSHARE_BITRATE: u32 = 128_000;
+
+/// Stream-audio encoder: real stereo, tuned for music and game sound, no FEC.
+pub struct MusicEncoder {
+    encoder: Encoder,
+}
+
+impl MusicEncoder {
+    pub fn new(bitrate: u32) -> Result<Self, CodecError> {
+        let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Stereo, Application::Audio)?;
+        encoder.set_signal(Signal::Music)?;
+        encoder.set_vbr(true)?;
+        encoder.set_bitrate(Bitrate::Bits(bitrate.clamp(6_000, 510_000) as i32))?;
+        Ok(Self { encoder })
+    }
+
+    /// Encodes one 20 ms interleaved stereo frame into `out`.
+    pub fn encode_stereo(
+        &mut self,
+        pcm: &[f32; FRAME_SAMPLES * CHANNELS],
+        out: &mut EncodedPacket,
+    ) -> Result<(), CodecError> {
+        let len = self
+            .encoder
+            .encode_float(&pcm[..], &mut out.bytes[..MAX_FRAME_BYTES])?;
+        out.len = len as u16;
+        Ok(())
+    }
+}
+
 /// Decoder for one incoming stream: stereo 48 kHz output.
 pub struct VoiceDecoder {
     decoder: Decoder,

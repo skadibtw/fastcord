@@ -2109,6 +2109,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "sys-locale",
  "windows 0.62.2",
+ "windows-core 0.62.2",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
  "zeroize",

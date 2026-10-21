@@ -4,6 +4,7 @@
 
 pub mod capture;
 pub mod clipboard;
+pub mod loopback;
 pub mod notify;
 pub mod realtime;
 pub mod shortcut;

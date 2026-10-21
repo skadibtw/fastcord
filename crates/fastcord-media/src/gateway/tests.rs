@@ -1292,9 +1292,11 @@ async fn parent_voice_and_stream_establish_independent_udp_dave_sessions() {
     stream
         .session
         .media()
-        .send_opus(b"stream-frame".to_vec())
+        .send_soundshare(b"stream-frame".to_vec())
         .unwrap();
-    assert_eq!(stream_ws.recv_op(5).await["d"]["speaking"], 1);
+    // Stream audio is announced with the SOUNDSHARE flag, not VOICE, and is
+    // DAVE-sealed on the stream's own group like voice.
+    assert_eq!(stream_ws.recv_op(5).await["d"]["speaking"], 2);
     let stream_packet = stream_udp.recv().await;
     let transport_key = TransportKey::from_slice(&KEY).unwrap();
     let stream_cipher = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &transport_key);

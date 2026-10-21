@@ -233,6 +233,8 @@ impl std::error::Error for MediaSendError {}
 
 pub(crate) enum MediaCommand {
     Opus(Vec<u8>),
+    /// A stream-audio frame: like `Opus`, announced with the SOUNDSHARE speaking flag.
+    Soundshare(Vec<u8>),
     EndSpeech,
     VideoKeyframe(u32),
 }
@@ -268,7 +270,20 @@ impl MediaSender {
         if frame.is_empty() || frame.len() > MAX_OPUS_FRAME {
             return Err(MediaSendError::InvalidFrame);
         }
-        self.push_audio(frame)
+        self.push_audio(MediaCommand::Opus(frame))
+    }
+
+    /// Queues one 20 ms Opus frame of shared application or system audio. A
+    /// stream connection announces speaking with the SOUNDSHARE flag (and no
+    /// voice flag) before the first frame after silence; [`end_speech`]
+    /// ends the burst.
+    ///
+    /// [`end_speech`]: Self::end_speech
+    pub fn send_soundshare(&self, frame: Vec<u8>) -> Result<(), MediaSendError> {
+        if frame.is_empty() || frame.len() > MAX_OPUS_FRAME {
+            return Err(MediaSendError::InvalidFrame);
+        }
+        self.push_audio(MediaCommand::Soundshare(frame))
     }
 
     /// Ends a speech burst: five Opus silence frames, then speaking off.
@@ -344,7 +359,7 @@ impl MediaSender {
         self.push(MediaCommand::VideoKeyframe(ssrc))
     }
 
-    fn push_audio(&self, frame: Vec<u8>) -> Result<(), MediaSendError> {
+    fn push_audio(&self, command: MediaCommand) -> Result<(), MediaSendError> {
         if self.queue.is_closed() {
             return Err(MediaSendError::Closed);
         }
@@ -363,15 +378,13 @@ impl MediaSender {
                 Err(current) => queued = current,
             }
         }
-        self.queue
-            .try_send(MediaCommand::Opus(frame))
-            .map_err(|error| {
-                self.queued_audio.fetch_sub(1, Ordering::AcqRel);
-                match error {
-                    mpsc::error::TrySendError::Full(_) => MediaSendError::Full,
-                    mpsc::error::TrySendError::Closed(_) => MediaSendError::Closed,
-                }
-            })
+        self.queue.try_send(command).map_err(|error| {
+            self.queued_audio.fetch_sub(1, Ordering::AcqRel);
+            match error {
+                mpsc::error::TrySendError::Full(_) => MediaSendError::Full,
+                mpsc::error::TrySendError::Closed(_) => MediaSendError::Closed,
+            }
+        })
     }
     fn push(&self, command: MediaCommand) -> Result<(), MediaSendError> {
         self.queue.try_send(command).map_err(|error| match error {

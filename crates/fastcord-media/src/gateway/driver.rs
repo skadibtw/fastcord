@@ -463,7 +463,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 },
                 command = self.ch.media.recv(), if media_open => match command {
                     Some(command) => {
-                        if matches!(&command, MediaCommand::Opus(_)) {
+                        if matches!(&command, MediaCommand::Opus(_) | MediaCommand::Soundshare(_)) {
                             self.ch.queued_audio.fetch_sub(1, Ordering::AcqRel);
                         }
                         self.on_media(&mut conn, &mut socket, command).await
@@ -1225,15 +1225,21 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let Some(media) = &mut self.media else {
             return Ok(());
         };
+        let soundshare = matches!(command, MediaCommand::Soundshare(_));
         match command {
-            MediaCommand::Opus(frame) => {
+            MediaCommand::Opus(frame) | MediaCommand::Soundshare(frame) => {
+                let flags = if soundshare {
+                    wire::speaking::SOUNDSHARE
+                } else {
+                    wire::speaking::VOICE
+                };
                 media.silence_left = 0;
                 conn.silence_at = None;
                 if !media.speaking {
                     // Announce before the first audible packet.
                     media.speaking = true;
                     let ssrc = media.rtp.ssrc();
-                    self.send_text(conn, socket, &wire::speaking(wire::speaking::VOICE, ssrc))
+                    self.send_text(conn, socket, &wire::speaking(flags, ssrc))
                         .await?;
                 }
                 self.send_rtp(&frame).await

@@ -8,11 +8,15 @@ use fastcord_media::{
 };
 use tokio::sync::watch;
 
+use super::VoiceControls;
+use super::stream_speaker::Playback;
 use super::stream_video::{Sink, StatusSink, StreamDecoder, StreamStatus};
 
 /// A watch connection owns its transport and DAVE identity, but never a
-/// microphone or AudioEngine. The session task only routes borrowed-frame and
-/// status callbacks to the lazily allocated decoding worker.
+/// microphone. The session task routes borrowed-frame and status callbacks to
+/// the lazily allocated decoding worker, and the stream's Opus packets to an
+/// output-only speaker (`stream_speaker`) that follows the call's output
+/// device and deafen state, started by the first packet.
 ///
 /// `visible` gates submissions and in-flight output immediately; `visibility`
 /// wakes the session even when no packets arrive so native references are
@@ -24,6 +28,7 @@ pub(super) async fn run(
     visibility: watch::Receiver<bool>,
     sink: Sink,
     status: StatusSink,
+    controls: watch::Receiver<VoiceControls>,
 ) {
     (status)(StreamStatus::Connecting);
     let session = match connect_with_video(credentials.voice_credentials(), watch_options()) {
@@ -35,7 +40,7 @@ pub(super) async fn run(
             return;
         }
     };
-    pump(session, visible, visibility, sink, status).await;
+    pump(session, visible, visibility, sink, status, controls).await;
 }
 
 fn watch_options() -> VideoOptions {
@@ -77,7 +82,10 @@ async fn pump(
     mut visibility: watch::Receiver<bool>,
     sink: Sink,
     status: StatusSink,
+    mut controls: watch::Receiver<VoiceControls>,
 ) {
+    let mut playback = Playback::default();
+    let mut controls_open = true;
     let mut decoder = StreamDecoder::new(session.media(), visible, Some(sink), Arc::clone(&status));
     let mut connection = session.watch_status();
     let mut observed_visible = *visibility.borrow_and_update();
@@ -108,6 +116,13 @@ async fn pump(
                 decoder.visibility_notified(observed_visible, announced);
                 observed_visible = announced;
             }
+            changed = controls.changed(), if controls_open => {
+                if changed.is_err() {
+                    controls_open = false;
+                } else {
+                    playback.apply(&controls.borrow_and_update());
+                }
+            }
             changed = connection.changed() => {
                 if changed.is_err() {
                     break;
@@ -127,6 +142,7 @@ async fn pump(
             }
             message = session.next_message() => match message {
                 Some(VoiceMessage::Video(frame)) => decoder.push(frame),
+                Some(VoiceMessage::Audio(audio)) => playback.push(audio, &controls.borrow()),
                 Some(VoiceMessage::Event(VoiceEvent::VideoSource { ssrc, active, .. })) => {
                     decoder.source_changed(if active { ssrc } else { 0 });
                 }
@@ -142,6 +158,7 @@ async fn pump(
     }
     // Schedule native teardown before the transport's close-handshake await.
     drop(decoder);
+    drop(playback);
     if !terminal && !publish_session_end(session.status(), &status) {
         (status)(StreamStatus::Failed(
             "Stream session stopped unexpectedly".into(),

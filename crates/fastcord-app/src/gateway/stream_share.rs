@@ -26,6 +26,8 @@ use fastcord_video::share::{
 };
 use tokio::sync::watch;
 
+use super::share_audio::{self, AudioShare, AudioSlot};
+
 /// What the owner offers the server: the SPEC §8.2 baseline layer.
 const SEND: SendOptions = SendOptions::SCREEN_720P30;
 
@@ -101,6 +103,8 @@ pub(super) struct ShareProgress {
     pub(super) source: Option<(u32, u32)>,
     pub(super) converter: Option<ConversionPath>,
     pub(super) encoder: Option<EncoderReport>,
+    /// What the share's audio captures, when audio was requested.
+    pub(super) audio: Option<fastcord_platform::loopback::LoopbackScope>,
     pub(super) connection: Connection,
     /// The first reason the share ended, as text for the screen.
     pub(super) ended: Option<String>,
@@ -177,6 +181,9 @@ pub(super) fn describe(title: &str, progress: &ShareProgress) -> String {
                     encoder.width, encoder.height, encoder.backend
                 ));
             }
+            if let Some(audio) = progress.audio {
+                text.push_str(&format!(" · {}", share_audio::scope_text(audio)));
+            }
             text
         }
         Connection::Idle | Connection::Connecting => {
@@ -231,6 +238,8 @@ pub(super) struct ShareSession {
     pub(super) request: StreamCreateRequest,
     pub(super) key: StreamKey,
     pub(super) phase: Phase,
+    /// The audio sent with the picture, when the user asked for it.
+    pub(super) audio: Option<AudioShare>,
 }
 
 impl ShareSession {
@@ -335,6 +344,7 @@ pub(super) async fn run(
     credentials: StreamCredentials,
     control: ShareControl,
     progress: Arc<watch::Sender<ShareProgress>>,
+    audio: AudioSlot,
 ) {
     control.set_negotiated(false);
     progress.send_modify(|progress| progress.connection = Connection::Connecting);
@@ -351,6 +361,8 @@ pub(super) async fn run(
     // Until H.264 is negotiated the share only captures; attaching resets the
     // stream to a keyframe.
     control.attach(sink(session.media()));
+    // Stream audio leaves on this connection as SOUNDSHARE, DAVE-sealed.
+    *audio.lock() = Some(session.media());
     let mut connection = session.watch_status();
     loop {
         tokio::select! {
@@ -391,6 +403,7 @@ pub(super) async fn run(
             },
         }
     }
+    audio.lock().take();
     #[cfg(debug_assertions)]
     {
         eprintln!("share session ended: {:?}", session.stats());
@@ -410,7 +423,12 @@ use fastcord_discord::gateway::Gateway;
 
 impl super::Worker {
     /// Starts a share: the capture first, then (once it runs) the stream.
-    pub(super) fn start_share(&mut self, source: CaptureSource, request: StreamCreateRequest) {
+    pub(super) fn start_share(
+        &mut self,
+        source: CaptureSource,
+        request: StreamCreateRequest,
+        with_audio: bool,
+    ) {
         if self.share.is_some() {
             // The UI offers no second share; keep the running one.
             return;
@@ -427,8 +445,24 @@ impl super::Worker {
             ));
             return;
         };
+        // The audio source first: a refused or missing one is an error shown
+        // before anything is captured or created on Discord.
+        let audio = if with_audio {
+            match share_audio::start(source.id) {
+                Ok(audio) => Some(audio),
+                Err(text) => {
+                    self.publish_share(ShareView::failed(text));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         match start_worker(&source) {
             Ok((worker, sender, progress)) => {
+                if let Some(audio) = &audio {
+                    sender.send_modify(|progress| progress.audio = Some(audio.scope));
+                }
                 self.share = Some(ShareSession {
                     worker: Some(worker),
                     progress,
@@ -437,6 +471,7 @@ impl super::Worker {
                     request,
                     key,
                     phase: Phase::StartingCapture,
+                    audio,
                 });
                 self.publish_share(ShareView::active(format!(
                     "Starting capture of “{}”…",
@@ -481,10 +516,15 @@ impl super::Worker {
                 self.stop_stream_key(&share.key.to_wire());
             }
         }
-        if let Some(worker) = share.worker {
-            // Dropping stops the capture thread and waits for it to release the
-            // OS objects: not on the async worker.
-            tokio::task::spawn_blocking(move || drop(worker));
+        let ShareSession { worker, audio, .. } = share;
+        if worker.is_some() || audio.is_some() {
+            // Dropping stops the capture threads and waits for them to release
+            // the OS objects: not on the async worker. The audio goes first,
+            // so no sound is encoded after the picture stopped.
+            tokio::task::spawn_blocking(move || {
+                drop(audio);
+                drop(worker);
+            });
         }
         self.publish_share(view);
     }
@@ -533,6 +573,7 @@ mod tests {
             request: request(),
             key: owner_key(&request(), Snowflake(9)).unwrap(),
             phase: Phase::StartingCapture,
+            audio: None,
         }
     }
 
@@ -734,7 +775,7 @@ mod tests {
             primary: false,
         };
         assert_eq!(bridge.share_view(), ShareView::idle());
-        assert!(bridge.start_share(source, request()));
+        assert!(bridge.start_share(source, request(), false));
         assert_eq!(
             bridge.share_view(),
             ShareView::active("Starting capture of “Secret plans”…".to_owned())
@@ -784,5 +825,20 @@ mod tests {
         assert_eq!(ShareView::idle(), ShareView::default());
         assert!(ShareView::active("a".into()).active);
         assert!(!ShareView::failed("b".into()).active);
+    }
+
+    #[test]
+    fn the_status_names_what_the_audio_captures() {
+        use fastcord_platform::loopback::LoopbackScope;
+        let mut progress = ShareProgress {
+            capturing: true,
+            connection: Connection::Live,
+            ..ShareProgress::default()
+        };
+        assert_eq!(describe("Editor", &progress), "Sharing “Editor”");
+        progress.audio = Some(LoopbackScope::SystemExcludingFastcord);
+        assert!(describe("Editor", &progress).ends_with("system audio without fastcord"));
+        progress.audio = Some(LoopbackScope::SystemIncludingFastcord);
+        assert!(describe("Editor", &progress).contains("may hear your call"));
     }
 }

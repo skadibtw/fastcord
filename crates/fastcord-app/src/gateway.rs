@@ -7,8 +7,10 @@
 //! when the account screen is left (which closes the Gateway session cleanly).
 
 mod camera;
+mod share_audio;
 mod stream_audio;
 mod stream_share;
+mod stream_speaker;
 mod stream_video;
 #[cfg(test)]
 pub(crate) use stream_video::MAX_QUEUED_BYTES as MAX_QUEUED_VIDEO_BYTES;
@@ -19,6 +21,7 @@ pub use camera::{
     CameraChoice, CameraControls, CameraList, CameraStatus, CameraTiles, TileVisibility, TilesView,
     can_send as can_send_camera, describe as describe_camera, list_cameras, preview_caption,
 };
+pub use share_audio::AudioOffer;
 pub use stream_share::{SharePicker, ShareView};
 pub use voice_audio::VoiceAudioState;
 
@@ -615,6 +618,8 @@ pub enum Command {
     StartShare {
         source: CaptureSource,
         request: StreamCreateRequest,
+        /// Also send the shared application's or the system's audio.
+        audio: bool,
     },
     /// End the screen share and its stream.
     StopShare,
@@ -1143,11 +1148,20 @@ impl NavigationBridge {
 
     /// Starts sharing `source` into the voice channel `request` names. The
     /// capture starts first; the stream is created once the OS accepted it.
-    pub fn start_share(&self, source: CaptureSource, request: StreamCreateRequest) -> bool {
+    pub fn start_share(
+        &self,
+        source: CaptureSource,
+        request: StreamCreateRequest,
+        audio: bool,
+    ) -> bool {
         let text = format!("Starting capture of “{}”…", source.title);
         let queued = self
             .commands
-            .try_send(Command::StartShare { source, request })
+            .try_send(Command::StartShare {
+                source,
+                request,
+                audio,
+            })
             .is_ok();
         self.share_view.send_replace(if queued {
             ShareView::active(text)
@@ -2413,6 +2427,11 @@ impl Worker {
                         credentials,
                         worker.control(),
                         Arc::clone(&share.sender),
+                        share
+                            .audio
+                            .as_ref()
+                            .map(|audio| Arc::clone(&audio.slot))
+                            .unwrap_or_default(),
                     ));
                     self.stream_tasks.insert(key, task);
                     return;
@@ -2444,6 +2463,7 @@ impl Worker {
                         presentation.visibility(),
                         Box::new(presentation.sink()),
                         status,
+                        self.voice_controls.clone(),
                     )),
                 );
             }
@@ -2800,8 +2820,12 @@ pub fn status_stream(
                             worker.stream_command(&gateway, intent);
                             (None, false)
                         }
-                        WorkerInput::Command(Command::StartShare { source, request }) => {
-                            worker.start_share(source, request);
+                        WorkerInput::Command(Command::StartShare {
+                            source,
+                            request,
+                            audio,
+                        }) => {
+                            worker.start_share(source, request, audio);
                             (None, false)
                         }
                         WorkerInput::Command(Command::StopShare) => {
@@ -2926,6 +2950,8 @@ pub struct GatewayPanel {
     pub call_view: crate::call_layout::CallView,
     /// The source picker of the screen share.
     pub share_picker: SharePicker,
+    /// The picker's "Share audio" choice (on by default).
+    pub share_audio: bool,
     _worker: Handle,
     pub attachments: Option<AttachmentCache>,
     /// Render state for the account's cached/downloaded attachment previews.
@@ -3143,6 +3169,7 @@ impl GatewayPanel {
             directs: false,
             call_view: crate::call_layout::CallView::default(),
             share_picker: SharePicker::default(),
+            share_audio: true,
             voice_guild: None,
             voice_call: None,
             composer: Composer::default(),

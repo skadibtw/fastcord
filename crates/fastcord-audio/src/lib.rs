@@ -35,11 +35,12 @@ mod resample;
 mod ring;
 mod sched;
 pub mod soundboard;
+pub mod soundshare;
 
 #[cfg(test)]
 mod alloc_counter;
 
-pub use codec::{CodecError, EncodedPacket, VoiceDecoder, VoiceEncoder};
+pub use codec::{CodecError, EncodedPacket, MusicEncoder, VoiceDecoder, VoiceEncoder};
 pub use denoise::{DenoiseError, Denoiser, NoiseSuppression, NoiseSuppressionStatus};
 pub use device::{DeviceChoice, DeviceErrorKind, DeviceInfo, DeviceKey, Direction, list_devices};
 pub use engine::{

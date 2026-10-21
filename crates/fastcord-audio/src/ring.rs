@@ -196,7 +196,6 @@ impl RingConsumer {
     }
 
     /// Buffered (unread) samples.
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.shared.fill()
     }

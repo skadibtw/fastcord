@@ -682,3 +682,21 @@ Routes and events used, all from Discord's public documentation (Soundboard reso
 ## Text chat in voice and Stage channels (#88)
 
 Nothing new on the wire: `GET/POST /channels/{id}/messages`, the opcode-37 channel subscription and `MESSAGE_CREATE/UPDATE/DELETE`, reactions and acknowledgements all use the voice or Stage channel's own ID. **Not captured from an official user client or exercised with the alt account.** Assumptions to verify: VIEW_CHANNEL (not CONNECT) is enough to read and, with SEND_MESSAGES, to write; READ_MESSAGE_HISTORY gates history with a 403 otherwise (handled like any channel: the chat shows its note and nothing is requested); the text-in-voice chat of a Stage channel behaves like a voice channel's; threads cannot be started in either.
+
+## Stream audio (milestone 35)
+
+Implemented by `fastcord-platform::loopback`, `fastcord-audio::soundshare`, `fastcord-media` (`MediaSender::send_soundshare`) and the app's `gateway::share_audio` / `gateway::stream_speaker`.
+
+### What is sent
+- Audio is Opus on the **stream** session only (the one opened for Go Live), at the audio SSRC from that session's READY (the same SSRC announced as `audio_ssrc` in opcode 12), payload type 120, 20 ms frames, stereo, 128 kbit/s music-tuned, RTP timestamp step 960. Each frame is DAVE-sealed with the stream group's key exactly like voice (`encrypt_opus`), then rtpsize AEAD. The call connection carries only the microphone.
+- Before the first frame after silence the stream session sends opcode 5 `{"speaking": 2, "delay": 0, "ssrc": <audio ssrc>}` (SOUNDSHARE, `1 << 1`, no VOICE bit). After 500 ms of digital silence (or a stalled capture) the driver's end-of-speech path runs: five Opus silence frames are not sent (the DAVE silence sentinel is never put on the wire), then `{"speaking": 0, ...}`. Sound resumes with another `speaking: 2`.
+- Nothing audio-related is added to Identify, Select Protocol or opcode 12 (the audio SSRC was already announced there).
+
+### What is received
+A watch session already receives `VoiceMessage::Audio` for SSRCs it mapped (opcode 12 `audio_ssrc`, opcode 5). Those packets now go to an output-only speaker; nothing else changed on the wire.
+
+### Verified offline
+Opcode 5 `speaking: 2` followed by a DAVE-sealed packet that the peer group decrypts to the exact frame, on a resumed stream session next to a surviving parent (`gateway/tests.rs`); stereo 20 ms Opus packetization from synthetic PCM (`soundshare`).
+
+### Assumed, not captured from Discord (verify live, docs/TESTING.md)
+That the official viewer plays an SSRC announced as `audio_ssrc` of a stream session with `speaking: 2` (not `1` or `3`); that its decoder accepts 128 kbit/s stereo Opus with no in-band FEC; that no `delay`, priority bit or extra opcode is needed; the official client's own bitrate and whether it expects a lower one; and the audio/video offset a viewer perceives.
