@@ -26,10 +26,70 @@ use crate::level::{FLOOR_TENTHS_DB, GainStage, InputDiagnostics, InputGain, meas
 use crate::resample::RateConverter;
 use crate::ring::{RingConsumer, RingProducer};
 
-/// Hard cap of either ring (SPEC §7.1).
+/// Hard cap of the capture ring (SPEC §7.1).
 pub(crate) const RING_LIMIT_MS: u32 = 100;
+/// Hard cap of the playback ring: room for the adaptive target below.
+pub(crate) const PLAYBACK_RING_MS: u32 = 200;
 /// Normal playback buffering target (SPEC §7.1).
 pub(crate) const PLAYBACK_TARGET_MS: u32 = 40;
+/// The furthest the playback target grows after the device ran dry.
+const PLAYBACK_TARGET_MAX_MS: u32 = 160;
+/// One growth or recovery step of the playback target.
+const PLAYBACK_TARGET_STEP_MS: u32 = 20;
+/// Calm time after which the target steps back towards its base.
+const PLAYBACK_CALM: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The playback ring's fill target. It grows when the device ran dry in the
+/// middle of audio (the owner thread was late, e.g. a game took the CPU) and
+/// shrinks back after a calm period, so latency stays low when it can.
+#[derive(Clone, Copy, Debug)]
+struct AdaptiveTarget {
+    base: usize,
+    step: usize,
+    max: usize,
+    current: usize,
+    /// The ring reached the target since audio last started or ran dry.
+    primed: bool,
+    calm_since: std::time::Instant,
+}
+
+impl AdaptiveTarget {
+    fn new(base: usize, step: usize, max: usize, now: std::time::Instant) -> Self {
+        let max = max.max(base);
+        Self {
+            base,
+            step: step.max(1),
+            max,
+            current: base,
+            primed: false,
+            calm_since: now,
+        }
+    }
+
+    /// Called once per playback pass with the ring's fill before refilling.
+    fn observe(&mut self, level: usize, now: std::time::Instant) {
+        if self.primed && level == 0 {
+            self.current = (self.current + self.step).min(self.max);
+            self.primed = false;
+            self.calm_since = now;
+        } else if self.current > self.base
+            && now.saturating_duration_since(self.calm_since) >= PLAYBACK_CALM
+        {
+            self.current = self.current.saturating_sub(self.step).max(self.base);
+            self.calm_since = now;
+        }
+    }
+
+    /// The ring reached the target: a later empty ring is a real dropout.
+    fn reached(&mut self) {
+        self.primed = true;
+    }
+
+    /// Nothing is playing: the ring drains on purpose.
+    fn idle(&mut self) {
+        self.primed = false;
+    }
+}
 /// Maximum Opus decode attempts in one playback service pass.
 const PLAYBACK_PACKET_BUDGET: usize = 16;
 
@@ -348,7 +408,7 @@ impl CapturePipeline {
 
 pub(crate) struct PlaybackPipeline {
     ring: RingProducer,
-    target: usize,
+    target: AdaptiveTarget,
     decoder: VoiceDecoder,
     pcm: Box<[f32]>,
     mixer: JitterMixer,
@@ -365,14 +425,22 @@ pub(crate) struct PlaybackPipeline {
 
 impl PlaybackPipeline {
     pub(crate) fn new(format: StreamFormat, ring: RingProducer) -> Result<Self, AudioError> {
+        let ring_frames = ring.limit() / format.channels;
         let target_frames = frames_for(format.rate, PLAYBACK_TARGET_MS)
             .max(2 * format.period_frames.unwrap_or(0) as usize)
-            .min(ring.limit() / format.channels);
+            .min(ring_frames);
+        let max_frames = frames_for(format.rate, PLAYBACK_TARGET_MAX_MS).min(ring_frames);
+        let step_frames = frames_for(format.rate, PLAYBACK_TARGET_STEP_MS);
         // One maximal packet plus the converter's staged chunk, at the device rate.
         let pending_frames =
             (MAX_FRAME_SAMPLES + 480) * format.rate as usize / SAMPLE_RATE as usize + 64;
         Ok(Self {
-            target: target_frames * format.channels,
+            target: AdaptiveTarget::new(
+                target_frames * format.channels,
+                step_frames * format.channels,
+                max_frames * format.channels,
+                std::time::Instant::now(),
+            ),
             decoder: VoiceDecoder::new()?,
             pcm: vec![0.0; MAX_FRAME_SAMPLES * CHANNELS].into_boxed_slice(),
             mixer: JitterMixer::new()?,
@@ -437,9 +505,14 @@ impl PlaybackPipeline {
         next: &mut impl FnMut() -> Option<EncodedPacket>,
     ) {
         let mut attempts = 0;
+        self.target
+            .observe(self.ring.len(), std::time::Instant::now());
         loop {
             self.flush_pending();
-            if self.pending_start < self.pending.len() || self.ring.len() >= self.target {
+            if self.ring.len() >= self.target.current {
+                self.target.reached();
+            }
+            if self.pending_start < self.pending.len() || self.ring.len() >= self.target.current {
                 return;
             }
             if attempts == PLAYBACK_PACKET_BUDGET {
@@ -464,6 +537,7 @@ impl PlaybackPipeline {
                     });
                     continue;
                 }
+                self.target.idle();
                 return;
             };
             attempts += 1;
@@ -920,5 +994,42 @@ mod tests {
         });
         assert_eq!(crate::alloc_counter::thread_callback_heap_ops(), before);
         assert!(emitted > 15);
+    }
+}
+
+#[cfg(test)]
+mod adaptive_target_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_dry_device_grows_the_target_and_calm_brings_it_back() {
+        let start = Instant::now();
+        let mut target = AdaptiveTarget::new(40, 20, 160, start);
+        // Empty before ever reaching the target: start-up, not a dropout.
+        target.observe(0, start);
+        assert_eq!(target.current, 40);
+        target.reached();
+        target.observe(0, start);
+        assert_eq!(target.current, 60);
+        // Idle audio drains the ring on purpose: no growth.
+        target.idle();
+        target.observe(0, start);
+        assert_eq!(target.current, 60);
+        for _ in 0..10 {
+            target.reached();
+            target.observe(0, start);
+        }
+        assert_eq!(target.current, 160, "bounded by the maximum");
+        target.observe(80, start + PLAYBACK_CALM);
+        assert_eq!(target.current, 140);
+        target.observe(80, start + PLAYBACK_CALM + Duration::from_secs(1));
+        assert_eq!(target.current, 140, "one step per calm period");
+        let mut at = start + PLAYBACK_CALM;
+        for _ in 0..10 {
+            at += PLAYBACK_CALM;
+            target.observe(80, at);
+        }
+        assert_eq!(target.current, 40, "never below the base");
     }
 }

@@ -25,8 +25,8 @@ use crate::device::{Backend, CpalBackend, DeviceChoice, DeviceErrorKind, Directi
 use crate::echo::EchoCanceller;
 use crate::error::AudioError;
 use crate::pipeline::{
-    CapturePipeline, CapturedFrame, PipelineCounters, PlaybackPipeline, RING_LIMIT_MS, RemoteFrame,
-    frames_for,
+    CapturePipeline, CapturedFrame, PLAYBACK_RING_MS, PipelineCounters, PlaybackPipeline,
+    RING_LIMIT_MS, RemoteFrame, frames_for,
 };
 use crate::ring::sample_ring;
 use crate::sched::{Elevated, Ticker, elevated_threads};
@@ -505,7 +505,8 @@ fn open_playback<B: Backend>(
 ) -> Result<(B::Stream, PlaybackPipeline, StreamFormat), AudioError> {
     let mut producer = None;
     let (stream, format) = backend.open_output(choice, counters, &mut |format| {
-        let (ring, consumer) = sample_ring(format.channels, frames_for(format.rate, RING_LIMIT_MS));
+        let (ring, consumer) =
+            sample_ring(format.channels, frames_for(format.rate, PLAYBACK_RING_MS));
         producer = Some(ring);
         OutputCallback::new(consumer, Arc::clone(counters))
     })?;
