@@ -30,6 +30,7 @@ futures-util.workspace = true
 reqwest.workspace = true
 image.workspace = true
 filetime.workspace = true
+time.workspace = true
 sha2.workspace = true
 rfd.workspace = true
 parking_lot.workspace = true

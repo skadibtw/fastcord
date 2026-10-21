@@ -1105,9 +1105,12 @@ fn message_view<'a>(
             .padding(0)
             .style(style::plain_button)
             .on_press_with(|| Event::OpenProfile(message.author.clone())),
-        text(format_timestamp(&message.timestamp))
-            .size(12)
-            .style(text::secondary),
+        text(format_timestamp(
+            &message.timestamp,
+            crate::localtime::offset()
+        ))
+        .size(12)
+        .style(text::secondary),
     ]
     .spacing(8)
     .align_y(Vertical::Center);
@@ -1163,6 +1166,7 @@ fn message_view<'a>(
         names: &snapshot.names,
         revealed: assets.revealed,
         emojis: assets.emojis,
+        now: crate::localtime::now(),
     };
     if !content.is_empty() {
         body = body.push(
@@ -1546,7 +1550,10 @@ fn poll_view<'a>(
         "Poll ended".to_owned()
     } else {
         match poll.expiry.as_deref() {
-            Some(expiry) => format!("Ends {}", format_timestamp(expiry)),
+            Some(expiry) => format!(
+                "Ends {}",
+                format_timestamp(expiry, crate::localtime::offset())
+            ),
             None => "No end time".to_owned(),
         }
     };
@@ -1859,10 +1866,27 @@ pub(crate) fn format_size(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-/// `2026-10-07T11:32:01.508000+00:00` as `2026-10-07 11:32 UTC`. Offsets other
-/// than UTC are shown as written, since there is no time-zone database here;
-/// anything that is not ISO 8601 is shown truncated rather than guessed at.
-fn format_timestamp(raw: &str) -> String {
+/// `2026-10-07T11:32:01+00:00` as `2026-10-07 14:32` at `+03:00`. Without a
+/// known local offset (`None`) it reads `2026-10-07 11:32 UTC`.
+fn format_timestamp(raw: &str, local: Option<time::UtcOffset>) -> String {
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+    if let (Some(local), Ok(at)) = (local, OffsetDateTime::parse(raw, &Rfc3339)) {
+        let at = at.to_offset(local);
+        return format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            at.year(),
+            at.month() as u8,
+            at.day(),
+            at.hour(),
+            at.minute()
+        );
+    }
+    format_utc(raw)
+}
+
+/// Fallback: offsets other than UTC are shown as written; anything that is not
+/// ISO 8601 is shown truncated rather than guessed at.
+fn format_utc(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let digits = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_digit);
     let iso = bytes.len() >= 16
@@ -2156,25 +2180,37 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_read_as_utc_or_as_written() {
+    fn timestamps_read_in_local_time_or_as_utc() {
         assert_eq!(
-            format_timestamp("2026-10-07T11:32:01.508000+00:00"),
+            format_timestamp("2026-10-07T11:32:01.508000+00:00", None),
             "2026-10-07 11:32 UTC"
         );
         assert_eq!(
-            format_timestamp("2026-10-07T11:32:01Z"),
+            format_timestamp("2026-10-07T11:32:01Z", None),
             "2026-10-07 11:32 UTC"
         );
         assert_eq!(
-            format_timestamp("2026-10-07T11:32:01.5+02:00"),
+            format_timestamp("2026-10-07T11:32:01.5+02:00", None),
             "2026-10-07 11:32 +02:00"
         );
-        assert_eq!(format_timestamp("2026-10-07T11:32"), "2026-10-07 11:32 UTC");
+        assert_eq!(
+            format_timestamp("2026-10-07T11:32", None),
+            "2026-10-07 11:32 UTC"
+        );
         for odd in ["", "yesterday", "2026-13", "２０２６-10-07T11:32:01+00:00"] {
-            assert_eq!(format_timestamp(odd), odd);
+            assert_eq!(format_timestamp(odd, None), odd);
         }
         let long = "x".repeat(200);
-        assert_eq!(format_timestamp(&long).chars().count(), MAX_TIMESTAMP_CHARS);
+        assert_eq!(
+            format_timestamp(&long, None).chars().count(),
+            MAX_TIMESTAMP_CHARS
+        );
+        let plus3 = time::UtcOffset::from_hms(3, 0, 0).ok();
+        let local = |raw| format_timestamp(raw, plus3);
+        assert_eq!(local("2026-10-21T09:38:01.5+00:00"), "2026-10-21 12:38");
+        assert_eq!(local("2026-10-21T22:30:00Z"), "2026-10-22 01:30");
+        assert_eq!(local("2026-10-21T11:00:00+02:00"), "2026-10-21 12:00");
+        assert_eq!(local("yesterday"), "yesterday");
     }
 
     #[test]

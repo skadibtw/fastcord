@@ -96,6 +96,8 @@ pub struct Cx<'a> {
     pub names: &'a Names,
     pub revealed: &'a HashSet<(Snowflake, u16)>,
     pub emojis: &'a HashMap<Asset, View>,
+    /// Unix seconds, for `<t:…:R>`; read when the row is built, never ticking.
+    pub now: i64,
 }
 
 /// What rendering reads of a message: the ordinary one or a forward's snapshot
@@ -397,6 +399,10 @@ impl<'a> Renderer<'a> {
                 .names
                 .channel(id)
                 .map_or("#unknown-channel".into(), |name| format!("#{name}").into()),
+            Kind::Timestamp { unix, style } => {
+                crate::localtime::markup(unix, style, crate::localtime::offset(), self.cx.now)
+                    .map_or(shown.into(), Into::into)
+            }
             _ => shown.into(),
         };
         let mut font = Font::DEFAULT;
@@ -425,7 +431,7 @@ impl<'a> Renderer<'a> {
                 item = item.color(LINK).underline(true);
                 target = Some(url);
             }
-            Kind::User(_) | Kind::Role(_) | Kind::Channel(_) => {
+            Kind::User(_) | Kind::Role(_) | Kind::Channel(_) | Kind::Timestamp { .. } => {
                 item = item.color(MENTION).background(MENTION_BG);
             }
             Kind::Everyone | Kind::Here if message.everyone => {
@@ -632,6 +638,7 @@ let a;
             names: &names,
             revealed: &revealed,
             emojis: &emojis,
+            now: 0,
         };
         assert!(body(&message.content, &message, Snowflake(20), 1, cx).is_some());
         assert!(body("plain text", &message, Snowflake(20), 1, cx).is_none());

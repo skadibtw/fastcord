@@ -20,6 +20,7 @@ mod group_dm;
 mod history;
 mod icons;
 mod inbox;
+mod localtime;
 mod login;
 mod media_ui;
 mod message_link;
@@ -99,6 +100,8 @@ fn call_signal(session: &Session, channel: Snowflake, signal: CallSignal) -> Tas
 }
 
 fn main() -> iced::Result {
+    // Before any thread exists: `time` refuses the local offset afterwards on Unix.
+    localtime::init();
     render::application(App::boot, App::update, App::view)
         .title("fastcord")
         .theme(App::theme)
@@ -3663,7 +3666,9 @@ impl App {
                             running.then_some(Message::SetSelfMute(!voice_controls.self_muted)),
                             !voice_controls.self_muted,
                             voice_controls.self_muted,
-                            if voice_controls.self_muted {
+                            if !running {
+                                "Microphone (join a voice channel to use)"
+                            } else if voice_controls.self_muted {
                                 "Microphone muted. Click to unmute"
                             } else {
                                 "Microphone on. Click to mute"
@@ -3677,7 +3682,9 @@ impl App {
                             running.then_some(Message::SetDeafen(!voice_controls.deafened)),
                             !voice_controls.deafened,
                             voice_controls.deafened,
-                            if voice_controls.deafened {
+                            if !running {
+                                "Deafen (join a voice channel to use)"
+                            } else if voice_controls.deafened {
                                 "Deafened. Click to hear again"
                             } else {
                                 "Hearing. Click to deafen"

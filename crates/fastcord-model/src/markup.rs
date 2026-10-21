@@ -53,6 +53,23 @@ pub enum Kind<'a> {
     Channel(Snowflake),
     Everyone,
     Here,
+    /// `<t:unix[:style]>`; the app formats it in local time.
+    Timestamp {
+        unix: i64,
+        style: TimeStyle,
+    },
+}
+
+/// The `<t:…:X>` display styles; no style means `ShortDateTime`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeStyle {
+    ShortTime,
+    LongTime,
+    ShortDate,
+    LongDate,
+    ShortDateTime,
+    LongDateTime,
+    Relative,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -512,6 +529,25 @@ fn angle(tail: &str) -> Option<(usize, Option<Kind<'_>>, &str)> {
     if let Some(rest) = inner.strip_prefix('#') {
         return Some((end + 1, Some(Kind::Channel(id(rest)?)), token));
     }
+    if let Some(rest) = inner.strip_prefix("t:") {
+        let (digits, style) = rest.split_once(':').unwrap_or((rest, "f"));
+        let style = match style {
+            "t" => TimeStyle::ShortTime,
+            "T" => TimeStyle::LongTime,
+            "d" => TimeStyle::ShortDate,
+            "D" => TimeStyle::LongDate,
+            "f" => TimeStyle::ShortDateTime,
+            "F" => TimeStyle::LongDateTime,
+            "R" => TimeStyle::Relative,
+            _ => return None,
+        };
+        let unsigned = digits.strip_prefix('-').unwrap_or(digits);
+        if unsigned.is_empty() || !unsigned.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let unix = digits.parse().ok()?;
+        return Some((end + 1, Some(Kind::Timestamp { unix, style }), token));
+    }
     if inner.starts_with("http://") || inner.starts_with("https://") {
         return (!inner.contains(char::is_whitespace)).then_some((
             end + 1,
@@ -764,6 +800,38 @@ mod tests {
                 Kind::Here,
             ]
         );
+        let found = spans("<t:1618935630> <t:-5:R> <t:7:t><t:8:T><t:9:d><t:10:D><t:11:F>");
+        let stamps: Vec<_> = found
+            .iter()
+            .filter_map(|s| match s.kind {
+                Kind::Timestamp { unix, style } => Some((unix, style)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stamps,
+            [
+                (1_618_935_630, TimeStyle::ShortDateTime),
+                (-5, TimeStyle::Relative),
+                (7, TimeStyle::ShortTime),
+                (8, TimeStyle::LongTime),
+                (9, TimeStyle::ShortDate),
+                (10, TimeStyle::LongDate),
+                (11, TimeStyle::LongDateTime),
+            ]
+        );
+        assert_eq!(found[0].text, "<t:1618935630>");
+        for bad in [
+            "<t:abc>",
+            "<t:1:x>",
+            "<t:>",
+            "<t:->",
+            "<t:1:>",
+            "<t:1:f:f>",
+            "<t:99999999999999999999>",
+        ] {
+            assert!(spans(bad).iter().all(|s| s.kind == Kind::Text), "{bad}");
+        }
         // Malformed ids, non-HTTP masked links and javascript: targets are text.
         for bad in [
             "<@abc>",
