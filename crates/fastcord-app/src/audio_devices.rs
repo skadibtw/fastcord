@@ -8,7 +8,7 @@ use fastcord_audio::{
     DeviceChoice, DeviceInfo, DeviceKey, Direction, EngineStats, NoiseSuppression,
     NoiseSuppressionStatus, list_devices,
 };
-use iced::widget::{button, checkbox, column, container, pick_list, row, text};
+use iced::widget::{button, checkbox, column, container, pick_list, row, slider, text};
 use iced::{Element, Length};
 use serde_json::{Value, json};
 
@@ -61,6 +61,10 @@ pub struct Preferences {
     pub camera: CameraSelection,
     /// Received soundboard volume, mute and favourite sounds.
     pub soundboard: crate::soundboard::Prefs,
+    /// Short tones for mute, deafen, joining and leaving, and pings (on by default).
+    pub interface_sounds: bool,
+    /// Their volume, 0 to 100.
+    pub interface_volume: u8,
 }
 
 impl Default for Preferences {
@@ -76,6 +80,8 @@ impl Default for Preferences {
             voice_input: crate::shortcuts::Settings::default(),
             camera: CameraSelection::default(),
             soundboard: crate::soundboard::Prefs::default(),
+            interface_sounds: true,
+            interface_volume: crate::ui_sound::DEFAULT_VOLUME,
         }
     }
 }
@@ -265,6 +271,8 @@ pub fn view<'a>(
         checkbox(prefs.echo_cancellation).label("Echo cancellation").on_toggle(crate::Message::EchoCancellationChanged),
         text("Removes what your speakers play from your microphone, so others do not hear themselves. It needs a few seconds of speech to adapt, works best with the microphone and speakers in a fixed position, and is not needed with a headset."),
         checkbox(!prefs.notifications_off).label("Desktop notifications for DMs and mentions while the window is not active").on_toggle(crate::Message::NotificationsToggled),
+        checkbox(prefs.interface_sounds).label("Interface sounds (mute, deafen, joining and leaving a call, pings)").on_toggle(crate::Message::InterfaceSoundsToggled),
+        row![text("Interface sound volume"), slider(0..=100u8, prefs.interface_volume, crate::Message::InterfaceVolumeChanged).width(Length::Fill), text(format!("{}%", prefs.interface_volume))].spacing(12),
         checkbox(prefs.voice_recording).label("Voice message recording (experimental)").on_toggle(crate::Message::VoiceRecordingToggled),
         text("Adds a Record voice message button to text channels: record, preview, then send. Discord documents voice-message recording for its mobile apps only, so whether it is accepted from this client is unverified. The microphone is open only while recording."),
         text(stats_summary(stats)),
@@ -349,6 +357,12 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
             .get("soundboard")
             .map(crate::soundboard::Prefs::from_json)
             .unwrap_or_default(),
+        // Older settings predate interface sounds: on, at the default volume.
+        interface_sounds: value.get("interface_sounds").and_then(Value::as_bool) != Some(false),
+        interface_volume: value
+            .get("interface_volume")
+            .and_then(Value::as_u64)
+            .map_or(crate::ui_sound::DEFAULT_VOLUME, |v| v.min(100) as u8),
     })
 }
 
@@ -388,7 +402,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json()}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json(), "interface_sounds": prefs.interface_sounds, "interface_volume": prefs.interface_volume}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -517,6 +531,8 @@ mod tests {
                 muted: true,
                 favorites: vec![42, 43],
             },
+            interface_sounds: false,
+            interface_volume: 15,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);
@@ -559,6 +575,18 @@ mod tests {
             unavailable: false,
         };
         assert_eq!(selected, renamed);
+    }
+    #[test]
+    fn older_files_mean_interface_sounds_on_at_the_default_volume() {
+        let older =
+            decode(br#"{"input":{"id":null,"label":""},"output":{"id":null,"label":""}}"#).unwrap();
+        assert!(older.interface_sounds);
+        assert_eq!(older.interface_volume, crate::ui_sound::DEFAULT_VOLUME);
+        let loud = decode(
+            br#"{"input":{"id":null,"label":""},"output":{"id":null,"label":""},"interface_volume":900}"#,
+        )
+        .unwrap();
+        assert_eq!(loud.interface_volume, 100);
     }
     #[test]
     fn settings_bytes_ids_and_labels_are_bounded() {

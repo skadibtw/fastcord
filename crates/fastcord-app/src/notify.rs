@@ -141,6 +141,7 @@ pub fn on_message(message: &Message, me: Option<Snowflake>, muted: bool, suppres
             .decide(&candidate, true, false, Instant::now())
     });
     if let Some(toast) = toast {
+        crate::ui_sound::play(crate::ui_sound::Sound::Ping);
         std::thread::spawn(move || {
             let _ = fastcord_platform::notify::show(&toast.title, &toast.body);
         });

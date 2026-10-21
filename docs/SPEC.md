@@ -651,6 +651,9 @@ These are project design decisions, not benchmark claims about the alternatives.
 
 A compatibility unknown is not permission to ship a stub. The relevant milestone stays incomplete until its acceptance criteria pass or the user explicitly approves a scope change.
 
+### Interface sounds
+Original synthesized tones (`ui_sound`, never copied from Discord) for mute/deafen, joining/leaving a call, others joining/leaving, push-to-talk, screen share and notification pings. Played by a short-lived output-only `FilePlayer` on the selected output device (soundboard path, at most 3 at once, nothing alive while idle); never sent to the call and not in the call engine's echo reference. Events come from snapshots of the call (`Watcher`), so shortcuts and buttons behave alike and the initial participant list is silent. Setting: "Interface sounds" (default on) and volume (default 40%) in the audio dialog.
+
 ## 16. Ordered milestones — exactly one commit per item
 
 Each item is one coherent feature commit containing its implementation, deterministic tests, and the relevant README/protocol/testing/changelog update. Later acceptance does not retroactively excuse an earlier broken feature. Platform/media test fixtures are sanitized; live tests use the accepted alt account and a cooperating test participant. At drafting, none of the checks below had been run for this specification; an implementer performs them. Their results, and the live and hardware checks still pending for each milestone, are recorded in `docs/TESTING.md`.

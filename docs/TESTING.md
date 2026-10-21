@@ -595,3 +595,10 @@ Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, wind
 - The icon buttons (camera, share, soundboard, settings) have tooltips and fit the 240 px sidebar; camera and share turn to their active look while on; the soundboard button appears only in server calls; Share screen is Windows-only; the camera button only where sending is supported.
 - Call settings: camera device, effect, Mirror preview, Find cameras, per-person volume, Watch/Stop watching; speaking people in your call get a green ring in the sidebar list.
 - Open the voice list of a server you are not connected to while someone joins or leaves a channel: the list follows (VOICE_STATE_UPDATE or PASSIVE_UPDATE_V2).
+
+### Interface sounds
+Automated: tone length/amplitude bounds, event-to-sound mapping, deafen suppression, silent initial participant list, settings persistence. Manual (Windows, alt account; hardware test `cargo test -p fastcord-app ui_sound::tests::hardware_plays_every_sound -- --ignored --nocapture` plays all 13 sounds on the default device without Discord):
+- In a call: mute/unmute (descending/ascending), deafen/undeafen (lower, triangle), joining and leaving (arpeggio up/down), a second account joining/leaving (two soft notes), push-to-mute and push-to-talk ticks, starting/stopping a screen share.
+- Joining a busy channel is silent for the people already there; deafened, only the toggles and leaving play.
+- A DM or mention with the window unfocused pings once with the toast; nothing while the window is focused.
+- Audio dialog: the checkbox off silences everything, the slider changes loudness, both persist after restart; the chosen output device is used. Idle: no extra threads or CPU.

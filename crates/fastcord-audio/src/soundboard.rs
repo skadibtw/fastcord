@@ -144,6 +144,29 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<Clip, SoundError> {
     Ok(clip)
 }
 
+/// Encodes mono 48 kHz samples (an interface sound synthesized by the app) as a clip.
+/// Blocking and CPU-bound, like [`decode`]; at most [`MAX_CLIP_MS`] of audio.
+pub fn clip_from_mono(samples: &[f32]) -> Result<Clip, SoundError> {
+    let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Stereo, Application::Audio)
+        .map_err(|_| SoundError::Unsupported)?;
+    encoder
+        .set_bitrate(Bitrate::Bits(BITRATE))
+        .map_err(|_| SoundError::Unsupported)?;
+    let mut sink = Sink {
+        clip: Clip::new(),
+        encoder,
+        pcm: Vec::with_capacity(STEREO_FRAME * 2),
+        packet: vec![0; MAX_PACKET_BYTES],
+    };
+    for &sample in samples {
+        sink.pcm.extend_from_slice(&[sample, sample]);
+        if sink.pcm.len() >= STEREO_FRAME {
+            sink.encode()?;
+        }
+    }
+    sink.finish()
+}
+
 /// The audio after a leading ID3v2 tag, which the MPEG reader expects to be gone.
 fn strip_id3(bytes: &[u8]) -> &[u8] {
     if bytes.len() >= 10 && &bytes[..3] == b"ID3" {
@@ -290,6 +313,18 @@ mod tests {
         assert_eq!(count as u64 * 20, clip.len_ms());
         clip.seek_ms(40).unwrap();
         assert!(clip.next_packet().unwrap().is_some());
+    }
+
+    #[test]
+    fn mono_samples_become_a_clip_of_the_same_length() {
+        let tone: Vec<f32> = (0..9_600).map(|i| (i as f32 * 0.1).sin() * 0.3).collect();
+        let mut clip = clip_from_mono(&tone).unwrap();
+        assert_eq!(clip.len_ms(), 200);
+        assert!(clip.next_packet().unwrap().is_some());
+        assert_eq!(
+            clip_from_mono(&vec![0.0; 48_000 * 7]).err(),
+            Some(SoundError::TooLong)
+        );
     }
 
     #[test]

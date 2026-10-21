@@ -51,6 +51,7 @@ mod style;
 mod switcher;
 mod threads;
 mod timeline;
+mod ui_sound;
 mod variable_list;
 mod virtual_list;
 mod voice_record;
@@ -265,6 +266,8 @@ enum Message {
     ChannelViewport(virtual_list::Window),
     SetSelfMute(bool),
     SetDeafen(bool),
+    InterfaceSoundsToggled(bool),
+    InterfaceVolumeChanged(u8),
     SetParticipantVolume(Snowflake, u16),
     CommitParticipantVolume(Snowflake),
     PresetParticipantVolume(Snowflake, u16),
@@ -824,6 +827,7 @@ impl App {
                 notify::set_enabled(!preferences.notifications_off);
                 self.soundboard.set_prefs(preferences.soundboard.clone());
                 self.audio_preferences = preferences;
+                self.configure_ui_sound();
                 self.shortcuts.rebuild(&self.audio_preferences.voice_input);
                 return self.handle(Message::StoreReady(store));
             }
@@ -916,6 +920,18 @@ impl App {
                 if let Phase::Account { gateway, .. } = &self.phase {
                     gateway.controls.select_echo_cancellation(enabled);
                 }
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::InterfaceSoundsToggled(on) => {
+                self.audio_preferences.interface_sounds = on;
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::InterfaceVolumeChanged(volume) => {
+                self.audio_preferences.interface_volume = volume;
                 if self.audio_saving.is_none() {
                     return self.save_audio_preferences();
                 }
@@ -1274,6 +1290,7 @@ impl App {
                     gateway.directs = gateway.navigation.private_selection.is_some();
                     refocus = iced::widget::operation::focus(composer::EDITOR_ID);
                 }
+                self.observe_ui_sound();
                 return Task::batch([refocus, self.soundboard_follow()]);
             }
             Message::ShowDirects(on) => {
@@ -2567,7 +2584,35 @@ impl App {
         task
     }
 
+    fn configure_ui_sound(&self) {
+        let prefs = &self.audio_preferences;
+        ui_sound::configure(
+            prefs.interface_sounds,
+            prefs.interface_volume,
+            &prefs.output.choice,
+        );
+    }
+
+    /// Plays the interface sound for what changed in the call since the last look.
+    fn observe_ui_sound(&self) {
+        let Phase::Account { gateway, .. } = &self.phase else {
+            return;
+        };
+        let controls = gateway.controls.voice_controls();
+        ui_sound::observe(ui_sound::Snap {
+            state: gateway.controls.voice_audio_state(),
+            self_muted: controls.self_muted,
+            deafened: controls.deafened,
+            push_to_mute: controls.push_to_mute_down,
+            ptt: (controls.effective_mode() == shortcuts::InputMode::PushToTalk)
+                .then_some(controls.ptt_down),
+            sharing: gateway.controls.share_view().active,
+            users: controls.participants.iter().map(|p| p.user_id).collect(),
+        });
+    }
+
     fn save_audio_preferences(&mut self) -> Task<Message> {
+        self.configure_ui_sound();
         let preferences = self.audio_preferences.clone();
         self.audio_saving = Some(preferences.clone());
         Task::perform(
