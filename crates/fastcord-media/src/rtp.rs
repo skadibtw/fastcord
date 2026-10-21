@@ -328,6 +328,13 @@ impl RtpSender {
         self.timestamp
     }
 
+    /// Lets the media clock run on through a gap in which nothing was sent
+    /// (silence), so the next packet's timestamp reflects real time while
+    /// the sequence number stays contiguous.
+    pub fn skip(&mut self, ticks: u32) {
+        self.timestamp = self.timestamp.wrapping_add(ticks);
+    }
+
     /// The header for the next packet, advancing the stream by `ticks` of the
     /// media clock (960 for a 20 ms Opus frame).
     pub fn next_header(&mut self, ticks: u32) -> RtpHeader {

@@ -692,6 +692,35 @@ async fn a_transition_zero_commit_takes_effect_without_an_execute() {
     assert_eq!(harness.session.stats().audio_waiting_for_keys, 0);
 }
 
+/// The media clock runs on through silence: a packet after a pause carries a
+/// timestamp that much later (the sequence stays contiguous), while frames in
+/// a running burst advance by exactly one frame.
+#[tokio::test(start_paused = true)]
+async fn rtp_timestamps_follow_real_time_across_silence() {
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    let (mut udp, _) = negotiate(&mut harness, &mut ws, &BOTH_MODES).await;
+    ws.send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let _fixture = install_test_dave_group(&harness, &mut ws).await;
+    let key = TransportKey::from_slice(&KEY).unwrap();
+    let cipher = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &key);
+    let media = harness.session.media();
+    let mut sent = Vec::new();
+    for gap in [0, 20, 20, 1000, 20] {
+        tokio::time::sleep(Duration::from_millis(gap)).await;
+        media.send_opus(b"frame".to_vec()).unwrap();
+        sent.push(open_rtp(&cipher, &udp.recv().await).0);
+    }
+    let delta = |i: usize| sent[i].timestamp.wrapping_sub(sent[i - 1].timestamp);
+    assert_eq!([delta(1), delta(2)], [960, 960]);
+    assert_eq!(delta(3), 50 * 960, "one second of silence is 50 frames");
+    assert_eq!(delta(4), 960);
+    for i in 1..sent.len() {
+        assert_eq!(sent[i].sequence, sent[i - 1].sequence.wrapping_add(1));
+    }
+}
+
 /// One server RTP datagram from `ssrc`.
 fn server_rtp(sender: &mut TransportCipher, ssrc: u32, sequence: u16, payload: &[u8]) -> Vec<u8> {
     let mut clear = Vec::new();

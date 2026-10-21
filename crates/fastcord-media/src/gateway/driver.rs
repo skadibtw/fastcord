@@ -42,6 +42,10 @@ use crate::video::{ReceivedVideo, VideoControl, VideoFrame, VideoOptions};
 use video::VideoState;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// One Opus frame of the media clock, in milliseconds.
+const OPUS_FRAME_MS: u128 = 20;
+/// A send gap of at least this many frames (200 ms) is silence, not jitter.
+const SILENCE_GAP_FRAMES: u128 = 10;
 /// READY after Identify, RESUMED after Resume, Session Description after
 /// Select Protocol.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -124,6 +128,8 @@ struct Media {
     rtp: RtpSender,
     speaking: bool,
     silence_left: u8,
+    /// When the last Opus packet left; see `send_rtp`.
+    last_audio_at: Option<Instant>,
     packets: u32,
     octets: u32,
     reported_packets: u32,
@@ -651,6 +657,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     rtp: RtpSender::new(udp.ssrc, OPUS_PAYLOAD_TYPE, sequence, timestamp),
                     speaking: false,
                     silence_left: 0,
+                    last_audio_at: None,
                     packets: 0,
                     octets: 0,
                     reported_packets: 0,
@@ -1268,6 +1275,19 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let (Some(media), Some(udp)) = (&mut self.media, &self.udp) else {
             return Ok(());
         };
+        // The media clock keeps running while nothing is sent. Without this a
+        // receiver sees contiguous timestamps after a pause, reads the pause
+        // as network delay and grows its jitter buffer by it (seconds of lag
+        // after a few silences). Only real gaps count, not delivery jitter.
+        let now = Instant::now();
+        if let Some(last) = media.last_audio_at {
+            let frames = (now - last).as_millis() / OPUS_FRAME_MS;
+            if frames >= SILENCE_GAP_FRAMES {
+                let skipped = u32::try_from(frames - 1).unwrap_or(u32::MAX / OPUS_FRAME_TICKS);
+                media.rtp.skip(skipped.saturating_mul(OPUS_FRAME_TICKS));
+            }
+        }
+        media.last_audio_at = Some(now);
         let header = media.rtp.next_header(OPUS_FRAME_TICKS);
         self.clear.clear();
         header.write(&mut self.clear);
