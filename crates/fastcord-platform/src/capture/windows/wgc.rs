@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use windows::Foundation::TypedEventHandler;
+use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
@@ -232,6 +232,13 @@ fn run(
         .capture("Direct3D11CaptureFramePool::CreateCaptureSession")?;
     // The OS capture border and the cursor stay at their defaults: the user
     // always sees what is shared.
+    // Limit capture at the source as well as delivery: otherwise a 144/240 Hz
+    // desktop still makes WGC copy full-resolution surfaces at that rate.
+    // Older Windows versions have no session5 interface; delivery pacing is
+    // still enforced below when this optional setting is unavailable.
+    let _ = session.SetMinUpdateInterval(TimeSpan {
+        Duration: (10_000_000 / u64::from(config.frame_rate)) as i64,
+    });
     session
         .StartCapture()
         .capture("GraphicsCaptureSession::StartCapture")?;
@@ -380,7 +387,7 @@ impl Capture {
     /// Keeps only the newest of the frames that arrived.
     fn take_frames(&mut self) -> Result<(), CaptureError> {
         let mut newest: Option<Direct3D11CaptureFrame> = None;
-        loop {
+        for _ in 0..NATIVE_FRAME_COUNT {
             match self.wgc.pool.TryGetNextFrame() {
                 Ok(frame) => {
                     if let Some(older) = newest.replace(frame) {

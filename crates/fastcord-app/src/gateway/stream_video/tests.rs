@@ -490,6 +490,23 @@ fn queued_frames_behind_a_failure_are_dropped_up_to_the_next_keyframe() {
 }
 
 #[test]
+fn a_stalled_stream_requests_a_fresh_keyframe_without_decoding_stale_dependencies() {
+    let (control, requests, mut decoder) = setup();
+    push_settled(&mut decoder, video(SSRC, 0, true, vec![1]));
+    decoder.refresh();
+    control.wait_drops(1);
+    assert_eq!(*requests.lock(), [SSRC]);
+    push_settled(&mut decoder, video(SSRC, 1, false, vec![2]));
+    assert_eq!(control.log(), [1]);
+    push_settled(&mut decoder, video(SSRC, 2, true, vec![3]));
+    assert_eq!(control.log(), [1, 3]);
+    let stats = decoder.finish();
+    assert_eq!(stats.keyframes_requested, 1);
+    control.assert_owner_thread();
+    assert_accounted(&stats);
+}
+
+#[test]
 fn a_native_failure_distrusts_the_decoder_and_the_next_keyframe_opens_a_new_one() {
     let (control, requests, mut decoder) = setup();
     push_settled(&mut decoder, video(SSRC, 0, true, vec![1]));

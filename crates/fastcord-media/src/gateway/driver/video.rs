@@ -924,17 +924,19 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             Counters::add(&self.ch.counters.video_frames_refused, 1);
             return Ok(());
         }
-        if video.need_keyframe && !h264::is_keyframe(&frame.data) {
+        let keyframe = h264::is_keyframe(&frame.data);
+        if video.need_keyframe && !keyframe {
             // After any gap the stream restarts at a keyframe.
             self.refuse_video_frame(now, false);
             return Ok(());
         }
-        if !video
-            .sender
-            .as_ref()
-            .is_some_and(|sender| sender.can_accept(now, frame.data.len()))
-        {
-            self.refuse_video_frame(now, true);
+        let sender = video.sender.as_ref().expect("checked above");
+        if !sender.can_accept_frame(now, frame.data.len(), keyframe) {
+            // A frame too large even for an empty queue is not evidence of
+            // network congestion. Cutting bitrate also cuts that queue's
+            // capacity, trapping every future keyframe in a downward spiral.
+            let congested = sender.has_queued_packets();
+            self.refuse_video_frame(now, congested);
             return Ok(());
         }
         let Some(dave) = self.dave.as_mut() else {
@@ -957,7 +959,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let Some(sender) = self.video.as_mut().and_then(|video| video.sender.as_mut()) else {
             return Ok(());
         };
-        match sender.enqueue(now, frame.timestamp, sealed) {
+        match sender.enqueue_frame(now, frame.timestamp, sealed, keyframe) {
             Ok(()) => {
                 Counters::add(&self.ch.counters.video_frames_sent, 1);
                 if let Some(video) = self.video.as_mut() {
@@ -965,7 +967,8 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 }
             }
             Err(error) => {
-                self.refuse_video_frame(now, error == VideoError::QueueFull);
+                let congested = error == VideoError::QueueFull && sender.has_queued_packets();
+                self.refuse_video_frame(now, congested);
                 return Ok(());
             }
         }

@@ -109,8 +109,17 @@ pub(super) struct ShareProgress {
     pub(super) audio: Option<fastcord_platform::loopback::LoopbackScope>,
     pub(super) zero_copy: Option<ZeroCopy>,
     pub(super) connection: Connection,
+    /// Actual transport progress, sampled only while this share exists.
+    pub(super) health: Option<SendHealth>,
     /// The first reason the share ended, as text for the screen.
     pub(super) ended: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SendHealth {
+    frames_per_second: u16,
+    refused: u64,
+    audio_packets: u64,
 }
 
 impl ShareProgress {
@@ -190,6 +199,15 @@ pub(super) fn describe(title: &str, progress: &ShareProgress) -> String {
             }
             if let Some(ZeroCopy::Copy(reason)) = &progress.zero_copy {
                 text.push_str(&format!(" · copy path: {reason}"));
+            }
+            if let Some(health) = progress.health {
+                text.push_str(&format!(
+                    " · {} fps · audio {} packets",
+                    health.frames_per_second, health.audio_packets
+                ));
+                if health.refused > 0 {
+                    text.push_str(&format!(" · {} frames refused", health.refused));
+                }
             }
             text
         }
@@ -371,6 +389,10 @@ pub(super) async fn run(
     // Stream audio leaves on this connection as SOUNDSHARE, DAVE-sealed.
     *audio.lock() = Some(session.media());
     let mut connection = session.watch_status();
+    let mut health_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut measured_at = tokio::time::Instant::now();
+    let mut sent_frames = 0;
     loop {
         tokio::select! {
             biased;
@@ -382,6 +404,25 @@ pub(super) async fn run(
                 if let Some(text) = session_end_text(status) {
                     progress.send_modify(|progress| progress.fail(text));
                     break;
+                }
+            }
+            _ = health_tick.tick() => {
+                let now = tokio::time::Instant::now();
+                let stats = session.stats();
+                let elapsed = now.saturating_duration_since(measured_at).as_secs_f64();
+                if elapsed >= 1.0 {
+                    let health = SendHealth {
+                        frames_per_second: ((stats.video_frames_sent.saturating_sub(sent_frames)) as f64 / elapsed).round().min(u16::MAX as f64) as u16,
+                        refused: stats.video_frames_refused,
+                        audio_packets: stats.rtp_sent,
+                    };
+                    progress.send_if_modified(|progress| {
+                        if progress.health == Some(health) { return false; }
+                        progress.health = Some(health);
+                        true
+                    });
+                    measured_at = now;
+                    sent_frames = stats.video_frames_sent;
                 }
             }
             message = session.next_message() => match message {
@@ -565,6 +606,45 @@ mod tests {
     use fastcord_platform::capture::{SourceId, SourceKind};
 
     use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "captures the primary desktop briefly; reports byte counts only, never saves pixels"]
+    fn hardware_desktop_keyframe_sizes() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{Duration, Instant};
+        let source = fastcord_platform::capture::list_sources()
+            .unwrap()
+            .into_iter()
+            .find(|source| source.id.kind() == SourceKind::Display && source.primary)
+            .unwrap();
+        let maximum = Arc::new(AtomicU64::new(0));
+        let count = Arc::new(AtomicU64::new(0));
+        let worker = ShareWorker::start(source.id, share_config(), Arc::new(|_| {})).unwrap();
+        let control = worker.control();
+        let largest = maximum.clone();
+        let seen = count.clone();
+        control.attach(Box::new(move |unit| {
+            if unit.keyframe {
+                largest.fetch_max(unit.data.len() as u64, Ordering::Relaxed);
+            }
+            seen.fetch_add(1, Ordering::Relaxed);
+            SinkOutcome::Sent
+        }));
+        control.set_negotiated(true);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(4) {
+            control.request_keyframe();
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        worker.stop().unwrap();
+        assert!(count.load(Ordering::Relaxed) > 0);
+        eprintln!(
+            "desktop frames={}, largest keyframe={} bytes",
+            count.load(Ordering::Relaxed),
+            maximum.load(Ordering::Relaxed)
+        );
+    }
 
     fn request() -> StreamCreateRequest {
         StreamCreateRequest::guild(Snowflake(41), Snowflake(127))

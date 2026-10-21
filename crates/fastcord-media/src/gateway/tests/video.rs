@@ -758,6 +758,41 @@ impl Owner {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_large_desktop_keyframe_crosses_real_dave_and_the_pacer_then_video_continues() {
+    let mut rig = start_owner().await;
+    let [first, delta, ..] = access_units();
+    let mut keyframe = first.to_vec();
+    keyframe.resize(100_000, 0xAB);
+    let media = rig.harness.session.media();
+    media.send_video(frame_of(&keyframe, 0)).unwrap();
+    assert_eq!(rig.ws.recv_op(12).await["d"]["streams"][0]["active"], true);
+    let packets = tokio::time::timeout(Duration::from_secs(1), rig.media_packets())
+        .await
+        .expect("the desktop keyframe must not be refused by the 100 ms delta-frame budget");
+    let refs: Vec<&Opened> = packets.iter().collect();
+    assert_eq!(
+        rig.dave.peer.decrypt_video(ME.0, &join(&refs)).unwrap(),
+        keyframe
+    );
+    let spread = packets.last().unwrap().at - packets[0].at;
+    assert!(
+        spread >= Duration::from_millis(100) && spread < Duration::from_millis(180),
+        "{spread:?}"
+    );
+    assert!(packets.iter().all(|packet| packet.datagram_len <= 1200));
+    media.send_video(frame_of(delta, 200)).unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(1), rig.media_packets())
+        .await
+        .unwrap();
+    assert_eq!(
+        next[0].header.sequence,
+        packets.last().unwrap().header.sequence.wrapping_add(1)
+    );
+    assert_eq!(rig.harness.session.stats().video_frames_refused, 0);
+    assert_eq!(rig.harness.session.stats().video_frames_sent, 2);
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_owner_negotiates_seals_packetizes_and_paces_a_screen_layer() {
     let mut rig = start_owner().await;
     // The offer: video, one screen layer with its limits, H.264 both ways.
@@ -1084,13 +1119,13 @@ async fn an_owner_pauses_resumes_and_cuts_its_rate_when_the_pacer_is_full() {
         VoiceEvent::VideoBitrate(1_000_000)
     );
 
-    // A frame the 100 ms pacer cannot hold is refused whole; the sequence
-    // numbers do not skip, the rate drops by 20%, and a keyframe is asked for.
+    // A frame too large even for an empty keyframe queue is refused whole.
+    // It must not cut bitrate: that would also shrink the next keyframe's
+    // allowance and permanently prevent recovery.
     tokio::time::sleep(Duration::from_millis(400)).await;
     let mut huge = vec![0, 0, 0, 1, 0x65];
     huge.extend((0..200_000u32).map(|i| 0x80 | (i % 0x7F) as u8));
     media.send_video(frame_of(&huge, 200)).unwrap();
-    assert_eq!(rig.harness.event().await, VoiceEvent::VideoBitrate(800_000));
     assert_eq!(rig.harness.event().await, VoiceEvent::KeyframeRequested);
     media.send_video(frame_of(delta, 233)).unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;

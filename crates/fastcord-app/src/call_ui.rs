@@ -88,25 +88,68 @@ fn tile<'a>(
             .style(style::tool_button(full, false)),
     );
     if let TileId::Stream(key) = &id {
+        if tile.session.failed() {
+            controls = controls.push(
+                button(text("Retry watching").size(11))
+                    .on_press(Message::WatchStream(key.clone()))
+                    .style(style::action_button(false)),
+            );
+        }
         controls = controls.push(
             button(text("Stop watching").size(11))
                 .on_press(Message::UnwatchStream(key.clone()))
                 .style(style::action_button(true)),
         );
     }
-    container(
-        column![
-            container(playback::view::<Message>(tile.session.clone()))
-                .width(Length::Fill)
-                .height(Length::Fill),
-            controls
+    let mut content = column![
+        container(playback::view::<Message>(tile.session.clone()))
+            .width(Length::Fill)
+            .height(Length::Fill),
+        controls
+    ]
+    .spacing(3);
+    if let TileId::Stream(key) = &id {
+        content = content.push(stream_audio_controls(key, &tile.session));
+    }
+    container(content)
+        .padding(3)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::speaking(speaking))
+        .into()
+}
+
+fn stream_audio_controls<'a>(key: &str, session: &playback::Session) -> Element<'a, Message> {
+    let audio = session.audio_settings();
+    let mute_key = key.to_owned();
+    let volume_key = key.to_owned();
+    column![
+        row![
+            button(
+                text(if audio.muted {
+                    "Unmute stream"
+                } else {
+                    "Mute stream"
+                })
+                .size(11)
+            )
+            .on_press(Message::MuteStream(mute_key, !audio.muted))
+            .style(style::tool_button(audio.muted, false)),
+            slider(0.0..=200.0, f32::from(audio.percent), move |value| {
+                Message::SetStreamVolume(volume_key.clone(), value.round() as u16)
+            })
+            .width(Length::Fill),
+            text(format!("{}%", audio.percent)).size(11),
         ]
-        .spacing(3),
-    )
-    .padding(3)
+        .width(Length::Fill)
+        .spacing(6)
+        .align_y(iced::alignment::Vertical::Center),
+        text(session.audio_description())
+            .size(11)
+            .style(text::secondary),
+    ]
     .width(Length::Fill)
-    .height(Length::Fill)
-    .style(style::speaking(speaking))
+    .spacing(3)
     .into()
 }
 
@@ -425,8 +468,8 @@ pub struct CameraSettings {
 pub struct Settings<'a> {
     pub camera: Option<CameraSettings>,
     pub voice: &'a VoiceControls,
-    /// Streams being watched: (wire key, caption).
-    pub watching: Vec<(String, String)>,
+    /// Streams being watched: (session, caption).
+    pub watching: Vec<(std::sync::Arc<playback::Session>, String)>,
     /// Streams on offer: (wire key, owner name).
     pub offers: Vec<(String, String)>,
     /// Watching needs a running call.
@@ -529,19 +572,20 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
     if !set.watching.is_empty() || !set.offers.is_empty() {
         content = content.push(heading("STREAMS"));
     }
-    for (key, caption) in set.watching {
+    for (session, caption) in set.watching {
         content = content.push(
             row![
                 container(text(caption).size(12).wrapping(NAME))
                     .width(Length::Fill)
                     .clip(true),
                 button(text("Stop watching").size(11))
-                    .on_press(Message::UnwatchStream(key))
+                    .on_press(Message::UnwatchStream(session.key.clone()))
                     .style(style::action_button(true)),
             ]
             .spacing(4)
             .align_y(iced::alignment::Vertical::Center),
         );
+        content = content.push(stream_audio_controls(&session.key, &session));
     }
     for (key, owner) in set.offers {
         content = content.push(
@@ -660,7 +704,7 @@ mod tests {
                 status: String::new(),
             }),
             voice: &voice,
-            watching: vec![("k1".into(), "Ann: live".into())],
+            watching: vec![(playback::Session::new("k1".into()), "Ann: live".into())],
             offers: vec![("k2".into(), "Bob".into())],
             running: true,
         });
@@ -676,5 +720,23 @@ mod tests {
         ] {
             assert!(hit.contains(name), "{name} is not reachable: {hit:?}");
         }
+    }
+
+    #[test]
+    fn stream_audio_controls_fit_the_sidebar_and_route_to_the_selected_watch() {
+        let session = playback::Session::new("guild:1:2:3".into());
+        let mut ui = Ui::new(
+            WIDTH - 20.0,
+            90.0,
+            stream_audio_controls(&session.key, &session),
+        );
+        let hit = reachable(&mut ui, 0, WIDTH as i32 - 20, 90);
+        for name in ["MuteStream", "SetStreamVolume"] {
+            assert!(hit.contains(name), "{name} is not reachable: {hit:?}");
+        }
+        let messages = ui.click(15.0, 10.0);
+        assert!(messages.iter().any(
+            |message| matches!(message, Message::MuteStream(key, true) if key == "guild:1:2:3")
+        ));
     }
 }

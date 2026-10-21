@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Overview
-fastcord is a native, lightweight third-party Discord desktop client in Rust. Goals: no ads/upsells, idle RAM < 150 MB, near-zero idle CPU. MVP scope (nothing more): text channels, DMs/group DMs, voice with device selection and noise suppression, screen share send/watch, emoji and reactions. Login is by user-token paste (ToS risk accepted; test on an alt account). No selfbot automation.
+fastcord is a native, lightweight third-party Discord desktop client in Rust. Goals: no ads/upsells, lower measured RAM/CPU/GPU use than the official Discord client under equivalent workloads, near-zero idle CPU (the former 150 MB hard RAM limit was removed on 2026-10-21). MVP scope (nothing more): text channels, DMs/group DMs, voice with device selection and noise suppression, screen share send/watch, emoji and reactions. Login is by user-token paste (ToS risk accepted; test on an alt account). No selfbot automation.
 
 `docs/SPEC.md` is the source of truth for design decisions and the **ordered milestone list (§16)**. Read the relevant section before implementing anything. The initial MVP scope above is followed by the approved everyday-client milestones M39-M51; see `docs/ROADMAP.md` and GitHub tracker #67. Their additional capabilities do not change the initial MVP acceptance gates. The later full free communication stage is ordered in `docs/COMMUNICATION_COVERAGE.md` and tracker #109 (#69-#108); it includes camera and communication administration, but excludes paid/Nitro/game features and selfbot automation.
 

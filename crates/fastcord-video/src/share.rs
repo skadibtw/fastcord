@@ -404,6 +404,15 @@ pub struct ShareControl {
 }
 
 impl ShareControl {
+    /// Pauses sending and releases the old transport before it is closed.
+    /// Taking the sink lock also lets an already-running send finish first;
+    /// a picture still being encoded will find no sink and be discarded.
+    pub fn detach(&self) {
+        self.shared.negotiated.store(false, Ordering::Release);
+        self.shared.attached.store(false, Ordering::Release);
+        self.shared.sink.lock().take();
+    }
+
     /// Gives the share the transport's sink. Until then nothing is encoded.
     /// The stream restarts at a keyframe.
     pub fn attach(&self, sink: FrameSink) {

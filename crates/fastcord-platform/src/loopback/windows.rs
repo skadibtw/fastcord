@@ -51,8 +51,9 @@ const ELEMENT_NOT_FOUND: windows::core::HRESULT = windows::core::HRESULT(0x8007_
 const PROCESS_LOOPBACK_BUILD: u32 = 20_348;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
-/// Without data the loop still looks at the stop event this often.
-const IDLE_WAIT_MS: u32 = 200;
+/// Also drain on a timeout: some process-loopback devices produce packets
+/// without signalling their event. Keep that fallback within one Opus frame.
+const IDLE_WAIT_MS: u32 = 20;
 /// Device buffer: 200 ms in 100 ns units.
 const BUFFER_DURATION: i64 = 2_000_000;
 /// Frames of zeros handed over per call while the OS reports silence.
@@ -264,18 +265,16 @@ fn pump(
     handler: &mut Handler,
     zeros: &[f32],
 ) -> Result<(), LoopbackError> {
-    let handles = [wake.0, stop.0];
+    let handles = [stop.0, wake.0];
     loop {
         // SAFETY: both handles are alive for the whole loop.
         let waited = unsafe { WaitForMultipleObjects(&handles, false, IDLE_WAIT_MS) };
-        if waited == WAIT_TIMEOUT {
-            continue;
-        }
-        if waited.0.wrapping_sub(WAIT_OBJECT_0.0) != 0 {
+        if waited != WAIT_TIMEOUT && waited.0.wrapping_sub(WAIT_OBJECT_0.0) != 1 {
             // The stop event, or a failed wait: either way the capture is over.
             return Ok(());
         }
-        loop {
+        // A busy producer must not starve the stop event.
+        for _ in 0..64 {
             // SAFETY: the stream is running.
             let next = unsafe { reader.GetNextPacketSize() }
                 .map_err(|error| native("GetNextPacketSize", &error))?;

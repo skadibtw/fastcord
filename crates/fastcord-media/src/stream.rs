@@ -114,8 +114,20 @@ impl StreamCorrelator {
                 generation: self.bump(),
             };
         };
+        // Discord can repeat STREAM_CREATE when viewer membership changes.
+        // The RTC identity is unchanged: keep its credentials, DAVE group and
+        // transport instead of waiting for another STREAM_SERVER_UPDATE.
+        if self
+            .streams
+            .get(&key)
+            .and_then(|pending| pending.create.as_ref())
+            == Some(event)
+        {
+            return StreamCorrelation::Waiting;
+        }
         let generation = self.bump();
         let previous = self.streams.remove(&key);
+        let was_connected = previous.as_ref().is_some_and(|pending| pending.connected);
         let server = previous
             .filter(|pending| pending.create.is_none())
             .and_then(|pending| pending.server);
@@ -128,7 +140,12 @@ impl StreamCorrelator {
                 connected: false,
             },
         );
-        self.try_connect(key)
+        let result = self.try_connect(key.clone());
+        if was_connected && matches!(result, StreamCorrelation::Waiting) {
+            StreamCorrelation::Reallocating { key, generation }
+        } else {
+            result
+        }
     }
 
     /// Feeds STREAM_SERVER_UPDATE; changed credentials advance the stream's
@@ -274,6 +291,67 @@ mod tests {
             StreamCorrelation::Connect(credentials) => credentials,
             other => panic!("expected connect, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn repeated_create_keeps_live_credentials_and_identity_changes_reallocate() {
+        let mut correlator = StreamCorrelator::new(Snowflake(1), "main-session");
+        assert!(matches!(
+            correlator.create(&create(500)),
+            StreamCorrelation::Waiting
+        ));
+        let first =
+            connected(correlator.server_update(&server(Some("rtc.example.test:443"), "secret")));
+        for _ in 0..3 {
+            assert!(matches!(
+                correlator.create(&create(500)),
+                StreamCorrelation::Waiting
+            ));
+            assert!(matches!(
+                correlator.server_update(&server(Some("rtc.example.test:443"), "secret")),
+                StreamCorrelation::Waiting
+            ));
+        }
+        assert_eq!(
+            correlator.streams[&StreamKey::from_wire(key()).unwrap()].generation,
+            first.generation
+        );
+        assert!(matches!(
+            correlator.create(&create(501)),
+            StreamCorrelation::Reallocating { .. }
+        ));
+        let next = connected(
+            correlator.server_update(&server(Some("rtc2.example.test:443"), "new-secret")),
+        );
+        assert_eq!(next.mls_group_id, 500);
+        assert!(next.generation > first.generation);
+    }
+
+    #[test]
+    fn sending_and_watching_remain_independent_during_create_replays() {
+        let mut correlator = StreamCorrelator::new(Snowflake(1), "main-session");
+        correlator.create(&create(500));
+        let own =
+            connected(correlator.server_update(&server(Some("rtc.example.test:443"), "secret")));
+        let mut other = create(600);
+        other.stream_key = "guild:123:456:2".into();
+        correlator.create(&other);
+        let mut other_server = server(Some("rtc2.example.test:443"), "other-secret");
+        other_server.stream_key = other.stream_key.clone();
+        let watched = connected(correlator.server_update(&other_server));
+        assert!(matches!(
+            correlator.create(&create(500)),
+            StreamCorrelation::Waiting
+        ));
+        assert!(matches!(
+            correlator.create(&other),
+            StreamCorrelation::Waiting
+        ));
+        correlator.delete(&other.stream_key);
+        let pending = &correlator.streams[&own.key];
+        assert!(pending.connected);
+        assert_eq!(pending.generation, own.generation);
+        assert!(!correlator.is_active(&watched.key));
     }
 
     #[test]

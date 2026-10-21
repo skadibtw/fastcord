@@ -17,12 +17,16 @@ use super::h264::{self, Part};
 use super::{CodecOffer, MAX_PACKETS, MAX_PAYLOAD_BYTES, SendOptions, VideoError};
 use crate::rtp::VIDEO_CLOCK_HZ;
 
-/// No packet waits longer than this to be paced out: a frame that does not
-/// fit is refused instead (SPEC §8.3).
+/// Normal-frame queue budget. An empty queue may admit a keyframe using
+/// KEYFRAME_WINDOW so a normal desktop IDR cannot permanently block recovery.
 pub(crate) const PACER_WINDOW: Duration = Duration::from_millis(100);
+/// One recovery/keyframe may use extra room, still below the receiver's
+/// 200 ms frame deadline. Rate and burst credit do not increase.
+const KEYFRAME_WINDOW: Duration = Duration::from_millis(180);
 /// The pacer drains at 2.5 times the target bitrate (the pacing multiplier
 /// libwebrtc defaults to), so a keyframe leaves in tens of milliseconds and
-/// the 100 ms window holds a whole keyframe at the target rate.
+/// ordinary frames leave in tens of milliseconds. Keyframes get separate,
+/// bounded headroom without changing this rate.
 const PACING_PERCENT: u64 = 250;
 /// Credit an idle or late pacer may spend at once. A coarse OS timer can wake
 /// the task this late without lowering the average rate.
@@ -106,6 +110,7 @@ pub(crate) struct Pacer {
     ready_at: Option<Instant>,
     /// Retransmissions at the front of the queue, in the order requested.
     repairs: usize,
+    window: Duration,
 }
 
 impl Pacer {
@@ -116,6 +121,7 @@ impl Pacer {
             rate: pacing_rate(bitrate),
             ready_at: None,
             repairs: 0,
+            window: PACER_WINDOW,
         }
     }
 
@@ -125,7 +131,7 @@ impl Pacer {
 
     /// What the window holds at the current rate.
     fn capacity(&self) -> usize {
-        (self.rate / 8 * PACER_WINDOW.as_millis() as u64 / 1000) as usize
+        (self.rate / 8 * self.window.as_millis() as u64 / 1000) as usize
     }
 
     fn fits(&self, now: Instant, bytes: usize, packets: usize) -> bool {
@@ -134,15 +140,30 @@ impl Pacer {
         let stale = self
             .queue
             .front()
-            .is_some_and(|(queued, _)| now.saturating_duration_since(*queued) > PACER_WINDOW);
+            .is_some_and(|(queued, _)| now.saturating_duration_since(*queued) > self.window);
         !stale && self.bytes + bytes <= self.capacity() && self.queue.len() + packets <= MAX_PACKETS
     }
 
-    /// Queues a whole frame, or none of it.
-    fn push_frame(&mut self, now: Instant, packets: Vec<Packet>) -> Result<(), VideoError> {
+    fn fits_keyframe(&self, bytes: usize, packets: usize) -> bool {
+        self.queue.is_empty()
+            && packets <= MAX_PACKETS
+            && transmit_time(bytes, self.rate) <= KEYFRAME_WINDOW
+    }
+
+    /// Queues a whole frame, or none of it. A large keyframe may extend an
+    /// empty queue's time budget; it never accelerates the network pacer.
+    fn push_frame(
+        &mut self,
+        now: Instant,
+        packets: Vec<Packet>,
+        keyframe: bool,
+    ) -> Result<(), VideoError> {
         let bytes = packets.iter().map(Packet::wire_len).sum();
         if !self.fits(now, bytes, packets.len()) {
-            return Err(VideoError::QueueFull);
+            if !keyframe || !self.fits_keyframe(bytes, packets.len()) {
+                return Err(VideoError::QueueFull);
+            }
+            self.window = KEYFRAME_WINDOW;
         }
         self.bytes += bytes;
         self.queue
@@ -171,6 +192,9 @@ impl Pacer {
         self.repairs = self.repairs.saturating_sub(1);
         let bytes = packet.wire_len();
         self.bytes -= bytes;
+        if self.queue.is_empty() {
+            self.window = PACER_WINDOW;
+        }
         let earliest = now.checked_sub(PACER_BURST).unwrap_or(now);
         let base = self.ready_at.map_or(now, |ready| ready.max(earliest));
         self.ready_at = Some(base + transmit_time(bytes, self.rate));
@@ -427,13 +451,43 @@ impl VideoSender {
         )
     }
 
+    pub(crate) fn can_accept_frame(
+        &self,
+        now: Instant,
+        frame_bytes: usize,
+        keyframe: bool,
+    ) -> bool {
+        let packets = frame_bytes / MAX_PAYLOAD_BYTES + 1;
+        self.can_accept(now, frame_bytes)
+            || (keyframe
+                && self.pacer.fits_keyframe(
+                    frame_bytes + packets * (PACKET_OVERHEAD + PRIMARY_EXTENSION_BYTES),
+                    packets,
+                ))
+    }
+
+    pub(crate) fn has_queued_packets(&self) -> bool {
+        !self.pacer.queue.is_empty()
+    }
+
     /// Packetizes a sealed frame and queues it for pacing. On any error the
     /// RTP sequence and timestamp state is untouched.
+    #[cfg(test)]
     pub(crate) fn enqueue(
         &mut self,
         now: Instant,
         timestamp: Duration,
         sealed: Vec<u8>,
+    ) -> Result<(), VideoError> {
+        self.enqueue_frame(now, timestamp, sealed, false)
+    }
+
+    pub(crate) fn enqueue_frame(
+        &mut self,
+        now: Instant,
+        timestamp: Duration,
+        sealed: Vec<u8>,
+        keyframe: bool,
     ) -> Result<(), VideoError> {
         let parts = h264::packetize(&sealed, MAX_PAYLOAD_BYTES)?;
         let frame: Arc<[u8]> = sealed.into();
@@ -453,7 +507,7 @@ impl VideoSender {
                 packet
             })
             .collect();
-        self.pacer.push_frame(now, packets)?;
+        self.pacer.push_frame(now, packets, keyframe)?;
         self.commit_timestamp(timestamp, rtp);
         self.sequence = sequence;
         self.clock = Some((now, rtp));
@@ -653,6 +707,49 @@ mod tests {
             at += Duration::from_millis(1);
         }
         out
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_desktop_keyframe_can_use_bounded_headroom_without_bursting_or_growing_the_next_queue()
+     {
+        let now = Instant::now();
+        let mut sender = sender(now);
+        assert!(!sender.can_accept(now, 100_000));
+        assert!(sender.can_accept_frame(now, 100_000, true));
+        sender
+            .enqueue_frame(now, Duration::ZERO, frame(100_000), true)
+            .unwrap();
+        assert_eq!(sender.pacer.window, KEYFRAME_WINDOW);
+        assert!(sender.pacer_bytes() <= sender.pacer.capacity());
+        assert_eq!(drain(&mut sender, now).len(), 1);
+        let mut at = now;
+        let mut sent = 1;
+        while sender.next_wake().is_some() {
+            at += Duration::from_millis(1);
+            sent += drain(&mut sender, at).len();
+            assert!(at - now <= KEYFRAME_WINDOW);
+        }
+        assert!(sent > 80);
+        assert!(at - now > PACER_WINDOW);
+        assert_eq!(sender.pacer.capacity(), 78_125);
+        assert!(!sender.can_accept(now, 100_000));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keyframe_headroom_never_extends_an_occupied_queue_or_admits_an_unbounded_frame() {
+        let now = Instant::now();
+        let mut sender = sender(now);
+        sender.enqueue(now, Duration::ZERO, frame(40_000)).unwrap();
+        let sequence = sender.sequence;
+        assert!(!sender.can_accept_frame(now, 100_000, true));
+        assert_eq!(
+            sender.enqueue_frame(now, Duration::from_millis(33), frame(100_000), true),
+            Err(VideoError::QueueFull)
+        );
+        assert_eq!(sender.sequence, sequence);
+        assert_eq!(sender.pacer.window, PACER_WINDOW);
+        drain_all(&mut sender, now).await;
+        assert!(!sender.can_accept_frame(Instant::now(), 200_000, true));
     }
 
     #[tokio::test(start_paused = true)]

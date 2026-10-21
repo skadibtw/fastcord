@@ -352,6 +352,24 @@ impl StreamDecoder {
         self.shared.wake.notify_one();
     }
 
+    /// A visible transport has stopped delivering pictures. Drop stale
+    /// dependencies and request a keyframe without touching audio or voice.
+    pub(super) fn refresh(&self) {
+        let mut queue = self.shared.lock();
+        if queue.closed || queue.suspended {
+            return;
+        }
+        let dropped = queue.reset();
+        if let Some(ssrc) = queue.last_ssrc {
+            self.shared.request(&mut queue, ssrc);
+        } else {
+            queue.request_needed = true;
+        }
+        drop(queue);
+        Counters::add(&self.shared.counters.frames_dropped, dropped);
+        self.shared.wake.notify_one();
+    }
+
     /// Offers one frame without doing codec work or waiting for the worker.
     pub(super) fn push(&mut self, frame: ReceivedVideo) {
         let shared = Arc::clone(&self.shared);

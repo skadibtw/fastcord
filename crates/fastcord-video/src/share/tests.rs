@@ -30,6 +30,7 @@ struct Log {
     hardware: bool,
     settable: bool,
     unit_bytes: usize,
+    on_encode: Option<Box<dyn FnMut() + Send>>,
 }
 
 impl Default for Log {
@@ -43,6 +44,7 @@ impl Default for Log {
             hardware: false,
             settable: true,
             unit_bytes: 200,
+            on_encode: None,
         }
     }
 }
@@ -71,6 +73,9 @@ impl VideoEncoder for FakeEncoder {
         out: &mut Vec<EncodedFrame>,
     ) -> Result<(), CodecError> {
         let mut log = self.log.lock();
+        if let Some(mut action) = log.on_encode.take() {
+            action();
+        }
         if log.failing_encodes > 0 {
             log.failing_encodes -= 1;
             return Err(CodecError::Platform {
@@ -235,6 +240,23 @@ impl Rig {
 
 fn config() -> ShareConfig {
     ShareConfig::SCREEN_SHARE_720P30
+}
+
+#[test]
+fn reallocation_during_encoding_detaches_the_old_sink_without_ending_capture() {
+    let mut rig = Rig::armed(config());
+    assert_eq!(rig.picture(320, 180, 0), Flow::Continue);
+    *rig.outcome.lock() = SinkOutcome::Closed;
+    let control = rig.control.clone();
+    rig.log.lock().on_encode = Some(Box::new(move || control.detach()));
+    assert_eq!(rig.picture(320, 180, 40), Flow::Continue);
+    assert_eq!(rig.sent.lock().len(), 1);
+    assert!(rig.shared.failure.lock().is_none());
+    *rig.outcome.lock() = SinkOutcome::Sent;
+    rig.attach();
+    rig.control.set_negotiated(true);
+    assert_eq!(rig.picture(320, 180, 80), Flow::Continue);
+    assert_eq!(rig.sent_keyframes(), [true, true]);
 }
 
 #[test]

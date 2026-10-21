@@ -326,7 +326,9 @@ impl Transform {
         allow_software_fallback: bool,
     ) -> Result<usize, CodecError> {
         let mut delivered = 0;
-        loop {
+        // A broken MFT can repeatedly succeed without returning a sample or
+        // change its output type forever. Never spin on the codec/GPU thread.
+        for _ in 0..64 {
             match self.process_output(session, sink) {
                 Ok(Step::Output) => delivered += 1,
                 Ok(Step::StreamChanged | Step::NoOutput) => {}
@@ -341,6 +343,9 @@ impl Transform {
                 Err(error) => return Err(error),
             }
         }
+        Err(CodecError::Stalled(
+            "the codec did not finish producing output",
+        ))
     }
 
     fn process_output(

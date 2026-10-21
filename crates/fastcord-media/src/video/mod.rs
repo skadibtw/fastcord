@@ -356,7 +356,7 @@ pub enum VideoError {
     Malformed,
     TooLarge,
     Incomplete,
-    /// The pacer's 100 ms queue cannot take the frame.
+    /// The pacer's bounded queue cannot take the frame.
     QueueFull,
 }
 
@@ -367,7 +367,7 @@ impl fmt::Display for VideoError {
             Self::Malformed => "malformed codec RTP payload",
             Self::TooLarge => "video frame exceeds its byte bound",
             Self::Incomplete => "incomplete video frame",
-            Self::QueueFull => "video pacing queue reached its 100 ms bound",
+            Self::QueueFull => "video pacing queue reached its time or byte bound",
         })
     }
 }

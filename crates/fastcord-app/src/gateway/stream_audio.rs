@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
 
 use fastcord_media::video::VideoOptions;
 use fastcord_media::{
@@ -29,6 +30,7 @@ pub(super) async fn run(
     sink: Sink,
     status: StatusSink,
     controls: watch::Receiver<VoiceControls>,
+    presentation: Arc<crate::playback::Session>,
 ) {
     (status)(StreamStatus::Connecting);
     let session = match connect_with_video(credentials.voice_credentials(), watch_options()) {
@@ -40,7 +42,16 @@ pub(super) async fn run(
             return;
         }
     };
-    pump(session, visible, visibility, sink, status, controls).await;
+    pump(
+        session,
+        visible,
+        visibility,
+        sink,
+        status,
+        controls,
+        presentation,
+    )
+    .await;
 }
 
 fn watch_options() -> VideoOptions {
@@ -76,6 +87,7 @@ fn publish_session_end(voice: VoiceStatus, status: &StatusSink) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn pump(
     mut session: VoiceSession,
     visible: Arc<AtomicBool>,
@@ -83,12 +95,20 @@ async fn pump(
     sink: Sink,
     status: StatusSink,
     mut controls: watch::Receiver<VoiceControls>,
+    presentation: Arc<crate::playback::Session>,
 ) {
     let mut playback = Playback::default();
+    let mut audio = presentation.watch_audio();
     let mut controls_open = true;
     let mut decoder = StreamDecoder::new(session.media(), visible, Some(sink), Arc::clone(&status));
     let mut connection = session.watch_status();
     let mut observed_visible = *visibility.borrow_and_update();
+    let mut last_video = Instant::now();
+    let mut refreshes = 0;
+    // Session-health checks only while video is visible, never a redraw or
+    // playback clock. A silent freeze becomes actionable after bounded repair.
+    let mut health = tokio::time::interval(Duration::from_secs(5));
+    health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // A hidden stream costs nothing: the server forwards its video only while
     // it is drawn (and again, from a keyframe, once it is).
     session.media().set_video_wanted(observed_visible);
@@ -115,12 +135,19 @@ async fn pump(
                 session.media().set_video_wanted(announced);
                 decoder.visibility_notified(observed_visible, announced);
                 observed_visible = announced;
+                last_video = Instant::now();
+                refreshes = 0;
             }
             changed = controls.changed(), if controls_open => {
                 if changed.is_err() {
                     controls_open = false;
                 } else {
-                    playback.apply(&controls.borrow_and_update());
+                    playback.apply(&controls.borrow_and_update(), *audio.borrow());
+                }
+            }
+            changed = audio.changed() => {
+                if changed.is_ok() {
+                    playback.apply(&controls.borrow(), *audio.borrow_and_update());
                 }
             }
             changed = connection.changed() => {
@@ -133,6 +160,17 @@ async fn pump(
                     break;
                 }
             }
+            _ = health.tick(), if observed_visible => {
+                if last_video.elapsed() >= Duration::from_secs(5) && refreshes < 3 {
+                    refreshes += 1;
+                    decoder.refresh();
+                    if refreshes == 3 {
+                        (status)(StreamStatus::Failed(
+                            "No video is arriving. Retry watching; your call and screen share are still connected.".into(),
+                        ));
+                    }
+                }
+            }
             _ = debug_tick => {
                 #[cfg(debug_assertions)]
                 {
@@ -141,8 +179,15 @@ async fn pump(
                 }
             }
             message = session.next_message() => match message {
-                Some(VoiceMessage::Video(frame)) => decoder.push(frame),
-                Some(VoiceMessage::Audio(audio)) => playback.push(audio, &controls.borrow()),
+                Some(VoiceMessage::Video(frame)) => {
+                    last_video = Instant::now();
+                    refreshes = 0;
+                    decoder.push(frame);
+                },
+                Some(VoiceMessage::Audio(packet)) => {
+                    let report = playback.push(packet, &controls.borrow(), *audio.borrow());
+                    presentation.audio_status(report);
+                },
                 Some(VoiceMessage::Event(VoiceEvent::VideoSource { ssrc, active, .. })) => {
                     decoder.source_changed(if active { ssrc } else { 0 });
                 }

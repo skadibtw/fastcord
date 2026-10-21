@@ -22,6 +22,22 @@ use tokio::sync::{Notify, watch};
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
+/// Local controls belong to this watch, independently of the owner's voice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioSettings {
+    pub percent: u16,
+    pub muted: bool,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            percent: 100,
+            muted: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Connecting,
@@ -58,6 +74,8 @@ pub struct Session {
     pub visible: Arc<AtomicBool>,
     pub active: Arc<AtomicBool>,
     visibility: watch::Sender<bool>,
+    audio: watch::Sender<AudioSettings>,
+    audio_status: Mutex<String>,
     latest: Mutex<Latest>,
     wake: Notify,
 }
@@ -80,6 +98,8 @@ impl Session {
             visible: Arc::new(AtomicBool::new(false)),
             active: Arc::new(AtomicBool::new(true)),
             visibility,
+            audio: watch::channel(AudioSettings::default()).0,
+            audio_status: Mutex::new("Waiting for stream audio".into()),
             latest: Mutex::new(Latest {
                 frame: None,
                 status: Status::Connecting,
@@ -93,6 +113,40 @@ impl Session {
 
     pub fn visibility(&self) -> watch::Receiver<bool> {
         self.visibility.subscribe()
+    }
+
+    pub fn audio_settings(&self) -> AudioSettings {
+        *self.audio.borrow()
+    }
+
+    pub fn watch_audio(&self) -> watch::Receiver<AudioSettings> {
+        self.audio.subscribe()
+    }
+
+    pub fn set_audio(&self, settings: AudioSettings) {
+        let settings = AudioSettings {
+            percent: settings.percent.min(200),
+            ..settings
+        };
+        self.audio.send_if_modified(|current| {
+            if *current == settings {
+                return false;
+            }
+            *current = settings;
+            true
+        });
+    }
+
+    pub fn audio_status(&self, status: &str) {
+        let mut current = self.audio_status.lock();
+        if *current != status {
+            *current = status.to_owned();
+            self.notify(&mut self.latest.lock());
+        }
+    }
+
+    pub fn audio_description(&self) -> String {
+        self.audio_status.lock().clone()
     }
 
     pub fn set_visible(&self, visible: bool) {
@@ -360,6 +414,32 @@ mod tests {
             color: ColorDescription::default(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn stream_audio_controls_are_independent_bounded_and_survive_hiding() {
+        let first = Session::new("guild:1:2:3".into());
+        let second = Session::new("guild:1:2:4".into());
+        let mut changes = first.watch_audio();
+        assert_eq!(first.audio_settings(), AudioSettings::default());
+        first.set_audio(AudioSettings {
+            percent: 500,
+            muted: true,
+        });
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(
+            *changes.borrow_and_update(),
+            AudioSettings {
+                percent: 200,
+                muted: true
+            }
+        );
+        assert_eq!(second.audio_settings(), AudioSettings::default());
+        first.set_visible(true);
+        first.set_visible(false);
+        assert!(first.audio_settings().muted);
+        first.set_audio(first.audio_settings());
+        assert!(!changes.has_changed().unwrap());
     }
 
     #[test]

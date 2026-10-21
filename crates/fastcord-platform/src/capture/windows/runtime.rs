@@ -79,7 +79,12 @@ pub(super) fn signal(event: &Handle) -> Result<(), CaptureError> {
 /// Waits for any of `handles`; returns its index (the lowest signaled one), or
 /// `None` on timeout.
 pub(super) fn wait(handles: &[HANDLE], timeout: Duration) -> Result<Option<usize>, CaptureError> {
-    let milliseconds = timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+    // Round up: rounding a sub-ms pacing deadline down to zero busy-spins
+    // until that deadline, particularly on high-refresh displays.
+    let milliseconds = timeout
+        .as_nanos()
+        .div_ceil(1_000_000)
+        .min(u128::from(u32::MAX - 1)) as u32;
     // SAFETY: callers hold every handle through this bounded wait.
     let result = unsafe { WaitForMultipleObjects(handles, false, milliseconds) };
     if result == WAIT_TIMEOUT {

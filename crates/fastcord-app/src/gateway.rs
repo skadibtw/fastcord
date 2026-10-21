@@ -2361,7 +2361,6 @@ impl Worker {
                 if !self.admit_stream_key(&key) {
                     return Some(StreamCorrelation::Ignored);
                 }
-                self.stop_stream_key(&key.to_wire());
                 return self.stream_correlator.as_mut().map(|c| c.create(created));
             }
             Dispatch::StreamServerUpdate(update) => {
@@ -2464,6 +2463,7 @@ impl Worker {
                         Box::new(presentation.sink()),
                         status,
                         self.voice_controls.clone(),
+                        presentation.clone(),
                     )),
                 );
             }
@@ -2497,6 +2497,20 @@ impl Worker {
         let Some(key) = StreamKey::from_wire(wire_key) else {
             return;
         };
+        // Pause capture before aborting its RTC task. Otherwise the next
+        // picture sees the old closed sink and ends the whole share during
+        // server reallocation or credential replacement.
+        if let Some(share) = self.share.as_ref().filter(|share| share.key == key) {
+            if let Some(worker) = &share.worker {
+                worker.control().detach();
+            }
+            if let Some(audio) = &share.audio {
+                audio.slot.lock().take();
+            }
+            share
+                .sender
+                .send_modify(|progress| progress.connection = stream_share::Connection::Connecting);
+        }
         if let Some(task) = self.stream_tasks.remove(&key) {
             task.abort();
         }
@@ -4494,6 +4508,43 @@ mod tests {
             typing_send: TypingSend::default(),
             bridge,
         }
+    }
+
+    #[tokio::test]
+    async fn repeated_stream_create_does_not_abort_either_send_or_watch_task() {
+        let mut worker = worker();
+        worker.stream_intents.ready(Snowflake(1));
+        worker.stream_correlator = Some(StreamCorrelator::new(Snowflake(1), "fixture-session"));
+        worker
+            .stream_intents
+            .record_create(&StreamCreateRequest::guild(Snowflake(41), Snowflake(127)));
+        let own = StreamKey::from_wire("guild:41:127:1").unwrap();
+        let other = StreamKey::from_wire("guild:41:127:2").unwrap();
+        worker.stream_intents.watch(other.clone());
+        for (key, rtc) in [(&own, 500), (&other, 600)] {
+            let created = fastcord_model::StreamCreate {
+                stream_key: key.to_wire(),
+                rtc_server_id: Snowflake(rtc),
+                rtc_channel_id: Snowflake(rtc + 1),
+            };
+            worker.stream_correlator.as_mut().unwrap().create(&created);
+            worker
+                .stream_tasks
+                .insert(key.clone(), tokio::spawn(std::future::pending::<()>()));
+            assert!(matches!(
+                worker.stream_dispatch(&GatewayEvent::Dispatch {
+                    sequence: 2,
+                    event: Dispatch::StreamCreate(Box::new(created)),
+                }),
+                Some(StreamCorrelation::Waiting)
+            ));
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(worker.stream_tasks.len(), 2);
+        assert!(worker.stream_tasks.values().all(|task| !task.is_finished()));
+        worker.stop_stream_key(&other.to_wire());
+        assert!(!worker.stream_tasks[&own].is_finished());
+        worker.stop_stream_key(&own.to_wire());
     }
     fn private_channel(id: u64) -> Channel {
         Channel {

@@ -235,6 +235,8 @@ enum Message {
     CallSignalled(Result<(), fastcord_discord::RestError>),
     WatchStream(String),
     UnwatchStream(String),
+    SetStreamVolume(String, u16),
+    MuteStream(String, bool),
     /// Open or close the call view (the large layout of the call's videos).
     ShowStream(bool),
     /// The voice panel's heading: the large call view, and the call's chat for a server call.
@@ -1523,14 +1525,47 @@ impl App {
                             "Could not watch this stream. Join its voice channel and retry.".into(),
                         );
                     } else {
-                        match gateway.controls.watch_stream(key) {
+                        let previous = gateway
+                            .controls
+                            .watched_stream(&key)
+                            .filter(|session| session.failed());
+                        if previous.is_some() && !gateway.controls.unwatch_stream(key.clone()) {
+                            self.notice = Some("Could not queue Retry watching; retry.".into());
+                            return Task::none();
+                        }
+                        match gateway.controls.watch_stream(key.clone()) {
                             Ok(()) => {
+                                if let Some(previous) = previous
+                                    && let Some(session) = gateway.controls.watched_stream(&key)
+                                {
+                                    session.set_audio(previous.audio_settings());
+                                }
                                 gateway.call_view.open = true;
                                 self.notice = None;
                             }
                             Err(reason) => self.notice = Some(reason.into()),
                         }
                     }
+                }
+            }
+            Message::SetStreamVolume(key, percent) => {
+                if let Phase::Account { gateway, .. } = &self.phase
+                    && let Some(session) = gateway.controls.watched_stream(&key)
+                {
+                    session.set_audio(playback::AudioSettings {
+                        percent,
+                        ..session.audio_settings()
+                    });
+                }
+            }
+            Message::MuteStream(key, muted) => {
+                if let Phase::Account { gateway, .. } = &self.phase
+                    && let Some(session) = gateway.controls.watched_stream(&key)
+                {
+                    session.set_audio(playback::AudioSettings {
+                        muted,
+                        ..session.audio_settings()
+                    });
                 }
             }
             Message::UnwatchStream(key) => {
@@ -3512,7 +3547,7 @@ impl App {
                                     |owner| voice_controls.display_name(owner),
                                 );
                                 (
-                                    session.key.clone(),
+                                    session.clone(),
                                     format!("{owner}: {}", session.description()),
                                 )
                             })
