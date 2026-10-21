@@ -84,6 +84,58 @@ Live Discord tests use the alt account only. Never commit tokens, voice tokens, 
 
 ## Per-milestone checklist
 
+### Windows live check (2026-10-21)
+
+Release build of `eee1bb3` and then `eeaac04`. Authorized alt `skadimvp` in fastcord, with the maintainer's second account in the official client 1.0.9264 in the maintainer's test server. The checks were driven by an agent through screenshots.
+
+- **Passed:**
+  - **#117 footer.** All six icons and the identity fit at a compact and a maximized window. The Mic, Safety and Log out tooltips appear. While in voice, Mute shows the red slash, and the official client shows the muted-mic icon for the account.
+  - **#88 voice chat.**
+    - The Chat button opens "сквад 1" without joining, and the composer is enabled.
+    - Clicking the row joins voice ("Voice connected", call bar). The open text chat stays selected through joining and leaving.
+    - The official client lists the account in the channel.
+  - **#54 / #14 formatting and emoji.**
+    - A message sent from fastcord with bold, italic, underline, strike, inline code, a spoiler, a masked link, 👩🏽‍💻 👍🏻 🇺🇸 and ❤️ looks identical in the official client.
+    - An official message with a user mention, a code block and a quote renders correctly.
+  - **#15 reactions.**
+    - Adding 👍 from fastcord shows 1 in both clients.
+    - Adding the same reaction from the official client shows 2 in fastcord.
+    - Removing ours leaves 1, no longer highlighted, in both clients.
+  - **#56 / #77 unread and mentions.**
+    - An official mention in another channel makes the row bold with a red 1 and changes Inbox to "4 @1".
+    - Opening the channel clears the mark.
+  - **#58 search.**
+    - A query for an exact word returns "1 of 1 results", and opening the result lands on the message ("Jumped here").
+    - A query for a Russian word stem returns nothing. The official search does no Russian stemming either; this was not compared side by side.
+  - **#59 pins.** The pins panel opens and reads "No pinned messages".
+  - **#60 friends.** The Friends screen shows the Online, All, Pending and Blocked tabs (the alt has no friends).
+  - **#61 status.** Choosing Idle in fastcord shows Idle in the official member list, and Online restores it.
+  - **Voice receive.** The other participant's speaking ring lights in fastcord's call bar.
+- **Fixed during the check:**
+  - A long voice-channel name drew under the Chat button (`eeaac04`).
+  - `[label](<url>)` masked links and formatting inside their labels (`a773e07`).
+  - Message times are now local instead of UTC, `<t:…>` timestamp markup renders, and the disabled mic and deafen buttons get honest tooltips (`44f5938`).
+  - The second and third fixes are not yet re-checked live.
+- **Found, still open:**
+  - A message that mentions the account has no row highlight.
+  - Voice channel rows do not list their participants.
+  - The call bar does not include the account itself and shows initials instead of avatars.
+  - The status menu stays open after a choice.
+  - The emoji picker is a single column of solid-blue rows.
+  - Invite links have no invite card.
+  - Embed thumbnails are not shown.
+  - Resizing the window loses the timeline's bottom anchor ("Jump to latest" appears).
+  - Errors show only a generic reason: a refused password login says only "HTTP 400", and a refused send only maps 403. Neither shows Discord's error code or message.
+- **Account risk:**
+  - About ten minutes into the session, Discord revoked the alt's token. The maintainer then received an "action on your account" notice.
+  - Before the revocation, three fastcord instances had been running concurrently with the same token by mistake: the agent's application launcher starts a new process each time.
+  - The account was reinstated the same day. Afterwards every send, including plain text in a DM, returned 403. This is consistent with a post-enforcement restriction, not a client regression: the same build had sent successfully earlier.
+  - Live checks must use exactly one fastcord instance per token, and must stop when the account is restricted.
+- **Not exercised:**
+  - An attachment upload: the 403 restriction above blocked it.
+  - Notifications: a toast was not observable through screenshots.
+  - Noise-suppression quality, calls, Go Live, screen share and threads.
+
 ### Windows acceptance rerun (2026-10-16)
 
 - **Source and scope:** working tree based on `1b04dd0`, including an existing uncommitted ignored reaction live test. The pass found and fixed the earlier Linux/macOS CI failure in run `38299166910`: `ZONE_IDENTIFIER` was compiled under `cfg(test)` outside Windows but used only on Windows. Its declaration is now Windows-only; no warning is suppressed. Existing unrelated roadmap/source edits were preserved.
