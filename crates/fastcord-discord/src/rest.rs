@@ -500,6 +500,33 @@ mod tests {
     }
 
     #[test]
+    fn a_join_challenge_pauses_writes_but_not_lookups() {
+        let client = RestClient::new(
+            UserToken::new("offline-test-credential".to_owned()),
+            ClientProperties::web(HostOs::Linux, "en-US", 1),
+        )
+        .unwrap();
+        let join = || {
+            RestRequest::new(
+                Route::new(Method::POST, "/invites/abc123").unwrap(),
+                Priority::UserWrite,
+            )
+        };
+        let lookup = RestRequest::new(
+            Route::new(Method::GET, "/invites/abc123?with_counts=true").unwrap(),
+            Priority::SpeculativeRead,
+        );
+        assert!(client.check_write(&join()).is_ok());
+        let captcha = br#"{"captcha_key":["captcha-required"],"captcha_sitekey":"k"}"#;
+        assert!(client.observe_refusal(StatusCode::BAD_REQUEST, captcha));
+        assert_eq!(
+            client.check_write(&join()),
+            Err(RestError::AccountVerificationRequired)
+        );
+        assert!(client.check_write(&lookup).is_ok());
+    }
+
+    #[test]
     fn expired_attachment_urls_refresh_on_the_global_authenticated_route() {
         let route = attachment_refresh_route().unwrap();
         assert_eq!(route.key().normalized(), "/attachments/refresh-urls");

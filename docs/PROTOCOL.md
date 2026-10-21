@@ -677,6 +677,18 @@ Every request is sent once, on one explicit click, at `UserWrite` priority, with
 - **Failures:** 403 and 404 and 400 and 429 each get their own wording; a network error or 5xx is "may have been applied, check the list" and is never repeated automatically.
 - Not implemented: creating a group from a one-to-one DM (adding to a DM), group-icon rendering, a typed-ID add, `silent` leave.
 
+## Invitations and membership (#90)
+
+Each write is sent once, on one explicit click, at `UserWrite` priority, never retried; a 401 stops the account, and the server list changes only on `GUILD_CREATE`/`GUILD_DELETE`. Responses are read with bounded names; an invite without a `guild` (a group DM invite) is shown as invalid.
+
+Verified offline against synthetic fixtures (`fixtures/rest/invites-synthetic.json`) only; **no route has been captured from an official user client or exercised with the alt account.**
+
+- **Resolve:** `GET /invites/{code}?with_counts=true` (`SpeculativeRead`, no body). Reads `code`, `guild.{id,name,icon}`, `channel.name`, `approximate_member_count`, `approximate_presence_count`, `expires_at`; every count may be absent. `404` with code `10006` ("Unknown Invite") means expired, revoked or unknown. Codes are 2 to 32 characters of `[A-Za-z0-9-]` and are checked before a route is built.
+- **Join:** `POST /invites/{code}` body `{}`. Unverified for a user account: the official client may add fields (for example a `session_id`) and may answer with a CAPTCHA (`captcha_key`/`captcha_sitekey`) or verification (`40002`) refusal, which sets the write pause. Other refusals (`403` banned, full, `400`) keep Discord's code and short message (`with_error_detail`).
+- **Leave:** `DELETE /users/@me/guilds/{guild}` body `{"lurking":false}`. Unverified; an owner is stopped before the request.
+- **Create:** `POST /channels/{channel}/invites` body `{"max_age":604800,"max_uses":0,"temporary":false}`; the response's `code` is shown as `https://discord.gg/{code}`.
+- **Permission:** `CREATE_INSTANT_INVITE` (bit 0) of the channel's effective permissions gates the Invite button.
+
 ## Multi-participant call video (#86)
 
 Two small additions to the viewer side of opcode 15 and no new opcode. A call connection already wants `{"<primary ssrc>": 100, "any": 0}` for the cameras that are drawn (#84). A camera drawn small (`MediaSender::set_video_thumbnails`) now names the *lowest-quality active* stream of that user from opcode 12 instead of the best one; the value stays 100 and users with one layer are unchanged. The choice is made by SSRC, not by a quality number, because the only documented use of the value is to scale a sender's bitrate. Changing the layer asks for a keyframe on every receiver. **Not observed against Discord:** whether user clients announce more than one camera layer, and whether the server forwards the lower one on request. A stream viewer (several can run at once, one connection each) now sends `{"any": 0}` while its stream is not drawn, which was previously only a decoder-side suspension, and wants the stream again, from a keyframe, when it is.

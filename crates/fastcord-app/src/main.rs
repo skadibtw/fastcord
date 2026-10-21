@@ -22,6 +22,7 @@ mod group_dm;
 mod history;
 mod icons;
 mod inbox;
+mod invite;
 mod localtime;
 mod login;
 mod media_ui;
@@ -146,6 +147,7 @@ struct App {
     pins: pins::State,
     inbox: inbox::State,
     group: group_dm::State,
+    invite: invite::State,
     identity: profile_edit::State,
     safety: safety::State,
     report: report::State,
@@ -323,6 +325,7 @@ enum Message {
     Pins(pins::Event),
     Inbox(inbox::Event),
     Group(group_dm::Event),
+    Invite(invite::Event),
     Identity(profile_edit::Event),
     Safety(safety::Event),
     Report(report::Event),
@@ -400,6 +403,7 @@ impl App {
                 pins: pins::State::default(),
                 inbox: inbox::State::default(),
                 group: group_dm::State::default(),
+                invite: invite::State::default(),
                 identity: profile_edit::State::default(),
                 safety: safety::State::default(),
                 report: report::State::default(),
@@ -482,7 +486,7 @@ impl App {
         gateway
             .controls
             .emoji_request(&gateway.emoji_picker.request);
-        let wanted = wanted_avatars(gateway, own_user(gateway, session));
+        let wanted = wanted_avatars(gateway, own_user(gateway, session), &self.invite);
         let avatars = gateway
             .avatars
             .synchronize(wanted, gateway.id, gateway.attachments.as_ref());
@@ -1274,8 +1278,17 @@ impl App {
                 {
                     inbox_jump(&gateway.controls, channel, target);
                 }
-                if let Phase::Account { gateway, .. } = &self.phase {
+                let mut invite_task = Task::none();
+                if let Phase::Account {
+                    gateway, session, ..
+                } = &self.phase
+                {
                     self.sticker.sync(gateway.timeline.channel_id);
+                    self.invite.cache.sync_guilds(&gateway.navigation);
+                    invite_task = self
+                        .invite
+                        .pump(&gateway.timeline.rows, &session.client)
+                        .map(Message::Invite);
                     self.forward.sync(gateway.timeline.channel_id);
                     self.group.sync(
                         gateway
@@ -1307,7 +1320,7 @@ impl App {
                     refocus = iced::widget::operation::focus(composer::EDITOR_ID);
                 }
                 self.observe_ui_sound();
-                return Task::batch([refocus, self.soundboard_follow()]);
+                return Task::batch([refocus, self.soundboard_follow(), invite_task]);
             }
             Message::ShowDirects(on) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
@@ -1321,6 +1334,7 @@ impl App {
             Message::Switcher(event) => return self.switcher_event(event),
             Message::Shortcut(shortcut) => return self.navigation_shortcut(shortcut),
             Message::Group(event) => return self.group_event(event),
+            Message::Invite(event) => return self.invite_event(event),
             Message::Identity(event) => return self.identity_event(event),
             Message::Safety(event) => return self.safety_event(event),
             Message::Report(event) => return self.report_event(event),
@@ -2094,6 +2108,12 @@ impl App {
                                 guild, channel_id, message_id,
                             ));
                         }
+                        timeline::Event::JoinInvite(code) => {
+                            return self.invite_event(invite::Event::Join(code));
+                        }
+                        timeline::Event::OpenGuild(guild) => {
+                            return self.handle(Message::SelectGuild(guild));
+                        }
                         timeline::Event::CopyId { message_id } => {
                             return iced::clipboard::write(message_id.to_string());
                         }
@@ -2422,6 +2442,7 @@ impl App {
                 self.pins = pins::State::default();
                 self.inbox.clear();
                 self.group.clear();
+                self.invite.clear();
                 self.identity.clear();
                 self.safety.clear();
                 self.report.clear();
@@ -2733,6 +2754,7 @@ impl App {
         self.pins = pins::State::default();
         self.inbox.clear();
         self.group.clear();
+        self.invite.clear();
         self.identity.clear();
         self.safety.clear();
         self.report.clear();
@@ -3128,6 +3150,30 @@ impl App {
             ));
         }
         task.map(Message::Group)
+    }
+
+    fn invite_event(&mut self, event: invite::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = invite::State::is_rejected(&event);
+        let task = self.invite.update(
+            event,
+            &gateway.navigation,
+            &gateway.timeline.rows,
+            &session.client,
+        );
+        if rejected {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Invite)
     }
 
     fn identity_event(&mut self, event: profile_edit::Event) -> Task<Message> {
@@ -3811,6 +3857,9 @@ impl App {
             {
                 banner_column = banner_column.push(panel.map(Message::Voice));
             }
+            if let Some(panel) = invite::view(&self.invite) {
+                banner_column = banner_column.push(panel.map(Message::Invite));
+            }
             if let Some(panel) = group_dm::view(&self.group, &gateway.navigation, session.user.id) {
                 banner_column = banner_column.push(panel.map(Message::Group));
             }
@@ -4041,6 +4090,7 @@ impl App {
                     emojis: &gateway.emoji.views,
                     avatars: &gateway.avatars.views,
                     revealed: &gateway.revealed,
+                    invites: &self.invite.cache,
                     members: if gateway.directs {
                         &NO_MEMBERS
                     } else {
@@ -4429,6 +4479,7 @@ const MAX_WANTED_PICTURES: usize = 16;
 fn wanted_avatars(
     gateway: &gateway::GatewayPanel,
     user: &fastcord_model::User,
+    invites: &invite::State,
 ) -> Vec<avatars::AvatarKey> {
     let mut wanted = vec![avatars::AvatarKey::user(user.id, user.avatar.as_deref())];
     let guilds = gateway
@@ -4437,6 +4488,9 @@ fn wanted_avatars(
         .rows
         .iter()
         .filter_map(|guild| avatars::AvatarKey::guild(guild.id, guild.icon.as_deref()));
+    let invite_icons = invites
+        .cache
+        .icon_keys(&invite::visible_codes(&gateway.timeline.rows));
     let authors = gateway.timeline.rows.iter().rev().flat_map(|row| {
         let stickers = row
             .message
@@ -4480,6 +4534,7 @@ fn wanted_avatars(
         .collect::<Vec<_>>();
     let room = avatars::MAX_WANTED - pictures.len();
     for key in guilds
+        .chain(invite_icons)
         .chain(occupants)
         .chain(callers)
         .chain(authors)

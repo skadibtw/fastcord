@@ -16,6 +16,7 @@ impl Permissions {
     pub const NONE: Self = Self(0);
     pub const ALL: Self = Self(u64::MAX);
 
+    pub const CREATE_INSTANT_INVITE: Self = Self(1 << 0);
     pub const ADMINISTRATOR: Self = Self(1 << 3);
     pub const KICK_MEMBERS: Self = Self(1 << 1);
     pub const BAN_MEMBERS: Self = Self(1 << 2);

@@ -474,6 +474,16 @@ A guild voice (type 2) or Stage (type 13) channel carries a text conversation un
 - **Not offered:** threads (Discord does not allow them in voice chats; the Threads button is hidden) and the Stage audience/speaker flows (#89).
 - **Limits.** Whether the official client also requires CONNECT, or a live Stage, to show the chat is unverified (see PROTOCOL).
 
+### 8.13 Invitations and membership (#90)
+
+A message that contains an invite link (`discord.gg/<code>`, `discord.com/invite/<code>`, `discordapp.com/invite/<code>`, with or without `http(s)://` and `www.`; the host must begin a word, so look-alike hosts and paths are ignored) shows an invite card below its text, at most two per message. A card is a fixed 76 px block (server icon, name, channel, online and member counts when Discord sent them, expiry date, a Join or Joined button) so the row never changes height when the invite resolves, and it reads "Invite invalid" for an expired, revoked or unknown code.
+
+- **Lookup.** `GET /invites/{code}?with_counts=true` for codes of messages the timeline has built (newest first, at most 16 considered per pass), from a cache of at most 64 codes with a 10 minute TTL, at most 3 lookups in flight. A failed lookup is not repeated for 30 seconds; no lookup is ever retried by a loop. Icons use the existing public avatar store.
+- **Join.** One explicit click, `POST /invites/{code}` with `{}`, one request, never retried by the client. A CAPTCHA or verification answer sets the existing write pause (`RestError::AccountVerificationRequired`): the card shows the paused-account text and no write is sent until the official client has verified the account and fastcord is reconnected. Any other refusal shows Discord's own message. A server already in the rail window reads "Joined"; clicking Joined opens it. The rail changes only on `GUILD_CREATE`.
+- **Leave.** Right-click a server in the rail, then confirm: `DELETE /users/@me/guilds/{guild}` with `{"lurking":false}`. The owner (the reducer's `owned` flag, checked again at the confirming click) is told why it cannot leave and nothing is sent. The rail changes only on `GUILD_DELETE`.
+- **Create.** The header of a text, announcement or voice channel where the account has CREATE_INSTANT_INVITE offers Invite: `POST /channels/{id}/invites` `{"max_age":604800,"max_uses":0,"temporary":false}`, then the `discord.gg/<code>` link with Copy. No settings UI, no listing or revoking of invites.
+- **Not implemented:** server discovery browsing and search (no endpoint is scraped), invite management (list, revoke, expiry and use settings), temporary or limited invites, and a joined-server verification or onboarding flow beyond the pause above.
+
 ## 10. iced UI architecture
 
 Use iced's `Application`-style builder with `update`, `view`, `Task`, and `Subscription` concepts as provided by 0.14. UI messages are typed intents/results. Long-lived gateway/media workers feed stable subscriptions; creating a view must never reconnect a socket or recreate audio state.

@@ -1,0 +1,21 @@
+{
+  "full": {
+    "type": 0,
+    "code": "abc123",
+    "expires_at": "2030-01-01T00:00:00+00:00",
+    "guild": {"id": "100", "name": "Test Server", "icon": "iconhash", "features": []},
+    "channel": {"id": "200", "type": 0, "name": "general"},
+    "approximate_member_count": 1200,
+    "approximate_presence_count": 340
+  },
+  "no_counts": {
+    "code": "abc123",
+    "guild": {"id": "100", "name": "Test Server", "icon": null},
+    "channel": {"id": "200", "type": 0, "name": "general"}
+  },
+  "no_guild": {"code": "grp", "channel": {"id": "300", "type": 3}},
+  "expired": {"message": "Unknown Invite", "code": 10006},
+  "create_request": {"max_age": 604800, "max_uses": 0, "temporary": false},
+  "create_response": {"code": "newcode9", "max_age": 604800, "max_uses": 0, "temporary": false},
+  "leave_request": {"lurking": false}
+}

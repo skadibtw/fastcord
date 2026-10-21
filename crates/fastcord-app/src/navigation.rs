@@ -4,7 +4,7 @@
 //! navigation windows, never full state.
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot, Occupant};
 use iced::font::Weight;
-use iced::widget::{button, column, container, image, row, space, text, text_input};
+use iced::widget::{button, column, container, image, mouse_area, row, space, text, text_input};
 use iced::{Element, Font, Length, Padding, alignment};
 use std::collections::HashMap;
 
@@ -185,7 +185,10 @@ fn rail<'a>(
             selected,
             guild.available.then_some(Message::SelectGuild(guild.id)),
         ));
-        container(cell).height(RAIL_ROW).into()
+        // Right click asks to leave the server (a confirmation follows).
+        mouse_area(container(cell).height(RAIL_ROW))
+            .on_right_press(Message::Invite(crate::invite::Event::AskLeave(guild.id)))
+            .into()
     });
     container(
         column![
@@ -785,6 +788,15 @@ fn main_pane<'a>(
                             tools.push((
                                 "Threads",
                                 Message::Threads(crate::threads::Event::ToggleArchived(
+                                    selection.guild_id,
+                                    selection.channel_id,
+                                )),
+                            ));
+                        }
+                        if permissions.create_invite {
+                            tools.push((
+                                "Invite",
+                                Message::Invite(crate::invite::Event::Create(
                                     selection.guild_id,
                                     selection.channel_id,
                                 )),

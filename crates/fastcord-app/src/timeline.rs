@@ -452,6 +452,10 @@ pub enum Event {
         channel_id: Snowflake,
         message_id: Snowflake,
     },
+    /// Join the server of an invite card (an explicit click).
+    JoinInvite(String),
+    /// Open a server from an invite card that reads "Joined".
+    OpenGuild(Snowflake),
     /// Copy the message's ID.
     CopyId {
         message_id: Snowflake,
@@ -722,6 +726,8 @@ pub struct Attachments<'a> {
     pub revealed: &'a std::collections::HashSet<(Snowflake, u16)>,
     /// Held members of the open server, for nicknames (empty in a DM).
     pub members: &'a HashMap<Snowflake, fastcord_discord::state::navigation::MemberView>,
+    /// Resolved invites for the cards under messages.
+    pub invites: &'a crate::invite::Cache,
 }
 
 /// The name a message author is shown under: server nickname, else the
@@ -1208,6 +1214,9 @@ fn message_view<'a>(
     }
     for embed in rich::embeds(message, channel_id, row.revision, cx) {
         body = body.push(embed);
+    }
+    for code in fastcord_discord::extract_codes(&message.content) {
+        body = body.push(crate::invite::card(assets.invites, &code, assets.avatars));
     }
     if let Some(poll) = message.poll.as_deref() {
         body = body.push(poll_view(row, poll, channel_id));
@@ -2007,6 +2016,8 @@ mod tests {
         static MEMBERS: std::sync::LazyLock<
             HashMap<Snowflake, fastcord_discord::state::navigation::MemberView>,
         > = std::sync::LazyLock::new(HashMap::new);
+        static INVITES: std::sync::LazyLock<crate::invite::Cache> =
+            std::sync::LazyLock::new(Default::default);
         Attachments {
             account: Snowflake(1),
             views,
@@ -2015,6 +2026,7 @@ mod tests {
             avatars: &AVATARS,
             revealed: &REVEALED,
             members: &MEMBERS,
+            invites: &INVITES,
         }
     }
 

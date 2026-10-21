@@ -70,6 +70,8 @@ pub struct GuildRow {
     pub icon: Option<String>,
     /// Outage guilds have only an ID and cannot be explicitly selected.
     pub available: bool,
+    /// The account owns the server, so it cannot leave it.
+    pub owned: bool,
     pub selected: bool,
     /// Unmuted messages not yet read in some channel, and mentions in all.
     pub unread: bool,
@@ -121,6 +123,7 @@ pub struct PermissionSummary {
     pub create_threads: bool,
     pub manage_threads: bool,
     pub attach_files: bool,
+    pub create_invite: bool,
 }
 
 impl From<Permissions> for PermissionSummary {
@@ -139,6 +142,7 @@ impl From<Permissions> for PermissionSummary {
             create_threads: permissions.contains(Permissions::CREATE_PUBLIC_THREADS),
             manage_threads: permissions.contains(Permissions::MANAGE_THREADS),
             attach_files: permissions.contains(Permissions::ATTACH_FILES),
+            create_invite: permissions.contains(Permissions::CREATE_INSTANT_INVITE),
         }
     }
 }
@@ -615,6 +619,10 @@ impl Navigation {
                         |guild| capped_name(Some(guild.name()), "Unnamed guild"),
                     ),
                     available: guild.is_some(),
+                    owned: guild.is_some_and(|guild| {
+                        guild.owner_id().is_some()
+                            && guild.owner_id() == store.current_user().map(|user| user.id)
+                    }),
                     selected: self.account == store.current_user().map(|user| user.id)
                         && self.selected_guild == Some(id),
                 }
