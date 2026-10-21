@@ -56,6 +56,7 @@ mod timeline;
 mod ui_sound;
 mod variable_list;
 mod virtual_list;
+mod voice_log;
 mod voice_record;
 mod voice_settings;
 

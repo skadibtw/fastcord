@@ -406,6 +406,8 @@ async fn run_with(
         }
     };
     state.send_replace(VoiceAudioState::Running);
+    crate::voice_log::note("call: audio engine running");
+    let mut anomalies = Anomalies::default();
     // Every call starts with the camera off; only the user's click turns it on.
     let mut video = CallVideo::new(media.clone(), tiles, controls_tx.clone());
     let mut tile_changes = video.changes();
@@ -560,8 +562,10 @@ async fn run_with(
                 let _ = media.end_speech();
             }
             _ = stats_tick.tick() => {
-                let transport = controls.borrow().diagnostics_open.then(|| session.stats());
-                noise_status.publish_stats(engine.stats(), transport);
+                let (engine_stats, transport_stats) = (engine.stats(), session.stats());
+                anomalies.check(&engine_stats, &transport_stats);
+                let transport = controls.borrow().diagnostics_open.then_some(transport_stats);
+                noise_status.publish_stats(engine_stats, transport);
             }
             _ = wait_for_release(retry_at) => {
                 sync.apply(&controls.borrow(), hold.active);
@@ -574,6 +578,7 @@ async fn run_with(
                             fastcord_audio::Direction::Input => controls.input_error = Some(kind),
                             fastcord_audio::Direction::Output => controls.output_error = Some(kind),
                         });
+                        crate::voice_log::note(&format!("device: {direction:?} stream failed ({kind:?})"));
                         match direction {
                             fastcord_audio::Direction::Input => {
                                 captured = None;
@@ -588,6 +593,7 @@ async fn run_with(
                             fastcord_audio::Direction::Input => controls.input_error = None,
                             fastcord_audio::Direction::Output => controls.output_error = None,
                         });
+                        crate::voice_log::note(&format!("device: {direction:?} stream ready"));
                         match direction {
                             fastcord_audio::Direction::Input => {
                                 let _ = media.end_speech();
@@ -600,11 +606,18 @@ async fn run_with(
                     Some(fastcord_audio::EngineEvent::NoiseSuppressionChanged(noise)) => {
                         noise_status.publish(noise);
                     }
-                    None => { engine_failed = true; break; }
+                    None => {
+                        crate::voice_log::note("call: audio engine stopped unexpectedly");
+                        engine_failed = true;
+                        break;
+                    }
                 }
             }
             changed = status.changed() => {
-                if changed.is_err() || matches!(*status.borrow_and_update(), VoiceStatus::Closed(_)) { break; }
+                if changed.is_err() { break; }
+                let now = *status.borrow_and_update();
+                crate::voice_log::note(&format!("connection: {}", describe_status(&now)));
+                if matches!(now, VoiceStatus::Closed(_)) { break; }
             }
             _ = &mut cancel_rx => break,
         }
@@ -623,6 +636,7 @@ async fn run_with(
     drop(noise_status);
     let _ = media.end_speech();
     controls_tx.send_if_modified(|controls| replace(&mut controls.self_speaking, false));
+    crate::voice_log::note("call: left");
     session.leave().await;
     // A failed engine stays visible (the worker then leaves the Gateway voice state too).
     state.send_replace(if engine_failed {
@@ -1178,5 +1192,122 @@ mod tests {
             rx.try_recv(),
             Ok(EngineControl::Diagnostics(false))
         ));
+    }
+}
+
+/// A short, key-free name for a connection state.
+fn describe_status(status: &VoiceStatus) -> String {
+    match status {
+        VoiceStatus::Connecting => "connecting".into(),
+        VoiceStatus::Identifying => "identifying".into(),
+        VoiceStatus::Discovering => "discovering address".into(),
+        VoiceStatus::Negotiating => "negotiating transport".into(),
+        VoiceStatus::Rekeying { transition_id } => match transition_id {
+            Some(id) => format!(
+                "end-to-end keys changing (transition {id}); audio pauses until it executes"
+            ),
+            None => "waiting for end-to-end keys; audio paused".into(),
+        },
+        VoiceStatus::Connected { .. } => "connected".into(),
+        VoiceStatus::Resuming { attempt } => {
+            format!("connection dropped, resuming (attempt {attempt})")
+        }
+        VoiceStatus::Closed(reason) => format!("closed: {reason:?}"),
+    }
+}
+
+/// Once-a-second counters that only grow when something goes wrong; a line
+/// is logged for each second in which one of them grew.
+#[derive(Default)]
+struct Anomalies {
+    engine: Option<fastcord_audio::EngineStats>,
+    transport: Option<fastcord_media::gateway::TransportStats>,
+}
+
+impl Anomalies {
+    fn check(
+        &mut self,
+        engine: &fastcord_audio::EngineStats,
+        transport: &fastcord_media::gateway::TransportStats,
+    ) {
+        for line in anomaly_lines(
+            self.engine.as_ref(),
+            engine,
+            self.transport.as_ref(),
+            transport,
+        ) {
+            crate::voice_log::note(&line);
+        }
+        self.engine = Some(*engine);
+        self.transport = Some(*transport);
+    }
+}
+
+fn anomaly_lines(
+    old_engine: Option<&fastcord_audio::EngineStats>,
+    engine: &fastcord_audio::EngineStats,
+    old_transport: Option<&fastcord_media::gateway::TransportStats>,
+    transport: &fastcord_media::gateway::TransportStats,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let (Some(e), Some(t)) = (old_engine, old_transport) else {
+        return lines;
+    };
+    let mut grew = |now: u64, before: u64, what: &str| {
+        if now > before {
+            lines.push(format!("{what}: {}", now - before));
+        }
+    };
+    grew(
+        transport.rejected_authentication,
+        t.rejected_authentication,
+        "inbound: packets that failed decryption (end-to-end keys out of step) in the last second",
+    );
+    grew(
+        transport.dropped_unknown_ssrc,
+        t.dropped_unknown_ssrc,
+        "inbound: packets from an unannounced speaker dropped",
+    );
+    grew(
+        transport.dropped_queue_full,
+        t.dropped_queue_full,
+        "inbound: packets dropped because playback fell behind",
+    );
+    grew(
+        engine.decode_errors,
+        e.decode_errors,
+        "playback: Opus decode errors",
+    );
+    grew(
+        engine.output_underruns,
+        e.output_underruns,
+        "playback: underruns (silence played)",
+    );
+    grew(engine.device_xruns, e.device_xruns, "device: xruns");
+    grew(
+        engine.late_ticks,
+        e.late_ticks,
+        "engine: late wake-ups (CPU starved)",
+    );
+    lines
+}
+
+#[cfg(test)]
+mod anomaly_tests {
+    use super::*;
+
+    #[test]
+    fn only_counters_that_grew_are_logged() {
+        let engine = fastcord_audio::EngineStats::default();
+        let transport = fastcord_media::gateway::TransportStats::default();
+        assert!(anomaly_lines(None, &engine, None, &transport).is_empty());
+        assert!(anomaly_lines(Some(&engine), &engine, Some(&transport), &transport).is_empty());
+        let failing = fastcord_media::gateway::TransportStats {
+            rejected_authentication: 40,
+            ..transport
+        };
+        let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &failing);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("failed decryption") && lines[0].ends_with(": 40"));
     }
 }

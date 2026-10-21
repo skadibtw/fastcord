@@ -213,6 +213,18 @@ fn stats_summary(stats: Option<EngineStats>) -> String {
     }
 }
 
+/// The newest voice events, so a dropout can be explained from the dialog.
+fn voice_log_summary() -> String {
+    let lines = crate::voice_log::recent(8);
+    if lines.is_empty() {
+        return String::new();
+    }
+    let place = crate::voice_log::file()
+        .map(|path| format!(" (full log: {})", path.display()))
+        .unwrap_or_default();
+    format!("Recent voice events{place}:\n{}", lines.join("\n"))
+}
+
 /// What the microphone sends in this call, so "nobody hears me" can be told
 /// apart: muted or push-to-talk, the sensitivity gate, or end-to-end keys.
 pub fn transmit_summary(
@@ -277,12 +289,18 @@ pub fn view<'a>(
         text("Adds a Record voice message button to text channels: record, preview, then send. Discord documents voice-message recording for its mobile apps only, so whether it is accepted from this client is unverified. The microphone is open only while recording."),
         text(stats_summary(stats)),
         text(transmit),
+        text(voice_log_summary()).size(12),
         text(if settings.probing { "Looking for audio devices…" } else { "System default follows the OS only when selected. Refresh lists after plugging a device in." }),
         row![button("Refresh devices").on_press_maybe((!settings.probing).then_some(crate::Message::RefreshAudioDevices)), button("Close").on_press(crate::Message::CloseAudioSettings)].spacing(12),
     ].spacing(12)).padding(24).width(Length::Fixed(650.0)).style(container::rounded_box).into()
 }
 
 fn path() -> Option<PathBuf> {
+    data_dir().map(|dir| dir.join("audio-devices.json"))
+}
+
+/// fastcord's per-user data folder (settings, the voice log).
+pub(crate) fn data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     let root = std::env::var_os("APPDATA").map(PathBuf::from)?;
     #[cfg(target_os = "macos")]
@@ -293,7 +311,7 @@ fn path() -> Option<PathBuf> {
     let root = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(root.join("fastcord").join("audio-devices.json"))
+    Some(root.join("fastcord"))
 }
 
 fn decode(bytes: &[u8]) -> Option<Preferences> {
