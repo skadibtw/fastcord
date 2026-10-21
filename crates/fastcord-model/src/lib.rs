@@ -46,7 +46,7 @@ pub use relationship::{Relationship, RelationshipKind};
 pub use snowflake::{DISCORD_EPOCH_MS, ParseSnowflakeError, Snowflake};
 pub use user::User;
 pub use voice::{
-    StreamCreate, StreamCreateRequest, StreamDelete, StreamDeleteReason, StreamKey,
+    StageInstance, StreamCreate, StreamCreateRequest, StreamDelete, StreamDeleteReason, StreamKey,
     StreamServerUpdate, StreamType, StreamUpdate, VoiceServerUpdate, VoiceState, VoiceStateRequest,
     VoiceToken,
 };

@@ -816,6 +816,7 @@ fn large_ready() -> Ready {
                         communication_disabled_until: None,
                     }],
                     member_count: 1,
+                    stage_instances: Vec::new(),
                 }
             })
             .collect(),
@@ -1751,6 +1752,7 @@ fn voice_rows_are_followed_by_their_capped_occupants() {
             self_stream: user == 3,
             self_video: user == 4,
             suppress: false,
+            request_to_speak_timestamp: None,
         };
         store.apply(event(Dispatch::VoiceStateUpdate(Box::new(
             crate::gateway::VoiceStateUpdate {

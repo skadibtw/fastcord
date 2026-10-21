@@ -126,6 +126,23 @@ pub fn view<'a>(
                         false,
                     ));
                 }
+                if voice.stage.permissions.moderate
+                    && let Some(seat) = voice.stage.seat(user)
+                {
+                    use fastcord_discord::StageAction;
+                    use fastcord_discord::state::navigation::StageSeat;
+                    let (label, request) = match seat {
+                        StageSeat::Speaker => ("Move to audience", StageAction::Demote(user)),
+                        StageSeat::Hand => ("Approve request", StageAction::Invite(user)),
+                        StageSeat::Audience => ("Invite to speak", StageAction::Invite(user)),
+                    };
+                    card = card.push(text("STAGE").size(11).style(text::secondary));
+                    card = card.push(action(
+                        label,
+                        (!restricted).then_some(Message::Stage(crate::stage::Event::Do(request))),
+                        false,
+                    ));
+                }
                 let mut any = false;
                 for (allowed, action_kind) in [
                     (

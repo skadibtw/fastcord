@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use fastcord_model::{
     CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildEmoji, GuildMember,
     MAX_REACTION_EMOJI_NAME_BYTES, Message, MessageUpdate, Relationship, RelationshipKind, Role,
-    Snowflake, StreamCreate, StreamDelete, StreamServerUpdate, StreamUpdate, User,
+    Snowflake, StageInstance, StreamCreate, StreamDelete, StreamServerUpdate, StreamUpdate, User,
     VoiceServerUpdate, VoiceState,
 };
 use serde::{Deserialize, Deserializer};
@@ -129,6 +129,8 @@ struct GuildWire {
     members: Vec<MemberWire>,
     #[serde(default)]
     member_count: u32,
+    #[serde(default, deserialize_with = "null_default")]
+    stage_instances: Vec<StageInstance>,
 }
 
 #[derive(Deserialize)]
@@ -506,6 +508,7 @@ impl Normalizer {
             emojis: wire.emojis,
             members,
             member_count: wire.member_count,
+            stage_instances: wire.stage_instances,
         }))
     }
 }
@@ -1258,6 +1261,10 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         | "GUILD_SOUNDBOARD_SOUNDS_UPDATE" => {
             json::<SoundboardGuildWire>(raw).map(|wire| Dispatch::SoundboardChanged(wire.guild_id))
         }
+        "STAGE_INSTANCE_CREATE" | "STAGE_INSTANCE_UPDATE" => {
+            json::<StageInstance>(raw).map(Dispatch::StageInstanceUpsert)
+        }
+        "STAGE_INSTANCE_DELETE" => json::<StageInstance>(raw).map(Dispatch::StageInstanceDelete),
         "CALL_CREATE" => json::<CallCreate>(raw).map(|c| Dispatch::CallCreate(Box::new(c))),
         "CALL_UPDATE" => json::<CallUpdate>(raw).map(Dispatch::CallUpdate),
         "CALL_DELETE" => json::<CallDelete>(raw).map(Dispatch::CallDelete),

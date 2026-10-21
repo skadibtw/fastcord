@@ -2,7 +2,7 @@
 //! sidebar of channels (or direct messages) with the user's own panel at its
 //! foot, and the conversation. Presentation of compact reducer-owned
 //! navigation windows, never full state.
-use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot, Occupant};
+use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot, Occupant, StageSeat};
 use iced::font::Weight;
 use iced::widget::{button, column, container, image, mouse_area, row, space, text, text_input};
 use iced::{Element, Font, Length, Padding, alignment};
@@ -311,6 +311,11 @@ pub(crate) fn occupant_row<'a>(
             .size(12)
             .style(text::secondary)
             .into(),
+        Occupant::Heading(label) => text(label.to_uppercase())
+            .size(10)
+            .font(BOLD)
+            .style(text::secondary)
+            .into(),
         Occupant::Member {
             user_id,
             name,
@@ -319,6 +324,7 @@ pub(crate) fn occupant_row<'a>(
             deafened,
             streaming,
             video,
+            seat,
         } => {
             let face = container(avatars::view(
                 avatar_views,
@@ -341,6 +347,13 @@ pub(crate) fn occupant_row<'a>(
             ]
             .spacing(6)
             .align_y(alignment::Vertical::Center);
+            if *seat == Some(StageSeat::Hand) {
+                line = line.push(
+                    container(text("HAND").size(9).font(BOLD))
+                        .padding([1, 4])
+                        .style(style::live_badge),
+                );
+            }
             if *streaming {
                 line = line.push(
                     container(text("LIVE").size(9).font(BOLD))
@@ -505,6 +518,7 @@ fn sidebar<'a>(
             let prefix = match channel.kind {
                 ChannelKind::Text => "# ",
                 ChannelKind::Announcement => "\u{25B6} ",
+                ChannelKind::Voice if channel.stage => "\u{266B} ",
                 ChannelKind::Voice => "\u{266A} ",
                 ChannelKind::Thread => "    \u{21B3} ",
                 ChannelKind::Forum => "\u{2630} ",
@@ -931,6 +945,7 @@ mod occupant_tests {
             deafened: true,
             streaming,
             video,
+            seat: None,
         }
     }
 

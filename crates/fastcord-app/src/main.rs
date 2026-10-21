@@ -48,6 +48,7 @@ mod safety;
 mod search;
 mod shortcuts;
 mod soundboard;
+mod stage;
 mod status;
 mod sticker;
 mod style;
@@ -154,6 +155,7 @@ struct App {
     gif: gif::State,
     sticker: sticker::State,
     soundboard: soundboard::State,
+    stage: stage::State,
     forward: forward::State,
     poll: poll_create::State,
     voice: voice_record::State,
@@ -332,6 +334,7 @@ enum Message {
     Gif(gif::Event),
     Sticker(sticker::Event),
     Soundboard(soundboard::Event),
+    Stage(stage::Event),
     Forward(forward::Event),
     Poll(poll_create::Event),
     Voice(voice_record::Event),
@@ -410,6 +413,7 @@ impl App {
                 gif: gif::State::default(),
                 sticker: sticker::State::default(),
                 soundboard: soundboard::State::default(),
+                stage: stage::State::default(),
                 forward: forward::State::default(),
                 poll: poll_create::State::default(),
                 voice: voice_record::State::default(),
@@ -1341,6 +1345,7 @@ impl App {
             Message::Gif(event) => return self.gif_event(event),
             Message::Sticker(event) => return self.sticker_event(event),
             Message::Soundboard(event) => return self.soundboard_event(event),
+            Message::Stage(event) => return self.stage_event(event),
             Message::Forward(event) => return self.forward_event(event),
             Message::Poll(event) => return self.poll_event(event),
             Message::Voice(event) => return self.voice_event(event),
@@ -1460,6 +1465,7 @@ impl App {
                         .iter()
                         .any(|row| row.id == channel && !row.permissions.use_vad);
                     if join {
+                        self.stage.reset();
                         gateway.controls.set_vad_forbidden(vad_forbidden);
                         gateway.voice_guild = Some(guild);
                         gateway.voice_call = None;
@@ -1514,6 +1520,7 @@ impl App {
                     .map(|_| "The call request failed; try again.".to_owned());
             }
             Message::LeaveVoice => {
+                self.stage.reset();
                 let mut cancel = None;
                 if let Phase::Account {
                     session, gateway, ..
@@ -2449,7 +2456,7 @@ impl App {
                 self.gif = gif::State::default();
                 self.sticker = sticker::State::default();
                 self.soundboard.reset();
-                self.soundboard.reset();
+                self.stage.reset();
                 self.forward = forward::State::default();
                 self.poll = poll_create::State::default();
                 self.voice.reset();
@@ -3080,6 +3087,65 @@ impl App {
                 .into_iter()
                 .map(|task| task.map(Message::Soundboard))
                 .chain([saved]),
+        )
+    }
+
+    fn stage_event(&mut self, event: stage::Event) -> Task<Message> {
+        use stage::Event;
+        let Phase::Account {
+            gateway, session, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let stage = gateway.controls.voice_controls().stage;
+        let action = match event {
+            Event::Done(serial, result) => {
+                self.stage.finish(serial, result);
+                return Task::none();
+            }
+            Event::OpenTopic(editing) => {
+                let draft = if editing {
+                    stage.topic.clone().unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                self.stage.topic = Some((editing, draft));
+                return Task::none();
+            }
+            Event::Topic(value) => {
+                if let Some((_, draft)) = &mut self.stage.topic {
+                    *draft = value
+                        .chars()
+                        .take(fastcord_discord::MAX_TOPIC_CHARS)
+                        .collect();
+                }
+                return Task::none();
+            }
+            Event::CloseTopic => {
+                self.stage.topic = None;
+                return Task::none();
+            }
+            Event::SubmitTopic => match self.stage.submission() {
+                Some(action) => action,
+                None => return Task::none(),
+            },
+            Event::Do(action) => action,
+        };
+        self.member_menu.close();
+        let (Some(guild), Some(channel)) = (stage.guild, stage.channel) else {
+            return Task::none();
+        };
+        if session.client.writes_restricted() {
+            return Task::none();
+        }
+        let Some(serial) = self.stage.begin() else {
+            return Task::none();
+        };
+        let bridge = gateway.controls.clone();
+        Task::perform(
+            async move { bridge.stage(guild, channel, action).await },
+            move |result| Message::Stage(Event::Done(serial, result)),
         )
     }
 
@@ -3839,6 +3905,13 @@ impl App {
             if let Some(panel) = soundboard::view(&self.soundboard) {
                 banner_column = banner_column.push(panel.map(Message::Soundboard));
             }
+            if let Some(panel) = stage::banner(
+                &self.stage,
+                &voice_controls,
+                session.client.writes_restricted(),
+            ) {
+                banner_column = banner_column.push(panel);
+            }
             if let Some(channel) = gateway.timeline.channel_id
                 && self.sticker.is_open_for(channel)
                 && let Some(panel) = sticker::view(&self.sticker)
@@ -3945,6 +4018,13 @@ impl App {
             }
             if let Some(settings) = voice_settings {
                 foot = foot.push(settings);
+            }
+            if let Some(panel) = stage::own(
+                &self.stage,
+                &voice_controls,
+                session.client.writes_restricted(),
+            ) {
+                foot = foot.push(panel);
             }
             if let Some(panel) = voice_panel {
                 foot = foot.push(panel);
@@ -5465,6 +5545,7 @@ mod tests {
             unread: false,
             mentions: 0,
             thread: None,
+            stage: false,
             occupant: None,
         };
         let mut app = login_app();
@@ -5541,6 +5622,7 @@ mod tests {
                     unread: false,
                     mentions: 0,
                     thread: None,
+                    stage: false,
                     occupant: None,
                 }],
             },

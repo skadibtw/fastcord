@@ -622,6 +622,7 @@ mod tests {
             channels: Vec::new(),
             emojis,
             member_count: 1,
+            stage_instances: Vec::new(),
             members: vec![GuildMember {
                 user_id: Snowflake(1),
                 nick: None,

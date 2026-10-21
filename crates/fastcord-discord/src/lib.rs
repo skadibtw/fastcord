@@ -43,6 +43,7 @@ mod search;
 mod secret;
 mod send;
 mod soundboard;
+mod stage;
 pub mod state;
 mod sticker;
 mod thread;
@@ -102,6 +103,7 @@ pub use send::{
     OutgoingMessage, ReplyTo, SendError,
 };
 pub use soundboard::{GUILD_SOUNDS, MAX_SOUND_NAME_CHARS, SoundboardSound};
+pub use stage::{MAX_TOPIC_CHARS, StageAction, StagePermissions, iso8601, topic as stage_topic};
 pub use sticker::{GUILD_STICKERS, GuildSticker};
 pub use thread::{
     ARCHIVED_PAGE_SIZE, ArchivedThreads, ForumPost, MAX_THREAD_NAME_CHARS, PostError, PostInvalid,

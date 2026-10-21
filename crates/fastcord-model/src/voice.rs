@@ -30,6 +30,20 @@ pub struct VoiceState {
     pub self_video: bool,
     #[serde(default)]
     pub suppress: bool,
+    /// ISO 8601 time the user asked to speak in a Stage channel; `null` or
+    /// absent when there is no request.
+    #[serde(default)]
+    pub request_to_speak_timestamp: Option<String>,
+}
+
+/// A live Stage: the topic of a Stage channel while a session runs. The topic
+/// is user text, capped by the reducer.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct StageInstance {
+    pub guild_id: Snowflake,
+    pub channel_id: Snowflake,
+    #[serde(default)]
+    pub topic: String,
 }
 
 impl fmt::Debug for VoiceState {
@@ -46,6 +60,7 @@ impl fmt::Debug for VoiceState {
             .field("self_stream", &self.self_stream)
             .field("self_video", &self.self_video)
             .field("suppress", &self.suppress)
+            .field("hand_raised", &self.request_to_speak_timestamp.is_some())
             .finish()
     }
 }

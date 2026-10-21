@@ -182,6 +182,7 @@ mod tests {
             self_stream: false,
             self_video: false,
             suppress: false,
+            request_to_speak_timestamp: None,
         }
     }
 

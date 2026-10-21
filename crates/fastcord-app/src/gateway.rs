@@ -50,8 +50,40 @@ pub struct UserVolume {
     pub percent: u16,
 }
 
+/// The Stage side of the current call, derived by the reducer from the voice
+/// states, the channel's permissions and its live session. `Default` outside a
+/// Stage channel.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StageControls {
+    /// The call is in a Stage channel.
+    pub active: bool,
+    /// The account is in the audience, or its own voice state is not known yet:
+    /// the microphone stays closed until the server says it may speak.
+    pub suppressed: bool,
+    /// The account has a raised hand.
+    pub requested: bool,
+    pub permissions: fastcord_discord::StagePermissions,
+    /// The live session's topic; `None` while no session runs.
+    pub topic: Option<String>,
+    pub guild: Option<Snowflake>,
+    pub channel: Option<Snowflake>,
+    /// Who sits where: speakers, then raised hands, then the audience; at most
+    /// [`MAX_VOICE_NAMES`].
+    pub seats: Vec<(Snowflake, StageSeat)>,
+}
+
+impl StageControls {
+    pub fn seat(&self, user: Snowflake) -> Option<StageSeat> {
+        self.seats
+            .iter()
+            .find(|(id, _)| *id == user)
+            .map(|(_, s)| *s)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VoiceControls {
+    pub stage: StageControls,
     pub self_muted: bool,
     pub deafened: bool,
     pub server_muted: bool,
@@ -164,11 +196,12 @@ impl VoiceControls {
         }
     }
 
-    /// The one microphone gate. A server mute, self mute, deafen or held push-to-mute
-    /// always closes it; push-to-talk mode additionally needs `ptt_active` (the key
+    /// The one microphone gate. Stage audience (suppression), a server mute, self mute,
+    /// deafen or held push-to-mute always closes it; push-to-talk mode additionally needs `ptt_active` (the key
     /// held, or inside its release delay).
     pub fn capture_enabled_with(&self, ptt_active: bool) -> bool {
-        !self.server_muted
+        !self.stage.suppressed
+            && !self.server_muted
             && !self.self_muted
             && !self.deafened
             && !self.push_to_mute_down
@@ -198,6 +231,7 @@ impl VoiceControls {
 }
 use fastcord_discord::UploadFile;
 use fastcord_discord::state::Store;
+use fastcord_discord::state::navigation::StageSeat;
 use fastcord_discord::state::navigation::{Navigation, NavigationSnapshot};
 use fastcord_media::{Correlation, JoinCorrelator, StreamCorrelation, StreamCorrelator};
 use fastcord_model::{
@@ -534,6 +568,12 @@ pub enum Command {
         action: fastcord_discord::MemberAction,
         reply: tokio::sync::oneshot::Sender<Result<(), fastcord_discord::RestError>>,
     },
+    Stage {
+        guild: Snowflake,
+        channel: Snowflake,
+        action: fastcord_discord::StageAction,
+        reply: tokio::sync::oneshot::Sender<Result<(), fastcord_discord::RestError>>,
+    },
     Send {
         channel: Snowflake,
         content: String,
@@ -681,6 +721,17 @@ impl fmt::Debug for Command {
                 .field(user)
                 .field(action)
                 .finish(),
+            Self::Stage {
+                guild,
+                channel,
+                action,
+                ..
+            } => f
+                .debug_tuple("Stage")
+                .field(guild)
+                .field(channel)
+                .field(&std::mem::discriminant(action))
+                .finish(),
             Self::Send {
                 channel, everyone, ..
             } => f
@@ -827,6 +878,27 @@ impl NavigationBridge {
             .try_send(Command::Moderate {
                 guild,
                 user,
+                action,
+                reply,
+            })
+            .map_err(|_| fastcord_discord::RestError::SchedulerCapacityExceeded)?;
+        answer
+            .await
+            .unwrap_or(Err(fastcord_discord::RestError::AuthenticationRequired))
+    }
+    /// One explicit Stage action; the reducer rechecks permissions and state
+    /// immediately before handing the request to the transport.
+    pub async fn stage(
+        &self,
+        guild: Snowflake,
+        channel: Snowflake,
+        action: fastcord_discord::StageAction,
+    ) -> Result<(), fastcord_discord::RestError> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.commands
+            .try_send(Command::Stage {
+                guild,
+                channel,
                 action,
                 reply,
             })
@@ -2094,6 +2166,25 @@ impl Worker {
                     });
                 }
             }
+            Command::Stage {
+                guild,
+                channel,
+                action,
+                reply,
+            } => {
+                if !self.tracker.store.stage_allows(guild, channel, &action) {
+                    let _ = reply.send(Err(fastcord_discord::RestError::PermissionDenied));
+                } else {
+                    let rest = self.rest.clone();
+                    let unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |elapsed| elapsed.as_secs());
+                    tokio::spawn(async move {
+                        let now = fastcord_discord::iso8601(unix);
+                        let _ = reply.send(rest.stage_action(guild, channel, &action, &now).await);
+                    });
+                }
+            }
             Command::Send {
                 channel,
                 content,
@@ -2251,7 +2342,8 @@ impl Worker {
                 .participants
                 .iter()
                 .map(|participant| participant.user_id)
-                .chain(controls.streams.iter().map(|offer| offer.owner));
+                .chain(controls.streams.iter().map(|offer| offer.owner))
+                .chain(controls.stage.seats.iter().map(|(user, _)| *user));
             for id in users {
                 if names.len() == MAX_VOICE_NAMES || names.iter().any(|(seen, _)| *seen == id) {
                     continue;
@@ -2328,8 +2420,73 @@ impl Worker {
             }
         }
         self.voice_flags = (request.self_mute, request.self_deaf, request.self_video);
+        // A Stage is joined as audience until the server's own state says otherwise.
+        self.refresh_stage();
         gateway.voice_state().request(request);
         true
+    }
+
+    fn stage_controls(&self) -> StageControls {
+        let store = &self.tracker.store;
+        let request = *self.voice_requests.borrow();
+        let (Some(guild_id), Some(channel_id), Some(me)) = (
+            request.and_then(|r| r.guild_id),
+            request.and_then(|r| r.channel_id),
+            store.current_user().map(|user| user.id),
+        ) else {
+            return StageControls::default();
+        };
+        let Some(guild) = store.guild(guild_id) else {
+            return StageControls::default();
+        };
+        if guild
+            .channel(channel_id)
+            .is_none_or(|c| c.kind != fastcord_model::ChannelKind::GuildStageVoice)
+        {
+            return StageControls::default();
+        }
+        let own = guild
+            .voice_state(me)
+            .filter(|state| state.channel_id == Some(channel_id));
+        let mut here: Vec<_> = guild
+            .voice_states()
+            .filter(|state| state.channel_id == Some(channel_id))
+            .collect();
+        here.sort_by_key(|s| {
+            (
+                s.suppress,
+                s.request_to_speak_timestamp.is_none(),
+                s.request_to_speak_timestamp.clone(),
+                s.user_id,
+            )
+        });
+        StageControls {
+            active: true,
+            suppressed: own.is_none_or(|state| state.suppress),
+            requested: own.is_some_and(|state| state.request_to_speak_timestamp.is_some()),
+            permissions: store.stage_permissions(guild_id, channel_id),
+            topic: guild
+                .stage_instance(channel_id)
+                .map(|stage| stage.topic.clone()),
+            guild: Some(guild_id),
+            channel: Some(channel_id),
+            seats: here
+                .into_iter()
+                .take(MAX_VOICE_NAMES)
+                .map(|state| (state.user_id, StageSeat::of(state)))
+                .collect(),
+        }
+    }
+
+    fn refresh_stage(&self) {
+        let stage = self.stage_controls();
+        self.bridge.voice_controls.send_if_modified(|controls| {
+            let changed = controls.stage != stage;
+            if changed {
+                controls.stage = stage;
+            }
+            changed
+        });
     }
 
     fn voice_dispatch(&mut self, event: &GatewayEvent) -> Option<Correlation> {
@@ -2359,6 +2516,15 @@ impl Worker {
                     self.bridge.voice_controls.send_modify(|controls| {
                         controls.server_muted = update.state.mute;
                         controls.server_deafened = update.state.deaf;
+                        // Moves between audience and speakers take effect at once;
+                        // everything else about the Stage follows the store.
+                        if controls.stage.active
+                            && update.state.channel_id == controls.stage.channel
+                        {
+                            controls.stage.suppressed = update.state.suppress;
+                            controls.stage.requested =
+                                update.state.request_to_speak_timestamp.is_some();
+                        }
                     });
                 }
                 if let Some(correlator) = self.voice_correlator.as_mut() {
@@ -2759,6 +2925,7 @@ impl Worker {
                 })
             })
             .unwrap_or_default();
+        self.refresh_stage();
         self.bridge.voice_controls.send_if_modified(|controls| {
             if controls.streams.as_ref() == offers.as_slice() {
                 false
@@ -4496,6 +4663,7 @@ mod tests {
             emojis: Vec::new(),
             members: Vec::new(),
             member_count: 0,
+            stage_instances: Vec::new(),
         };
         let dm = |id| Channel {
             id: Snowflake(id),
@@ -5061,22 +5229,29 @@ mod tests {
                     )
                 })
             {
-                let controls = VoiceControls {
-                    input_mode: mode,
-                    self_muted,
-                    deafened,
-                    server_muted,
-                    push_to_mute_down: push_to_mute,
-                    vad_forbidden,
-                    ..VoiceControls::default()
-                };
-                let restricted = self_muted || deafened || server_muted || push_to_mute;
-                let needs_key = mode == PushToTalk || vad_forbidden;
-                assert_eq!(
-                    controls.capture_enabled_with(ptt),
-                    !restricted && (!needs_key || ptt),
-                    "{mode:?} mute={self_muted} deaf={deafened} server={server_muted} ptm={push_to_mute} novad={vad_forbidden} ptt={ptt}"
-                );
+                for suppressed in [false, true] {
+                    let controls = VoiceControls {
+                        input_mode: mode,
+                        self_muted,
+                        deafened,
+                        server_muted,
+                        push_to_mute_down: push_to_mute,
+                        vad_forbidden,
+                        stage: StageControls {
+                            suppressed,
+                            ..StageControls::default()
+                        },
+                        ..VoiceControls::default()
+                    };
+                    let restricted =
+                        self_muted || deafened || server_muted || push_to_mute || suppressed;
+                    let needs_key = mode == PushToTalk || vad_forbidden;
+                    assert_eq!(
+                        controls.capture_enabled_with(ptt),
+                        !restricted && (!needs_key || ptt),
+                        "{mode:?} mute={self_muted} deaf={deafened} server={server_muted} ptm={push_to_mute} novad={vad_forbidden} ptt={ptt} audience={suppressed}"
+                    );
+                }
             }
         }
     }
@@ -5221,6 +5396,65 @@ mod tests {
         bridge.request_voice_state(join(71));
         assert_eq!(bridge.voice_audio_state(), VoiceAudioState::Connecting);
         assert!(requests.has_changed().unwrap());
+    }
+
+    #[test]
+    fn the_own_stage_seat_follows_the_servers_voice_state_at_once() {
+        let mut worker = worker();
+        *worker.bridge.account_id.lock().unwrap() = Some(Snowflake(1));
+        worker.bridge.voice_controls.send_modify(|controls| {
+            controls.stage = StageControls {
+                active: true,
+                suppressed: true,
+                channel: Some(Snowflake(70)),
+                ..StageControls::default()
+            };
+        });
+        let update =
+            |user: u64, channel: u64, suppress: bool, hand: Option<&str>| GatewayEvent::Dispatch {
+                sequence: 1,
+                event: Dispatch::VoiceStateUpdate(Box::new(
+                    fastcord_discord::gateway::VoiceStateUpdate {
+                        state: fastcord_model::VoiceState {
+                            guild_id: Some(Snowflake(7)),
+                            channel_id: Some(Snowflake(channel)),
+                            user_id: Snowflake(user),
+                            session_id: String::new(),
+                            deaf: false,
+                            mute: false,
+                            self_deaf: false,
+                            self_mute: false,
+                            self_stream: false,
+                            self_video: false,
+                            suppress,
+                            request_to_speak_timestamp: hand.map(str::to_owned),
+                        },
+                        member: None,
+                        users: Vec::new(),
+                    },
+                )),
+            };
+        let seat = |worker: &Worker| {
+            let controls = worker.bridge.voice_controls();
+            (controls.stage.suppressed, controls.stage.requested)
+        };
+        // Someone else's state, or another channel's, changes nothing.
+        worker.voice_dispatch(&update(2, 70, false, None));
+        worker.voice_dispatch(&update(1, 71, false, None));
+        assert_eq!(seat(&worker), (true, false));
+        worker.voice_dispatch(&update(
+            1,
+            70,
+            true,
+            Some("2026-10-21T10:00:00.000000+00:00"),
+        ));
+        assert_eq!(seat(&worker), (true, true));
+        worker.voice_dispatch(&update(1, 70, false, None));
+        assert_eq!(seat(&worker), (false, false));
+        assert!(worker.bridge.voice_controls().capture_enabled_with(true));
+        // Moved back to the audience: the microphone closes at once.
+        worker.voice_dispatch(&update(1, 70, true, None));
+        assert!(!worker.bridge.voice_controls().capture_enabled_with(true));
     }
 
     #[test]

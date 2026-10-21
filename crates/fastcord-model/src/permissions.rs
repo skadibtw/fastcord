@@ -20,6 +20,8 @@ impl Permissions {
     pub const ADMINISTRATOR: Self = Self(1 << 3);
     pub const KICK_MEMBERS: Self = Self(1 << 1);
     pub const BAN_MEMBERS: Self = Self(1 << 2);
+    pub const MANAGE_CHANNELS: Self = Self(1 << 4);
+    pub const REQUEST_TO_SPEAK: Self = Self(1 << 32);
     pub const MUTE_MEMBERS: Self = Self(1 << 22);
     pub const DEAFEN_MEMBERS: Self = Self(1 << 23);
     pub const MOVE_MEMBERS: Self = Self(1 << 24);

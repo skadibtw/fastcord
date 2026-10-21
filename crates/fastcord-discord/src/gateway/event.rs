@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use fastcord_model::{
     CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildMember, Message, MessageUpdate,
-    Relationship, RelationshipKind, Role, Snowflake, User, VoiceServerUpdate, VoiceState,
+    Relationship, RelationshipKind, Role, Snowflake, StageInstance, User, VoiceServerUpdate,
+    VoiceState,
 };
 
 /// The Gateway session ID. Not a credential on its own (resuming also needs the
@@ -331,6 +332,8 @@ pub struct GuildEmojisUpdate {
 
 /// GUILD_CREATE: a joined or newly available guild, or one that is now known
 /// only by ID because of an outage.
+// One event is held at a time, so the size gap costs nothing worth a Box.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq)]
 pub enum GuildCreate {
     Available { guild: Guild, users: Vec<User> },
@@ -600,6 +603,10 @@ pub enum Dispatch {
     VoiceStateUpdate(Box<VoiceStateUpdate>),
     /// A soundboard sound was played in a voice channel.
     VoiceChannelSound(SoundboardPlay),
+    /// A Stage session started or its topic changed.
+    StageInstanceUpsert(StageInstance),
+    /// A Stage session ended.
+    StageInstanceDelete(StageInstance),
     /// A server's soundboard sounds were created, edited, deleted or replaced.
     SoundboardChanged(Snowflake),
     /// A DM or group-DM call started, with who is ringing and connected.
@@ -665,6 +672,8 @@ impl Dispatch {
             Self::GuildRoleDelete(_) => "GUILD_ROLE_DELETE",
             Self::VoiceStateUpdate(_) => "VOICE_STATE_UPDATE",
             Self::VoiceChannelSound(_) => "VOICE_CHANNEL_EFFECT_SEND",
+            Self::StageInstanceUpsert(_) => "STAGE_INSTANCE_UPDATE",
+            Self::StageInstanceDelete(_) => "STAGE_INSTANCE_DELETE",
             Self::SoundboardChanged(_) => "GUILD_SOUNDBOARD_SOUNDS_UPDATE",
             Self::CallCreate(_) => "CALL_CREATE",
             Self::CallUpdate(_) => "CALL_UPDATE",

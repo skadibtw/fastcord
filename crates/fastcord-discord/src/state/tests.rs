@@ -920,6 +920,7 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
             communication_disabled_until: None,
         }],
         member_count: 250_000,
+        stage_instances: Vec::new(),
     }
 }
 
@@ -1003,6 +1004,7 @@ fn the_metadata_budget_holds_through_a_large_account_and_flood_of_members() {
                 self_stream: false,
                 self_video: false,
                 suppress: false,
+                request_to_speak_timestamp: None,
             },
             member: None,
             users: Vec::new(),
@@ -1080,6 +1082,7 @@ fn shedding_goes_oldest_unreferenced_first_and_never_touches_pinned_members() {
                 self_stream: false,
                 self_video: false,
                 suppress: false,
+                request_to_speak_timestamp: None,
             },
             member: None,
             users: Vec::new(),
@@ -1335,6 +1338,7 @@ fn entity_costs_charge_owned_capacity_instead_of_logical_lengths() {
         self_stream: false,
         self_video: false,
         suppress: false,
+        request_to_speak_timestamp: None,
     };
     assert_eq!(
         voice_bytes(&voice),

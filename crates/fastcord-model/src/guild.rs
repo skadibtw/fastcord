@@ -1,4 +1,4 @@
-use crate::{Channel, Permissions, Snowflake};
+use crate::{Channel, Permissions, Snowflake, StageInstance};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Role {
@@ -56,4 +56,6 @@ pub struct Guild {
     /// READY_SUPPLEMENTAL (or lazy member requests) provides more.
     pub members: Vec<GuildMember>,
     pub member_count: u32,
+    /// Live Stage sessions delivered with the guild.
+    pub stage_instances: Vec<StageInstance>,
 }

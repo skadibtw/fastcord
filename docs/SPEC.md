@@ -471,7 +471,7 @@ A guild voice (type 2) or Stage (type 13) channel carries a text conversation un
 - **Opening.** Each voice or Stage row in the sidebar has a Chat button; the row itself still joins the call (`Message::JoinVoice`). Opening a chat (`Message::SelectChannel`) is the same reducer selection as for a text channel and never sends a voice request; joining, moving or leaving the call never changes the selection (tests in `main.rs` and `gateway.rs`). Nothing is fetched for rows that are merely listed: history loads when the chat is opened, like a text channel.
 - **Permissions** reuse the one computation (`PermissionContext`; the text-like implicit rules already covered voice). The chat opens with VIEW_CHANNEL alone; CONNECT gates only the join (`ChannelRow::enabled` now means "chat can be opened", `permissions.connect` "call can be joined"; a row without CONNECT is labelled "(no access)" and cannot be joined). History needs READ_MESSAGE_HISTORY, the composer SEND_MESSAGES, reactions ADD_REACTIONS. An overwrite or role change re-evaluates the open chat on the next snapshot: sendability follows at once, losing VIEW_CHANNEL closes it, and the voice connection is never touched.
 - **Read state.** `MESSAGE_CREATE` marks the row unread and counts mentions exactly as for text channels, and the unified inbox lists voice chats. Notifications use the same path.
-- **Not offered:** threads (Discord does not allow them in voice chats; the Threads button is hidden) and the Stage audience/speaker flows (#89).
+- **Not offered:** threads (Discord does not allow them in voice chats; the Threads button is hidden) (the Stage audience and speaker flows are 8.14, #89).
 - **Limits.** Whether the official client also requires CONNECT, or a live Stage, to show the chat is unverified (see PROTOCOL).
 
 ### 8.13 Invitations and membership (#90)
@@ -483,6 +483,15 @@ A message that contains an invite link (`discord.gg/<code>`, `discord.com/invite
 - **Leave.** Right-click a server in the rail, then confirm: `DELETE /users/@me/guilds/{guild}` with `{"lurking":false}`. The owner (the reducer's `owned` flag, checked again at the confirming click) is told why it cannot leave and nothing is sent. The rail changes only on `GUILD_DELETE`.
 - **Create.** The header of a text, announcement or voice channel where the account has CREATE_INSTANT_INVITE offers Invite: `POST /channels/{id}/invites` `{"max_age":604800,"max_uses":0,"temporary":false}`, then the `discord.gg/<code>` link with Copy. No settings UI, no listing or revoking of invites.
 - **Not implemented:** server discovery browsing and search (no endpoint is scraped), invite management (list, revoke, expiry and use settings), temporary or limited invites, and a joined-server verification or onboarding flow beyond the pause above.
+
+### 8.14 Stage audience, speakers and moderators (#89)
+
+A Stage channel (type 13) is a voice channel with a role per person: speakers (`suppress: false`) and the audience (`suppress: true`), plus a live session with a topic (the stage instance). Everything is derived from the voice states and `STAGE_INSTANCE_*` events held by the reducer; nothing is cached outside it.
+
+- **Transmit gate.** `VoiceControls::capture_enabled_with` is the only gate and now also requires `!stage.suppressed`. `StageControls` is derived from the store on every snapshot and set at once from the account's own `VOICE_STATE_UPDATE`; in a Stage the account counts as suppressed until its own voice state in that channel is known, so joining, moving and reconnecting (READY rebuilds voice states) never transmit before the server permits. Suppression and the raised hand are server state and survive a reconnect because they come back with the voice state.
+- **Permissions** (`Store::stage_permissions`, the same role/overwrite computation as member actions, failing closed on unknown roles or a timeout): REQUEST_TO_SPEAK to raise a hand; MUTE_MEMBERS to invite, approve, move speakers to the audience and to speak without asking; the Stage moderator set (MANAGE_CHANNELS, MUTE_MEMBERS, MOVE_MEMBERS) to start, edit and end the session. `Store::stage_allows` also checks the state an action changes (a second request, inviting a speaker, starting a live Stage all send nothing). The worker runs it again immediately before the request. Role hierarchy is not applied to speaker changes.
+- **UI.** Sidebar: speakers then audience under headings, hands first (earliest request first), counted in the existing 8-person cap. Seat controls above the voice panel; moderator actions in the member menu; the topic header and the hand list above the conversation. One write at a time; a late answer after leaving or changing Stage is ignored.
+- **Not offered:** scheduled-event linkage, public Stages, the audience's own video or screen share rules beyond what the call already allows, and automatic acceptance of anything.
 
 ## 10. iced UI architecture
 

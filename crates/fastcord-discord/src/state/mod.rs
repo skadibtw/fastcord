@@ -47,9 +47,10 @@ use std::mem::size_of;
 
 use fastcord_model::{
     Channel, Guild, GuildEmoji, GuildMember, Message, OverwriteKind, PermissionOverwrite, Role,
-    Snowflake, ThreadMember, User, VoiceState,
+    Snowflake, StageInstance, ThreadMember, User, VoiceState,
 };
 
+use crate::stage::MAX_TOPIC_CHARS;
 pub use member_list::{MAX_ROWS, MemberList};
 pub use read::{MAX_MUTED, MAX_READ_ENTRIES, ReadStates, Unread};
 
@@ -131,7 +132,21 @@ fn member_bytes(member: &GuildMember) -> usize {
 }
 
 fn voice_bytes(state: &VoiceState) -> usize {
-    size_of::<VoiceState>() + state.session_id.capacity()
+    size_of::<VoiceState>() + state.session_id.capacity() + text(&state.request_to_speak_timestamp)
+}
+
+/// Most live Stage sessions kept per guild.
+const MAX_STAGES: usize = 64;
+
+fn stage_bytes(stage: &StageInstance) -> usize {
+    size_of::<StageInstance>() + stage.topic.capacity()
+}
+
+fn capped_stage(mut stage: StageInstance) -> StageInstance {
+    if stage.topic.chars().count() > MAX_TOPIC_CHARS {
+        stage.topic = stage.topic.chars().take(MAX_TOPIC_CHARS).collect();
+    }
+    stage
 }
 
 /// Dense channel metadata avoids paying for a full Channel in every unused
@@ -184,6 +199,7 @@ pub struct GuildEntry {
     emojis: Vec<GuildEmoji>,
     members: HashMap<Snowflake, MemberSlot>,
     voice: HashMap<Snowflake, VoiceState>,
+    stages: Vec<StageInstance>,
     lists: Vec<MemberList>,
     /// Cached sizes of the parts that change one element at a time.
     meta_bytes: usize,
@@ -204,6 +220,12 @@ impl GuildEntry {
             emojis: sorted_emojis(guild.emojis),
             members: HashMap::new(),
             voice: HashMap::new(),
+            stages: guild
+                .stage_instances
+                .into_iter()
+                .take(MAX_STAGES)
+                .map(capped_stage)
+                .collect(),
             lists: Vec::new(),
             meta_bytes: 0,
             members_bytes: 0,
@@ -289,6 +311,11 @@ impl GuildEntry {
         self.voice.get(&user)
     }
 
+    /// The live Stage session of a Stage channel, if one runs.
+    pub fn stage_instance(&self, channel: Snowflake) -> Option<&StageInstance> {
+        self.stages.iter().find(|stage| stage.channel_id == channel)
+    }
+
     /// The visible member list: the most recently updated one.
     pub fn member_list(&self) -> Option<&MemberList> {
         self.lists.iter().max_by_key(|list| list.updated)
@@ -320,6 +347,7 @@ impl GuildEntry {
             + self.roles.iter().map(role_bytes).sum::<usize>()
             + self.channels.iter().map(channel_bytes).sum::<usize>()
             + self.emojis.iter().map(emoji_bytes).sum::<usize>()
+            + self.stages.iter().map(stage_bytes).sum::<usize>()
             + self
                 .members
                 .values()
@@ -332,7 +360,8 @@ impl GuildEntry {
     fn recompute_meta(&mut self) {
         self.meta_bytes = self.roles.iter().map(role_bytes).sum::<usize>()
             + self.channels.iter().map(channel_bytes).sum::<usize>()
-            + self.emojis.iter().map(emoji_bytes).sum::<usize>();
+            + self.emojis.iter().map(emoji_bytes).sum::<usize>()
+            + self.stages.iter().map(stage_bytes).sum::<usize>();
     }
 
     fn put_member(&mut self, member: GuildMember, tick: u64) {
@@ -1217,6 +1246,8 @@ impl Store {
             }
             Dispatch::GuildRoleDelete(event) => self.role_remove(event, &mut changes),
             Dispatch::VoiceStateUpdate(update) => self.voice_update(*update, &mut changes),
+            Dispatch::StageInstanceUpsert(stage) => self.stage_event(stage, true, &mut changes),
+            Dispatch::StageInstanceDelete(stage) => self.stage_event(stage, false, &mut changes),
             // Voice connection state is owned by the voice layer.
             Dispatch::VoiceServerUpdate(_)
             | Dispatch::StreamCreate(_)
@@ -1424,6 +1455,12 @@ impl Store {
                 }
             }
             entry.channels = channels;
+            entry.stages = guild
+                .stage_instances
+                .into_iter()
+                .take(MAX_STAGES)
+                .map(capped_stage)
+                .collect();
             entry.trim_threads();
             entry.recompute_meta();
             for member in guild.members {
@@ -1646,6 +1683,42 @@ impl Store {
         });
         changes.guilds.insert(update.guild_id);
         changes.voice.insert(update.guild_id);
+    }
+
+    /// A Stage session started, changed or ended. Replayed or reordered events
+    /// settle on the last one: a delete of an unknown session changes nothing.
+    fn stage_event(&mut self, stage: StageInstance, present: bool, changes: &mut Changes) {
+        let guild = stage.guild_id;
+        let changed = self.with_guild(guild, |entry| {
+            let at = entry
+                .stages
+                .iter()
+                .position(|held| held.channel_id == stage.channel_id);
+            let changed = match (at, present) {
+                (Some(at), true) => {
+                    let stage = capped_stage(stage);
+                    let same = entry.stages[at] == stage;
+                    entry.stages[at] = stage;
+                    !same
+                }
+                (None, true) if entry.stages.len() < MAX_STAGES => {
+                    entry.stages.push(capped_stage(stage));
+                    true
+                }
+                (Some(at), false) => {
+                    entry.stages.remove(at);
+                    entry.stages.shrink_to_fit();
+                    true
+                }
+                _ => false,
+            };
+            entry.recompute_meta();
+            changed
+        });
+        if changed == Some(true) {
+            changes.guilds.insert(guild);
+            changes.voice.insert(guild);
+        }
     }
 
     fn voice_update(&mut self, update: VoiceStateUpdate, changes: &mut Changes) {

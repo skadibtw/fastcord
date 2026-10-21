@@ -707,6 +707,17 @@ Routes and events used, all from Discord's public documentation (Soundboard reso
 
 Nothing new on the wire: `GET/POST /channels/{id}/messages`, the opcode-37 channel subscription and `MESSAGE_CREATE/UPDATE/DELETE`, reactions and acknowledgements all use the voice or Stage channel's own ID. **Not captured from an official user client or exercised with the alt account.** Assumptions to verify: VIEW_CHANNEL (not CONNECT) is enough to read and, with SEND_MESSAGES, to write; READ_MESSAGE_HISTORY gates history with a 403 otherwise (handled like any channel: the chat shows its note and nothing is requested); the text-in-voice chat of a Stage channel behaves like a voice channel's; threads cannot be started in either.
 
+## Stage channels (#89)
+
+Routes and events from Discord's public documentation (Stage Instance and Voice resources). **None has been captured from an official user client or exercised with the alt account**; bot documentation does not by itself prove user-account behaviour, so every item below is unverified until the live gate in docs/TESTING.md is run.
+
+- Own seat, `PATCH /guilds/{guild}/voice-states/@me`: `{"channel_id", "request_to_speak_timestamp": "<ISO 8601 now>"}` raises a hand; `"request_to_speak_timestamp": null` cancels; `{"channel_id", "suppress": false}` becomes a speaker (needs MUTE_MEMBERS, or an invitation: the official acceptance shape is unverified); `{"channel_id", "suppress": true}` returns to the audience (always allowed). Answers 204.
+- Another person, `PATCH /guilds/{guild}/voice-states/{user}`: `{"channel_id", "suppress": false}` invites or approves, `true` moves a speaker to the audience (MUTE_MEMBERS; the person must be in the channel).
+- Session: `POST /stage-instances` `{"channel_id", "topic", "privacy_level": 2}` (guild-only), `PATCH /stage-instances/{channel}` `{"topic"}`, `DELETE /stage-instances/{channel}`; topic 1 to 120 characters, trimmed. No `send_start_notification` and no `guild_scheduled_event_id`.
+- Events: `VOICE_STATE_UPDATE` carries `suppress` and `request_to_speak_timestamp` (absent or `null` is no request); `STAGE_INSTANCE_CREATE`, `_UPDATE` and `_DELETE` carry `guild_id`, `channel_id`, `topic`; `GUILD_CREATE.stage_instances` is read when present. Whether a user session receives them without extra subscriptions, and whether READY/READY_SUPPLEMENTAL carry running sessions, is unverified.
+- Errors: 401 stops the account, 403 is shown as "not allowed", 404 as "the session no longer exists", 429 follows the shared scheduler; any other refusal shows Discord's code and message. A write is sent once and never repeated automatically; an ambiguous failure is shown and the state is left to the next dispatch.
+- Unverified assumptions: that a moderator's invite arrives as `suppress: false` on the invitee (so the audience member is moved to speakers without clicking) and not as a pending invitation that the invitee accepts; that the microphone must stay unsent while suppressed (the client enforces it regardless); that voice-state updates for a Stage carry no other field this client needs.
+
 ## Stream audio (milestone 35)
 
 Implemented by `fastcord-platform::loopback`, `fastcord-audio::soundshare`, `fastcord-media` (`MediaSender::send_soundshare`) and the app's `gateway::share_audio` / `gateway::stream_speaker`.
