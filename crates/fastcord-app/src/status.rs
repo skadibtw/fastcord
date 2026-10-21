@@ -178,6 +178,7 @@ impl State {
                 self.pending = false;
                 match result {
                     Ok(()) => {
+                        self.open = false;
                         let local = self.local.take().filter(|l| l.base == base);
                         let mut local = local.unwrap_or(Local {
                             base,
@@ -313,6 +314,33 @@ mod tests {
             base.clone(),
         );
         assert_eq!(state.custom(base.as_ref()), None);
+    }
+
+    #[test]
+    fn the_menu_closes_after_a_confirmed_choice_and_stays_on_failure() {
+        let mut state = State::default();
+        let base = Some(own(Status::Online, None));
+        for change in [
+            StatusChange::Status(Status::Idle),
+            StatusChange::Custom(Some("x".into())),
+            StatusChange::Custom(None),
+        ] {
+            state.open = true;
+            confirmed(&mut state, change, base.clone());
+            assert!(!state.open);
+        }
+        state.open = true;
+        let _ = state.update(
+            Event::Done(
+                state.epoch,
+                StatusChange::Status(Status::Dnd),
+                base.clone(),
+                Err(RestError::AuthenticationRequired),
+            ),
+            base.as_ref(),
+            &rest(),
+        );
+        assert!(state.open && state.notice.is_some());
     }
 
     #[test]
