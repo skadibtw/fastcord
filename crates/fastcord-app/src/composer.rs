@@ -806,6 +806,10 @@ pub fn update(
                 composer.notice = Some(REPLY_DELETED);
                 return;
             }
+            if !snapshot.can_tts && fastcord_discord::strip_tts(&composer.content.text()).0 {
+                composer.notice = Some(NO_TTS);
+                return;
+            }
             let open = snapshot.can_send && snapshot.channel_id == composer.channel;
             let Some(submission) = composer.submission(open, snapshot.outbox.len()) else {
                 return;
@@ -868,6 +872,7 @@ const EDIT_DISCARDED: &str =
 const EMPTY_EDIT: &str = "A message needs some text. Use Delete to remove it instead.";
 const NOT_QUEUED: &str =
     "Not sent: too many messages are waiting, or the connection has stopped. Your text is kept.";
+const NO_TTS: &str = "You cannot send text-to-speech messages in this channel.";
 const REPLY_DELETED: &str = "That message was deleted. Choose another message to reply to.";
 
 fn preview(content: &str) -> String {
@@ -1880,6 +1885,28 @@ mod tests {
     }
 
     #[test]
+    fn a_tts_draft_is_refused_without_the_permission_and_sent_with_it() {
+        use crate::gateway::Command;
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut composer = composer_in(A);
+        type_text(&mut composer, "/tts hello");
+        update(&mut composer, Event::Send, &open(A, Vec::new()), &bridge);
+        assert!(commands.try_recv().is_err());
+        assert_eq!(composer.notice, Some(NO_TTS));
+        assert_eq!(composer.content.text().trim(), "/tts hello", "kept");
+        let allowed = Snapshot {
+            can_tts: true,
+            ..open(A, Vec::new())
+        };
+        update(&mut composer, Event::Send, &allowed, &bridge);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Send { content, .. }) if content.trim() == "/tts hello"
+        ));
+    }
+
+    #[test]
     fn edit_moves_only_a_failed_message_back_and_then_discards_it() {
         use crate::gateway::Command;
         let bridge = NavigationBridge::new();
@@ -1959,6 +1986,7 @@ mod tests {
                 referenced_message: fastcord_model::Referenced::Unknown,
                 nonce: None,
                 call: None,
+                tts: false,
             }),
             revision: 1,
             own,

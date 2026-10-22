@@ -441,6 +441,15 @@ impl Tracker {
                         suppressed,
                         self.store.notifies_account(message),
                     );
+                    let me = self.store.current_user().map(|u| u.id);
+                    crate::speech::on_message(
+                        message,
+                        me,
+                        self.history.open_channel(),
+                        me.and_then(|me| self.store.presences().get(&me).map(|p| p.status)),
+                        muted,
+                        suppressed,
+                    );
                 }
                 let changes = self.store.apply(dispatch);
                 self.navigation_dirty = (relevant && !changes.is_empty())
@@ -4459,6 +4468,7 @@ mod bridge_tests {
         assert!(!panel.emoji_picker.request.open);
         panel.timeline = Arc::new(timeline::Snapshot {
             can_react: true,
+            can_tts: true,
             ..(*panel.timeline).clone()
         });
         panel.message_action(Event::React {

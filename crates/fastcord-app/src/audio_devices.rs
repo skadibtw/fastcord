@@ -69,6 +69,8 @@ pub struct Preferences {
     pub chat: crate::chat_prefs::Prefs,
     /// Open folders, folded categories and hidden muted channels, per account.
     pub organize: crate::organize::Local,
+    /// Text-to-speech mode, voice and rate.
+    pub speech: crate::speech::Prefs,
 }
 
 impl Default for Preferences {
@@ -88,6 +90,7 @@ impl Default for Preferences {
             interface_volume: crate::ui_sound::DEFAULT_VOLUME,
             chat: crate::chat_prefs::Prefs::default(),
             organize: crate::organize::Local::default(),
+            speech: crate::speech::Prefs::default(),
         }
     }
 }
@@ -397,6 +400,11 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
             .get("organize")
             .map(crate::organize::Local::from_json)
             .unwrap_or_default(),
+        // Older settings predate text-to-speech: never speak received messages.
+        speech: value
+            .get("speech")
+            .map(crate::speech::Prefs::from_json)
+            .unwrap_or_default(),
     })
 }
 
@@ -436,7 +444,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json(), "interface_sounds": prefs.interface_sounds, "interface_volume": prefs.interface_volume, "chat": prefs.chat.to_json(), "organize": prefs.organize.to_json()}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json(), "interface_sounds": prefs.interface_sounds, "interface_volume": prefs.interface_volume, "chat": prefs.chat.to_json(), "organize": prefs.organize.to_json(), "speech": prefs.speech.to_json()}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -578,6 +586,11 @@ mod tests {
                 let mut local = crate::organize::Local::default();
                 local.apply(7, crate::organize::Event::Folder(3));
                 local
+            },
+            speech: crate::speech::Prefs {
+                mode: crate::speech::TtsMode::SelectedChannel,
+                voice: Some("voice-id".to_owned()),
+                rate: 160,
             },
         };
         save_to(&path, &prefs).unwrap();

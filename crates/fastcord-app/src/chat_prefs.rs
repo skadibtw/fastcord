@@ -217,7 +217,111 @@ pub fn clock(hour: u8, minute: u8, hour12: bool) -> String {
     }
 }
 
-pub fn view<'a>(prefs: Prefs) -> Element<'a, Message> {
+/// A voice in the settings list; `id` is `None` for the system default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VoiceChoice {
+    id: Option<String>,
+    label: String,
+}
+
+impl std::fmt::Display for VoiceChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// What the text-to-speech rows of the panel show.
+pub struct SpeechView<'a> {
+    pub prefs: &'a crate::speech::Prefs,
+    /// Installed voices once listed.
+    pub voices: &'a [fastcord_platform::speech::Voice],
+    /// Why speech is unavailable, if it is.
+    pub error: Option<fastcord_platform::speech::SpeechError>,
+    pub speaking: bool,
+}
+
+fn speech_rows<'a>(speech: &SpeechView<'a>) -> Element<'a, Message> {
+    let default = VoiceChoice {
+        id: None,
+        label: "System default".to_owned(),
+    };
+    let mut choices = vec![default.clone()];
+    choices.extend(speech.voices.iter().map(|voice| VoiceChoice {
+        id: Some(voice.id.clone()),
+        label: format!("{} ({})", voice.name, voice.language),
+    }));
+    // A saved voice that is no longer installed stays visible, not silently replaced.
+    let selected = match &speech.prefs.voice {
+        None => default,
+        Some(id) => choices
+            .iter()
+            .find(|choice| choice.id.as_ref() == Some(id))
+            .cloned()
+            .unwrap_or_else(|| {
+                let missing = VoiceChoice {
+                    id: Some(id.clone()),
+                    label: "Saved voice (not installed)".to_owned(),
+                };
+                choices.push(missing.clone());
+                missing
+            }),
+    };
+    let prefs = speech.prefs.clone();
+    let for_voice = prefs.clone();
+    let for_rate = prefs.clone();
+    let note = match speech.error {
+        Some(error) => error.to_string(),
+        None => "Speech is produced on this computer; no text is sent to any service. Start a message with /tts to send it as a Discord text-to-speech message (needs the Send Text-to-Speech Messages permission).".to_owned(),
+    };
+    column![
+        text("Text-to-speech").size(18),
+        row![
+            text("Speak received text-to-speech messages"),
+            pick_list(crate::speech::TtsMode::ALL, Some(prefs.mode), move |mode| {
+                Message::SpeechPrefs(crate::speech::Prefs {
+                    mode,
+                    ..prefs.clone()
+                })
+            }),
+        ]
+        .spacing(12),
+        row![
+            text("Voice"),
+            pick_list(choices, Some(selected), move |choice: VoiceChoice| {
+                Message::SpeechPrefs(crate::speech::Prefs {
+                    voice: choice.id,
+                    ..for_voice.clone()
+                })
+            }),
+        ]
+        .spacing(12),
+        row![
+            text("Speaking rate"),
+            slider(
+                fastcord_platform::speech::MIN_RATE..=fastcord_platform::speech::MAX_RATE,
+                speech.prefs.rate,
+                move |rate| Message::SpeechPrefs(crate::speech::Prefs {
+                    rate,
+                    ..for_rate.clone()
+                })
+            )
+            .step(10u16)
+            .width(Length::Fill),
+            text(format!("{}%", speech.prefs.rate)),
+        ]
+        .spacing(12),
+        row![
+            button("Test voice").on_press(Message::SpeechTest),
+            button("Stop").on_press_maybe(speech.speaking.then_some(Message::StopSpeech)),
+        ]
+        .spacing(12),
+        text(note).size(12),
+    ]
+    .spacing(12)
+    .into()
+}
+
+pub fn view<'a>(prefs: Prefs, speech: &SpeechView<'a>) -> Element<'a, Message> {
     let set = move |edit: fn(&mut Prefs, bool)| {
         move |on| {
             let mut next = prefs;
@@ -252,6 +356,7 @@ pub fn view<'a>(prefs: Prefs) -> Element<'a, Message> {
                 }),
             ]
             .spacing(12),
+            speech_rows(speech),
             text("Tab moves between these controls and Space toggles them. The interface has no screen-reader support yet (the toolkit exposes no accessibility tree), and spellcheck is not available in the message box.").size(12),
             button("Close").on_press(Message::CloseChatSettings),
         ]

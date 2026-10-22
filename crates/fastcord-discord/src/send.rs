@@ -172,11 +172,22 @@ impl std::error::Error for ComposeError {}
 /// notifications and without that prefix. Returns whether it was there and the
 /// rest, untrimmed.
 pub fn strip_silent(content: &str) -> (bool, &str) {
+    strip_prefix_word(content, "@silent")
+}
+
+/// The "/tts" convention: a draft that starts with `/tts` (any case) followed
+/// by whitespace or nothing is a text-to-speech message, without that prefix.
+/// Whether the account may send one is the caller's check (`SEND_TTS_MESSAGES`).
+pub fn strip_tts(content: &str) -> (bool, &str) {
+    strip_prefix_word(content, "/tts")
+}
+
+fn strip_prefix_word<'a>(content: &'a str, prefix: &str) -> (bool, &'a str) {
     let content = content.trim_start();
-    const PREFIX: &str = "@silent";
-    match content.get(..PREFIX.len()) {
-        Some(head) if head.eq_ignore_ascii_case(PREFIX) => {
-            let rest = &content[PREFIX.len()..];
+    let prefix_len = prefix.len();
+    match content.get(..prefix_len) {
+        Some(head) if head.eq_ignore_ascii_case(prefix) => {
+            let rest = &content[prefix_len..];
             if rest.is_empty() || rest.starts_with(char::is_whitespace) {
                 return (true, rest);
             }
@@ -198,11 +209,13 @@ pub struct OutgoingMessage {
     forward: Option<ForwardSource>,
     poll: Option<PollDraft>,
     silent: bool,
+    tts: bool,
 }
 
 impl OutgoingMessage {
     /// Surrounding whitespace is trimmed, as Discord does; interior text is sent as written.
     pub fn new(content: &str, nonce: Nonce, mentions: MentionPolicy) -> Result<Self, ComposeError> {
+        let (tts, content) = strip_tts(content);
         let (silent, content) = strip_silent(content);
         let content = content.trim();
         if content.is_empty() {
@@ -221,6 +234,7 @@ impl OutgoingMessage {
             forward: None,
             poll: None,
             silent,
+            tts,
         })
     }
 
@@ -231,6 +245,7 @@ impl OutgoingMessage {
         nonce: Nonce,
         mentions: MentionPolicy,
     ) -> Result<Self, ComposeError> {
+        let (tts, content) = strip_tts(content);
         let (silent, content) = strip_silent(content);
         let content = content.trim();
         if content.is_empty() && files.is_empty() {
@@ -254,6 +269,7 @@ impl OutgoingMessage {
             forward: None,
             poll: None,
             silent,
+            tts,
         })
     }
 
@@ -269,6 +285,7 @@ impl OutgoingMessage {
             forward: None,
             poll: None,
             silent: false,
+            tts: false,
         }
     }
 
@@ -285,6 +302,7 @@ impl OutgoingMessage {
             forward: Some(source),
             poll: None,
             silent: false,
+            tts: false,
         }
     }
 
@@ -300,6 +318,7 @@ impl OutgoingMessage {
             forward: None,
             poll: Some(poll),
             silent: false,
+            tts: false,
         }
     }
 
@@ -320,7 +339,7 @@ impl OutgoingMessage {
             content: &self.content,
             nonce: self.nonce,
             enforce_nonce: true,
-            tts: false,
+            tts: self.tts,
             flags: if self.files.iter().any(|file| file.voice.is_some()) {
                 VOICE_MESSAGE_FLAG
             } else {
@@ -383,6 +402,7 @@ impl fmt::Debug for OutgoingMessage {
             .field("forward", &self.forward.is_some())
             .field("poll", &self.poll.is_some())
             .field("silent", &self.silent)
+            .field("tts", &self.tts)
             .finish()
     }
 }
@@ -693,6 +713,28 @@ mod tests {
                 .is_none()
         );
         assert!(!format!("{message:?}").contains("token/photo.png"));
+    }
+
+    #[test]
+    fn slash_tts_sets_the_tts_flag_and_is_removed_from_the_text() {
+        let body = |text: &str| {
+            let message = OutgoingMessage::new(text, Nonce(9), MentionPolicy::default()).unwrap();
+            serde_json::to_value(message.body()).unwrap()
+        };
+        let sent = body("  /TTS  hello there");
+        assert_eq!(
+            (sent["tts"].as_bool(), sent["content"].as_str()),
+            (Some(true), Some("hello there"))
+        );
+        assert_eq!(body("plain")["tts"], false);
+        // Only a leading word.
+        assert_eq!(body("/ttsx hi")["tts"], false);
+        assert_eq!(body("say /tts")["content"], "say /tts");
+        assert_eq!(body("/tts @silent hi")["flags"], 4096);
+        assert_eq!(
+            OutgoingMessage::new("/tts", Nonce(9), MentionPolicy::default()).err(),
+            Some(ComposeError::Empty)
+        );
     }
 
     #[test]

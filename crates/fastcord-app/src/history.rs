@@ -263,6 +263,8 @@ pub struct History {
     notice: Option<&'static str>,
     /// The open channel when the user may add reactions to it.
     reactable: Option<Snowflake>,
+    /// The open channel when the user may send TTS messages to it.
+    ttsable: Option<Snowflake>,
     /// Reactions of the user that Discord has not answered yet.
     reactions: Reactions,
     reaction_requests: FuturesUnordered<ReactionFuture>,
@@ -299,6 +301,11 @@ impl History {
 
     pub fn dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// The channel the timeline has open.
+    pub fn open_channel(&self) -> Option<Snowflake> {
+        self.channel
     }
 
     /// The account may send to `channel` (validated by the worker).
@@ -1226,6 +1233,11 @@ impl History {
         self.guild = guild_selection
             .filter(|selection| Some(selection.channel_id) == selected)
             .map(|selection| selection.guild_id);
+        self.ttsable = self.sendable.filter(|&channel| {
+            guild_selection.is_none_or(|selection| {
+                selection.channel_id != channel || selection.permissions.send_tts
+            })
+        });
         self.reactable = guild_selection
             .filter(|selection| {
                 Some(selection.channel_id) == selected && selection.permissions.add_reactions
@@ -1913,6 +1925,7 @@ impl History {
             notice: self.notice,
             interaction: self.interaction_view(channel),
             can_react: self.reactable == Some(channel),
+            can_tts: self.ttsable == Some(channel),
             names: Default::default(),
             candidates: Vec::new(),
             reaction_users: self.inspection.as_ref().map(|inspection| ReactionUsers {
@@ -2014,6 +2027,7 @@ mod tests {
             referenced_message: Referenced::Unknown,
             nonce: None,
             call: None,
+            tts: false,
         }
     }
 
@@ -3643,6 +3657,27 @@ mod tests {
         assert_eq!(history.snapshot().notice, Some(reactions::FULL));
         assert_eq!(history.reactions.len(), reactions::MAX_PENDING);
         assert_eq!(take_reactions(&mut history), reactions::MAX_PENDING);
+    }
+
+    #[test]
+    fn tts_is_offered_only_with_send_tts_messages() {
+        let rest = rest();
+        let (mut history, _) = reacting_history();
+        let mut navigation = navigation(true);
+        history.refresh(&rest, &navigation, &Request::default());
+        assert!(history.snapshot().can_send && !history.snapshot().can_tts);
+        navigation.selection.as_mut().unwrap().permissions.send_tts = true;
+        history.refresh(&rest, &navigation, &Request::default());
+        assert!(history.snapshot().can_tts);
+        // Without SEND_MESSAGES there is no sending at all, TTS included.
+        navigation
+            .selection
+            .as_mut()
+            .unwrap()
+            .permissions
+            .send_messages = false;
+        history.refresh(&rest, &navigation, &Request::default());
+        assert!(!history.snapshot().can_tts);
     }
 
     #[test]

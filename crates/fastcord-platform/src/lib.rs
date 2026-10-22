@@ -8,6 +8,7 @@ pub mod loopback;
 pub mod notify;
 pub mod realtime;
 pub mod shortcut;
+pub mod speech;
 
 use std::collections::HashMap;
 use std::fmt;

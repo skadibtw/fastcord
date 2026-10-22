@@ -601,6 +601,17 @@ Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, wind
   - [ ] The time left matches the official client's expiry.
   - [ ] `GET /discoverable-guilds?offset=0&limit=24` answers for a user account and the response shape matches `docs/PROTOCOL.md`; Show more loads pages 2 to 4 and then stops; icons, descriptions and counts show; a joined server reads Joined; a 403/404 shows an error and not a crash.
 
+### Text-to-speech and read-aloud (#104)
+
+- **Automated:** `speech::tests` (platform: queue bound and text clip, Stop; app: plain text, announcements, which received messages are spoken under each setting, replay filter, settings round trip), `send::tests` (`/tts` flag and prefix removal), `history::tests` (`can_tts` follows SEND_TTS_MESSAGES), `composer::tests` (refused without the permission), `audio_devices` persistence round trip including `speech`. `speech::tests::manual_native_synthesizer_speaks` is `#[ignore]`; run it on Windows with sound.
+- **Outstanding gates (manual, unchecked):**
+  - [ ] Windows: the voice list shows the installed voices, Test voice speaks with the chosen voice and rate, Stop silences at once and clears the queue.
+  - [ ] Read aloud on a message with mentions, a spoiler, a code block and custom emoji sounds right; Stop reading appears while speaking.
+  - [ ] Alt account: a `/tts hello` message is sent with `tts: true` and the official client reads it (where the channel permits and the user's own setting is on); without SEND_TTS_MESSAGES the composer refuses it.
+  - [ ] Alt account: a received TTS message is spoken under "All channels", only in the open channel under "For the selected channel only", never under "Never", and not when the channel is muted or the status is Do Not Disturb.
+  - [ ] Logging out or switching accounts silences narration immediately.
+  - [ ] Linux and macOS report that speech is unsupported instead of failing silently.
+
 ### Chat & accessibility preferences (#103)
 
 - **Automated:** `chat_prefs::tests` (defaults and round trip, scale clamping, compact row layout, spoiler and animation gating with reduced motion over autoplay, 12h/24h clock), `audio_devices` persistence round trip including `chat`, `timeline::tests` 12-hour timestamps, `style::tests` contrast ratios of the high-contrast palette.

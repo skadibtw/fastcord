@@ -250,6 +250,7 @@ impl SnapshotMessage {
             referenced_message: Referenced::Unknown,
             nonce: None,
             call: None,
+            tts: false,
             mention_everyone: false,
             pinned: false,
             ..parent.clone()
@@ -339,6 +340,9 @@ pub struct Message {
     /// How a call message (type 3) ended; absent on every other type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call: Option<MessageCall>,
+    /// Sent as a text-to-speech message (`tts`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tts: bool,
 }
 
 /// Longest sticker name kept; Discord allows 30 characters.
@@ -938,6 +942,7 @@ mod tests {
             referenced_message: Referenced::Unknown,
             nonce: None,
             call: None,
+            tts: false,
         }
     }
 

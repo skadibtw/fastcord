@@ -179,6 +179,8 @@ pub struct PermissionSummary {
     pub manage_guild: bool,
     /// MANAGE_CHANNELS: may list and revoke this channel's invites.
     pub manage_channel: bool,
+    /// SEND_TTS_MESSAGES: may send a message flagged `tts`.
+    pub send_tts: bool,
 }
 
 impl From<Permissions> for PermissionSummary {
@@ -200,6 +202,7 @@ impl From<Permissions> for PermissionSummary {
             create_invite: permissions.contains(Permissions::CREATE_INSTANT_INVITE),
             manage_guild: permissions.contains(Permissions::MANAGE_GUILD),
             manage_channel: permissions.contains(Permissions::MANAGE_CHANNELS),
+            send_tts: permissions.contains(Permissions::SEND_TTS_MESSAGES),
         }
     }
 }

@@ -60,6 +60,7 @@ mod search;
 mod shortcuts;
 mod slash;
 mod soundboard;
+mod speech;
 mod stage;
 mod status;
 mod sticker;
@@ -158,6 +159,8 @@ struct App {
     audio_preferences: audio_devices::Preferences,
     audio_settings: audio_devices::Settings,
     chat_settings_open: bool,
+    /// Installed speech voices, listed when the chat settings open.
+    speech_voices: Vec<fastcord_platform::speech::Voice>,
     audio_saving: Option<audio_devices::Preferences>,
     /// The camera picker; probed only when the user asks.
     camera_list: gateway::CameraList,
@@ -325,6 +328,10 @@ enum Message {
     OpenChatSettings,
     CloseChatSettings,
     ChatPrefs(chat_prefs::Prefs),
+    SpeechPrefs(speech::Prefs),
+    SpeechVoices(Vec<fastcord_platform::speech::Voice>),
+    SpeechTest,
+    StopSpeech,
     RefreshAudioDevices,
     AudioDevicesListed(audio_devices::Inventory),
     Initialized(audio_devices::Preferences, Result<StoreReady, StoreError>),
@@ -443,6 +450,7 @@ impl App {
                 audio_preferences: audio_devices::Preferences::default(),
                 audio_settings: audio_devices::Settings::default(),
                 chat_settings_open: false,
+                speech_voices: Vec::new(),
                 audio_saving: None,
                 camera_list: gateway::CameraList::default(),
                 shortcuts: shortcuts::Runtime::default(),
@@ -514,6 +522,8 @@ impl App {
             self.friends.purge();
             self.member_menu.reset();
             self.status.purge();
+            // Narration ends with the session (logout, account switch).
+            speech::stop();
         }
         let mut task = self.handle(message);
         if let Phase::Account { gateway, .. } = &self.phase {
@@ -922,6 +932,7 @@ impl App {
                 self.audio_preferences = preferences;
                 chat_prefs::apply(self.audio_preferences.chat);
                 organize::publish(&self.audio_preferences.organize);
+                speech::apply(&self.audio_preferences.speech);
                 self.configure_ui_sound();
                 self.shortcuts.rebuild(&self.audio_preferences.voice_input);
                 return self.handle(Message::StoreReady(store));
@@ -1019,7 +1030,22 @@ impl App {
                     return self.save_audio_preferences();
                 }
             }
-            Message::OpenChatSettings => self.chat_settings_open = true,
+            Message::OpenChatSettings => {
+                self.chat_settings_open = true;
+                return Task::perform(speech::load_voices(), |voices| {
+                    Message::SpeechVoices(voices.unwrap_or_default())
+                });
+            }
+            Message::SpeechVoices(voices) => self.speech_voices = voices,
+            Message::SpeechPrefs(prefs) => {
+                speech::apply(&prefs);
+                self.audio_preferences.speech = prefs;
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::SpeechTest => speech::speak("This is how messages will sound.".to_owned()),
+            Message::StopSpeech => speech::stop(),
             Message::CloseChatSettings => self.chat_settings_open = false,
             Message::ChatPrefs(prefs) => {
                 self.audio_preferences.chat = prefs;
@@ -2186,6 +2212,17 @@ impl App {
                                 return iced::clipboard::write(source.to_owned());
                             }
                         }
+                        timeline::Event::ReadAloud {
+                            channel_id,
+                            message_id,
+                        } => {
+                            if let Some(message) =
+                                timeline::message_of(&gateway.timeline, channel_id, message_id)
+                            {
+                                speech::speak(speech::announcement(message));
+                            }
+                        }
+                        timeline::Event::StopReading => speech::stop(),
                         timeline::Event::Forward {
                             channel_id,
                             message_id,
@@ -4111,7 +4148,16 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         if self.chat_settings_open {
             return center(scrollable(
-                column![chat_prefs::view(self.audio_preferences.chat)].padding(12),
+                column![chat_prefs::view(
+                    self.audio_preferences.chat,
+                    &chat_prefs::SpeechView {
+                        prefs: &self.audio_preferences.speech,
+                        voices: &self.speech_voices,
+                        error: speech::error(),
+                        speaking: speech::speaking(),
+                    },
+                )]
+                .padding(12),
             ))
             .into();
         }
@@ -5899,6 +5945,7 @@ mod tests {
             channel_id: Some(channel),
             can_send: true,
             can_react: true,
+            can_tts: true,
             ..timeline::Snapshot::default()
         });
         gateway.composer.select(Some(channel));

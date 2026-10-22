@@ -356,6 +356,8 @@ pub struct Snapshot {
     pub deleted: Vec<Snowflake>,
     /// The user may react here (validated by the worker): rows offer React.
     pub can_react: bool,
+    /// The user may send a `/tts` message here (SEND_TTS_MESSAGES, or a DM).
+    pub can_tts: bool,
     /// Who reacted with one emoji, loaded only because the user asked.
     pub reaction_users: Option<ReactionUsers>,
     /// Names of the roles and channels the rows mention.
@@ -455,6 +457,13 @@ pub enum Event {
         channel_id: Snowflake,
         message_id: Snowflake,
     },
+    /// Speak the message with the local synthesizer.
+    ReadAloud {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    /// Silence the synthesizer.
+    StopReading,
     /// Copy the message's `discord.com/channels/…` link.
     CopyLink {
         channel_id: Snowflake,
@@ -695,6 +704,20 @@ pub fn copy_text(snapshot: &Snapshot, channel: Snowflake, message: Snowflake) ->
         .iter()
         .find(|row| row.message.id == message)
         .map(content)
+}
+
+/// The loaded message of the open channel, for read-aloud.
+pub fn message_of(
+    snapshot: &Snapshot,
+    channel: Snowflake,
+    message: Snowflake,
+) -> Option<&fastcord_model::Message> {
+    (snapshot.channel_id == Some(channel)).then_some(())?;
+    snapshot
+        .rows
+        .iter()
+        .find(|row| row.message.id == message)
+        .map(|row| &*row.message)
 }
 
 /// What a report says about a still-loaded message of someone else.
@@ -968,6 +991,8 @@ fn message_tool(label: &'static str, event: Event) -> Element<'static, Event> {
         "Hide embeds" => Icon::EyeOff,
         "Report" => Icon::Report,
         "Back" => Icon::ChevronLeft,
+        "Read aloud" => Icon::Speaker,
+        "Stop reading" => Icon::Stop,
         _ => Icon::More,
     };
     icons::action(icons::Action {
@@ -1500,6 +1525,15 @@ fn message_view<'a>(
                 },
             ))
             .push(message_tool("Copy ID", Event::CopyId { message_id }));
+        if show_copy {
+            actions = actions.push(message_tool(
+                "Read aloud",
+                Event::ReadAloud {
+                    channel_id,
+                    message_id,
+                },
+            ));
+        }
         if show_embeds {
             let suppressed = message.embeds_suppressed();
             actions = actions.push(message_tool(
@@ -1590,6 +1624,9 @@ fn message_view<'a>(
                 message_id,
             },
         ));
+    }
+    if crate::speech::speaking() {
+        actions = actions.push(message_tool("Stop reading", Event::StopReading));
     }
     actions = actions.push(message_tool("More", Event::More(Some(message_id))));
     hover(base, actions_overlay(actions))

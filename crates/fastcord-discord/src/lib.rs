@@ -133,7 +133,7 @@ pub use search::{
 pub use secret::UserToken;
 pub use send::{
     ComposeError, ForwardSource, MAX_CONTENT_CHARS, MentionPolicy, Nonce, NonceGenerator,
-    OutgoingMessage, ReplyTo, SendError,
+    OutgoingMessage, ReplyTo, SendError, strip_tts,
 };
 pub use soundboard::{GUILD_SOUNDS, MAX_SOUND_NAME_CHARS, SoundboardSound};
 pub use stage::{MAX_TOPIC_CHARS, StageAction, StagePermissions, iso8601, topic as stage_topic};
