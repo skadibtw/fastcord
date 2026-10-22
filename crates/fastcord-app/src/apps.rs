@@ -865,6 +865,9 @@ mod tests {
                 rules_channel: None,
                 public_updates_channel: None,
                 verification_level: 0,
+                mfa_required: false,
+                safety_alerts_channel: None,
+                raid_alerts_disabled: false,
                 features: Vec::new(),
             }),
             ..NavigationSnapshot::default()

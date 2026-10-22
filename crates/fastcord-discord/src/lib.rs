@@ -16,6 +16,7 @@ mod announce;
 mod apps;
 mod assets;
 mod attachment;
+mod automod;
 mod call;
 mod clock;
 mod community_admin;
@@ -77,6 +78,14 @@ pub use assets::{
     MIN_TAGS_CHARS, SoundFile, StickerFile, emoji_name, expression_limits,
 };
 pub use attachment::{RefreshedAttachmentUrl, decode_waveform};
+pub use automod::{
+    AutoModAction, AutoModChange, AutoModFeed, AutoModRequestError, AutoModRule, CREATABLE,
+    MAX_ALLOW_KEYWORD, MAX_ALLOW_PRESET, MAX_BLOCK_MESSAGE_CHARS, MAX_EXEMPT_CHANNELS,
+    MAX_EXEMPT_ROLES, MAX_KEYWORD_CHARS, MAX_KEYWORDS, MAX_MENTION_LIMIT, MAX_REGEX,
+    MAX_REGEX_CHARS, MAX_RULE_NAME_CHARS, MAX_RULES, MAX_TIMEOUT_SECONDS, PRESETS, RuleError,
+    TRIGGER_KEYWORD, TRIGGER_MENTION, TRIGGER_PRESET, TRIGGER_PROFILE, TRIGGER_SPAM,
+    decode_change as decode_automod_change, has_keywords, trigger_limit, trigger_name,
+};
 pub use call::CallSignal;
 pub use clock::{Clock, MonotonicClock};
 pub use community_admin::{
@@ -100,7 +109,7 @@ pub use guild_admin::{
     GuildEdit, GuildIcon, MAX_CHANNEL_NAME_CHARS, MAX_CHANNEL_TOPIC_CHARS,
     MAX_GUILD_DESCRIPTION_CHARS, MAX_GUILD_NAME_CHARS, MAX_PLACEMENTS, MAX_VOICE_USER_LIMIT,
     MIN_BITRATE, MIN_GUILD_NAME_CHARS, NOTIFICATION_LEVELS, NewChannel, Placement, SLOWMODE,
-    VoiceRegion, bitrate_ceiling, needs_community, parse_regions,
+    VERIFICATION_CHOICES, VoiceRegion, bitrate_ceiling, needs_community, parse_regions,
 };
 pub use inbox::{
     MENTIONS_PAGE_SIZE, MentionFilter, MentionsPage, MuteFor, NOTIFICATION_WRITES_ENABLED,

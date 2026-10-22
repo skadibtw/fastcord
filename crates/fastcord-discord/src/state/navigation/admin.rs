@@ -157,6 +157,10 @@ pub struct GuildAdmin {
     pub verification_level: u8,
     /// Feature flags as the Gateway reported them.
     pub features: Vec<String>,
+    /// Moderation needs two-factor authentication (`mfa_level` 1).
+    pub mfa_required: bool,
+    pub safety_alerts_channel: Option<Snowflake>,
+    pub raid_alerts_disabled: bool,
     pub can_manage_guild: bool,
     /// Guild-wide MANAGE_CHANNELS: create channels and reorder them.
     pub can_manage_channels: bool,
@@ -477,6 +481,9 @@ pub fn guild_admin(store: &Store, guild_id: Snowflake) -> Option<GuildAdmin> {
         public_updates_channel: settings.public_updates_channel_id,
         verification_level: settings.verification_level,
         features: settings.features.clone(),
+        mfa_required: settings.mfa_level == 1,
+        safety_alerts_channel: settings.safety_alerts_channel_id,
+        raid_alerts_disabled: settings.raid_alerts_disabled,
         can_manage_guild: base.contains(Permissions::MANAGE_GUILD),
         can_manage_channels: base.contains(Permissions::MANAGE_CHANNELS),
         channels: ordered,

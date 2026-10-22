@@ -365,6 +365,8 @@ struct Tracker {
     typing: TypingTable,
     /// The typing line changed: the snapshot is rebuilt.
     typing_dirty: bool,
+    /// AutoMod rule changes the Gateway reported (issue #96).
+    automod: fastcord_discord::AutoModFeed,
     clock: MonotonicClock,
 }
 
@@ -400,9 +402,13 @@ impl Tracker {
                 ConnectionState::Stopped(reason) => GatewayStatus::Stopped(reason),
             }),
             dispatch @ GatewayEvent::Dispatch { .. } => {
+                let automod_before = self.automod.latest();
                 if let GatewayEvent::Dispatch { event, .. } = &dispatch {
                     self.history.apply(event);
                     self.apply_typing(event);
+                    if let Dispatch::AutoModeration(change) = event {
+                        self.automod.push((**change).clone());
+                    }
                 }
                 let relevant = !matches!(
                     &dispatch,
@@ -459,6 +465,7 @@ impl Tracker {
                 let changes = self.store.apply(dispatch);
                 self.navigation_dirty = (relevant && !changes.is_empty())
                     || changes.read
+                    || self.automod.latest() != automod_before
                     || self.store.limit_exceeded();
                 if self.navigation_dirty {
                     self.navigation.reconcile(&self.store);
@@ -3133,6 +3140,7 @@ impl Worker {
                 fastcord_discord::state::navigation::MAX_QUICK_RESULTS,
             )
         });
+        navigation.automod = self.tracker.automod.clone();
         navigation.admin = request.admin.and_then(|guild| {
             fastcord_discord::state::navigation::guild_admin(&self.tracker.store, guild)
         });

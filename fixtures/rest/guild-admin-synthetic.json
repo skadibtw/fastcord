@@ -10,12 +10,15 @@
       "name": "Synthetic server",
       "owner_id": "175928847299117063",
       "description": "A synthetic description",
-      "features": ["COMMUNITY", "NEWS"],
+      "features": ["COMMUNITY", "NEWS", "RAID_ALERTS_DISABLED"],
       "system_channel_id": "9101",
       "afk_channel_id": null,
       "afk_timeout": 900,
       "default_message_notifications": 1,
-      "explicit_content_filter": 2
+      "explicit_content_filter": 2,
+      "verification_level": 3,
+      "mfa_level": 1,
+      "safety_alerts_channel_id": "9101"
     },
     "channels": [
       {"id": "9100", "type": 4, "name": "Talk", "position": 0},
@@ -34,6 +37,9 @@
     "afk_channel_id": "9102",
     "afk_timeout": 300,
     "default_message_notifications": 0,
-    "explicit_content_filter": 0
+    "explicit_content_filter": 0,
+    "verification_level": 1,
+    "mfa_level": 0,
+    "safety_alerts_channel_id": null
   }
 }

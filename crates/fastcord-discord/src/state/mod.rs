@@ -1369,6 +1369,8 @@ impl Store {
             | Dispatch::VoiceChannelSound(_)
             | Dispatch::SoundboardChanged(_)
             | Dispatch::StickersChanged(_)
+            // AutoMod rules belong to the open panel, not the reducer.
+            | Dispatch::AutoModeration(_)
             // Typing is transient and lives outside the store.
             | Dispatch::TypingStart(_) => {}
         }

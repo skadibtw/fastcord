@@ -8,6 +8,7 @@ mod assets;
 mod attachment_ui;
 mod attachments;
 mod audio_devices;
+mod automod;
 mod av_player;
 mod avatars;
 mod call_layout;
@@ -247,6 +248,7 @@ struct App {
     apps: apps::State,
     community: community::State,
     assets: assets::State,
+    automod: automod::State,
     discover: discover::State,
     onboarding: onboarding::State,
     events: scheduled_events::State,
@@ -450,6 +452,7 @@ enum Message {
     Apps(apps::Event),
     Community(community::Event),
     Assets(assets::Event),
+    AutoMod(automod::Event),
     Discover(discover::Event),
     Onboarding(onboarding::Event),
     Events(scheduled_events::Event),
@@ -563,6 +566,7 @@ impl App {
                 apps: apps::State::default(),
                 community: community::State::default(),
                 assets: assets::State::default(),
+                automod: automod::State::default(),
                 discover: discover::State::default(),
                 onboarding: onboarding::State::default(),
                 events: scheduled_events::State::default(),
@@ -639,13 +643,15 @@ impl App {
         if let Phase::Account { gateway, .. } = &self.phase {
             gateway.controls.quick_query(self.switcher.wanted());
             self.guild_admin.sync(&gateway.navigation);
+            self.automod.observe(&gateway.navigation.automod);
             gateway.controls.admin_guild(
                 self.guild_admin
                     .wanted()
                     .or(self.announce.wanted_guild())
                     .or(self.moderation.wanted())
                     .or(self.apps.wanted_guild())
-                    .or(self.community.wanted()),
+                    .or(self.community.wanted())
+                    .or(self.automod.wanted()),
             );
             gateway
                 .controls
@@ -1758,6 +1764,7 @@ impl App {
                 return self.guild_admin_event(event);
             }
             Message::Moderation(event) => return self.moderation_event(event),
+            Message::AutoMod(event) => return self.automod_event(event),
             Message::Discover(event) => return self.discover_event(event),
             Message::Onboarding(event) => return self.onboarding_event(event),
             Message::Events(event) => return self.events_event(event),
@@ -3154,6 +3161,7 @@ impl App {
         self.apps.clear();
         self.community.clear();
         self.assets.clear();
+        self.automod.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -3341,6 +3349,7 @@ impl App {
         self.apps.clear();
         self.community.clear();
         self.assets.clear();
+        self.automod.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -4150,6 +4159,13 @@ impl App {
                 .update(event, &gateway.navigation, &session.client);
             return self.invite_event(invite::Event::AskLeave(guild));
         }
+        if let guild_admin::Event::AutoMod(guild) = event {
+            // The menu hands over to the AutoMod panel.
+            let _ = self
+                .guild_admin
+                .update(event, &gateway.navigation, &session.client);
+            return self.automod_event(automod::Event::Open(guild));
+        }
         if let guild_admin::Event::Bans(guild) | guild_admin::Event::Audit(guild) = event {
             // The menu hands over to the moderation panels.
             let audit = matches!(event, guild_admin::Event::Audit(_));
@@ -4195,6 +4211,27 @@ impl App {
             ));
         }
         task.map(Message::Moderation)
+    }
+
+    fn automod_event(&mut self, event: automod::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = automod::State::is_rejected(&event);
+        let task = self
+            .automod
+            .update(event, &gateway.navigation, &session.client);
+        if rejected {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::AutoMod)
     }
 
     fn identity_event(&mut self, event: profile_edit::Event) -> Task<Message> {
@@ -5048,6 +5085,9 @@ impl App {
             }
             if let Some(panel) = assets::view(&self.assets, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::Assets));
+            }
+            if let Some(panel) = automod::view(&self.automod, &gateway.navigation) {
+                banner_column = banner_column.push(panel.map(Message::AutoMod));
             }
             if let Some(panel) = invite::view(&self.invite, localtime::now()) {
                 banner_column = banner_column.push(panel.map(Message::Invite));

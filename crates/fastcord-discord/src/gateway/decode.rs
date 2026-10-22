@@ -128,6 +128,10 @@ struct GuildProperties {
     verification_level: Option<u8>,
     #[serde(default)]
     premium_tier: Option<u8>,
+    #[serde(default)]
+    mfa_level: Option<u8>,
+    #[serde(default)]
+    safety_alerts_channel_id: Option<Snowflake>,
 }
 
 #[derive(Deserialize)]
@@ -165,6 +169,10 @@ struct GuildWire {
     verification_level: Option<u8>,
     #[serde(default)]
     premium_tier: Option<u8>,
+    #[serde(default)]
+    mfa_level: Option<u8>,
+    #[serde(default)]
+    safety_alerts_channel_id: Option<Snowflake>,
     #[serde(default, deserialize_with = "null_default")]
     roles: Vec<Role>,
     #[serde(default, deserialize_with = "null_default")]
@@ -229,6 +237,10 @@ struct GuildUpdateWire {
     verification_level: Option<u8>,
     #[serde(default)]
     premium_tier: Option<u8>,
+    #[serde(default)]
+    mfa_level: Option<u8>,
+    #[serde(default)]
+    safety_alerts_channel_id: Option<Snowflake>,
 }
 
 #[derive(Deserialize)]
@@ -626,6 +638,12 @@ impl Normalizer {
                     wire.verification_level
                         .or(p.and_then(|p| p.verification_level)),
                     wire.premium_tier.or(p.and_then(|p| p.premium_tier)),
+                    Safety {
+                        mfa_level: wire.mfa_level.or(p.and_then(|p| p.mfa_level)),
+                        alerts_channel: wire
+                            .safety_alerts_channel_id
+                            .or(p.and_then(|p| p.safety_alerts_channel_id)),
+                    },
                 )
             },
         }))
@@ -1041,6 +1059,12 @@ fn decode_guild_create(raw: &str) -> Result<GuildCreate, Malformed> {
     })
 }
 
+/// The safety fields of a guild object (issue #96).
+struct Safety {
+    mfa_level: Option<u8>,
+    alerts_channel: Option<Snowflake>,
+}
+
 /// The settings of a guild object whose fields sit at the top level or, for
 /// the user-client form, under `properties`. Texts are capped.
 #[allow(clippy::too_many_arguments)]
@@ -1056,6 +1080,7 @@ fn guild_settings(
     public_updates_channel_id: Option<Snowflake>,
     verification_level: Option<u8>,
     premium_tier: Option<u8>,
+    safety: Safety,
 ) -> GuildSettings {
     let mut description = description;
     if let Some(text) = &mut description
@@ -1085,6 +1110,9 @@ fn guild_settings(
             .cloned()
             .collect(),
         premium_tier,
+        mfa_level: safety.mfa_level.unwrap_or(0),
+        safety_alerts_channel_id: safety.alerts_channel,
+        raid_alerts_disabled: features.iter().any(|f| f == "RAID_ALERTS_DISABLED"),
     }
 }
 
@@ -1115,6 +1143,10 @@ fn decode_guild_update(raw: &str) -> Result<GuildUpdate, Malformed> {
                 wire.public_updates_channel_id,
                 wire.verification_level,
                 wire.premium_tier,
+                Safety {
+                    mfa_level: wire.mfa_level,
+                    alerts_channel: wire.safety_alerts_channel_id,
+                },
             )
         }),
     })
@@ -1550,6 +1582,14 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "EMBEDDED_ACTIVITY_UPDATE" | "EMBEDDED_ACTIVITY_UPDATE_V2" => {
             return match decode_activity(raw) {
                 Some(update) => Decoded::Event(Dispatch::EmbeddedActivity(update)),
+                None => Decoded::Malformed,
+            };
+        }
+        "AUTO_MODERATION_RULE_CREATE"
+        | "AUTO_MODERATION_RULE_UPDATE"
+        | "AUTO_MODERATION_RULE_DELETE" => {
+            return match crate::decode_automod_change(raw, name == "AUTO_MODERATION_RULE_DELETE") {
+                Some(change) => Decoded::Event(Dispatch::AutoModeration(Box::new(change))),
                 None => Decoded::Malformed,
             };
         }
@@ -2499,6 +2539,31 @@ mod tests {
         ));
         assert!(matches!(
             decode_dispatch("GUILD_STICKERS_UPDATE", r#"{"stickers":[]}"#),
+            Decoded::Malformed
+        ));
+    }
+
+    #[test]
+    fn automod_rule_events_decode_and_a_rule_without_a_guild_is_malformed() {
+        let raw = r#"{"id":"4","guild_id":"3","name":"r","trigger_type":3,"actions":[{"type":1}],"enabled":true}"#;
+        for name in ["AUTO_MODERATION_RULE_CREATE", "AUTO_MODERATION_RULE_UPDATE"] {
+            assert!(
+                matches!(
+                    decode_dispatch(name, raw),
+                    Decoded::Event(Dispatch::AutoModeration(change))
+                        if matches!(*change, crate::AutoModChange::Upsert(ref rule)
+                            if rule.id == id(4) && rule.guild == id(3))
+                ),
+                "{name}"
+            );
+        }
+        assert!(matches!(
+            decode_dispatch("AUTO_MODERATION_RULE_DELETE", raw),
+            Decoded::Event(Dispatch::AutoModeration(change))
+                if *change == crate::AutoModChange::Delete { guild: id(3), id: id(4) }
+        ));
+        assert!(matches!(
+            decode_dispatch("AUTO_MODERATION_RULE_UPDATE", r#"{"id":"4"}"#),
             Decoded::Malformed
         ));
     }

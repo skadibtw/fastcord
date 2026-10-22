@@ -824,3 +824,13 @@ Manual (Windows, alt account only, not run offline):
   - [ ] Ending the Activity in the official client removes both within a few seconds; no join or launch control exists.
   - [ ] Record whether `EMBEDDED_ACTIVITY_UPDATE`/`_V2` reaches this client at all and the real field names.
   - [ ] Native Activity join/leave interoperation (the rest of #102) remains outstanding.
+### AutoMod and communication safety (#96)
+
+- **Automated:** `fastcord-discord` `automod::tests` (parsing of `fixtures/rest/automod-rules.json` with unknown keys and actions, create/edit bodies, every Discord limit at and over its edge, per-kind counts, the bounded feed), `gateway::decode` (rule events, malformed payloads), `guild_admin::tests` (verification and alerts channel bodies), `state::navigation` (new settings from the user-form guild and `GUILD_UPDATE`), `fastcord-app` `automod::tests` (permission gating, one write in flight, Confirm, Discord's refusal text, 403/404/429/2FA/ambiguous, stale and replayed events), `guild_admin::tests` (safety edits, owner-only two-factor), `outbox::tests` (200000/200001) and `timeline::tests` (type 24).
+- **Outstanding gates (alt account only, unchecked, unverified routes and events):**
+  - [ ] Create a keyword, spam, word list and mention spam rule; each appears in the official client with the same name, actions and exemptions; the 7th keyword rule and a second mention rule are refused with Discord's text.
+  - [ ] Edit a rule created in the official client that has options this client does not show; its other settings are unchanged afterwards. Switch it off and on; delete it with Confirm.
+  - [ ] Change rules in the official client with the panel open: the list follows `AUTO_MODERATION_RULE_*` (confirm that user accounts receive them).
+  - [ ] Send a message that a rule blocks: the outbox shows the AutoMod reason, keeps the text, resends nothing by itself; check whether the answer names the rule. Check the exact error codes.
+  - [ ] Read an AutoMod alert in the alert channel: confirm the embed field names (`rule_name`) and author.
+  - [ ] Change the verification level and safety alerts channel in server settings and check nothing else changed; the owner's Require 2FA either applies or shows Discord's two-factor demand without bypassing it.

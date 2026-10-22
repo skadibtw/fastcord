@@ -2250,10 +2250,28 @@ fn placeholder(message: &Message) -> Option<String> {
         18 => "A thread was created.".to_owned(),
         21 => "The message this thread was started from.".to_owned(),
         22 => "An invite reminder was posted.".to_owned(),
-        24 => "AutoMod flagged a message.".to_owned(),
+        24 => automod_summary(message),
         46 => "A poll has ended.".to_owned(),
         kind => format!("Message type {kind} is not displayed by this client."),
     })
+}
+
+/// An AutoMod alert (type 24): the rule and the person, read from the alert's
+/// embed fields (`rule_name`) and author; the flagged text is the embed's own
+/// description, shown with it.
+fn automod_summary(message: &Message) -> String {
+    let embed = message.embeds.first();
+    let rule = embed
+        .and_then(|e| e.fields.iter().find(|f| f.name == "rule_name"))
+        .map(|f| f.value.as_str())
+        .filter(|rule| !rule.is_empty());
+    let user = embed
+        .and_then(|e| e.author.as_ref())
+        .map_or_else(|| message.author.display_name(), |a| a.name.as_str());
+    match rule {
+        Some(rule) => format!("AutoMod flagged a message from {user} (rule: {rule})."),
+        None => format!("AutoMod flagged a message from {user}."),
+    }
 }
 
 /// A call message: still going, missed (nobody but the caller joined), or over.
@@ -2727,6 +2745,27 @@ mod tests {
             placeholder(&bare).as_deref(),
             Some("Alt Account called. The call has ended.")
         );
+        bare.kind = 24;
+        assert_eq!(
+            placeholder(&bare).as_deref(),
+            Some("AutoMod flagged a message from Alt Account.")
+        );
+        bare.embeds = vec![fastcord_model::Embed {
+            author: Some(fastcord_model::EmbedText {
+                name: "Someone".to_owned(),
+            }),
+            fields: vec![fastcord_model::EmbedField {
+                name: "rule_name".to_owned(),
+                value: "Friendly words".to_owned(),
+                inline: false,
+            }],
+            ..fastcord_model::Embed::default()
+        }];
+        assert_eq!(
+            placeholder(&bare).as_deref(),
+            Some("AutoMod flagged a message from Someone (rule: Friendly words).")
+        );
+        bare.embeds.clear();
         bare.kind = 250;
         assert_eq!(
             placeholder(&bare).as_deref(),

@@ -313,6 +313,21 @@ fn refusal_reason(refusal: Refusal, reply: bool) -> &'static str {
             reply,
         )
     };
+    // AutoMod refused the text (200000 blocked, 200001 flagged): Discord's own
+    // reason, which names the rule when it gives one. The text stays here to
+    // change; it is never sent again by itself.
+    if let (Some(code @ (200_000 | 200_001)), message) = (refusal.code, refusal.message()) {
+        let reason = if message.is_empty() {
+            "AutoMod blocked this message".to_owned()
+        } else {
+            format!("AutoMod blocked this message: {message}")
+        };
+        if let Some(text) = intern(format!(
+            "{reason} ({code}). Nothing was sent; change the text, then retry."
+        )) {
+            return text;
+        }
+    }
     // 50035 (invalid form body) and bodies without a code keep the specific
     // 400 wording; any other code is shown as Discord said it.
     let Some(code) = refusal.code.filter(|code| *code != 50035) else {
@@ -1111,5 +1126,28 @@ mod tests {
         );
         assert_eq!(dirty, "Discord refused the send: x ... (77777).");
         assert!(!refused(403, "{}").is_ambiguous());
+    }
+
+    #[test]
+    fn an_automod_block_names_discords_reason_and_keeps_the_text_without_resending() {
+        let text = |body: &str| reason(refused(400, body), false);
+        let blocked =
+            text(r#"{"code":200000,"message":"Message blocked by AutoMod: Friendly words"}"#);
+        assert_eq!(
+            blocked,
+            "AutoMod blocked this message: Message blocked by AutoMod: Friendly words (200000). Nothing was sent; change the text, then retry."
+        );
+        assert!(text(r#"{"code":200001,"message":"Flagged"}"#).contains("(200001)"));
+        assert!(text(r#"{"code":200000}"#).starts_with("AutoMod blocked this message ("));
+        // The send stays in the outbox as a failure and posts nothing again.
+        let mut f = Fixture::new();
+        let id = f.send(A, "blocked text");
+        f.outbox.take_ready();
+        let error = refused(400, r#"{"code":200000,"message":"Blocked"}"#);
+        assert_eq!(f.outbox.finish(id, Err(error)), Finished::Kept);
+        assert!(matches!(f.states(A)[0], OutboxState::Failed(t) if t.contains("AutoMod")));
+        for _ in 0..3 {
+            assert!(f.outbox.take_ready().is_empty());
+        }
     }
 }

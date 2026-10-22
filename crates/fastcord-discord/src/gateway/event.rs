@@ -664,6 +664,8 @@ pub enum Dispatch {
         user: ScheduledEventUser,
         added: bool,
     },
+    /// An AutoMod rule was created, changed or deleted (issue #96).
+    AutoModeration(Box<crate::AutoModChange>),
     /// A server's soundboard sounds were created, edited, deleted or replaced.
     SoundboardChanged(Snowflake),
     /// A server's stickers were created, edited or deleted (`GUILD_STICKERS_UPDATE`).
@@ -744,6 +746,7 @@ impl Dispatch {
             Self::ScheduledEventUser { .. } => "GUILD_SCHEDULED_EVENT_USER_REMOVE",
             Self::SoundboardChanged(_) => "GUILD_SOUNDBOARD_SOUNDS_UPDATE",
             Self::StickersChanged(_) => "GUILD_STICKERS_UPDATE",
+            Self::AutoModeration(_) => "AUTO_MODERATION_RULE_UPDATE",
             Self::CallCreate(_) => "CALL_CREATE",
             Self::CallUpdate(_) => "CALL_UPDATE",
             Self::CallDelete(_) => "CALL_DELETE",

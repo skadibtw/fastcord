@@ -110,6 +110,11 @@ pub struct GuildSettings {
     /// `premium_tier` (0 to 3): the boost level that sets the expression slots.
     /// `None` when Discord did not say; no slot is then assumed.
     pub premium_tier: Option<u8>,
+    /// `mfa_level`: 1 when moderation needs two-factor authentication.
+    pub mfa_level: u8,
+    pub safety_alerts_channel_id: Option<Snowflake>,
+    /// The `RAID_ALERTS_DISABLED` feature is on.
+    pub raid_alerts_disabled: bool,
 }
 
 /// Feature flags kept per server; a real server has far fewer.

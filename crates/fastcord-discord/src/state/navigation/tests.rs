@@ -2486,6 +2486,15 @@ fn a_user_form_guild_carries_its_settings_and_channel_details() {
         (Some(id(9101)), None, 900)
     );
     assert_eq!((admin.notifications, admin.content_filter), (1, 2));
+    assert_eq!(
+        (
+            admin.verification_level,
+            admin.mfa_required,
+            admin.safety_alerts_channel,
+            admin.raid_alerts_disabled
+        ),
+        (3, true, Some(id(9101)), true)
+    );
     assert_eq!(names(&admin), ["Talk", "general", "Lounge"]);
     let general = admin.channel(id(9101)).unwrap();
     assert_eq!(general.parent_id, Some(id(9100)));
@@ -2518,6 +2527,15 @@ fn guild_updates_replace_settings_and_a_partial_one_keeps_them() {
         (None, Some(id(9102)), 300)
     );
     assert_eq!((admin.notifications, admin.content_filter), (0, 0));
+    assert_eq!(
+        (
+            admin.verification_level,
+            admin.mfa_required,
+            admin.safety_alerts_channel,
+            admin.raid_alerts_disabled
+        ),
+        (1, false, None, false)
+    );
     // A replay changes nothing; an update without `features` keeps the settings.
     apply(&mut store, "GUILD_UPDATE", &update.to_string());
     apply(

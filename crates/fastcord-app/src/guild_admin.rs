@@ -30,7 +30,8 @@ use fastcord_discord::{
     AFK_TIMEOUTS, AdminError, AdminRequestError, BASE_BITRATE, CONTENT_FILTERS, ChannelEdit,
     GuildEdit, GuildIcon, MAX_CHANNEL_TOPIC_CHARS, MAX_GUILD_DESCRIPTION_CHARS,
     MAX_GUILD_NAME_CHARS, MAX_VOICE_USER_LIMIT, MIN_BITRATE, NOTIFICATION_LEVELS, NewChannel,
-    RestClient, RestError, SLOWMODE, VoiceRegion, bitrate_ceiling, needs_community,
+    RestClient, RestError, SLOWMODE, VERIFICATION_CHOICES, VoiceRegion, bitrate_ceiling,
+    needs_community,
 };
 use fastcord_model::{OverwriteKind, Permissions, Snowflake};
 use iced::widget::{
@@ -44,6 +45,7 @@ pub enum Action {
     SaveServer,
     Transfer,
     DeleteServer,
+    Mfa,
     CreateChannel,
     SaveChannel,
     DeleteChannel,
@@ -83,6 +85,8 @@ pub enum Choice {
     AfkTimeout(u32),
     Notifications(u8),
     Filter(u8),
+    Verification(u8),
+    Alerts(Option<Snowflake>),
     Kind(AdminKind),
     NewParent(Option<Snowflake>),
     Parent(Option<Snowflake>),
@@ -96,6 +100,8 @@ pub enum Choice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ask {
     DeleteServer,
+    /// Requiring (or no longer requiring) two-factor authentication of moderators.
+    Mfa,
     Transfer,
     DeleteChannel,
     DeleteRole,
@@ -148,6 +154,8 @@ pub enum Event {
     /// "Community setup" of a server's settings: the caller opens the
     /// `community` panel and this one closes.
     Community(Snowflake),
+    /// The menu's "AutoMod": the `automod` module shows it.
+    AutoMod(Snowflake),
     Close,
     Input(Field, String),
     Choose(Choice),
@@ -189,6 +197,8 @@ enum Danger {
         filter: String,
         to: Option<(Snowflake, String)>,
     },
+    /// Waiting for the Confirm of the two-factor requirement: the new state.
+    Mfa(bool),
 }
 
 #[derive(Debug)]
@@ -204,6 +214,8 @@ struct ServerForm {
     afk_timeout: Option<u32>,
     notifications: u8,
     filter: u8,
+    verification: u8,
+    alerts: Option<Snowflake>,
     danger: Danger,
 }
 
@@ -220,6 +232,8 @@ impl ServerForm {
             afk_timeout: None,
             notifications: 0,
             filter: 0,
+            verification: 0,
+            alerts: None,
             danger: Danger::None,
         }
     }
@@ -233,6 +247,8 @@ impl ServerForm {
         self.afk_timeout = (admin.afk_timeout != 0).then_some(admin.afk_timeout);
         self.notifications = admin.notifications;
         self.filter = admin.content_filter;
+        self.verification = admin.verification_level;
+        self.alerts = admin.safety_alerts_channel;
     }
 
     /// What differs from the server as the reducer holds it now.
@@ -253,6 +269,10 @@ impl ServerForm {
             notifications: (self.notifications != admin.notifications)
                 .then_some(self.notifications),
             content_filter: (self.filter != admin.content_filter).then_some(self.filter),
+            verification_level: (self.verification != admin.verification_level)
+                .then_some(self.verification),
+            safety_alerts_channel: (self.alerts != admin.safety_alerts_channel)
+                .then_some(self.alerts),
         }
     }
 }
@@ -577,7 +597,11 @@ impl State {
             }
             Event::Followed(..) | Event::Apps(_) | Event::Webhooks(..) | Event::Community(_) => {}
             // Forwarded by the caller; the menu closes with it.
-            Event::Leave(_) | Event::Bans(_) | Event::Audit(_) | Event::Assets(_) => {
+            Event::Leave(_)
+            | Event::Bans(_)
+            | Event::Audit(_)
+            | Event::Assets(_)
+            | Event::AutoMod(_) => {
                 if self.busy.is_none() {
                     self.panel = None;
                 }
@@ -719,6 +743,12 @@ impl State {
                 self.notice = Some(SENT.to_owned());
             }
             Action::SaveChannel | Action::Move => self.notice = Some(SENT.to_owned()),
+            Action::Mfa => {
+                if let Some(Panel::Server(form)) = &mut self.panel {
+                    form.danger = Danger::None;
+                }
+                self.notice = Some(SENT.to_owned());
+            }
             Action::SaveRole
             | Action::CreateRole
             | Action::DeleteRole
@@ -771,6 +801,8 @@ impl State {
             (Some(Panel::Server(form)), Choice::AfkTimeout(t)) => form.afk_timeout = Some(t),
             (Some(Panel::Server(form)), Choice::Notifications(n)) => form.notifications = n,
             (Some(Panel::Server(form)), Choice::Filter(f)) => form.filter = f,
+            (Some(Panel::Server(form)), Choice::Verification(v)) => form.verification = v,
+            (Some(Panel::Server(form)), Choice::Alerts(c)) => form.alerts = c,
             (Some(Panel::Server(form)), Choice::Transfer(id, name)) => {
                 if let Danger::Transfer { to, .. } = &mut form.danger {
                     *to = Some((id, name));
@@ -795,6 +827,9 @@ impl State {
         match (&mut self.panel, ask) {
             (Some(Panel::Server(form)), Ask::DeleteServer) if admin.is_some_and(|a| a.owner) => {
                 form.danger = Danger::Delete(String::new());
+            }
+            (Some(Panel::Server(form)), Ask::Mfa) if admin.is_some_and(|a| a.owner) => {
+                form.danger = Danger::Mfa(admin.is_some_and(|a| !a.mfa_required));
             }
             (Some(Panel::Server(form)), Ask::Transfer) if admin.is_some_and(|a| a.owner) => {
                 form.danger = Danger::Transfer {
@@ -910,6 +945,19 @@ impl State {
         }
         match &self.panel {
             Some(Panel::Server(form)) => match &form.danger {
+                Danger::Mfa(required) => {
+                    let Some(admin) = admin.filter(|a| a.id == form.guild && a.owner) else {
+                        self.notice = Some("Only the owner can change this.".to_owned());
+                        return Task::none();
+                    };
+                    let (guild, required) = (admin.id, *required);
+                    self.send(Action::Mfa, client, move |client| async move {
+                        client
+                            .set_mfa_level(guild, required)
+                            .await
+                            .map_err(Into::into)
+                    })
+                }
                 Danger::Delete(typed) => {
                     let Some(admin) = admin.filter(|a| a.id == form.guild && a.owner) else {
                         self.notice = Some("Only the owner can delete a server.".to_owned());
@@ -1142,6 +1190,52 @@ fn server_view<'a>(
             Event::Choose(Choice::Filter(f))
         }),
     ));
+    panel = panel.push(labelled(
+        "Verification level",
+        select(
+            presets(&VERIFICATION_CHOICES),
+            &form.verification,
+            edit,
+            |v| Event::Choose(Choice::Verification(v)),
+        ),
+    ));
+    panel = panel.push(labelled(
+        "Safety alerts channel",
+        select(
+            channel_choices(admin, |k| {
+                matches!(k, AdminKind::Text | AdminKind::Announcement)
+            }),
+            &form.alerts,
+            edit,
+            |c| Event::Choose(Choice::Alerts(c)),
+        ),
+    ));
+    panel = panel.push(
+        row![
+            small(if admin.raid_alerts_disabled {
+                "Join raid alerts are off (change in the official client)."
+            } else {
+                "Join raid alerts are on (change in the official client)."
+            }),
+            space::horizontal(),
+            small(if admin.mfa_required {
+                "Moderators need two-factor authentication (Confirm to change)."
+            } else {
+                "Moderators do not need two-factor authentication."
+            }),
+            button(
+                text(if admin.mfa_required {
+                    "Stop requiring"
+                } else {
+                    "Require 2FA"
+                })
+                .size(12)
+            )
+            .on_press_maybe((idle && admin.owner).then_some(Event::Ask(Ask::Mfa))),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    );
     panel = panel.push(
         row![
             button(text("Save settings").size(13)).on_press_maybe(edit.then_some(Event::Save)),
@@ -1239,6 +1333,23 @@ fn danger_view<'a>(form: &'a ServerForm, admin: &'a GuildAdmin, idle: bool) -> E
                     ]
                     .spacing(6),
                 );
+        }
+        Danger::Mfa(required) => {
+            panel = panel.push(
+                row![
+                    text(if *required {
+                        "Require two-factor authentication for moderators of this server?"
+                    } else {
+                        "Stop requiring two-factor authentication for moderators?"
+                    })
+                    .size(12),
+                    button(text("Confirm").size(12))
+                        .on_press_maybe(idle.then_some(Event::Confirm))
+                        .style(button::danger),
+                    button(text("Cancel").size(12)).on_press_maybe(idle.then_some(Event::Cancel)),
+                ]
+                .spacing(6),
+            );
         }
         Danger::Transfer { filter, to } => {
             let needle = filter.trim().to_lowercase();
@@ -1574,40 +1685,43 @@ fn menu_view<'a>(
     let admin = admin.filter(|a| a.id == guild);
     let mut buttons = row![].spacing(6);
     if let Some(admin) = admin {
-        buttons = buttons
-            .push(
-                button(text("Server settings").size(13)).on_press_maybe(
+        buttons =
+            buttons
+                .push(button(text("Server settings").size(13)).on_press_maybe(
                     (idle && admin.can_manage_guild).then_some(Event::Settings(guild)),
-                ),
-            )
-            .push(button(text("Create channel").size(13)).on_press_maybe(
-                (idle && admin.can_manage_channels).then_some(Event::CreateChannel(guild, None)),
-            ))
-            .push(
-                button(text("Roles").size(13)).on_press_maybe(
+                ))
+                .push(
+                    button(text("Create channel").size(13)).on_press_maybe(
+                        (idle && admin.can_manage_channels)
+                            .then_some(Event::CreateChannel(guild, None)),
+                    ),
+                )
+                .push(button(text("Roles").size(13)).on_press_maybe(
                     (idle && admin.can_manage_roles).then_some(Event::Roles(guild)),
-                ),
-            )
-            .push(
-                button(text("Bans").size(13)).on_press_maybe(
-                    (idle && admin.mine.contains(Permissions::BAN_MEMBERS))
-                        .then_some(Event::Bans(guild)),
-                ),
-            )
-            .push(
-                button(text("Audit log").size(13)).on_press_maybe(
-                    (idle && admin.mine.contains(Permissions::VIEW_AUDIT_LOG))
-                        .then_some(Event::Audit(guild)),
-                ),
-            )
-            .push(
-                button(text("Emoji and sounds").size(13)).on_press_maybe(
-                    (idle
-                        && (admin.mine.contains(Permissions::CREATE_GUILD_EXPRESSIONS)
-                            || admin.mine.contains(Permissions::MANAGE_GUILD_EXPRESSIONS)))
-                    .then_some(Event::Assets(guild)),
-                ),
-            );
+                ))
+                .push(button(text("AutoMod").size(13)).on_press_maybe(
+                    (idle && admin.can_manage_guild).then_some(Event::AutoMod(guild)),
+                ))
+                .push(
+                    button(text("Bans").size(13)).on_press_maybe(
+                        (idle && admin.mine.contains(Permissions::BAN_MEMBERS))
+                            .then_some(Event::Bans(guild)),
+                    ),
+                )
+                .push(
+                    button(text("Audit log").size(13)).on_press_maybe(
+                        (idle && admin.mine.contains(Permissions::VIEW_AUDIT_LOG))
+                            .then_some(Event::Audit(guild)),
+                    ),
+                )
+                .push(
+                    button(text("Emoji and sounds").size(13)).on_press_maybe(
+                        (idle
+                            && (admin.mine.contains(Permissions::CREATE_GUILD_EXPRESSIONS)
+                                || admin.mine.contains(Permissions::MANAGE_GUILD_EXPRESSIONS)))
+                        .then_some(Event::Assets(guild)),
+                    ),
+                );
     }
     buttons = buttons.push(
         button(text("Leave server").size(13))
@@ -1784,6 +1898,9 @@ mod tests {
             public_updates_channel: None,
             verification_level: 0,
             features: Vec::new(),
+            mfa_required: false,
+            safety_alerts_channel: None,
+            raid_alerts_disabled: false,
             can_manage_guild: manage_guild,
             can_manage_channels: manage_channels,
             channels: vec![
@@ -1853,6 +1970,63 @@ mod tests {
         assert_eq!(edit.name.as_deref(), Some("Renamed"));
         assert_eq!(edit.notifications, Some(1));
         assert!(edit.description.is_none() && edit.afk_timeout.is_none());
+    }
+
+    #[test]
+    fn safety_settings_send_only_what_changed_and_mfa_is_for_the_owner() {
+        let owner = nav(admin(true, true, true, false));
+        let nav = nav(admin(false, true, false, false));
+        let mut state = server(&nav);
+        let _ = state.update(Event::Choose(Choice::Verification(4)), &nav, &client());
+        let _ = state.update(
+            Event::Choose(Choice::Alerts(Some(Snowflake(11)))),
+            &nav,
+            &client(),
+        );
+        let Some(Panel::Server(form)) = &state.panel else {
+            panic!("no panel")
+        };
+        let edit = form.edit(nav.admin.as_ref().unwrap());
+        assert_eq!(edit.verification_level, Some(4));
+        assert_eq!(edit.safety_alerts_channel, Some(Some(Snowflake(11))));
+        assert!(edit.name.is_none() && edit.content_filter.is_none());
+        assert_eq!(state.update(Event::Save, &nav, &client()).units(), 1);
+        // A manager who is not the owner cannot change the two-factor rule.
+        let mut state = server(&nav);
+        let _ = state.update(Event::Ask(Ask::Mfa), &nav, &client());
+        assert!(matches!(
+            state.panel,
+            Some(Panel::Server(ref f)) if matches!(f.danger, Danger::None)
+        ));
+        assert_eq!(state.update(Event::Confirm, &nav, &client()).units(), 0);
+        // The owner must Confirm: asking sends nothing, Cancel drops it.
+        let mut state = server(&owner);
+        let _ = state.update(Event::Ask(Ask::Mfa), &owner, &client());
+        let _ = state.update(Event::Cancel, &owner, &client());
+        assert_eq!(state.update(Event::Confirm, &owner, &client()).units(), 0);
+        assert!(state.busy.is_none());
+        let _ = state.update(Event::Ask(Ask::Mfa), &owner, &client());
+        // Ownership is checked again at the Confirm.
+        assert_eq!(state.update(Event::Confirm, &nav, &client()).units(), 0);
+        assert!(state.notice.as_deref().unwrap().contains("owner"));
+        let _ = state.update(Event::Ask(Ask::Mfa), &owner, &client());
+        assert_eq!(state.update(Event::Confirm, &owner, &client()).units(), 1);
+        assert_eq!(state.busy, Some(Action::Mfa));
+        let _ = state.update(Event::Ask(Ask::Mfa), &owner, &client());
+        assert_eq!(state.update(Event::Confirm, &owner, &client()).units(), 0);
+        let serial = state.serial;
+        let demand = AdminRequestError::Rest(RestError::Refused(Refusal::new(
+            StatusCode::FORBIDDEN,
+            Some(60003),
+            "x",
+        )));
+        let _ = state.update(
+            Event::Done(serial, Action::Mfa, Err(demand)),
+            &owner,
+            &client(),
+        );
+        assert!(state.busy.is_none());
+        assert!(state.notice.as_deref().unwrap().contains("two-factor"));
     }
 
     #[test]

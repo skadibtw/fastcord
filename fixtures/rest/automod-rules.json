@@ -1,0 +1,61 @@
+[
+  {
+    "id": "1000000000000000001",
+    "guild_id": "1000000000000000100",
+    "name": "Friendly words",
+    "creator_id": "1000000000000000200",
+    "event_type": 1,
+    "trigger_type": 1,
+    "trigger_metadata": {
+      "keyword_filter": ["bad*", "*worse"],
+      "regex_patterns": ["b+a+d"],
+      "allow_list": ["badge"],
+      "future_key": 7
+    },
+    "actions": [
+      {"type": 1, "metadata": {"custom_message": "Please keep it friendly."}},
+      {"type": 2, "metadata": {"channel_id": "1000000000000000300"}},
+      {"type": 3, "metadata": {"duration_seconds": 60}},
+      {"type": 99, "metadata": {"future": true}}
+    ],
+    "enabled": true,
+    "exempt_roles": ["1000000000000000400"],
+    "exempt_channels": ["1000000000000000301"]
+  },
+  {
+    "id": "1000000000000000002",
+    "guild_id": "1000000000000000100",
+    "name": "Word lists",
+    "event_type": 1,
+    "trigger_type": 4,
+    "trigger_metadata": {"presets": [1, 3], "allow_list": []},
+    "actions": [{"type": 1}],
+    "enabled": false,
+    "exempt_roles": [],
+    "exempt_channels": []
+  },
+  {
+    "id": "1000000000000000003",
+    "guild_id": "1000000000000000100",
+    "name": "Mentions",
+    "event_type": 1,
+    "trigger_type": 5,
+    "trigger_metadata": {"mention_total_limit": 8, "mention_raid_protection_enabled": true},
+    "actions": [{"type": 1}, {"type": 3, "metadata": {"duration_seconds": 3600}}],
+    "enabled": true,
+    "exempt_roles": [],
+    "exempt_channels": []
+  },
+  {
+    "id": "1000000000000000004",
+    "guild_id": "1000000000000000100",
+    "name": "Profiles",
+    "event_type": 2,
+    "trigger_type": 6,
+    "trigger_metadata": {"keyword_filter": ["nope"]},
+    "actions": [{"type": 4}],
+    "enabled": true,
+    "exempt_roles": [],
+    "exempt_channels": []
+  }
+]

@@ -502,6 +502,8 @@ pub struct NavigationSnapshot {
     pub follow: Option<FollowTargets>,
     /// The server whose emoji, stickers and sounds the assets panel manages.
     pub assets: Option<GuildAssets>,
+    /// The latest AutoMod rule changes, for the panel that is open.
+    pub automod: crate::AutoModFeed,
     /// Message requests awaiting an explicit accept or decline.
     pub requests: MessageRequests,
     /// Ignored and blocked users (shared, rebuilt only when it changes).
@@ -1245,6 +1247,7 @@ impl Navigation {
             admin_member: None,
             follow: None,
             assets: None,
+            automod: crate::AutoModFeed::default(),
             quick: Vec::new(),
             requests: self.message_requests(store),
             suppressed: store.suppressed(),

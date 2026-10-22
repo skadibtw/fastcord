@@ -67,6 +67,14 @@ pub const CONTENT_FILTERS: [(u8, &str); 3] = [
     (1, "Members without roles"),
     (2, "All members"),
 ];
+/// Verification levels a server may require of new members (issue #96).
+pub const VERIFICATION_CHOICES: [(u8, &str); 5] = [
+    (0, "None: anyone can join and talk"),
+    (1, "Low: a verified e-mail address"),
+    (2, "Medium: registered on Discord for 5 minutes"),
+    (3, "High: a member of this server for 10 minutes"),
+    (4, "Highest: a verified phone number"),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdminError {
@@ -293,6 +301,9 @@ pub struct GuildEdit {
     pub afk_timeout: Option<u32>,
     pub notifications: Option<u8>,
     pub content_filter: Option<u8>,
+    pub verification_level: Option<u8>,
+    /// `Some(None)` clears the safety alerts channel.
+    pub safety_alerts_channel: Option<Option<Snowflake>>,
 }
 
 fn guild_edit_body(edit: &GuildEdit) -> Result<serde_json::Value, AdminError> {
@@ -353,6 +364,18 @@ fn guild_edit_body(edit: &GuildEdit) -> Result<serde_json::Value, AdminError> {
             return Err(AdminError::BadValue);
         }
         body.insert("explicit_content_filter".into(), filter.into());
+    }
+    if let Some(level) = edit.verification_level {
+        if !VERIFICATION_CHOICES.iter().any(|(l, _)| *l == level) {
+            return Err(AdminError::BadValue);
+        }
+        body.insert("verification_level".into(), level.into());
+    }
+    if let Some(channel) = edit.safety_alerts_channel {
+        body.insert(
+            "safety_alerts_channel_id".into(),
+            channel.map_or(serde_json::Value::Null, |c| c.to_string().into()),
+        );
     }
     if body.is_empty() {
         return Err(AdminError::NothingToChange);
@@ -451,6 +474,16 @@ impl<C: Clock> RestClient<C> {
         let request = write(Method::PATCH, &format!("/guilds/{guild}"))?.json(&body)?;
         self.execute(request).await?;
         Ok(())
+    }
+
+    /// Requires (or stops requiring) two-factor authentication of moderators
+    /// (`POST /guilds/{id}/mfa`, owner only). Discord may demand two-factor
+    /// verification itself; that answer is shown, never answered. The display
+    /// follows `GUILD_UPDATE`.
+    pub async fn set_mfa_level(&self, guild: Snowflake, required: bool) -> Result<(), RestError> {
+        let request = write(Method::POST, &format!("/guilds/{guild}/mfa"))?
+            .json(&serde_json::json!({ "level": u8::from(required) }))?;
+        self.execute(request).await.map(drop)
     }
 
     /// Hands the server to another member (`PATCH /guilds/{id}` `owner_id`).
@@ -704,13 +737,16 @@ mod tests {
             afk_timeout: Some(900),
             notifications: Some(1),
             content_filter: Some(2),
+            verification_level: Some(3),
+            safety_alerts_channel: Some(None),
         };
         assert_eq!(
             guild_edit_body(&edit).unwrap(),
             json!({
                 "name": "Renamed", "icon": null, "description": null,
                 "system_channel_id": "5", "afk_channel_id": null, "afk_timeout": 900,
-                "default_message_notifications": 1, "explicit_content_filter": 2
+                "default_message_notifications": 1, "explicit_content_filter": 2,
+                "verification_level": 3, "safety_alerts_channel_id": null
             })
         );
         assert_eq!(
@@ -736,6 +772,10 @@ mod tests {
             },
             GuildEdit {
                 content_filter: Some(3),
+                ..GuildEdit::default()
+            },
+            GuildEdit {
+                verification_level: Some(5),
                 ..GuildEdit::default()
             },
         ] {
