@@ -310,6 +310,9 @@ mod tests {
             name: "s".into(),
             format_type: 1,
             available,
+            description: String::new(),
+            tags: String::new(),
+            creator: None,
         }
     }
 

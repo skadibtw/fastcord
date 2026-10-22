@@ -148,6 +148,8 @@ pub struct VoiceControls {
     pub sound_seq: u64,
     /// The latest soundboard catalog change: the server and the `sound_seq` it set.
     pub sound_catalog_change: Option<(Snowflake, u64)>,
+    /// The latest sticker change: the server and the `sound_seq` it set.
+    pub sticker_change: Option<(Snowflake, u64)>,
 }
 
 /// Most soundboard plays kept for the UI between two looks; a burst keeps the newest.
@@ -558,6 +560,8 @@ struct Request {
     admin_member: Option<Snowflake>,
     /// The announcement channel (server, channel) the follow picker is for.
     follow: Option<(Snowflake, Snowflake)>,
+    /// The server whose emoji, stickers and sounds the assets panel manages.
+    assets: Option<Snowflake>,
     /// Bumped when the local list layout (`organize`) changed.
     layout_rev: u64,
     timeline: crate::history::Request,
@@ -1517,6 +1521,17 @@ impl NavigationBridge {
                 return false;
             }
             request.follow = source;
+            true
+        });
+    }
+
+    /// The server the assets panel manages, `None` once it closes.
+    pub fn assets_guild(&self, guild: Option<Snowflake>) {
+        self.requests.send_if_modified(|request| {
+            if request.assets == guild {
+                return false;
+            }
+            request.assets = guild;
             true
         });
     }
@@ -2776,6 +2791,12 @@ impl Worker {
                     controls.sound_catalog_change = Some((*guild, controls.sound_seq));
                 });
             }
+            Dispatch::StickersChanged(guild) => {
+                self.bridge.voice_controls.send_modify(|controls| {
+                    controls.sound_seq = controls.sound_seq.wrapping_add(1);
+                    controls.sticker_change = Some((*guild, controls.sound_seq));
+                });
+            }
             Dispatch::VoiceServerUpdate(update) => {
                 if let Some(correlator) = self.voice_correlator.as_mut() {
                     let correlation = correlator.voice_server(update);
@@ -3102,6 +3123,9 @@ impl Worker {
         });
         navigation.admin = request.admin.and_then(|guild| {
             fastcord_discord::state::navigation::guild_admin(&self.tracker.store, guild)
+        });
+        navigation.assets = request.assets.and_then(|guild| {
+            fastcord_discord::state::navigation::guild_assets(&self.tracker.store, guild)
         });
         navigation.follow = request.follow.and_then(|(guild, source)| {
             fastcord_discord::state::navigation::follow_targets(&self.tracker.store, guild, source)

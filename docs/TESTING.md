@@ -744,6 +744,17 @@ Manual (Windows, alt account only): open a server with many members, quit fastco
   - [ ] Follow into a text channel (Manage Webhooks there): the official client lists the same follower; the picker omits channels without the permission, including through an overwrite; following twice or into the source's own server reads as Discord's refusal.
   - [ ] "Followed announcements": the list matches the official client's Integrations > Channels Followed; Unfollow removes it there too; a deleted-elsewhere row reads "already removed"; the response of `GET /channels/{id}/webhooks` for a channel with other webhook types never shows a token.
 
+### Server emoji, stickers and soundboard assets (#99)
+
+- **Automated:** `fastcord-discord` `assets::tests` (names, tier slots, emoji/sound/sticker file checks including the size edge, the emoji, sound and edit bodies, the sticker multipart, routes), `state::tests` (`guild_assets` permissions and the emoji list), `gateway::decode::tests` (`GUILD_STICKERS_UPDATE`, `premium_tier`); `fastcord-app` `assets::tests` (permission and slot gating, animated emoji counted separately, unknown tier, one request in flight, stale and refused answers with Discord's text, own versus others' assets, Confirm before delete, change events seen once, 401 stops the account).
+- **Outstanding gates (alt account with Create/Manage Expressions only, unchecked, unverified routes):**
+  - [ ] Upload a static and an animated emoji; both appear through `GUILD_EMOJIS_UPDATE` in the picker and in existing messages; a second upload past the slots reads Discord's 30008 text.
+  - [ ] Rename and delete an emoji, a sticker and a sound; a member with only Create Expressions cannot change another member's (403 text), a member with Manage can.
+  - [ ] Sticker multipart: PNG, APNG, GIF and Lottie are accepted or refused exactly as the official client does; the field names and limits match.
+  - [ ] Sound upload: MP3 and Ogg Opus up to 5.2 s work, a longer or oversize file is refused with 50045 or a local reason, the volume and emoji persist, and a preview plays through the chosen output.
+  - [ ] Does `GUILD_STICKERS_UPDATE` arrive and the lists refresh? Does the creator (`user`, `user_id`) appear on all three kinds?
+  - [ ] `premium_tier` in GUILD_CREATE matches the official slot counts after a boost change in another client.
+
 ## Accounts, sessions and security overview (#107)
 Automated: `accounts::tests` (index round trip, migration by reconcile, bounds), `account_security::tests` (session list parse, logout body, overview booleans, 60003 recognised in 401 and 403), `account_panel::tests` (Confirm gating, one request in flight, MFA refusal shown and not retried, ambiguous failure text, stale answers), and the `main.rs` state-machine tests for switching (teardown before the next sign-in, saved login kept, memory-only refused).
 Manual (Windows, alt account only, not run offline):

@@ -827,6 +827,18 @@ Every route below is a user-client route **not captured from an official client 
 - **Unfollow (unverified):** `DELETE /webhooks/{id}` of the follower webhook after a Confirm. A 204 (or a 404, meaning it was already gone) removes the row; the list is not live (no `WEBHOOKS_UPDATE` handling).
 - **Not implemented:** a followers list for announcement channels (who follows this channel), unfollowing from the source side, incoming and other webhook types, any scheduler or automatic publishing.
 
+## Server emoji, stickers and soundboard assets (#99)
+
+Every route below is a user-client route **not captured from an official client or exercised with the alt account**; shapes follow public documentation of the guild emoji, sticker and soundboard resources. Writes are `UserWrite` with `with_error_detail`, sent once on one click and never retried; Discord's `code` and `message` are shown verbatim (30008 maximum emojis, 30039 maximum stickers, 50045 file too large, ...). The UI changes only on the Gateway or on a fresh list.
+
+- **Slots:** from `premium_tier` (READY/GUILD_CREATE/GUILD_UPDATE, tiers above 3 count as 3): emoji 50/100/150/250 (static and animated each), stickers 5/15/30/60, sounds 8/24/36/48. A missing tier means no slot is assumed. Discord remains the authority; the local count only avoids a request that must fail.
+- **Permissions:** `CREATE_GUILD_EXPRESSIONS` (bit 43) uploads and changes the account's own assets, `MANAGE_GUILD_EXPRESSIONS` (bit 30) changes anyone's, computed by the reducer from the guild-wide permissions (owner and Administrator included). The creator comes from the emoji/sticker `user` and the sound `user` or `user_id`; an unknown creator needs Manage.
+- **Emoji (unverified):** `POST /guilds/{g}/emojis` `{"name","image":"data:image/png;base64,..."}` (PNG, JPEG, GIF or WebP by signature, at most 256 KiB, name `[A-Za-z0-9_]{2,32}`); `PATCH /guilds/{g}/emojis/{id}` `{"name"}`; `DELETE /guilds/{g}/emojis/{id}`. Listing is the Gateway: `GUILD_EMOJIS_UPDATE` (see Custom emoji).
+- **Stickers (unverified):** `POST /guilds/{g}/stickers` as `multipart/form-data` with `name` (2 to 30), `description` (empty or 2 to 100), `tags` (2 to 200) and `file` (PNG, APNG, GIF or Lottie JSON by content, at most 512 KiB); `PATCH /guilds/{g}/stickers/{id}` `{"name","description","tags"}`; `DELETE /guilds/{g}/stickers/{id}`. The list is `GET /guilds/{g}/stickers` again after `GUILD_STICKERS_UPDATE` (`{guild_id, stickers}`; only the guild is read). Lottie needing a verified or partnered server is left to Discord's refusal.
+- **Soundboard (unverified):** `POST /guilds/{g}/soundboard-sounds` `{"name","sound":"data:audio/ogg;base64,...","volume","emoji_name"?}` (MP3 or Ogg by signature, at most 512 KiB and 5.2 s, name 2 to 32, volume 0 to 1); `PATCH .../{id}` `{"name","volume","emoji_name"}`; `DELETE .../{id}`. The list is the existing `GET /guilds/{g}/soundboard-sounds`, fetched again on `GUILD_SOUNDBOARD_SOUND_*`.
+- **Duration** is measured by the bounded `fastcord-audio` soundboard decoder on a worker thread; a file it cannot decode (for example Ogg Vorbis) is refused locally with that reason.
+- **Not implemented:** standard sticker packs, emoji role restrictions, any purchase, boost or premium cross-server use.
+
 ## Account sessions and security overview (issue #107)
 
 Implemented by `fastcord-discord::account_security` and the app's `account_panel`. All three routes are user-client routes from community documentation and **unverified** against a live account.

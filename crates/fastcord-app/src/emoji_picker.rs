@@ -594,6 +594,7 @@ mod tests {
             animated,
             roles: roles.iter().map(|&id| Snowflake(id)).collect(),
             available,
+            creator: None,
         }
     }
 

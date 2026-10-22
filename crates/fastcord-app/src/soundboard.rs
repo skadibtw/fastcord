@@ -99,7 +99,7 @@ pub enum Origin {
 
 /// A started player on its way to the reducer.
 #[derive(Clone)]
-pub struct Handle(Arc<FilePlayer>);
+pub struct Handle(pub(crate) Arc<FilePlayer>);
 
 impl std::fmt::Debug for Handle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -259,7 +259,7 @@ fn describe_sound(error: fastcord_audio::soundboard::SoundError) -> &'static str
 
 /// Fetches, decodes and starts one sound. Runs off the UI thread; the blocking part holds
 /// at most the 1 MiB file and the decoded clip.
-async fn start(
+pub(crate) async fn start(
     cache: AttachmentCache,
     sound: Snowflake,
     output: DeviceChoice,
@@ -271,14 +271,31 @@ async fn start(
         .map_err(|_| "That sound could not be downloaded.")?;
     tokio::task::spawn_blocking(move || {
         let bytes = std::fs::read(path).map_err(|_| "That sound could not be read.")?;
-        let clip = fastcord_audio::soundboard::decode(&bytes).map_err(describe_sound)?;
-        let player = FilePlayer::start_source(clip, Some(output))
-            .map_err(|_| "The output device could not play the sound.")?;
-        player.set_volume(gain);
-        Ok(Handle(Arc::new(player)))
+        play(&bytes, output, gain)
     })
     .await
     .map_err(|_| "Playback was cancelled.")?
+}
+
+/// Decodes and starts sound bytes. Blocking: call it on a worker thread.
+fn play(bytes: &[u8], output: DeviceChoice, gain: f32) -> Result<Handle, &'static str> {
+    let clip = fastcord_audio::soundboard::decode(bytes).map_err(describe_sound)?;
+    let player = FilePlayer::start_source(clip, Some(output))
+        .map_err(|_| "The output device could not play the sound.")?;
+    player.set_volume(gain);
+    Ok(Handle(Arc::new(player)))
+}
+
+/// The preview of a sound file chosen for upload, played from memory on its own
+/// output-only engine like any #87 preview. Runs off the UI thread.
+pub(crate) async fn start_bytes(
+    bytes: Vec<u8>,
+    output: DeviceChoice,
+    gain: f32,
+) -> Result<Handle, &'static str> {
+    tokio::task::spawn_blocking(move || play(&bytes, output, gain))
+        .await
+        .map_err(|_| "Playback was cancelled.")?
 }
 
 impl State {
@@ -718,6 +735,7 @@ mod tests {
             volume_percent: 80,
             emoji: None,
             available,
+            creator: None,
         }
     }
 

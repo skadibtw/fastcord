@@ -126,6 +126,8 @@ struct GuildProperties {
     public_updates_channel_id: Option<Snowflake>,
     #[serde(default)]
     verification_level: Option<u8>,
+    #[serde(default)]
+    premium_tier: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +163,8 @@ struct GuildWire {
     public_updates_channel_id: Option<Snowflake>,
     #[serde(default)]
     verification_level: Option<u8>,
+    #[serde(default)]
+    premium_tier: Option<u8>,
     #[serde(default, deserialize_with = "null_default")]
     roles: Vec<Role>,
     #[serde(default, deserialize_with = "null_default")]
@@ -223,6 +227,8 @@ struct GuildUpdateWire {
     public_updates_channel_id: Option<Snowflake>,
     #[serde(default)]
     verification_level: Option<u8>,
+    #[serde(default)]
+    premium_tier: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -619,6 +625,7 @@ impl Normalizer {
                         .or(p.and_then(|p| p.public_updates_channel_id)),
                     wire.verification_level
                         .or(p.and_then(|p| p.verification_level)),
+                    wire.premium_tier.or(p.and_then(|p| p.premium_tier)),
                 )
             },
         }))
@@ -1007,6 +1014,7 @@ fn guild_settings(
     rules_channel_id: Option<Snowflake>,
     public_updates_channel_id: Option<Snowflake>,
     verification_level: Option<u8>,
+    premium_tier: Option<u8>,
 ) -> GuildSettings {
     let mut description = description;
     if let Some(text) = &mut description
@@ -1035,6 +1043,7 @@ fn guild_settings(
             .filter(|f| f.len() <= MAX_FEATURE_BYTES)
             .cloned()
             .collect(),
+        premium_tier,
     }
 }
 
@@ -1064,6 +1073,7 @@ fn decode_guild_update(raw: &str) -> Result<GuildUpdate, Malformed> {
                 wire.rules_channel_id,
                 wire.public_updates_channel_id,
                 wire.verification_level,
+                wire.premium_tier,
             )
         }),
     })
@@ -1492,6 +1502,9 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         | "GUILD_SOUNDBOARD_SOUND_DELETE"
         | "GUILD_SOUNDBOARD_SOUNDS_UPDATE" => {
             json::<SoundboardGuildWire>(raw).map(|wire| Dispatch::SoundboardChanged(wire.guild_id))
+        }
+        "GUILD_STICKERS_UPDATE" => {
+            json::<SoundboardGuildWire>(raw).map(|wire| Dispatch::StickersChanged(wire.guild_id))
         }
         "STAGE_INSTANCE_CREATE" | "STAGE_INSTANCE_UPDATE" => {
             json::<StageInstance>(raw).map(Dispatch::StageInstanceUpsert)
@@ -2429,6 +2442,18 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn sticker_updates_name_only_their_guild() {
+        assert!(matches!(
+            decode_dispatch("GUILD_STICKERS_UPDATE", r#"{"guild_id":"3","stickers":[]}"#),
+            Decoded::Event(Dispatch::StickersChanged(guild)) if guild == id(3)
+        ));
+        assert!(matches!(
+            decode_dispatch("GUILD_STICKERS_UPDATE", r#"{"stickers":[]}"#),
+            Decoded::Malformed
+        ));
     }
 
     #[test]

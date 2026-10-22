@@ -133,6 +133,8 @@ pub enum Event {
     EditChannel(Snowflake, Snowflake, bool),
     /// The menu's "Leave server": the invite module asks its own confirmation.
     Leave(Snowflake),
+    /// The menu's "Emoji and sounds": the `assets` panel takes over.
+    Assets(Snowflake),
     /// "Followed announcements" of a text channel: server and channel. The
     /// caller opens the list (`announce`); the panel stays as it is.
     Followed(Snowflake, Snowflake),
@@ -575,7 +577,7 @@ impl State {
             }
             Event::Followed(..) | Event::Apps(_) | Event::Webhooks(..) | Event::Community(_) => {}
             // Forwarded by the caller; the menu closes with it.
-            Event::Leave(_) | Event::Bans(_) | Event::Audit(_) => {
+            Event::Leave(_) | Event::Bans(_) | Event::Audit(_) | Event::Assets(_) => {
                 if self.busy.is_none() {
                     self.panel = None;
                 }
@@ -1596,6 +1598,14 @@ fn menu_view<'a>(
                 button(text("Audit log").size(13)).on_press_maybe(
                     (idle && admin.mine.contains(Permissions::VIEW_AUDIT_LOG))
                         .then_some(Event::Audit(guild)),
+                ),
+            )
+            .push(
+                button(text("Emoji and sounds").size(13)).on_press_maybe(
+                    (idle
+                        && (admin.mine.contains(Permissions::CREATE_GUILD_EXPRESSIONS)
+                            || admin.mine.contains(Permissions::MANAGE_GUILD_EXPRESSIONS)))
+                    .then_some(Event::Assets(guild)),
                 ),
             );
     }

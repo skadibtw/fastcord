@@ -663,6 +663,8 @@ pub enum Dispatch {
     },
     /// A server's soundboard sounds were created, edited, deleted or replaced.
     SoundboardChanged(Snowflake),
+    /// A server's stickers were created, edited or deleted (`GUILD_STICKERS_UPDATE`).
+    StickersChanged(Snowflake),
     /// A DM or group-DM call started, with who is ringing and connected.
     CallCreate(Box<CallCreate>),
     CallUpdate(CallUpdate),
@@ -737,6 +739,7 @@ impl Dispatch {
             Self::ScheduledEventUser { added: true, .. } => "GUILD_SCHEDULED_EVENT_USER_ADD",
             Self::ScheduledEventUser { .. } => "GUILD_SCHEDULED_EVENT_USER_REMOVE",
             Self::SoundboardChanged(_) => "GUILD_SOUNDBOARD_SOUNDS_UPDATE",
+            Self::StickersChanged(_) => "GUILD_STICKERS_UPDATE",
             Self::CallCreate(_) => "CALL_CREATE",
             Self::CallUpdate(_) => "CALL_UPDATE",
             Self::CallDelete(_) => "CALL_DELETE",

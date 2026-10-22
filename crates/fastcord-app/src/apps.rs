@@ -835,6 +835,7 @@ mod tests {
                 Permissions::NONE
             },
             synced: None,
+            everyone_view: false,
         }
     }
 
@@ -861,6 +862,10 @@ mod tests {
                 mine: Permissions::NONE,
                 grant_all: false,
                 top_position: 0,
+                rules_channel: None,
+                public_updates_channel: None,
+                verification_level: 0,
+                features: Vec::new(),
             }),
             ..NavigationSnapshot::default()
         }

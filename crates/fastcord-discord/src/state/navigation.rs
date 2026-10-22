@@ -498,6 +498,8 @@ pub struct NavigationSnapshot {
     pub admin_member: Option<AdminMember>,
     /// Where the announcement channel the follow picker names may be followed.
     pub follow: Option<FollowTargets>,
+    /// The server whose emoji, stickers and sounds the assets panel manages.
+    pub assets: Option<GuildAssets>,
     /// Message requests awaiting an explicit accept or decline.
     pub requests: MessageRequests,
     /// Ignored and blocked users (shared, rebuilt only when it changes).
@@ -1237,6 +1239,7 @@ impl Navigation {
             admin: None,
             admin_member: None,
             follow: None,
+            assets: None,
             quick: Vec::new(),
             requests: self.message_requests(store),
             suppressed: store.suppressed(),
@@ -1646,10 +1649,11 @@ fn visible_channels<'a>(
 
 mod admin;
 pub use admin::{
-    ABOVE_YOUR_ROLE, AdminChannel, AdminKind, AdminMember, AdminRole, EVERYONE_ROLE, FollowTarget,
-    FollowTargets, GuildAdmin, MANAGED_ROLE, MAX_ADMIN_CHANNELS, MAX_ADMIN_PEOPLE, MAX_ADMIN_ROLES,
-    MAX_FOLLOW_TARGETS, MEMBER_ABOVE_YOU, MEMBER_IS_OWNER, MEMBER_ROLES_UNKNOWN,
-    NEEDS_MANAGE_ROLES, admin_member, follow_targets, guild_admin,
+    ABOVE_YOUR_ROLE, AdminChannel, AdminKind, AdminMember, AdminRole, AssetEmoji, EVERYONE_ROLE,
+    FollowTarget, FollowTargets, GuildAdmin, GuildAssets, MANAGED_ROLE, MAX_ADMIN_CHANNELS,
+    MAX_ADMIN_PEOPLE, MAX_ADMIN_ROLES, MAX_ASSET_EMOJI, MAX_FOLLOW_TARGETS, MEMBER_ABOVE_YOU,
+    MEMBER_IS_OWNER, MEMBER_ROLES_UNKNOWN, NEEDS_MANAGE_ROLES, admin_member, follow_targets,
+    guild_admin, guild_assets,
 };
 mod inbox;
 pub use inbox::{Inbox, InboxRow, MAX_INBOX_ROWS};

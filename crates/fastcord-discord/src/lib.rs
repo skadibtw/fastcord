@@ -14,6 +14,7 @@ mod account_security;
 mod ack;
 mod announce;
 mod apps;
+mod assets;
 mod attachment;
 mod call;
 mod clock;
@@ -69,6 +70,11 @@ pub use announce::{Follower, MAX_FOLLOWERS, parse_followers};
 pub use apps::{
     AuthorizedApp, Integration, MAX_WEBHOOK_NAME, Webhook, WebhookToken, authorize_url,
     parse_client_id, parse_webhooks,
+};
+pub use assets::{
+    EmojiImage, ExpressionLimits, MAX_EMOJI_NAME_CHARS, MAX_SOUND_BYTES, MAX_SOUND_MS,
+    MAX_STICKER_BYTES, MAX_STICKER_EDIT_NAME_CHARS, MIN_EMOJI_NAME_CHARS, MIN_STICKER_NAME_CHARS,
+    MIN_TAGS_CHARS, SoundFile, StickerFile, emoji_name, expression_limits,
 };
 pub use attachment::{RefreshedAttachmentUrl, decode_waveform};
 pub use call::CallSignal;
@@ -162,7 +168,9 @@ pub use send::{
 };
 pub use soundboard::{GUILD_SOUNDS, MAX_SOUND_NAME_CHARS, SoundboardSound};
 pub use stage::{MAX_TOPIC_CHARS, StageAction, StagePermissions, iso8601, topic as stage_topic};
-pub use sticker::{GUILD_STICKERS, GuildSticker};
+pub use sticker::{
+    GUILD_STICKERS, GuildSticker, MAX_STICKER_DESCRIPTION_CHARS, MAX_STICKER_TAGS_CHARS,
+};
 pub use thread::{
     ARCHIVED_PAGE_SIZE, ArchivedThreads, ForumPost, MAX_THREAD_NAME_CHARS, PostError, PostInvalid,
     PostRules, ThreadError, thread_name,

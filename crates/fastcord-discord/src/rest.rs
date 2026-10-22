@@ -36,6 +36,8 @@ pub struct RestRequest {
     route: Route,
     priority: Priority,
     body: Option<Bytes>,
+    /// Set only for a multipart body; JSON bodies leave it unset.
+    content_type: Option<String>,
     error_detail: bool,
     audit_reason: Option<HeaderValue>,
 }
@@ -82,6 +84,7 @@ impl RestRequest {
             route,
             priority,
             body: None,
+            content_type: None,
             error_detail: false,
             audit_reason: None,
         }
@@ -100,6 +103,16 @@ impl RestRequest {
             });
         }
         self.body = Some(output.bytes.into());
+        Ok(self)
+    }
+
+    /// A prepared non-JSON body (multipart) within the same byte budget as JSON.
+    pub(crate) fn raw(mut self, content_type: String, body: Vec<u8>) -> Result<Self, RestError> {
+        if body.len() > REQUEST_BODY_BYTE_BUDGET {
+            return Err(RestError::RequestBodyTooLarge);
+        }
+        self.content_type = Some(content_type);
+        self.body = Some(body.into());
         Ok(self)
     }
 
@@ -369,8 +382,12 @@ impl<C: Clock> RestClient<C> {
             request.route.url.clone(),
         );
         if let Some(body) = &request.body {
+            let content_type = request
+                .content_type
+                .as_deref()
+                .unwrap_or("application/json");
             builder = builder
-                .header(CONTENT_TYPE, "application/json")
+                .header(CONTENT_TYPE, content_type)
                 .body(body.clone());
         }
         if let Some(reason) = &request.audit_reason {

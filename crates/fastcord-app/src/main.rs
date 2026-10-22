@@ -4,6 +4,7 @@ mod account_panel;
 mod accounts;
 mod announce;
 mod apps;
+mod assets;
 mod attachment_ui;
 mod attachments;
 mod audio_devices;
@@ -245,6 +246,7 @@ struct App {
     moderation: moderation::State,
     apps: apps::State,
     community: community::State,
+    assets: assets::State,
     discover: discover::State,
     onboarding: onboarding::State,
     events: scheduled_events::State,
@@ -447,6 +449,7 @@ enum Message {
     Moderation(moderation::Event),
     Apps(apps::Event),
     Community(community::Event),
+    Assets(assets::Event),
     Discover(discover::Event),
     Onboarding(onboarding::Event),
     Events(scheduled_events::Event),
@@ -559,6 +562,7 @@ impl App {
                 moderation: moderation::State::default(),
                 apps: apps::State::default(),
                 community: community::State::default(),
+                assets: assets::State::default(),
                 discover: discover::State::default(),
                 onboarding: onboarding::State::default(),
                 events: scheduled_events::State::default(),
@@ -646,6 +650,7 @@ impl App {
             gateway
                 .controls
                 .follow_source(self.announce.wanted_follow());
+            gateway.controls.assets_guild(self.assets.wanted());
             gateway
                 .controls
                 .admin_member(self.guild_admin.wanted_member());
@@ -1720,7 +1725,12 @@ impl App {
                     refocus = iced::widget::operation::focus(composer::EDITOR_ID);
                 }
                 self.observe_ui_sound();
-                return Task::batch([refocus, self.soundboard_follow(), invite_task]);
+                return Task::batch([
+                    refocus,
+                    self.soundboard_follow(),
+                    self.assets_follow(),
+                    invite_task,
+                ]);
             }
             Message::ShowDirects(on) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
@@ -1740,6 +1750,7 @@ impl App {
             Message::Announce(event) => return self.announce_event(event),
             Message::Apps(event) => return self.apps_event(event),
             Message::Community(event) => return self.community_event(event),
+            Message::Assets(event) => return self.assets_event(event),
             Message::GuildAdmin(event) => {
                 if matches!(event, guild_admin::Event::MemberRoles(..)) {
                     self.member_menu.close();
@@ -3142,6 +3153,7 @@ impl App {
         self.moderation.clear();
         self.apps.clear();
         self.community.clear();
+        self.assets.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -3328,6 +3340,7 @@ impl App {
         self.moderation.clear();
         self.apps.clear();
         self.community.clear();
+        self.assets.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -3467,6 +3480,47 @@ impl App {
         self.gif
             .update(event, &session.client, gateway.attachments.as_ref())
             .map(Message::Gif)
+    }
+
+    fn assets_event(&mut self, event: assets::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = assets::State::is_rejected(&event);
+        let env = assets::Env {
+            client: &session.client,
+            navigation: &gateway.navigation,
+            cache: gateway.attachments.as_ref(),
+            output: self.audio_preferences.output.choice.clone(),
+        };
+        let task = self.assets.update(event, &env);
+        if rejected {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Assets)
+    }
+
+    /// Lists stickers and sounds again when Discord reports a change.
+    fn assets_follow(&mut self) -> Task<Message> {
+        let Phase::Account { gateway, .. } = &self.phase else {
+            return Task::none();
+        };
+        let controls = gateway.controls.voice_controls();
+        let (stickers, sounds) = (controls.sticker_change, controls.sound_catalog_change);
+        let tasks: Vec<_> = self
+            .assets
+            .new_changes(stickers, sounds)
+            .into_iter()
+            .map(|event| self.assets_event(event))
+            .collect();
+        Task::batch(tasks)
     }
 
     fn apps_event(&mut self, event: apps::Event) -> Task<Message> {
@@ -4068,6 +4122,13 @@ impl App {
                 return self.apps_event(apps::Event::OpenWebhooks(guild, channel));
             }
             _ => {}
+        }
+        if let guild_admin::Event::Assets(guild) = event {
+            // The menu hands over to the emoji, sticker and sound panel.
+            let _ = self
+                .guild_admin
+                .update(event, &gateway.navigation, &session.client);
+            return self.assets_event(assets::Event::Open(guild));
         }
         if let guild_admin::Event::Followed(guild, channel) = event {
             // The channel panel hands over to the followed-announcements list.
@@ -4984,6 +5045,9 @@ impl App {
             }
             if let Some(panel) = apps::view(&self.apps, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::Apps));
+            }
+            if let Some(panel) = assets::view(&self.assets, &gateway.navigation) {
+                banner_column = banner_column.push(panel.map(Message::Assets));
             }
             if let Some(panel) = invite::view(&self.invite, localtime::now()) {
                 banner_column = banner_column.push(panel.map(Message::Invite));

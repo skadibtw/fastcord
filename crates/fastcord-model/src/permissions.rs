@@ -28,6 +28,8 @@ impl Permissions {
     pub const CHANGE_NICKNAME: Self = Self(1 << 26);
     pub const MANAGE_NICKNAMES: Self = Self(1 << 27);
     pub const MODERATE_MEMBERS: Self = Self(1 << 40);
+    pub const MANAGE_GUILD_EXPRESSIONS: Self = Self(1 << 30);
+    pub const CREATE_GUILD_EXPRESSIONS: Self = Self(1 << 43);
     pub const REQUEST_TO_SPEAK: Self = Self(1 << 32);
     pub const MUTE_MEMBERS: Self = Self(1 << 22);
     pub const DEAFEN_MEMBERS: Self = Self(1 << 23);
@@ -137,6 +139,7 @@ pub const PERMISSION_GROUPS: [(&str, &[PermissionInfo]); 5] = [
             info(4, "Manage channels", scope::CHANNEL),
             info(28, "Manage roles", scope::CHANNEL),
             info(30, "Manage expressions", scope::ROLE),
+            info(43, "Create expressions", scope::ROLE),
             info(7, "View audit log", scope::ROLE),
             info(19, "View server insights", scope::ROLE),
             info(29, "Manage webhooks", scope::CHANNEL),

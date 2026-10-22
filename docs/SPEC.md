@@ -445,7 +445,7 @@ A call can hold at once: the account's camera on the call connection (§8.8), it
 
 ### 8.11 Free server-local soundboard (#87)
 
-The open server's soundboard, for the voice channel the account is in. Scope: the server's own sounds only; other servers' sounds (Nitro), Discord's default sounds, entrance sounds and creating or editing sounds (#99) are not offered.
+The open server's soundboard, for the voice channel the account is in. Scope: the server's own sounds only; other servers' sounds (Nitro), Discord's default sounds, and entrance sounds are not offered here (managing the server's own sounds is the #99 assets panel).
 
 - **Catalog.** `GET /guilds/{id}/soundboard-sounds` when the panel opens (at most 64 sounds, names cut to 32 characters) and again after `GUILD_SOUNDBOARD_SOUND_CREATE/UPDATE/DELETE` or `..._SOUNDS_UPDATE` for that server. A re-list drops the preview and a selection whose sound vanished. The list lives in the panel only, not in the reducer's store, and is dropped when the panel closes.
 - **Preview** is local: CDN fetch (`cdn.discordapp.com/soundboard-sounds/{id}`, no credentials, through the shared disk LRU, at most 1 MiB), decode on a blocking worker (`fastcord-audio::soundboard`, ADR 0011) and playback on the file player's output-only engine. It sends nothing and stops on a second click, deafening, closing the panel or leaving the call.
@@ -556,6 +556,15 @@ Implemented in `fastcord-discord::community_admin` (editable documents that pres
 - The editor reloads from the answer (or the next read); Community changes show only after `GUILD_UPDATE`.
 - Disabling Community needs a Confirm. Enabling needs a rules and an updates channel.
 - **Left:** analytics and monetization dashboards, custom emoji, non-TERMS questions.
+
+### 8.22 Server emoji, stickers and soundboard assets (#99)
+
+Implemented in `fastcord-discord::assets` (the nine requests, the tier slots `expression_limits`, validated names and files), `image_data` (emoji and sound `data:` helpers), `rest.rs` (`RestRequest::raw` for the sticker multipart), `state/navigation/admin.rs` (`guild_assets`: Create/Manage Expressions and the emoji list from the reducer), the `GUILD_STICKERS_UPDATE` decode, and `fastcord-app::assets` (the panel).
+
+- **Panel.** The server menu's "Emoji and sounds" (shown with Create or Manage Expressions) opens Emoji, Stickers and Soundboard tabs, each with its free-slot count, an upload form, and rows with Edit and Delete (after a Confirm).
+- **One click, one request.** Permissions, the slot and the asset's existence are re-checked against the reducer's read model at the click; at most one write is in flight; nothing is retried. Discord's refusal is shown verbatim and an ambiguous failure reads "may have been applied".
+- **Files** are judged by signature and size on a worker thread; a sound's length uses the #87 decoder; previews are the bounded emoji decoder and the #87 player. Nothing is written to disk.
+- **Free only.** Slots come from `premium_tier` and are never bought; with no tier reported none is assumed.
 
 ### Apps: commands and components (#100)
 
@@ -920,7 +929,7 @@ Windows is the target; other OSes return `Unsupported` with a reason from `fastc
 - **Compact call mode** (`Message::ToggleCompact`, Pin button in the voice panel): the main window becomes a 300x260 always-on-top window showing who is speaking (speaking rings), the account's own mute and deafen buttons, Disconnect and a way back; it ends with the call. A second iced window (`daemon`) was judged too invasive for this milestone. No game injection or hooking of other processes: an overlay inside other apps is not offered and is not advertised.
 - **Notification actions**: not implemented. The #57 toast is a plain WinRT toast for an unpackaged app; activating it into the running process needs a COM activator registered for an AUMID (a Start-menu shortcut), which this build does not create.
 
-### 8.20 Manual moderation and audit log (#95)
+### 8.23 Manual moderation and audit log (#95)
 
 Implemented in `fastcord-discord::member` (the actions, `MemberPermissions`, `Store::member_action_allowed` and `can_move_to`), `fastcord-discord::moderation` (ban list, bulk deletion rules, audit-log parsing), `RestRequest::with_audit_reason`, `fastcord-app::member_menu`, `fastcord-app::moderation` (Bans and Audit log panels, opened from the server menu), `fastcord-app::history::moderation` (deleting other messages, Select messages, reaction removal) and the thread tools in `fastcord-app::threads`. Routes are in `docs/PROTOCOL.md`, all unverified.
 
@@ -930,6 +939,6 @@ Implemented in `fastcord-discord::member` (the actions, `MemberPermissions`, `St
 - **Threads.** Archive/Unarchive and Lock/Unlock in a thread header for Manage Threads.
 - **Not included.** Automated moderation, member search or bulk member lists, pruning, member screening review, timeouts longer than a week, reasons for message deletion.
 
-### 8.21 App access and webhooks (#101)
+### 8.24 App access and webhooks (#101)
 
 `fastcord-discord::apps` holds the requests and bounded parsers (100 rows, 80-character webhook names, the token in a zeroizing type that never formats); `apps.rs` in the app is one panel state machine for authorized apps (account panel), a server's integrations (server settings, MANAGE_GUILD) and a channel's incoming webhooks (channel edit panel, MANAGE_WEBHOOKS, beside the #98 follower list, which stays the only home of type 2). Permissions come from the reducer's admin read model and are re-checked at the click. Removals need a Confirm; one request in flight; stale answers for a closed or changed panel are ignored; logout and account change clear everything including webhook tokens. Connections reuse the profile editor and gain the activity toggle. Adding an app is a browser hand-off to Discord's authorize page, never a native grant. No game, store or paid-app features; webhooks are configured, never posted to. All routes unverified (PROTOCOL.md).

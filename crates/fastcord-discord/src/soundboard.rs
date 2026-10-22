@@ -30,6 +30,8 @@ pub struct SoundboardSound {
     pub emoji: Option<String>,
     /// `false` when the server lost the boost level that kept it usable.
     pub available: bool,
+    /// The member who uploaded it, when Discord says.
+    pub creator: Option<Snowflake>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +45,14 @@ struct Wire {
     emoji_name: Option<String>,
     #[serde(default = "yes")]
     available: bool,
+    #[serde(
+        default,
+        rename = "user",
+        deserialize_with = "fastcord_model::creator_id"
+    )]
+    creator: Option<Snowflake>,
+    #[serde(default)]
+    user_id: Option<Snowflake>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +84,7 @@ impl From<Wire> for SoundboardSound {
                 .filter(|name| !name.is_empty())
                 .map(|name| name.chars().take(MAX_EMOJI_NAME_CHARS).collect()),
             available: wire.available,
+            creator: wire.creator.or(wire.user_id),
         }
     }
 }

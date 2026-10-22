@@ -1639,6 +1639,7 @@ fn oversized_required_emoji_metadata_trips_the_existing_store_safety_limit() {
             animated: false,
             roles: vec![id(1); 8],
             available: true,
+            creator: None,
         })
         .collect();
     store.apply(event(Dispatch::GuildEmojisUpdate(Box::new(

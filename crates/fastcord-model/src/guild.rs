@@ -51,6 +51,32 @@ pub struct GuildEmoji {
     pub roles: Vec<Snowflake>,
     #[serde(default = "emoji_available")]
     pub available: bool,
+    /// The member who uploaded it, when Discord says (`user.id`).
+    #[serde(
+        default,
+        rename = "user",
+        deserialize_with = "creator_id",
+        skip_serializing
+    )]
+    pub creator: Option<Snowflake>,
+}
+
+/// A string that Discord may send as `null`.
+pub fn null_default_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(<Option<String> as serde::Deserialize>::deserialize(d)?.unwrap_or_default())
+}
+
+/// The `id` of a `user` object, as the creator of an expression asset; any
+/// other shape is no creator.
+pub fn creator_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Snowflake>, D::Error> {
+    #[derive(serde::Deserialize)]
+    struct User {
+        id: Snowflake,
+    }
+    let user: Option<serde_json::Value> = serde::Deserialize::deserialize(d)?;
+    Ok(user
+        .and_then(|value| serde_json::from_value::<User>(value).ok())
+        .map(|user| user.id))
 }
 
 fn emoji_available() -> bool {
@@ -81,6 +107,9 @@ pub struct GuildSettings {
     /// Feature flags (at most [`MAX_FEATURES`] of [`MAX_FEATURE_BYTES`]), kept
     /// so a Community change can send them back.
     pub features: Vec<String>,
+    /// `premium_tier` (0 to 3): the boost level that sets the expression slots.
+    /// `None` when Discord did not say; no slot is then assumed.
+    pub premium_tier: Option<u8>,
 }
 
 /// Feature flags kept per server; a real server has far fewer.

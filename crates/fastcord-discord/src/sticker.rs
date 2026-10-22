@@ -13,6 +13,10 @@ use crate::{Clock, Method, Priority, RestClient, RestError, RestRequest, Route};
 
 /// Most stickers kept from one answer (Discord's largest server allows 60 to 250).
 pub const GUILD_STICKERS: usize = 250;
+/// Longest description Discord accepts for a sticker.
+pub const MAX_STICKER_DESCRIPTION_CHARS: usize = 100;
+/// Longest tags text Discord accepts for a sticker.
+pub const MAX_STICKER_TAGS_CHARS: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuildSticker {
@@ -22,6 +26,11 @@ pub struct GuildSticker {
     pub format_type: u8,
     /// `false` when the server lost the boost level that kept it usable.
     pub available: bool,
+    pub description: String,
+    /// Discord's tags: the related Unicode emoji name and keywords.
+    pub tags: String,
+    /// The member who uploaded it, when Discord says.
+    pub creator: Option<Snowflake>,
 }
 
 #[derive(Deserialize)]
@@ -33,6 +42,16 @@ struct Wire {
     format_type: u8,
     #[serde(default = "yes")]
     available: bool,
+    #[serde(default, deserialize_with = "fastcord_model::null_default_string")]
+    description: String,
+    #[serde(default, deserialize_with = "fastcord_model::null_default_string")]
+    tags: String,
+    #[serde(
+        default,
+        rename = "user",
+        deserialize_with = "fastcord_model::creator_id"
+    )]
+    creator: Option<Snowflake>,
 }
 
 fn yes() -> bool {
@@ -61,6 +80,13 @@ pub(crate) fn parse_stickers(body: &[u8]) -> Result<Vec<GuildSticker>, RestError
             name: wire.name.chars().take(MAX_STICKER_NAME_CHARS).collect(),
             format_type: wire.format_type,
             available: wire.available,
+            description: wire
+                .description
+                .chars()
+                .take(MAX_STICKER_DESCRIPTION_CHARS)
+                .collect(),
+            tags: wire.tags.chars().take(MAX_STICKER_TAGS_CHARS).collect(),
+            creator: wire.creator,
         })
         .collect();
     stickers.sort_by_cached_key(|sticker| (sticker.name.to_lowercase(), sticker.id));

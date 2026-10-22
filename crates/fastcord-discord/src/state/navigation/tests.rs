@@ -3037,3 +3037,66 @@ fn a_channel_overwrite_removes_a_destination() {
         json!([{"id": "9001", "type": 0, "allow": "0", "deny": "1024"}]);
     assert_eq!(follow_ids(&admin_store(&guild), 9103), None);
 }
+
+// ----- server expression assets (issue #99) -----
+
+const CREATE_EXPRESSIONS: &str = "8796093022208";
+const MANAGE_EXPRESSIONS: &str = "1073741824";
+
+fn assets_guild(mod_permissions: &str) -> Value {
+    let mut guild = follow_guild(mod_permissions);
+    guild["properties"]["premium_tier"] = json!(2);
+    guild["emojis"] = json!([
+        {"id": "9701", "name": "mine", "animated": false, "user": {"id": ME.to_string()}},
+        {"id": "9702", "name": "theirs", "animated": true, "user": {"id": "9500", "username": "helper-person"}}
+    ]);
+    guild
+}
+
+#[test]
+fn assets_follow_create_and_manage_expressions_and_the_tier() {
+    let guild = |permissions| {
+        let store = admin_store(&assets_guild(permissions));
+        guild_assets(&store, id(ADMIN_GUILD)).unwrap()
+    };
+    let none = guild("0");
+    assert!(!none.can_create && !none.can_manage);
+    let create = guild(CREATE_EXPRESSIONS);
+    assert!(create.can_create && !create.can_manage);
+    assert!(create.may_change(Some(id(ME))) && !create.may_change(Some(id(9500))));
+    assert!(!create.may_change(None));
+    let manage = guild(MANAGE_EXPRESSIONS);
+    assert!(!manage.can_create && manage.can_manage);
+    assert!(manage.may_change(Some(id(9500))) && manage.may_change(None));
+    assert_eq!(create.tier, Some(2));
+    assert_eq!(create.limits().unwrap().emoji, 150);
+    let names: Vec<_> = create
+        .emojis
+        .iter()
+        .map(|e| (e.name.as_str(), e.animated, e.creator))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("mine", false, Some(id(ME))),
+            ("theirs", true, Some(id(9500)))
+        ]
+    );
+    assert_eq!(
+        create.emojis[1].creator_name.as_deref(),
+        Some("helper-person")
+    );
+    assert!(guild_assets(&admin_store(&assets_guild("0")), id(1)).is_none());
+}
+
+#[test]
+fn an_unreported_tier_stays_unknown() {
+    let mut guild = assets_guild(CREATE_EXPRESSIONS);
+    guild["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("premium_tier");
+    let found = guild_assets(&admin_store(&guild), id(ADMIN_GUILD)).unwrap();
+    assert_eq!(found.tier, None);
+    assert!(found.limits().is_none());
+}

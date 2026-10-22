@@ -649,3 +649,81 @@ pub fn follow_targets(store: &Store, guild: Snowflake, source: Snowflake) -> Opt
     }
     Some(FollowTargets { source, targets })
 }
+
+/// Emoji listed (a tier 3 server holds 250 of each kind).
+pub const MAX_ASSET_EMOJI: usize = 500;
+
+/// One custom emoji of the server, as the expression assets tab lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetEmoji {
+    pub id: Snowflake,
+    pub name: String,
+    pub animated: bool,
+    pub creator: Option<Snowflake>,
+    /// The creator's name when the account holds that user.
+    pub creator_name: Option<String>,
+}
+
+/// What the account may do with the server's emoji, stickers and sounds, and
+/// the emoji it holds. Computed by the reducer from the guild-wide permissions
+/// (owner and Administrator included); stickers and sounds are listed by REST.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuildAssets {
+    pub id: Snowflake,
+    pub name: String,
+    /// The account itself: it may change what it created.
+    pub me: Snowflake,
+    /// CREATE_GUILD_EXPRESSIONS: upload, and change one's own assets.
+    pub can_create: bool,
+    /// MANAGE_GUILD_EXPRESSIONS: change and delete anyone's assets.
+    pub can_manage: bool,
+    /// The server's `premium_tier`; `None` when Discord did not say, in which
+    /// case no free slot is assumed.
+    pub tier: Option<u8>,
+    pub emojis: Vec<AssetEmoji>,
+}
+
+impl GuildAssets {
+    /// Whether the account may rename or delete an asset made by `creator`:
+    /// anyone's with Manage Expressions, its own with Create Expressions. An
+    /// unknown creator needs Manage Expressions.
+    pub fn may_change(&self, creator: Option<Snowflake>) -> bool {
+        self.can_manage || (self.can_create && creator == Some(self.me))
+    }
+
+    /// The free slots the tier gives, `None` while the tier is unknown.
+    pub fn limits(&self) -> Option<crate::ExpressionLimits> {
+        self.tier.map(crate::expression_limits)
+    }
+}
+
+/// The expression assets view of one held guild; `None` when it is unknown or
+/// the account's own roles are not yet established.
+pub fn guild_assets(store: &Store, guild_id: Snowflake) -> Option<GuildAssets> {
+    let guild = store.guild(guild_id)?;
+    let me = store.current_user()?.id;
+    let base = PermissionContext::new(store, guild)?.base();
+    Some(GuildAssets {
+        id: guild_id,
+        name: capped_name(Some(guild.name()), "Unnamed server"),
+        me,
+        can_create: base.contains(Permissions::CREATE_GUILD_EXPRESSIONS),
+        can_manage: base.contains(Permissions::MANAGE_GUILD_EXPRESSIONS),
+        tier: guild.settings().premium_tier,
+        emojis: guild
+            .emojis()
+            .iter()
+            .take(MAX_ASSET_EMOJI)
+            .map(|emoji| AssetEmoji {
+                id: emoji.id,
+                name: capped_name(emoji.name.as_deref(), "unnamed"),
+                animated: emoji.animated,
+                creator: emoji.creator,
+                creator_name: emoji
+                    .creator
+                    .and_then(|id| store.user(id))
+                    .map(|user| capped_name(Some(user.display_name()), "")),
+            })
+            .collect(),
+    })
+}

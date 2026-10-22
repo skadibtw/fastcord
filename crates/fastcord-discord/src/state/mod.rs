@@ -1362,6 +1362,7 @@ impl Store {
             // Soundboard plays and catalog changes belong to the voice layer.
             | Dispatch::VoiceChannelSound(_)
             | Dispatch::SoundboardChanged(_)
+            | Dispatch::StickersChanged(_)
             // Typing is transient and lives outside the store.
             | Dispatch::TypingStart(_) => {}
         }
