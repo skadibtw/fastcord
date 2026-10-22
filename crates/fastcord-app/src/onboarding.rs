@@ -1158,6 +1158,7 @@ mod tests {
             thread: None,
             occupant: None,
             stage: false,
+            collapsed: false,
         };
         let nav = NavigationSnapshot {
             channels: Window {

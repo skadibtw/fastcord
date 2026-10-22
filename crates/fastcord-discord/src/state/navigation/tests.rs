@@ -2878,3 +2878,102 @@ fn losing_manage_roles_takes_effect_with_the_members_own_update() {
     assert!(admin.roles.iter().all(|r| r.edit_lock.is_some()));
     assert!(admin.channels.iter().all(|c| !c.can_manage_permissions));
 }
+
+fn folders(list: &[(Option<u64>, &[u64])]) -> Dispatch {
+    Dispatch::UserFoldersUpdate(Box::new(crate::user_settings::GuildFolders {
+        folders: list
+            .iter()
+            .map(|(folder, guilds)| crate::user_settings::GuildFolder {
+                id: *folder,
+                name: Some("Pals".to_owned()),
+                color: Some(0x00ff00),
+                guilds: guilds.iter().map(|g| id(*g)).collect(),
+            })
+            .collect(),
+    }))
+}
+
+#[test]
+fn folders_order_the_rail_new_servers_first_and_fold_with_local_state() {
+    let (mut store, mut navigation) = setup(READY);
+    let rail = |navigation: &Navigation, store: &Store| {
+        navigation
+            .guild_window(store, 0, usize::MAX)
+            .rows
+            .iter()
+            .map(|row| (row.id, row.folder.as_ref().map(|f| (f.header, f.expanded))))
+            .collect::<Vec<_>>()
+    };
+    // No settings: READY order, no folders.
+    assert_eq!(
+        rail(&navigation, &store)
+            .iter()
+            .map(|r| r.0)
+            .collect::<Vec<_>>(),
+        [id(FIRST), id(SECOND), id(OUTAGE)]
+    );
+    // SECOND is in folder 9; FIRST is placed alone; an unknown guild is ignored.
+    store.apply(event(folders(&[(None, &[FIRST]), (Some(9), &[SECOND, 5])])));
+    // OUTAGE is not placed by the settings, so it comes first.
+    assert_eq!(
+        rail(&navigation, &store),
+        [
+            (id(OUTAGE), None),
+            (id(FIRST), None),
+            (id(9), Some((true, false)))
+        ]
+    );
+    let mut layout = Layout::default();
+    layout.open_folders.insert(9);
+    navigation.set_layout(Arc::new(layout));
+    let open = rail(&navigation, &store);
+    assert_eq!(open[2], (id(9), Some((true, true))));
+    assert_eq!(open[3], (id(SECOND), Some((false, true))));
+    let window = navigation.guild_window(&store, 0, usize::MAX);
+    let header = &window.rows[2];
+    assert_eq!(
+        header.folder.as_ref().map(|f| (f.count, f.color)),
+        Some((1, Some(0x00ff00)))
+    );
+    assert!(!header.available);
+    // Windows page through the flattened list.
+    assert_eq!(navigation.guild_window(&store, 3, 5).rows.len(), 1);
+}
+
+#[test]
+fn collapsed_categories_and_hidden_muted_channels_keep_unread_and_open_ones() {
+    let (mut store, mut navigation) = setup(NAV_READY);
+    let g = id(100);
+    let before = ids(&rows(&navigation, &store));
+    let mut layout = Layout::default();
+    layout.collapsed_categories.insert(id(2000));
+    navigation.set_layout(Arc::new(layout.clone()));
+    let after = rows(&navigation, &store);
+    for child in [2001, 2002, 2003] {
+        assert!(before.contains(&id(child)) && !ids(&after).contains(&id(child)));
+    }
+    let category = after.iter().find(|row| row.id == id(2000)).unwrap();
+    assert!(category.collapsed);
+    // The open channel stays visible.
+    assert!(navigation.select_channel(&store, id(2002)));
+    assert!(ids(&rows(&navigation, &store)).contains(&id(2002)));
+    // Muted channels hide only where asked, and only when nothing mentions.
+    layout.collapsed_categories.clear();
+    layout.hide_muted.insert(g);
+    navigation.set_layout(Arc::new(layout));
+    store.apply(event(Dispatch::UserGuildSettingsUpdate(Box::new(
+        crate::gateway::GuildMuteUpdate {
+            guild_id: Some(g),
+            guild_muted: false,
+            channels: vec![(id(2001), true), (id(2002), true)],
+            level: None,
+            suppress_everyone: false,
+            suppress_roles: false,
+            channel_levels: Vec::new(),
+        },
+    ))));
+    let hidden = ids(&rows(&navigation, &store));
+    assert!(!hidden.contains(&id(2001)), "muted and closed: hidden");
+    assert!(hidden.contains(&id(2002)), "the open channel stays");
+    assert!(hidden.contains(&id(2003)), "not muted");
+}

@@ -198,12 +198,41 @@ pub struct ReadStateEntry {
 pub struct MuteSettings {
     pub guilds: Vec<Snowflake>,
     pub channels: Vec<Snowflake>,
+    /// Every settings entry, for the notification levels and suppressions.
+    pub entries: Vec<GuildMuteUpdate>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReadyRead {
     pub entries: Vec<ReadStateEntry>,
     pub mutes: MuteSettings,
+    /// Server folders from the user settings; `None` when READY had none.
+    pub folders: Option<crate::user_settings::GuildFolders>,
+}
+
+/// What a server or channel notifies about (`message_notifications`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NotifyLevel {
+    #[default]
+    All,
+    Mentions,
+    Nothing,
+}
+
+impl NotifyLevel {
+    /// 0 to 2; 3 (use the server's setting) and anything else is `None`.
+    pub fn from_wire(value: u64) -> Option<Self> {
+        match value {
+            0 => Some(Self::All),
+            1 => Some(Self::Mentions),
+            2 => Some(Self::Nothing),
+            _ => None,
+        }
+    }
+
+    pub fn wire(self) -> u8 {
+        self as u8
+    }
 }
 
 /// MESSAGE_ACK: some client of the account moved a channel's read cursor.
@@ -241,6 +270,12 @@ pub struct GuildMuteUpdate {
     pub guild_id: Option<Snowflake>,
     pub guild_muted: bool,
     pub channels: Vec<(Snowflake, bool)>,
+    /// The server's level; `None` follows the server's own default.
+    pub level: Option<NotifyLevel>,
+    pub suppress_everyone: bool,
+    pub suppress_roles: bool,
+    /// Channel overrides; `None` inherits.
+    pub channel_levels: Vec<(Snowflake, Option<NotifyLevel>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -570,6 +605,9 @@ pub enum Dispatch {
     UserSettingsUpdate(Box<crate::PrivacySettings>),
     /// Mute settings changed.
     UserGuildSettingsUpdate(Box<GuildMuteUpdate>),
+    /// Server folders changed (`USER_SETTINGS_PROTO_UPDATE`, or
+    /// `USER_SETTINGS_UPDATE` carrying `guild_folders`).
+    UserFoldersUpdate(Box<crate::user_settings::GuildFolders>),
     /// A user reacted to a message.
     MessageReactionAdd(Box<MessageReaction>),
     /// A user took a reaction back.
@@ -659,6 +697,7 @@ impl Dispatch {
             Self::RelationshipRemove(_) => "RELATIONSHIP_REMOVE",
             Self::UserSettingsUpdate(_) => "USER_SETTINGS_UPDATE",
             Self::UserGuildSettingsUpdate(_) => "USER_GUILD_SETTINGS_UPDATE",
+            Self::UserFoldersUpdate(_) => "USER_SETTINGS_PROTO_UPDATE",
             Self::MessageReactionAdd(_) => "MESSAGE_REACTION_ADD",
             Self::MessageReactionRemove(_) => "MESSAGE_REACTION_REMOVE",
             Self::MessageReactionRemoveAll(_) => "MESSAGE_REACTION_REMOVE_ALL",

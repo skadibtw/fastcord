@@ -1681,3 +1681,56 @@ fn private_calls_follow_create_update_voice_and_delete_and_reset_on_ready() {
     apply(&mut store, "READY", READY);
     assert!(store.calls().is_empty(), "a reconnect forgets stale calls");
 }
+
+#[test]
+fn levels_and_suppressed_mentions_shape_what_counts_as_unread_or_a_mention() {
+    let mut store = ready_with_read_state(1, 0);
+    let message = |event: GatewayEvent| match event {
+        GatewayEvent::Dispatch {
+            event: Dispatch::MessageCreate(message),
+            ..
+        } => *message,
+        _ => unreachable!(),
+    };
+    let update = |level, suppress| GatewayEvent::Dispatch {
+        sequence: 1,
+        event: Dispatch::UserGuildSettingsUpdate(Box::new(crate::gateway::GuildMuteUpdate {
+            guild_id: Some(id(FIRST)),
+            guild_muted: false,
+            channels: Vec::new(),
+            level,
+            suppress_everyone: suppress,
+            suppress_roles: false,
+            channel_levels: Vec::new(),
+        })),
+    };
+    let mut everyone = message(channel_message(GENERAL, 10, NELLY, &[]));
+    everyone.mention_everyone = true;
+    assert!(store.notifies_account(&everyone));
+    assert!(store.apply(update(None, true)).read);
+    assert!(!store.notifies_account(&everyone), "suppressed @everyone");
+    assert!(store.mentions_account(&everyone), "still highlighted");
+    // Only mentions: a plain message no longer lights the channel, a direct
+    // mention still counts.
+    store.apply(update(Some(crate::gateway::NotifyLevel::Mentions), true));
+    store.apply(channel_message(GENERAL, 1_000_000, NELLY, &[]));
+    assert!(
+        !store
+            .unread(
+                id(GENERAL),
+                Some(id(FIRST)),
+                store.last_message(Some(id(FIRST)), id(GENERAL))
+            )
+            .unread
+    );
+    store.apply(channel_message(GENERAL, 1_000_001, NELLY, &[ME]));
+    let shown = store.unread(id(GENERAL), Some(id(FIRST)), Some(id(1_000_001)));
+    assert_eq!(shown.mentions, 1);
+    // Nothing: no badge at all.
+    store.apply(update(Some(crate::gateway::NotifyLevel::Nothing), true));
+    assert_eq!(
+        store.unread(id(GENERAL), Some(id(FIRST)), Some(id(1_000_001))),
+        Unread::default()
+    );
+    assert_eq!(store.recount(), store.bytes());
+}

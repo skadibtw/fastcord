@@ -13,8 +13,9 @@
 //! members and thread managers, and a thread whose parent is not viewable or
 //! not held is never exposed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 use fastcord_model::{
     Channel, ChannelKind as ModelChannelKind, FLAG_PINNED, FLAG_REQUIRE_TAG, GuildScope,
@@ -23,7 +24,7 @@ use fastcord_model::{
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{GuildEntry, Store, Unread};
-use crate::gateway::SubscriptionTarget;
+use crate::gateway::{NotifyLevel, SubscriptionTarget};
 
 /// Held members copied into one snapshot, and roles listed with them.
 pub const MAX_SNAPSHOT_MEMBERS: usize = 1024;
@@ -76,6 +77,56 @@ pub struct GuildRow {
     /// Unmuted messages not yet read in some channel, and mentions in all.
     pub unread: bool,
     pub mentions: u32,
+    /// Set when the server sits in one of the account's folders, and on the
+    /// folder's own header row.
+    pub folder: Option<FolderTag>,
+}
+
+/// A server folder as the rail shows it (issue #106).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderTag {
+    /// The folder's ID; on a header row this is also the row's `id`.
+    pub id: u64,
+    pub name: String,
+    /// 24-bit RGB.
+    pub color: Option<u32>,
+    /// The folder's own row, not one of its servers.
+    pub header: bool,
+    pub expanded: bool,
+    /// Servers in the folder that this client holds.
+    pub count: usize,
+}
+
+/// The notification settings of the open server, its open channel and the
+/// open direct conversation, for the alerts panel.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotificationView {
+    pub guild: Option<Snowflake>,
+    /// The server's explicit level; `None` follows its default.
+    pub guild_level: Option<NotifyLevel>,
+    pub guild_default: NotifyLevel,
+    pub guild_muted: bool,
+    pub suppress_everyone: bool,
+    pub suppress_roles: bool,
+    pub hide_muted: bool,
+    /// The open channel of the server, or the open direct conversation.
+    pub channel: Option<Snowflake>,
+    pub channel_level: Option<NotifyLevel>,
+    pub channel_muted: bool,
+    pub private: Option<Snowflake>,
+    pub private_level: Option<NotifyLevel>,
+    pub private_muted: bool,
+}
+
+/// Local, per-account presentation choices (never sent to Discord).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Layout {
+    /// Categories whose channels are folded away.
+    pub collapsed_categories: HashSet<Snowflake>,
+    /// Folders showing their servers.
+    pub open_folders: HashSet<u64>,
+    /// Servers that hide their muted channels.
+    pub hide_muted: HashSet<Snowflake>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,6 +386,9 @@ pub struct ChannelRow {
     pub occupant: Option<Occupant>,
     /// A Stage channel (also `kind == Voice`).
     pub stage: bool,
+    /// A category whose channels are folded away (unread, selected and
+    /// occupied voice channels still show).
+    pub collapsed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -441,6 +495,8 @@ pub struct NavigationSnapshot {
     pub suppressed: std::sync::Arc<std::collections::BTreeMap<Snowflake, super::Suppression>>,
     /// Privacy settings as Gateway events set them (shared).
     pub privacy: std::sync::Arc<crate::PrivacyLive>,
+    /// Notification settings of what is open.
+    pub notifications: NotificationView,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -458,9 +514,15 @@ pub struct Navigation {
     selected_channel: Option<Snowflake>,
     remembered: BTreeMap<Snowflake, Snowflake>,
     selected_private_channel: Option<Snowflake>,
+    layout: Arc<Layout>,
 }
 
 impl Navigation {
+    /// The local presentation choices that order and fold the lists.
+    pub fn set_layout(&mut self, layout: Arc<Layout>) {
+        self.layout = layout;
+    }
+
     pub fn selected_guild(&self) -> Option<Snowflake> {
         self.selected_guild
     }
@@ -636,41 +698,112 @@ impl Navigation {
     /// READY/GUILD_CREATE order for available guilds, then outage IDs in numeric
     /// order. Outage names are decimal IDs because no name is authoritative.
     pub fn guild_window(&self, store: &Store, offset: usize, count: usize) -> Window<GuildRow> {
-        let ids = || {
-            store.guild_ids().iter().copied().chain(
+        enum Entry {
+            Guild(Snowflake, Option<usize>),
+            Header(usize),
+        }
+        let known: Vec<Snowflake> = store
+            .guild_ids()
+            .iter()
+            .copied()
+            .chain(
                 store
                     .unavailable_guilds()
                     .filter(|id| store.guild(*id).is_none()),
             )
-        };
-        let total = store.guild_ids().len()
-            + store
-                .unavailable_guilds()
-                .filter(|id| store.guild(*id).is_none())
-                .count();
+            .collect();
+        let held: HashSet<Snowflake> = known.iter().copied().collect();
+        let folders = store.folders();
+        // Servers the settings do not place come first (new servers), then the
+        // settings' own order; a server listed twice keeps its first place.
+        let mut placed = HashSet::new();
+        let mut members: Vec<Vec<Snowflake>> = Vec::new();
+        for folder in &folders.folders {
+            members.push(
+                folder
+                    .guilds
+                    .iter()
+                    .copied()
+                    .filter(|id| held.contains(id) && placed.insert(*id))
+                    .collect(),
+            );
+        }
+        let mut entries: Vec<Entry> = known
+            .iter()
+            .filter(|id| !placed.contains(id))
+            .map(|id| Entry::Guild(*id, None))
+            .collect();
+        for (at, (folder, guilds)) in folders.folders.iter().zip(&members).enumerate() {
+            match folder.id.filter(|_| !guilds.is_empty()) {
+                Some(id) => {
+                    entries.push(Entry::Header(at));
+                    if self.layout.open_folders.contains(&id) {
+                        entries.extend(guilds.iter().map(|g| Entry::Guild(*g, Some(at))));
+                    }
+                }
+                None => entries.extend(guilds.iter().map(|g| Entry::Guild(*g, None))),
+            }
+        }
+        let total = entries.len();
         let offset = offset.min(total);
-        let rows = ids()
+        let me = store.current_user().map(|user| user.id);
+        let tag = |at: usize, header: bool| {
+            let folder = &folders.folders[at];
+            let id = folder.id.unwrap_or_default();
+            FolderTag {
+                id,
+                name: capped_name(folder.name.as_deref(), "Folder"),
+                color: folder.color,
+                header,
+                expanded: self.layout.open_folders.contains(&id),
+                count: members[at].len(),
+            }
+        };
+        let rows = entries
+            .iter()
             .skip(offset)
             .take(count.min(MAX_WINDOW_ROWS))
-            .map(|id| {
-                let guild = store.guild(id);
-                let unread = store.guild_unread(id);
-                GuildRow {
-                    unread: unread.unread,
-                    mentions: unread.mentions,
-                    id,
-                    icon: guild.and_then(|guild| guild.icon().map(str::to_owned)),
-                    name: guild.map_or_else(
-                        || id.to_string(),
-                        |guild| capped_name(Some(guild.name()), "Unnamed guild"),
-                    ),
-                    available: guild.is_some(),
-                    owned: guild.is_some_and(|guild| {
-                        guild.owner_id().is_some()
-                            && guild.owner_id() == store.current_user().map(|user| user.id)
-                    }),
-                    selected: self.account == store.current_user().map(|user| user.id)
-                        && self.selected_guild == Some(id),
+            .map(|entry| match *entry {
+                Entry::Header(at) => {
+                    let tag = tag(at, true);
+                    // A closed folder shows what is unread inside it.
+                    let unread = members[at]
+                        .iter()
+                        .filter(|_| !tag.expanded)
+                        .fold(Unread::default(), |sum, id| {
+                            sum.merge(store.guild_unread(*id))
+                        });
+                    GuildRow {
+                        id: Snowflake(tag.id),
+                        name: tag.name.clone(),
+                        icon: None,
+                        available: false,
+                        owned: false,
+                        selected: false,
+                        unread: unread.unread,
+                        mentions: unread.mentions,
+                        folder: Some(tag),
+                    }
+                }
+                Entry::Guild(id, folder) => {
+                    let guild = store.guild(id);
+                    let unread = store.guild_unread(id);
+                    GuildRow {
+                        unread: unread.unread,
+                        mentions: unread.mentions,
+                        id,
+                        icon: guild.and_then(|guild| guild.icon().map(str::to_owned)),
+                        name: guild.map_or_else(
+                            || id.to_string(),
+                            |guild| capped_name(Some(guild.name()), "Unnamed guild"),
+                        ),
+                        available: guild.is_some(),
+                        owned: guild.is_some_and(|guild| {
+                            guild.owner_id().is_some() && guild.owner_id() == me
+                        }),
+                        selected: self.account == me && self.selected_guild == Some(id),
+                        folder: folder.map(|at| tag(at, false)),
+                    }
                 }
             })
             .collect();
@@ -692,7 +825,11 @@ impl Navigation {
             .filter(|_| self.account == store.current_user().map(|user| user.id))
             .and_then(|id| store.guild(id));
         let visible = guild.map_or_else(Vec::new, |guild| {
-            visible_channels(store, guild, self.selected_channel)
+            self.fold(
+                store,
+                guild,
+                visible_channels(store, guild, self.selected_channel),
+            )
         });
         let guild = self.selected_guild.and_then(|id| store.guild(id));
         // Voice and Stage rows are followed by their occupants, one fixed-height
@@ -774,6 +911,8 @@ impl Navigation {
                     permissions: row.permissions,
                     occupant: None,
                     stage: row.channel.kind == ModelChannelKind::GuildStageVoice,
+                    collapsed: row.kind == ChannelKind::Category
+                        && self.layout.collapsed_categories.contains(&row.channel.id),
                 };
                 let lines = std::mem::take(&mut all_lines[at]);
                 let all = std::iter::once(channel.clone()).chain(lines.into_iter().map(|line| {
@@ -796,6 +935,54 @@ impl Navigation {
             total,
             rows,
         }
+    }
+
+    /// Drops the channels the local layout folds away: those in a collapsed
+    /// category and, where the server asks for it, muted ones. The open
+    /// channel, unread ones and voice channels with people in them stay.
+    fn fold<'a>(
+        &self,
+        store: &Store,
+        guild: &GuildEntry,
+        mut visible: Vec<VisibleChannel<'a>>,
+    ) -> Vec<VisibleChannel<'a>> {
+        let hide_muted = self.layout.hide_muted.contains(&guild.id());
+        if !hide_muted && self.layout.collapsed_categories.is_empty() {
+            return visible;
+        }
+        let mut dropped = HashSet::new();
+        visible.retain(|row| {
+            let id = row.channel.id;
+            if row.kind == ChannelKind::Category || self.selected_channel == Some(id) {
+                return true;
+            }
+            if row.kind == ChannelKind::Thread {
+                return !row
+                    .channel
+                    .parent_id
+                    .is_some_and(|parent| dropped.contains(&parent));
+            }
+            let unread = unread_of(store, row.channel);
+            let occupied = row.kind == ChannelKind::Voice
+                && guild
+                    .voice_states()
+                    .any(|state| state.channel_id == Some(id));
+            let muted = hide_muted
+                && store.is_muted(id, Some(guild.id()))
+                && unread.mentions == 0
+                && !occupied;
+            let folded = row
+                .parent_id
+                .is_some_and(|parent| self.layout.collapsed_categories.contains(&parent))
+                && !unread.any()
+                && !occupied;
+            if muted || folded {
+                dropped.insert(id);
+                return false;
+            }
+            true
+        });
+        visible
     }
 
     /// Rechecks authorization before exposing an open channel or its summary.
@@ -1030,6 +1217,30 @@ impl Navigation {
             requests: self.message_requests(store),
             suppressed: store.suppressed(),
             privacy: store.privacy(),
+            notifications: self.notifications(store, selected_guild),
+        }
+    }
+
+    fn notifications(&self, store: &Store, guild: Option<Snowflake>) -> NotificationView {
+        let channel = self.selected_channel.filter(|_| guild.is_some());
+        let private = self.selected_private_channel;
+        NotificationView {
+            guild,
+            guild_level: guild.and_then(|g| store.guild_notify_level(g)),
+            guild_default: guild
+                .and_then(|g| store.guild(g))
+                .and_then(|g| NotifyLevel::from_wire(g.settings().notifications.into()))
+                .unwrap_or_default(),
+            guild_muted: guild.is_some_and(|g| store.guild_muted(g)),
+            suppress_everyone: guild.is_some_and(|g| store.suppressions(g).0),
+            suppress_roles: guild.is_some_and(|g| store.suppressions(g).1),
+            hide_muted: guild.is_some_and(|g| self.layout.hide_muted.contains(&g)),
+            channel,
+            channel_level: channel.and_then(|c| store.channel_notify_level(c)),
+            channel_muted: channel.is_some_and(|c| store.channel_muted(c)),
+            private,
+            private_level: private.and_then(|c| store.channel_notify_level(c)),
+            private_muted: private.is_some_and(|c| store.channel_muted(c)),
         }
     }
 

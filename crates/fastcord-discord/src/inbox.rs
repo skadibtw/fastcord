@@ -1,13 +1,16 @@
 //! Inbox requests (SPEC §16, issue #77): the account's recent mentions
 //! (`GET /users/@me/mentions?limit=25&roles=..&everyone=..[&before={id}]`)
-//! and muting one conversation (`PATCH /users/@me/guilds/{guild|@me}/settings`
-//! with `channel_overrides`). Both are sent once, on the user's request only;
-//! a repeated mute or unmute sets the same state, so there is no hidden retry.
+//! and the notification settings of a server or one conversation
+//! (`PATCH /users/@me/guilds/{guild|@me}/settings`: mute with a duration,
+//! `message_notifications`, `suppress_everyone`/`suppress_roles`, issue #106).
+//! Both are sent once, on the user's request only; repeating a setting sets
+//! the same state, so there is no hidden retry.
 //! Unverified live (`docs/TESTING.md`).
 
 use fastcord_model::{Message, Snowflake};
 use reqwest::Method;
 
+use crate::gateway::NotifyLevel;
 use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route};
 
 /// Mentions per request (the `limit` asked for).
@@ -55,8 +58,111 @@ fn mute_route(guild: Option<Snowflake>) -> Result<Route, RestError> {
     )
 }
 
-fn mute_body(channel: Snowflake, muted: bool) -> serde_json::Value {
-    serde_json::json!({"channel_overrides": {channel.to_string(): {"muted": muted}}})
+/// How long a mute lasts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MuteFor {
+    Minutes15,
+    Hour1,
+    Hours3,
+    Hours8,
+    Hours24,
+    /// Until the user turns it back on.
+    Forever,
+}
+
+impl MuteFor {
+    pub const ALL: [Self; 6] = [
+        Self::Minutes15,
+        Self::Hour1,
+        Self::Hours3,
+        Self::Hours8,
+        Self::Hours24,
+        Self::Forever,
+    ];
+
+    fn seconds(self) -> Option<i64> {
+        match self {
+            Self::Minutes15 => Some(15 * 60),
+            Self::Hour1 => Some(3600),
+            Self::Hours3 => Some(3 * 3600),
+            Self::Hours8 => Some(8 * 3600),
+            Self::Hours24 => Some(24 * 3600),
+            Self::Forever => None,
+        }
+    }
+}
+
+impl std::fmt::Display for MuteFor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Minutes15 => "For 15 minutes",
+            Self::Hour1 => "For 1 hour",
+            Self::Hours3 => "For 3 hours",
+            Self::Hours8 => "For 8 hours",
+            Self::Hours24 => "For 24 hours",
+            Self::Forever => "Until I turn it back on",
+        })
+    }
+}
+
+/// One notification setting of a server or conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotifySetting {
+    Mute(MuteFor),
+    Unmute,
+    /// `None` inherits (a channel follows its server, a server its default).
+    Level(Option<NotifyLevel>),
+    /// Server only.
+    SuppressEveryone(bool),
+    /// Server only.
+    SuppressRoles(bool),
+}
+
+/// `2026-01-02T03:04:05.000Z`, which is what `end_time` carries.
+fn rfc3339(unix: i64) -> String {
+    let Ok(t) = time::OffsetDateTime::from_unix_timestamp(unix) else {
+        return String::new();
+    };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second()
+    )
+}
+
+fn setting_fields(setting: NotifySetting, now: i64) -> serde_json::Value {
+    match setting {
+        NotifySetting::Mute(length) => serde_json::json!({
+            "muted": true,
+            "mute_config": match length.seconds() {
+                Some(seconds) => serde_json::json!({
+                    "selected_time_window": seconds,
+                    "end_time": rfc3339(now.saturating_add(seconds)),
+                }),
+                None => serde_json::json!({"selected_time_window": -1, "end_time": null}),
+            },
+        }),
+        NotifySetting::Unmute => serde_json::json!({"muted": false, "mute_config": null}),
+        // 3 is "use the server's setting".
+        NotifySetting::Level(level) => {
+            serde_json::json!({"message_notifications": level.map_or(3, NotifyLevel::wire)})
+        }
+        NotifySetting::SuppressEveryone(on) => serde_json::json!({"suppress_everyone": on}),
+        NotifySetting::SuppressRoles(on) => serde_json::json!({"suppress_roles": on}),
+    }
+}
+
+/// The body for the server itself (`channel` `None`) or one of its channels.
+fn setting_body(channel: Option<Snowflake>, setting: NotifySetting, now: i64) -> serde_json::Value {
+    let fields = setting_fields(setting, now);
+    match channel {
+        Some(channel) => serde_json::json!({"channel_overrides": {channel.to_string(): fields}}),
+        None => fields,
+    }
 }
 
 pub(crate) fn parse_mentions(body: &[u8]) -> Result<MentionsPage, RestError> {
@@ -92,8 +198,34 @@ impl<C: Clock> RestClient<C> {
         channel: Snowflake,
         muted: bool,
     ) -> Result<(), RestError> {
+        let setting = if muted {
+            NotifySetting::Mute(MuteFor::Forever)
+        } else {
+            NotifySetting::Unmute
+        };
+        self.set_notification(guild, Some(channel), setting).await
+    }
+
+    /// Changes one notification setting of a server (`channel` `None`) or of
+    /// a conversation (`guild` `None` for a DM or group DM). Server-only
+    /// settings on a channel, and channel settings of the DMs without a
+    /// channel, are refused here before anything is sent.
+    pub async fn set_notification(
+        &self,
+        guild: Option<Snowflake>,
+        channel: Option<Snowflake>,
+        setting: NotifySetting,
+    ) -> Result<(), RestError> {
+        let server_only = matches!(
+            setting,
+            NotifySetting::SuppressEveryone(_) | NotifySetting::SuppressRoles(_)
+        );
+        if (guild.is_none() && channel.is_none()) || (server_only && channel.is_some()) {
+            return Err(RestError::InvalidJson);
+        }
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let request = RestRequest::new(mute_route(guild)?, Priority::UserWrite)
-            .json(&mute_body(channel, muted))?;
+            .json(&setting_body(channel, setting, now))?;
         self.execute(request).await.map(drop)
     }
 }
@@ -140,9 +272,54 @@ mod tests {
             path(&mute_route(None).unwrap()),
             "/users/@me/guilds/@me/settings"
         );
+    }
+
+    #[test]
+    fn mutes_carry_a_window_and_an_end_time() {
+        // 2026-01-02T03:04:05Z
+        let now = 1_767_323_045;
+        let body = setting_body(
+            Some(Snowflake(500)),
+            NotifySetting::Mute(MuteFor::Hour1),
+            now,
+        );
         assert_eq!(
-            mute_body(Snowflake(500), true),
-            serde_json::json!({"channel_overrides": {"500": {"muted": true}}})
+            body,
+            serde_json::json!({"channel_overrides": {"500": {"muted": true, "mute_config": {
+                "selected_time_window": 3600, "end_time": "2026-01-02T04:04:05.000Z"}}}})
+        );
+        assert_eq!(
+            setting_body(None, NotifySetting::Mute(MuteFor::Forever), now),
+            serde_json::json!({"muted": true, "mute_config": {"selected_time_window": -1, "end_time": null}})
+        );
+        assert_eq!(
+            setting_body(Some(Snowflake(5)), NotifySetting::Unmute, now),
+            serde_json::json!({"channel_overrides": {"5": {"muted": false, "mute_config": null}}})
+        );
+        for length in MuteFor::ALL {
+            assert_eq!(length.seconds().is_none(), length == MuteFor::Forever);
+        }
+    }
+
+    #[test]
+    fn levels_and_suppressions_are_plain_fields_and_inherit_is_three() {
+        let level = |l| setting_body(None, NotifySetting::Level(l), 0);
+        assert_eq!(
+            level(Some(NotifyLevel::Mentions)),
+            serde_json::json!({"message_notifications": 1})
+        );
+        assert_eq!(level(None), serde_json::json!({"message_notifications": 3}));
+        assert_eq!(
+            setting_body(None, NotifySetting::SuppressRoles(true), 0),
+            serde_json::json!({"suppress_roles": true})
+        );
+        assert_eq!(
+            setting_body(
+                Some(Snowflake(9)),
+                NotifySetting::Level(Some(NotifyLevel::Nothing)),
+                0
+            ),
+            serde_json::json!({"channel_overrides": {"9": {"message_notifications": 2}}})
         );
     }
 

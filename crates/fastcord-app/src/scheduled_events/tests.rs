@@ -55,6 +55,7 @@ fn channel(connect: bool) -> ChannelRow {
         thread: None,
         occupant: None,
         stage: false,
+        collapsed: false,
     }
 }
 

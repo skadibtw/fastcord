@@ -46,7 +46,7 @@ pub use event::{
     GuildEmojisUpdate, GuildMemberEvent, GuildMemberRemove, GuildMuteUpdate, GuildRoleDelete,
     GuildRoleEvent, GuildUpdate, ListGroup, ListRow, MemberListId, MemberListOp, MemberListUpdate,
     MessageAck, MessageDelete, MessageDeleteBulk, MessagePollVote, MessageReaction,
-    MessageReactionRemoveAll, MessageReactionRemoveEmoji, MuteSettings, PassiveUpdate,
+    MessageReactionRemoveAll, MessageReactionRemoveEmoji, MuteSettings, NotifyLevel, PassiveUpdate,
     ReadStateEntry, Ready, ReadyRead, ReadySupplemental, ReconnectReason, RelationshipUpdate,
     SessionId, SoundboardPlay, StopReason, SupplementalGuild, ThreadListSync, ThreadMemberUpdate,
     ThreadMembersUpdate, TypingStart, VoiceStateUpdate,

@@ -55,6 +55,7 @@ mod sticker;
 mod thread;
 mod typing;
 mod upload;
+pub mod user_settings;
 mod ws;
 
 pub use account_security::{
@@ -77,7 +78,7 @@ pub use guild_admin::{
     MIN_BITRATE, MIN_GUILD_NAME_CHARS, NOTIFICATION_LEVELS, NewChannel, Placement, SLOWMODE,
     VoiceRegion, bitrate_ceiling, needs_community, parse_regions,
 };
-pub use inbox::{MENTIONS_PAGE_SIZE, MentionFilter, MentionsPage};
+pub use inbox::{MENTIONS_PAGE_SIZE, MentionFilter, MentionsPage, MuteFor, NotifySetting};
 pub use interaction::{
     AppCommand, ArgError, CommandArg, CommandIndex, CommandOption, IndexScope, InteractionContext,
     InteractionModal, InteractionOutcome, InteractionRequest, MAX_COMMAND_TEXT_CHARS, MAX_COMMANDS,

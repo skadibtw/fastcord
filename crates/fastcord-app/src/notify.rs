@@ -115,7 +115,13 @@ pub fn set_active(active: bool) {
 
 /// Called by the Gateway worker for each created message; shows a toast on a
 /// short-lived thread when the policy allows one.
-pub fn on_message(message: &Message, me: Option<Snowflake>, muted: bool, suppressed: bool) {
+pub fn on_message(
+    message: &Message,
+    me: Option<Snowflake>,
+    muted: bool,
+    suppressed: bool,
+    mentions_me: bool,
+) {
     let Some(me) = me else { return };
     if ACTIVE.load(Ordering::Relaxed) || !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -123,7 +129,7 @@ pub fn on_message(message: &Message, me: Option<Snowflake>, muted: bool, suppres
     let candidate = Candidate {
         id: message.id,
         direct: message.guild_id.is_none(),
-        mentions_me: message.mention_everyone || message.mentions.iter().any(|m| m.id == me),
+        mentions_me,
         own: message.author.id == me,
         muted,
         suppressed,

@@ -1500,6 +1500,7 @@ mod tests {
             selected: false,
             unread: false,
             mentions: 0,
+            folder: None,
         };
         let navigation = NavigationSnapshot {
             guilds: Window {

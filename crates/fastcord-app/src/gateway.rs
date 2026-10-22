@@ -421,7 +421,15 @@ impl Tracker {
                     let muted = self.store.is_muted(message.channel_id, message.guild_id);
                     // One rule for every consumer: ignored/blocked authors and
                     // message requests never raise a toast.
-                    let suppressed = self.store.suppression(message.author.id).is_some()
+                    // "Nothing" is the account's own level for the place: not
+                    // even a mention raises a toast. Suppressed @everyone and
+                    // role mentions are not mentions.
+                    let nothing = self
+                        .store
+                        .notify_level(message.channel_id, message.guild_id)
+                        == fastcord_discord::gateway::NotifyLevel::Nothing;
+                    let suppressed = nothing
+                        || self.store.suppression(message.author.id).is_some()
                         || self
                             .store
                             .private_channel(message.channel_id)
@@ -431,6 +439,7 @@ impl Tracker {
                         self.store.current_user().map(|u| u.id),
                         muted,
                         suppressed,
+                        self.store.notifies_account(message),
                     );
                 }
                 let changes = self.store.apply(dispatch);
@@ -538,6 +547,8 @@ struct Request {
     admin: Option<Snowflake>,
     /// The member the roles panel or permission inspection describes.
     admin_member: Option<Snowflake>,
+    /// Bumped when the local list layout (`organize`) changed.
+    layout_rev: u64,
     timeline: crate::history::Request,
     emoji: emoji_picker::Request,
 }
@@ -1750,6 +1761,13 @@ impl NavigationBridge {
         self.requests.send_modify(|request| {
             request.revision = request.revision.wrapping_add(1);
             request.selection = Some(SelectionIntent::Thread(guild, Box::new(thread)));
+        });
+    }
+
+    /// The local list layout changed (folders, folded categories): rebuild.
+    pub fn layout_changed(&self) {
+        self.requests.send_modify(|request| {
+            request.layout_rev = request.layout_rev.wrapping_add(1);
         });
     }
 
@@ -2968,6 +2986,11 @@ impl Worker {
             .subscription_target(&self.tracker.store);
         self.tracker.store.focus(&target);
         gateway.subscriptions().update(|current| *current = target);
+        if let Some(me) = self.tracker.store.current_user().map(|user| user.id) {
+            self.tracker
+                .navigation
+                .set_layout(crate::organize::current(me.0));
+        }
         let mut navigation = self.tracker.navigation.snapshot_with_private(
             &self.tracker.store,
             request.guilds.start,

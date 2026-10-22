@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use fastcord_model::Snowflake;
 
 use super::table_bytes;
-use crate::gateway::{MuteSettings, ReadStateEntry};
+use crate::gateway::{GuildMuteUpdate, MuteSettings, NotifyLevel, ReadStateEntry};
 
 /// Read cursors kept; the rest of a larger READY is ignored (those channels
 /// simply show no marker).
@@ -55,6 +55,11 @@ pub struct ReadStates {
     entries: HashMap<Snowflake, Entry>,
     muted_guilds: HashSet<Snowflake>,
     muted_channels: HashSet<Snowflake>,
+    /// Explicit notification levels; absent means inherit.
+    guild_levels: HashMap<Snowflake, NotifyLevel>,
+    channel_levels: HashMap<Snowflake, NotifyLevel>,
+    suppress_everyone: HashSet<Snowflake>,
+    suppress_roles: HashSet<Snowflake>,
 }
 
 impl ReadStates {
@@ -75,6 +80,66 @@ impl ReadStates {
             .collect();
         self.muted_guilds = mutes.guilds.into_iter().take(MAX_MUTED).collect();
         self.muted_channels = mutes.channels.into_iter().take(MAX_MUTED).collect();
+        self.guild_levels.clear();
+        self.channel_levels.clear();
+        self.suppress_everyone.clear();
+        self.suppress_roles.clear();
+        for entry in &mutes.entries {
+            self.update_levels(entry);
+        }
+    }
+
+    /// The levels and suppressions of one settings entry (READY's or an
+    /// update's). Returns whether anything changed.
+    pub fn update_levels(&mut self, update: &GuildMuteUpdate) -> bool {
+        let mut changed = false;
+        if let Some(guild) = update.guild_id {
+            changed |= put(&mut self.guild_levels, guild, update.level);
+            changed |= set(&mut self.suppress_everyone, guild, update.suppress_everyone);
+            changed |= set(&mut self.suppress_roles, guild, update.suppress_roles);
+        }
+        for &(channel, level) in &update.channel_levels {
+            changed |= put(&mut self.channel_levels, channel, level);
+        }
+        changed
+    }
+
+    /// What a channel notifies about: its own override, else the server's,
+    /// else the server's default (`guild_default`: Discord's 0 or 1).
+    pub fn level(
+        &self,
+        channel: Snowflake,
+        guild: Option<Snowflake>,
+        guild_default: Option<NotifyLevel>,
+    ) -> NotifyLevel {
+        self.channel_levels
+            .get(&channel)
+            .or_else(|| guild.and_then(|guild| self.guild_levels.get(&guild)))
+            .copied()
+            .or(guild_default)
+            .unwrap_or_default()
+    }
+
+    /// The server's own explicit level, if it set one.
+    pub fn guild_level(&self, guild: Snowflake) -> Option<NotifyLevel> {
+        self.guild_levels.get(&guild).copied()
+    }
+
+    /// The channel's own override, if it has one.
+    pub fn channel_level(&self, channel: Snowflake) -> Option<NotifyLevel> {
+        self.channel_levels.get(&channel).copied()
+    }
+
+    pub fn guild_muted(&self, guild: Snowflake) -> bool {
+        self.muted_guilds.contains(&guild)
+    }
+
+    pub fn suppresses_everyone(&self, guild: Snowflake) -> bool {
+        self.suppress_everyone.contains(&guild)
+    }
+
+    pub fn suppresses_roles(&self, guild: Snowflake) -> bool {
+        self.suppress_roles.contains(&guild)
     }
 
     /// `USER_GUILD_SETTINGS_UPDATE` for one guild (or the DMs, `None`).
@@ -141,8 +206,10 @@ impl ReadStates {
         channel: Snowflake,
         guild: Option<Snowflake>,
         message: Snowflake,
+        level: NotifyLevel,
     ) -> bool {
         !self.is_muted(channel, guild)
+            && level == NotifyLevel::All
             && self
                 .entries
                 .get(&channel)
@@ -168,14 +235,22 @@ impl ReadStates {
         channel: Snowflake,
         guild: Option<Snowflake>,
         last_message: Option<Snowflake>,
+        level: NotifyLevel,
     ) -> Unread {
         let Some(entry) = self.entries.get(&channel) else {
             return Unread::default();
         };
         Unread {
             unread: !self.is_muted(channel, guild)
+                && level == NotifyLevel::All
                 && last_message.is_some_and(|last| last > entry.acked),
-            mentions: entry.mentions,
+            // "Nothing" hides the badge too; mentions are still counted so a
+            // change of level shows them.
+            mentions: if level == NotifyLevel::Nothing {
+                0
+            } else {
+                entry.mentions
+            },
         }
     }
 
@@ -184,17 +259,39 @@ impl ReadStates {
     pub fn forget(&mut self, channel: Snowflake) {
         self.entries.remove(&channel);
         self.muted_channels.remove(&channel);
+        self.channel_levels.remove(&channel);
     }
 
     pub fn bytes(&self) -> usize {
         table_bytes::<Snowflake, Entry>(self.entries.capacity())
             + table_bytes::<Snowflake, ()>(self.muted_guilds.capacity())
             + table_bytes::<Snowflake, ()>(self.muted_channels.capacity())
+            + table_bytes::<Snowflake, NotifyLevel>(
+                self.guild_levels.capacity() + self.channel_levels.capacity(),
+            )
+            + table_bytes::<Snowflake, ()>(
+                self.suppress_everyone.capacity() + self.suppress_roles.capacity(),
+            )
     }
 
     #[cfg(test)]
     fn cursors(&self) -> usize {
         self.entries.len()
+    }
+}
+
+/// Sets or clears one level; the table is bounded like the mutes.
+fn put(
+    levels: &mut HashMap<Snowflake, NotifyLevel>,
+    id: Snowflake,
+    level: Option<NotifyLevel>,
+) -> bool {
+    match level {
+        Some(level) if levels.len() < MAX_MUTED || levels.contains_key(&id) => {
+            levels.insert(id, level) != Some(level)
+        }
+        Some(_) => false,
+        None => levels.remove(&id).is_some(),
     }
 }
 
@@ -213,6 +310,81 @@ mod tests {
     const A: Snowflake = Snowflake(100);
     const G: Snowflake = Snowflake(7);
 
+    fn all(
+        read: &ReadStates,
+        channel: Snowflake,
+        guild: Option<Snowflake>,
+        last: Option<Snowflake>,
+    ) -> Unread {
+        read.unread(channel, guild, last, NotifyLevel::All)
+    }
+
+    fn entry(
+        guild: u64,
+        level: Option<NotifyLevel>,
+        channel: Option<(u64, NotifyLevel)>,
+    ) -> GuildMuteUpdate {
+        GuildMuteUpdate {
+            guild_id: Some(Snowflake(guild)),
+            guild_muted: false,
+            channels: Vec::new(),
+            level,
+            suppress_everyone: true,
+            suppress_roles: false,
+            channel_levels: channel
+                .map(|(c, l)| (Snowflake(c), Some(l)))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn levels_resolve_channel_then_server_then_default_and_hide_badges() {
+        let mut read = states(50, 2);
+        let default = Some(NotifyLevel::Mentions);
+        assert_eq!(read.level(A, Some(G), default), NotifyLevel::Mentions);
+        assert_eq!(read.level(A, Some(G), None), NotifyLevel::All);
+        assert!(read.update_levels(&entry(
+            7,
+            Some(NotifyLevel::All),
+            Some((100, NotifyLevel::Nothing))
+        )));
+        assert!(!read.update_levels(&entry(
+            7,
+            Some(NotifyLevel::All),
+            Some((100, NotifyLevel::Nothing))
+        )));
+        assert_eq!(read.level(A, Some(G), default), NotifyLevel::Nothing);
+        assert!(read.suppresses_everyone(G) && !read.suppresses_roles(G));
+        let last = Some(Snowflake(60));
+        let unread = |level| read.unread(A, Some(G), last, level);
+        assert_eq!(
+            unread(NotifyLevel::All),
+            Unread {
+                unread: true,
+                mentions: 2
+            }
+        );
+        assert_eq!(
+            unread(NotifyLevel::Mentions),
+            Unread {
+                unread: false,
+                mentions: 2
+            }
+        );
+        assert_eq!(unread(NotifyLevel::Nothing), Unread::default());
+        assert!(!read.would_flag(A, Some(G), Snowflake(60), NotifyLevel::Mentions));
+        // Inheriting again clears the override; a new READY forgets everything.
+        let mut inherit = entry(7, None, None);
+        inherit.channel_levels = vec![(A, None)];
+        inherit.suppress_everyone = false;
+        assert!(read.update_levels(&inherit));
+        assert_eq!(read.level(A, Some(G), None), NotifyLevel::All);
+        read.update_levels(&entry(7, Some(NotifyLevel::Nothing), None));
+        read.replace(Vec::new(), MuteSettings::default());
+        assert_eq!(read.guild_level(G), None);
+    }
+
     fn states(acked: u64, mentions: u32) -> ReadStates {
         let mut read = ReadStates::default();
         read.replace(
@@ -230,18 +402,18 @@ mod tests {
     fn a_channel_is_unread_only_past_the_account_cursor() {
         let read = states(50, 2);
         assert_eq!(
-            read.unread(A, Some(G), Some(Snowflake(60))),
+            all(&read, A, Some(G), Some(Snowflake(60))),
             Unread {
                 unread: true,
                 mentions: 2
             }
         );
         // Newest equals the cursor: read. The channel's own last id alone says nothing.
-        assert!(!read.unread(A, Some(G), Some(Snowflake(50))).unread);
-        assert!(!read.unread(A, Some(G), None).unread);
+        assert!(!all(&read, A, Some(G), Some(Snowflake(50))).unread);
+        assert!(!all(&read, A, Some(G), None).unread);
         // No cursor, no marker.
         assert_eq!(
-            read.unread(Snowflake(5), None, Some(Snowflake(999))),
+            all(&read, Snowflake(5), None, Some(Snowflake(999))),
             Unread::default()
         );
     }
@@ -250,12 +422,12 @@ mod tests {
     fn mutes_hide_the_dot_but_not_mentions() {
         let mut read = states(50, 1);
         read.update_mutes(Some(G), true, &[]);
-        let muted = read.unread(A, Some(G), Some(Snowflake(60)));
+        let muted = all(&read, A, Some(G), Some(Snowflake(60)));
         assert_eq!((muted.unread, muted.mentions), (false, 1));
         read.update_mutes(Some(G), false, &[(A, true)]);
-        assert!(!read.unread(A, Some(G), Some(Snowflake(60))).unread);
+        assert!(!all(&read, A, Some(G), Some(Snowflake(60))).unread);
         read.update_mutes(None, false, &[(A, false)]);
-        assert!(read.unread(A, Some(G), Some(Snowflake(60))).unread);
+        assert!(all(&read, A, Some(G), Some(Snowflake(60))).unread);
     }
 
     #[test]
@@ -264,7 +436,7 @@ mod tests {
         assert!(!read.ack(A, Snowflake(50), 3), "same cursor, same count");
         assert!(read.ack(A, Snowflake(70), 0));
         assert_eq!(read.acked(A), Some(Snowflake(70)));
-        assert_eq!(read.unread(A, None, Some(Snowflake(70))), Unread::default());
+        assert_eq!(all(&read, A, None, Some(Snowflake(70))), Unread::default());
         // A cursor for a channel not seen before is added.
         assert!(read.ack(Snowflake(200), Snowflake(1), 0));
     }
@@ -277,14 +449,11 @@ mod tests {
             !read.note_mention(A, Snowflake(40)),
             "older than the cursor"
         );
-        assert_eq!(read.unread(A, None, Some(Snowflake(60))).mentions, 1);
+        assert_eq!(all(&read, A, None, Some(Snowflake(60))).mentions, 1);
         assert!(read.note_mention(Snowflake(300), Snowflake(900)));
-        assert!(
-            read.unread(Snowflake(300), None, Some(Snowflake(900)))
-                .unread
-        );
+        assert!(all(&read, Snowflake(300), None, Some(Snowflake(900))).unread);
         read.forget(A);
-        assert_eq!(read.unread(A, None, Some(Snowflake(60))), Unread::default());
+        assert_eq!(all(&read, A, None, Some(Snowflake(60))), Unread::default());
     }
 
     #[test]

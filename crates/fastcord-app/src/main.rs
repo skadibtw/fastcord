@@ -38,7 +38,9 @@ mod message_link;
 mod mic_panel;
 mod navigation;
 mod notify;
+mod notify_settings;
 mod onboarding;
+mod organize;
 mod outbox;
 mod password;
 mod paste;
@@ -169,6 +171,7 @@ struct App {
     search: search::State,
     pins: pins::State,
     inbox: inbox::State,
+    notify_settings: notify_settings::State,
     group: group_dm::State,
     invite: invite::State,
     guild_admin: guild_admin::State,
@@ -361,6 +364,8 @@ enum Message {
     Search(search::Event),
     Pins(pins::Event),
     Inbox(inbox::Event),
+    Organize(organize::Event),
+    NotifySettings(notify_settings::Event),
     Group(group_dm::Event),
     Invite(invite::Event),
     GuildAdmin(guild_admin::Event),
@@ -448,6 +453,7 @@ impl App {
                 search: search::State::default(),
                 pins: pins::State::default(),
                 inbox: inbox::State::default(),
+                notify_settings: notify_settings::State::default(),
                 group: group_dm::State::default(),
                 invite: invite::State::default(),
                 guild_admin: guild_admin::State::default(),
@@ -915,6 +921,7 @@ impl App {
                 self.soundboard.set_prefs(preferences.soundboard.clone());
                 self.audio_preferences = preferences;
                 chat_prefs::apply(self.audio_preferences.chat);
+                organize::publish(&self.audio_preferences.organize);
                 self.configure_ui_sound();
                 self.shortcuts.rebuild(&self.audio_preferences.voice_input);
                 return self.handle(Message::StoreReady(store));
@@ -1417,6 +1424,8 @@ impl App {
             Message::Search(event) => return self.search_event(event),
             Message::Pins(event) => return self.pins_event(event),
             Message::Inbox(event) => return self.inbox_event(event),
+            Message::Organize(event) => return self.organize_event(event),
+            Message::NotifySettings(event) => return self.notify_settings_event(event),
             Message::Switcher(event) => return self.switcher_event(event),
             Message::Shortcut(shortcut) => return self.navigation_shortcut(shortcut),
             Message::Group(event) => return self.group_event(event),
@@ -2782,6 +2791,7 @@ impl App {
         }
         self.pins = pins::State::default();
         self.inbox.clear();
+        self.notify_settings.clear();
         self.group.clear();
         self.invite.clear();
         self.guild_admin.clear();
@@ -2960,6 +2970,7 @@ impl App {
         self.search = search::State::default();
         self.pins = pins::State::default();
         self.inbox.clear();
+        self.notify_settings.clear();
         self.group.clear();
         self.invite.clear();
         self.guild_admin.clear();
@@ -3938,6 +3949,52 @@ impl App {
         }
     }
 
+    /// A click on a folder, category or the hide-muted choice: kept locally for
+    /// this account and applied by the next navigation snapshot.
+    fn organize_event(&mut self, event: organize::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        self.audio_preferences
+            .organize
+            .apply(session.user.id.0, event);
+        organize::publish(&self.audio_preferences.organize);
+        gateway.controls.layout_changed();
+        if self.audio_saving.is_none() {
+            return self.save_audio_preferences();
+        }
+        Task::none()
+    }
+
+    fn notify_settings_event(&mut self, event: notify_settings::Event) -> Task<Message> {
+        if let notify_settings::Event::HideMuted(guild) = event {
+            return self.organize_event(organize::Event::HideMuted(guild));
+        }
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = matches!(
+            &event,
+            notify_settings::Event::Done(Err(RestError::AuthenticationRequired))
+        );
+        let task =
+            self.notify_settings
+                .update(event, &gateway.navigation.notifications, &session.client);
+        if rejected {
+            return self.handle(Message::Gateway(
+                gateway.id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::NotifySettings)
+    }
+
     fn inbox_event(&mut self, event: inbox::Event) -> Task<Message> {
         let Phase::Account {
             session, gateway, ..
@@ -4627,9 +4684,22 @@ impl App {
                             localtime::now(),
                         )
                     }),
-                    inbox: self.inbox.is_open().then(|| {
-                        inbox::view(&self.inbox, &gateway.navigation.inbox).map(Message::Inbox)
-                    }),
+                    inbox: self
+                        .inbox
+                        .is_open()
+                        .then(|| {
+                            inbox::view(&self.inbox, &gateway.navigation.inbox).map(Message::Inbox)
+                        })
+                        .or_else(|| {
+                            self.notify_settings.is_open().then(|| {
+                                notify_settings::view(
+                                    &self.notify_settings,
+                                    &gateway.navigation.notifications,
+                                    gateway.directs,
+                                )
+                                .map(Message::NotifySettings)
+                            })
+                        }),
                     friends: self.friends.open.then(|| {
                         friends::view(
                             &self.friends,
@@ -6035,6 +6105,7 @@ mod tests {
             mentions: 0,
             thread: None,
             stage: false,
+            collapsed: false,
             occupant: None,
         };
         let mut app = login_app();
@@ -6112,6 +6183,7 @@ mod tests {
                     mentions: 0,
                     thread: None,
                     stage: false,
+                    collapsed: false,
                     occupant: None,
                 }],
             },

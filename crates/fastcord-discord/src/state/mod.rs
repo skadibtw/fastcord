@@ -53,15 +53,14 @@ use fastcord_model::{
     VoiceState,
 };
 
+use crate::gateway::{
+    Dispatch, GatewayEvent, GuildCreate, GuildMemberEvent, GuildRoleDelete, GuildRoleEvent,
+    GuildUpdate, MemberListUpdate, NotifyLevel, PassiveUpdate, Ready, ReadySupplemental,
+    SubscriptionTarget, ThreadListSync, VoiceStateUpdate,
+};
 use crate::stage::MAX_TOPIC_CHARS;
 pub use member_list::{MAX_ROWS, MemberList};
 pub use read::{MAX_MUTED, MAX_READ_ENTRIES, ReadStates, Unread};
-
-use crate::gateway::{
-    Dispatch, GatewayEvent, GuildCreate, GuildMemberEvent, GuildRoleDelete, GuildRoleEvent,
-    GuildUpdate, MemberListUpdate, PassiveUpdate, Ready, ReadySupplemental, SubscriptionTarget,
-    ThreadListSync, VoiceStateUpdate,
-};
 
 /// Budget for guild/channel/role metadata, users, members, voice states, and
 /// visible member ranges together (SPEC §4.5).
@@ -647,6 +646,7 @@ pub struct Store {
     presences: presences::Presences,
     focus: Focus,
     read: ReadStates,
+    folders: std::sync::Arc<crate::user_settings::GuildFolders>,
 }
 
 impl fmt::Debug for Store {
@@ -692,6 +692,7 @@ impl Store {
             presences: presences::Presences::default(),
             focus: Focus::default(),
             read: ReadStates::default(),
+            folders: Default::default(),
         }
     }
 
@@ -823,6 +824,7 @@ impl Store {
             + self.unavailable.len() * (size_of::<Snowflake>() + 48)
             + self.focus.bytes()
             + self.read.bytes()
+            + self.folders.bytes()
     }
 
     pub fn budget(&self) -> usize {
@@ -838,17 +840,61 @@ impl Store {
         guild: Option<Snowflake>,
         last_message: Option<Snowflake>,
     ) -> Unread {
-        self.read.unread(channel, guild, last_message)
+        self.read.unread(
+            channel,
+            guild,
+            last_message,
+            self.notify_level(channel, guild),
+        )
+    }
+
+    /// What a channel notifies about: its override, the server's level, or
+    /// the server's default (`default_message_notifications`).
+    pub fn notify_level(&self, channel: Snowflake, guild: Option<Snowflake>) -> NotifyLevel {
+        let default = guild
+            .and_then(|guild| self.guild(guild))
+            .and_then(|guild| NotifyLevel::from_wire(guild.settings().notifications.into()));
+        self.read.level(channel, guild, default)
+    }
+
+    /// Whether the server itself is muted.
+    pub fn guild_muted(&self, guild: Snowflake) -> bool {
+        self.read.guild_muted(guild)
+    }
+
+    /// The server's explicit level (`None`: its default applies).
+    pub fn guild_notify_level(&self, guild: Snowflake) -> Option<NotifyLevel> {
+        self.read.guild_level(guild)
+    }
+
+    /// The channel's own override (`None`: inherits).
+    pub fn channel_notify_level(&self, channel: Snowflake) -> Option<NotifyLevel> {
+        self.read.channel_level(channel)
+    }
+
+    /// Whether `@everyone`/`@here` and role mentions of a server are muted.
+    pub fn suppressions(&self, guild: Snowflake) -> (bool, bool) {
+        (
+            self.read.suppresses_everyone(guild),
+            self.read.suppresses_roles(guild),
+        )
+    }
+
+    /// The account's server folders and order (shared, replaced whole).
+    pub fn folders(&self) -> std::sync::Arc<crate::user_settings::GuildFolders> {
+        self.folders.clone()
     }
 
     /// What a guild shows: its channels' unread flags and mention counts.
     pub fn guild_unread(&self, guild: Snowflake) -> Unread {
         self.guild(guild).map_or_else(Unread::default, |entry| {
             entry.channels().fold(Unread::default(), |total, channel| {
-                total.merge(
-                    self.read
-                        .unread(channel.id, Some(guild), channel.last_message_id),
-                )
+                total.merge(self.read.unread(
+                    channel.id,
+                    Some(guild),
+                    channel.last_message_id,
+                    self.notify_level(channel.id, Some(guild)),
+                ))
             })
         })
     }
@@ -908,11 +954,13 @@ impl Store {
             }
             return;
         }
-        let mentioned = message.guild_id.is_none() || self.mentions_account(message);
+        let mentioned = message.guild_id.is_none() || self.notifies_account(message);
         let moved = if mentioned {
             self.read.note_mention(channel, message.id)
         } else {
-            self.read.would_flag(channel, message.guild_id, message.id)
+            let level = self.notify_level(channel, message.guild_id);
+            self.read
+                .would_flag(channel, message.guild_id, message.id, level)
         };
         changes.read |= moved;
     }
@@ -921,13 +969,27 @@ impl Store {
     /// roles, or `@everyone`/`@here` as Discord flagged it. A plain direct
     /// message does not count (that is only an unread-badge rule).
     pub fn mentions_account(&self, message: &Message) -> bool {
+        self.mentions_with(message, true, true)
+    }
+
+    /// [`Self::mentions_account`] as the account's server settings count it:
+    /// suppressed `@everyone`/`@here` and role mentions do not.
+    pub fn notifies_account(&self, message: &Message) -> bool {
+        let (everyone, roles) = message
+            .guild_id
+            .map_or((false, false), |guild| self.suppressions(guild));
+        self.mentions_with(message, !everyone, !roles)
+    }
+
+    fn mentions_with(&self, message: &Message, everyone: bool, roles: bool) -> bool {
         let Some(me) = self.current_user else {
             return false;
         };
-        message.mention_everyone
+        (everyone && message.mention_everyone)
             || message.mentions.iter().any(|user| user.id == me)
             || message.guild_id.is_some_and(|guild| {
-                !message.mention_roles.is_empty()
+                roles
+                    && !message.mention_roles.is_empty()
                     && self
                         .guild(guild)
                         .and_then(|entry| entry.member(me))
@@ -1121,13 +1183,19 @@ impl Store {
                     changes.privacy = true;
                 }
             }
-            Dispatch::UserGuildSettingsUpdate(update) => {
-                if self
-                    .read
-                    .update_mutes(update.guild_id, update.guild_muted, &update.channels)
-                {
+            Dispatch::UserFoldersUpdate(folders) => {
+                if *self.folders != *folders {
+                    self.folders = std::sync::Arc::new(*folders);
                     changes.read = true;
                 }
+            }
+            Dispatch::UserGuildSettingsUpdate(update) => {
+                let muted = self.read.update_mutes(
+                    update.guild_id,
+                    update.guild_muted,
+                    &update.channels,
+                );
+                changes.read |= self.read.update_levels(&update) | muted;
             }
             // Message bodies, reactions included, are the message store's;
             // none of these changes navigation metadata.
@@ -1344,6 +1412,7 @@ impl Store {
         self.private_channels = HashMap::new();
         self.private_bytes = 0;
         self.read.replace(ready.read.entries, ready.read.mutes);
+        self.folders = std::sync::Arc::new(ready.read.folders.unwrap_or_default());
         self.relationships
             .replace(ready.relationships, ready.ignored);
         std::sync::Arc::make_mut(&mut self.privacy).reset();

@@ -31,9 +31,9 @@ use super::event::{
     GuildRoleEvent, GuildUpdate, ListGroup, ListRow, MAX_PRESENCES, MAX_RELATIONSHIPS,
     MemberListId, MemberListOp, MemberListUpdate, MessageAck, MessageDelete, MessageDeleteBulk,
     MessageReaction, MessageReactionRemoveAll, MessageReactionRemoveEmoji, MuteSettings,
-    PassiveUpdate, PresenceUpdate, ReadStateEntry, Ready, ReadyRead, ReadySupplemental,
-    RelationshipUpdate, SessionId, SupplementalGuild, ThreadListSync, ThreadMemberUpdate,
-    ThreadMembersUpdate, VoiceStateUpdate,
+    NotifyLevel, PassiveUpdate, PresenceUpdate, ReadStateEntry, Ready, ReadyRead,
+    ReadySupplemental, RelationshipUpdate, SessionId, SupplementalGuild, ThreadListSync,
+    ThreadMemberUpdate, ThreadMembersUpdate, VoiceStateUpdate,
 };
 
 /// A known payload that did not decode into its typed form.
@@ -249,6 +249,11 @@ struct ReadyWire {
     read_state: Option<serde_json::Value>,
     #[serde(default)]
     user_guild_settings: Option<serde_json::Value>,
+    /// Only `guild_folders` is read, from either form of the user settings.
+    #[serde(default)]
+    user_settings: Option<serde_json::Value>,
+    #[serde(default)]
+    user_settings_proto: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -658,6 +663,18 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
             .as_ref()
             .map(mute_settings)
             .unwrap_or_default(),
+        // The protobuf wins when both are present: it is the newer form.
+        folders: wire
+            .user_settings_proto
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::user_settings::from_proto_base64)
+            .or_else(|| {
+                wire.user_settings
+                    .as_ref()
+                    .and_then(|settings| settings.get("guild_folders"))
+                    .and_then(crate::user_settings::from_json)
+            }),
     };
     Ok(DecodedReady {
         ready: Ready {
@@ -808,6 +825,9 @@ fn mute_settings(value: &serde_json::Value) -> MuteSettings {
                     .filter(|(_, m)| *m)
                     .map(|(id, _)| *id),
             );
+            if mutes.entries.len() < 1_024 {
+                mutes.entries.push(update);
+            }
         }
     }
     mutes
@@ -826,10 +846,31 @@ fn mute_update(entry: &serde_json::Value) -> Option<GuildMuteUpdate> {
                 .collect()
         })
         .unwrap_or_default();
+    let level = |value: &serde_json::Value| {
+        value
+            .get("message_notifications")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(NotifyLevel::from_wire)
+    };
+    let flag = |key| entry.get(key) == Some(&serde_json::Value::Bool(true));
+    let channel_levels = entry
+        .get("channel_overrides")
+        .and_then(serde_json::Value::as_array)
+        .map(|overrides| {
+            overrides
+                .iter()
+                .filter_map(|o| Some((snowflake_of(o.get("channel_id")?)?, level(o))))
+                .collect()
+        })
+        .unwrap_or_default();
     entry.is_object().then(|| GuildMuteUpdate {
         guild_id,
         guild_muted: mute_active(entry),
         channels,
+        level: level(entry),
+        suppress_everyone: flag("suppress_everyone"),
+        suppress_roles: flag("suppress_roles"),
+        channel_levels,
     })
 }
 
@@ -1281,7 +1322,23 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
                 ignored: ignored_flag(&value),
             }))
         }),
+        "USER_SETTINGS_PROTO_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
+            // `{"settings": {"type": 1, "proto": base64}, "partial": bool}`; a
+            // blob without `guild_folders` leaves the folders as they are.
+            value
+                .pointer("/settings/proto")
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::user_settings::from_proto_base64)
+                .map(|folders| Dispatch::UserFoldersUpdate(Box::new(folders)))
+                .ok_or(Malformed)
+        }),
         "USER_SETTINGS_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
+            if let Some(folders) = value
+                .get("guild_folders")
+                .and_then(crate::user_settings::from_json)
+            {
+                return Ok(Dispatch::UserFoldersUpdate(Box::new(folders)));
+            }
             value
                 .is_object()
                 .then(|| {
@@ -2740,5 +2797,69 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn notification_settings_and_folders_decode_from_events() {
+        let raw = r#"{"guild_id":"7","muted":false,"message_notifications":1,
+            "suppress_everyone":true,"suppress_roles":false,
+            "channel_overrides":[{"channel_id":"9","muted":false,"message_notifications":3},
+            {"channel_id":"10","muted":true,"message_notifications":2}]}"#;
+        let Decoded::Event(Dispatch::UserGuildSettingsUpdate(update)) =
+            decode_dispatch("USER_GUILD_SETTINGS_UPDATE", raw)
+        else {
+            panic!("not decoded");
+        };
+        assert_eq!(update.level, Some(NotifyLevel::Mentions));
+        assert!(update.suppress_everyone && !update.suppress_roles);
+        assert_eq!(
+            update.channel_levels,
+            [
+                (Snowflake(9), None),
+                (Snowflake(10), Some(NotifyLevel::Nothing))
+            ]
+        );
+        // The legacy event carries folders; a proto event a blob.
+        let legacy = r#"{"guild_folders":[{"id":3,"name":"A","color":null,"guild_ids":["7"]}]}"#;
+        assert!(matches!(
+            decode_dispatch("USER_SETTINGS_UPDATE", legacy),
+            Decoded::Event(Dispatch::UserFoldersUpdate(f)) if f.folders[0].guilds == [Snowflake(7)]
+        ));
+        let proto = |blob| format!(r#"{{"settings":{{"type":1,"proto":"{blob}"}}}}"#);
+        // No guild_folders field: unknown, nothing changes.
+        assert!(matches!(
+            decode_dispatch("USER_SETTINGS_PROTO_UPDATE", &proto("AA==")),
+            Decoded::Malformed
+        ));
+        // Field 14, empty message: the account has no folders.
+        assert!(matches!(
+            decode_dispatch("USER_SETTINGS_PROTO_UPDATE", &proto("cgA=")),
+            Decoded::Event(Dispatch::UserFoldersUpdate(f)) if f.folders.is_empty()
+        ));
+    }
+
+    #[test]
+    fn ready_folders_come_from_the_json_settings_and_the_protobuf_wins() {
+        let folders = |extra: serde_json::Value| {
+            let mut value: serde_json::Value = serde_json::from_str(READY).unwrap();
+            for (key, field) in extra.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            let Decoded::Ready(ready) = decode_dispatch("READY", &value.to_string()) else {
+                panic!("READY did not decode");
+            };
+            ready.ready.read.folders
+        };
+        assert_eq!(folders(serde_json::json!({})), None);
+        let legacy = serde_json::json!({"user_settings": {"guild_folders": [
+            {"id": 4, "name": "Old", "color": null, "guild_ids": ["41771983423143937"]}]}});
+        let got = folders(legacy.clone()).unwrap();
+        assert_eq!(got.folders[0].name.as_deref(), Some("Old"));
+        // Field 14 holding one empty folder: the protobuf takes over.
+        let mut both = legacy;
+        both["user_settings_proto"] = serde_json::json!("cgIKAA==");
+        let got = folders(both).unwrap();
+        assert_eq!(got.folders.len(), 1);
+        assert_eq!(got.folders[0].name, None);
     }
 }

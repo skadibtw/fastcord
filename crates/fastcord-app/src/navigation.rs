@@ -181,18 +181,73 @@ fn rail<'a>(
                 }),
         );
         let picture = AvatarKey::guild(guild.id, guild.icon.as_deref());
-        cell = cell.push(icon(
-            initials(&guild.name),
-            picture.as_ref(),
-            selected,
-            guild.available.then_some(Message::SelectGuild(guild.id)),
-        ));
+        match &guild.folder {
+            // The folder's own row opens and closes it locally.
+            Some(folder) if folder.header => {
+                let glyph = if folder.expanded {
+                    "\u{25BE}"
+                } else {
+                    "\u{25B8}"
+                };
+                let label = format!("{glyph} {}", initials(&folder.name));
+                let face = centered_label(label, 15.0);
+                let face = match folder.color {
+                    Some(rgb) => container(face)
+                        .style(move |_| container::Style {
+                            text_color: Some(iced::Color::from_rgb8(
+                                (rgb >> 16) as u8,
+                                (rgb >> 8) as u8,
+                                rgb as u8,
+                            )),
+                            ..container::Style::default()
+                        })
+                        .into(),
+                    None => face,
+                };
+                cell = cell.push(
+                    container(
+                        button(face)
+                            .on_press(Message::Organize(crate::organize::Event::Folder(folder.id)))
+                            .width(48)
+                            .height(48)
+                            .padding(0)
+                            .style(style::server_button(false)),
+                    )
+                    .center_x(Length::Fill)
+                    .center_y(RAIL_ROW),
+                );
+            }
+            // A server inside a folder is drawn a little narrower.
+            Some(_) => {
+                cell = cell.push(
+                    container(icon(
+                        initials(&guild.name),
+                        picture.as_ref(),
+                        selected,
+                        guild.available.then_some(Message::SelectGuild(guild.id)),
+                    ))
+                    .padding(Padding::new(0.0).left(8.0))
+                    .width(Length::Fill),
+                );
+            }
+            None => {
+                cell = cell.push(icon(
+                    initials(&guild.name),
+                    picture.as_ref(),
+                    selected,
+                    guild.available.then_some(Message::SelectGuild(guild.id)),
+                ));
+            }
+        }
         // Right click opens the server menu (settings, create channel, leave).
-        mouse_area(container(cell).height(RAIL_ROW))
-            .on_right_press(Message::GuildAdmin(crate::guild_admin::Event::Menu(
-                guild.id,
-            )))
-            .into()
+        let cell = mouse_area(container(cell).height(RAIL_ROW));
+        if guild.folder.as_ref().is_some_and(|f| f.header) {
+            return cell.into();
+        }
+        cell.on_right_press(Message::GuildAdmin(crate::guild_admin::Event::Menu(
+            guild.id,
+        )))
+        .into()
     });
     let rail_tool = |kind, label: String, selected, message, count: Option<String>| {
         let mut face = column![icons::sized(kind, style::TEXT, 24.0)]
@@ -469,6 +524,12 @@ fn sidebar<'a>(
                 .font(BOLD)
                 .wrapping(text::Wrapping::None)
                 .width(Length::Fill),
+            button(text("Alerts").size(11))
+                .on_press_maybe((directs || snapshot.selected_guild.is_some()).then_some(
+                    Message::NotifySettings(crate::notify_settings::Event::Toggle)
+                ))
+                .padding([2, 6])
+                .style(style::tool_button(false, false)),
             button(text("Report").size(11))
                 .on_press_maybe(
                     can_report.then_some(Message::Report(crate::report::Event::OpenServer))
@@ -552,16 +613,28 @@ fn sidebar<'a>(
                 return occupant_row(occupant, talking, avatar_views);
             }
             if channel.kind == ChannelKind::Category {
-                return container(
-                    text(channel.name.to_uppercase())
-                        .size(11)
-                        .font(BOLD)
-                        .wrapping(text::Wrapping::None)
-                        .style(text::secondary),
+                let glyph = if channel.collapsed {
+                    "\u{25B8}"
+                } else {
+                    "\u{25BE}"
+                };
+                // A click folds or unfolds the category (local only).
+                return mouse_area(
+                    container(
+                        text(format!("{glyph} {}", channel.name.to_uppercase()))
+                            .size(11)
+                            .font(BOLD)
+                            .wrapping(text::Wrapping::None)
+                            .style(text::secondary),
+                    )
+                    .height(ROW_HEIGHT)
+                    .width(Length::Fill)
+                    .padding(Padding::new(0.0).left(16.0).top(14.0))
+                    .clip(true),
                 )
-                .height(ROW_HEIGHT)
-                .padding(Padding::new(0.0).left(16.0).top(14.0))
-                .clip(true)
+                .on_press(Message::Organize(crate::organize::Event::Category(
+                    channel.id,
+                )))
                 .into();
             }
             let kind = match channel.kind {
