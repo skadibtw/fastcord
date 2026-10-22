@@ -9,6 +9,7 @@ mod call_layout;
 mod call_ui;
 mod captcha;
 mod changes;
+mod chat_prefs;
 mod composer;
 mod discover;
 mod drafts;
@@ -121,6 +122,7 @@ fn main() -> iced::Result {
     render::application(App::boot, App::update, App::view)
         .title("fastcord")
         .theme(App::theme)
+        .scale_factor(App::scale_factor)
         .subscription(App::subscription)
         .window(iced::window::Settings {
             size: iced::Size::new(1080.0, 640.0),
@@ -146,6 +148,7 @@ struct App {
     attachment_purge_failed: bool,
     audio_preferences: audio_devices::Preferences,
     audio_settings: audio_devices::Settings,
+    chat_settings_open: bool,
     audio_saving: Option<audio_devices::Preferences>,
     /// The camera picker; probed only when the user asks.
     camera_list: gateway::CameraList,
@@ -303,6 +306,9 @@ enum Message {
     PresetParticipantVolume(Snowflake, u16),
     OpenAudioSettings,
     CloseAudioSettings,
+    OpenChatSettings,
+    CloseChatSettings,
+    ChatPrefs(chat_prefs::Prefs),
     RefreshAudioDevices,
     AudioDevicesListed(audio_devices::Inventory),
     Initialized(audio_devices::Preferences, Result<StoreReady, StoreError>),
@@ -415,6 +421,7 @@ impl App {
                 attachment_purge_failed: false,
                 audio_preferences: audio_devices::Preferences::default(),
                 audio_settings: audio_devices::Settings::default(),
+                chat_settings_open: false,
                 audio_saving: None,
                 camera_list: gateway::CameraList::default(),
                 shortcuts: shortcuts::Runtime::default(),
@@ -464,6 +471,11 @@ impl App {
 
     fn theme(&self) -> iced::Theme {
         style::theme()
+    }
+
+    /// The one place the text-size preference is applied: the whole interface scales.
+    fn scale_factor(&self) -> f32 {
+        self.audio_preferences.chat.scale_factor()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -882,6 +894,7 @@ impl App {
                 notify::set_enabled(!preferences.notifications_off);
                 self.soundboard.set_prefs(preferences.soundboard.clone());
                 self.audio_preferences = preferences;
+                chat_prefs::apply(self.audio_preferences.chat);
                 self.configure_ui_sound();
                 self.shortcuts.rebuild(&self.audio_preferences.voice_input);
                 return self.handle(Message::StoreReady(store));
@@ -975,6 +988,15 @@ impl App {
                 if let Phase::Account { gateway, .. } = &self.phase {
                     gateway.controls.select_echo_cancellation(enabled);
                 }
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::OpenChatSettings => self.chat_settings_open = true,
+            Message::CloseChatSettings => self.chat_settings_open = false,
+            Message::ChatPrefs(prefs) => {
+                self.audio_preferences.chat = prefs;
+                chat_prefs::apply(prefs);
                 if self.audio_saving.is_none() {
                     return self.save_audio_preferences();
                 }
@@ -3821,6 +3843,12 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if self.chat_settings_open {
+            return center(scrollable(
+                column![chat_prefs::view(self.audio_preferences.chat)].padding(12),
+            ))
+            .into();
+        }
         if self.audio_settings.open {
             let (input_error, output_error, noise_status, audio_stats, vad_forbidden, transmit) =
                 match &self.phase {
@@ -4305,6 +4333,14 @@ impl App {
                             true,
                             false,
                             "Audio settings",
+                            0,
+                        ),
+                        action(
+                            icons::Icon::Settings,
+                            Some(Message::OpenChatSettings),
+                            true,
+                            false,
+                            "Chat & accessibility settings",
                             0,
                         ),
                         action(

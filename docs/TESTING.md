@@ -601,6 +601,17 @@ Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, wind
   - [ ] The time left matches the official client's expiry.
   - [ ] `GET /discoverable-guilds?offset=0&limit=24` answers for a user account and the response shape matches `docs/PROTOCOL.md`; Show more loads pages 2 to 4 and then stops; icons, descriptions and counts show; a joined server reads Joined; a 403/404 shows an error and not a crash.
 
+### Chat & accessibility preferences (#103)
+
+- **Automated:** `chat_prefs::tests` (defaults and round trip, scale clamping, compact row layout, spoiler and animation gating with reduced motion over autoplay, 12h/24h clock), `audio_devices` persistence round trip including `chat`, `timeline::tests` 12-hour timestamps, `style::tests` contrast ratios of the high-contrast palette.
+- **Known limitation (honest gate):** iced 0.14 has no accessibility tree, so no screen reader (Narrator, VoiceOver, Orca) can read the interface. This is an outstanding gate, not simulated. Tab focus reaches buttons, checkboxes, sliders and pick lists where iced supports it; focus order is not audited. OS-backed spellcheck is not available in iced's `text_editor`/`text_input` and is left.
+- **Outstanding gates (manual, unchecked):**
+  - [ ] Every new control is reachable and operable with Tab/Space on Windows, Linux and macOS.
+  - [ ] At 150% the main screen, call view and dialogs stay usable at the default window size; at 85% text stays legible.
+  - [ ] Compact mode scrolls and jumps to messages correctly (rows are measured, not estimated); reduced motion leaves emoji on their first frame and the timer idle (idle CPU stays near zero).
+  - [ ] High contrast: secondary panels that use their own colors (embeds, forum, scheduled events) are readable or noted.
+  - [ ] IME composition, RTL text and message selection keep the source text.
+
 ### Scheduled community events (#92)
 
 - **Automated:** `fastcord-model` `scheduled_event::tests` (decoding, external location, unknown kinds, bounded text, recurrence text); `fastcord-discord` `scheduled_event::tests` (list parsing from the synthetic fixture, routes and bodies of every write, draft checks, permission and state gating of every action, CREATE_EVENTS limited to own events) and `state::navigation::tests` (`GUILD_CREATE` events, create/update/delete replay and stale handling, interest add/remove counted once, a late list not reviving a deleted event, 100-per-guild bound with ended events first, snapshot order, byte ledger); `fastcord-app` `scheduled_events::tests` (local time parsing, one write in flight, confirmations, 403/404/429/network/401 handling, stale answers after logout or for another server, form checks, banner selection, join gating).

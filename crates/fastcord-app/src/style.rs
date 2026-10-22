@@ -20,12 +20,32 @@ pub const GREEN: Color = Color::from_rgb(0.137, 0.647, 0.349); // #23a559
 pub const RED: Color = Color::from_rgb(0.949, 0.247, 0.263); // #f23f43
 pub const YELLOW: Color = Color::from_rgb(0.941, 0.698, 0.196); // #f0b232
 
+/// The high-contrast variant (`chat_prefs`): near-black panes, white text.
+fn high_contrast() -> bool {
+    crate::chat_prefs::current().high_contrast
+}
+
+/// Panel background: `normal`, or black-based under high contrast.
+fn pane(normal: Color, strong: Color) -> Color {
+    if high_contrast() { strong } else { normal }
+}
+
+/// Body text.
+pub fn text_color() -> Color {
+    pane(TEXT, BRIGHT)
+}
+
+/// Secondary text, for the styles in this module.
+pub fn muted() -> Color {
+    pane(MUTED, Color::from_rgb(0.88, 0.89, 0.90))
+}
+
 pub fn theme() -> Theme {
     Theme::custom(
         "Discord".to_owned(),
         Palette {
-            background: CHAT,
-            text: TEXT,
+            background: pane(CHAT, Color::BLACK),
+            text: text_color(),
             primary: BLURPLE,
             success: GREEN,
             warning: YELLOW,
@@ -37,36 +57,40 @@ pub fn theme() -> Theme {
 fn fill(color: Color) -> container::Style {
     container::Style {
         background: Some(Background::Color(color)),
-        text_color: Some(TEXT),
+        text_color: Some(text_color()),
         ..container::Style::default()
     }
 }
 
 pub fn rail(_: &Theme) -> container::Style {
-    fill(RAIL)
+    fill(pane(RAIL, Color::BLACK))
 }
 
 pub fn sidebar(_: &Theme) -> container::Style {
-    fill(SIDEBAR)
+    fill(pane(SIDEBAR, Color::from_rgb(0.05, 0.05, 0.06)))
 }
 
 pub fn chat(_: &Theme) -> container::Style {
-    fill(CHAT)
+    fill(pane(CHAT, Color::BLACK))
 }
 
 pub fn footer(_: &Theme) -> container::Style {
-    fill(FOOTER)
+    fill(pane(FOOTER, Color::from_rgb(0.03, 0.03, 0.04)))
 }
 
 /// A rounded card on the chat pane (embeds, code, popups).
 pub fn card(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(SIDEBAR)),
+        background: Some(Background::Color(pane(
+            SIDEBAR,
+            Color::from_rgb(0.05, 0.05, 0.06),
+        ))),
         border: Border {
             radius: 6.0.into(),
-            ..Border::default()
+            width: if high_contrast() { 1.0 } else { 0.0 },
+            color: BRIGHT,
         },
-        text_color: Some(TEXT),
+        text_color: Some(text_color()),
         ..container::Style::default()
     }
 }
@@ -171,7 +195,7 @@ pub fn row_button(
                 _ => None,
             }
         },
-        text_color: if selected || unread { BRIGHT } else { MUTED },
+        text_color: if selected || unread { BRIGHT } else { muted() },
         border: Border {
             radius: 4.0.into(),
             ..Border::default()
@@ -208,7 +232,7 @@ pub fn tool_button(active: bool, danger: bool) -> impl Fn(&Theme, button::Status
         } else if active {
             BRIGHT
         } else {
-            MUTED
+            muted()
         },
         border: Border {
             radius: 4.0.into(),
@@ -221,7 +245,7 @@ pub fn tool_button(active: bool, danger: bool) -> impl Fn(&Theme, button::Status
 /// A button that looks like its content (a name or avatar that opens a profile).
 pub fn plain_button(_: &Theme, _: button::Status) -> button::Style {
     button::Style {
-        text_color: TEXT,
+        text_color: text_color(),
         ..button::Style::default()
     }
 }
@@ -265,4 +289,41 @@ pub fn initial(name: &str) -> String {
     name.chars()
         .find(|c| c.is_alphanumeric())
         .map_or_else(|| "?".to_owned(), |c| c.to_uppercase().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luminance(c: Color) -> f32 {
+        let lin = |v: f32| {
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    }
+
+    fn ratio(a: Color, b: Color) -> f32 {
+        let (hi, lo) = (
+            luminance(a).max(luminance(b)),
+            luminance(a).min(luminance(b)),
+        );
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn the_high_contrast_palette_is_stronger() {
+        // Pure functions of the colors: the global preference is not touched.
+        let normal = ratio(MUTED, SIDEBAR);
+        let strong = ratio(
+            Color::from_rgb(0.88, 0.89, 0.90),
+            Color::from_rgb(0.05, 0.05, 0.06),
+        );
+        assert!(strong >= 7.0, "{strong}");
+        assert!(strong > normal);
+        assert!(ratio(BRIGHT, Color::BLACK) >= 7.0);
+    }
 }

@@ -1156,6 +1156,7 @@ fn message_view<'a>(
     let message = &*row.message;
     let message_id = message.id;
     let state = row_state(row, interaction);
+    let prefs = crate::chat_prefs::current();
     let mut header = row![
         button(text(author_name(message, assets)).font(BOLD).size(15))
             .padding(0)
@@ -1259,8 +1260,10 @@ fn message_view<'a>(
     if let Some(thread) = created_thread(message) {
         body = body.push(row![row_button("Open thread", Event::OpenThread(thread))]);
     }
-    for embed in rich::embeds(message, channel_id, row.revision, cx) {
-        body = body.push(embed);
+    if prefs.link_embeds {
+        for embed in rich::embeds(message, channel_id, row.revision, cx) {
+            body = body.push(embed);
+        }
     }
     for code in fastcord_discord::extract_codes(&message.content) {
         body = body.push(crate::invite::card(assets.invites, &code, assets.avatars));
@@ -1281,6 +1284,7 @@ fn message_view<'a>(
             assets.views.get(&key),
             assets.media,
             message.is_voice_message(),
+            prefs.inline_media,
         ));
     }
     for sticker in &message.sticker_items {
@@ -1360,27 +1364,38 @@ fn message_view<'a>(
     };
     // The avatar sits in a gutter; a message that continues its author's
     // group has an empty gutter instead and no header.
-    let gutter: Element<'a, Event> = if continues {
-        container(text("")).width(40).into()
+    let layout = prefs.row_layout(continues);
+    let gutter: Option<Element<'a, Event>> = if let Some(width) = layout.gutter
+        && continues
+    {
+        Some(container(text("")).width(width).into())
+    } else if layout.gutter.is_none() {
+        None
     } else {
         let name = author_name(message, assets);
         let key =
             crate::avatars::AvatarKey::user(message.author.id, message.author.avatar.as_deref());
-        button(crate::avatars::view(assets.avatars, &key, 40.0, || {
-            container(text(style::initial(name)).size(17).font(BOLD))
-                .center(40)
-                .style(style::avatar(style::avatar_color(message.author.id.0)))
-                .into()
-        }))
-        .padding(0)
-        .style(style::plain_button)
-        .on_press_with(|| Event::OpenProfile(message.author.clone()))
-        .into()
+        Some(
+            button(crate::avatars::view(assets.avatars, &key, 40.0, || {
+                container(text(style::initial(name)).size(17).font(BOLD))
+                    .center(40)
+                    .style(style::avatar(style::avatar_color(message.author.id.0)))
+                    .into()
+            }))
+            .padding(0)
+            .style(style::plain_button)
+            .on_press_with(|| Event::OpenProfile(message.author.clone()))
+            .into(),
+        )
     };
     if continues && message.edited_timestamp.is_some() {
         body = body.push(text("(edited)").size(11).style(text::secondary));
     }
-    let inner = row![gutter, body.width(Length::Fill)].spacing(14);
+    let inner = match gutter {
+        Some(gutter) => row![gutter, body.width(Length::Fill)],
+        None => row![body.width(Length::Fill)],
+    }
+    .spacing(layout.gap);
     let base = if row.mentions_me {
         // Tinted row with a gold bar on its left edge, as the official client.
         container(
@@ -1399,7 +1414,7 @@ fn message_view<'a>(
     }
     .width(Length::Fill)
     .padding(Padding {
-        top: if continues { 1.0 } else { 14.0 },
+        top: layout.top,
         right: 16.0,
         bottom: 2.0,
         left: if row.mentions_me { 0.0 } else { 16.0 },
@@ -1680,8 +1695,11 @@ fn forwarded_view<'a>(
                 .unwrap_or_else(|| text(snapshot.content.as_str()).into()),
         );
     }
-    for embed in rich::embeds(parts, channel_id, revision, cx) {
-        body = body.push(embed);
+    let prefs = crate::chat_prefs::current();
+    if prefs.link_embeds {
+        for embed in rich::embeds(parts, channel_id, revision, cx) {
+            body = body.push(embed);
+        }
     }
     for attachment in &snapshot.attachments {
         let key = AttachmentKey {
@@ -1696,6 +1714,7 @@ fn forwarded_view<'a>(
             assets.views.get(&key),
             assets.media,
             false,
+            prefs.inline_media,
         ));
     }
     for sticker in &snapshot.sticker_items {
@@ -1753,6 +1772,7 @@ fn attachment_view(
     state: Option<&AttachmentView>,
     media: Option<&crate::media_ui::MediaSession>,
     voice_message: bool,
+    inline_media: bool,
 ) -> Element<'static, Event> {
     let ids = (key.channel, key.message, key.attachment);
     let mut content = column![
@@ -1764,6 +1784,8 @@ fn attachment_view(
     ]
     .spacing(4);
     match state {
+        // Inline previews off: the description and the View/Download buttons remain.
+        Some(AttachmentView::Ready(_)) if !inline_media => {}
         Some(AttachmentView::Ready(preview)) => {
             let thumbnail = image(preview.handle.clone())
                 .width(Length::Fixed(preview.width as f32))
@@ -1788,7 +1810,7 @@ fn attachment_view(
         }
         None => {}
     }
-    if crate::media_ui::is_playable(attachment) {
+    if inline_media && crate::media_ui::is_playable(attachment) {
         content = content.push(crate::media_ui::view(media, key, attachment, voice_message));
     }
     let mut actions = row![].spacing(4);
@@ -1945,16 +1967,19 @@ pub(crate) fn format_size(bytes: u64) -> String {
 /// `2026-10-07T11:32:01+00:00` as `2026-10-07 14:32` at `+03:00`. Without a
 /// known local offset (`None`) it reads `2026-10-07 11:32 UTC`.
 fn format_timestamp(raw: &str, local: Option<time::UtcOffset>) -> String {
+    format_timestamp_in(raw, local, crate::localtime::hour12())
+}
+
+fn format_timestamp_in(raw: &str, local: Option<time::UtcOffset>, hour12: bool) -> String {
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
     if let (Some(local), Ok(at)) = (local, OffsetDateTime::parse(raw, &Rfc3339)) {
         let at = at.to_offset(local);
         return format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}",
+            "{:04}-{:02}-{:02} {}",
             at.year(),
             at.month() as u8,
             at.day(),
-            at.hour(),
-            at.minute()
+            crate::chat_prefs::clock(at.hour(), at.minute(), hour12)
         );
     }
     format_utc(raw)
@@ -2291,6 +2316,9 @@ mod tests {
         assert_eq!(local("2026-10-21T22:30:00Z"), "2026-10-22 01:30");
         assert_eq!(local("2026-10-21T11:00:00+02:00"), "2026-10-21 12:00");
         assert_eq!(local("yesterday"), "yesterday");
+        let twelve = |raw| format_timestamp_in(raw, plus3, true);
+        assert_eq!(twelve("2026-10-21T09:38:01Z"), "2026-10-21 12:38 PM");
+        assert_eq!(twelve("2026-10-21T22:30:00Z"), "2026-10-22 1:30 AM");
     }
 
     #[test]

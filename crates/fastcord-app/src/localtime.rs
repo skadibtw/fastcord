@@ -3,11 +3,22 @@
 //! sent across a DST change shows today's offset, not the offset of its day.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use fastcord_model::markup::TimeStyle;
 use time::{OffsetDateTime, UtcOffset};
 
 static OFFSET: OnceLock<Option<UtcOffset>> = OnceLock::new();
+static HOUR12: AtomicBool = AtomicBool::new(false);
+
+/// The clock of every time of day shown (see `chat_prefs::TimeFormat`).
+pub fn set_hour12(on: bool) {
+    HOUR12.store(on, Ordering::Relaxed);
+}
+
+pub fn hour12() -> bool {
+    HOUR12.load(Ordering::Relaxed)
+}
 
 /// Call from `main` before any thread is spawned: `time` refuses to read the
 /// local offset once the process is multi-threaded on Unix.
@@ -60,14 +71,21 @@ pub fn markup(unix: i64, style: TimeStyle, offset: Option<UtcOffset>, now: i64) 
     let (y, m, d) = (at.year(), at.month() as usize, at.day());
     let (h, min, s) = (at.hour(), at.minute(), at.second());
     let long_date = format!("{d} {} {y}", MONTHS[m - 1]);
+    let hour12 = hour12();
+    let short = crate::chat_prefs::clock(h, min, hour12);
     Some(match style {
-        TimeStyle::ShortTime => format!("{h:02}:{min:02}"),
-        TimeStyle::LongTime => format!("{h:02}:{min:02}:{s:02}"),
+        TimeStyle::ShortTime => short,
+        TimeStyle::LongTime if hour12 => {
+            // "4:20:30 PM": seconds go before the AM/PM suffix.
+            let (hm, suffix) = short.split_once(' ').unwrap_or((&short, ""));
+            format!("{hm}:{s:02} {suffix}")
+        }
+        TimeStyle::LongTime => format!("{short}:{s:02}"),
         TimeStyle::ShortDate => format!("{d:02}/{m:02}/{y}"),
         TimeStyle::LongDate => long_date,
-        TimeStyle::ShortDateTime => format!("{long_date} {h:02}:{min:02}"),
+        TimeStyle::ShortDateTime => format!("{long_date} {short}"),
         TimeStyle::LongDateTime => format!(
-            "{}, {long_date} {h:02}:{min:02}",
+            "{}, {long_date} {short}",
             DAYS[at.weekday().number_days_from_monday() as usize]
         ),
         TimeStyle::Relative => unreachable!(),

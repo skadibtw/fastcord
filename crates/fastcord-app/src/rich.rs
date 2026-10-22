@@ -494,9 +494,10 @@ impl<'a> Renderer<'a> {
             }
             _ => {}
         }
+        let prefs = crate::chat_prefs::current();
         let hidden = part
             .spoiler
-            .is_some_and(|id| !self.cx.revealed.contains(&(message.id, id)));
+            .is_some_and(|id| prefs.spoiler_hidden(self.cx.revealed.contains(&(message.id, id))));
         if let Some(id) = part.spoiler {
             if hidden {
                 item = item

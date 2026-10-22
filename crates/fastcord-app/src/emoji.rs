@@ -211,7 +211,13 @@ impl View {
         }
     }
     pub fn handle(&self) -> image::Handle {
-        self.frames[self.frame].clone()
+        // Reduced motion (or autoplay off) shows the first frame.
+        let frame = if crate::chat_prefs::current().animated() {
+            self.frame
+        } else {
+            0
+        };
+        self.frames[frame].clone()
     }
 }
 
@@ -357,7 +363,9 @@ impl State {
     }
 
     pub fn animating(&self) -> bool {
-        self.active && self.views.values().any(|view| view.frames.len() > 1)
+        self.active
+            && crate::chat_prefs::current().animated()
+            && self.views.values().any(|view| view.frames.len() > 1)
     }
 
     pub fn tick(&mut self, now: Instant) {
