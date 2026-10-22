@@ -14,6 +14,7 @@ mod call_ui;
 mod captcha;
 mod changes;
 mod chat_prefs;
+mod community;
 mod component_view;
 mod composer;
 mod desktop;
@@ -243,6 +244,7 @@ struct App {
     announce: announce::State,
     moderation: moderation::State,
     apps: apps::State,
+    community: community::State,
     discover: discover::State,
     onboarding: onboarding::State,
     events: scheduled_events::State,
@@ -444,6 +446,7 @@ enum Message {
     Announce(announce::Event),
     Moderation(moderation::Event),
     Apps(apps::Event),
+    Community(community::Event),
     Discover(discover::Event),
     Onboarding(onboarding::Event),
     Events(scheduled_events::Event),
@@ -555,6 +558,7 @@ impl App {
                 announce: announce::State::default(),
                 moderation: moderation::State::default(),
                 apps: apps::State::default(),
+                community: community::State::default(),
                 discover: discover::State::default(),
                 onboarding: onboarding::State::default(),
                 events: scheduled_events::State::default(),
@@ -636,7 +640,8 @@ impl App {
                     .wanted()
                     .or(self.announce.wanted_guild())
                     .or(self.moderation.wanted())
-                    .or(self.apps.wanted_guild()),
+                    .or(self.apps.wanted_guild())
+                    .or(self.community.wanted()),
             );
             gateway
                 .controls
@@ -1734,6 +1739,7 @@ impl App {
             Message::Invite(event) => return self.invite_event(event),
             Message::Announce(event) => return self.announce_event(event),
             Message::Apps(event) => return self.apps_event(event),
+            Message::Community(event) => return self.community_event(event),
             Message::GuildAdmin(event) => {
                 if matches!(event, guild_admin::Event::MemberRoles(..)) {
                     self.member_menu.close();
@@ -3135,6 +3141,7 @@ impl App {
         self.announce.clear();
         self.moderation.clear();
         self.apps.clear();
+        self.community.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -3320,6 +3327,7 @@ impl App {
         self.announce.clear();
         self.moderation.clear();
         self.apps.clear();
+        self.community.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -4024,6 +4032,27 @@ impl App {
         task.map(Message::Invite)
     }
 
+    fn community_event(&mut self, event: community::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = community::State::is_rejected(&event);
+        let task =
+            self.community
+                .update(event, &gateway.navigation, &session.client, session.user.id);
+        if rejected {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Community)
+    }
+
     fn guild_admin_event(&mut self, event: guild_admin::Event) -> Task<Message> {
         let Phase::Account {
             session, gateway, ..
@@ -4043,6 +4072,15 @@ impl App {
         if let guild_admin::Event::Followed(guild, channel) = event {
             // The channel panel hands over to the followed-announcements list.
             return self.announce_event(announce::Event::OpenFollowers(guild, channel));
+        }
+        if let guild_admin::Event::Community(guild) = event {
+            // The settings hand over to the community setup panel.
+            let _ = self.guild_admin.update(
+                guild_admin::Event::Close,
+                &gateway.navigation,
+                &session.client,
+            );
+            return self.community_event(community::Event::Open(guild));
         }
         if let guild_admin::Event::Leave(guild) = event {
             // The menu hands over to the leave confirmation of the invite module.
@@ -4934,6 +4972,9 @@ impl App {
             }
             if let Some(panel) = guild_admin::view(&self.guild_admin, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::GuildAdmin));
+            }
+            if let Some(panel) = community::view(&self.community, &gateway.navigation) {
+                banner_column = banner_column.push(panel.map(Message::Community));
             }
             if let Some(panel) = announce::view(&self.announce, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::Announce));

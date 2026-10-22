@@ -81,6 +81,8 @@ impl ScreeningField {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Screening {
     version: Value,
+    /// `enabled`, when Discord sends it with the form.
+    pub enabled: Option<bool>,
     pub description: String,
     pub fields: Vec<ScreeningField>,
     /// Discord sent more fields than [`MAX_FIELDS`].
@@ -94,6 +96,7 @@ impl Screening {
             version: Value,
             description: Option<String>,
             form_fields: Option<Vec<Value>>,
+            enabled: Option<bool>,
         }
         let wire: Wire = parse(body)?;
         if !matches!(wire.version, Value::String(_) | Value::Number(_)) {
@@ -132,10 +135,25 @@ impl Screening {
             .collect();
         Some(Self {
             version: wire.version,
+            enabled: wire.enabled,
             description: note(wire.description),
             fields,
             truncated,
         })
+    }
+
+    /// The version to send back with an edit.
+    pub(crate) fn version(&self) -> &Value {
+        &self.version
+    }
+
+    /// Whether every field arrived, so an edit sends them all back.
+    pub fn complete(&self) -> bool {
+        !self.truncated
+    }
+
+    pub(crate) fn raw_fields(&self) -> impl Iterator<Item = &Value> {
+        self.fields.iter().map(|field| &field.raw)
     }
 
     /// The first required field this client cannot answer.

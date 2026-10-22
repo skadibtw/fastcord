@@ -17,6 +17,7 @@ mod apps;
 mod attachment;
 mod call;
 mod clock;
+mod community_admin;
 mod edit;
 mod error;
 pub mod gateway;
@@ -72,6 +73,15 @@ pub use apps::{
 pub use attachment::{RefreshedAttachmentUrl, decode_waveform};
 pub use call::CallSignal;
 pub use clock::{Clock, MonotonicClock};
+pub use community_admin::{
+    CommunityError, CommunityRequestError, Emoji as OnboardingEmoji, GuideDoc, GuideEntry, Known,
+    MAX_ENTRY_DESCRIPTION_CHARS, MAX_ENTRY_TITLE_CHARS, MAX_NEW_MEMBER_ACTIONS,
+    MAX_OPTION_DESCRIPTION_CHARS, MAX_OPTION_TITLE_CHARS, MAX_OPTIONS_EDITED,
+    MAX_PROMPT_TITLE_CHARS, MAX_PROMPTS_EDITED, MAX_RESOURCE_CHANNELS, MAX_RULE_CHARS,
+    MAX_RULES_DESCRIPTION_CHARS, MAX_RULES_EDITED, MAX_WELCOME_CHARS, ONBOARDING_MODES,
+    OnboardingDoc, OptionDoc, PromptDoc, RulesEdit, VERIFICATION_LEVELS, disable_community_body,
+    enable_community_body, fresh_id,
+};
 pub use edit::{EditedMessage, edit_response_update, is_own_message};
 pub use error::{NetworkFailure, Refusal, RestError, RetryableFailure};
 pub use gateway::{ConnectionState, Gateway, GatewayEvent};

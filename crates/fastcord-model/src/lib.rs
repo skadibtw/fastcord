@@ -32,7 +32,10 @@ pub use component::{
 pub use embed::{
     Embed, EmbedField, EmbedFooter, EmbedMedia, EmbedText, MAX_EMBED_FIELDS, MAX_EMBEDS,
 };
-pub use guild::{Guild, GuildEmoji, GuildMember, GuildSettings, MAX_DESCRIPTION_BYTES, Role};
+pub use guild::{
+    Guild, GuildEmoji, GuildMember, GuildSettings, MAX_DESCRIPTION_BYTES, MAX_FEATURE_BYTES,
+    MAX_FEATURES, Role,
+};
 pub use message::{
     Attachment, CROSSPOSTED_FLAG, Emoji, FORWARD_REFERENCE, IS_CROSSPOST_FLAG,
     MAX_MESSAGE_SNAPSHOTS, MAX_REACTION_EMOJI_NAME_BYTES, MAX_REACTIONS, MAX_STICKER_ITEMS,

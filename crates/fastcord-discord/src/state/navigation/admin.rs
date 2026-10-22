@@ -106,6 +106,9 @@ pub struct AdminChannel {
     /// For a channel in a category: whether its overwrites are exactly the
     /// category's. `None` outside a category.
     pub synced: Option<bool>,
+    /// The `@everyone` role can view the channel (its permissions and the
+    /// channel's `@everyone` overwrite): what onboarding default channels need.
+    pub everyone_view: bool,
 }
 
 /// Why a role cannot be changed, or `None` when it can.
@@ -148,6 +151,12 @@ pub struct GuildAdmin {
     pub afk_timeout: u32,
     pub notifications: u8,
     pub content_filter: u8,
+    pub rules_channel: Option<Snowflake>,
+    pub public_updates_channel: Option<Snowflake>,
+    /// 0 none .. 4 highest.
+    pub verification_level: u8,
+    /// Feature flags as the Gateway reported them.
+    pub features: Vec<String>,
     pub can_manage_guild: bool,
     /// Guild-wide MANAGE_CHANNELS: create channels and reorder them.
     pub can_manage_channels: bool,
@@ -285,6 +294,11 @@ pub fn guild_admin(store: &Store, guild_id: Snowflake) -> Option<GuildAdmin> {
     let me = store.current_user()?.id;
     let context = PermissionContext::new(store, guild)?;
     let base = context.base();
+    let everyone = guild
+        .roles()
+        .iter()
+        .find(|r| r.id == guild_id)
+        .map_or(Permissions::NONE, |r| r.permissions);
     let mut rows: Vec<AdminChannel> = guild
         .channels()
         .filter_map(|channel| {
@@ -294,7 +308,21 @@ pub fn guild_admin(store: &Store, guild_id: Snowflake) -> Option<GuildAdmin> {
                 return None;
             }
             let mine = context.raw(channel);
+            let own = channel
+                .permission_overwrites
+                .iter()
+                .find(|o| o.id == guild_id && o.kind == fastcord_model::OverwriteKind::Role);
+            let everyone_view = everyone.contains(Permissions::ADMINISTRATOR)
+                || own.map_or(everyone.contains(Permissions::VIEW_CHANNEL), |o| {
+                    if o.deny.contains(Permissions::VIEW_CHANNEL) {
+                        false
+                    } else {
+                        o.allow.contains(Permissions::VIEW_CHANNEL)
+                            || everyone.contains(Permissions::VIEW_CHANNEL)
+                    }
+                });
             Some(AdminChannel {
+                everyone_view,
                 id: channel.id,
                 name: capped_name(channel.name.as_deref(), "Unnamed channel"),
                 kind,
@@ -445,6 +473,10 @@ pub fn guild_admin(store: &Store, guild_id: Snowflake) -> Option<GuildAdmin> {
         afk_timeout: settings.afk_timeout,
         notifications: settings.notifications,
         content_filter: settings.content_filter,
+        rules_channel: settings.rules_channel_id,
+        public_updates_channel: settings.public_updates_channel_id,
+        verification_level: settings.verification_level,
+        features: settings.features.clone(),
         can_manage_guild: base.contains(Permissions::MANAGE_GUILD),
         can_manage_channels: base.contains(Permissions::MANAGE_CHANNELS),
         channels: ordered,

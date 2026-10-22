@@ -18,10 +18,10 @@ use std::collections::HashMap;
 
 use fastcord_model::{
     CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildEmoji, GuildMember,
-    GuildSettings, MAX_DESCRIPTION_BYTES, MAX_REACTION_EMOJI_NAME_BYTES, Message, MessageUpdate,
-    Relationship, RelationshipKind, Role, ScheduledEvent, ScheduledEventKey, ScheduledEventUser,
-    Snowflake, StageInstance, StreamCreate, StreamDelete, StreamServerUpdate, StreamUpdate, User,
-    VoiceServerUpdate, VoiceState,
+    GuildSettings, MAX_DESCRIPTION_BYTES, MAX_FEATURE_BYTES, MAX_FEATURES,
+    MAX_REACTION_EMOJI_NAME_BYTES, Message, MessageUpdate, Relationship, RelationshipKind, Role,
+    ScheduledEvent, ScheduledEventKey, ScheduledEventUser, Snowflake, StageInstance, StreamCreate,
+    StreamDelete, StreamServerUpdate, StreamUpdate, User, VoiceServerUpdate, VoiceState,
 };
 use serde::{Deserialize, Deserializer};
 
@@ -120,6 +120,12 @@ struct GuildProperties {
     default_message_notifications: Option<u8>,
     #[serde(default)]
     explicit_content_filter: Option<u8>,
+    #[serde(default)]
+    rules_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    public_updates_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    verification_level: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +155,12 @@ struct GuildWire {
     default_message_notifications: Option<u8>,
     #[serde(default)]
     explicit_content_filter: Option<u8>,
+    #[serde(default)]
+    rules_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    public_updates_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    verification_level: Option<u8>,
     #[serde(default, deserialize_with = "null_default")]
     roles: Vec<Role>,
     #[serde(default, deserialize_with = "null_default")]
@@ -205,6 +217,12 @@ struct GuildUpdateWire {
     default_message_notifications: Option<u8>,
     #[serde(default)]
     explicit_content_filter: Option<u8>,
+    #[serde(default)]
+    rules_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    public_updates_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    verification_level: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -596,6 +614,11 @@ impl Normalizer {
                         .or(p.and_then(|p| p.default_message_notifications)),
                     wire.explicit_content_filter
                         .or(p.and_then(|p| p.explicit_content_filter)),
+                    wire.rules_channel_id.or(p.and_then(|p| p.rules_channel_id)),
+                    wire.public_updates_channel_id
+                        .or(p.and_then(|p| p.public_updates_channel_id)),
+                    wire.verification_level
+                        .or(p.and_then(|p| p.verification_level)),
                 )
             },
         }))
@@ -981,6 +1004,9 @@ fn guild_settings(
     afk_timeout: Option<u32>,
     notifications: Option<u8>,
     content_filter: Option<u8>,
+    rules_channel_id: Option<Snowflake>,
+    public_updates_channel_id: Option<Snowflake>,
+    verification_level: Option<u8>,
 ) -> GuildSettings {
     let mut description = description;
     if let Some(text) = &mut description
@@ -1000,6 +1026,15 @@ fn guild_settings(
         afk_timeout: afk_timeout.unwrap_or(0),
         notifications: notifications.unwrap_or(0),
         content_filter: content_filter.unwrap_or(0),
+        rules_channel_id,
+        public_updates_channel_id,
+        verification_level: verification_level.unwrap_or(0),
+        features: features
+            .iter()
+            .take(MAX_FEATURES)
+            .filter(|f| f.len() <= MAX_FEATURE_BYTES)
+            .cloned()
+            .collect(),
     }
 }
 
@@ -1026,6 +1061,9 @@ fn decode_guild_update(raw: &str) -> Result<GuildUpdate, Malformed> {
                 wire.afk_timeout,
                 wire.default_message_notifications,
                 wire.explicit_content_filter,
+                wire.rules_channel_id,
+                wire.public_updates_channel_id,
+                wire.verification_level,
             )
         }),
     })

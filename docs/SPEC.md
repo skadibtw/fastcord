@@ -548,6 +548,15 @@ Implemented in `fastcord-discord::announce` (the four requests, the type-2 webho
 - **Followed destinations.** The text channel edit panel (Manage Webhooks) has "Followed announcements": the type-2 webhooks with their source and Unfollow after a Confirm (`DELETE /webhooks/{id}`).
 - **Not offered:** any scheduler or automatic posting, other webhook types, paid features.
 
+### 8.21 Community setup (#97)
+
+Implemented in `fastcord-discord::community_admin` (editable documents that preserve unrelated fields, request bodies, bounds, permission checks, the five requests), `fastcord-model::GuildSettings` (rules/updates channel, verification level, features), `state/navigation/admin.rs` (`GuildAdmin` fields and per-channel `everyone_view`) and `fastcord-app::community` (the panel). The server settings' "Community setup" opens four tabs (Rules, Onboarding, Guide, Community), gated on Manage Server, with role grants gated on Manage Roles through the #94 reducer (`can_grant`).
+
+- One save per tab, re-checked against current permissions just before sending; dirty indicator and Discard; one write in flight; stale answers ignored by a serial; 401 stops the account.
+- The editor reloads from the answer (or the next read); Community changes show only after `GUILD_UPDATE`.
+- Disabling Community needs a Confirm. Enabling needs a rules and an updates channel.
+- **Left:** analytics and monetization dashboards, custom emoji, non-TERMS questions.
+
 ### Apps: commands and components (#100)
 
 A message's buttons and selects, the Components V2 layout pieces and slash commands of installed applications. Ownership: `fastcord-model` holds the bounded component tree (`component`); `fastcord-discord` holds the wire (`interaction`: request bodies, the command index, the modal and outcome events) and the byte-accounted store; the history worker (`history/interact.rs`, rules in `interactions.rs`) owns the session ID, the ledger of unsettled interactions, the open modal and the 15-second timers; the UI draws components (`component_view`) and the command list, option form and modal (`slash`). One click is one request, re-checked against the store, the open channel, the send permission and the session when it reaches the worker, sent once at user-write priority and never retried. The ledger allows one pending component per message and one pending command per channel (8 in all). Premium buttons are disabled with "not available in this client"; nothing here purchases, schedules or automates anything. Ephemeral messages (flag 64) are labelled, dismissable locally and purged with the conversation. Route and event details, and what is left, are in docs/PROTOCOL.md.

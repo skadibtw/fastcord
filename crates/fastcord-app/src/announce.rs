@@ -800,6 +800,7 @@ mod tests {
                 Permissions::NONE
             },
             synced: None,
+            everyone_view: true,
         };
         NavigationSnapshot {
             admin: Some(GuildAdmin {
@@ -814,6 +815,10 @@ mod tests {
                 afk_timeout: 300,
                 notifications: 0,
                 content_filter: 0,
+                rules_channel: None,
+                public_updates_channel: None,
+                verification_level: 0,
+                features: Vec::new(),
                 can_manage_guild: false,
                 can_manage_channels: false,
                 channels: vec![channel],

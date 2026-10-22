@@ -724,6 +724,16 @@ Manual (Windows, alt account only): open a server with many members, quit fastco
   - [ ] Inspection of a held member in a channel matches the official "View server as role" / permission display, including a member overwrite and a timeout.
   - [ ] Losing Manage Roles in another client removes the controls here without a restart.
 
+### Community onboarding, rules screening and guide configuration (#97)
+
+- **Automated:** `fastcord-discord` `community_admin::tests` (document round trips that keep unknown fields, bounds, bodies, inaccessible role/channel refusal, Community bodies), decode tests for the new guild fields, `fastcord-app` `community::tests` (dirty/discard, one in-flight write, success, 403, 404, 429, network, stale and 401).
+- **Outstanding gates (alt accounts only, unchecked, unverified routes):**
+  - [ ] Rules edit: the official client shows the same rules and description; other form fields are unchanged.
+  - [ ] Onboarding edit: a new prompt and option with a client-generated id is accepted (or record Discord's refusal) and the official client shows it with the roles and channels; unrelated fields (type, mode) survive a save.
+  - [ ] Guide edit: welcome text, actions and resource channels match the official client; confirm the PUT route and body shape.
+  - [ ] Community on/off: record required fields and Discord's validation text; the panel follows `GUILD_UPDATE`.
+  - [ ] A member without Manage Server sees no Community setup; without Manage Roles the role pickers refuse.
+
 ### Announcement channels (#98)
 
 - **Automated:** `fastcord-discord` `announce::tests` (type-2-only parse from `fixtures/rest/channel-webhooks-synthetic.json`, no token, bounds, routes and the follow body), `state::navigation::tests` (`follow_targets`: Manage Webhooks per destination, overwrites, announcement source only), `message_store::tests` (a received crosspost keeps its source across an edit, a delete and its replay, and `CROSSPOSTED` arrives only through the update); `fastcord-app` `announce::tests` (publish asks first, rechecked at the click, one request in flight, stale answers, already-published refusal; picker offers reducer targets only and sends once; list, Confirm, removal, forbidden and gone answers) and `timeline::tests` (Publish by right, the confirmation row, no Publish once published).

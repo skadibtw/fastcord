@@ -143,6 +143,9 @@ pub enum Event {
     Apps(Snowflake),
     /// "Webhooks" of a text channel: server and channel; the caller opens it.
     Webhooks(Snowflake, Snowflake),
+    /// "Community setup" of a server's settings: the caller opens the
+    /// `community` panel and this one closes.
+    Community(Snowflake),
     Close,
     Input(Field, String),
     Choose(Choice),
@@ -425,7 +428,7 @@ fn community_note() -> String {
     "Announcement, Stage and forum channels need the Community feature, which this server does not have. Turn it on in the official Discord client (it needs rules and updates channels).".to_owned()
 }
 
-fn describe_rest(error: RestError) -> String {
+pub(crate) fn describe_rest(error: RestError) -> String {
     match error {
         RestError::PermissionDenied => "Discord refused: you lack the permission for this (Manage Server, Manage Channels, Manage Roles, a role above the one involved, or being the owner).".to_owned(),
         RestError::ResourceGone => "That server or channel no longer exists.".to_owned(),
@@ -570,7 +573,7 @@ impl State {
                     );
                 }
             }
-            Event::Followed(..) | Event::Apps(_) | Event::Webhooks(..) => {}
+            Event::Followed(..) | Event::Apps(_) | Event::Webhooks(..) | Event::Community(_) => {}
             // Forwarded by the caller; the menu closes with it.
             Event::Leave(_) | Event::Bans(_) | Event::Audit(_) => {
                 if self.busy.is_none() {
@@ -1143,10 +1146,12 @@ fn server_view<'a>(
             button(text("Roles").size(13)).on_press_maybe(idle.then_some(Event::Roles(admin.id))),
             button(text("Apps and integrations").size(13))
                 .on_press_maybe((idle && admin.can_manage_guild).then_some(Event::Apps(admin.id))),
+            button(text("Community setup").size(13))
+                .on_press_maybe(idle.then_some(Event::Community(admin.id))),
             small(if admin.community {
                 "Community is on."
             } else {
-                "Community is off. Turning it on needs rules and updates channels and a verification level: use the official client."
+                "Community is off."
             }),
         ]
         .spacing(10)
@@ -1713,6 +1718,7 @@ mod tests {
             can_manage_permissions: true,
             mine: Permissions(VIEW | SEND | MANAGE_ROLES),
             synced: None,
+            everyone_view: true,
         }
     }
 
@@ -1764,6 +1770,10 @@ mod tests {
             afk_timeout: 0,
             notifications: 0,
             content_filter: 0,
+            rules_channel: None,
+            public_updates_channel: None,
+            verification_level: 0,
+            features: Vec::new(),
             can_manage_guild: manage_guild,
             can_manage_channels: manage_channels,
             channels: vec![

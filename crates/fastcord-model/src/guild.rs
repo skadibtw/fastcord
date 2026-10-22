@@ -72,7 +72,20 @@ pub struct GuildSettings {
     pub notifications: u8,
     /// `explicit_content_filter`: 0 off, 1 members without roles, 2 everyone.
     pub content_filter: u8,
+    /// The channel Community rules live in.
+    pub rules_channel_id: Option<Snowflake>,
+    /// The channel Discord posts Community updates to.
+    pub public_updates_channel_id: Option<Snowflake>,
+    /// `verification_level`: 0 none, 1 low, 2 medium, 3 high, 4 highest.
+    pub verification_level: u8,
+    /// Feature flags (at most [`MAX_FEATURES`] of [`MAX_FEATURE_BYTES`]), kept
+    /// so a Community change can send them back.
+    pub features: Vec<String>,
 }
+
+/// Feature flags kept per server; a real server has far fewer.
+pub const MAX_FEATURES: usize = 128;
+pub const MAX_FEATURE_BYTES: usize = 64;
 
 /// Longest server description kept.
 pub const MAX_DESCRIPTION_BYTES: usize = 512;
