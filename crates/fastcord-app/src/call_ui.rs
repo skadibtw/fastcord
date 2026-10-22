@@ -467,6 +467,14 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
         }));
     }
     buttons = buttons.push(icons::action(Action {
+        icon: Icon::Pin,
+        on_press: Some(Message::ToggleCompact),
+        active: false,
+        danger: false,
+        tip: "Compact call window (small, always on top)".to_owned(),
+        badge: 0,
+    }));
+    buttons = buttons.push(icons::action(Action {
         icon: Icon::Settings,
         on_press: Some(Message::ToggleVoiceDetails),
         active: bar.settings_open,

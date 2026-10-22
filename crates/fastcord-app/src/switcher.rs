@@ -243,14 +243,17 @@ pub fn view<'a>(
     }
     let card = container(
         column![
-            text_input("Jump to a channel or conversation", &state.query)
-                .id(INPUT_ID)
-                .on_input(Event::Query)
-                .on_submit(Event::Submit)
-                .size(15)
-                .padding(8),
+            text_input(
+                "Jump to a conversation, or paste a Discord link",
+                &state.query
+            )
+            .id(INPUT_ID)
+            .on_input(Event::Query)
+            .on_submit(Event::Submit)
+            .size(15)
+            .padding(8),
             scrollable(list).height(Length::Shrink),
-            text("Enter opens, Up/Down chooses, Escape closes")
+            text("Enter opens, Up/Down chooses, Escape closes. A pasted Discord link opens too.")
                 .size(11)
                 .color(style::MUTED),
         ]

@@ -2,13 +2,16 @@
 //! block and belong on a worker, never the UI thread. No default/global keyring
 //! store or plaintext fallback.
 
+pub mod autostart;
 pub mod capture;
 pub mod clipboard;
+pub mod instance;
 pub mod loopback;
 pub mod notify;
 pub mod realtime;
 pub mod shortcut;
 pub mod speech;
+pub mod tray;
 
 use std::collections::HashMap;
 use std::fmt;

@@ -71,6 +71,8 @@ pub struct Preferences {
     pub organize: crate::organize::Local,
     /// Text-to-speech mode, voice and rate.
     pub speech: crate::speech::Prefs,
+    /// Closing the window hides it to the tray icon instead of quitting (off by default).
+    pub close_to_tray: bool,
 }
 
 impl Default for Preferences {
@@ -91,6 +93,7 @@ impl Default for Preferences {
             chat: crate::chat_prefs::Prefs::default(),
             organize: crate::organize::Local::default(),
             speech: crate::speech::Prefs::default(),
+            close_to_tray: false,
         }
     }
 }
@@ -405,6 +408,8 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
             .get("speech")
             .map(crate::speech::Prefs::from_json)
             .unwrap_or_default(),
+        // Older settings predate the tray: closing quits.
+        close_to_tray: value.get("close_to_tray").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -444,7 +449,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json(), "interface_sounds": prefs.interface_sounds, "interface_volume": prefs.interface_volume, "chat": prefs.chat.to_json(), "organize": prefs.organize.to_json(), "speech": prefs.speech.to_json()}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json(), "interface_sounds": prefs.interface_sounds, "interface_volume": prefs.interface_volume, "chat": prefs.chat.to_json(), "organize": prefs.organize.to_json(), "speech": prefs.speech.to_json(), "close_to_tray": prefs.close_to_tray}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -592,6 +597,7 @@ mod tests {
                 voice: Some("voice-id".to_owned()),
                 rate: 160,
             },
+            close_to_tray: true,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);

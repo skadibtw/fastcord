@@ -9,7 +9,7 @@
 use fastcord_model::Snowflake;
 
 /// Hosts whose `/channels/…` links are Discord message links.
-const HOSTS: [&str; 4] = [
+pub(crate) const HOSTS: [&str; 4] = [
     "discord.com",
     "ptb.discord.com",
     "canary.discord.com",
@@ -32,7 +32,7 @@ pub fn format(guild: Option<Snowflake>, channel: Snowflake, message: Snowflake) 
     }
 }
 
-fn id(part: &str) -> Option<Snowflake> {
+pub(crate) fn id(part: &str) -> Option<Snowflake> {
     // Decimal digits only (no sign), at most a u64.
     (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
         .then(|| part.parse::<u64>().ok())

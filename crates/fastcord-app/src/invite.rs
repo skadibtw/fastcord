@@ -430,6 +430,9 @@ pub enum Event {
     ConfirmRevoke(String),
     Revoked(u64, String, Result<(), RestError>),
     CloseManage,
+    /// A pasted or launched invite link: look it up and show it, never join it.
+    Open(String),
+    CloseOpened,
 }
 
 #[derive(Debug)]
@@ -606,6 +609,8 @@ pub struct State {
     leave: Option<Leave>,
     creating: Option<Creating>,
     manage: Option<Manage>,
+    /// The invite of a link the user opened (deep link or switcher paste).
+    opened: Option<String>,
     /// What the create request in flight allows, shown with its link.
     made: Option<String>,
     notice: Option<String>,
@@ -692,6 +697,20 @@ impl State {
             | Event::Created(..)
             | Event::Listed(..)
             | Event::Revoked(..) => {}
+            Event::Open(code) => {
+                let start = self.cache.want(std::slice::from_ref(&code), Instant::now());
+                self.opened = Some(code);
+                let generation = self.generation;
+                return Task::batch(start.into_iter().map(|code| {
+                    let client = client.clone();
+                    let ask = code.clone();
+                    Task::perform(
+                        async move { client.lookup_invite(&ask).await },
+                        move |result| Event::Resolved(generation, code.clone(), result),
+                    )
+                }));
+            }
+            Event::CloseOpened => self.opened = None,
             Event::Join(code) => {
                 if self.cache.begin_join(&code) {
                     let generation = self.generation;
@@ -975,6 +994,66 @@ fn manage_view(manage: &Manage, now: i64) -> Element<'_, Event> {
     .into()
 }
 
+/// The invite of an opened link: what it is and an explicit Join.
+fn opened_view<'a>(cache: &'a Cache, code: &str) -> Element<'a, Event> {
+    let (title, detail, join) = match cache.get(code) {
+        Some(
+            entry @ Entry {
+                card: Card::Ready(invite),
+                join,
+                ..
+            },
+        ) => {
+            let detail = match join {
+                Join::Refused(reason) => reason.clone(),
+                _ => counts_line(invite),
+            };
+            let action = if cache.is_member(entry) {
+                ("Joined", None)
+            } else if *join == Join::Joining {
+                ("Joining\u{2026}", None)
+            } else {
+                ("Join", Some(Event::Join(code.to_owned())))
+            };
+            (invite.guild_name.clone(), detail, Some(action))
+        }
+        Some(Entry {
+            card: Card::Invalid,
+            ..
+        }) => (
+            "Invite invalid".to_owned(),
+            "This invite has expired or does not exist.".to_owned(),
+            None,
+        ),
+        Some(Entry {
+            card: Card::Failed, ..
+        }) => (
+            "Invite".to_owned(),
+            "Discord did not answer. Open the link again to retry.".to_owned(),
+            None,
+        ),
+        _ => ("Invite".to_owned(), "Loading\u{2026}".to_owned(), None),
+    };
+    let mut line = row![
+        column![
+            text(title).size(14),
+            text(detail).size(12).style(text::secondary)
+        ]
+        .width(Length::Fill),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    if let Some((label, press)) = join {
+        line = line.push(
+            button(text(label).size(13))
+                .on_press_maybe(press)
+                .style(button::success),
+        );
+    }
+    line.push(button(text("Close").size(13)).on_press(Event::CloseOpened))
+        .into()
+}
+
 /// The leave confirmation, the created link and the last result, as panels
 /// above the conversation.
 pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
@@ -1090,6 +1169,10 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
             );
         }
         None => {}
+    }
+    if let Some(code) = &state.opened {
+        any = true;
+        panel = panel.push(opened_view(&state.cache, code));
     }
     if let Some(manage) = &state.manage {
         any = true;
@@ -1543,5 +1626,26 @@ mod tests {
             &client,
         );
         assert!(state.notice.is_none());
+    }
+
+    #[test]
+    fn an_opened_invite_is_looked_up_but_never_joined() {
+        let client = fastcord_discord::RestClient::new(
+            fastcord_discord::UserToken::new("offline-test-credential".to_owned()),
+            fastcord_discord::gateway::ClientProperties::web(
+                fastcord_discord::gateway::HostOs::Linux,
+                "en-US",
+                1,
+            ),
+        )
+        .unwrap();
+        let navigation = NavigationSnapshot::default();
+        let mut state = State::default();
+        let _ = state.update(Event::Open("abcd".into()), &navigation, &[], &client);
+        assert_eq!(state.opened.as_deref(), Some("abcd"));
+        let entry = state.cache.get("abcd").unwrap();
+        assert_eq!((&entry.card, &entry.join), (&Card::Loading, &Join::Idle));
+        let _ = state.update(Event::CloseOpened, &navigation, &[], &client);
+        assert_eq!(state.opened, None);
     }
 }

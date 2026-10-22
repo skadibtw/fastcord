@@ -751,3 +751,16 @@ Manual (Windows, alt account only, not run offline):
   - [ ] Server and channel levels (all, only @mentions, nothing, default) and the two suppressions are accepted by the route, echoed by `USER_GUILD_SETTINGS_UPDATE`, and match the official client's display; badges and toasts follow them.
   - [ ] DM and group DM notification settings through `@me`.
   - [ ] Folded categories keep unread and occupied voice channels; "hide muted channels" keeps channels with mentions; both survive a restart per account.
+
+### Desktop communication integration (#105)
+
+- **Automated:** `desktop::tests` (deep links in every form and the rejects), platform `instance::tests` (hand-off encode/decode, foreign/oversize/malformed), `autostart::tests` (quoted value, refused paths), `tray::tests` (menu per state, id mapping, tooltip, icon entry), `main::tests` (closing quits by default and hides only with the tray chosen and up; a forwarded link waits for sign-in), `invite::tests` (an opened invite is looked up, never joined). None touches the registry or starts a window.
+- **Outstanding gates (manual, unchecked; never run two instances on one token):**
+  - [ ] Windows: the tray icon appears with the app icon, shows the mention count in its tooltip, survives an Explorer restart, and left click/Open raise the window.
+  - [ ] In a call the menu shows Mute/Unmute microphone and Disconnect and they work; outside a call they are absent. Quit leaves the call and exits; no process remains in Task Manager.
+  - [ ] With "minimizes to the tray" on, the close button hides the window, the call keeps running, and a mention still raises a toast; with it off the close button exits.
+  - [ ] Starting a second `fastcord.exe` (with and without a link argument) never opens a second session: the first window comes forward, the link opens, the second process exits.
+  - [ ] The autostart checkbox adds and removes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\fastcord`; the next sign-in starts fastcord once.
+  - [ ] `fastcord.exe discord://-/channels/{g}/{c}/{m}`, the https form and a pasted link in Ctrl+K open the right conversation/message; an invite link shows the invite and joins only on Join.
+  - [ ] Compact call mode stays above a full-screen-windowed app, shows speaking rings for another account, and ends when the call ends.
+  - [ ] Linux and macOS report the tray and autostart as unsupported instead of failing silently.

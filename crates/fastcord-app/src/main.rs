@@ -15,6 +15,7 @@ mod changes;
 mod chat_prefs;
 mod component_view;
 mod composer;
+mod desktop;
 mod discover;
 mod drafts;
 mod emoji;
@@ -112,6 +113,31 @@ fn search_bar_is_empty(gateway: &GatewayPanel) -> bool {
     App::search_target(gateway).is_none()
 }
 
+/// Opens a conversation, and with `message` jumps to it: in the open channel
+/// at once, otherwise once the channel (which must be one the account can
+/// see) has opened.
+fn jump_to(
+    search: &mut search::State,
+    gateway: &GatewayPanel,
+    guild: Option<Snowflake>,
+    channel: Snowflake,
+    message: Option<Snowflake>,
+) {
+    if let Some(message) = message {
+        if gateway.timeline.channel_id == Some(channel) {
+            gateway
+                .controls
+                .timeline_intent(history::Intent::JumpTo { channel, message });
+            return;
+        }
+        search.set_pending_jump(channel, message);
+    }
+    match guild {
+        Some(guild) => gateway.controls.select_channel(guild, channel),
+        None => gateway.controls.select_private_channel(channel),
+    }
+}
+
 /// One ring or stop-ringing request for a private call.
 fn call_signal(session: &Session, channel: Snowflake, signal: CallSignal) -> Task<Message> {
     let client = session.client.clone();
@@ -128,6 +154,18 @@ fn main() -> iced::Result {
     }
     // Before any thread exists: `time` refuses the local offset afterwards on Unix.
     localtime::init();
+    // One session per process and per sign-in: a second launch hands its link
+    // to the first and exits, never opening a second Gateway on the same token.
+    let arg = std::env::args().nth(1);
+    let (forwarded, requests) = tokio::sync::mpsc::channel(8);
+    let _instance = match fastcord_platform::instance::acquire(arg.as_deref(), move |request| {
+        let _ = forwarded.try_send(request);
+    }) {
+        fastcord_platform::instance::Start::Primary(guard) => guard,
+        fastcord_platform::instance::Start::Secondary => return Ok(()),
+    };
+    desktop::set_forwarded(requests);
+    desktop::set_startup(arg);
     render::application(App::boot, App::update, App::view)
         .title("fastcord")
         .theme(App::theme)
@@ -136,6 +174,9 @@ fn main() -> iced::Result {
         .window(iced::window::Settings {
             size: iced::Size::new(1080.0, 640.0),
             icon: icons::window_icon(),
+            // Close requests go through `Message::CloseRequested`: hide to the
+            // tray or leave any call and quit.
+            exit_on_close_request: false,
             ..iced::window::Settings::default()
         })
         .run()
@@ -168,6 +209,19 @@ struct App {
     shortcuts: shortcuts::Runtime,
     window_active: bool,
     window_drawable: bool,
+    /// The tray icon is up (or why it is not). Closing hides to it only when it is.
+    tray: Result<(), String>,
+    /// Closing the window hid it to the tray; the process and any call go on.
+    window_hidden: bool,
+    /// Compact call mode: the small always-on-top window with the call only.
+    compact_call: bool,
+    /// The window size, restored when compact call mode ends.
+    window_size: iced::Size,
+    /// The Windows start-at-sign-in setting as read from the registry; `None`
+    /// where it does not exist.
+    autostart: Option<bool>,
+    /// A link from the command line or a second launch, opened once signed in.
+    pending_link: Option<desktop::DeepLink>,
     /// The window was put in full screen by the call view's button.
     window_fullscreen: bool,
     /// The per-person volume sliders are open.
@@ -415,6 +469,19 @@ enum Message {
     VoiceInput(shortcuts::Event),
     ShortcutKey(shortcuts::KeyInput),
     GlobalShortcut(shortcuts::GlobalEvent),
+    /// The tray icon came up, failed, or was clicked.
+    Tray(desktop::TrayEvent),
+    /// A second launch handed its argument over (or only asked to be raised).
+    Forwarded(fastcord_platform::instance::Forwarded),
+    /// The window's close button: hide to the tray or quit, per the setting.
+    CloseRequested,
+    /// Leave any call and exit.
+    Quit,
+    Exit,
+    CloseToTrayToggled(bool),
+    AutostartToggled(bool),
+    /// Enter or leave compact call mode (small, always on top).
+    ToggleCompact,
     WindowSize(iced::Size),
     /// Direct messages (true) or a server's channels in the sidebar.
     ShowDirects(bool),
@@ -459,6 +526,12 @@ impl App {
                 shortcuts: shortcuts::Runtime::default(),
                 window_active: true,
                 window_drawable: true,
+                tray: Err("The tray icon is starting.".to_owned()),
+                window_hidden: false,
+                compact_call: false,
+                window_size: iced::Size::new(1080.0, 640.0),
+                autostart: cfg!(windows).then(fastcord_platform::autostart::is_enabled),
+                pending_link: desktop::take_startup(),
                 window_fullscreen: false,
                 voice_details: false,
                 search: search::State::default(),
@@ -530,6 +603,18 @@ impl App {
             speech::stop();
         }
         let mut task = self.handle(message);
+        if self.pending_link.is_some()
+            && matches!(self.phase, Phase::Account { .. })
+            && let Some(link) = self.pending_link.take()
+        {
+            task = Task::batch([task, self.open_link(link)]);
+        }
+        if self.compact_call && !self.call_active() {
+            task = Task::batch([task, self.end_compact()]);
+        }
+        if resynchronize {
+            self.sync_tray();
+        }
         if let Phase::Account { gateway, .. } = &self.phase {
             gateway.controls.quick_query(self.switcher.wanted());
             self.guild_admin.sync(&gateway.navigation);
@@ -668,6 +753,9 @@ impl App {
             iced::Event::Window(iced::window::Event::FileDropped(path)) => {
                 Some(Message::FileDropped(path))
             }
+            iced::Event::Window(iced::window::Event::CloseRequested) => {
+                Some(Message::CloseRequested)
+            }
             iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowActive(true)),
             iced::Event::Window(iced::window::Event::Unfocused | iced::window::Event::Closed) => {
                 Some(Message::WindowActive(false))
@@ -685,6 +773,8 @@ impl App {
             self.media_frame_subscription(),
             self.shortcut_subscription(),
             self.navigation_keys(),
+            iced::Subscription::run(desktop::tray_stream).map(Message::Tray),
+            iced::Subscription::run(desktop::forwarded_stream).map(Message::Forwarded),
         ])
     }
 
@@ -730,6 +820,92 @@ impl App {
     /// Whether a call is connecting or running, the only time shortcuts are heard.
     fn call_active(&self) -> bool {
         matches!(&self.phase, Phase::Account { gateway, .. } if gateway.controls.voice_audio_state() != gateway::VoiceAudioState::Idle)
+    }
+
+    /// What a click on the tray icon or its menu does.
+    fn tray_command(&mut self, command: fastcord_platform::tray::Command) -> Task<Message> {
+        use fastcord_platform::tray::Command;
+        match command {
+            Command::Open => self.show_window(),
+            Command::ToggleMute => {
+                self.apply_shortcuts(vec![shortcuts::Do::Toggle(shortcuts::Action::ToggleMute)])
+            }
+            Command::Disconnect if self.call_active() => self.handle(Message::LeaveVoice),
+            Command::Disconnect => Task::none(),
+            Command::Quit => self.handle(Message::Quit),
+        }
+    }
+
+    /// Brings the window forward, showing it first if closing hid it.
+    fn show_window(&mut self) -> Task<Message> {
+        let was_hidden = std::mem::take(&mut self.window_hidden);
+        self.window_drawable = true;
+        self.sync_viewing();
+        iced::window::latest().and_then(move |id| {
+            if was_hidden {
+                iced::window::set_mode(id, iced::window::Mode::Windowed)
+            } else {
+                Task::none()
+            }
+            .chain(iced::window::minimize(id, false))
+            .chain(iced::window::gain_focus(id))
+        })
+    }
+
+    /// Leaves compact call mode: normal stacking and the remembered size.
+    fn end_compact(&mut self) -> Task<Message> {
+        self.compact_call = false;
+        let size = self.window_size;
+        iced::window::latest().and_then(move |id| {
+            iced::window::set_level(id, iced::window::Level::Normal)
+                .chain(iced::window::resize(id, size))
+        })
+    }
+
+    /// Opens a link from the command line, a second launch or the switcher; called
+    /// only once signed in. An invite is only shown, joining stays a click.
+    fn open_link(&mut self, link: desktop::DeepLink) -> Task<Message> {
+        let (guild, channel, message) = match link {
+            desktop::DeepLink::Invite(code) => return self.invite_event(invite::Event::Open(code)),
+            desktop::DeepLink::Channel {
+                guild,
+                channel,
+                message,
+            } => (guild, channel, message),
+        };
+        let Phase::Account { gateway, .. } = &mut self.phase else {
+            return Task::none();
+        };
+        self.threads.close();
+        self.friends.close();
+        if self.inbox.is_open() {
+            self.inbox.clear();
+            gateway.controls.inbox_rows(self.inbox.rows_wanted());
+        }
+        gateway.directs = guild.is_none();
+        jump_to(&mut self.search, gateway, guild, channel, message);
+        self.nav_pending = true;
+        Task::none()
+    }
+
+    /// The tray icon's menu and tooltip follow the call and the unread mentions.
+    fn sync_tray(&self) {
+        let (in_call, muted, mentions) = match &self.phase {
+            Phase::Account { gateway, .. } => {
+                let in_call = self.call_active();
+                (
+                    in_call,
+                    in_call && gateway.controls.voice_controls().self_muted,
+                    gateway.navigation.inbox.mentions,
+                )
+            }
+            _ => (false, false, 0),
+        };
+        fastcord_platform::tray::set_state(fastcord_platform::tray::State {
+            in_call,
+            muted,
+            mentions,
+        });
     }
 
     /// Key listeners exist only while a call has bindings (or a binding is being
@@ -947,6 +1123,79 @@ impl App {
                 return self.handle(Message::StoreReady(store));
             }
             Message::VoiceInput(event) => return self.voice_input_event(event),
+            Message::Tray(event) => match event {
+                desktop::TrayEvent::Started => self.tray = Ok(()),
+                desktop::TrayEvent::Failed(error) => self.tray = Err(error),
+                desktop::TrayEvent::Command(command) => return self.tray_command(command),
+            },
+            Message::Forwarded(request) => {
+                if let fastcord_platform::instance::Forwarded::Open(text) = request
+                    && let Some(link) = desktop::parse(&text)
+                {
+                    self.pending_link = Some(link);
+                }
+                return self.show_window();
+            }
+            Message::CloseRequested => {
+                match desktop::close_action(self.audio_preferences.close_to_tray, self.tray.is_ok())
+                {
+                    desktop::CloseAction::Hide => {
+                        self.window_hidden = true;
+                        self.window_drawable = false;
+                        self.sync_viewing();
+                        return iced::window::latest()
+                            .and_then(|id| iced::window::set_mode(id, iced::window::Mode::Hidden));
+                    }
+                    desktop::CloseAction::Quit => return self.handle(Message::Quit),
+                }
+            }
+            Message::Quit => {
+                // Leaving the call first lets the server drop the voice state at
+                // once; the process exit then releases every device and socket.
+                if !self.call_active() {
+                    return iced::exit();
+                }
+                let leave = self.handle(Message::LeaveVoice);
+                return Task::batch([
+                    leave,
+                    Task::perform(
+                        tokio::time::sleep(std::time::Duration::from_millis(300)),
+                        |()| Message::Exit,
+                    ),
+                ]);
+            }
+            Message::Exit => return iced::exit(),
+            Message::CloseToTrayToggled(on) => {
+                self.audio_preferences.close_to_tray = on;
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::AutostartToggled(on) => match fastcord_platform::autostart::set(on) {
+                Ok(()) => self.autostart = Some(on),
+                Err(error) => self.notice = Some(error.to_string()),
+            },
+            Message::ToggleCompact => {
+                if self.compact_call {
+                    return self.end_compact();
+                }
+                if self.call_active() {
+                    self.compact_call = true;
+                    let leave_fullscreen = std::mem::take(&mut self.window_fullscreen);
+                    return iced::window::latest().and_then(move |id| {
+                        if leave_fullscreen {
+                            iced::window::set_mode(id, iced::window::Mode::Windowed)
+                        } else {
+                            Task::none()
+                        }
+                        .chain(iced::window::set_level(
+                            id,
+                            iced::window::Level::AlwaysOnTop,
+                        ))
+                        .chain(iced::window::resize(id, desktop::COMPACT_SIZE))
+                    });
+                }
+            }
             Message::ShortcutKey(input) => {
                 if input.down && input.code == "Escape" && self.shortcuts.recording.is_some() {
                     let cancelled = self.shortcuts.cancel_record().into_iter().collect();
@@ -2105,6 +2354,9 @@ impl App {
             }
             Message::WindowSize(size) => {
                 self.window_drawable = size.width > 0.0 && size.height > 0.0;
+                if self.window_drawable && !self.compact_call {
+                    self.window_size = size;
+                }
                 self.sync_viewing();
             }
             Message::MarkRead(guild, channel) => {
@@ -2294,24 +2546,15 @@ impl App {
                         }
                         timeline::Event::OpenLink(url) => {
                             if let Some(link) = message_link::parse(&url) {
-                                if gateway.timeline.channel_id == Some(link.channel) {
-                                    gateway.controls.timeline_intent(history::Intent::JumpTo {
-                                        channel: link.channel,
-                                        message: link.message,
-                                    });
-                                } else {
-                                    // Only a channel the account can open is selected;
-                                    // otherwise the wait ends with a notice.
-                                    self.search.set_pending_jump(link.channel, link.message);
-                                    match link.guild {
-                                        Some(guild) => {
-                                            gateway.controls.select_channel(guild, link.channel);
-                                        }
-                                        None => {
-                                            gateway.controls.select_private_channel(link.channel)
-                                        }
-                                    }
-                                }
+                                // Only a channel the account can open is selected;
+                                // otherwise the wait ends with a notice.
+                                jump_to(
+                                    &mut self.search,
+                                    gateway,
+                                    link.guild,
+                                    link.channel,
+                                    Some(link.message),
+                                );
                             } else if rich::safe_url(&url) {
                                 let _ = fastcord_platform::open_url(&url);
                             }
@@ -3945,6 +4188,13 @@ impl App {
 
     /// Events of the quick switcher and the shortcuts help.
     fn switcher_event(&mut self, event: switcher::Event) -> Task<Message> {
+        // Enter on a pasted Discord link opens it instead of a search result.
+        if matches!(event, switcher::Event::Submit)
+            && let Some(link) = self.switcher.wanted().and_then(desktop::parse)
+        {
+            self.switcher.close();
+            return self.open_link(link);
+        }
         let Phase::Account { gateway, .. } = &mut self.phase else {
             return Task::none();
         };
@@ -4206,6 +4456,11 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if self.compact_call
+            && let Phase::Account { gateway, .. } = &self.phase
+        {
+            return desktop::compact_view(&gateway.controls.voice_controls());
+        }
         if self.chat_settings_open {
             return center(scrollable(
                 column![chat_prefs::view(
@@ -4258,6 +4513,11 @@ impl App {
                                 &self.shortcuts,
                                 vad_forbidden,
                                 self.call_active(),
+                            ),
+                            desktop::view(
+                                self.audio_preferences.close_to_tray,
+                                &self.tray,
+                                self.autostart,
                             ),
                             mic_panel::view(
                                 &self.mic_panel,
@@ -6331,5 +6591,40 @@ mod tests {
         }
         // Mute and deafen stay in the account footer, not in the voice panel.
         assert!(joined.contains("OpenAudioSettings"), "{joined:?}");
+    }
+
+    #[test]
+    fn closing_quits_by_default_and_hides_only_with_the_tray_chosen_and_up() {
+        let mut app = login_app();
+        assert!(!app.audio_preferences.close_to_tray, "default is quit");
+        let _ = app.update(Message::CloseRequested);
+        assert!(!app.window_hidden, "default: the window is not hidden");
+        app.audio_preferences.close_to_tray = true;
+        let _ = app.update(Message::CloseRequested);
+        assert!(!app.window_hidden, "no tray icon, no hiding");
+        let _ = app.update(Message::Tray(desktop::TrayEvent::Started));
+        let _ = app.update(Message::CloseRequested);
+        assert!(app.window_hidden && !app.window_drawable);
+        // The tray's Open brings it back.
+        let _ = app.update(Message::Tray(desktop::TrayEvent::Command(
+            fastcord_platform::tray::Command::Open,
+        )));
+        assert!(!app.window_hidden && app.window_drawable);
+    }
+
+    #[test]
+    fn a_link_from_a_second_launch_waits_for_sign_in_and_is_opened_once() {
+        use fastcord_platform::instance::Forwarded;
+        let mut app = login_app();
+        let _ = app.update(Message::Forwarded(Forwarded::Raise));
+        assert_eq!(app.pending_link, None);
+        let _ = app.update(Message::Forwarded(Forwarded::Open("not a link".into())));
+        assert_eq!(app.pending_link, None);
+        let _ = app.update(Message::Forwarded(Forwarded::Open(
+            "discord://-/channels/1/2/3".into(),
+        )));
+        assert!(app.pending_link.is_some());
+        authenticate(&mut app, Persistence::MemoryOnly);
+        assert_eq!(app.pending_link, None, "taken once signed in");
     }
 }
