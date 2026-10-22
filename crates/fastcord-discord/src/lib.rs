@@ -25,6 +25,7 @@ mod inbox;
 mod invite;
 mod member;
 pub mod message_store;
+mod onboarding;
 mod password_auth;
 mod pins;
 mod poll;
@@ -68,6 +69,11 @@ pub use invite::{
     extract_codes, owner_cannot_leave,
 };
 pub use member::{MemberAction, MemberPermissions};
+pub use onboarding::{
+    ApplicationStatus, COMPLETED_ONBOARDING, Guide, GuideItem, Onboarding, OnboardingOption,
+    OnboardingPrompt, STARTED_ONBOARDING, Screening, ScreeningField, onboarding_body,
+    onboarding_due,
+};
 pub use password_auth::{
     CaptchaChallenge, CaptchaSolution, LoginRefusal, MAX_CREDENTIAL_BYTES, MfaChallenge,
     PasswordAuth, PasswordAuthError, PasswordLogin,

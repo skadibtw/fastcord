@@ -601,6 +601,16 @@ Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, wind
   - [ ] The time left matches the official client's expiry.
   - [ ] `GET /discoverable-guilds?offset=0&limit=24` answers for a user account and the response shape matches `docs/PROTOCOL.md`; Show more loads pages 2 to 4 and then stops; icons, descriptions and counts show; a joined server reads Joined; a 403/404 shows an error and not a crash.
 
+### Rules screening, onboarding and server guide (#91)
+
+- **Automated:** `fastcord-discord` `onboarding::tests` (screening, onboarding and guide parsing from the synthetic fixtures with entry and string bounds, accept/submit request bodies, application status, flag rule, routes), `gateway::decode::tests::member_screening_and_onboarding_fields_decode_only_when_present`, `state::navigation::tests::a_pending_member_cannot_write_until_the_gateway_says_so` (pending from Gateway dispatches, replays, omitted fields, composer and reaction gate); `fastcord-app` `onboarding::tests` (single/multi choice, required blocks submit, one request in flight, 403/429/network/401 handling, stale answers after logout, role preselection, guide links limited to visible channels, banner follows the Gateway).
+- **Outstanding gates (alt account only, unchecked, unverified routes):**
+  - [ ] A member of a server with rules screening shows `pending` in READY/GUILD_CREATE; the banner appears, the composer and reactions are off with the note.
+  - [ ] `GET /guilds/{id}/member-verification?with_guild=false` shape matches PROTOCOL.md; "I have read and agree" sends one `PUT /guilds/{id}/requests/@me` that Discord accepts; `GUILD_MEMBER_UPDATE` with `pending: false` then opens the composer.
+  - [ ] A server with a membership application answers `SUBMITTED` and the banner reads waiting for moderators; a server with a required question blocks the button.
+  - [ ] `GET /guilds/{id}/onboarding` and `PUT .../onboarding-responses` shapes and the `flags` bits (1<<1, 1<<3) match; chosen roles and channels appear only after Gateway updates; "Channels & Roles" preselects held options.
+  - [ ] `GET /guilds/{id}/new-member-welcome` shape; a server without a guide shows "This server has no guide."; guide links open visible channels only.
+
 ### Text chat in voice and Stage channels (#88)
 
 - **Automated:** `fastcord-discord` `state::navigation::tests::voice_chat` (the chat opens with VIEW_CHANNEL without CONNECT, including a Stage channel; overwrite changes make it read-only, unreadable, closed and reopenable; `MESSAGE_CREATE` and a replay mark the voice row unread and count a mention, and the inbox lists them), `fastcord-app` `history::tests` (nothing fetched until the chat is selected; sendability and readability follow permissions), `tests::a_voice_channels_chat_and_its_call_are_selected_independently` and `gateway::bridge_tests::choosing_a_chat_and_requesting_voice_never_change_each_other` (opening or switching a chat sends no join/leave; joining or leaving does not change the selection; a row without CONNECT cannot be joined).

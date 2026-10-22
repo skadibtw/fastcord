@@ -410,6 +410,11 @@ pub struct NavigationSnapshot {
     pub forum: Option<ForumView>,
     /// Available guild lacks authoritative own-member/role/owner data.
     pub permissions_pending: bool,
+    /// The account has not accepted the selected server's rules; sending,
+    /// reacting and creating threads are off in it until Discord says so.
+    pub own_pending: bool,
+    /// The account's member flags in the selected guild (0 when unknown).
+    pub own_flags: u32,
     /// Friends, blocks and pending requests (shared, rebuilt per change).
     pub relationships: std::sync::Arc<[fastcord_model::Relationship]>,
     /// Presence of referenced users (shared, copied on write).
@@ -915,6 +920,10 @@ impl Navigation {
         let permissions_pending = selected_guild
             .and_then(|id| store.guild(id))
             .is_some_and(|guild| PermissionContext::new(store, guild).is_none());
+        let own_member = selected_guild
+            .and_then(|id| store.guild(id))
+            .zip(store.current_user())
+            .and_then(|(guild, me)| guild.member(me.id));
         NavigationSnapshot {
             guilds: self.guild_window(store, guild_offset, guild_count),
             channels: self.channel_window(store, channel_offset, channel_count),
@@ -971,6 +980,8 @@ impl Navigation {
                 .zip(store.current_user())
                 .and_then(|(guild, me)| guild.member(me.id))
                 .and_then(|member| member.nick.clone()),
+            own_pending: own_member.is_some_and(|m| m.pending == Some(true)),
+            own_flags: own_member.and_then(|m| m.flags).unwrap_or(0),
             selected_guild,
             forum: self.forum_view(store),
             selection: self.selection(store),
@@ -1148,6 +1159,8 @@ enum PermissionContext<'a> {
     Member {
         guild: GuildScope<'a>,
         member: MemberScope<'a>,
+        /// Membership screening is not accepted: no writing until Discord says so.
+        pending: bool,
     },
 }
 
@@ -1195,6 +1208,7 @@ impl<'a> PermissionContext<'a> {
                     .as_deref()
                     .is_some_and(|until| timeout_active(until, now())),
             },
+            pending: own.pending == Some(true),
         })
     }
 
@@ -1211,11 +1225,17 @@ impl<'a> PermissionContext<'a> {
         };
         let permissions = match self {
             Self::Owner => Permissions::ALL,
-            Self::Member { guild, member } => {
+            Self::Member { guild, member, .. } => {
                 channel_permissions(*guild, *member, overwrites, channel.kind.is_text_like())
             }
         };
         let mut summary = PermissionSummary::from(permissions);
+        if matches!(self, Self::Member { pending: true, .. }) {
+            summary.send_messages = false;
+            summary.add_reactions = false;
+            summary.create_threads = false;
+            summary.attach_files = false;
+        }
         if let Some(thread) = ThreadState::of(channel) {
             // Private threads exist only for members and thread managers.
             if channel.kind == ModelChannelKind::PrivateThread

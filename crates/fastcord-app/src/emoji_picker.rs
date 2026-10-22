@@ -629,6 +629,8 @@ mod tests {
                 roles: vec![Snowflake(101)],
                 roles_known: true,
                 communication_disabled_until: None,
+                pending: None,
+                flags: None,
             }],
         };
         let mut store = Store::new();

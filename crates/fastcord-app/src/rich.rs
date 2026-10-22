@@ -126,6 +126,16 @@ impl<'a> From<&'a Message> for Parts<'a> {
 }
 
 impl<'a> Parts<'a> {
+    /// Text that belongs to no message (the server guide): no mentions or embeds.
+    pub fn none() -> Self {
+        Self {
+            id: Snowflake(0),
+            mentions: &[],
+            everyone: false,
+            embeds: &[],
+        }
+    }
+
     pub fn snapshot(parent: &Message, snapshot: &'a SnapshotMessage) -> Self {
         Self {
             id: parent.id,

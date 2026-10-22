@@ -918,6 +918,8 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
             roles: vec![id(guild * 100 + 1)],
             roles_known: true,
             communication_disabled_until: None,
+            pending: None,
+            flags: None,
         }],
         member_count: 250_000,
         stage_instances: Vec::new(),
@@ -943,6 +945,8 @@ fn member_event(guild: u64, n: u64) -> GatewayEvent {
             roles: vec![id(guild * 100 + 1), id(guild * 100 + 2)],
             roles_known: true,
             communication_disabled_until: None,
+            pending: None,
+            flags: None,
         },
         nick_present: true,
         roles_present: true,
@@ -1144,6 +1148,8 @@ fn visible_list_rows_pin_their_members_until_navigation_releases_them() {
                     roles: Vec::new(),
                     roles_known: true,
                     communication_disabled_until: None,
+                    pending: None,
+                    flags: None,
                 })
                 .collect(),
             users: (1..=3).map(person).collect(),
@@ -1291,6 +1297,8 @@ fn entity_costs_charge_owned_capacity_instead_of_logical_lengths() {
         roles: Vec::with_capacity(64),
         roles_known: true,
         communication_disabled_until: Some(allocated_text("t", 256)),
+        pending: None,
+        flags: None,
     };
     assert_eq!(
         member_bytes(&member),

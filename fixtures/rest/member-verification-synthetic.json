@@ -1,0 +1,46 @@
+{
+  "terms": {
+    "version": "2030-01-01T00:00:00.000000+00:00",
+    "description": "Welcome to the synthetic server.",
+    "form_fields": [
+      {
+        "field_type": "TERMS",
+        "label": "Read and agree to the server rules",
+        "required": true,
+        "values": ["Be kind.", "No spam.", "Keep it on topic."]
+      }
+    ]
+  },
+  "with_question": {
+    "version": "2030-01-02T00:00:00.000000+00:00",
+    "description": null,
+    "form_fields": [
+      {
+        "field_type": "TERMS",
+        "label": "Rules",
+        "required": true,
+        "values": ["Be kind."]
+      },
+      {
+        "field_type": "PARAGRAPH",
+        "label": "Why do you want to join?",
+        "required": true,
+        "placeholder": "Tell us",
+        "values": null
+      },
+      {
+        "field_type": "TEXT_INPUT",
+        "label": "Nickname",
+        "required": false,
+        "values": null
+      }
+    ]
+  },
+  "no_rules": {
+    "version": "2030-01-03T00:00:00.000000+00:00",
+    "description": "No fields.",
+    "form_fields": []
+  },
+  "submitted": {"application_status": "SUBMITTED", "guild_id": "100"},
+  "approved": {"application_status": "APPROVED", "guild_id": "100"}
+}

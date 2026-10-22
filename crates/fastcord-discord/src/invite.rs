@@ -124,7 +124,7 @@ struct WireInvite {
     expires_at: Option<String>,
 }
 
-fn cut_at(mut text: String, max: usize) -> String {
+pub(crate) fn cut_at(mut text: String, max: usize) -> String {
     if text.len() > max {
         let mut end = max;
         while !text.is_char_boundary(end) {

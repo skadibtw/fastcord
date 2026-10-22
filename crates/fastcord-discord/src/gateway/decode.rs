@@ -89,6 +89,10 @@ struct MemberWire {
     roles: Option<Vec<Snowflake>>,
     #[serde(default)]
     communication_disabled_until: Option<String>,
+    #[serde(default)]
+    pending: Option<bool>,
+    #[serde(default)]
+    flags: Option<u32>,
 }
 
 /// Guild fields nested under `properties` when CLIENT_STATE_V2 is on; merged
@@ -446,6 +450,8 @@ impl Normalizer {
             roles_known: wire.roles.is_some(),
             roles: wire.roles.unwrap_or_default(),
             communication_disabled_until: wire.communication_disabled_until,
+            pending: wire.pending,
+            flags: wire.flags,
         })
     }
 
@@ -2204,6 +2210,18 @@ mod tests {
         }
         let empty = member_list(r#"{"id":"x","guild_id":"1","groups":null,"ops":null}"#);
         assert!(empty.ops.is_empty() && empty.groups.is_none());
+    }
+
+    #[test]
+    fn member_screening_and_onboarding_fields_decode_only_when_present() {
+        let member = |raw: &str| match decode_dispatch("GUILD_MEMBER_UPDATE", raw) {
+            Decoded::Event(Dispatch::GuildMemberUpdate(update)) => update.member,
+            _ => panic!("GUILD_MEMBER_UPDATE did not decode"),
+        };
+        let said = member(r#"{"guild_id":"4","user":{"id":"5"},"pending":true,"flags":8}"#);
+        assert_eq!((said.pending, said.flags), (Some(true), Some(8)));
+        let silent = member(r#"{"guild_id":"4","user":{"id":"5"},"pending":null}"#);
+        assert_eq!((silent.pending, silent.flags), (None, None));
     }
 
     #[test]

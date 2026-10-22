@@ -486,6 +486,16 @@ A message that contains an invite link (`discord.gg/<code>`, `discord.com/invite
 - **Discovery.** The Ex button at the top of the server rail opens a read-only list of public servers (`GET /discoverable-guilds`, unverified): icon, name, description and approximate counts, 24 per page, Show more up to 4 pages. It states that a server is joined with an invite link; no join route is invented.
 - **Not implemented:** discovery search, joining straight from the discovery list, and a joined-server verification or onboarding flow beyond the pause above.
 
+### 8.15 Rules screening, onboarding and server guide (#91)
+
+The member side only (configuration is #97). Implemented in `fastcord-discord::onboarding` (bounded parsing, request bodies) and `fastcord-app::onboarding` (one panel at a time, banners). Routes are in `docs/PROTOCOL.md` and are all unverified.
+
+- **Pending.** Guild members carry `pending` and `flags` (Gateway). While the own member is pending the navigation reducer reports no SEND_MESSAGES, ADD_REACTIONS, thread creation or attachments, so the composer and reactions are off with the note "Accept the server's rules to write or react"; a banner offers Review rules. The state ends only when the Gateway reports `pending: false`.
+- **Rules.** Review rules loads `member-verification`; the rules (TERMS) are shown with one "I have read and agree" button, sent once. Other required questions are left to the official client. A submitted application reads "waiting for the server's moderators".
+- **Onboarding.** A banner appears when the member flags say onboarding started and not completed; the channel header's "Channels & Roles" opens the questions for revisiting, preselected from held roles. Single/multi choice and required questions are enforced before one explicit Save. Roles and channels change only through Gateway role and channel updates.
+- **Guide.** The header's "Guide" shows the welcome text, new-member actions and resource channels read-only; links open only channels the account can already see.
+- **Not implemented:** Browse Channels, non-TERMS screening answers, configuration.
+
 ### 8.14 Stage audience, speakers and moderators (#89)
 
 A Stage channel (type 13) is a voice channel with a role per person: speakers (`suppress: false`) and the audience (`suppress: true`), plus a live session with a topic (the stage instance). Everything is derived from the voice states and `STAGE_INSTANCE_*` events held by the reducer; nothing is cached outside it.

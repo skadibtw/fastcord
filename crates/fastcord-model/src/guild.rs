@@ -21,6 +21,11 @@ pub struct GuildMember {
     pub roles_known: bool,
     /// Timeout expiry (ISO 8601); a time in the past means the timeout ended.
     pub communication_disabled_until: Option<String>,
+    /// `Some(true)`: membership screening (rules) is not accepted yet. `None`:
+    /// the Gateway did not say.
+    pub pending: Option<bool>,
+    /// Member flags (`COMPLETED_ONBOARDING` is bit 1, `STARTED_ONBOARDING` bit 3).
+    pub flags: Option<u32>,
 }
 
 /// Guild-owned custom emoji metadata. `available=false` and explicit role

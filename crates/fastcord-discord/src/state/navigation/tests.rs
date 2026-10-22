@@ -814,6 +814,8 @@ fn large_ready() -> Ready {
                         roles: Vec::new(),
                         roles_known: true,
                         communication_disabled_until: None,
+                        pending: None,
+                        flags: None,
                     }],
                     member_count: 1,
                     stage_instances: Vec::new(),
@@ -2230,4 +2232,59 @@ fn forum_metadata_decodes_leniently_and_bounded() {
     assert!(nulls.available_tags.is_empty() && nulls.applied_tags.is_empty());
     let plain: Channel = serde_json::from_value(json!({"id": "1", "type": 0})).unwrap();
     assert!(plain.available_tags.is_empty() && plain.flags == 0);
+}
+
+#[test]
+fn a_pending_member_cannot_write_until_the_gateway_says_so() {
+    let (mut store, mut navigation) = setup(NAV_READY);
+    assert!(navigation.select_channel(&store, id(1000)));
+    // The fixture's @everyone may react once granted; pending must still win.
+    apply(
+        &mut store,
+        "GUILD_ROLE_UPDATE",
+        &json!({"guild_id": "100", "role": {"id": "100", "name": "e", "permissions": (68_608u64 | 64).to_string()}})
+            .to_string(),
+    );
+    let update = |store: &mut Store, extra: Value| {
+        let mut raw = json!({"guild_id": "100", "user": {"id": "1"}});
+        raw.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        apply(store, "GUILD_MEMBER_UPDATE", &raw.to_string());
+    };
+    let write = |navigation: &mut Navigation, store: &Store| {
+        let selection = navigation.selection(store).unwrap();
+        (
+            selection.permissions.send_messages,
+            selection.permissions.add_reactions,
+            selection.permissions.read_history,
+        )
+    };
+    assert_eq!(write(&mut navigation, &store), (true, true, true));
+    assert!(!navigation.snapshot(&store, 0, 10, 0, 10).own_pending);
+
+    update(&mut store, json!({"pending": true, "flags": 8}));
+    let snapshot = navigation.snapshot(&store, 0, 10, 0, 10);
+    assert!(snapshot.own_pending && snapshot.own_flags == 8);
+    assert_eq!(write(&mut navigation, &store), (false, false, true));
+
+    // A replay changes nothing; an update that does not mention it keeps it.
+    update(&mut store, json!({"pending": true, "flags": 8}));
+    update(&mut store, json!({"nick": "Nell"}));
+    assert!(navigation.snapshot(&store, 0, 10, 0, 10).own_pending);
+    assert_eq!(write(&mut navigation, &store), (false, false, true));
+
+    // A member object that omits the field (voice, member list) is not "accepted".
+    apply(
+        &mut store,
+        "GUILD_MEMBER_ADD",
+        &json!({"guild_id": "100", "user": {"id": "1"}, "roles": []}).to_string(),
+    );
+    assert!(navigation.snapshot(&store, 0, 10, 0, 10).own_pending);
+
+    update(&mut store, json!({"pending": false, "flags": 2}));
+    let snapshot = navigation.snapshot(&store, 0, 10, 0, 10);
+    assert!(!snapshot.own_pending && snapshot.own_flags == 2);
+    assert_eq!(write(&mut navigation, &store), (true, true, true));
+    assert_eq!(store.bytes(), store.recount());
 }

@@ -777,6 +777,9 @@ fn main_pane<'a>(
                     (true, true, Some((true, _))) => "Archived: sending a message reopens it",
                     (true, false, Some((true, _))) => "Archived",
                     (true, true, _) => "",
+                    (true, false, _) if snapshot.own_pending => {
+                        "Accept the server's rules to write or react"
+                    }
                     (true, false, _) => "Read-only",
                 };
                 let mut tools = Vec::new();
@@ -825,6 +828,19 @@ fn main_pane<'a>(
                                 )),
                             ));
                         }
+                        tools.push((
+                            "Guide",
+                            Message::Onboarding(crate::onboarding::Event::OpenGuide(
+                                selection.guild_id,
+                            )),
+                        ));
+                        tools.push((
+                            "Channels & Roles",
+                            Message::Onboarding(crate::onboarding::Event::OpenQuestions(
+                                selection.guild_id,
+                                true,
+                            )),
+                        ));
                         let prefix = if selection.kind == ChannelKind::Voice {
                             "\u{266A}"
                         } else {

@@ -364,7 +364,13 @@ impl GuildEntry {
             + self.stages.iter().map(stage_bytes).sum::<usize>();
     }
 
-    fn put_member(&mut self, member: GuildMember, tick: u64) {
+    fn put_member(&mut self, mut member: GuildMember, tick: u64) {
+        // Voice and list members may omit the screening and onboarding
+        // fields; that is not "accepted".
+        if let Some(old) = self.members.get(&member.user_id) {
+            member.pending = member.pending.or(old.member.pending);
+            member.flags = member.flags.or(old.member.flags);
+        }
         let cost = member_bytes(&member);
         let old = self.members.insert(
             member.user_id,
@@ -1788,6 +1794,13 @@ impl Store {
                 if event.timeout_present {
                     previous.member.communication_disabled_until =
                         member.communication_disabled_until;
+                }
+                // An omitted field keeps what was known.
+                if member.pending.is_some() {
+                    previous.member.pending = member.pending;
+                }
+                if member.flags.is_some() {
+                    previous.member.flags = member.flags;
                 }
                 previous.touched = tick;
                 entry.members_bytes = entry.members_bytes + member_bytes(&previous.member) - before;
