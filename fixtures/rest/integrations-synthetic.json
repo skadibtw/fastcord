@@ -1,0 +1,4 @@
+[
+  {"id": "8201", "name": "Example Bot", "type": "discord", "account": {"id": "8301", "name": "Example Bot"}, "application": {"id": "8301", "name": "Example Bot", "bot": {"id": "8301", "username": "example-bot"}}},
+  {"id": "8202", "name": "Example Feed", "type": "youtube", "account": {"id": "abc", "name": "Example Account"}}
+]

@@ -139,6 +139,10 @@ pub enum Event {
     /// The menu's "Bans" and "Audit log": the moderation module shows them.
     Bans(Snowflake),
     Audit(Snowflake),
+    /// "Apps and integrations" of a server's settings; the caller opens it.
+    Apps(Snowflake),
+    /// "Webhooks" of a text channel: server and channel; the caller opens it.
+    Webhooks(Snowflake, Snowflake),
     Close,
     Input(Field, String),
     Choose(Choice),
@@ -566,7 +570,7 @@ impl State {
                     );
                 }
             }
-            Event::Followed(..) => {}
+            Event::Followed(..) | Event::Apps(_) | Event::Webhooks(..) => {}
             // Forwarded by the caller; the menu closes with it.
             Event::Leave(_) | Event::Bans(_) | Event::Audit(_) => {
                 if self.busy.is_none() {
@@ -1137,6 +1141,8 @@ fn server_view<'a>(
         row![
             button(text("Save settings").size(13)).on_press_maybe(edit.then_some(Event::Save)),
             button(text("Roles").size(13)).on_press_maybe(idle.then_some(Event::Roles(admin.id))),
+            button(text("Apps and integrations").size(13))
+                .on_press_maybe((idle && admin.can_manage_guild).then_some(Event::Apps(admin.id))),
             small(if admin.community {
                 "Community is on."
             } else {
@@ -1494,6 +1500,10 @@ fn channel_view<'a>(
         panel = panel.push(
             button(text("Followed announcements").size(12))
                 .on_press_maybe(idle.then_some(Event::Followed(admin.id, current.id))),
+        );
+        panel = panel.push(
+            button(text("Webhooks").size(12))
+                .on_press_maybe(idle.then_some(Event::Webhooks(admin.id, current.id))),
         );
     }
     panel = panel.push(access::access_view(form, current, admin, member, idle));

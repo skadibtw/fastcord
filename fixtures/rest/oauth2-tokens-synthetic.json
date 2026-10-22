@@ -1,0 +1,4 @@
+[
+  {"id": "8001", "application": {"id": "8101", "name": "Example App"}, "scopes": ["identify", "guilds"], "authorized_at": "2026-10-01T12:00:00.000000+00:00"},
+  {"id": "8002", "scopes": []}
+]

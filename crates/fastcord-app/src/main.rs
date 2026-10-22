@@ -3,6 +3,7 @@
 mod account_panel;
 mod accounts;
 mod announce;
+mod apps;
 mod attachment_ui;
 mod attachments;
 mod audio_devices;
@@ -241,6 +242,7 @@ struct App {
     guild_admin: guild_admin::State,
     announce: announce::State,
     moderation: moderation::State,
+    apps: apps::State,
     discover: discover::State,
     onboarding: onboarding::State,
     events: scheduled_events::State,
@@ -441,6 +443,7 @@ enum Message {
     GuildAdmin(guild_admin::Event),
     Announce(announce::Event),
     Moderation(moderation::Event),
+    Apps(apps::Event),
     Discover(discover::Event),
     Onboarding(onboarding::Event),
     Events(scheduled_events::Event),
@@ -551,6 +554,7 @@ impl App {
                 guild_admin: guild_admin::State::default(),
                 announce: announce::State::default(),
                 moderation: moderation::State::default(),
+                apps: apps::State::default(),
                 discover: discover::State::default(),
                 onboarding: onboarding::State::default(),
                 events: scheduled_events::State::default(),
@@ -631,7 +635,8 @@ impl App {
                 self.guild_admin
                     .wanted()
                     .or(self.announce.wanted_guild())
-                    .or(self.moderation.wanted()),
+                    .or(self.moderation.wanted())
+                    .or(self.apps.wanted_guild()),
             );
             gateway
                 .controls
@@ -1728,6 +1733,7 @@ impl App {
             Message::Group(event) => return self.group_event(event),
             Message::Invite(event) => return self.invite_event(event),
             Message::Announce(event) => return self.announce_event(event),
+            Message::Apps(event) => return self.apps_event(event),
             Message::GuildAdmin(event) => {
                 if matches!(event, guild_admin::Event::MemberRoles(..)) {
                     self.member_menu.close();
@@ -3128,6 +3134,7 @@ impl App {
         self.guild_admin.clear();
         self.announce.clear();
         self.moderation.clear();
+        self.apps.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -3202,6 +3209,9 @@ impl App {
             }
             Some(account_panel::Action::Logout) => {
                 Task::batch([task, self.handle(Message::Logout)])
+            }
+            Some(account_panel::Action::Apps) => {
+                Task::batch([task, self.apps_event(apps::Event::OpenAuthorized)])
             }
             Some(account_panel::Action::OpenWeb) => {
                 let _ = fastcord_platform::open_url(account_panel::SETTINGS_URL);
@@ -3309,6 +3319,7 @@ impl App {
         self.guild_admin.clear();
         self.announce.clear();
         self.moderation.clear();
+        self.apps.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -3448,6 +3459,35 @@ impl App {
         self.gif
             .update(event, &session.client, gateway.attachments.as_ref())
             .map(Message::Gif)
+    }
+
+    fn apps_event(&mut self, event: apps::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = apps::State::is_rejected(&event);
+        let (task, action) = self
+            .apps
+            .update(event, &gateway.navigation, &session.client);
+        if rejected {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        let task = task.map(Message::Apps);
+        match action {
+            Some(apps::Action::Open(url)) => {
+                let _ = fastcord_platform::open_url(&url);
+                task
+            }
+            Some(apps::Action::Copy(text)) => Task::batch([task, iced::clipboard::write(text)]),
+            None => task,
+        }
     }
 
     fn announce_event(&mut self, event: announce::Event) -> Task<Message> {
@@ -3991,6 +4031,15 @@ impl App {
         else {
             return Task::none();
         };
+        match event {
+            guild_admin::Event::Apps(guild) => {
+                return self.apps_event(apps::Event::OpenGuild(guild));
+            }
+            guild_admin::Event::Webhooks(guild, channel) => {
+                return self.apps_event(apps::Event::OpenWebhooks(guild, channel));
+            }
+            _ => {}
+        }
         if let guild_admin::Event::Followed(guild, channel) = event {
             // The channel panel hands over to the followed-announcements list.
             return self.announce_event(announce::Event::OpenFollowers(guild, channel));
@@ -4891,6 +4940,9 @@ impl App {
             }
             if let Some(panel) = moderation::view(&self.moderation, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::Moderation));
+            }
+            if let Some(panel) = apps::view(&self.apps, &gateway.navigation) {
+                banner_column = banner_column.push(panel.map(Message::Apps));
             }
             if let Some(panel) = invite::view(&self.invite, localtime::now()) {
                 banner_column = banner_column.push(panel.map(Message::Invite));

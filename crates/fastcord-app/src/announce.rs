@@ -95,7 +95,7 @@ pub struct State {
 
 const SENT: &str = "Sent. The message shows Published when Discord confirms.";
 
-fn describe(error: RestError, forbidden: &str, gone: &str) -> String {
+pub(crate) fn describe(error: RestError, forbidden: &str, gone: &str) -> String {
     match error {
         RestError::PermissionDenied => forbidden.to_owned(),
         RestError::Refused(r) if r.status.as_u16() == 403 => forbidden.to_owned(),
@@ -420,7 +420,7 @@ fn right_to_see(navigation: &NavigationSnapshot, channel: Snowflake) -> bool {
 }
 
 /// Manage Webhooks in a text channel of the server the reducer describes.
-fn can_manage_webhooks(
+pub(crate) fn can_manage_webhooks(
     navigation: &NavigationSnapshot,
     guild: Snowflake,
     channel: Snowflake,

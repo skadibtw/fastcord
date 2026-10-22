@@ -43,6 +43,8 @@ pub enum Event {
     LoggedOut(u64, String, Result<(), RestError>),
     Switch(Snowflake),
     OpenWeb,
+    /// "Authorized apps" (issue #101).
+    OpenApps,
     Logout,
 }
 
@@ -52,6 +54,7 @@ pub enum Action {
     Switch(Snowflake),
     Remove(Snowflake),
     OpenWeb,
+    Apps,
     Logout,
 }
 
@@ -190,6 +193,7 @@ impl State {
             }
             Event::Switch(id) => return (Task::none(), Some(Action::Switch(id))),
             Event::OpenWeb => return (Task::none(), Some(Action::OpenWeb)),
+            Event::OpenApps => return (Task::none(), Some(Action::Apps)),
             Event::Logout => return (Task::none(), Some(Action::Logout)),
             _ => {}
         }
@@ -302,6 +306,7 @@ pub fn view<'a>(
                 .style(text::secondary),
         )
         .push(button(text("Open account settings in the browser").size(12)).on_press(Event::OpenWeb))
+        .push(button(text("Authorized apps").size(12)).on_press(Event::OpenApps))
         .push(
             row![
                 text("Sessions").size(14).width(Length::Fill),

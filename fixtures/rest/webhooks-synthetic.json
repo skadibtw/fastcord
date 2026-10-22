@@ -1,0 +1,5 @@
+[
+  {"id": "9001", "type": 1, "name": "Example Hook", "channel_id": "10", "token": "fake-token-aaaa"},
+  {"id": "9002", "type": 1, "name": "No Token Hook", "channel_id": "10"},
+  {"id": "9003", "type": 2, "name": "Follower", "channel_id": "10", "source_guild": {"name": "Source"}}
+]

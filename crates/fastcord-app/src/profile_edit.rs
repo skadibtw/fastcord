@@ -34,6 +34,7 @@ pub enum Action {
     Nick,
     Connections,
     Visibility,
+    Activity,
 }
 
 /// What a finished request hands back.
@@ -46,6 +47,7 @@ pub enum Outcome {
     Profile(Box<Profile>),
     Connections(Vec<Connection>),
     Visibility(usize, bool),
+    Activity(usize, bool),
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +67,7 @@ pub enum Event {
     SaveNick,
     LoadConnections,
     ToggleConnection(usize),
+    ToggleActivity(usize),
     Done(u64, Action, Result<Outcome, ProfileRequestError>),
 }
 
@@ -368,6 +371,23 @@ impl State {
                         .map(|()| Outcome::Visibility(index, visible))
                 });
             }
+            Event::ToggleActivity(index) => {
+                let Some(connection) = self
+                    .connections
+                    .as_ref()
+                    .and_then(|list| list.get(index))
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+                let show = !connection.show_activity.unwrap_or(false);
+                return self.send(Action::Activity, client, move |client| async move {
+                    client
+                        .set_connection_show_activity(&connection, show)
+                        .await
+                        .map(|()| Outcome::Activity(index, show))
+                });
+            }
             _ => {}
         }
         Task::none()
@@ -403,6 +423,12 @@ impl State {
             Outcome::Visibility(index, visible) => {
                 if let Some(connection) = self.connections.as_mut().and_then(|l| l.get_mut(index)) {
                     connection.visible = visible;
+                }
+                self.notice = Some("Saved.".to_owned());
+            }
+            Outcome::Activity(index, show) => {
+                if let Some(connection) = self.connections.as_mut().and_then(|l| l.get_mut(index)) {
+                    connection.show_activity = Some(show);
                 }
                 self.notice = Some("Saved.".to_owned());
             }
@@ -540,6 +566,19 @@ pub fn view<'a>(
                     .on_press_maybe((idle && c.editable).then_some(Event::ToggleConnection(index)))
                     .style(button::secondary),
             ]
+            .extend(c.show_activity.map(|shown| {
+                button(
+                    text(if shown {
+                        "Activity shown"
+                    } else {
+                        "Activity hidden"
+                    })
+                    .size(12),
+                )
+                .on_press_maybe((idle && c.editable).then_some(Event::ToggleActivity(index)))
+                .style(button::secondary)
+                .into()
+            }))
             .spacing(6)
             .align_y(iced::Alignment::Center)
             .into()

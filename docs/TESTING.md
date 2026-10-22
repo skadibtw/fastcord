@@ -784,3 +784,13 @@ Manual (Windows, alt account only, not run offline):
   - [ ] Delete another user message; select 2+ messages and bulk delete; a 14-day-old message cannot be ticked; remove one reaction and clear an emoji; confirm the exact routes (typed `/0/{user}` form for reactions) against the official client.
   - [ ] Archive, lock, unlock and unarchive a thread; the header and the other client follow `THREAD_UPDATE`.
   - [ ] Audit log: pages, filters by action and user, unknown action numbers, reasons and change summaries; a two-factor demand is shown and not answered.
+
+### App access and webhooks (#101)
+
+- **Automated:** `fastcord-discord` `apps::tests` (parsing from `fixtures/rest/oauth2-tokens-synthetic.json`, `integrations-synthetic.json`, `webhooks-synthetic.json`, type-1-only filtering, token never formatted, routes, bodies, client id and authorize URL), `profile_edit` connection tests, and `fastcord-app` `apps::tests` (permission gating, single in-flight write, Confirm, re-check, 403/404/429/network text, token cleared on close, copy only on click, stale answers).
+- **Outstanding gates (alt account only, unchecked, unverified routes):**
+  - [ ] "Authorized apps" matches the official Settings > Authorized Apps; Deauthorize removes it there and does not need a password or MFA (if it does, the refusal text is shown).
+  - [ ] A server's integrations list matches the official Integrations page and Remove works for a bot; a member without Manage Server does not see the button.
+  - [ ] "Add an app" opens the official consent page in the browser for a test client id and nothing is authorized until consent is accepted there.
+  - [ ] Connections list matches the official one; visibility and show-activity toggles apply there too.
+  - [ ] Webhooks: create, rename, move and delete match the official channel Integrations page; Copy webhook URL gives a working URL (do not post to it from fastcord); the token is in no log; closing the panel drops it.

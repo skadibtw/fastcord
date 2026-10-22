@@ -13,6 +13,7 @@
 mod account_security;
 mod ack;
 mod announce;
+mod apps;
 mod attachment;
 mod call;
 mod clock;
@@ -64,6 +65,10 @@ pub use account_security::{
     AuthSession, MAX_SESSIONS, MFA_REQUIRED, SecurityOverview, is_mfa_required, logout_body,
 };
 pub use announce::{Follower, MAX_FOLLOWERS, parse_followers};
+pub use apps::{
+    AuthorizedApp, Integration, MAX_WEBHOOK_NAME, Webhook, WebhookToken, authorize_url,
+    parse_client_id, parse_webhooks,
+};
 pub use attachment::{RefreshedAttachmentUrl, decode_waveform};
 pub use call::CallSignal;
 pub use clock::{Clock, MonotonicClock};

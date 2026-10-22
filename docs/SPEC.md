@@ -920,3 +920,7 @@ Implemented in `fastcord-discord::member` (the actions, `MemberPermissions`, `St
 - **Panels.** Bans (paged, at most 500 held, Unban with Confirm) and Audit log (50 per page, at most 4 pages held, filters by action type and user ID). Neither is polled or kept after closing.
 - **Threads.** Archive/Unarchive and Lock/Unlock in a thread header for Manage Threads.
 - **Not included.** Automated moderation, member search or bulk member lists, pruning, member screening review, timeouts longer than a week, reasons for message deletion.
+
+### 8.21 App access and webhooks (#101)
+
+`fastcord-discord::apps` holds the requests and bounded parsers (100 rows, 80-character webhook names, the token in a zeroizing type that never formats); `apps.rs` in the app is one panel state machine for authorized apps (account panel), a server's integrations (server settings, MANAGE_GUILD) and a channel's incoming webhooks (channel edit panel, MANAGE_WEBHOOKS, beside the #98 follower list, which stays the only home of type 2). Permissions come from the reducer's admin read model and are re-checked at the click. Removals need a Confirm; one request in flight; stale answers for a closed or changed panel are ignored; logout and account change clear everything including webhook tokens. Connections reuse the profile editor and gain the activity toggle. Adding an app is a browser hand-off to Discord's authorize page, never a native grant. No game, store or paid-app features; webhooks are configured, never posted to. All routes unverified (PROTOCOL.md).

@@ -118,6 +118,8 @@ pub struct Connection {
     pub id: String,
     pub name: String,
     pub visible: bool,
+    /// "Show activity"; `None` when Discord did not send it.
+    pub show_activity: Option<bool>,
     /// False when `kind` or `id` could not be placed in a route safely.
     pub editable: bool,
 }
@@ -140,6 +142,8 @@ struct WireConnection {
     name: String,
     #[serde(default)]
     visibility: serde_json::Value,
+    #[serde(default)]
+    show_activity: Option<bool>,
 }
 
 /// Lenient: unknown fields are ignored, at most [`MAX_CONNECTIONS`] are kept,
@@ -154,6 +158,7 @@ pub fn parse_connections(body: &[u8]) -> Result<Vec<Connection>, RestError> {
             editable: route_safe(&c.kind) && route_safe(&c.id),
             visible: matches!(&c.visibility, serde_json::Value::Bool(true))
                 || c.visibility.as_u64() == Some(1),
+            show_activity: c.show_activity,
             name: c.name.chars().take(MAX_CONNECTION_NAME_CHARS).collect(),
             kind: c.kind,
             id: c.id,
@@ -252,6 +257,18 @@ impl<C: Clock> RestClient<C> {
         self.execute(request).await?;
         Ok(())
     }
+
+    /// Turns "Show activity" of one connection on or off (issue #101).
+    pub async fn set_connection_show_activity(
+        &self,
+        connection: &Connection,
+        show: bool,
+    ) -> Result<(), ProfileRequestError> {
+        let request = RestRequest::new(connection_route(connection)?, Priority::UserWrite)
+            .json(&serde_json::json!({ "show_activity": show }))?;
+        self.execute(request).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -340,6 +357,8 @@ mod tests {
         assert_eq!(list.len(), 3);
         assert_eq!(list[0].kind, "github");
         assert!(list[0].visible && list[0].editable);
+        assert_eq!(list[0].show_activity, Some(false));
+        assert_eq!(list[1].show_activity, None);
         assert!(!list[1].visible && list[1].editable);
         assert!(list[2].visible && !list[2].editable);
         assert_eq!(parse_connections(b"{}"), Err(RestError::InvalidJson));
