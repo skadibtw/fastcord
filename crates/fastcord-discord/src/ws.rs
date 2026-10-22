@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
+#[cfg(not(feature = "fake-discord"))]
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, crypto};
@@ -18,7 +19,105 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 
-pub(crate) type TlsSocket = WebSocketStream<TlsStream<TcpStream>>;
+#[cfg(not(feature = "fake-discord"))]
+type Stream = TlsStream<TcpStream>;
+#[cfg(feature = "fake-discord")]
+type Stream = fake::Stream;
+
+pub(crate) type TlsSocket = WebSocketStream<Stream>;
+
+/// A TLS stream, or, only in the test-only fake mode, a plain loopback one.
+#[cfg(feature = "fake-discord")]
+pub(crate) mod fake {
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use tokio::net::TcpStream;
+    use tokio_rustls::client::TlsStream;
+
+    pub(crate) enum Stream {
+        Tls(Box<TlsStream<TcpStream>>),
+        Plain(TcpStream),
+    }
+
+    impl From<TlsStream<TcpStream>> for Stream {
+        fn from(stream: TlsStream<TcpStream>) -> Self {
+            Self::Tls(Box::new(stream))
+        }
+    }
+
+    impl AsyncRead for Stream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            match self.get_mut() {
+                Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+                Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            }
+        }
+    }
+
+    impl AsyncWrite for Stream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            match self.get_mut() {
+                Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+                Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            match self.get_mut() {
+                Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+                Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            }
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            match self.get_mut() {
+                Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+                Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            }
+        }
+    }
+
+    /// The only plaintext connection this client ever makes: `ws://127.0.0.1:<port>`
+    /// of the configured fake origin. Anything else is refused while it is set.
+    pub(super) async fn connect(
+        mut request: tokio_tungstenite::tungstenite::handshake::client::Request,
+        origin: &'static str,
+        config: super::WebSocketConfig,
+    ) -> Result<super::TlsSocket, super::ConnectError> {
+        use super::{ConnectError, HeaderValue};
+        let uri = request.uri().clone();
+        let port = crate::fake_origin::port().ok_or(ConnectError)?;
+        if uri.scheme_str() != Some("ws")
+            || uri.host() != Some("127.0.0.1")
+            || uri.port_u16() != Some(port)
+        {
+            return Err(ConnectError);
+        }
+        request
+            .headers_mut()
+            .insert("Origin", HeaderValue::from_static(origin));
+        let tcp = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .map_err(|_| ConnectError)?;
+        tcp.set_nodelay(true).map_err(|_| ConnectError)?;
+        let (socket, _response) =
+            super::client_async_with_config(request, Stream::Plain(tcp), Some(config))
+                .await
+                .map_err(|_| ConnectError)?;
+        Ok(socket)
+    }
+}
 
 /// Categorical: URLs and TLS errors never reach logs or messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +142,10 @@ async fn connect_inner(
     config: WebSocketConfig,
 ) -> Result<TlsSocket, ConnectError> {
     let mut request = url.into_client_request().map_err(|_| ConnectError)?;
+    #[cfg(feature = "fake-discord")]
+    if crate::fake_origin::active() {
+        return fake::connect(request, origin, config).await;
+    }
     let uri = request.uri().clone();
     if uri.scheme_str() != Some("wss") {
         return Err(ConnectError);
@@ -61,7 +164,7 @@ async fn connect_inner(
         .connect(server_name, tcp)
         .await
         .map_err(|_| ConnectError)?;
-    let (socket, _response) = client_async_with_config(request, tls, Some(config))
+    let (socket, _response) = client_async_with_config(request, tls.into(), Some(config))
         .await
         .map_err(|_| ConnectError)?;
     Ok(socket)

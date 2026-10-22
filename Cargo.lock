@@ -2064,6 +2064,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastcord-fake"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "fastcord-discord",
+ "fastcord-model",
+ "flate2",
+ "futures-util",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "fastcord-media"
 version = "0.1.0-alpha.1"
 dependencies = [

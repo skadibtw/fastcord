@@ -91,6 +91,11 @@ impl fmt::Display for LoginError {
 impl std::error::Error for LoginError {}
 
 pub async fn initialize_store() -> Result<StoreReady, StoreError> {
+    // Fake mode never opens the native credential store.
+    #[cfg(feature = "fake-discord")]
+    if crate::fake::active() {
+        return Err(StoreError::Unavailable);
+    }
     tokio::task::spawn_blocking(|| {
         let store = NativeCredentialStore::new()?;
         let accounts = store.accounts()?;
@@ -204,6 +209,10 @@ pub async fn delete_saved(
     store: Option<NativeCredentialStore>,
     account: Snowflake,
 ) -> Result<(), StoreError> {
+    #[cfg(feature = "fake-discord")]
+    if crate::fake::active() {
+        return Ok(());
+    }
     tokio::task::spawn_blocking(move || {
         let store = match store {
             Some(store) => store,

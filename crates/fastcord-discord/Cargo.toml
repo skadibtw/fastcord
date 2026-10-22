@@ -7,6 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Test-only: lets the loopback fake Discord server (crates/fastcord-fake) stand in
+# for Discord. Debug builds only; see `fake_origin`.
+fake-discord = []
+
 [dependencies]
 fastcord-model.workspace = true
 base64.workspace = true

@@ -680,6 +680,8 @@ Use Windows Performance Recorder/Analyzer and process memory counters on Windows
 
 ## 13. CI and release design
 
+> Test-only fake: `crates/fastcord-fake` and the `fake-discord` features of `fastcord-discord` and `fastcord-app` (docs/TESTING.md) let the app run against a loopback server. They are off by default, inert until a loopback origin is set, never packaged, and `compile_error!` in any release build, so a release binary cannot contain them. The host allowlists (REST origin, `*.discord.gg` Gateway, upload/CDN hosts) are unchanged without the feature.
+
 ### 13.1 CI — milestone 1
 
 On pull requests and main-branch pushes:

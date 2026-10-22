@@ -64,6 +64,22 @@
 - Live, unauthenticated (needs only network; run manually): `cargo test -p fastcord-discord live_ --locked -- --ignored --nocapture`. `live_build_number_is_fetched_from_the_web_client` reads the real build number; `live_real_gateway_negotiates_zlib_stream_and_rejects_a_bogus_token` performs real discovery, TLS WebSocket, real compressed HELLO, the real Identify payload, and expects the real close 4004. Windows results (2026-10-07): build number 631730 fetched; states `Connecting, AwaitHello, Identifying, AuthenticationRequired` (4004, not 4002).
 - **Pending live check (alt account; needs a token, which was not available):** with `FASTCORD_LIVE_TOKEN` set in the environment of that single command (never in a file), run `cargo test -p fastcord-discord live_account --locked -- --ignored --nocapture`. It Identifies with the real profile, prints READY/READY_SUPPLEMENTAL counts, severs the connection, and requires `Resuming` then `RESUMED` with no second READY. Also record whether READY arrives without a challenge or `required_action` (closes risk U1), whether `merged_members` really is parallel to `guilds` (including unavailable ones) and READY_SUPPLEMENTAL's member/user shape (the code assumes the documented ones and stops with `MalformedReady` otherwise), and that `PASSIVE_UPDATE_V2` arrives for an unsubscribed guild. In the app: log in as the alt, confirm the account screen reads "Connected to Discord: N servers, M direct messages.", disable the network for ~1 minute and confirm it shows reconnecting (never "Connected"), restore it and confirm it recovers, then log out and confirm the alt shows offline in the official client.
 
+## Offline app testing with the fake server
+Click through the real app with no Discord account (the test alt was restricted during live testing). Debug builds only. Two terminals:
+
+```sh
+cargo run -p fastcord-fake -- --chatter 20
+cargo run -p fastcord-app --features fake-discord -- --fake-discord 8765
+```
+The fake binds 127.0.0.1:8765 by default (`--port N`, `--world PATH`, `--log PATH`, `--chatter SECONDS`) and writes every HTTP request and Gateway op to stdout and `fake-requests.jsonl` (tokens, passwords and captcha keys replaced by `<redacted>`); the file is the input for traffic audits. Calls it does not implement answer 404 `fake: not implemented` and are marked `UNIMPLEMENTED`; more than 5 hits per second on one route answer 429 so back-off can be watched.
+
+Fake mode signs in at once with the token `fake-token` (memory-only), uses `fastcord-fake` directories for settings and caches, never touches the credential store, tray, autostart or the single-instance hand-off, titles the window `[FAKE]` with a banner, and fetches nothing from the network: avatars are placeholders and the world has no attachments or custom emoji.
+
+Works: the three servers (owner with all channel types and 5 roles; ordinary member with a hidden channel; pending rules screening that Accept flips), DMs and a group DM, friends and one request, history paging, send/edit/delete, reactions, pins, ack, typing, channel and role create/edit/delete/reorder, invites (`fakeinvite`, create, revoke), scheduled events list, member-list sync, live chatter.
+Does not work: voice and video (joining sends opcode 4 and nothing answers), screen share, QR and password login, uploads, threads, interactions (the buttons message), search, and anything else logged `UNIMPLEMENTED`. The fake's request and response shapes are written from the client's own decoders and fixtures, so a pass here proves UI behavior, not wire compatibility; live alt-account checks remain the only proof of that.
+
+Automated: `cargo test -p fastcord-fake --locked` (unit tests plus `tests/drive_client.rs`, which drives the real REST client and Gateway against the fake). `cargo check -p fastcord-app --release --features fake-discord` must fail with "fake-discord is a debug-only test mode".
+
 ## Live / manual
 | Platform | Where | Who | Limits |
 |---|---|---|---|

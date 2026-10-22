@@ -1,0 +1,6563 @@
+{
+ "token": "fake-token",
+ "user": {
+  "id": "1001",
+  "username": "fake_me",
+  "global_name": "Fake Me",
+  "avatar": null,
+  "discriminator": "0",
+  "flags": 0,
+  "mfa_enabled": false,
+  "premium_type": 0
+ },
+ "users": [
+  {
+   "id": "2001",
+   "username": "aster",
+   "global_name": "Aster",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2002",
+   "username": "birch",
+   "global_name": "Birch",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2003",
+   "username": "cedar",
+   "global_name": "Cedar",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2004",
+   "username": "dune",
+   "global_name": "Dune",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2005",
+   "username": "ember",
+   "global_name": "Ember",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2006",
+   "username": "fable",
+   "global_name": "Fable",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2007",
+   "username": "gale",
+   "global_name": "Gale",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2008",
+   "username": "harbor",
+   "global_name": "Harbor",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2009",
+   "username": "iris",
+   "global_name": "Iris",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2010",
+   "username": "jun",
+   "global_name": "Jun",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2011",
+   "username": "kite",
+   "global_name": "Kite",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2012",
+   "username": "lumen",
+   "global_name": "Lumen",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2013",
+   "username": "moss",
+   "global_name": "Moss",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2014",
+   "username": "nova",
+   "global_name": "Nova",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2015",
+   "username": "onyx",
+   "global_name": "Onyx",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2016",
+   "username": "pine",
+   "global_name": "Pine",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2017",
+   "username": "quill",
+   "global_name": "Quill",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2018",
+   "username": "rune",
+   "global_name": "Rune",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2019",
+   "username": "sage",
+   "global_name": "Sage",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2020",
+   "username": "tide",
+   "global_name": "Tide",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2021",
+   "username": "umber",
+   "global_name": "Umber",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2022",
+   "username": "vale",
+   "global_name": "Vale",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2023",
+   "username": "wren",
+   "global_name": "Wren",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2024",
+   "username": "xylo",
+   "global_name": "Xylo",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2025",
+   "username": "yarrow",
+   "global_name": "Yarrow",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2026",
+   "username": "zephyr",
+   "global_name": "Zephyr",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2027",
+   "username": "alder",
+   "global_name": "Alder",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2028",
+   "username": "brook",
+   "global_name": "Brook",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "2029",
+   "username": "cove",
+   "global_name": "Cove",
+   "avatar": null,
+   "discriminator": "0"
+  },
+  {
+   "id": "3001",
+   "username": "fakebot",
+   "global_name": "FakeBot",
+   "avatar": null,
+   "discriminator": "0",
+   "bot": true
+  },
+  {
+   "id": "2090",
+   "username": "newcomer",
+   "global_name": "Newcomer",
+   "avatar": null,
+   "discriminator": "0"
+  }
+ ],
+ "presences": {
+  "2001": "online",
+  "2002": "idle",
+  "2003": "dnd",
+  "2004": "offline",
+  "2005": "offline",
+  "2006": "online",
+  "2007": "online",
+  "2008": "idle",
+  "2009": "dnd",
+  "2010": "offline",
+  "2011": "offline",
+  "2012": "online",
+  "2013": "online",
+  "2014": "idle",
+  "2015": "dnd",
+  "2016": "offline",
+  "2017": "offline",
+  "2018": "online",
+  "2019": "online",
+  "2020": "idle",
+  "2021": "dnd",
+  "2022": "offline",
+  "2023": "offline",
+  "2024": "online",
+  "2025": "online",
+  "2026": "idle",
+  "2027": "dnd",
+  "2028": "offline",
+  "2029": "offline",
+  "1001": "online",
+  "3001": "online"
+ },
+ "guilds": [
+  {
+   "id": "5001",
+   "name": "Fake Admin Lab",
+   "icon": null,
+   "owner_id": "1001",
+   "member_count": 30,
+   "large": false,
+   "joined_at": "2026-01-10T09:00:00.000000+00:00",
+   "features": [
+    "COMMUNITY",
+    "NEWS"
+   ],
+   "description": "A synthetic server you own.",
+   "verification_level": 1,
+   "premium_tier": 0,
+   "default_message_notifications": 1,
+   "explicit_content_filter": 2,
+   "mfa_level": 0,
+   "afk_timeout": 300,
+   "preferred_locale": "en-US",
+   "roles": [
+    {
+     "id": "5001",
+     "name": "@everyone",
+     "permissions": "1071698660929",
+     "position": 0,
+     "color": 0,
+     "hoist": false,
+     "managed": false,
+     "mentionable": false
+    },
+    {
+     "id": "7001",
+     "name": "Admin",
+     "permissions": "8",
+     "position": 5,
+     "color": 15158332,
+     "hoist": true,
+     "managed": false,
+     "mentionable": false
+    },
+    {
+     "id": "7002",
+     "name": "Moderator",
+     "permissions": "1099511635974",
+     "position": 4,
+     "color": 3447003,
+     "hoist": true,
+     "managed": false,
+     "mentionable": true
+    },
+    {
+     "id": "7003",
+     "name": "Builder",
+     "permissions": "8208",
+     "position": 3,
+     "color": 3066993,
+     "hoist": false,
+     "managed": false,
+     "mentionable": true
+    },
+    {
+     "id": "7004",
+     "name": "Member",
+     "permissions": "0",
+     "position": 2,
+     "color": 0,
+     "hoist": false,
+     "managed": false,
+     "mentionable": true
+    },
+    {
+     "id": "7005",
+     "name": "Guest",
+     "permissions": "0",
+     "position": 1,
+     "color": 0,
+     "hoist": false,
+     "managed": false,
+     "mentionable": true
+    }
+   ],
+   "channels": [
+    {
+     "id": "6001",
+     "type": 4,
+     "name": "Info",
+     "position": 0,
+     "parent_id": null,
+     "permission_overwrites": [],
+     "nsfw": false
+    },
+    {
+     "id": "6002",
+     "type": 0,
+     "name": "rules",
+     "position": 0,
+     "parent_id": "6001",
+     "permission_overwrites": [],
+     "nsfw": false,
+     "topic": "Read these first.",
+     "rate_limit_per_user": 0,
+     "last_message_id": "1549000002000000000"
+    },
+    {
+     "id": "6003",
+     "type": 5,
+     "name": "announcements",
+     "position": 1,
+     "parent_id": "6001",
+     "permission_overwrites": [],
+     "nsfw": false,
+     "topic": "News about the lab.",
+     "rate_limit_per_user": 0,
+     "last_message_id": "1549000005000000000"
+    },
+    {
+     "id": "6004",
+     "type": 4,
+     "name": "Text",
+     "position": 1,
+     "parent_id": null,
+     "permission_overwrites": [],
+     "nsfw": false
+    },
+    {
+     "id": "6005",
+     "type": 0,
+     "name": "general",
+     "position": 0,
+     "parent_id": "6004",
+     "permission_overwrites": [],
+     "nsfw": false,
+     "topic": "Everyday chat.",
+     "rate_limit_per_user": 0,
+     "last_message_id": "1549000065000000000"
+    },
+    {
+     "id": "6006",
+     "type": 0,
+     "name": "dev-talk",
+     "position": 1,
+     "parent_id": "6004",
+     "permission_overwrites": [],
+     "nsfw": false,
+     "topic": "Build and review chatter.",
+     "rate_limit_per_user": 0,
+     "last_message_id": "1549000095000000000"
+    },
+    {
+     "id": "6007",
+     "type": 0,
+     "name": "markdown-lab",
+     "position": 2,
+     "parent_id": "6004",
+     "permission_overwrites": [],
+     "nsfw": false,
+     "topic": "Formatting, mentions, embeds, components.",
+     "rate_limit_per_user": 0,
+     "last_message_id": "1549000107000000000"
+    },
+    {
+     "id": "6008",
+     "type": 4,
+     "name": "Voice",
+     "position": 2,
+     "parent_id": null,
+     "permission_overwrites": [],
+     "nsfw": false
+    },
+    {
+     "id": "6009",
+     "type": 2,
+     "name": "Lounge",
+     "position": 0,
+     "parent_id": "6008",
+     "permission_overwrites": [],
+     "nsfw": false,
+     "bitrate": 64000,
+     "user_limit": 0,
+     "rtc_region": null
+    },
+    {
+     "id": "6010",
+     "type": 13,
+     "name": "Stage Room",
+     "position": 1,
+     "parent_id": "6008",
+     "permission_overwrites": [],
+     "nsfw": false,
+     "bitrate": 64000,
+     "user_limit": 0,
+     "rtc_region": null
+    },
+    {
+     "id": "6011",
+     "type": 15,
+     "name": "ideas",
+     "position": 3,
+     "parent_id": "6004",
+     "permission_overwrites": [],
+     "nsfw": false,
+     "topic": "Post an idea.",
+     "rate_limit_per_user": 0
+    }
+   ],
+   "emojis": [],
+   "stickers": [],
+   "stage_instances": [],
+   "members": [
+    {
+     "user_id": "1001",
+     "roles": [
+      "7001"
+     ],
+     "nick": "Fake Admin",
+     "joined_at": "2026-02-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2001",
+     "roles": [
+      "7002"
+     ],
+     "nick": null,
+     "joined_at": "2026-01-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2002",
+     "roles": [
+      "7003"
+     ],
+     "nick": null,
+     "joined_at": "2026-02-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2003",
+     "roles": [
+      "7004"
+     ],
+     "nick": null,
+     "joined_at": "2026-03-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2004",
+     "roles": [
+      "7004"
+     ],
+     "nick": null,
+     "joined_at": "2026-04-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2005",
+     "roles": [
+      "7005"
+     ],
+     "nick": null,
+     "joined_at": "2026-05-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2006",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-06-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2007",
+     "roles": [
+      "7002"
+     ],
+     "nick": null,
+     "joined_at": "2026-07-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2008",
+     "roles": [
+      "7003"
+     ],
+     "nick": null,
+     "joined_at": "2026-08-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2009",
+     "roles": [
+      "7004"
+     ],
+     "nick": null,
+     "joined_at": "2026-09-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2010",
+     "roles": [
+      "7004"
+     ],
+     "nick": null,
+     "joined_at": "2026-01-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2011",
+     "roles": [
+      "7005"
+     ],
+     "nick": null,
+     "joined_at": "2026-02-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2012",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-03-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2013",
+     "roles": [
+      "7002"
+     ],
+     "nick": null,
+     "joined_at": "2026-04-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2014",
+     "roles": [
+      "7003"
+     ],
+     "nick": null,
+     "joined_at": "2026-05-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2015",
+     "roles": [
+      "7004"
+     ],
+     "nick": null,
+     "joined_at": "2026-06-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2016",
+     "roles": [
+      "7004"
+     ],
+     "nick": null,
+     "joined_at": "2026-07-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2017",
+     "roles": [
+      "7005"
+     ],
+     "nick": null,
+     "joined_at": "2026-08-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2018",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-09-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2019",
+     "roles": [
+      "7002"
+     ],
+     "nick": null,
+     "joined_at": "2026-01-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2020",
+     "roles": [
+      "7003"
+     ],
+     "nick": null,
+     "joined_at": "2026-02-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2021",
+     "roles": [
+      "7004"
+     ],
+     "nick": null,
+     "joined_at": "2026-03-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2022",
+     "roles": [
+      "7004"
+     ],
+     "nick": null,
+     "joined_at": "2026-04-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2023",
+     "roles": [
+      "7005"
+     ],
+     "nick": null,
+     "joined_at": "2026-05-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2024",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-06-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2025",
+     "roles": [
+      "7002"
+     ],
+     "nick": null,
+     "joined_at": "2026-07-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2026",
+     "roles": [
+      "7003"
+     ],
+     "nick": null,
+     "joined_at": "2026-08-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2027",
+     "roles": [
+      "7004"
+     ],
+     "nick": null,
+     "joined_at": "2026-09-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2028",
+     "roles": [
+      "7004"
+     ],
+     "nick": null,
+     "joined_at": "2026-01-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2029",
+     "roles": [
+      "7005"
+     ],
+     "nick": null,
+     "joined_at": "2026-02-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    }
+   ],
+   "rules_channel_id": "6002",
+   "system_channel_id": "6005",
+   "public_updates_channel_id": "6003"
+  },
+  {
+   "id": "5002",
+   "name": "Fake Member Club",
+   "icon": null,
+   "owner_id": "2001",
+   "member_count": 12,
+   "large": false,
+   "joined_at": "2026-01-10T09:00:00.000000+00:00",
+   "features": [],
+   "description": "A server where you are an ordinary member.",
+   "verification_level": 1,
+   "premium_tier": 0,
+   "default_message_notifications": 1,
+   "explicit_content_filter": 2,
+   "mfa_level": 0,
+   "afk_timeout": 300,
+   "preferred_locale": "en-US",
+   "roles": [
+    {
+     "id": "5002",
+     "name": "@everyone",
+     "permissions": "68672",
+     "position": 0,
+     "color": 0,
+     "hoist": false,
+     "managed": false,
+     "mentionable": false
+    },
+    {
+     "id": "7101",
+     "name": "Regular",
+     "permissions": "0",
+     "position": 1,
+     "color": 10181046,
+     "hoist": false,
+     "managed": false,
+     "mentionable": true
+    }
+   ],
+   "channels": [
+    {
+     "id": "6101",
+     "type": 0,
+     "name": "lounge",
+     "position": 0,
+     "parent_id": null,
+     "permission_overwrites": [],
+     "nsfw": false,
+     "topic": "Hang out.",
+     "rate_limit_per_user": 0,
+     "last_message_id": "1549000137000000000"
+    },
+    {
+     "id": "6102",
+     "type": 0,
+     "name": "help",
+     "position": 1,
+     "parent_id": null,
+     "permission_overwrites": [],
+     "nsfw": false,
+     "topic": "Ask questions.",
+     "rate_limit_per_user": 0,
+     "last_message_id": "1549000152000000000"
+    },
+    {
+     "id": "6103",
+     "type": 0,
+     "name": "staff-only",
+     "position": 2,
+     "parent_id": null,
+     "permission_overwrites": [
+      {
+       "id": "5002",
+       "type": 0,
+       "allow": "0",
+       "deny": "1024"
+      }
+     ],
+     "nsfw": false,
+     "topic": "Hidden from you.",
+     "rate_limit_per_user": 0,
+     "last_message_id": "1549000156000000000"
+    }
+   ],
+   "emojis": [],
+   "stickers": [],
+   "stage_instances": [],
+   "members": [
+    {
+     "user_id": "1001",
+     "roles": [
+      "7101"
+     ],
+     "nick": null,
+     "joined_at": "2026-03-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2001",
+     "roles": [
+      "7101"
+     ],
+     "nick": null,
+     "joined_at": "2026-04-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2002",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-05-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2003",
+     "roles": [
+      "7101"
+     ],
+     "nick": null,
+     "joined_at": "2026-06-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2004",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-07-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2005",
+     "roles": [
+      "7101"
+     ],
+     "nick": null,
+     "joined_at": "2026-08-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2006",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-09-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2007",
+     "roles": [
+      "7101"
+     ],
+     "nick": null,
+     "joined_at": "2026-01-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2008",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-02-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2009",
+     "roles": [
+      "7101"
+     ],
+     "nick": null,
+     "joined_at": "2026-03-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2010",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-04-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2011",
+     "roles": [
+      "7101"
+     ],
+     "nick": null,
+     "joined_at": "2026-05-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    }
+   ]
+  },
+  {
+   "id": "5003",
+   "name": "Fake Rules Gate",
+   "icon": null,
+   "owner_id": "2002",
+   "member_count": 6,
+   "large": false,
+   "joined_at": "2026-01-10T09:00:00.000000+00:00",
+   "features": [
+    "COMMUNITY",
+    "MEMBER_VERIFICATION_GATE_ENABLED"
+   ],
+   "description": "A server that wants you to accept its rules first.",
+   "verification_level": 1,
+   "premium_tier": 0,
+   "default_message_notifications": 1,
+   "explicit_content_filter": 2,
+   "mfa_level": 0,
+   "afk_timeout": 300,
+   "preferred_locale": "en-US",
+   "roles": [
+    {
+     "id": "5003",
+     "name": "@everyone",
+     "permissions": "68608",
+     "position": 0,
+     "color": 0,
+     "hoist": false,
+     "managed": false,
+     "mentionable": false
+    }
+   ],
+   "channels": [
+    {
+     "id": "6201",
+     "type": 0,
+     "name": "rules",
+     "position": 0,
+     "parent_id": null,
+     "permission_overwrites": [],
+     "nsfw": false,
+     "topic": "Accept the rules to join in.",
+     "rate_limit_per_user": 0,
+     "last_message_id": "1549000157000000000"
+    },
+    {
+     "id": "6202",
+     "type": 0,
+     "name": "welcome",
+     "position": 1,
+     "parent_id": null,
+     "permission_overwrites": [],
+     "nsfw": false,
+     "rate_limit_per_user": 0,
+     "last_message_id": "1549000161000000000"
+    }
+   ],
+   "emojis": [],
+   "stickers": [],
+   "stage_instances": [],
+   "members": [
+    {
+     "user_id": "1001",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-05-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false,
+     "pending": true
+    },
+    {
+     "user_id": "2001",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-01-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2002",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-02-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2003",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-03-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2004",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-04-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    },
+    {
+     "user_id": "2005",
+     "roles": [],
+     "nick": null,
+     "joined_at": "2026-05-10T09:00:00.000000+00:00",
+     "flags": 0,
+     "mute": false,
+     "deaf": false
+    }
+   ],
+   "rules_channel_id": "6201"
+  }
+ ],
+ "private_channels": [
+  {
+   "id": "8001",
+   "type": 1,
+   "recipient_ids": [
+    "2001"
+   ],
+   "last_message_id": "1549000175000000000"
+  },
+  {
+   "id": "8002",
+   "type": 1,
+   "recipient_ids": [
+    "2002"
+   ],
+   "last_message_id": "1549000189000000000"
+  },
+  {
+   "id": "8003",
+   "type": 3,
+   "name": "Weekend plans",
+   "owner_id": "1001",
+   "icon": null,
+   "recipient_ids": [
+    "2002",
+    "2003"
+   ],
+   "last_message_id": "1549000204000000000"
+  }
+ ],
+ "relationships": [
+  {
+   "id": "2001",
+   "type": 1,
+   "user_id": "2001",
+   "nickname": null,
+   "since": "2026-02-01T00:00:00.000000+00:00"
+  },
+  {
+   "id": "2002",
+   "type": 1,
+   "user_id": "2002",
+   "nickname": null,
+   "since": "2026-02-01T00:00:00.000000+00:00"
+  },
+  {
+   "id": "2003",
+   "type": 1,
+   "user_id": "2003",
+   "nickname": null,
+   "since": "2026-02-01T00:00:00.000000+00:00"
+  },
+  {
+   "id": "2004",
+   "type": 1,
+   "user_id": "2004",
+   "nickname": null,
+   "since": "2026-02-01T00:00:00.000000+00:00"
+  },
+  {
+   "id": "2090",
+   "type": 3,
+   "user_id": "2090",
+   "nickname": null,
+   "since": "2026-10-19T00:00:00.000000+00:00"
+  }
+ ],
+ "read_state": [
+  {
+   "id": "6005",
+   "last_acked_id": "1549000060000000000",
+   "mention_count": 0
+  },
+  {
+   "id": "6006",
+   "last_acked_id": "1549000095000000000",
+   "mention_count": 0
+  },
+  {
+   "id": "6007",
+   "last_acked_id": "1549000105000000000",
+   "mention_count": 1
+  },
+  {
+   "id": "6002",
+   "last_acked_id": "1549000002000000000",
+   "mention_count": 0
+  },
+  {
+   "id": "6003",
+   "last_acked_id": "1549000004000000000",
+   "mention_count": 0
+  },
+  {
+   "id": "6101",
+   "last_acked_id": "1549000134000000000",
+   "mention_count": 0
+  },
+  {
+   "id": "6102",
+   "last_acked_id": "1549000152000000000",
+   "mention_count": 0
+  },
+  {
+   "id": "8001",
+   "last_acked_id": "1549000173000000000",
+   "mention_count": 0
+  },
+  {
+   "id": "8002",
+   "last_acked_id": "1549000189000000000",
+   "mention_count": 0
+  },
+  {
+   "id": "8003",
+   "last_acked_id": "1549000204000000000",
+   "mention_count": 0
+  }
+ ],
+ "messages": {
+  "6002": [
+   {
+    "id": "1549000001000000000",
+    "type": 0,
+    "content": "**Rule 1.** Be kind.\n**Rule 2.** No spam.\n**Rule 3.** Keep it on topic.",
+    "channel_id": "6002",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": true,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T08:00:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000002000000000",
+    "type": 0,
+    "content": "Questions about the rules go to the moderators.",
+    "channel_id": "6002",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T08:03:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "6003": [
+   {
+    "id": "1549000003000000000",
+    "type": 0,
+    "content": "Welcome to the Fake Admin Lab. Nothing here is real.",
+    "channel_id": "6003",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T08:10:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000004000000000",
+    "type": 0,
+    "content": "Maintenance window on Saturday (not real either).",
+    "channel_id": "6003",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T08:40:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000005000000000",
+    "type": 0,
+    "content": "New channel: #markdown-lab.",
+    "channel_id": "6003",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T09:10:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "6005": [
+   {
+    "id": "1549000006000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T09:40:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000007000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T09:47:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000008000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T09:54:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000009000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T10:01:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000010000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T10:08:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000011000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T10:15:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000012000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2007",
+     "username": "gale",
+     "global_name": "Gale",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T10:22:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000013000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2008",
+     "username": "harbor",
+     "global_name": "Harbor",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T10:29:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000014000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "6005",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T10:36:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000015000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T10:43:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000016000000000",
+    "type": 0,
+    "content": "Great, that unblocks the next step.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T10:50:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000017000000000",
+    "type": 0,
+    "content": "Has anyone looked at the voice settings page yet?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T10:57:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000018000000000",
+    "type": 0,
+    "content": "Let's keep the discussion in the thread so it stays tidy.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:04:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000019000000000",
+    "type": 0,
+    "content": "Quick poll: tabs or spaces? (Please do not answer.)",
+    "channel_id": "6005",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:11:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000020000000000",
+    "type": 0,
+    "content": "I pushed the fix for the sidebar spacing.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:18:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000021000000000",
+    "type": 0,
+    "content": "The release checklist is updated.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2007",
+     "username": "gale",
+     "global_name": "Gale",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:25:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000022000000000",
+    "type": 0,
+    "content": "Coffee is ready in the kitchen channel.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2008",
+     "username": "harbor",
+     "global_name": "Harbor",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:32:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000023000000000",
+    "type": 0,
+    "content": "Lunch break, back in 30.",
+    "channel_id": "6005",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:39:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000024000000000",
+    "type": 0,
+    "content": "Does the new layout feel faster to you?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:46:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000025000000000",
+    "type": 0,
+    "content": "The docs page has a typo in the second paragraph.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:53:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000026000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:00:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000027000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:07:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000028000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:14:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000029000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:21:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000030000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2007",
+     "username": "gale",
+     "global_name": "Gale",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:28:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000031000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2008",
+     "username": "harbor",
+     "global_name": "Harbor",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:35:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000032000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "6005",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:42:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000033000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:49:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000034000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:56:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000035000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:03:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000036000000000",
+    "type": 0,
+    "content": "Great, that unblocks the next step.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:10:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000037000000000",
+    "type": 0,
+    "content": "Has anyone looked at the voice settings page yet?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:17:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000038000000000",
+    "type": 0,
+    "content": "Let's keep the discussion in the thread so it stays tidy.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:24:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000039000000000",
+    "type": 0,
+    "content": "Quick poll: tabs or spaces? (Please do not answer.)",
+    "channel_id": "6005",
+    "author": {
+     "id": "2007",
+     "username": "gale",
+     "global_name": "Gale",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:31:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000040000000000",
+    "type": 0,
+    "content": "I pushed the fix for the sidebar spacing.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2008",
+     "username": "harbor",
+     "global_name": "Harbor",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:38:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000041000000000",
+    "type": 0,
+    "content": "The release checklist is updated.",
+    "channel_id": "6005",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:45:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000042000000000",
+    "type": 0,
+    "content": "Coffee is ready in the kitchen channel.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:52:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000043000000000",
+    "type": 0,
+    "content": "Lunch break, back in 30.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:59:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000044000000000",
+    "type": 0,
+    "content": "Does the new layout feel faster to you?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:06:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000045000000000",
+    "type": 0,
+    "content": "The docs page has a typo in the second paragraph.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:13:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000046000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:20:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000047000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:27:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000048000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2007",
+     "username": "gale",
+     "global_name": "Gale",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:34:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000049000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2008",
+     "username": "harbor",
+     "global_name": "Harbor",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:41:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000050000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "6005",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:48:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000051000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:55:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000052000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:02:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000053000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:09:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000054000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:16:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000055000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:23:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000056000000000",
+    "type": 0,
+    "content": "Great, that unblocks the next step.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:30:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000057000000000",
+    "type": 0,
+    "content": "Has anyone looked at the voice settings page yet?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2007",
+     "username": "gale",
+     "global_name": "Gale",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:37:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000058000000000",
+    "type": 0,
+    "content": "Let's keep the discussion in the thread so it stays tidy.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2008",
+     "username": "harbor",
+     "global_name": "Harbor",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:44:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000059000000000",
+    "type": 0,
+    "content": "Quick poll: tabs or spaces? (Please do not answer.)",
+    "channel_id": "6005",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:51:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000060000000000",
+    "type": 0,
+    "content": "I pushed the fix for the sidebar spacing.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:58:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000061000000000",
+    "type": 0,
+    "content": "The release checklist is updated.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:05:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000062000000000",
+    "type": 0,
+    "content": "Coffee is ready in the kitchen channel.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:12:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000063000000000",
+    "type": 0,
+    "content": "Lunch break, back in 30.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:19:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000064000000000",
+    "type": 0,
+    "content": "Does the new layout feel faster to you?",
+    "channel_id": "6005",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:26:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000065000000000",
+    "type": 0,
+    "content": "The docs page has a typo in the second paragraph.",
+    "channel_id": "6005",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:33:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "6006": [
+   {
+    "id": "1549000066000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2009",
+     "username": "iris",
+     "global_name": "Iris",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:20:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000067000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2010",
+     "username": "jun",
+     "global_name": "Jun",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:27:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000068000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2011",
+     "username": "kite",
+     "global_name": "Kite",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:34:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000069000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "6006",
+    "author": {
+     "id": "2012",
+     "username": "lumen",
+     "global_name": "Lumen",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:41:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000070000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2013",
+     "username": "moss",
+     "global_name": "Moss",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:48:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000071000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "6006",
+    "author": {
+     "id": "2014",
+     "username": "nova",
+     "global_name": "Nova",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T11:55:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000072000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "6006",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:02:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000073000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2009",
+     "username": "iris",
+     "global_name": "Iris",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:09:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000074000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2010",
+     "username": "jun",
+     "global_name": "Jun",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:16:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000075000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2011",
+     "username": "kite",
+     "global_name": "Kite",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:23:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000076000000000",
+    "type": 0,
+    "content": "Great, that unblocks the next step.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2012",
+     "username": "lumen",
+     "global_name": "Lumen",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:30:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000077000000000",
+    "type": 0,
+    "content": "Has anyone looked at the voice settings page yet?",
+    "channel_id": "6006",
+    "author": {
+     "id": "2013",
+     "username": "moss",
+     "global_name": "Moss",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:37:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000078000000000",
+    "type": 0,
+    "content": "Let's keep the discussion in the thread so it stays tidy.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2014",
+     "username": "nova",
+     "global_name": "Nova",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:44:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000079000000000",
+    "type": 0,
+    "content": "Quick poll: tabs or spaces? (Please do not answer.)",
+    "channel_id": "6006",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:51:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000080000000000",
+    "type": 0,
+    "content": "I pushed the fix for the sidebar spacing.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2009",
+     "username": "iris",
+     "global_name": "Iris",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T12:58:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000081000000000",
+    "type": 0,
+    "content": "The release checklist is updated.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2010",
+     "username": "jun",
+     "global_name": "Jun",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:05:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000082000000000",
+    "type": 0,
+    "content": "Coffee is ready in the kitchen channel.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2011",
+     "username": "kite",
+     "global_name": "Kite",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:12:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000083000000000",
+    "type": 0,
+    "content": "Lunch break, back in 30.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2012",
+     "username": "lumen",
+     "global_name": "Lumen",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:19:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000084000000000",
+    "type": 0,
+    "content": "Does the new layout feel faster to you?",
+    "channel_id": "6006",
+    "author": {
+     "id": "2013",
+     "username": "moss",
+     "global_name": "Moss",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:26:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000085000000000",
+    "type": 0,
+    "content": "The docs page has a typo in the second paragraph.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2014",
+     "username": "nova",
+     "global_name": "Nova",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:33:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000086000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "6006",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:40:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000087000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2009",
+     "username": "iris",
+     "global_name": "Iris",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:47:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000088000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2010",
+     "username": "jun",
+     "global_name": "Jun",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:54:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000089000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "6006",
+    "author": {
+     "id": "2011",
+     "username": "kite",
+     "global_name": "Kite",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:01:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000090000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2012",
+     "username": "lumen",
+     "global_name": "Lumen",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:08:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000091000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "6006",
+    "author": {
+     "id": "2013",
+     "username": "moss",
+     "global_name": "Moss",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:15:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000092000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2014",
+     "username": "nova",
+     "global_name": "Nova",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:22:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000093000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "6006",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:29:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000094000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2009",
+     "username": "iris",
+     "global_name": "Iris",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:36:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000095000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "6006",
+    "author": {
+     "id": "2010",
+     "username": "jun",
+     "global_name": "Jun",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:43:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "6007": [
+   {
+    "id": "1549000096000000000",
+    "type": 0,
+    "content": "Formatting check: **bold**, *italic*, __underline__, ~~strike~~, `inline code`, ||spoiler||.",
+    "channel_id": "6007",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:00:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000097000000000",
+    "type": 0,
+    "content": "```rust\nfn main() {\n    println!(\"hello from the fake world\");\n}\n```",
+    "channel_id": "6007",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:03:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000098000000000",
+    "type": 0,
+    "content": "> A quoted line\nand a list:\n- one\n- two\n- three",
+    "channel_id": "6007",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:06:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000099000000000",
+    "type": 0,
+    "content": "Hey <@2005> and <@1001>, the <@&7002> role should look at <#6006>.",
+    "channel_id": "6007",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [
+     {
+      "id": "2005",
+      "username": "ember",
+      "global_name": "Ember",
+      "avatar": null,
+      "discriminator": "0"
+     },
+     {
+      "id": "1001",
+      "username": "fake_me",
+      "global_name": "Fake Me",
+      "avatar": null,
+      "discriminator": "0",
+      "flags": 0,
+      "mfa_enabled": false,
+      "premium_type": 0
+     }
+    ],
+    "mention_roles": [
+     "7002"
+    ],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:09:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000100000000000",
+    "type": 0,
+    "content": "Docs: https://example.com/fastcord",
+    "channel_id": "6007",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [
+     {
+      "type": "link",
+      "url": "https://example.com/fastcord",
+      "title": "Example page",
+      "description": "A synthetic link embed with no image.",
+      "provider": {
+       "name": "Example"
+      }
+     }
+    ],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:12:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000101000000000",
+    "type": 0,
+    "content": "Who wants to review the settings page?",
+    "channel_id": "6007",
+    "author": {
+     "id": "2007",
+     "username": "gale",
+     "global_name": "Gale",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": true,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:15:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000102000000000",
+    "type": 19,
+    "content": "I can, after lunch.",
+    "channel_id": "6007",
+    "author": {
+     "id": "2008",
+     "username": "harbor",
+     "global_name": "Harbor",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:18:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": [],
+    "message_reference": {
+     "type": 0,
+     "channel_id": "6007",
+     "message_id": "1549000101000000000",
+     "guild_id": "5001"
+    },
+    "referenced_message": {
+     "id": "1549000101000000000",
+     "type": 0,
+     "content": "Who wants to review the settings page?",
+     "channel_id": "6007",
+     "author": {
+      "id": "2007",
+      "username": "gale",
+      "global_name": "Gale",
+      "avatar": null,
+      "discriminator": "0"
+     },
+     "attachments": [],
+     "embeds": [],
+     "mentions": [],
+     "mention_roles": [],
+     "pinned": true,
+     "mention_everyone": false,
+     "tts": false,
+     "timestamp": "2026-10-21T13:15:00.000000+00:00",
+     "edited_timestamp": null,
+     "flags": 0,
+     "components": []
+    }
+   },
+   {
+    "id": "1549000103000000000",
+    "type": 0,
+    "content": "Reactions on this one.",
+    "channel_id": "6007",
+    "author": {
+     "id": "2009",
+     "username": "iris",
+     "global_name": "Iris",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:21:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": [],
+    "reactions": [
+     {
+      "emoji": {
+       "id": null,
+       "name": "\ud83d\udc4d"
+      },
+      "count": 3,
+      "count_details": {
+       "burst": 0,
+       "normal": 3
+      },
+      "burst_colors": [],
+      "me_burst": false,
+      "burst_me": false,
+      "me": true,
+      "burst_count": 0
+     },
+     {
+      "emoji": {
+       "id": null,
+       "name": "\u2764\ufe0f"
+      },
+      "count": 1,
+      "count_details": {
+       "burst": 0,
+       "normal": 1
+      },
+      "burst_colors": [],
+      "me_burst": false,
+      "burst_me": false,
+      "me": false,
+      "burst_count": 0
+     },
+     {
+      "emoji": {
+       "id": null,
+       "name": "\ud83d\ude02"
+      },
+      "count": 2,
+      "count_details": {
+       "burst": 0,
+       "normal": 2
+      },
+      "burst_colors": [],
+      "me_burst": false,
+      "burst_me": false,
+      "me": false,
+      "burst_count": 0
+     }
+    ]
+   },
+   {
+    "id": "1549000104000000000",
+    "type": 0,
+    "content": "Join the other lab: https://discord.gg/fakeinvite",
+    "channel_id": "6007",
+    "author": {
+     "id": "2010",
+     "username": "jun",
+     "global_name": "Jun",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:24:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000105000000000",
+    "type": 0,
+    "content": "Pick an action:",
+    "channel_id": "6007",
+    "author": {
+     "id": "3001",
+     "username": "fakebot",
+     "global_name": "FakeBot",
+     "avatar": null,
+     "discriminator": "0",
+     "bot": true
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:27:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": [
+     {
+      "type": 1,
+      "components": [
+       {
+        "type": 2,
+        "style": 1,
+        "label": "Confirm",
+        "custom_id": "fake_confirm"
+       },
+       {
+        "type": 2,
+        "style": 4,
+        "label": "Cancel",
+        "custom_id": "fake_cancel"
+       },
+       {
+        "type": 2,
+        "style": 5,
+        "label": "Docs",
+        "url": "https://example.com/docs"
+       }
+      ]
+     },
+     {
+      "type": 1,
+      "components": [
+       {
+        "type": 3,
+        "custom_id": "fake_select",
+        "placeholder": "Choose a flavour",
+        "min_values": 1,
+        "max_values": 1,
+        "options": [
+         {
+          "label": "Alpha",
+          "value": "a"
+         },
+         {
+          "label": "Beta",
+          "value": "b"
+         },
+         {
+          "label": "Gamma",
+          "value": "g"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "application_id": "3001"
+   },
+   {
+    "id": "1549000106000000000",
+    "type": 0,
+    "content": "My own message, editable and deletable.",
+    "channel_id": "6007",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:30:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000107000000000",
+    "type": 0,
+    "content": "Last one for now, with a mention of <@1001>.",
+    "channel_id": "6007",
+    "author": {
+     "id": "2011",
+     "username": "kite",
+     "global_name": "Kite",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [
+     {
+      "id": "1001",
+      "username": "fake_me",
+      "global_name": "Fake Me",
+      "avatar": null,
+      "discriminator": "0",
+      "flags": 0,
+      "mfa_enabled": false,
+      "premium_type": 0
+     }
+    ],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T13:33:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "6101": [
+   {
+    "id": "1549000108000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:40:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000109000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:47:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000110000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T14:54:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000111000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "6101",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:01:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000112000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:08:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000113000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "6101",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:15:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000114000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:22:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000115000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:29:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000116000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:36:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000117000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:43:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000118000000000",
+    "type": 0,
+    "content": "Great, that unblocks the next step.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:50:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000119000000000",
+    "type": 0,
+    "content": "Has anyone looked at the voice settings page yet?",
+    "channel_id": "6101",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T15:57:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000120000000000",
+    "type": 0,
+    "content": "Let's keep the discussion in the thread so it stays tidy.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:04:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000121000000000",
+    "type": 0,
+    "content": "Quick poll: tabs or spaces? (Please do not answer.)",
+    "channel_id": "6101",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:11:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000122000000000",
+    "type": 0,
+    "content": "I pushed the fix for the sidebar spacing.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:18:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000123000000000",
+    "type": 0,
+    "content": "The release checklist is updated.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:25:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000124000000000",
+    "type": 0,
+    "content": "Coffee is ready in the kitchen channel.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:32:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000125000000000",
+    "type": 0,
+    "content": "Lunch break, back in 30.",
+    "channel_id": "6101",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:39:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000126000000000",
+    "type": 0,
+    "content": "Does the new layout feel faster to you?",
+    "channel_id": "6101",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:46:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000127000000000",
+    "type": 0,
+    "content": "The docs page has a typo in the second paragraph.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:53:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000128000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:00:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000129000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:07:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000130000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:14:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000131000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "6101",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:21:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000132000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:28:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000133000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "6101",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:35:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000134000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:42:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000135000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2004",
+     "username": "dune",
+     "global_name": "Dune",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:49:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000136000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "6101",
+    "author": {
+     "id": "2005",
+     "username": "ember",
+     "global_name": "Ember",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:56:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000137000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "6101",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T18:03:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "6102": [
+   {
+    "id": "1549000138000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "6102",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:20:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000139000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "6102",
+    "author": {
+     "id": "2007",
+     "username": "gale",
+     "global_name": "Gale",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:27:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000140000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "6102",
+    "author": {
+     "id": "2008",
+     "username": "harbor",
+     "global_name": "Harbor",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:34:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000141000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "6102",
+    "author": {
+     "id": "2009",
+     "username": "iris",
+     "global_name": "Iris",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:41:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000142000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "6102",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:48:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000143000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "6102",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T16:55:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000144000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "6102",
+    "author": {
+     "id": "2007",
+     "username": "gale",
+     "global_name": "Gale",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:02:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000145000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "6102",
+    "author": {
+     "id": "2008",
+     "username": "harbor",
+     "global_name": "Harbor",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:09:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000146000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "6102",
+    "author": {
+     "id": "2009",
+     "username": "iris",
+     "global_name": "Iris",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:16:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000147000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "6102",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:23:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000148000000000",
+    "type": 0,
+    "content": "Great, that unblocks the next step.",
+    "channel_id": "6102",
+    "author": {
+     "id": "2006",
+     "username": "fable",
+     "global_name": "Fable",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:30:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000149000000000",
+    "type": 0,
+    "content": "Has anyone looked at the voice settings page yet?",
+    "channel_id": "6102",
+    "author": {
+     "id": "2007",
+     "username": "gale",
+     "global_name": "Gale",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:37:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000150000000000",
+    "type": 0,
+    "content": "Let's keep the discussion in the thread so it stays tidy.",
+    "channel_id": "6102",
+    "author": {
+     "id": "2008",
+     "username": "harbor",
+     "global_name": "Harbor",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:44:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000151000000000",
+    "type": 0,
+    "content": "Quick poll: tabs or spaces? (Please do not answer.)",
+    "channel_id": "6102",
+    "author": {
+     "id": "2009",
+     "username": "iris",
+     "global_name": "Iris",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:51:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000152000000000",
+    "type": 0,
+    "content": "I pushed the fix for the sidebar spacing.",
+    "channel_id": "6102",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T17:58:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "6103": [
+   {
+    "id": "1549000153000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "6103",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T18:00:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000154000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "6103",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T18:07:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000155000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "6103",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T18:14:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000156000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "6103",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T18:21:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "6201": [
+   {
+    "id": "1549000157000000000",
+    "type": 0,
+    "content": "Welcome! Read the rules, then accept them.",
+    "channel_id": "6201",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T19:40:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "6202": [
+   {
+    "id": "1549000158000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "6202",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T19:50:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000159000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "6202",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T19:57:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000160000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "6202",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T20:04:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000161000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "6202",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T20:11:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "8001": [
+   {
+    "id": "1549000162000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "8001",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T21:20:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000163000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "8001",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T21:27:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000164000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "8001",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T21:34:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000165000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "8001",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T21:41:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000166000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "8001",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T21:48:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000167000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "8001",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T21:55:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000168000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "8001",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T22:02:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000169000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "8001",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T22:09:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000170000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "8001",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T22:16:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000171000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "8001",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T22:23:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000172000000000",
+    "type": 0,
+    "content": "Great, that unblocks the next step.",
+    "channel_id": "8001",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T22:30:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000173000000000",
+    "type": 0,
+    "content": "Has anyone looked at the voice settings page yet?",
+    "channel_id": "8001",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T22:37:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000174000000000",
+    "type": 0,
+    "content": "Let's keep the discussion in the thread so it stays tidy.",
+    "channel_id": "8001",
+    "author": {
+     "id": "2001",
+     "username": "aster",
+     "global_name": "Aster",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T22:44:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000175000000000",
+    "type": 0,
+    "content": "Quick poll: tabs or spaces? (Please do not answer.)",
+    "channel_id": "8001",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T22:51:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "8002": [
+   {
+    "id": "1549000176000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "8002",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T23:00:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000177000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "8002",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T23:07:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000178000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "8002",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T23:14:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000179000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "8002",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T23:21:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000180000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "8002",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T23:28:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000181000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "8002",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T23:35:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000182000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "8002",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T23:42:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000183000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "8002",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T23:49:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000184000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "8002",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-21T23:56:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000185000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "8002",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T00:03:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000186000000000",
+    "type": 0,
+    "content": "Great, that unblocks the next step.",
+    "channel_id": "8002",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T00:10:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000187000000000",
+    "type": 0,
+    "content": "Has anyone looked at the voice settings page yet?",
+    "channel_id": "8002",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T00:17:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000188000000000",
+    "type": 0,
+    "content": "Let's keep the discussion in the thread so it stays tidy.",
+    "channel_id": "8002",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T00:24:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000189000000000",
+    "type": 0,
+    "content": "Quick poll: tabs or spaces? (Please do not answer.)",
+    "channel_id": "8002",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T00:31:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ],
+  "8003": [
+   {
+    "id": "1549000190000000000",
+    "type": 0,
+    "content": "That sounds right to me.",
+    "channel_id": "8003",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T00:40:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000191000000000",
+    "type": 0,
+    "content": "I'll take the review after the meeting.",
+    "channel_id": "8003",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T00:47:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000192000000000",
+    "type": 0,
+    "content": "Merged. Please pull before you continue.",
+    "channel_id": "8003",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T00:54:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000193000000000",
+    "type": 0,
+    "content": "Can we move the standup to 11?",
+    "channel_id": "8003",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T01:01:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000194000000000",
+    "type": 0,
+    "content": "Reminder: the freeze starts on Friday.",
+    "channel_id": "8003",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T01:08:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000195000000000",
+    "type": 0,
+    "content": "Anyone up for a quick call later?",
+    "channel_id": "8003",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T01:15:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000196000000000",
+    "type": 0,
+    "content": "I reproduced it on the second try, logs attached in my notes.",
+    "channel_id": "8003",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T01:22:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000197000000000",
+    "type": 0,
+    "content": "Works on my machine, but I will try a clean profile.",
+    "channel_id": "8003",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T01:29:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000198000000000",
+    "type": 0,
+    "content": "Morning all, the build is green again.",
+    "channel_id": "8003",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T01:36:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000199000000000",
+    "type": 0,
+    "content": "Nice catch! Thanks for flagging it.",
+    "channel_id": "8003",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T01:43:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000200000000000",
+    "type": 0,
+    "content": "Great, that unblocks the next step.",
+    "channel_id": "8003",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T01:50:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000201000000000",
+    "type": 0,
+    "content": "Has anyone looked at the voice settings page yet?",
+    "channel_id": "8003",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T01:57:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000202000000000",
+    "type": 0,
+    "content": "Let's keep the discussion in the thread so it stays tidy.",
+    "channel_id": "8003",
+    "author": {
+     "id": "2002",
+     "username": "birch",
+     "global_name": "Birch",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T02:04:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000203000000000",
+    "type": 0,
+    "content": "Quick poll: tabs or spaces? (Please do not answer.)",
+    "channel_id": "8003",
+    "author": {
+     "id": "2003",
+     "username": "cedar",
+     "global_name": "Cedar",
+     "avatar": null,
+     "discriminator": "0"
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T02:11:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   },
+   {
+    "id": "1549000204000000000",
+    "type": 0,
+    "content": "I pushed the fix for the sidebar spacing.",
+    "channel_id": "8003",
+    "author": {
+     "id": "1001",
+     "username": "fake_me",
+     "global_name": "Fake Me",
+     "avatar": null,
+     "discriminator": "0",
+     "flags": 0,
+     "mfa_enabled": false,
+     "premium_type": 0
+    },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-22T02:18:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0,
+    "components": []
+   }
+  ]
+ },
+ "scheduled_events": {
+  "5001": [
+   {
+    "id": "900",
+    "guild_id": "5001",
+    "channel_id": "6009",
+    "creator_id": "1001",
+    "name": "Movie night",
+    "description": "Bring snacks.",
+    "scheduled_start_time": "2026-10-30T18:00:00.000000+00:00",
+    "scheduled_end_time": null,
+    "privacy_level": 2,
+    "status": 1,
+    "entity_type": 2,
+    "entity_id": null,
+    "entity_metadata": null,
+    "user_count": 12
+   },
+   {
+    "id": "901",
+    "guild_id": "5001",
+    "channel_id": null,
+    "creator_id": "2001",
+    "name": "Meetup",
+    "description": null,
+    "scheduled_start_time": "2026-11-02T10:00:00.000000+00:00",
+    "scheduled_end_time": "2026-11-02T12:00:00.000000+00:00",
+    "privacy_level": 2,
+    "status": 1,
+    "entity_type": 3,
+    "entity_metadata": {
+     "location": "Town hall"
+    },
+    "user_count": 3
+   }
+  ]
+ },
+ "invites": {
+  "fakeinvite": {
+   "type": 0,
+   "code": "fakeinvite",
+   "expires_at": null,
+   "guild": {
+    "id": "5099",
+    "name": "Fake Other Place",
+    "icon": null,
+    "features": [
+     "COMMUNITY"
+    ]
+   },
+   "channel": {
+    "id": "6999",
+    "type": 0,
+    "name": "front-door"
+   },
+   "approximate_member_count": 120,
+   "approximate_presence_count": 34
+  }
+ },
+ "member_verification": {
+  "5003": {
+   "version": "2030-01-01T00:00:00.000000+00:00",
+   "description": "Welcome to the synthetic gate.",
+   "form_fields": [
+    {
+     "field_type": "TERMS",
+     "label": "Read and agree to the server rules",
+     "required": true,
+     "values": [
+      "Be kind.",
+      "No spam.",
+      "Keep it on topic."
+     ]
+    }
+   ]
+  }
+ },
+ "chatter": {
+  "guild_channel": "6005",
+  "dm_channel": "8001",
+  "friend": "2001"
+ }
+}

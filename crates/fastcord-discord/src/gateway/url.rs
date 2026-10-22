@@ -20,12 +20,17 @@ impl GatewayUrl {
     pub(crate) fn parse(base: &str) -> Option<Self> {
         let mut url = Url::parse(base).ok()?;
         let host = url.host_str()?;
-        if url.scheme() != "wss"
-            || !(host == "discord.gg" || host.ends_with(".discord.gg"))
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.port().is_some_and(|port| port != 443)
-            || url.fragment().is_some()
+        #[cfg(feature = "fake-discord")]
+        let fake = crate::fake_origin::is_gateway(&url);
+        #[cfg(not(feature = "fake-discord"))]
+        let fake = false;
+        if !fake
+            && (url.scheme() != "wss"
+                || !(host == "discord.gg" || host.ends_with(".discord.gg"))
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.port().is_some_and(|port| port != 443)
+                || url.fragment().is_some())
         {
             return None;
         }

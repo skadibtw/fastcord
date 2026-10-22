@@ -228,9 +228,14 @@ impl<C: Clock> RestClient<C> {
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|_| RestError::ClientConfiguration)?;
+            .timeout(Duration::from_secs(30));
+        #[cfg(feature = "fake-discord")]
+        let http = if crate::fake_origin::active() {
+            http.https_only(false).no_proxy()
+        } else {
+            http
+        };
+        let http = http.build().map_err(|_| RestError::ClientConfiguration)?;
         Ok(Self {
             http,
             limiter: RateLimiter::new(clock),

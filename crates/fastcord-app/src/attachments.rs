@@ -236,7 +236,11 @@ impl AttachmentCache {
 
     pub fn default_root(account: Snowflake) -> Result<Self, AttachmentError> {
         let base = cache_base().ok_or(AttachmentError::CacheUnavailable)?;
-        Self::new(account, base.join("fastcord/attachments"))
+        Self::new(
+            account,
+            base.join(crate::audio_devices::app_dir_name())
+                .join("attachments"),
+        )
     }
 
     fn ensure_active(&self) -> Result<(), AttachmentError> {
@@ -881,6 +885,11 @@ async fn send_following_redirects(
     if !valid_cdn_url(&url, allow_local_http) {
         return Err(AttachmentError::InvalidUrl);
     }
+    // Fake mode: no avatar, emoji or attachment fetch ever leaves the machine.
+    #[cfg(feature = "fake-discord")]
+    if crate::fake::active() && url.host_str() != Some("127.0.0.1") {
+        return Err(AttachmentError::Network);
+    }
     for _ in 0..=MAX_REDIRECTS {
         let response = http
             .get(url.clone())
@@ -900,6 +909,10 @@ async fn send_following_redirects(
             .map_err(|_| AttachmentError::InvalidUrl)?;
         if !valid_cdn_url(&next, allow_local_http) {
             return Err(AttachmentError::InvalidUrl);
+        }
+        #[cfg(feature = "fake-discord")]
+        if crate::fake::active() && next.host_str() != Some("127.0.0.1") {
+            return Err(AttachmentError::Network);
         }
         url = next;
     }

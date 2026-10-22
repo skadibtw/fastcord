@@ -11,6 +11,26 @@ use crate::RestError;
 pub(crate) const API_BASE: &str = "https://discord.com/api/v10";
 const MAX_ROUTE_BYTES: usize = 8 * 1024;
 
+/// The REST origin: Discord's, or the loopback fake's in the test-only mode.
+pub(crate) fn api_base() -> std::borrow::Cow<'static, str> {
+    #[cfg(feature = "fake-discord")]
+    if let Some(port) = crate::fake_origin::port() {
+        return format!("http://127.0.0.1:{port}/api/v10").into();
+    }
+    API_BASE.into()
+}
+
+/// Whether `url` is on the one origin requests may go to.
+fn trusted_origin(url: &Url) -> bool {
+    #[cfg(feature = "fake-discord")]
+    if let Some(port) = crate::fake_origin::port() {
+        return url.scheme() == "http"
+            && url.host_str() == Some("127.0.0.1")
+            && url.port() == Some(port);
+    }
+    url.scheme() == "https" && url.host_str() == Some("discord.com") && url.port().is_none()
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct WebhookToken(Arc<Zeroizing<String>>);
 
@@ -132,12 +152,9 @@ impl Route {
         }) {
             return Err(RestError::InvalidRoute);
         }
-        let url = Url::parse(&format!("{API_BASE}{path}")).map_err(|_| RestError::InvalidRoute)?;
-        if url.scheme() != "https"
-            || url.host_str() != Some("discord.com")
-            || url.port().is_some()
-            || !url.path().starts_with("/api/v10/")
-        {
+        let url =
+            Url::parse(&format!("{}{path}", api_base())).map_err(|_| RestError::InvalidRoute)?;
+        if !trusted_origin(&url) || !url.path().starts_with("/api/v10/") {
             return Err(RestError::InvalidRoute);
         }
         let segments = url.path()["/api/v10/".len()..].split('/');

@@ -8,7 +8,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use super::RemoteAuthError;
-use crate::route::API_BASE;
+use crate::route::api_base;
 
 const EXCHANGE_BODY_BYTE_BUDGET: usize = 16 * 1024;
 
@@ -27,6 +27,10 @@ pub(crate) struct HttpTicketExchange {
 
 impl HttpTicketExchange {
     pub(crate) fn new() -> Result<Self, RemoteAuthError> {
+        #[cfg(feature = "fake-discord")]
+        if crate::fake_origin::active() {
+            return Err(RemoteAuthError::Connect);
+        }
         let http = reqwest::Client::builder()
             .use_rustls_tls()
             .https_only(true)
@@ -56,7 +60,7 @@ impl TicketExchange for HttpTicketExchange {
             .map_err(|_| RemoteAuthError::Protocol)?;
         let mut response = self
             .http
-            .post(format!("{API_BASE}/users/@me/remote-auth/login"))
+            .post(format!("{}/users/@me/remote-auth/login", api_base()))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
             .body(body)

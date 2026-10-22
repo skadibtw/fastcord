@@ -11,6 +11,11 @@ repository.workspace = true
 name = "fastcord"
 path = "src/main.rs"
 
+[features]
+# Test-only fake mode (`--fake-discord <port>`), debug builds only: talks to the
+# loopback `fastcord-fake` server and never touches the credential store.
+fake-discord = ["fastcord-discord/fake-discord"]
+
 [dependencies]
 fastcord-model.workspace = true
 fastcord-discord.workspace = true

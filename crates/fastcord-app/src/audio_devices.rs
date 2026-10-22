@@ -323,7 +323,17 @@ pub(crate) fn data_dir() -> Option<PathBuf> {
     let root = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(root.join("fastcord"))
+    Some(root.join(app_dir_name()))
+}
+
+/// The per-user directory name under the config and cache roots. The test-only
+/// fake mode keeps its own, so it never reads or writes the real app's files.
+pub(crate) fn app_dir_name() -> &'static str {
+    #[cfg(feature = "fake-discord")]
+    if crate::fake::active() {
+        return "fastcord-fake";
+    }
+    "fastcord"
 }
 
 fn decode(bytes: &[u8]) -> Option<Preferences> {

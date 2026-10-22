@@ -21,7 +21,10 @@ fn settings_path() -> Option<PathBuf> {
     let root = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(root.join("fastcord").join("voice-settings.csv"))
+    Some(
+        root.join(crate::audio_devices::app_dir_name())
+            .join("voice-settings.csv"),
+    )
 }
 
 fn parse(contents: &str) -> Vec<(Snowflake, UserVolume)> {

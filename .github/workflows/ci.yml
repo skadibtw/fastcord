@@ -45,6 +45,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
+      - name: Fake server and debug-only fake mode
+        run: |
+          cargo clippy -p fastcord-fake -p fastcord-discord -p fastcord-app --features fastcord-app/fake-discord --all-targets --locked -- -D warnings
+          cargo test -p fastcord-fake --locked
       - name: Validate vendored Blocks runtime compatibility
         if: runner.os == 'macOS'
         run: |

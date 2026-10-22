@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(all(feature = "fake-discord", not(debug_assertions)))]
+compile_error!("fake-discord is a debug-only test mode");
+
 mod account_panel;
 mod accounts;
 mod announce;
@@ -24,6 +27,8 @@ mod discover;
 mod drafts;
 mod emoji;
 mod emoji_picker;
+#[cfg(feature = "fake-discord")]
+mod fake;
 mod forum;
 mod forward;
 mod friends;
@@ -152,6 +157,23 @@ fn call_signal(session: &Session, channel: Snowflake, signal: CallSignal) -> Tas
     )
 }
 
+/// True only in the test-only fake mode, which exists only in a build with the
+/// `fake-discord` feature.
+fn fake_mode() -> bool {
+    #[cfg(feature = "fake-discord")]
+    return fake::active();
+    #[cfg(not(feature = "fake-discord"))]
+    false
+}
+
+fn window_title() -> &'static str {
+    if fake_mode() {
+        "fastcord [FAKE]"
+    } else {
+        "fastcord"
+    }
+}
+
 fn main() -> iced::Result {
     // An offline UI check: runs before account restoration and single-instance
     // hand-off, with no session, credential access or Discord workers.
@@ -166,18 +188,28 @@ fn main() -> iced::Result {
     localtime::init();
     // One session per process and per sign-in: a second launch hands its link
     // to the first and exits, never opening a second Gateway on the same token.
-    let arg = std::env::args().nth(1);
+    #[cfg(feature = "fake-discord")]
+    fake::init();
+    // Fake mode takes no part in the hand-off: it neither receives a real
+    // instance's links nor is found by one.
+    let arg = std::env::args().nth(1).filter(|_| !fake_mode());
     let (forwarded, requests) = tokio::sync::mpsc::channel(8);
-    let _instance = match fastcord_platform::instance::acquire(arg.as_deref(), move |request| {
-        let _ = forwarded.try_send(request);
-    }) {
-        fastcord_platform::instance::Start::Primary(guard) => guard,
-        fastcord_platform::instance::Start::Secondary => return Ok(()),
+    let _instance = if fake_mode() {
+        None
+    } else {
+        Some(
+            match fastcord_platform::instance::acquire(arg.as_deref(), move |request| {
+                let _ = forwarded.try_send(request);
+            }) {
+                fastcord_platform::instance::Start::Primary(guard) => guard,
+                fastcord_platform::instance::Start::Secondary => return Ok(()),
+            },
+        )
     };
     desktop::set_forwarded(requests);
     desktop::set_startup(arg);
     render::application(App::boot, App::update, App::view)
-        .title("fastcord")
+        .title(window_title())
         .theme(App::theme)
         .scale_factor(App::scale_factor)
         .subscription(App::subscription)
@@ -546,11 +578,16 @@ impl App {
                 shortcuts: shortcuts::Runtime::default(),
                 window_active: true,
                 window_drawable: true,
-                tray: Err("The tray icon is starting.".to_owned()),
+                tray: Err(if fake_mode() {
+                    "The tray icon is off in fake mode.".to_owned()
+                } else {
+                    "The tray icon is starting.".to_owned()
+                }),
                 window_hidden: false,
                 compact_call: false,
                 window_size: iced::Size::new(1080.0, 640.0),
-                autostart: cfg!(windows).then(fastcord_platform::autostart::is_enabled),
+                autostart: (cfg!(windows) && !fake_mode())
+                    .then(fastcord_platform::autostart::is_enabled),
                 pending_link: desktop::take_startup(),
                 window_fullscreen: false,
                 voice_details: false,
@@ -806,7 +843,11 @@ impl App {
             self.media_frame_subscription(),
             self.shortcut_subscription(),
             self.navigation_keys(),
-            iced::Subscription::run(desktop::tray_stream).map(Message::Tray),
+            if fake_mode() {
+                iced::Subscription::none()
+            } else {
+                iced::Subscription::run(desktop::tray_stream).map(Message::Tray)
+            },
             iced::Subscription::run(desktop::forwarded_stream).map(Message::Forwarded),
         ])
     }
@@ -1153,6 +1194,21 @@ impl App {
                 speech::apply(&self.audio_preferences.speech);
                 self.configure_ui_sound();
                 self.shortcuts.rebuild(&self.audio_preferences.voice_input);
+                // Fake mode signs in at once with its fixed token, memory-only.
+                #[cfg(feature = "fake-discord")]
+                if fake::active() {
+                    self.phase = Phase::Authenticating {
+                        saved_account: None,
+                    };
+                    return Task::perform(
+                        login::token_login(
+                            Arc::new(UserToken::new(fake::TOKEN.to_owned())),
+                            None,
+                            false,
+                        ),
+                        Message::LoginFinished,
+                    );
+                }
                 return self.handle(Message::StoreReady(store));
             }
             Message::VoiceInput(event) => return self.voice_input_event(event),
@@ -3270,6 +3326,10 @@ impl App {
         )
     }
     fn start_qr(&mut self) -> Task<Message> {
+        if fake_mode() {
+            self.notice = Some("QR login is not available in fake mode.".to_owned());
+            return Task::none();
+        }
         self.clear_token();
         self.qr_attempts += 1;
         let id = self.qr_attempts;
@@ -4760,6 +4820,15 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let body = self.view_body();
+        #[cfg(feature = "fake-discord")]
+        if let Some(banner) = fake::banner() {
+            return column![banner, body].into();
+        }
+        body
+    }
+
+    fn view_body(&self) -> Element<'_, Message> {
         if self.compact_call
             && let Phase::Account { gateway, .. } = &self.phase
         {

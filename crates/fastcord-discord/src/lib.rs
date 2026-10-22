@@ -10,6 +10,9 @@
 //! taken back, and listed through [`RestClient::add_reaction`],
 //! [`RestClient::remove_own_reaction`], and [`RestClient::reaction_users`].
 
+#[cfg(all(feature = "fake-discord", not(debug_assertions)))]
+compile_error!("fake-discord is a debug-only test mode");
+
 mod account_security;
 mod ack;
 mod announce;
@@ -22,6 +25,8 @@ mod clock;
 mod community_admin;
 mod edit;
 mod error;
+#[cfg(feature = "fake-discord")]
+pub mod fake_origin;
 pub mod gateway;
 mod gif;
 mod group_dm;

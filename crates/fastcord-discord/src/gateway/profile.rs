@@ -65,6 +65,10 @@ impl BuildNumber {
 /// back to the bundled value on any failure (offline, page drift, redirect).
 /// The request is unauthenticated and carries no account data.
 pub async fn resolve_build_number() -> BuildNumber {
+    #[cfg(feature = "fake-discord")]
+    if crate::fake_origin::active() {
+        return BuildNumber::bundled();
+    }
     match fetch_build_number().await {
         Some(value) => BuildNumber::fetched(value),
         None => BuildNumber::bundled(),

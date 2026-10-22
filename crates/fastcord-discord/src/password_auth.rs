@@ -17,7 +17,7 @@ use crate::UserToken;
 use crate::error::{ERROR_BODY_BYTE_BUDGET, clean};
 use crate::gateway::ClientProperties;
 use crate::rest::identity_headers;
-use crate::route::API_BASE;
+use crate::route::api_base;
 
 const BODY_BYTE_BUDGET: usize = 16 * 1024;
 /// Discord accepts far less; this only bounds what is put on the wire.
@@ -251,6 +251,10 @@ pub struct PasswordAuth {
 
 impl PasswordAuth {
     pub fn new(properties: &ClientProperties) -> Result<Self, PasswordAuthError> {
+        #[cfg(feature = "fake-discord")]
+        if crate::fake_origin::active() {
+            return Err(PasswordAuthError::Configuration);
+        }
         let headers = identity_headers(properties).map_err(|_| PasswordAuthError::Configuration)?;
         let http = reqwest::Client::builder()
             .use_rustls_tls()
@@ -287,7 +291,7 @@ impl PasswordAuth {
             gift_code_sku_id: None,
         })
         .map_err(|_| PasswordAuthError::Protocol)?;
-        let mut request = self.http.post(format!("{API_BASE}/auth/login"));
+        let mut request = self.http.post(format!("{}/auth/login", api_base()));
         if let Some(solution) = captcha {
             request = request.header("x-captcha-key", &solution.key);
             if let Some(rqtoken) = &solution.rqtoken {
@@ -320,7 +324,7 @@ impl PasswordAuth {
         .map_err(|_| PasswordAuthError::Protocol)?;
         let request = self
             .http
-            .post(format!("{API_BASE}/auth/mfa/totp"))
+            .post(format!("{}/auth/mfa/totp", api_base()))
             .body(body);
         let (status, bytes) = send(request).await?;
         match classify_login(status, &bytes)? {
