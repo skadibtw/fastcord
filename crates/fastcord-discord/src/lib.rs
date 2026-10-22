@@ -10,6 +10,7 @@
 //! taken back, and listed through [`RestClient::add_reaction`],
 //! [`RestClient::remove_own_reaction`], and [`RestClient::reaction_users`].
 
+mod account_security;
 mod ack;
 mod attachment;
 mod call;
@@ -54,6 +55,9 @@ mod typing;
 mod upload;
 mod ws;
 
+pub use account_security::{
+    AuthSession, MAX_SESSIONS, MFA_REQUIRED, SecurityOverview, is_mfa_required, logout_body,
+};
 pub use attachment::{RefreshedAttachmentUrl, decode_waveform};
 pub use call::CallSignal;
 pub use clock::{Clock, MonotonicClock};

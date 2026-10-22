@@ -55,6 +55,8 @@ pub enum LoginOutcome {
 pub struct StoreReady {
     pub store: NativeCredentialStore,
     pub accounts: Vec<Snowflake>,
+    /// Labels of the saved accounts, reconciled with `accounts`.
+    pub index: crate::accounts::Index,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,7 +94,13 @@ pub async fn initialize_store() -> Result<StoreReady, StoreError> {
     tokio::task::spawn_blocking(|| {
         let store = NativeCredentialStore::new()?;
         let accounts = store.accounts()?;
-        Ok(StoreReady { store, accounts })
+        let mut index = crate::accounts::load();
+        index.reconcile(&accounts);
+        Ok(StoreReady {
+            store,
+            accounts,
+            index,
+        })
     })
     .await
     .map_err(|_| StoreError::Unavailable)?

@@ -1,0 +1,19 @@
+{
+  "user_sessions": [
+    {
+      "id_hash": "synthetic-hash-aaaa",
+      "approx_last_used_time": "2026-10-20T08:15:00.000000+00:00",
+      "client_info": { "os": "Windows", "platform": "Desktop", "location": "Exampleville, Exampleland" }
+    },
+    {
+      "id_hash": "synthetic-hash-bbbb",
+      "approx_last_used_time": "2026-10-01T12:00:00.000000+00:00",
+      "client_info": { "os": "Android", "platform": "Discord Android", "location": "Sampletown, Exampleland" }
+    },
+    {
+      "id_hash": "synthetic-hash-cccc",
+      "client_info": {}
+    },
+    { "client_info": { "os": "no hash, skipped" } }
+  ]
+}

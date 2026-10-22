@@ -527,6 +527,14 @@ Implemented in `fastcord-discord::guild_admin` (validated request bodies, preset
 - **Reorder.** Move up/down swaps a channel with its sibling in the same category and list (categories, text-like, voice) and sends only the positions that change.
 - **Not offered:** Community toggle, billing, boosts, vanity URL, monetization, paid media channels, roles and overwrites (#94).
 
+### 8.18 Accounts, sessions and security overview (#107)
+
+- **Saved accounts.** Tokens live in the native store, one entry per user id (unchanged). A non-secret index file (`accounts.tsv`: user id, display name, avatar hash; at most 32 rows, 16 KiB) labels them and is reconciled with the store on every start, so accounts saved before the index need no migration. A missing or damaged index only loses labels.
+- **Switching.** Exactly one active account. Switch runs the logout teardown (gateway, voice, every panel, drafts, attachment cache) without deleting the saved login, then restores the chosen account through the ordinary validate-then-enter path; the phase passes through Authenticating, never two sessions. A memory-only session cannot switch. Remove deletes another account's token after Confirm; logging out the active account still deletes its token.
+- **Sessions.** `GET /auth/sessions` list and `POST /auth/sessions/logout` after Confirm, one request, never retried. A 60003/MFA demand is shown as Discord's refusal with "Confirm in the official client"; MFA re-authentication is not implemented and never bypassed.
+- **Security overview.** Read-only MFA, email-verified and phone-present flags. Password, MFA, passkey and recovery changes are handed to the official client or `https://discord.com/settings/account`.
+- **Communication settings.** Friend-request sources and the explicit-content filter were delivered with the Safety panel (#80); no duplicate was added.
+
 ## 10. iced UI architecture
 
 Use iced's `Application`-style builder with `update`, `view`, `Task`, and `Subscription` concepts as provided by 0.14. UI messages are typed intents/results. Long-lived gateway/media workers feed stable subscriptions; creating a view must never reconnect a socket or recreate audio state.

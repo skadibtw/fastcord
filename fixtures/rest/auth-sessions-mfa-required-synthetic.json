@@ -1,0 +1,5 @@
+{
+  "message": "Multi-factor authentication required",
+  "code": 60003,
+  "mfa": { "ticket": "synthetic-ticket", "methods": [{ "type": "totp" }] }
+}

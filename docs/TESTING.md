@@ -691,3 +691,12 @@ Manual (Windows, alt account only): open a server with many members, quit fastco
   - [ ] Editing slowmode, user limit, bitrate (the server accepts every offered value), region and video quality; each is seen by a second client; topic and age restriction on text channels.
   - [ ] Move up/down on channels and categories matches the official client's order in two clients without stale rows; deleting a channel and a category with children leaves the sidebar and open channel consistent.
   - [ ] `GET /guilds/{id}/regions` shape; `GUILD_CREATE` field names for the settings (top level or `properties`).
+
+## Accounts, sessions and security overview (#107)
+Automated: `accounts::tests` (index round trip, migration by reconcile, bounds), `account_security::tests` (session list parse, logout body, overview booleans, 60003 recognised in 401 and 403), `account_panel::tests` (Confirm gating, one request in flight, MFA refusal shown and not retried, ambiguous failure text, stale answers), and the `main.rs` state-machine tests for switching (teardown before the next sign-in, saved login kept, memory-only refused).
+Manual (Windows, alt account only, not run offline):
+- [ ] With two saved accounts, open the padlock panel: both are listed by name; Switch signs the other in with no stale panels, drafts, voice or messages of the first; only one gateway runs.
+- [ ] Remove on the non-active account asks first, then the account is gone from the login screen and the native store.
+- [ ] Sessions list shows plausible platform, OS and last use; Log out of an older session asks first and removes only that row. Record whether Discord demands MFA/password (code 60003): the panel must show the refusal and "Confirm in the official client", with nothing retried.
+- [ ] Security shows MFA, email and phone flags matching the official client; "Open account settings" opens the browser.
+- [ ] Record the real route and field names of `GET /auth/sessions` and `POST /auth/sessions/logout` and correct docs/PROTOCOL.md.

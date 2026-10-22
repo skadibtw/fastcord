@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod account_panel;
+mod accounts;
 mod attachment_ui;
 mod attachments;
 mod audio_devices;
@@ -140,6 +142,8 @@ struct App {
     notice: Option<String>,
     store: Option<NativeCredentialStore>,
     saved_accounts: Vec<Snowflake>,
+    account_index: accounts::Index,
+    account_panel: account_panel::State,
     qr_attempts: u64,
     password_login: String,
     password: Arc<UserToken>,
@@ -246,6 +250,11 @@ enum Message {
     ContinueInMemory,
     CancelLogin,
     Logout,
+    Account(account_panel::Event),
+    /// Log out of this account locally (keeping its saved login) and sign in the other.
+    SwitchAccount(Snowflake),
+    AccountRemoved(Snowflake, Result<(), StoreError>),
+    AccountIndexSaved,
     Forget(Snowflake),
     RetryDelete,
     Deleted(Result<(), StoreError>),
@@ -413,6 +422,8 @@ impl App {
                 notice: None,
                 store: None,
                 saved_accounts: Vec::new(),
+                account_index: accounts::Index::default(),
+                account_panel: account_panel::State::default(),
                 qr_attempts: 0,
                 password_login: String::new(),
                 password: Arc::new(UserToken::new(String::new())),
@@ -1189,6 +1200,7 @@ impl App {
                     Ok(ready) => {
                         self.store = Some(ready.store);
                         self.saved_accounts = ready.accounts;
+                        self.account_index = ready.index;
                         if self.saved_accounts.len() == 1 {
                             return self.start_restore(self.saved_accounts[0]);
                         }
@@ -1212,8 +1224,13 @@ impl App {
                         {
                             self.saved_accounts.push(session.user.id);
                         }
+                        let mut index_task = Task::none();
+                        if persistence == Persistence::Saved {
+                            self.account_index.upsert(&session.user);
+                            index_task = self.save_account_index();
+                        }
                         self.notice = None;
-                        return self.enter_account(session, persistence);
+                        return Task::batch([index_task, self.enter_account(session, persistence)]);
                     }
                     Ok(LoginOutcome::NeedsMemoryConsent(session, error)) => {
                         self.phase = Phase::MemoryConsent { session, error };
@@ -2497,52 +2514,46 @@ impl App {
                 }
             }
             Message::Logout => {
-                self.switcher = switcher::State::default();
-                self.nav_pending = false;
-                if let Phase::Account { gateway, .. } = &mut self.phase {
-                    // Drafts live in memory only; logout forgets them at once.
-                    gateway.composer.clear();
-                }
-                self.pins = pins::State::default();
-                self.inbox.clear();
-                self.group.clear();
-                self.invite.clear();
-                self.guild_admin.clear();
-                self.discover.clear();
-                self.onboarding.clear();
-                self.events.clear();
-                self.identity.clear();
-                self.safety.clear();
-                self.report.clear();
-                self.gif = gif::State::default();
-                self.sticker = sticker::State::default();
-                self.soundboard.reset();
-                self.stage.reset();
-                self.forward = forward::State::default();
-                self.poll = poll_create::State::default();
-                self.voice.reset();
-                self.threads.drop_all();
-                self.forum.drop_all();
-                if let Phase::Account {
-                    session, gateway, ..
-                } = &self.phase
-                {
-                    let account = session.user.id;
-                    let cache = gateway.attachments.clone();
-                    session.client.stop_authenticated_work();
+                if let Some((account, cache)) = self.teardown_account() {
                     // Dropping the account phase aborts attachment workers before purge starts.
                     let delete = self.start_delete(account);
-                    return match cache {
-                        Some(cache) => Task::batch([
-                            delete,
-                            Task::perform(async move { cache.purge().await }, |result| {
-                                Message::AttachmentPurged(result.is_ok())
-                            }),
-                        ]),
-                        None => delete,
-                    };
+                    return Task::batch([delete, Self::purge_cache(cache)]);
                 }
             }
+            Message::SwitchAccount(target) => {
+                let Phase::Account {
+                    session,
+                    persistence,
+                    ..
+                } = &self.phase
+                else {
+                    return Task::none();
+                };
+                // A memory-only login would be lost, and the target must be saved.
+                if *persistence != Persistence::Saved
+                    || session.user.id == target
+                    || !self.saved_accounts.contains(&target)
+                    || self.store.is_none()
+                {
+                    return Task::none();
+                }
+                // Everything of the current account is gone (as for logout, but
+                // its saved login stays) before the other one starts signing in.
+                let cache = self.teardown_account().and_then(|(_, cache)| cache);
+                return Task::batch([self.start_restore(target), Self::purge_cache(cache)]);
+            }
+            Message::Account(event) => return self.account_event(event),
+            Message::AccountRemoved(account, result) => {
+                if result.is_ok() {
+                    self.saved_accounts.retain(|id| *id != account);
+                    self.account_index.remove(account);
+                    let _ = voice_settings::purge(account);
+                    return self.save_account_index();
+                }
+                self.account_panel
+                    .fail("The native store could not remove that saved login.");
+            }
+            Message::AccountIndexSaved => {}
             Message::Forget(account) if matches!(self.phase, Phase::Login) => {
                 return self.start_delete(account);
             }
@@ -2556,6 +2567,8 @@ impl App {
                     match result {
                         Ok(()) => {
                             self.saved_accounts.retain(|id| *id != account);
+                            self.account_index.remove(account);
+                            let index_task = self.save_account_index();
                             let purge_failed = self.attachment_purge_failed;
                             self.attachment_purge_failed = false;
                             self.reset_login();
@@ -2565,6 +2578,7 @@ impl App {
                             } else {
                                 "Logged out locally. The saved credential was removed and account state was cleared. Other Discord sessions were not revoked."
                             }.to_owned());
+                            return index_task;
                         }
                         Err(error) => {
                             self.phase = Phase::DeleteFailed { account, error };
@@ -2729,6 +2743,105 @@ impl App {
         self.notice = None;
     }
 
+    /// Stops and forgets everything of the active account (panels, drafts,
+    /// workers), the common part of logout and switching. Returns the account
+    /// and its attachment cache, which the caller purges.
+    fn teardown_account(
+        &mut self,
+    ) -> Option<(Snowflake, Option<crate::attachments::AttachmentCache>)> {
+        self.switcher = switcher::State::default();
+        self.nav_pending = false;
+        if let Phase::Account { gateway, .. } = &mut self.phase {
+            // Drafts live in memory only; logout forgets them at once.
+            gateway.composer.clear();
+        }
+        self.pins = pins::State::default();
+        self.inbox.clear();
+        self.group.clear();
+        self.invite.clear();
+        self.guild_admin.clear();
+        self.discover.clear();
+        self.onboarding.clear();
+        self.events.clear();
+        self.identity.clear();
+        self.safety.clear();
+        self.account_panel.clear();
+        self.report.clear();
+        self.gif = gif::State::default();
+        self.sticker = sticker::State::default();
+        self.soundboard.reset();
+        self.stage.reset();
+        self.forward = forward::State::default();
+        self.poll = poll_create::State::default();
+        self.voice.reset();
+        self.threads.drop_all();
+        self.forum.drop_all();
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return None;
+        };
+        session.client.stop_authenticated_work();
+        Some((session.user.id, gateway.attachments.clone()))
+    }
+
+    fn purge_cache(cache: Option<crate::attachments::AttachmentCache>) -> Task<Message> {
+        cache.map_or(Task::none(), |cache| {
+            Task::perform(async move { cache.purge().await }, |result| {
+                Message::AttachmentPurged(result.is_ok())
+            })
+        })
+    }
+
+    fn save_account_index(&self) -> Task<Message> {
+        let index = self.account_index.clone();
+        Task::perform(
+            async move {
+                let _ = tokio::task::spawn_blocking(move || accounts::save(&index)).await;
+            },
+            |()| Message::AccountIndexSaved,
+        )
+    }
+
+    fn account_event(&mut self, event: account_panel::Event) -> Task<Message> {
+        let Phase::Account { session, .. } = &self.phase else {
+            return Task::none();
+        };
+        let rejected = account_panel::State::is_rejected(&event);
+        let (task, action) = self.account_panel.update(event, &session.client);
+        if rejected && let Phase::Account { gateway, .. } = &self.phase {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        let task = task.map(Message::Account);
+        match action {
+            Some(account_panel::Action::Switch(id)) => {
+                Task::batch([task, self.handle(Message::SwitchAccount(id))])
+            }
+            Some(account_panel::Action::Remove(id)) => {
+                let store = self.store.clone();
+                Task::batch([
+                    task,
+                    Task::perform(login::delete_saved(store, id), move |result| {
+                        Message::AccountRemoved(id, result)
+                    }),
+                ])
+            }
+            Some(account_panel::Action::Logout) => {
+                Task::batch([task, self.handle(Message::Logout)])
+            }
+            Some(account_panel::Action::OpenWeb) => {
+                let _ = fastcord_platform::open_url(account_panel::SETTINGS_URL);
+                task
+            }
+            None => task,
+        }
+    }
+
     fn start_restore(&mut self, account: Snowflake) -> Task<Message> {
         let Some(store) = self.store.clone() else {
             self.notice = Some(LoginError::Store(StoreError::Unavailable).to_string());
@@ -2829,6 +2942,7 @@ impl App {
         self.events.clear();
         self.identity.clear();
         self.safety.clear();
+        self.account_panel.clear();
         self.report.clear();
         self.gif = gif::State::default();
         self.sticker = sticker::State::default();
@@ -4141,6 +4255,14 @@ impl App {
             if let Some(panel) = safety::view(&self.safety, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::Safety));
             }
+            if let Some(panel) = account_panel::view(
+                &self.account_panel,
+                &self.account_index,
+                session.user.id,
+                *persistence == Persistence::Saved,
+            ) {
+                banner_column = banner_column.push(panel.map(Message::Account));
+            }
             if let Some(panel) = report::view(&self.report, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::Report));
             }
@@ -4328,6 +4450,14 @@ impl App {
                             requests.try_into().unwrap_or(u32::MAX),
                         ),
                         action(
+                            icons::Icon::Lock,
+                            Some(Message::Account(account_panel::Event::Toggle)),
+                            self.account_panel.is_open(),
+                            false,
+                            "Accounts, security and log out",
+                            0,
+                        ),
+                        action(
                             icons::Icon::Audio,
                             Some(Message::OpenAudioSettings),
                             true,
@@ -4341,14 +4471,6 @@ impl App {
                             true,
                             false,
                             "Chat & accessibility settings",
-                            0,
-                        ),
-                        action(
-                            icons::Icon::Exit,
-                            Some(Message::Logout),
-                            false,
-                            false,
-                            "Log out",
                             0,
                         ),
                     ],
@@ -4560,8 +4682,13 @@ impl App {
         for account in &self.saved_accounts {
             content = content.push(
                 row![
-                    button(text(format!("Restore account {account}")))
-                        .on_press(Message::Restore(*account)),
+                    button(text(format!(
+                        "Restore {}",
+                        self.account_index
+                            .get(*account)
+                            .map_or_else(|| format!("account {account}"), accounts::Entry::label)
+                    )))
+                    .on_press(Message::Restore(*account)),
                     button("Forget saved login").on_press(Message::Forget(*account)),
                 ]
                 .spacing(12),
@@ -5350,6 +5477,50 @@ mod tests {
         assert!(matches!(app.phase, Phase::Deleting { .. }));
     }
 
+    #[tokio::test]
+    async fn switching_tears_down_the_account_before_the_other_one_signs_in() {
+        let Ok(store) = NativeCredentialStore::new() else {
+            return; // no native store on this machine
+        };
+        let mut app = login_app();
+        let session = authenticate(&mut app, Persistence::Saved);
+        let account = session.user.id;
+        let client = session.client.clone();
+        drop(session);
+        app.store = Some(store);
+        let other = Snowflake(42);
+        app.saved_accounts.push(other);
+        let (id, _) = gateway_status(&app);
+        // Switching to the active or an unsaved account does nothing.
+        let _ = app.update(Message::SwitchAccount(account));
+        let _ = app.update(Message::SwitchAccount(Snowflake(43)));
+        assert!(matches!(app.phase, Phase::Account { .. }));
+        let _ = app.update(Message::Account(account_panel::Event::Toggle));
+        assert!(app.account_panel.is_open());
+
+        let _ = app.update(Message::SwitchAccount(other));
+        // The old gateway and voice are gone, panels cleared, and the token
+        // of the old account has stopped working before the new login starts.
+        client.authentication_required().await;
+        assert!(
+            matches!(app.phase, Phase::Authenticating { saved_account: Some(a) } if a == other)
+        );
+        assert!(!app.account_panel.is_open());
+        let _ = app.update(Message::Gateway(id, GatewayStatus::Resuming));
+        assert!(matches!(app.phase, Phase::Authenticating { .. }));
+        // Unlike logout, the old account's saved login stays.
+        assert!(app.saved_accounts.contains(&account));
+    }
+
+    #[test]
+    fn a_memory_only_session_cannot_be_switched_away_from() {
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        app.saved_accounts.push(Snowflake(42));
+        let _ = app.update(Message::SwitchAccount(Snowflake(42)));
+        assert!(matches!(app.phase, Phase::Account { .. }));
+    }
+
     #[test]
     fn chords_open_overlays_and_escape_unwinds_them_before_cancelling_a_reply() {
         use switcher::Shortcut;
@@ -5856,10 +6027,10 @@ mod tests {
             "{idle:?}"
         );
         // The footer's own actions are there all along.
-        assert!(idle.contains("Logout"), "{idle:?}");
+        assert!(idle.contains("Account"), "{idle:?}");
         let _ = app.update(Message::JoinVoice(guild, voice));
         let joined = bottom(&app);
-        for name in ["OpenCall", "LeaveVoice", "ToggleVoiceDetails", "Logout"] {
+        for name in ["OpenCall", "LeaveVoice", "ToggleVoiceDetails", "Account"] {
             assert!(joined.contains(name), "{name}: {joined:?}");
         }
         // Mute and deafen stay in the account footer, not in the voice panel.

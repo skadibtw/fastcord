@@ -779,3 +779,14 @@ All routes below are user-client routes **not captured from an official client o
 - **Voice regions (unverified):** `GET /guilds/{guild}/regions` answers a list of `{id, name, optimal, deprecated, custom}`; deprecated and custom regions are dropped, at most 32 are kept.
 - **Gateway fields (unverified):** `GUILD_CREATE` and `GUILD_UPDATE` carry `description`, `features` (`COMMUNITY`), `system_channel_id`, `afk_channel_id`, `afk_timeout`, `default_message_notifications` and `explicit_content_filter`, at the top level or in `properties`; a `GUILD_UPDATE` without `features` keeps the held settings. Channels carry `topic`, `nsfw`, `rate_limit_per_user`, `bitrate`, `user_limit`, `rtc_region` and `video_quality_mode`.
 - **Not implemented:** toggling Community, billing, boosts, vanity URLs, monetization, paid media channels, roles and overwrites (#94).
+
+## Account sessions and security overview (issue #107)
+
+Implemented by `fastcord-discord::account_security` and the app's `account_panel`. All three routes are user-client routes from community documentation and **unverified** against a live account.
+
+- List: `GET /auth/sessions` -> `{"user_sessions":[{"id_hash", "approx_last_used_time", "client_info":{"os","platform","location"}}]}`. A row without `id_hash` is skipped; at most 50 rows and 64 characters per client-info field are kept.
+- Log out: `POST /auth/sessions/logout` with `{"session_id_hashes":["<hash from the list>"]}` (one hash per click), sent once after Confirm, never retried. Success is a 2xx; the row is then dropped locally (there is no Gateway event for it that this client relies on).
+- Re-authentication: Discord may answer 401 or 403 with `{"code":60003,"message":...,"mfa":{"ticket","methods"}}`. It is shown as a refusal (code and Discord's short message) with "Confirm in the official client". The ticket is neither read nor answered, and a 401 with 60003 does not stop the account.
+- Overview: `GET /users/@me` -> `mfa_enabled`, `verified` and whether `phone` is a string. The phone and email are never stored or shown by this panel.
+- Handoff only (not implemented): password change, enabling MFA, passkeys and account recovery; the panel opens `https://discord.com/settings/account` in the default browser.
+- Unverified: the exact route and field names, whether the logout needs MFA for every account, whether the current session can be told apart from the others (it cannot here), and whether Discord limits how many hashes one request may carry.

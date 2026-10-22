@@ -236,8 +236,9 @@ mod tests {
                 act(Icon::Headphones { deafened: true }, "deafen", true, 0),
                 act(Icon::Profile, "me", true, 0),
                 act(Icon::Safety, "safety", true, 12_345),
+                act(Icon::Lock, "accounts", true, 0),
                 act(Icon::Audio, "audio", true, 0),
-                act(Icon::Exit, "exit", true, 0),
+                act(Icon::Settings, "chat", true, 0),
             ],
         ))
         .padding(8)
@@ -254,7 +255,9 @@ mod tests {
                 hit.extend(ui.click(x as f32, y as f32));
             }
         }
-        for name in ["mute", "deafen", "me", "safety", "audio", "exit", "status"] {
+        for name in [
+            "mute", "deafen", "me", "safety", "accounts", "audio", "chat", "status",
+        ] {
             assert!(
                 hit.contains(name),
                 "{name} is not reachable inside {WIDTH}px"
