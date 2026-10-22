@@ -264,6 +264,8 @@ impl History {
             },
             poll_answer: Some(text),
             state: UsersState::Loading,
+            confirm: None,
+            busy: false,
         });
         let rest = rest.clone();
         let limit = u8::try_from(polls::MAX_VOTERS + 1).unwrap_or(u8::MAX);

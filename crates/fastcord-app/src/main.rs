@@ -38,6 +38,7 @@ mod media_ui;
 mod member_menu;
 mod message_link;
 mod mic_panel;
+mod moderation;
 mod navigation;
 mod notify;
 mod notify_settings;
@@ -239,6 +240,7 @@ struct App {
     invite: invite::State,
     guild_admin: guild_admin::State,
     announce: announce::State,
+    moderation: moderation::State,
     discover: discover::State,
     onboarding: onboarding::State,
     events: scheduled_events::State,
@@ -438,6 +440,7 @@ enum Message {
     Invite(invite::Event),
     GuildAdmin(guild_admin::Event),
     Announce(announce::Event),
+    Moderation(moderation::Event),
     Discover(discover::Event),
     Onboarding(onboarding::Event),
     Events(scheduled_events::Event),
@@ -547,6 +550,7 @@ impl App {
                 invite: invite::State::default(),
                 guild_admin: guild_admin::State::default(),
                 announce: announce::State::default(),
+                moderation: moderation::State::default(),
                 discover: discover::State::default(),
                 onboarding: onboarding::State::default(),
                 events: scheduled_events::State::default(),
@@ -623,9 +627,12 @@ impl App {
         if let Phase::Account { gateway, .. } = &self.phase {
             gateway.controls.quick_query(self.switcher.wanted());
             self.guild_admin.sync(&gateway.navigation);
-            gateway
-                .controls
-                .admin_guild(self.guild_admin.wanted().or(self.announce.wanted_guild()));
+            gateway.controls.admin_guild(
+                self.guild_admin
+                    .wanted()
+                    .or(self.announce.wanted_guild())
+                    .or(self.moderation.wanted()),
+            );
             gateway
                 .controls
                 .follow_source(self.announce.wanted_follow());
@@ -1727,6 +1734,7 @@ impl App {
                 }
                 return self.guild_admin_event(event);
             }
+            Message::Moderation(event) => return self.moderation_event(event),
             Message::Discover(event) => return self.discover_event(event),
             Message::Onboarding(event) => return self.onboarding_event(event),
             Message::Events(event) => return self.events_event(event),
@@ -2761,6 +2769,14 @@ impl App {
                         | timeline::Event::Delete { .. }
                         | timeline::Event::ConfirmDelete { .. }
                         | timeline::Event::CancelDelete
+                        | timeline::Event::SelectMode { .. }
+                        | timeline::Event::ToggleSelect { .. }
+                        | timeline::Event::AskBulkDelete { .. }
+                        | timeline::Event::CancelBulkDelete
+                        | timeline::Event::ConfirmBulkDelete { .. }
+                        | timeline::Event::AskReactionRemoval(_)
+                        | timeline::Event::CancelReactionRemoval
+                        | timeline::Event::ConfirmReactionRemoval
                         | timeline::Event::RetryChange { .. }
                         | timeline::Event::DismissChange { .. }
                         | timeline::Event::ToggleReaction { .. }
@@ -3111,6 +3127,7 @@ impl App {
         self.invite.clear();
         self.guild_admin.clear();
         self.announce.clear();
+        self.moderation.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -3291,6 +3308,7 @@ impl App {
         self.invite.clear();
         self.guild_admin.clear();
         self.announce.clear();
+        self.moderation.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -3375,6 +3393,24 @@ impl App {
                     gateway.controls.open_thread(guild, thread);
                 }
                 Task::none()
+            }
+            threads::Event::SetState {
+                thread,
+                archived,
+                locked,
+            } => {
+                // Checked against the current read model right before sending.
+                let allowed = gateway.navigation.selection.as_ref().is_some_and(|s| {
+                    s.channel_id == thread
+                        && s.permissions.manage_threads
+                        && s.thread.is_some_and(|t| {
+                            archived.is_none_or(|a| a != t.archived)
+                                && locked.is_none_or(|l| l != t.locked)
+                        })
+                });
+                self.threads
+                    .set_state((thread, archived, locked), allowed, &session.client)
+                    .map(Message::Threads)
             }
             threads::Event::Created(Ok(thread)) => {
                 self.threads.close();
@@ -3966,6 +4002,18 @@ impl App {
                 .update(event, &gateway.navigation, &session.client);
             return self.invite_event(invite::Event::AskLeave(guild));
         }
+        if let guild_admin::Event::Bans(guild) | guild_admin::Event::Audit(guild) = event {
+            // The menu hands over to the moderation panels.
+            let audit = matches!(event, guild_admin::Event::Audit(_));
+            let _ = self
+                .guild_admin
+                .update(event, &gateway.navigation, &session.client);
+            return self.moderation_event(if audit {
+                moderation::Event::Audit(guild)
+            } else {
+                moderation::Event::Bans(guild)
+            });
+        }
         let rejected = guild_admin::State::is_rejected(&event);
         let task = self
             .guild_admin
@@ -3978,6 +4026,27 @@ impl App {
             ));
         }
         task.map(Message::GuildAdmin)
+    }
+
+    fn moderation_event(&mut self, event: moderation::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = moderation::State::is_rejected(&event);
+        let task = self
+            .moderation
+            .update(event, &gateway.navigation, &session.client);
+        if rejected {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Moderation)
     }
 
     fn identity_event(&mut self, event: profile_edit::Event) -> Task<Message> {
@@ -4007,10 +4076,7 @@ impl App {
 
     fn member_menu_event(&mut self, event: member_menu::Event) -> Task<Message> {
         use member_menu::Event;
-        let Phase::Account {
-            gateway, session, ..
-        } = &self.phase
-        else {
+        let Phase::Account { gateway, .. } = &self.phase else {
             return Task::none();
         };
         match event {
@@ -4022,6 +4088,10 @@ impl App {
                         .then_some(gateway.navigation.selected_guild)
                         .flatten(),
                     confirm: None,
+                    sub: None,
+                    reason: String::new(),
+                    nick: String::new(),
+                    ban_window: 0,
                 });
                 self.member_menu.notice = None;
             }
@@ -4030,10 +4100,45 @@ impl App {
                 if self.member_menu.pending == Some(serial) {
                     self.member_menu.pending = None;
                     self.member_menu.notice =
-                        Some(result.map_or_else(friends::failure, |()| "Done.".into()));
+                        Some(result.map_or_else(moderation::failure, |()| "Done.".into()));
                     if let Some(target) = &mut self.member_menu.target {
                         target.confirm = None;
+                        target.sub = None;
+                        target.reason.clear();
                     }
+                }
+            }
+            Event::Sub(sub) => {
+                if let Some(target) = &mut self.member_menu.target {
+                    target.sub = sub;
+                    target.confirm = None;
+                    if sub == Some(member_menu::Sub::Nick) {
+                        // Start from the nickname the member shows now.
+                        target.nick = gateway
+                            .navigation
+                            .members
+                            .get(&target.user.id)
+                            .and_then(|m| m.nick.clone())
+                            .unwrap_or_default();
+                    }
+                }
+            }
+            Event::Reason(text) => {
+                if let Some(target) = &mut self.member_menu.target {
+                    target.reason = fastcord_discord::cut_reason(text);
+                }
+            }
+            Event::Nick(text) => {
+                if let Some(target) = &mut self.member_menu.target {
+                    target.nick = text
+                        .chars()
+                        .take(fastcord_discord::MAX_NICK_CHARS)
+                        .collect();
+                }
+            }
+            Event::BanWindow(seconds) => {
+                if let Some(target) = &mut self.member_menu.target {
+                    target.ban_window = seconds;
                 }
             }
             Event::Select(action) => {
@@ -4043,12 +4148,7 @@ impl App {
                 let Some(target) = &mut self.member_menu.target else {
                     return Task::none();
                 };
-                if matches!(
-                    action,
-                    fastcord_discord::MemberAction::Kick
-                        | fastcord_discord::MemberAction::Ban
-                        | fastcord_discord::MemberAction::Disconnect
-                ) {
+                if action.needs_confirm() {
                     target.confirm = Some(action);
                     return Task::none();
                 }
@@ -4059,18 +4159,17 @@ impl App {
                     .member_menu
                     .target
                     .as_ref()
-                    .and_then(|target| target.confirm)
+                    .and_then(|target| target.confirm.clone())
                 {
                     return self.begin_member_action(action);
                 }
             }
         }
-        // The menu never loads a profile merely by opening; it stays local.
-        let _ = session;
         Task::none()
     }
 
     fn begin_member_action(&mut self, action: fastcord_discord::MemberAction) -> Task<Message> {
+        use fastcord_discord::MemberAction;
         let Phase::Account {
             gateway, session, ..
         } = &self.phase
@@ -4089,23 +4188,38 @@ impl App {
         if self.member_menu.pending.is_some() || session.client.writes_restricted() {
             return Task::none();
         }
-        if !gateway
+        let own = gateway
+            .navigation
+            .current_user
+            .as_ref()
+            .is_some_and(|me| me.id == target.user.id);
+        let allowed = gateway
             .navigation
             .members
             .get(&target.user.id)
-            .is_some_and(|member| member.moderation.allows(action))
-        {
+            .is_some_and(|member| member.moderation.allows(&action))
+            && match &action {
+                MemberAction::OwnNick(_) => own,
+                MemberAction::Move(dest) => gateway
+                    .navigation
+                    .move_targets
+                    .iter()
+                    .any(|(id, _)| id == dest),
+                _ => !own,
+            };
+        if !allowed {
             self.member_menu.notice =
                 Some("This action is no longer available for this member.".into());
             return Task::none();
         }
+        let reason = Some(target.reason.trim().to_owned()).filter(|r| !r.is_empty());
         let (bridge, user) = (gateway.controls.clone(), target.user.id);
         self.member_menu.serial = self.member_menu.serial.wrapping_add(1);
         let serial = self.member_menu.serial;
         self.member_menu.pending = Some(serial);
         self.member_menu.notice = None;
         Task::perform(
-            async move { bridge.moderate(guild, user, action).await },
+            async move { bridge.moderate(guild, user, action, reason).await },
             move |result| Message::MemberMenu(member_menu::Event::Done(serial, result)),
         )
     }
@@ -4774,6 +4888,9 @@ impl App {
             }
             if let Some(panel) = announce::view(&self.announce, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::Announce));
+            }
+            if let Some(panel) = moderation::view(&self.moderation, &gateway.navigation) {
+                banner_column = banner_column.push(panel.map(Message::Moderation));
             }
             if let Some(panel) = invite::view(&self.invite, localtime::now()) {
                 banner_column = banner_column.push(panel.map(Message::Invite));

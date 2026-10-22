@@ -462,6 +462,10 @@ pub struct NavigationSnapshot {
     pub members: std::collections::HashMap<Snowflake, MemberView>,
     /// The selected guild's roles, highest first, without `@everyone`.
     pub guild_roles: Vec<(Snowflake, String)>,
+    /// Voice and Stage channels of the selected guild the account can connect
+    /// to, by name (at most [`MAX_WINDOW_ROWS`]): where a member in
+    /// voice may be moved. The reducer checks the member again when it moves.
+    pub move_targets: Vec<(Snowflake, String)>,
     pub selection: Option<ChannelSelection>,
     /// The selected channel, when it is a forum or media channel.
     pub forum: Option<ForumView>,
@@ -1173,6 +1177,20 @@ impl Navigation {
                         .take(MAX_SNAPSHOT_ROLES)
                         .map(|role| (role.id, capped_name(Some(&role.name), "Role")))
                         .collect()
+                })
+                .unwrap_or_default(),
+            move_targets: selected_guild
+                .and_then(|id| store.guild(id))
+                .and_then(|guild| {
+                    let context = PermissionContext::new(store, guild)?;
+                    let mut targets: Vec<_> = guild
+                        .channels()
+                        .filter(|c| c.kind.is_voice() && context.permissions(guild, c).connect)
+                        .map(|c| (c.id, capped_name(c.name.as_deref(), "Voice channel")))
+                        .collect();
+                    targets.sort_by_cached_key(|(id, name)| (name.to_lowercase(), *id));
+                    targets.truncate(MAX_WINDOW_ROWS);
+                    Some(targets)
                 })
                 .unwrap_or_default(),
             own_nick: selected_guild

@@ -772,3 +772,15 @@ Manual (Windows, alt account only, not run offline):
   - [ ] `fastcord.exe discord://-/channels/{g}/{c}/{m}`, the https form and a pasted link in Ctrl+K open the right conversation/message; an invite link shows the invite and joins only on Join.
   - [ ] Compact call mode stays above a full-screen-windowed app, shows speaking rings for another account, and ends when the call ends.
   - [ ] Linux and macOS report the tray and autostart as unsupported instead of failing silently.
+
+### Manual moderation and audit log (#95)
+
+- **Automated:** `fastcord-discord` `member::tests` (bodies and routes of every action, presets, reducer permissions, hierarchy, administrator and timed-out cases, move destinations, own versus other nickname), `moderation::tests` (ban and audit parsing from `fixtures/rest/guild-bans.json` and `audit-log.json`, bulk limits with an injected clock, filters), `rest::tests` (reason header), `reaction::tests`, `fastcord-app` `history::tests` (delete others, select mode, 100/14-day limits, confirm, failures, reaction removal), `moderation::tests` (panel state machines, stale answers, 403/404/429/2FA text) and `threads::tests`.
+- **Outstanding gates (alt account only, unchecked, unverified routes):**
+  - [ ] Timeout a member for each duration and remove it; the member list and a second client show it; an administrator is not offered; the reason appears in the audit log.
+  - [ ] Change own nickname and another member nickname, reset both; a member above the account is refused with a clear message.
+  - [ ] Ban with each delete window; the Bans list shows the user with the reason; Unban with Confirm; a second Unban reads as not banned.
+  - [ ] Move a member in voice to another channel; a channel the member cannot connect to is not offered.
+  - [ ] Delete another user message; select 2+ messages and bulk delete; a 14-day-old message cannot be ticked; remove one reaction and clear an emoji; confirm the exact routes (typed `/0/{user}` form for reactions) against the official client.
+  - [ ] Archive, lock, unlock and unarchive a thread; the header and the other client follow `THREAD_UPDATE`.
+  - [ ] Audit log: pages, filters by action and user, unknown action numbers, reasons and change summaries; a two-factor demand is shown and not answered.

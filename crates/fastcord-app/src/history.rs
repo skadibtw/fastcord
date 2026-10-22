@@ -9,6 +9,7 @@
 //! what a possibly stale UI showed.
 mod embeds;
 mod interact;
+mod moderation;
 mod poll;
 
 use std::collections::{HashMap, VecDeque};
@@ -34,12 +35,15 @@ use iced::futures::stream::FuturesUnordered;
 use self::embeds::EmbedsDone;
 use self::interact::InteractionEvent;
 pub use self::interact::InteractionView;
+use self::moderation::{ModDone, Selection};
 use self::poll::PollDone;
 use crate::changes::{self, ChangeKind, ChangeRequest, Changes};
 use crate::outbox::{Finished, MAX_REPLY_AUTHOR_CHARS, OpId, Outbox, Reply, SendFailure, Slots};
 use crate::polls::Polls;
 use crate::reactions::{self, Action, Reactions};
-use crate::timeline::{ReactionUsers, ReplyLine, ReplyState, Row, Snapshot, UsersState};
+use crate::timeline::{
+    ReactionTarget, ReactionUsers, ReplyLine, ReplyState, Row, Snapshot, UsersState,
+};
 use crate::variable_list::{Item, Measurement, VariableList, Viewport};
 
 /// Message bodies one snapshot may hold. Together with the latest slot and the
@@ -74,6 +78,7 @@ type AckFuture =
     Pin<Box<dyn Future<Output = (Snowflake, Snowflake, Result<(), RestError>)> + Send>>;
 type ReactionFuture = Pin<Box<dyn Future<Output = ReactionDone> + Send>>;
 type InteractionFuture = Pin<Box<dyn Future<Output = InteractionEvent> + Send>>;
+type ModFuture = Pin<Box<dyn Future<Output = ModDone> + Send>>;
 type PollFuture = Pin<Box<dyn Future<Output = PollDone> + Send>>;
 type EmbedFuture = Pin<Box<dyn Future<Output = EmbedsDone> + Send>>;
 type UsersFuture =
@@ -143,6 +148,10 @@ struct Inspection {
     /// For a poll answer's voters: the answer's text.
     poll_answer: Option<String>,
     state: UsersState,
+    /// A moderator's removal waiting for its Confirm.
+    confirm: Option<ReactionTarget>,
+    /// The removal in flight.
+    busy: bool,
 }
 
 /// A finished request of the worker: a history page, a reply preview, a send,
@@ -157,6 +166,7 @@ pub enum Completed {
     Reaction(ReactionDone),
     ReactionUsers(u64, Result<Vec<ReactionUser>, RestError>),
     Poll(PollDone),
+    Moderation(ModDone),
     Embeds(EmbedsDone),
     Interaction(InteractionEvent),
 }
@@ -288,6 +298,14 @@ pub struct History {
     inspection: Option<Inspection>,
     users_pending: Option<UsersFuture>,
     inspections: u64,
+    /// The open channel when the user has Manage Messages in it.
+    moderable: Option<Snowflake>,
+    /// The "Select messages" mode of the open channel.
+    selection: Option<Selection>,
+    mod_requests: FuturesUnordered<ModFuture>,
+    /// The clock bulk deletion judges message age by (Unix ms); `None` is the
+    /// system clock.
+    clock: Option<fn() -> u64>,
 }
 
 impl History {
@@ -327,6 +345,7 @@ impl History {
         self.highlight = None;
         self.inspection = None;
         self.users_pending = None;
+        self.selection = None;
         // Ephemeral messages and forms belong to the conversation they were
         // shown in: leaving it purges them with the rest of the store.
         self.modal = None;
@@ -425,11 +444,13 @@ impl History {
                 self.dirty |= self
                     .changes
                     .observed_delete(deleted.channel_id, std::slice::from_ref(&deleted.id));
+                self.deselect(std::slice::from_ref(&deleted.id));
             }
             Dispatch::MessageDeleteBulk(deleted) => {
                 self.dirty |= self
                     .changes
                     .observed_delete(deleted.channel_id, &deleted.ids);
+                self.deselect(&deleted.ids);
             }
             _ => {}
         }
@@ -630,11 +651,12 @@ impl History {
         }
     }
 
-    /// The user's explicit, confirmed deletion of one of their messages.
+    /// The user's explicit, confirmed deletion of one of their messages, or of
+    /// anyone's where they have Manage Messages.
     pub fn delete_message(&mut self, rest: &RestClient, channel: Snowflake, message: Snowflake) {
         self.dirty = true;
         self.notice = None;
-        if let Err(notice) = self.changeable(channel, message) {
+        if let Err(notice) = self.deletable(channel, message) {
             self.notice = Some(notice);
             return;
         }
@@ -652,7 +674,16 @@ impl History {
     pub fn retry_change(&mut self, rest: &RestClient, channel: Snowflake, message: Snowflake) {
         self.dirty = true;
         self.notice = None;
-        if let Err(notice) = self.changeable(channel, message) {
+        let deleting = self
+            .changes
+            .of(channel, message)
+            .is_some_and(|change| change.kind == ChangeKind::Delete);
+        let allowed = if deleting {
+            self.deletable(channel, message)
+        } else {
+            self.changeable(channel, message)
+        };
+        if let Err(notice) = allowed {
             self.notice = Some(notice);
             return;
         }
@@ -840,6 +871,8 @@ impl History {
             emoji,
             poll_answer: None,
             state: UsersState::Loading,
+            confirm: None,
+            busy: false,
         });
         let rest = rest.clone();
         // One more than is shown says whether Discord has more.
@@ -881,6 +914,7 @@ impl History {
                 let more = users.len() > reactions::MAX_USERS;
                 users.truncate(reactions::MAX_USERS);
                 inspection.state = UsersState::Loaded {
+                    ids: users.iter().map(|user| user.id).collect(),
                     names: users.into_iter().map(|user| user.name).collect(),
                     more,
                 };
@@ -1248,6 +1282,12 @@ impl History {
                     .filter(|selection| Some(selection.channel_id) == selected)
                     .map(|selection| selection.channel_id)
             });
+        self.moderable = guild_selection
+            .filter(|selection| {
+                Some(selection.channel_id) == selected && selection.permissions.manage_messages
+            })
+            .map(|selection| selection.channel_id);
+        self.prune_selection();
         if selected != self.channel {
             // Revisits fetch a fresh page instead of keeping hidden histories.
             self.reset();
@@ -1578,6 +1618,12 @@ impl History {
                 None => std::future::pending().await,
             }
         };
+        let moderation = async {
+            match self.mod_requests.next().await {
+                Some(done) => done,
+                None => std::future::pending().await,
+            }
+        };
         let users = async {
             match &mut self.users_pending {
                 Some(future) => future.await,
@@ -1592,6 +1638,7 @@ impl History {
             done = change => Completed::Change(done),
             done = reaction => Completed::Reaction(done),
             done = poll => Completed::Poll(done),
+            done = moderation => Completed::Moderation(done),
             done = embeds => Completed::Embeds(done),
             done = interaction => Completed::Interaction(done),
             (serial, result) = users => Completed::ReactionUsers(serial, result),
@@ -1611,6 +1658,7 @@ impl History {
             Completed::Reaction(done) => self.finish_reaction(done),
             Completed::ReactionUsers(serial, result) => self.finish_reaction_users(serial, result),
             Completed::Poll(done) => self.finish_poll(done),
+            Completed::Moderation(done) => self.finish_moderation(done),
             Completed::Interaction(done) => self.finish_interaction(done),
             Completed::Embeds(done) => self.finish_embeds(done),
         }
@@ -1933,7 +1981,12 @@ impl History {
                 emoji: inspection.emoji.clone(),
                 poll_answer: inspection.poll_answer.clone(),
                 state: inspection.state.clone(),
+                can_moderate: self.moderable == Some(inspection.channel),
+                confirm: inspection.confirm,
+                busy: inspection.busy,
             }),
+            select: self.select_view(channel),
+            can_moderate: self.moderable == Some(channel),
         }
     }
 }
@@ -3877,7 +3930,8 @@ mod tests {
             Completed::ReactionUsers(serial, Ok(people(reactions::MAX_USERS + 1)))
         ));
         assert!(history.users_pending.is_none());
-        let UsersState::Loaded { names, more } = history.snapshot().reaction_users.unwrap().state
+        let UsersState::Loaded { names, more, .. } =
+            history.snapshot().reaction_users.unwrap().state
         else {
             panic!("loaded");
         };
@@ -3899,6 +3953,7 @@ mod tests {
             history.snapshot().reaction_users.unwrap().state,
             UsersState::Loaded {
                 names: vec!["person 0".to_owned(), "person 1".to_owned()],
+                ids: vec![Snowflake(1_000), Snowflake(1_001)],
                 more: false
             }
         );
@@ -4262,7 +4317,8 @@ mod tests {
             &rest,
             Completed::ReactionUsers(second, Ok(people(polls::MAX_VOTERS + 1))),
         );
-        let UsersState::Loaded { names, more } = history.snapshot().reaction_users.unwrap().state
+        let UsersState::Loaded { names, more, .. } =
+            history.snapshot().reaction_users.unwrap().state
         else {
             panic!("not loaded");
         };
@@ -4817,5 +4873,320 @@ mod tests {
         })));
         assert_eq!(history.session.as_deref(), Some("second-session"));
         assert!(history.interactions.last_nonce().is_none());
+    }
+
+    // ----- moderation (issue #95) -----
+
+    use super::moderation::{ModKind, NO_MODERATION};
+    use fastcord_discord::{BulkError, BulkRequestError};
+
+    fn navigation_moderating(manage: bool) -> NavigationSnapshot {
+        let mut navigation = navigation_reacting(true);
+        navigation
+            .selection
+            .as_mut()
+            .unwrap()
+            .permissions
+            .manage_messages = manage;
+        navigation
+    }
+
+    /// A moderator's open channel. The fixtures' ids date from the Discord
+    /// epoch; the injected clock sits one hour after it.
+    fn moderating_history() -> History {
+        let mut history = sending_history();
+        history.clock = Some(|| fastcord_model::DISCORD_EPOCH_MS + 3_600_000);
+        history.refresh(&rest(), &navigation_moderating(true), &Request::default());
+        history
+    }
+
+    fn take_mods(history: &mut History) -> usize {
+        std::mem::take(&mut history.mod_requests).len()
+    }
+
+    fn bulk_done(result: Result<(), BulkRequestError>) -> Completed {
+        Completed::Moderation(ModDone {
+            kind: ModKind::Bulk(CHANNEL),
+            result,
+        })
+    }
+
+    #[test]
+    fn manage_messages_deletes_other_peoples_messages_and_nothing_else_does() {
+        let rest = rest();
+        let mut history = moderating_history();
+        let theirs = Snowflake(NEWEST);
+        assert!(!row_of(&mut history, theirs).own);
+        history.refresh(&rest, &navigation_moderating(true), &Request::default());
+        history.delete_message(&rest, CHANNEL, theirs);
+        assert_eq!(history.snapshot().notice, None);
+        assert_eq!(take_changes(&mut history), 1);
+        // Without the permission the same click is refused.
+        history.refresh(&rest, &navigation_moderating(false), &Request::default());
+        history.delete_message(&rest, CHANNEL, Snowflake(NEWEST - 1));
+        assert_eq!(history.snapshot().notice, Some(NOT_OWN));
+        assert_eq!(take_changes(&mut history), 0);
+        // A failed deletion is retried only where the permission still holds.
+        history.refresh(&rest, &navigation_moderating(true), &Request::default());
+        history.complete(
+            &rest,
+            answered(
+                theirs,
+                ChangeResult::Deleted(Err(RestError::PermissionDenied)),
+            ),
+        );
+        history.refresh(&rest, &navigation_moderating(false), &Request::default());
+        history.retry_change(&rest, CHANNEL, theirs);
+        assert_eq!(history.snapshot().notice, Some(NOT_OWN));
+        assert_eq!(take_changes(&mut history), 0);
+    }
+
+    #[test]
+    fn a_bulk_deletion_needs_the_selection_and_a_confirm_and_is_sent_once() {
+        let rest = rest();
+        let mut history = moderating_history();
+        let ids: Vec<Snowflake> = (0..3).map(|n| Snowflake(NEWEST - n)).collect();
+        // Not in select mode: ticking does nothing.
+        history.toggle_selected(CHANNEL, ids[0]);
+        assert!(history.snapshot().select.is_none());
+        history.select_messages(CHANNEL, true);
+        for id in &ids {
+            history.toggle_selected(CHANNEL, *id);
+        }
+        assert_eq!(history.snapshot().select.unwrap().ids.len(), 3);
+        history.toggle_selected(CHANNEL, ids[0]);
+        assert_eq!(history.snapshot().select.unwrap().ids.len(), 2);
+        // One message is not a bulk deletion.
+        history.toggle_selected(CHANNEL, ids[1]);
+        history.ask_bulk_delete(CHANNEL);
+        assert_eq!(
+            history.snapshot().notice,
+            Some("Select at least 2 messages.")
+        );
+        history.toggle_selected(CHANNEL, ids[1]);
+        // Delete only asks; nothing is sent before Confirm, and Cancel backs out.
+        history.ask_bulk_delete(CHANNEL);
+        assert!(history.snapshot().select.unwrap().confirming);
+        history.cancel_bulk_delete();
+        assert!(!history.snapshot().select.unwrap().confirming);
+        history.confirm_bulk_delete(&rest, CHANNEL);
+        assert_eq!(
+            take_mods(&mut history),
+            0,
+            "Confirm without Delete sends nothing"
+        );
+        history.ask_bulk_delete(CHANNEL);
+        history.confirm_bulk_delete(&rest, CHANNEL);
+        assert!(history.snapshot().select.unwrap().busy);
+        // While it is out nothing more can be asked or sent.
+        history.ask_bulk_delete(CHANNEL);
+        history.confirm_bulk_delete(&rest, CHANNEL);
+        history.toggle_selected(CHANNEL, ids[2]);
+        assert_eq!(take_mods(&mut history), 1, "one request");
+        assert_eq!(history.snapshot().select.unwrap().ids.len(), 2);
+        // Discord accepted: the mode ends; the rows go with the Gateway events.
+        assert!(!history.complete(&rest, bulk_done(Ok(()))));
+        assert!(history.snapshot().select.is_none());
+        assert!(history.store.get(CHANNEL, ids[1]).is_some());
+    }
+
+    #[test]
+    fn a_selection_holds_at_most_100_young_loaded_messages() {
+        let mut history = moderating_history();
+        for n in 1..=60 {
+            history.apply(&Dispatch::MessageCreate(Box::new(message(NEWEST + n))));
+        }
+        history.select_messages(CHANNEL, true);
+        let all: Vec<Snowflake> = history.store.ids(CHANNEL).collect();
+        assert!(all.len() > 100);
+        for id in all.iter().take(100) {
+            history.toggle_selected(CHANNEL, *id);
+        }
+        assert_eq!(history.snapshot().select.unwrap().ids.len(), 100);
+        history.toggle_selected(CHANNEL, all[100]);
+        assert_eq!(
+            history.snapshot().notice,
+            Some("At most 100 messages can be deleted at once.")
+        );
+        assert_eq!(history.snapshot().select.unwrap().ids.len(), 100);
+        // Not loaded: refused.
+        history.toggle_selected(CHANNEL, Snowflake(3));
+        assert_eq!(history.snapshot().notice, Some(NOT_LOADED));
+        // Messages 14 days old or older cannot be ticked.
+        let mut late = moderating_history();
+        late.clock = Some(|| fastcord_model::DISCORD_EPOCH_MS + 15 * 86_400_000);
+        late.select_messages(CHANNEL, true);
+        late.toggle_selected(CHANNEL, Snowflake(NEWEST));
+        assert_eq!(
+            late.snapshot().notice,
+            Some("Messages 14 days old or older cannot be deleted in bulk.")
+        );
+        assert!(late.snapshot().select.unwrap().ids.is_empty());
+    }
+
+    #[test]
+    fn age_is_checked_again_when_confirmed_and_failures_keep_the_selection() {
+        let rest = rest();
+        let mut history = moderating_history();
+        history.select_messages(CHANNEL, true);
+        for n in 0..2 {
+            history.toggle_selected(CHANNEL, Snowflake(NEWEST - n));
+        }
+        history.ask_bulk_delete(CHANNEL);
+        // Time passed while the Confirm was showing: the messages are too old now.
+        history.clock = Some(|| fastcord_model::DISCORD_EPOCH_MS + 15 * 86_400_000);
+        history.confirm_bulk_delete(&rest, CHANNEL);
+        assert_eq!(take_mods(&mut history), 0);
+        assert!(history.snapshot().notice.unwrap().contains("14 days"));
+        history.clock = Some(|| fastcord_model::DISCORD_EPOCH_MS + 3_600_000);
+        history.ask_bulk_delete(CHANNEL);
+        history.confirm_bulk_delete(&rest, CHANNEL);
+        assert_eq!(take_mods(&mut history), 1);
+        for (error, text) in [
+            (RestError::PermissionDenied, "Manage Messages"),
+            (
+                RestError::Retryable(fastcord_discord::RetryableFailure::Network(
+                    NetworkFailure::Timeout,
+                )),
+                "may have been applied",
+            ),
+            (RestError::InvalidRateLimit, "rate limiting"),
+        ] {
+            assert!(!history.complete(&rest, bulk_done(Err(BulkRequestError::Rest(error)))));
+            let view = history.snapshot().select.unwrap();
+            assert!(!view.busy && view.ids.len() == 2, "{error:?}");
+            assert!(history.snapshot().notice.unwrap().contains(text));
+        }
+        assert!(history.complete(
+            &rest,
+            bulk_done(Err(BulkRequestError::Rest(
+                RestError::AuthenticationRequired
+            )))
+        ));
+        assert!(!history.complete(
+            &rest,
+            bulk_done(Err(BulkRequestError::Invalid(BulkError::TooOld)))
+        ));
+    }
+
+    #[test]
+    fn select_mode_needs_manage_messages_and_follows_the_gateway_and_the_permission() {
+        let rest = rest();
+        let mut history = sending_history();
+        history.clock = Some(|| fastcord_model::DISCORD_EPOCH_MS + 3_600_000);
+        history.refresh(&rest, &navigation_moderating(false), &Request::default());
+        history.select_messages(CHANNEL, true);
+        assert!(history.snapshot().select.is_none());
+        assert_eq!(history.snapshot().notice, Some(NO_MODERATION));
+        history.refresh(&rest, &navigation_moderating(true), &Request::default());
+        history.select_messages(CHANNEL, true);
+        history.toggle_selected(CHANNEL, Snowflake(NEWEST));
+        history.toggle_selected(CHANNEL, Snowflake(NEWEST - 1));
+        // Discord reports one of them deleted: it leaves the selection.
+        history.apply(&Dispatch::MessageDeleteBulk(MessageDeleteBulk {
+            ids: vec![Snowflake(NEWEST)],
+            channel_id: CHANNEL,
+            guild_id: None,
+        }));
+        assert_eq!(history.snapshot().select.unwrap().ids.len(), 1);
+        // Losing the permission ends the mode.
+        history.refresh(&rest, &navigation_moderating(false), &Request::default());
+        assert!(history.snapshot().select.is_none());
+    }
+
+    fn moderating_reactions() -> (History, Snowflake, u64) {
+        let rest = rest();
+        let (mut history, id) = reacting_history();
+        history.refresh(&rest, &navigation_moderating(true), &Request::default());
+        history.reaction_users(&rest, CHANNEL, id, emoji(THUMBS));
+        let serial = history.inspection.as_ref().unwrap().serial;
+        history.complete(&rest, Completed::ReactionUsers(serial, Ok(people(3))));
+        (history, id, serial)
+    }
+
+    fn reaction_done(
+        serial: u64,
+        target: ReactionTarget,
+        result: Result<(), RestError>,
+    ) -> Completed {
+        Completed::Moderation(ModDone {
+            kind: ModKind::Reaction(serial, target),
+            result: result.map_err(BulkRequestError::Rest),
+        })
+    }
+
+    #[test]
+    fn a_moderator_removes_one_reaction_or_clears_an_emoji_after_a_confirm() {
+        let rest = rest();
+        let (mut history, _, serial) = moderating_reactions();
+        let shown = history.snapshot().reaction_users.unwrap();
+        assert!(shown.can_moderate && shown.confirm.is_none());
+        let user = ReactionTarget::User(Snowflake(1_001));
+        // Ask only asks; someone who is not listed cannot be asked about.
+        history.ask_reaction_removal(ReactionTarget::User(Snowflake(5)));
+        assert!(history.snapshot().reaction_users.unwrap().confirm.is_none());
+        history.confirm_reaction_removal(&rest);
+        history.ask_reaction_removal(user);
+        assert_eq!(
+            history.snapshot().reaction_users.unwrap().confirm,
+            Some(user)
+        );
+        assert_eq!(take_mods(&mut history), 0, "nothing before Confirm");
+        history.cancel_reaction_removal();
+        assert!(history.snapshot().reaction_users.unwrap().confirm.is_none());
+        history.ask_reaction_removal(user);
+        history.confirm_reaction_removal(&rest);
+        assert!(history.snapshot().reaction_users.unwrap().busy);
+        history.ask_reaction_removal(user);
+        history.confirm_reaction_removal(&rest);
+        assert_eq!(take_mods(&mut history), 1, "one request");
+        // The listed user goes once Discord accepted it.
+        history.complete(&rest, reaction_done(serial, user, Ok(())));
+        let UsersState::Loaded { names, ids, .. } =
+            history.snapshot().reaction_users.unwrap().state
+        else {
+            panic!("loaded");
+        };
+        assert_eq!((names.len(), ids.contains(&Snowflake(1_001))), (2, false));
+        // Clearing the emoji closes the list.
+        history.ask_reaction_removal(ReactionTarget::All);
+        history.confirm_reaction_removal(&rest);
+        assert_eq!(take_mods(&mut history), 1);
+        history.complete(&rest, reaction_done(serial, ReactionTarget::All, Ok(())));
+        assert!(history.snapshot().reaction_users.is_none());
+    }
+
+    #[test]
+    fn reaction_removal_needs_the_permission_and_failures_leave_the_list() {
+        let rest = rest();
+        let (mut history, _, serial) = moderating_reactions();
+        let user = ReactionTarget::User(Snowflake(1_000));
+        history.ask_reaction_removal(user);
+        history.confirm_reaction_removal(&rest);
+        assert_eq!(take_mods(&mut history), 1);
+        let failed = reaction_done(serial, user, Err(RestError::PermissionDenied));
+        assert!(!history.complete(&rest, failed));
+        let shown = history.snapshot().reaction_users.unwrap();
+        assert!(!shown.busy && shown.confirm.is_none());
+        assert!(
+            history
+                .snapshot()
+                .notice
+                .unwrap()
+                .contains("Manage Messages")
+        );
+        assert!(matches!(shown.state, UsersState::Loaded { ref ids, .. } if ids.len() == 3));
+        // An answer for a list since replaced changes nothing.
+        let stale = reaction_done(serial + 7, user, Ok(()));
+        assert!(!history.complete(&rest, stale));
+        // Without Manage Messages nothing can be asked.
+        history.refresh(&rest, &navigation_moderating(false), &Request::default());
+        assert!(!history.snapshot().reaction_users.unwrap().can_moderate);
+        history.ask_reaction_removal(user);
+        assert_eq!(history.snapshot().notice, Some(NO_MODERATION));
+        history.confirm_reaction_removal(&rest);
+        assert_eq!(take_mods(&mut history), 0);
+        // A poll voters list is never a moderation list.
+        assert!(history.inspection.as_ref().unwrap().poll_answer.is_none());
     }
 }

@@ -136,6 +136,9 @@ pub enum Event {
     /// "Followed announcements" of a text channel: server and channel. The
     /// caller opens the list (`announce`); the panel stays as it is.
     Followed(Snowflake, Snowflake),
+    /// The menu's "Bans" and "Audit log": the moderation module shows them.
+    Bans(Snowflake),
+    Audit(Snowflake),
     Close,
     Input(Field, String),
     Choose(Choice),
@@ -565,7 +568,7 @@ impl State {
             }
             Event::Followed(..) => {}
             // Forwarded by the caller; the menu closes with it.
-            Event::Leave(_) => {
+            Event::Leave(_) | Event::Bans(_) | Event::Audit(_) => {
                 if self.busy.is_none() {
                     self.panel = None;
                 }
@@ -1566,6 +1569,18 @@ fn menu_view<'a>(
             .push(
                 button(text("Roles").size(13)).on_press_maybe(
                     (idle && admin.can_manage_roles).then_some(Event::Roles(guild)),
+                ),
+            )
+            .push(
+                button(text("Bans").size(13)).on_press_maybe(
+                    (idle && admin.mine.contains(Permissions::BAN_MEMBERS))
+                        .then_some(Event::Bans(guild)),
+                ),
+            )
+            .push(
+                button(text("Audit log").size(13)).on_press_maybe(
+                    (idle && admin.mine.contains(Permissions::VIEW_AUDIT_LOG))
+                        .then_some(Event::Audit(guild)),
                 ),
             );
     }

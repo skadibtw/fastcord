@@ -29,6 +29,7 @@ mod interaction;
 mod invite;
 mod member;
 pub mod message_store;
+mod moderation;
 mod onboarding;
 mod password_auth;
 mod pins;
@@ -97,7 +98,11 @@ pub use invite::{
     Invite, InviteScope, MAX_CODES_PER_MESSAGE, MAX_LISTED, ManagedInvite, created_code,
     extract_codes, owner_cannot_leave,
 };
-pub use member::{MemberAction, MemberPermissions};
+pub use member::{BAN_DELETE, MemberAction, MemberPermissions, TIMEOUTS};
+pub use moderation::{
+    AUDIT_FILTERS, AUDIT_PAGE, AuditEntry, AuditPage, AuditQuery, BANS_PAGE, BULK_MAX, BULK_MIN,
+    BanEntry, BansPage, BulkError, BulkRequestError, action_name, bulk_deletable, cut_reason,
+};
 pub use onboarding::{
     ApplicationStatus, COMPLETED_ONBOARDING, Guide, GuideItem, Onboarding, OnboardingOption,
     OnboardingPrompt, STARTED_ONBOARDING, Screening, ScreeningField, onboarding_body,

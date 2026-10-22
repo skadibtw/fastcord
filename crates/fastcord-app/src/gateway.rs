@@ -584,6 +584,25 @@ pub struct Consumed {
     pub private_notice: Option<String>,
 }
 
+/// One step of the "Select messages" mode of a channel (issue #95).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectOp {
+    Mode(bool),
+    Toggle(Snowflake),
+    /// The Delete button: asks for the Confirm.
+    Ask,
+    Cancel,
+    Confirm,
+}
+
+/// One step of removing reactions from the open "who reacted" list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReactionOp {
+    Ask(crate::timeline::ReactionTarget),
+    Cancel,
+    Confirm,
+}
+
 /// An explicit, ordered user action on the outbox or on one of the user's
 /// messages. Unlike the coalesced [`Request`], none of these may be dropped or
 /// merged, so they travel through a small bounded queue of their own.
@@ -592,6 +611,8 @@ pub enum Command {
         guild: Snowflake,
         user: Snowflake,
         action: fastcord_discord::MemberAction,
+        /// The optional audit-log reason; never printed or logged.
+        reason: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<(), fastcord_discord::RestError>>,
     },
     Stage {
@@ -638,11 +659,17 @@ pub enum Command {
         /// Attachments that stay when the user removed some.
         keep: Option<Vec<Snowflake>>,
     },
-    /// Delete one of the user's messages (the user confirmed it).
+    /// Delete one of the user's messages, or anyone's with Manage Messages (the
+    /// user confirmed it).
     Delete {
         channel: Snowflake,
         message: Snowflake,
     },
+    Select {
+        channel: Snowflake,
+        op: SelectOp,
+    },
+    ReactionRemoval(ReactionOp),
     RetryChange {
         channel: Snowflake,
         message: Snowflake,
@@ -759,7 +786,8 @@ impl fmt::Debug for Command {
                 .debug_tuple("Moderate")
                 .field(guild)
                 .field(user)
-                .field(action)
+                // A nickname or reason typed by the user never reaches a log.
+                .field(&std::mem::discriminant(action))
                 .finish(),
             Self::Stage {
                 guild,
@@ -809,6 +837,12 @@ impl fmt::Debug for Command {
                 .field("channel", channel)
                 .field("message", message)
                 .finish(),
+            Self::Select { channel, op } => f
+                .debug_struct("Select")
+                .field("channel", channel)
+                .field("op", op)
+                .finish(),
+            Self::ReactionRemoval(op) => f.debug_tuple("ReactionRemoval").field(op).finish(),
             Self::RetryChange { channel, message } => f
                 .debug_struct("RetryChange")
                 .field("channel", channel)
@@ -923,6 +957,7 @@ impl NavigationBridge {
         guild: Snowflake,
         user: Snowflake,
         action: fastcord_discord::MemberAction,
+        reason: Option<String>,
     ) -> Result<(), fastcord_discord::RestError> {
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.commands
@@ -930,6 +965,7 @@ impl NavigationBridge {
                 guild,
                 user,
                 action,
+                reason,
                 reply,
             })
             .map_err(|_| fastcord_discord::RestError::SchedulerCapacityExceeded)?;
@@ -1558,6 +1594,18 @@ impl NavigationBridge {
         self.commands
             .try_send(Command::Delete { channel, message })
             .is_ok()
+    }
+
+    /// Queues one step of the "Select messages" mode.
+    pub fn select(&self, channel: Snowflake, op: SelectOp) -> bool {
+        self.commands
+            .try_send(Command::Select { channel, op })
+            .is_ok()
+    }
+
+    /// Queues one step of removing reactions from the open list.
+    pub fn reaction_removal(&self, op: ReactionOp) -> bool {
+        self.commands.try_send(Command::ReactionRemoval(op)).is_ok()
     }
 
     pub fn retry_change(&self, channel: Snowflake, message: Snowflake) -> bool {
@@ -2279,19 +2327,22 @@ impl Worker {
                 guild,
                 user,
                 action,
+                reason,
                 reply,
             } => {
                 if !self
                     .tracker
                     .store
-                    .member_permissions(guild, user)
-                    .allows(action)
+                    .member_action_allowed(guild, user, &action)
                 {
                     let _ = reply.send(Err(fastcord_discord::RestError::PermissionDenied));
                 } else {
                     let rest = self.rest.clone();
                     tokio::spawn(async move {
-                        let _ = reply.send(rest.member_action(guild, user, action).await);
+                        let _ = reply.send(
+                            rest.member_action(guild, user, &action, reason.as_deref())
+                                .await,
+                        );
                     });
                 }
             }
@@ -2372,6 +2423,18 @@ impl Worker {
             Command::Delete { channel, message } => {
                 history.delete_message(&self.rest, channel, message);
             }
+            Command::Select { channel, op } => match op {
+                SelectOp::Mode(on) => history.select_messages(channel, on),
+                SelectOp::Toggle(message) => history.toggle_selected(channel, message),
+                SelectOp::Ask => history.ask_bulk_delete(channel),
+                SelectOp::Cancel => history.cancel_bulk_delete(),
+                SelectOp::Confirm => history.confirm_bulk_delete(&self.rest, channel),
+            },
+            Command::ReactionRemoval(op) => match op {
+                ReactionOp::Ask(target) => history.ask_reaction_removal(target),
+                ReactionOp::Cancel => history.cancel_reaction_removal(),
+                ReactionOp::Confirm => history.confirm_reaction_removal(&self.rest),
+            },
             Command::RetryChange { channel, message } => {
                 history.retry_change(&self.rest, channel, message);
             }
@@ -3755,6 +3818,7 @@ impl GatewayPanel {
             publishing: None,
             can_thread: self.can_thread(),
             can_suppress_embeds: self.can_suppress_embeds(),
+            can_moderate: self.can_suppress_embeds(),
             more: self
                 .more
                 .filter(|(channel, _)| self.timeline.channel_id == Some(*channel))
@@ -3823,6 +3887,30 @@ impl GatewayPanel {
                 self.confirm_delete = None;
                 true
             }
+            Event::SelectMode { channel_id, on } if open == Some(channel_id) => {
+                self.confirm_delete = None;
+                self.controls.select(channel_id, SelectOp::Mode(on))
+            }
+            Event::ToggleSelect {
+                channel_id,
+                message_id,
+            } if open == Some(channel_id) => self
+                .controls
+                .select(channel_id, SelectOp::Toggle(message_id)),
+            Event::AskBulkDelete { channel_id } if open == Some(channel_id) => {
+                self.controls.select(channel_id, SelectOp::Ask)
+            }
+            Event::CancelBulkDelete => {
+                open.is_none_or(|channel| self.controls.select(channel, SelectOp::Cancel))
+            }
+            Event::ConfirmBulkDelete { channel_id } if open == Some(channel_id) => {
+                self.controls.select(channel_id, SelectOp::Confirm)
+            }
+            Event::AskReactionRemoval(target) => {
+                self.controls.reaction_removal(ReactionOp::Ask(target))
+            }
+            Event::CancelReactionRemoval => self.controls.reaction_removal(ReactionOp::Cancel),
+            Event::ConfirmReactionRemoval => self.controls.reaction_removal(ReactionOp::Confirm),
             Event::RetryChange {
                 channel_id,
                 message_id,

@@ -1,0 +1,37 @@
+{
+  "audit_log_entries": [
+    {
+      "id": "1000000000000000901",
+      "user_id": "1000000000000000101",
+      "target_id": "1000000000000000102",
+      "action_type": 22,
+      "reason": "spam",
+      "changes": []
+    },
+    {
+      "id": "1000000000000000902",
+      "user_id": "1000000000000000101",
+      "target_id": "1000000000000000102",
+      "action_type": 24,
+      "changes": [
+        { "key": "nick", "old_value": "old", "new_value": "new" },
+        { "key": "mute", "new_value": true },
+        { "key": "deaf", "new_value": true },
+        { "key": "communication_disabled_until", "new_value": "2026-01-01T00:00:00.000000+00:00" }
+      ]
+    },
+    {
+      "id": "1000000000000000903",
+      "user_id": "1000000000000000101",
+      "target_id": "1000000000000000500",
+      "action_type": 9999
+    }
+  ],
+  "users": [
+    { "id": "1000000000000000101", "username": "ada_l", "global_name": "Ada" },
+    { "id": "1000000000000000102", "username": "grace" }
+  ],
+  "webhooks": [],
+  "integrations": [],
+  "threads": []
+}

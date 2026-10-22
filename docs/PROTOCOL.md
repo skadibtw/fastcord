@@ -849,3 +849,17 @@ Evidence: Userdoccers/docs.discord.food descriptions of `user_guild_settings`, `
 ## Text-to-speech messages (issue #104)
 
 No new route. `POST /channels/{id}/messages` already carried `"tts": false`; a draft starting with `/tts` now sends `"tts": true` with the prefix removed. The message object's `tts` boolean is read on `MESSAGE_CREATE` and in history. Discord requires SEND_TTS_MESSAGES (bit 12) for a `tts` message; the client checks it first (the reducer's channel permissions) and the server stays authoritative (a 403 is the ordinary send failure). **Unverified:** that the official client reads a message sent this way, and whether a DM needs any permission (none is checked). Speech synthesis itself is local and has no wire traffic.
+
+## Manual moderation and audit log (#95)
+
+Every route below is a user-client route **not captured from an official client or exercised with the alt account**; shapes follow public documentation. Each is one explicit click, sent once, never retried. `X-Audit-Log-Reason` (percent-encoded, at most 512 bytes before encoding, omitted when blank) is added to kick, ban, timeout and nickname requests only.
+
+- **Timeout (unverified):** `PATCH /guilds/{g}/members/{u}` `{"communication_disabled_until": "<ISO 8601>"|null}`; durations 60 s, 5 min, 10 min, 1 h, 1 day, 1 week from the click; `null` removes it. Needs MODERATE_MEMBERS (bit 40); not offered for administrators or the owner.
+- **Nickname (unverified):** `PATCH /guilds/{g}/members/@me` `{"nick": str|null}` (CHANGE_NICKNAME, bit 26) and `PATCH /guilds/{g}/members/{u}` `{"nick"}` (MANAGE_NICKNAMES, bit 27, hierarchy as for kick); `null` resets; at most 32 characters.
+- **Ban (existing route, extended):** `PUT /guilds/{g}/bans/{u}` `{"delete_message_seconds": 0|3600|21600|43200|86400|259200|604800}`; the default is 0.
+- **Ban list (unverified):** `GET /guilds/{g}/bans?limit=50[&after=<user id>]` (BAN_MEMBERS); 50 per page, at most 500 held. **Unban (unverified):** `DELETE /guilds/{g}/bans/{u}` after a Confirm.
+- **Voice move (unverified):** `PATCH /guilds/{g}/members/{u}` `{"channel_id": "<voice channel>"}` (MOVE_MEMBERS; the account and the member must both see and connect to the destination, checked by the reducer).
+- **Delete another user message:** the existing `DELETE /channels/{c}/messages/{m}` with MANAGE_MESSAGES. **Bulk delete (unverified):** `POST /channels/{c}/messages/bulk-delete` `{"messages": [ids]}`, 2 to 100 messages, each younger than 14 days (judged from the snowflake time, one minute inside the limit, at selection and again at send); Discord refuses the whole request if one does not qualify. `MESSAGE_DELETE_BULK` (already decoded) removes the rows.
+- **Reactions (unverified):** `DELETE /channels/{c}/messages/{m}/reactions/{emoji}/{user}` removes one user reaction, `DELETE .../reactions/{emoji}` clears one emoji (MANAGE_MESSAGES, Confirm). The official client may use a typed `/0/{user}` form as it does for the own reaction.
+- **Threads (unverified):** `PATCH /channels/{thread}` `{"archived"?, "locked"?}` (MANAGE_THREADS); the header follows `THREAD_UPDATE`.
+- **Audit log (unverified):** `GET /guilds/{g}/audit-logs?limit=50[&before=<entry id>][&action_type=n][&user_id=u]` (VIEW_AUDIT_LOG, bit 7); parsed with at most 50 entries and 200 users; names come from the answer `users`; an unknown `action_type` shows as "Action n". A two-factor demand (code 60003) is shown, never answered.

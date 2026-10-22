@@ -8,7 +8,11 @@
 //! opens or "Load more" is pressed and are kept only while the panel is open:
 //! at most [`MAX_ARCHIVED`] of them and [`MAX_ARCHIVED_BYTES`] of names.
 //! Join, leave and create send one request each; the Gateway's THREAD_* events
-//! (not these answers) bring the sidebar to its new state.
+//! (not these answers) bring the sidebar to its new state. Archiving and
+//! locking a thread (issue #95) is one explicit click and one request for a
+//! thread manager: it is checked again against the current read model by the
+//! caller, at most one is in flight, it is never retried, and an unconfirmed
+//! answer says the change may have been applied.
 
 use fastcord_discord::{ArchivedThreads, RestClient, RestError, ThreadError, thread_name};
 use fastcord_model::{Channel, Snowflake};
@@ -36,6 +40,13 @@ pub enum Event {
     OpenArchived(usize),
     Join(Snowflake),
     Leave(Snowflake),
+    /// Archive or lock a thread (a `None` field is left alone).
+    SetState {
+        thread: Snowflake,
+        archived: Option<bool>,
+        locked: Option<bool>,
+    },
+    StateDone(Result<(), RestError>),
     /// Start naming a thread for a message (guild, channel, message, first text).
     Start(Snowflake, Snowflake, Snowflake, String),
     Name(String),
@@ -86,6 +97,8 @@ pub struct State {
     archived: Option<Archived>,
     draft: Option<Draft>,
     notice: Option<&'static str>,
+    /// An archive or lock request is waiting for Discord.
+    state_busy: bool,
     /// Identifies the current archive request; older answers find another.
     serial: u64,
     /// Dropping this aborts the archive request in flight.
@@ -102,6 +115,21 @@ fn describe(error: RestError) -> &'static str {
         }
         RestError::Retryable(_) | RestError::Http(_) => "Discord failed. Try again.",
         _ => "Discord did not accept that.",
+    }
+}
+
+/// What a failed archive or lock request tells the user.
+fn describe_write(error: RestError) -> &'static str {
+    match error {
+        RestError::Retryable(_) => {
+            "Discord did not confirm. The change may have been applied; check the thread before trying again."
+        }
+        RestError::PermissionDenied => "Discord refused: you need Manage Threads here.",
+        RestError::Refused(refusal) if refusal.status.as_u16() == 403 => {
+            "Discord refused: you need Manage Threads here."
+        }
+        RestError::Refused(refusal) if refusal.status.as_u16() == 404 => "That thread is gone.",
+        other => describe(other),
     }
 }
 
@@ -188,6 +216,32 @@ impl State {
         task
     }
 
+    /// Sends the archive or lock change once. `allowed` is the caller's check
+    /// of the thread, its state and Manage Threads against the current read
+    /// model; without it, or while another change is out, nothing is sent.
+    pub fn set_state(
+        &mut self,
+        change: (Snowflake, Option<bool>, Option<bool>),
+        allowed: bool,
+        client: &RestClient,
+    ) -> Task<Event> {
+        self.notice = None;
+        if self.state_busy {
+            return Task::none();
+        }
+        if !allowed {
+            self.notice = Some("This thread cannot be changed that way any more.");
+            return Task::none();
+        }
+        self.state_busy = true;
+        let (thread, archived, locked) = change;
+        let client = client.clone();
+        Task::perform(
+            async move { client.set_thread_state(thread, archived, locked).await },
+            Event::StateDone,
+        )
+    }
+
     pub fn update(&mut self, event: Event, client: &RestClient) -> Task<Event> {
         match event {
             Event::ToggleArchived(guild, channel) | Event::ToggleForumArchived(guild, channel) => {
@@ -265,6 +319,12 @@ impl State {
             Event::Membership(result) => {
                 self.notice = result.err().map(describe);
             }
+            Event::StateDone(result) => {
+                self.state_busy = false;
+                self.notice = result.err().map(describe_write);
+            }
+            // Sent by the caller through `set_state`, which checks it first.
+            Event::SetState { .. } => {}
             Event::Start(guild, channel, message, first_line) => {
                 self.close();
                 self.notice = None;
@@ -567,6 +627,33 @@ mod tests {
         assert!(state.notice.is_some());
         let _ = state.update(Event::CancelCreate, &client());
         assert!(state.draft.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_archive_or_lock_change_is_checked_sent_once_and_never_repeated() {
+        let mut state = State::default();
+        let thread = Snowflake(9);
+        // Not allowed by the read model: nothing is sent.
+        let _ = state.set_state((thread, Some(true), None), false, &client());
+        assert!(!state.state_busy && state.notice.is_some());
+        let _ = state.set_state((thread, Some(true), None), true, &client());
+        assert!(state.state_busy && state.notice.is_none());
+        // A second click while one is out sends nothing and changes nothing.
+        let _ = state.set_state((thread, None, Some(true)), true, &client());
+        assert!(state.state_busy && state.notice.is_none());
+        let unconfirmed = RestError::Retryable(fastcord_discord::RetryableFailure::Network(
+            fastcord_discord::NetworkFailure::Timeout,
+        ));
+        let _ = state.update(Event::StateDone(Err(unconfirmed)), &client());
+        assert!(!state.state_busy);
+        assert!(state.notice.unwrap().contains("may have been applied"));
+        let _ = state.update(
+            Event::StateDone(Err(RestError::PermissionDenied)),
+            &client(),
+        );
+        assert!(state.notice.unwrap().contains("Manage Threads"));
+        let _ = state.update(Event::StateDone(Ok(())), &client());
+        assert!(state.notice.is_none());
     }
 
     #[test]

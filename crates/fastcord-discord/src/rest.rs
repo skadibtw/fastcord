@@ -37,9 +37,33 @@ pub struct RestRequest {
     priority: Priority,
     body: Option<Bytes>,
     error_detail: bool,
+    audit_reason: Option<HeaderValue>,
 }
 
+/// Discord's audit-log reasons hold at most 512 characters.
+pub const MAX_AUDIT_REASON_BYTES: usize = 512;
+
 impl RestRequest {
+    /// Adds `X-Audit-Log-Reason`: the text cut to 512 bytes, then percent-encoded.
+    /// Blank text adds nothing. The reason is never part of `Debug` output.
+    pub fn with_audit_reason(mut self, reason: &str) -> Self {
+        let reason = reason.trim();
+        let mut end = reason.len().min(MAX_AUDIT_REASON_BYTES);
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut encoded = String::new();
+        for byte in reason[..end].bytes() {
+            if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
+                encoded.push(char::from(byte));
+            } else {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        self.audit_reason = HeaderValue::from_str(&encoded).ok().filter(|_| end > 0);
+        self
+    }
+
     /// Keeps Discord's error code and short message of a 4xx refusal
     /// (`RestError::Refused`) instead of the bare category.
     pub fn with_error_detail(mut self) -> Self {
@@ -59,6 +83,7 @@ impl RestRequest {
             priority,
             body: None,
             error_detail: false,
+            audit_reason: None,
         }
     }
 
@@ -348,6 +373,9 @@ impl<C: Clock> RestClient<C> {
                 .header(CONTENT_TYPE, "application/json")
                 .body(body.clone());
         }
+        if let Some(reason) = &request.audit_reason {
+            builder = builder.header("x-audit-log-reason", reason.clone());
+        }
         builder.build().map_err(|_| RestError::ClientConfiguration)
     }
 }
@@ -617,6 +645,24 @@ mod tests {
             Err(RestError::ResponseBodyTooLarge)
         );
         assert_eq!(buffer.finish().as_ref(), b"abcde");
+    }
+
+    #[test]
+    fn an_audit_reason_is_percent_encoded_capped_and_never_printed() {
+        let route = || Route::new(Method::DELETE, "/guilds/1/members/2").unwrap();
+        let reason = |text: &str| {
+            RestRequest::new(route(), Priority::UserWrite)
+                .with_audit_reason(text)
+                .audit_reason
+        };
+        assert_eq!(reason("spam & ads").unwrap(), "spam%20%26%20ads");
+        assert_eq!(reason("caf\u{e9}").unwrap(), "caf%C3%A9");
+        assert!(reason("  ").is_none());
+        // The cut falls on a character boundary, before encoding.
+        let long = "\u{e9}".repeat(MAX_AUDIT_REASON_BYTES);
+        assert_eq!(reason(&long).unwrap().len(), 256 * 6);
+        let request = RestRequest::new(route(), Priority::UserWrite).with_audit_reason("secret");
+        assert!(!format!("{request:?}").contains("secret"));
     }
 
     #[tokio::test]

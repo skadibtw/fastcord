@@ -24,6 +24,10 @@ impl Permissions {
     pub const MANAGE_GUILD: Self = Self(1 << 5);
     pub const MANAGE_ROLES: Self = Self(1 << 28);
     pub const MANAGE_WEBHOOKS: Self = Self(1 << 29);
+    pub const VIEW_AUDIT_LOG: Self = Self(1 << 7);
+    pub const CHANGE_NICKNAME: Self = Self(1 << 26);
+    pub const MANAGE_NICKNAMES: Self = Self(1 << 27);
+    pub const MODERATE_MEMBERS: Self = Self(1 << 40);
     pub const REQUEST_TO_SPEAK: Self = Self(1 << 32);
     pub const MUTE_MEMBERS: Self = Self(1 << 22);
     pub const DEAFEN_MEMBERS: Self = Self(1 << 23);

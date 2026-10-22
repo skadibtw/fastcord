@@ -323,6 +323,31 @@ impl<C: Clock> RestClient<C> {
         self.execute(request).await.map(drop)
     }
 
+    /// Archives or locks a thread (`PATCH /channels/{thread}` `{archived,
+    /// locked}`); a `None` field is left alone. It needs Manage Threads and the
+    /// header follows `THREAD_UPDATE`.
+    pub async fn set_thread_state(
+        &self,
+        thread: Snowflake,
+        archived: Option<bool>,
+        locked: Option<bool>,
+    ) -> Result<(), RestError> {
+        let mut body = serde_json::Map::new();
+        if let Some(archived) = archived {
+            body.insert("archived".into(), archived.into());
+        }
+        if let Some(locked) = locked {
+            body.insert("locked".into(), locked.into());
+        }
+        let request = RestRequest::new(
+            Route::new(Method::PATCH, &format!("/channels/{thread}"))?,
+            Priority::UserWrite,
+        )
+        .with_error_detail()
+        .json(&body)?;
+        self.execute(request).await.map(drop)
+    }
+
     /// Starts a public thread on a message (the thread takes the message's ID).
     /// Needs Create Public Threads in the channel.
     pub async fn create_thread(

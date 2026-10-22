@@ -304,6 +304,33 @@ impl<C: Clock> RestClient<C> {
             .map(drop)
     }
 
+    /// Removes another user's reaction (`DELETE .../reactions/{emoji}/{user}`),
+    /// which needs Manage Messages. Unverified for the user client.
+    pub async fn remove_user_reaction(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: &ReactionEmoji,
+        user: Snowflake,
+    ) -> Result<(), RestError> {
+        let route = reaction_route(Method::DELETE, channel, message, emoji, &format!("/{user}"))?;
+        let request = RestRequest::new(route, Priority::UserWrite).with_error_detail();
+        self.execute(request).await.map(drop)
+    }
+
+    /// Clears every reaction with one emoji (`DELETE .../reactions/{emoji}`),
+    /// which needs Manage Messages. Unverified for the user client.
+    pub async fn clear_emoji_reactions(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: &ReactionEmoji,
+    ) -> Result<(), RestError> {
+        let route = reaction_route(Method::DELETE, channel, message, emoji, "")?;
+        let request = RestRequest::new(route, Priority::UserWrite).with_error_detail();
+        self.execute(request).await.map(drop)
+    }
+
     /// Lists the users who reacted normally with `emoji`, for an explicit
     /// inspection. `limit` is clamped to 1 to 100 and the answer never holds
     /// more entries than that, whatever Discord sends; a body that is not an
@@ -372,6 +399,23 @@ mod tests {
             "custom wave:777" => custom(777, "wave"),
             other => panic!("unknown emoji in the route fixture: {other}"),
         }
+    }
+
+    #[test]
+    fn moderator_routes_name_the_user_or_clear_the_emoji() {
+        let heart = emoji(&unicode("\u{2764}"));
+        let (user, clear) = (
+            reaction_route(Method::DELETE, CHANNEL, MESSAGE, &heart, "/77").unwrap(),
+            reaction_route(Method::DELETE, CHANNEL, MESSAGE, &heart, "").unwrap(),
+        );
+        assert_eq!(
+            user.url.as_str(),
+            format!(
+                "https://discord.com/api/v10/channels/500/messages/{MESSAGE}/reactions/%E2%9D%A4/77"
+            )
+        );
+        assert!(clear.url.as_str().ends_with("/reactions/%E2%9D%A4"));
+        assert_eq!(clear.key().method(), &Method::DELETE);
     }
 
     #[test]

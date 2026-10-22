@@ -998,6 +998,28 @@ fn main_pane<'a>(
                                 Message::Threads(crate::threads::Event::Join(selection.channel_id)),
                             )
                         });
+                        if permissions.manage_threads {
+                            tools.push((
+                                if state.archived {
+                                    "Unarchive"
+                                } else {
+                                    "Archive"
+                                },
+                                Message::Threads(crate::threads::Event::SetState {
+                                    thread: selection.channel_id,
+                                    archived: Some(!state.archived),
+                                    locked: None,
+                                }),
+                            ));
+                            tools.push((
+                                if state.locked { "Unlock" } else { "Lock" },
+                                Message::Threads(crate::threads::Event::SetState {
+                                    thread: selection.channel_id,
+                                    archived: None,
+                                    locked: Some(!state.locked),
+                                }),
+                            ));
+                        }
                         format!("\u{21B3} {}", selection.name)
                     }
                     None => {
@@ -1068,6 +1090,15 @@ fn main_pane<'a>(
                         format!("{prefix} {}", selection.name)
                     }
                 };
+                if permissions.manage_messages && permissions.read_history {
+                    tools.push((
+                        "Select messages",
+                        Message::Timeline(crate::timeline::Event::SelectMode {
+                            channel_id: selection.channel_id,
+                            on: true,
+                        }),
+                    ));
+                }
                 body = body.push(header_with(
                     title,
                     note,

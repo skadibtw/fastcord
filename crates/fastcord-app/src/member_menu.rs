@@ -6,7 +6,7 @@ use fastcord_discord::{MemberAction, RestError};
 use fastcord_model::{Snowflake, User};
 use iced::widget::{
     button, column, container, mouse_area, opaque, responsive, row, scrollable, slider, space,
-    stack, text,
+    stack, text, text_input,
 };
 use iced::{Element, Length, Point};
 use iced_renderer::core::{self, layout, mouse, overlay, renderer, widget};
@@ -18,6 +18,22 @@ pub enum Event {
     Select(MemberAction),
     Confirm,
     Done(u64, Result<(), RestError>),
+    /// Opens or closes one of the choice lists below the actions.
+    Sub(Option<Sub>),
+    /// Optional audit-log reason, kept while the choice changes.
+    Reason(String),
+    Nick(String),
+    /// The message history a ban deletes (a `BAN_DELETE` preset).
+    BanWindow(u32),
+}
+
+/// The choice lists of the menu: each ends in one explicit action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sub {
+    Timeout,
+    Ban,
+    Nick,
+    Move,
 }
 
 #[derive(Debug)]
@@ -26,6 +42,10 @@ pub struct Target {
     pub point: Point,
     pub guild: Option<Snowflake>,
     pub confirm: Option<MemberAction>,
+    pub sub: Option<Sub>,
+    pub reason: String,
+    pub nick: String,
+    pub ban_window: u32,
 }
 
 #[derive(Debug, Default)]
@@ -155,60 +175,16 @@ pub fn view<'a>(
                         false,
                     ));
                 }
-                let mut any = false;
-                for (allowed, action_kind) in [
-                    (
-                        permissions.mute,
-                        MemberAction::Mute(!permissions.server_muted),
-                    ),
-                    (
-                        permissions.deafen,
-                        MemberAction::Deafen(!permissions.server_deafened),
-                    ),
-                    (permissions.disconnect, MemberAction::Disconnect),
-                    (permissions.kick, MemberAction::Kick),
-                    (permissions.ban, MemberAction::Ban),
-                ] {
-                    if allowed {
-                        if !any {
-                            card =
-                                card.push(text("SERVER ACTIONS").size(11).style(text::secondary));
-                            any = true;
-                        }
-                        card = card.push(action(
-                            action_kind.label(),
-                            (!restricted && state.pending.is_none())
-                                .then_some(Message::MemberMenu(Event::Select(action_kind))),
-                            true,
-                        ));
-                    }
-                }
-                if let Some(confirm) = target.confirm {
-                    card = card.push(
-                        text(format!(
-                            "{} for {}?",
-                            confirm.label(),
-                            target.user.display_name()
-                        ))
-                        .size(13),
-                    );
-                    if confirm == MemberAction::Ban {
-                        card = card.push(text("Message history will be kept.").size(11));
-                    }
-                    card = card.push(
-                        row![
-                            action(
-                                "Confirm",
-                                (!restricted && state.pending.is_none())
-                                    .then_some(Message::MemberMenu(Event::Confirm)),
-                                true
-                            ),
-                            action("Cancel", Some(Message::MemberMenu(Event::Close)), false)
-                        ]
-                        .spacing(6),
-                    );
-                }
             }
+            card = server_section(
+                card,
+                state,
+                target,
+                permissions,
+                navigation,
+                restricted,
+                own,
+            );
             if state.pending.is_some() {
                 card = card.push(text("Working…").size(12));
             }
@@ -247,6 +223,197 @@ pub fn view<'a>(
         })
         .into(),
     )
+}
+
+fn choice(
+    label: impl Into<String>,
+    on: bool,
+    message: Option<Message>,
+) -> Element<'static, Message> {
+    button(text(label.into()).size(12))
+        .on_press_maybe(message)
+        .width(Length::Fill)
+        .style(style::tool_button(on, false))
+        .into()
+}
+
+/// The moderation actions of the menu: the nickname for the account itself,
+/// and for another member voice, timeout, nickname, kick and ban. Every button
+/// names one action; Discord is asked once, after the explicit Confirm where
+/// there is one, and the reducer checks again before sending.
+fn server_section<'a>(
+    mut card: iced::widget::Column<'a, Message>,
+    state: &'a State,
+    target: &'a Target,
+    permissions: fastcord_discord::MemberPermissions,
+    navigation: &'a NavigationSnapshot,
+    restricted: bool,
+    own: bool,
+) -> iced::widget::Column<'a, Message> {
+    use fastcord_discord::{BAN_DELETE, TIMEOUTS};
+    let idle = !restricted && state.pending.is_none();
+    let send = |kind: MemberAction| idle.then_some(Message::MemberMenu(Event::Select(kind)));
+    let open = |sub: Sub| Some(Message::MemberMenu(Event::Sub(Some(sub))));
+    let name = target.user.display_name().to_owned();
+    let mut rows = Vec::<Element<'a, Message>>::new();
+    if own {
+        if permissions.nickname {
+            rows.push(action("Change nickname\u{2026}", open(Sub::Nick), false));
+        }
+    } else {
+        if permissions.mute {
+            let kind = MemberAction::Mute(!permissions.server_muted);
+            rows.push(action(kind.label(), send(kind), true));
+        }
+        if permissions.deafen {
+            let kind = MemberAction::Deafen(!permissions.server_deafened);
+            rows.push(action(kind.label(), send(kind), true));
+        }
+        if permissions.disconnect {
+            rows.push(action(
+                MemberAction::Disconnect.label(),
+                send(MemberAction::Disconnect),
+                true,
+            ));
+            if !navigation.move_targets.is_empty() {
+                rows.push(action("Move to\u{2026}", open(Sub::Move), false));
+            }
+        }
+        if permissions.timeout {
+            rows.push(action("Time out\u{2026}", open(Sub::Timeout), true));
+        }
+        if permissions.allows(&MemberAction::Timeout(None)) {
+            let kind = MemberAction::Timeout(None);
+            rows.push(action(kind.label(), send(kind), false));
+        }
+        if permissions.nickname {
+            rows.push(action("Nickname\u{2026}", open(Sub::Nick), false));
+        }
+        if permissions.kick {
+            rows.push(action(
+                MemberAction::Kick.label(),
+                send(MemberAction::Kick),
+                true,
+            ));
+        }
+        if permissions.ban {
+            rows.push(action("Ban\u{2026}", open(Sub::Ban), true));
+        }
+    }
+    if rows.is_empty() {
+        return card;
+    }
+    card = card.push(
+        text(if own {
+            "YOUR NICKNAME"
+        } else {
+            "SERVER ACTIONS"
+        })
+        .size(11)
+        .style(text::secondary),
+    );
+    for element in rows {
+        card = card.push(element);
+    }
+    let mut needs_reason = target
+        .confirm
+        .as_ref()
+        .is_some_and(MemberAction::takes_reason);
+    match target.sub {
+        Some(Sub::Timeout) => {
+            card = card.push(text("Time out for").size(12));
+            for (seconds, label) in TIMEOUTS {
+                card = card.push(choice(
+                    label,
+                    false,
+                    send(MemberAction::Timeout(Some(seconds))),
+                ));
+            }
+            needs_reason = true;
+        }
+        Some(Sub::Ban) => {
+            card = card.push(text("Delete messages from").size(12));
+            for (seconds, label) in BAN_DELETE {
+                card = card.push(choice(
+                    label,
+                    target.ban_window == seconds,
+                    Some(Message::MemberMenu(Event::BanWindow(seconds))),
+                ));
+            }
+            card = card.push(action(
+                "Ban",
+                send(MemberAction::Ban(target.ban_window)),
+                true,
+            ));
+            needs_reason = true;
+        }
+        Some(Sub::Nick) => {
+            card = card.push(
+                text_input("Nickname (empty resets)", &target.nick)
+                    .on_input(|v| Message::MemberMenu(Event::Nick(v)))
+                    .size(13),
+            );
+            card = card.push(
+                row![
+                    action(
+                        "Save",
+                        MemberAction::nick(own, &target.nick).and_then(send),
+                        false
+                    ),
+                    action("Reset", MemberAction::nick(own, "").and_then(send), false),
+                ]
+                .spacing(6),
+            );
+            needs_reason = true;
+        }
+        Some(Sub::Move) => {
+            card = card.push(text("Move to voice channel").size(12));
+            for (channel, label) in navigation.move_targets.iter().take(24) {
+                card = card.push(choice(
+                    format!("\u{266A} {label}"),
+                    false,
+                    send(MemberAction::Move(*channel)),
+                ));
+            }
+        }
+        None => {}
+    }
+    if needs_reason {
+        card = card.push(
+            text_input("Reason for the audit log (optional)", &target.reason)
+                .on_input(|v| Message::MemberMenu(Event::Reason(v)))
+                .size(12),
+        );
+    }
+    if let Some(confirm) = &target.confirm {
+        let detail = match confirm {
+            MemberAction::Ban(0) => " Message history will be kept.".to_owned(),
+            MemberAction::Ban(seconds) => BAN_DELETE
+                .iter()
+                .find(|(s, _)| s == seconds)
+                .map_or_else(String::new, |(_, label)| {
+                    format!(" Messages deleted: {}.", label.to_lowercase())
+                }),
+            MemberAction::Timeout(Some(seconds)) => TIMEOUTS
+                .iter()
+                .find(|(s, _)| s == seconds)
+                .map_or_else(String::new, |(_, label)| format!(" For {label}.")),
+            _ => String::new(),
+        };
+        card = card.push(text(format!("{} for {name}?{detail}", confirm.label())).size(13));
+        card = card.push(
+            row![
+                action(
+                    "Confirm",
+                    idle.then_some(Message::MemberMenu(Event::Confirm)),
+                    true
+                ),
+                action("Cancel", Some(Message::MemberMenu(Event::Close)), false)
+            ]
+            .spacing(6),
+        );
+    }
+    card
 }
 
 /// Carries the actual click position without subscribing to pointer movement

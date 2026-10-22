@@ -43,7 +43,8 @@ use fastcord_model::{Attachment, Emoji, Message, Snowflake, StickerItem, User};
 use iced::alignment::{Horizontal, Vertical};
 use iced::font::{Font, Weight};
 use iced::widget::{
-    Container, button, column, container, hover, image, mouse_area, row, stack, text, tooltip,
+    Container, button, checkbox, column, container, hover, image, mouse_area, row, stack, text,
+    tooltip,
 };
 use iced::{Element, Length, Padding};
 
@@ -235,6 +236,31 @@ pub struct ReactionUsers {
     /// The answer a poll's voters are listed for (then `emoji` is unused).
     pub poll_answer: Option<String>,
     pub state: UsersState,
+    /// The account has Manage Messages here: people can be removed.
+    pub can_moderate: bool,
+    /// A removal waiting for its Confirm.
+    pub confirm: Option<ReactionTarget>,
+    /// A removal is waiting for Discord.
+    pub busy: bool,
+}
+
+/// What a moderator removes from a list of who reacted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReactionTarget {
+    User(Snowflake),
+    /// Every reaction with the listed emoji.
+    All,
+}
+
+/// The "Select messages" mode as the timeline shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectView {
+    /// The ticked messages (at most 100).
+    pub ids: std::collections::BTreeSet<Snowflake>,
+    /// The Delete button was pressed: Confirm and Cancel are shown.
+    pub confirming: bool,
+    /// The deletion is waiting for Discord.
+    pub busy: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -244,6 +270,8 @@ pub enum UsersState {
     /// [`MAX_USERS`](crate::reactions::MAX_USERS)) and whether it has more.
     Loaded {
         names: Vec<String>,
+        /// The users behind `names`, in the same order.
+        ids: Vec<Snowflake>,
         more: bool,
     },
     /// Why they could not be loaded (a fixed, secret-free sentence).
@@ -360,6 +388,10 @@ pub struct Snapshot {
     pub can_tts: bool,
     /// Who reacted with one emoji, loaded only because the user asked.
     pub reaction_users: Option<ReactionUsers>,
+    /// The ticked messages while "Select messages" is on.
+    pub select: Option<SelectView>,
+    /// The account has Manage Messages in the open server channel.
+    pub can_moderate: bool,
     /// Names of the roles and channels the rows mention.
     pub names: rich::Names,
     /// What `@` and `#` can complete to in this channel's server.
@@ -455,6 +487,8 @@ pub struct Interaction {
     /// The account may hide or restore other people's link previews here
     /// (Manage Messages in a server channel).
     pub can_suppress_embeds: bool,
+    /// The account may delete other people's messages here (Manage Messages).
+    pub can_moderate: bool,
     /// The message whose secondary actions are shown instead of the usual ones.
     pub more: Option<Snowflake>,
     /// What the account may publish in the open channel.
@@ -542,6 +576,26 @@ pub enum Event {
         message_id: Snowflake,
     },
     CancelDelete,
+    /// Start or end ticking messages for one bulk deletion.
+    SelectMode {
+        channel_id: Snowflake,
+        on: bool,
+    },
+    ToggleSelect {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    AskBulkDelete {
+        channel_id: Snowflake,
+    },
+    CancelBulkDelete,
+    ConfirmBulkDelete {
+        channel_id: Snowflake,
+    },
+    /// Remove one user's reaction, or all of the listed emoji (Confirm follows).
+    AskReactionRemoval(ReactionTarget),
+    CancelReactionRemoval,
+    ConfirmReactionRemoval,
     /// Fetch and show the attachment preview in this message.
     LoadAttachment {
         channel_id: Snowflake,
@@ -868,6 +922,9 @@ pub fn view<'a>(
     if controls.jump {
         layers.push(jump_layer(channel_id));
     }
+    if let Some(select) = &snapshot.select {
+        layers.push(select_layer(select, channel_id));
+    }
     stack(layers)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -914,6 +971,48 @@ fn notice_layer(notice: Notice, channel_id: Snowflake) -> Element<'static, Event
         .into()
 }
 
+/// The bar of the "Select messages" mode: the count, Delete and Done, or the
+/// Confirm of a deletion that was asked for.
+fn select_layer(select: &SelectView, channel_id: Snowflake) -> Element<'static, Event> {
+    let count = select.ids.len();
+    let content: Element<'static, Event> = if select.busy {
+        text("Deleting\u{2026}").size(13).into()
+    } else if select.confirming {
+        row![
+            text(format!("Delete {count} messages? This cannot be undone."))
+                .size(13)
+                .style(text::danger),
+            pill_button("Confirm", Event::ConfirmBulkDelete { channel_id }),
+            pill_button("Cancel", Event::CancelBulkDelete),
+        ]
+        .spacing(8)
+        .align_y(Vertical::Center)
+        .into()
+    } else {
+        row![
+            text(format!("{count} selected (at most 100, under 14 days old)")).size(13),
+            pill_button("Delete", Event::AskBulkDelete { channel_id }),
+            pill_button(
+                "Done",
+                Event::SelectMode {
+                    channel_id,
+                    on: false
+                }
+            ),
+        ]
+        .spacing(8)
+        .align_y(Vertical::Center)
+        .into()
+    };
+    container(container(content).padding(8).style(container::rounded_box))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Horizontal::Right)
+        .align_y(Vertical::Top)
+        .padding(8)
+        .into()
+}
+
 fn jump_layer(channel_id: Snowflake) -> Element<'static, Event> {
     container(
         button(text("Jump to latest").size(13))
@@ -940,6 +1039,8 @@ fn jump_layer(channel_id: Snowflake) -> Element<'static, Event> {
 enum RowState {
     /// Someone else's message: no Edit or Delete actions.
     Plain,
+    /// Someone else's message and the account has Manage Messages: Delete only.
+    Moderate,
     /// The user's message: Edit and Delete while hovered.
     Actions,
     /// The composer holds this message's text.
@@ -954,7 +1055,7 @@ enum RowState {
 }
 
 fn row_state(row: &Row, interaction: Interaction) -> RowState {
-    if !row.own {
+    if !row.own && !interaction.can_moderate {
         return RowState::Plain;
     }
     let id = Some(row.message.id);
@@ -965,9 +1066,10 @@ fn row_state(row: &Row, interaction: Interaction) -> RowState {
     match change {
         Some((delete, ChangeState::Saving)) => RowState::Saving { delete },
         _ if interaction.confirming == id => RowState::Confirming,
-        _ if interaction.editing == id => RowState::Editing,
+        _ if row.own && interaction.editing == id => RowState::Editing,
         Some((delete, ChangeState::Failed(reason))) => RowState::Failed { delete, reason },
-        None => RowState::Actions,
+        None if row.own => RowState::Actions,
+        None => RowState::Moderate,
     }
 }
 
@@ -1162,7 +1264,56 @@ fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
             .style(text::secondary)
             .into(),
         UsersState::Failed(reason) => text(*reason).size(12).style(text::danger).into(),
-        UsersState::Loaded { names, more } => {
+        UsersState::Loaded { names, ids, more }
+            if users.can_moderate && users.poll_answer.is_none() && !names.is_empty() =>
+        {
+            let mut list = column![].spacing(2);
+            for (name, id) in names.iter().zip(ids) {
+                list = list.push(
+                    row![
+                        text(name.clone()).size(12).width(Length::Fill),
+                        row_button(
+                            "Remove",
+                            Event::AskReactionRemoval(ReactionTarget::User(*id))
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(Vertical::Center),
+                );
+            }
+            if *more {
+                list = list.push(text("and others").size(12).style(text::secondary));
+            }
+            list = list.push(row_button(
+                "Clear all of this emoji",
+                Event::AskReactionRemoval(ReactionTarget::All),
+            ));
+            if users.busy {
+                list = list.push(text("Waiting for Discord\u{2026}").size(12));
+            } else if let Some(target) = users.confirm {
+                let who = match target {
+                    ReactionTarget::User(id) => ids
+                        .iter()
+                        .position(|listed| *listed == id)
+                        .and_then(|at| names.get(at))
+                        .map_or_else(|| "this user".to_owned(), |name| format!("{name}'s")),
+                    ReactionTarget::All => "every".to_owned(),
+                };
+                list = list.push(
+                    row![
+                        text(format!("Remove {who} reaction? This cannot be undone."))
+                            .size(12)
+                            .style(text::danger),
+                        row_button("Confirm", Event::ConfirmReactionRemoval).style(button::danger),
+                        row_button("Cancel", Event::CancelReactionRemoval),
+                    ]
+                    .spacing(8)
+                    .align_y(Vertical::Center),
+                );
+            }
+            list.into()
+        }
+        UsersState::Loaded { names, more, .. } => {
             let mut line = if names.is_empty() {
                 "No one is listed.".to_owned()
             } else {
@@ -1426,7 +1577,7 @@ fn message_view<'a>(
         message_id,
     };
     body = match state {
-        RowState::Plain | RowState::Actions => body,
+        RowState::Plain | RowState::Moderate | RowState::Actions => body,
         RowState::Saving { delete: false } => body.push(status("Saving your edit…")),
         RowState::Saving { delete: true } => body.push(status("Deleting…")),
         RowState::Editing => body.push(status(
@@ -1452,7 +1603,7 @@ fn message_view<'a>(
         ),
         RowState::Failed { delete, reason } => {
             // The reason names the action and whether it may have taken effect.
-            let actions = if delete {
+            let actions = if delete || !row.own {
                 row![retry, dismiss]
             } else {
                 row![retry, row_button("Edit", edit.clone()), dismiss]
@@ -1524,11 +1675,38 @@ fn message_view<'a>(
         bottom: 2.0,
         left: if row.mentions_me { 0.0 } else { 16.0 },
     });
+    if let Some(select) = &snapshot.select {
+        // Select mode: a tick box over the left margin (no layout change), the
+        // whole row stays as it was and its other controls are off.
+        let ticked = select.ids.contains(&message_id);
+        let base = if ticked {
+            base.style(container::bordered_box)
+        } else {
+            base
+        };
+        let tick = checkbox(ticked)
+            .size(14)
+            .on_toggle_maybe((!select.busy).then_some(move |_| Event::ToggleSelect {
+                channel_id,
+                message_id,
+            }));
+        return stack![
+            base,
+            container(tick).padding(Padding {
+                top: 6.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 1.0,
+            }),
+        ]
+        .into();
+    }
     let can_reply = snapshot.can_send && interaction.editing.is_none();
     let show_own_actions = matches!(state, RowState::Actions | RowState::Failed { .. });
+    let show_delete = show_own_actions || state == RowState::Moderate;
     let idle = matches!(
         state,
-        RowState::Plain | RowState::Actions | RowState::Failed { .. }
+        RowState::Plain | RowState::Moderate | RowState::Actions | RowState::Failed { .. }
     );
     let show_reply = can_reply && idle;
     let show_copy = !content.is_empty() && idle;
@@ -1629,8 +1807,11 @@ fn message_view<'a>(
         actions = actions.push(message_tool("Back", Event::More(None)));
         return hover(base, actions_overlay(actions));
     }
-    if show_own_actions {
-        actions = actions.push(message_tool("Edit", edit)).push(message_tool(
+    if show_own_actions && row.own {
+        actions = actions.push(message_tool("Edit", edit));
+    }
+    if show_delete {
+        actions = actions.push(message_tool(
             "Delete",
             Event::Delete {
                 channel_id,
@@ -3851,6 +4032,9 @@ mod tests {
                 emoji: unicode(THUMBS),
                 poll_answer: None,
                 state,
+                can_moderate: false,
+                confirm: None,
+                busy: false,
             })
         };
         for state in [
@@ -3858,10 +4042,12 @@ mod tests {
             UsersState::Failed("Who reacted could not be loaded."),
             UsersState::Loaded {
                 names: vec!["Alice".to_owned(), "Bob".to_owned()],
+                ids: vec![Snowflake(1), Snowflake(2)],
                 more: true,
             },
             UsersState::Loaded {
                 names: Vec::new(),
+                ids: Vec::new(),
                 more: false,
             },
         ] {
@@ -3885,8 +4071,12 @@ mod tests {
                 poll_answer: None,
                 state: UsersState::Loaded {
                     names: vec!["Alice Private".to_owned()],
+                    ids: vec![Snowflake(1)],
                     more: false
-                }
+                },
+                can_moderate: false,
+                confirm: None,
+                busy: false,
             }
         );
         assert!(!printed.contains("Alice"), "{printed}");

@@ -1,0 +1,10 @@
+[
+  {
+    "reason": "spam links",
+    "user": { "id": "1000000000000000201", "username": "ada_l", "global_name": "Ada", "avatar": null }
+  },
+  {
+    "reason": null,
+    "user": { "id": "1000000000000000202", "username": "grace", "global_name": null, "discriminator": "0" }
+  }
+]
