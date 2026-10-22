@@ -554,3 +554,66 @@ pub fn admin_member(store: &Store, admin: &GuildAdmin, user: Snowflake) -> Optio
         effective,
     })
 }
+
+/// Text channels offered as the destination of a follow.
+pub const MAX_FOLLOW_TARGETS: usize = 256;
+
+/// A text channel a followed announcement channel may post into.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FollowTarget {
+    pub guild: Snowflake,
+    pub guild_name: String,
+    pub channel: Snowflake,
+    pub channel_name: String,
+}
+
+/// Where the announcement channel `source` may be followed from this account:
+/// every other text channel it can see in a server where it has Manage
+/// Webhooks (channel overwrites included), at most [`MAX_FOLLOW_TARGETS`], in
+/// server and channel order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FollowTargets {
+    pub source: Snowflake,
+    pub targets: Vec<FollowTarget>,
+}
+
+/// `None` unless `source` is an announcement channel of `guild` that the
+/// account can see; computed from the reducer's permissions, never guessed.
+pub fn follow_targets(store: &Store, guild: Snowflake, source: Snowflake) -> Option<FollowTargets> {
+    let entry = store.guild(guild)?;
+    let channel = entry.channel(source)?;
+    let context = PermissionContext::new(store, entry)?;
+    (channel.kind == ModelChannelKind::GuildAnnouncement
+        && context.permissions(entry, channel).view_channel)
+        .then_some(())?;
+    let mut targets = Vec::new();
+    'guilds: for id in store.guild_ids() {
+        let Some(entry) = store.guild(*id) else {
+            continue;
+        };
+        let Some(context) = PermissionContext::new(store, entry) else {
+            continue;
+        };
+        let mut channels: Vec<&fastcord_model::Channel> = entry
+            .channels()
+            .filter(|c| c.kind == ModelChannelKind::GuildText && c.id != source)
+            .filter(|c| {
+                context.permissions(entry, c).view_channel
+                    && context.raw(c).contains(Permissions::MANAGE_WEBHOOKS)
+            })
+            .collect();
+        channels.sort_by_key(|c| (c.position.unwrap_or(0), c.id));
+        for c in channels {
+            if targets.len() >= MAX_FOLLOW_TARGETS {
+                break 'guilds;
+            }
+            targets.push(FollowTarget {
+                guild: entry.id(),
+                guild_name: capped_name(Some(entry.name()), "Unnamed server"),
+                channel: c.id,
+                channel_name: capped_name(c.name.as_deref(), "Unnamed channel"),
+            });
+        }
+    }
+    Some(FollowTargets { source, targets })
+}

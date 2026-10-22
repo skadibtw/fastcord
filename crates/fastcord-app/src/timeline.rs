@@ -427,6 +427,18 @@ pub fn is_previewable_image(attachment: &Attachment) -> bool {
             }),
     }
 }
+/// Which announcements of the open channel the account may publish.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Publish {
+    /// Not an announcement channel, or no permission.
+    #[default]
+    No,
+    /// Its own messages (Send Messages).
+    Own,
+    /// Any message (Manage Messages).
+    Any,
+}
+
 /// What the UI is doing with a row that the snapshot does not know about.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Interaction {
@@ -445,6 +457,10 @@ pub struct Interaction {
     pub can_suppress_embeds: bool,
     /// The message whose secondary actions are shown instead of the usual ones.
     pub more: Option<Snowflake>,
+    /// What the account may publish in the open channel.
+    pub publish: Publish,
+    /// The message whose publishing waits for confirmation.
+    pub publishing: Option<Snowflake>,
 }
 
 /// What the timeline asks of the worker. Each event names its channel.
@@ -628,6 +644,17 @@ pub enum Event {
         message_id: Snowflake,
         spoiler: u16,
     },
+    /// Ask whether to publish an announcement to its followers.
+    Publish {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    /// The user confirmed publishing it.
+    ConfirmPublish {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    CancelPublish,
     /// Pin (`true`) or unpin a message.
     SetPinned {
         channel_id: Snowflake,
@@ -983,6 +1010,7 @@ fn message_tool(label: &'static str, event: Event) -> Element<'static, Event> {
         "Pin" => Icon::Pin,
         "Unpin" => Icon::Unpin,
         "Forward" => Icon::Forward,
+        "Publish" => Icon::Announcement,
         "Thread" => Icon::Thread,
         "Copy text" => Icon::Copy,
         "Copy link" => Icon::Link,
@@ -1231,6 +1259,9 @@ fn message_view<'a>(
     if message.edited_timestamp.is_some() {
         header = header.push(text("(edited)").size(12).style(text::secondary));
     }
+    if message.is_crossposted() {
+        header = header.push(text("Published").size(12).style(text::secondary));
+    }
     // An edit being saved shows its new text right away.
     let content = content(row);
     let mut body = column![].spacing(2);
@@ -1264,6 +1295,13 @@ fn message_view<'a>(
     }
     if !continues {
         body = body.push(header);
+    }
+    if message.crosspost_source().is_some() {
+        body = body.push(
+            text(format!("Published from {}", author_name(message, assets)))
+                .size(12)
+                .style(text::secondary),
+        );
     }
     let cx = rich::Cx {
         names: &snapshot.names,
@@ -1506,6 +1544,16 @@ fn message_view<'a>(
         && matches!(message.kind, 0 | 19)
         && (row.own || interaction.can_suppress_embeds)
         && (!message.embeds.is_empty() || message.embeds_suppressed());
+    // Announcements not yet published: the author's own with Send Messages,
+    // anyone's with Manage Messages (Discord has the last word).
+    let show_publish = idle
+        && message.kind == 0
+        && !message.is_crossposted()
+        && match interaction.publish {
+            Publish::No => false,
+            Publish::Own => row.own,
+            Publish::Any => true,
+        };
     // Only other people's ordinary messages (voice messages included) can be
     // reported.
     let show_report = idle && !row.own && matches!(message.kind, 0 | 19);
@@ -1515,6 +1563,26 @@ fn message_view<'a>(
     // Hover controls are layered over the top right so the measured row height
     // does not depend on whether the pointer is on it.
     let mut actions = row![].spacing(4);
+    if show_publish && interaction.publishing == Some(message_id) {
+        actions = actions
+            .push(
+                container(
+                    text("Publish to every server following this channel?")
+                        .size(12)
+                        .wrapping(text::Wrapping::None),
+                )
+                .padding([3, 4]),
+            )
+            .push(row_button(
+                "Publish",
+                Event::ConfirmPublish {
+                    channel_id,
+                    message_id,
+                },
+            ))
+            .push(row_button("Cancel", Event::CancelPublish));
+        return hover(base, actions_overlay(actions));
+    }
     if interaction.more == Some(message_id) {
         actions = actions
             .push(message_tool(
@@ -1602,6 +1670,15 @@ fn message_view<'a>(
         actions = actions.push(message_tool(
             "Forward",
             Event::Forward {
+                channel_id,
+                message_id,
+            },
+        ));
+    }
+    if show_publish {
+        actions = actions.push(message_tool(
+            "Publish",
+            Event::Publish {
                 channel_id,
                 message_id,
             },
@@ -1948,7 +2025,9 @@ fn continues_group(before: &Row, row: &Row) -> bool {
         return false;
     }
     let (a, b) = (&*before.message, &*row.message);
-    let plain = |m: &Message| matches!(m.kind, 0 | 19) && m.message_reference.is_none();
+    let plain = |m: &Message| {
+        matches!(m.kind, 0 | 19) && m.message_reference.is_none() && !m.is_crossposted()
+    };
     a.author.id == b.author.id
         && plain(a)
         && plain(b)
@@ -3170,6 +3249,59 @@ mod tests {
             },
         );
         assert!(with.iter().any(is_pin));
+    }
+
+    #[test]
+    fn publishing_is_offered_by_right_asks_first_and_not_for_published_messages() {
+        let publish = |events: &[Event], n: u64| {
+            events.iter().any(
+                |e| matches!(e, Event::Publish { message_id, .. } if *message_id == Snowflake(n)),
+            )
+        };
+        let with = |publish: Publish| Interaction {
+            publish,
+            ..Interaction::default()
+        };
+        let none = clickable(&mixed(), with(Publish::No));
+        assert!(!publish(&none, 1) && !publish(&none, 2));
+        let own = clickable(&mixed(), with(Publish::Own));
+        assert!(publish(&own, 2) && !publish(&own, 1));
+        let any = clickable(&mixed(), with(Publish::Any));
+        assert!(publish(&any, 1) && publish(&any, 2));
+        // A published message offers nothing more; the marker is drawn.
+        let mut published = mixed();
+        Arc::make_mut(&mut published.rows[1].message).flags = fastcord_model::CROSSPOSTED_FLAG;
+        assert!(!publish(&clickable(&published, with(Publish::Any)), 2));
+        // The confirmation replaces the tools of its row.
+        let asking = clickable(
+            &mixed(),
+            Interaction {
+                publish: Publish::Any,
+                publishing: Some(Snowflake(1)),
+                ..Interaction::default()
+            },
+        );
+        assert!(asking.iter().any(|e| matches!(
+            e,
+            Event::ConfirmPublish { message_id, .. } if *message_id == Snowflake(1)
+        )));
+        assert!(asking.contains(&Event::CancelPublish));
+    }
+
+    #[test]
+    fn a_received_crosspost_shows_its_source_and_is_never_grouped() {
+        let mut snapshot = mixed();
+        let crosspost = Arc::make_mut(&mut snapshot.rows[0].message);
+        crosspost.flags = fastcord_model::IS_CROSSPOST_FLAG;
+        crosspost.message_reference = Some(fastcord_model::MessageReference {
+            kind: 0,
+            message_id: Some(Snowflake(70)),
+            channel_id: Some(Snowflake(71)),
+            guild_id: Some(Snowflake(72)),
+        });
+        assert!(snapshot.rows[0].message.crosspost_source().is_some());
+        // It builds like any other row.
+        let _ = clickable(&snapshot, Interaction::default());
     }
 
     #[test]

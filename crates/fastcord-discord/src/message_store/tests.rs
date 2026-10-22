@@ -4,7 +4,7 @@
 use std::ops::RangeInclusive;
 use std::sync::LazyLock;
 
-use fastcord_model::{Emoji, MAX_REACTIONS};
+use fastcord_model::{Emoji, MAX_REACTIONS, MessageReference};
 
 use super::*;
 use crate::gateway::{
@@ -2325,4 +2325,50 @@ fn components_are_charged_to_the_budget_and_an_update_replaces_and_recounts_them
     store.apply_dispatch(&update(CHANNEL, 4, r#","components":[]"#));
     check(&store);
     assert!(store.get(CHANNEL, id(4)).unwrap().components.is_empty());
+}
+
+#[test]
+fn a_received_crosspost_follows_edits_and_deletes_of_its_source_and_publishing_follows_the_flag() {
+    let mut store = MessageStore::new();
+    load(&mut store, HistoryCursor::Latest, 9..=13);
+    // A crosspost as the follower's channel receives it.
+    let mut crosspost = message(14);
+    crosspost.flags = 1 << 1;
+    crosspost.message_reference = Some(MessageReference {
+        kind: 0,
+        message_id: Some(id(70)),
+        channel_id: Some(id(71)),
+        guild_id: Some(id(72)),
+    });
+    store.apply_dispatch(&Dispatch::MessageCreate(Box::new(crosspost)));
+    let held = store.get(CHANNEL, id(14)).unwrap();
+    assert_eq!(held.crosspost_source().unwrap().channel_id, Some(id(71)));
+    assert!(!held.is_crossposted());
+    // The source's edit arrives as an ordinary update and keeps the source.
+    assert!(
+        store
+            .apply_dispatch(&update(CHANNEL, 14, r#","content":"source edited""#))
+            .changed
+    );
+    let held = store.get(CHANNEL, id(14)).unwrap();
+    assert_eq!(held.content, "source edited");
+    assert!(held.crosspost_source().is_some());
+    // Its delete removes it; a replay is harmless.
+    assert!(store.apply_dispatch(&delete(CHANNEL, 14)).changed);
+    assert!(!store.apply_dispatch(&delete(CHANNEL, 14)).changed);
+    // Publishing a message shows only when Discord's update sets the flag.
+    assert!(!store.get(CHANNEL, id(13)).unwrap().is_crossposted());
+    assert!(
+        store
+            .apply_dispatch(&update(CHANNEL, 13, r#","flags":1"#))
+            .changed
+    );
+    assert!(store.get(CHANNEL, id(13)).unwrap().is_crossposted());
+    let revision = store.revision(CHANNEL, id(13));
+    assert!(
+        !store
+            .apply_dispatch(&update(CHANNEL, 13, r#","flags":1"#))
+            .changed
+    );
+    assert_eq!(store.revision(CHANNEL, id(13)), revision);
 }

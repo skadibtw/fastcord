@@ -538,6 +538,16 @@ Implemented in `fastcord-discord::role_admin` (validated bodies and requests), t
 - **Immediate effect.** Navigation, composer and media already derive from the reducer's role and overwrite state, so a role, member or overwrite event changes access at once; a refused or ambiguous write changes nothing on screen.
 - **Bounds.** At most 250 roles, 100 overwrites per channel, 500 channels, 256 held people; the member read model is rebuilt per request and kept nowhere.
 
+### 8.20 Announcement channels (#98)
+
+Implemented in `fastcord-discord::announce` (the four requests, the type-2 webhook parse that never reads a token), `state/navigation/admin.rs` (`follow_targets`: the reducer lists where a channel may be followed, with `MANAGE_WEBHOOKS` added to `Permissions`), `fastcord-model::Message` (`is_crossposted`, `crosspost_source`) and `fastcord-app::announce` (the Confirm, picker and list panel; the row tools and marker are in `timeline`). Routes are in `docs/PROTOCOL.md`, all unverified.
+
+- **Publish.** A message tool in an announcement channel for messages not yet crossposted (own with Send Messages, any with Manage Messages), then a Confirm in the row. One request, re-checked against the loaded message and the channel's permissions at the click; the row shows "Published" only after `MESSAGE_UPDATE` sets the flag.
+- **Received crossposts** show their source line; their later edits and deletes are ordinary events.
+- **Follow.** The announcement channel header's Follow opens a picker of text channels where the reducer computes Manage Webhooks; the follow is sent once.
+- **Followed destinations.** The text channel edit panel (Manage Webhooks) has "Followed announcements": the type-2 webhooks with their source and Unfollow after a Confirm (`DELETE /webhooks/{id}`).
+- **Not offered:** any scheduler or automatic posting, other webhook types, paid features.
+
 ### Apps: commands and components (#100)
 
 A message's buttons and selects, the Components V2 layout pieces and slash commands of installed applications. Ownership: `fastcord-model` holds the bounded component tree (`component`); `fastcord-discord` holds the wire (`interaction`: request bodies, the command index, the modal and outcome events) and the byte-accounted store; the history worker (`history/interact.rs`, rules in `interactions.rs`) owns the session ID, the ledger of unsettled interactions, the open modal and the 15-second timers; the UI draws components (`component_view`) and the command list, option form and modal (`slash`). One click is one request, re-checked against the store, the open channel, the send permission and the session when it reaches the worker, sent once at user-write priority and never retried. The ledger allows one pending component per message and one pending command per channel (8 in all). Premium buttons are disabled with "not available in this client"; nothing here purchases, schedules or automates anything. Ephemeral messages (flag 64) are labelled, dismissable locally and purged with the conversation. Route and event details, and what is left, are in docs/PROTOCOL.md.

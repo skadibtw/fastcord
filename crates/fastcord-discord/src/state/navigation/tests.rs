@@ -2977,3 +2977,63 @@ fn collapsed_categories_and_hidden_muted_channels_keep_unread_and_open_ones() {
     assert!(hidden.contains(&id(2002)), "the open channel stays");
     assert!(hidden.contains(&id(2003)), "not muted");
 }
+
+// ----- announcement following (issue #98) -----
+
+const MANAGE_WEBHOOKS: &str = "536870912";
+
+/// "Mod" holds only Manage Webhooks; channel 9103 is an announcement channel
+/// and 9101 the text channel it could be followed into.
+fn follow_guild(mod_permissions: &str) -> Value {
+    let mut guild = roles_guild();
+    guild["roles"][2]["permissions"] = json!(mod_permissions);
+    guild["channels"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "9103", "type": 5, "name": "news", "position": 2, "parent_id": "9100"}));
+    guild
+}
+
+fn follow_ids(store: &Store, source: u64) -> Option<Vec<u64>> {
+    follow_targets(store, id(ADMIN_GUILD), id(source))
+        .map(|f| f.targets.iter().map(|t| t.channel.0).collect())
+}
+
+#[test]
+fn follow_targets_need_manage_webhooks_in_the_destination_and_an_announcement_source() {
+    let store = admin_store(&follow_guild(MANAGE_WEBHOOKS));
+    let found = follow_targets(&store, id(ADMIN_GUILD), id(9103)).unwrap();
+    assert_eq!(found.source, id(9103));
+    // READY's own servers are offered too (the account owns them).
+    let ours: Vec<_> = found
+        .targets
+        .iter()
+        .filter(|t| t.guild == id(ADMIN_GUILD))
+        .collect();
+    assert_eq!(ours.len(), 1);
+    assert_eq!(
+        (ours[0].channel, ours[0].channel_name.as_str()),
+        (id(9101), "general")
+    );
+    assert_eq!(ours[0].guild_name, "Synthetic server");
+    // A text channel is not an announcement channel; an unknown one is nothing.
+    assert_eq!(follow_ids(&store, 9101), None);
+    assert_eq!(follow_ids(&store, 1), None);
+    // Without the permission nothing is offered, and never the source itself.
+    let store = admin_store(&follow_guild("0"));
+    assert!(!follow_ids(&store, 9103).unwrap().contains(&9101));
+}
+
+#[test]
+fn a_channel_overwrite_removes_a_destination() {
+    let mut guild = follow_guild(MANAGE_WEBHOOKS);
+    guild["channels"][1]["permission_overwrites"] =
+        json!([{"id": "9301", "type": 0, "allow": "0", "deny": MANAGE_WEBHOOKS}]);
+    let store = admin_store(&guild);
+    assert!(!follow_ids(&store, 9103).unwrap().contains(&9101));
+    // An overwrite that hides the source hides the whole picker.
+    let mut guild = follow_guild(MANAGE_WEBHOOKS);
+    guild["channels"][3]["permission_overwrites"] =
+        json!([{"id": "9001", "type": 0, "allow": "0", "deny": "1024"}]);
+    assert_eq!(follow_ids(&admin_store(&guild), 9103), None);
+}

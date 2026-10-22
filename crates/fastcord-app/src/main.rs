@@ -2,6 +2,7 @@
 
 mod account_panel;
 mod accounts;
+mod announce;
 mod attachment_ui;
 mod attachments;
 mod audio_devices;
@@ -178,6 +179,7 @@ struct App {
     group: group_dm::State,
     invite: invite::State,
     guild_admin: guild_admin::State,
+    announce: announce::State,
     discover: discover::State,
     onboarding: onboarding::State,
     events: scheduled_events::State,
@@ -376,6 +378,7 @@ enum Message {
     Group(group_dm::Event),
     Invite(invite::Event),
     GuildAdmin(guild_admin::Event),
+    Announce(announce::Event),
     Discover(discover::Event),
     Onboarding(onboarding::Event),
     Events(scheduled_events::Event),
@@ -465,6 +468,7 @@ impl App {
                 group: group_dm::State::default(),
                 invite: invite::State::default(),
                 guild_admin: guild_admin::State::default(),
+                announce: announce::State::default(),
                 discover: discover::State::default(),
                 onboarding: onboarding::State::default(),
                 events: scheduled_events::State::default(),
@@ -529,7 +533,12 @@ impl App {
         if let Phase::Account { gateway, .. } = &self.phase {
             gateway.controls.quick_query(self.switcher.wanted());
             self.guild_admin.sync(&gateway.navigation);
-            gateway.controls.admin_guild(self.guild_admin.wanted());
+            gateway
+                .controls
+                .admin_guild(self.guild_admin.wanted().or(self.announce.wanted_guild()));
+            gateway
+                .controls
+                .follow_source(self.announce.wanted_follow());
             gateway
                 .controls
                 .admin_member(self.guild_admin.wanted_member());
@@ -1406,6 +1415,7 @@ impl App {
                         .pump(&gateway.timeline.rows, &session.client)
                         .map(Message::Invite);
                     self.forward.sync(gateway.timeline.channel_id);
+                    self.announce.sync(gateway.timeline.channel_id);
                     self.group.sync(
                         gateway
                             .navigation
@@ -1456,6 +1466,7 @@ impl App {
             Message::Shortcut(shortcut) => return self.navigation_shortcut(shortcut),
             Message::Group(event) => return self.group_event(event),
             Message::Invite(event) => return self.invite_event(event),
+            Message::Announce(event) => return self.announce_event(event),
             Message::GuildAdmin(event) => {
                 if matches!(event, guild_admin::Event::MemberRoles(..)) {
                     self.member_menu.close();
@@ -2241,6 +2252,25 @@ impl App {
                             };
                             return self.forward_event(forward::Event::Open { source, preview });
                         }
+                        timeline::Event::Publish {
+                            channel_id,
+                            message_id,
+                        } => {
+                            return self.announce_event(announce::Event::AskPublish(
+                                channel_id, message_id,
+                            ));
+                        }
+                        timeline::Event::ConfirmPublish {
+                            channel_id,
+                            message_id,
+                        } => {
+                            return self.announce_event(announce::Event::ConfirmPublish(
+                                channel_id, message_id,
+                            ));
+                        }
+                        timeline::Event::CancelPublish => {
+                            return self.announce_event(announce::Event::CancelPublish);
+                        }
                         timeline::Event::CopyLink {
                             channel_id,
                             message_id,
@@ -2832,6 +2862,7 @@ impl App {
         self.group.clear();
         self.invite.clear();
         self.guild_admin.clear();
+        self.announce.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -3011,6 +3042,7 @@ impl App {
         self.group.clear();
         self.invite.clear();
         self.guild_admin.clear();
+        self.announce.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -3132,6 +3164,30 @@ impl App {
         self.gif
             .update(event, &session.client, gateway.attachments.as_ref())
             .map(Message::Gif)
+    }
+
+    fn announce_event(&mut self, event: announce::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let rejected = announce::State::is_rejected(&event);
+        let task = self.announce.update(
+            event,
+            &gateway.navigation,
+            &gateway.timeline,
+            &session.client,
+        );
+        if rejected {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Announce)
     }
 
     fn forward_event(&mut self, event: forward::Event) -> Task<Message> {
@@ -3651,6 +3707,10 @@ impl App {
         else {
             return Task::none();
         };
+        if let guild_admin::Event::Followed(guild, channel) = event {
+            // The channel panel hands over to the followed-announcements list.
+            return self.announce_event(announce::Event::OpenFollowers(guild, channel));
+        }
         if let guild_admin::Event::Leave(guild) = event {
             // The menu hands over to the leave confirmation of the invite module.
             let _ = self
@@ -4447,6 +4507,9 @@ impl App {
             if let Some(panel) = guild_admin::view(&self.guild_admin, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::GuildAdmin));
             }
+            if let Some(panel) = announce::view(&self.announce, &gateway.navigation) {
+                banner_column = banner_column.push(panel.map(Message::Announce));
+            }
             if let Some(panel) = invite::view(&self.invite, localtime::now()) {
                 banner_column = banner_column.push(panel.map(Message::Invite));
             }
@@ -4696,7 +4759,11 @@ impl App {
                 &gateway.navigation,
                 &gateway.timeline,
                 &gateway.composer,
-                gateway.interaction(),
+                {
+                    let mut interaction = gateway.interaction();
+                    interaction.publishing = self.announce.publishing();
+                    interaction
+                },
                 navigation::PrivateConversation {
                     recipients: &gateway.private.recipients,
                     notice: gateway.private.notice.as_deref(),

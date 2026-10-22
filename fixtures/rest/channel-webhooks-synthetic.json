@@ -1,0 +1,26 @@
+[
+  {
+    "id": "7001",
+    "type": 2,
+    "guild_id": "100",
+    "channel_id": "200",
+    "name": "Source Server #news",
+    "source_guild": {"id": "300", "name": "Source Server", "icon": null},
+    "source_channel": {"id": "310", "name": "news"}
+  },
+  {
+    "id": "7002",
+    "type": 1,
+    "guild_id": "100",
+    "channel_id": "200",
+    "name": "Incoming hook",
+    "token": "synthetic-incoming-webhook-credential"
+  },
+  {
+    "id": "7003",
+    "type": 2,
+    "guild_id": "100",
+    "channel_id": "200",
+    "name": "Half known"
+  }
+]

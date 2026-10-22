@@ -32,7 +32,7 @@ use fastcord_discord::{
     MAX_GUILD_NAME_CHARS, MAX_VOICE_USER_LIMIT, MIN_BITRATE, NOTIFICATION_LEVELS, NewChannel,
     RestClient, RestError, SLOWMODE, VoiceRegion, bitrate_ceiling, needs_community,
 };
-use fastcord_model::{OverwriteKind, Snowflake};
+use fastcord_model::{OverwriteKind, Permissions, Snowflake};
 use iced::widget::{
     button, checkbox, column, container, pick_list, row, scrollable, space, text, text_input,
 };
@@ -133,6 +133,9 @@ pub enum Event {
     EditChannel(Snowflake, Snowflake, bool),
     /// The menu's "Leave server": the invite module asks its own confirmation.
     Leave(Snowflake),
+    /// "Followed announcements" of a text channel: server and channel. The
+    /// caller opens the list (`announce`); the panel stays as it is.
+    Followed(Snowflake, Snowflake),
     Close,
     Input(Field, String),
     Choose(Choice),
@@ -560,6 +563,7 @@ impl State {
                     );
                 }
             }
+            Event::Followed(..) => {}
             // Forwarded by the caller; the menu closes with it.
             Event::Leave(_) => {
                 if self.busy.is_none() {
@@ -1483,6 +1487,12 @@ fn channel_view<'a>(
     }
     panel =
         panel.push(button(text("Save").size(13)).on_press_maybe(enabled.then_some(Event::Save)));
+    if kind == AdminKind::Text && current.mine.contains(Permissions::MANAGE_WEBHOOKS) {
+        panel = panel.push(
+            button(text("Followed announcements").size(12))
+                .on_press_maybe(idle.then_some(Event::Followed(admin.id, current.id))),
+        );
+    }
     panel = panel.push(access::access_view(form, current, admin, member, idle));
     panel = if form.confirm_delete {
         panel.push(

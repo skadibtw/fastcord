@@ -716,6 +716,16 @@ Manual (Windows, alt account only): open a server with many members, quit fastco
   - [ ] Inspection of a held member in a channel matches the official "View server as role" / permission display, including a member overwrite and a timeout.
   - [ ] Losing Manage Roles in another client removes the controls here without a restart.
 
+### Announcement channels (#98)
+
+- **Automated:** `fastcord-discord` `announce::tests` (type-2-only parse from `fixtures/rest/channel-webhooks-synthetic.json`, no token, bounds, routes and the follow body), `state::navigation::tests` (`follow_targets`: Manage Webhooks per destination, overwrites, announcement source only), `message_store::tests` (a received crosspost keeps its source across an edit, a delete and its replay, and `CROSSPOSTED` arrives only through the update); `fastcord-app` `announce::tests` (publish asks first, rechecked at the click, one request in flight, stale answers, already-published refusal; picker offers reducer targets only and sends once; list, Confirm, removal, forbidden and gone answers) and `timeline::tests` (Publish by right, the confirmation row, no Publish once published).
+- **Outstanding gates (alt accounts only, unchecked, unverified routes):**
+  - [ ] Publish a message in a real announcement channel followed by a second server: the follower receives exactly one crosspost with the source line, the sender sees "Published" through `MESSAGE_UPDATE`, and a second publish is not offered.
+  - [ ] Publishing as a member with only Send Messages works for own messages and is refused (403 text) for another's; a 429 after repeated publishing reads as rate limiting.
+  - [ ] Does the follower receive `MESSAGE_UPDATE` for a source edit and `MESSAGE_DELETE` for a source delete, and is the crosspost's `author` the "Server #channel" name the source line shows?
+  - [ ] Follow into a text channel (Manage Webhooks there): the official client lists the same follower; the picker omits channels without the permission, including through an overwrite; following twice or into the source's own server reads as Discord's refusal.
+  - [ ] "Followed announcements": the list matches the official client's Integrations > Channels Followed; Unfollow removes it there too; a deleted-elsewhere row reads "already removed"; the response of `GET /channels/{id}/webhooks` for a channel with other webhook types never shows a token.
+
 ## Accounts, sessions and security overview (#107)
 Automated: `accounts::tests` (index round trip, migration by reconcile, bounds), `account_security::tests` (session list parse, logout body, overview booleans, 60003 recognised in 401 and 403), `account_panel::tests` (Confirm gating, one request in flight, MFA refusal shown and not retried, ambiguous failure text, stale answers), and the `main.rs` state-machine tests for switching (teardown before the next sign-in, saved login kept, memory-only refused).
 Manual (Windows, alt account only, not run offline):

@@ -53,6 +53,11 @@ pub const MAX_WAVEFORM_CHARS: usize = 512;
 
 /// `IS_VOICE_MESSAGE` in a message's `flags`.
 pub const VOICE_MESSAGE_FLAG: u64 = 1 << 13;
+/// `CROSSPOSTED`: an announcement was published to the servers following it.
+pub const CROSSPOSTED_FLAG: u64 = 1 << 0;
+/// `IS_CROSSPOST`: the message is a published announcement received from a
+/// followed channel; its `message_reference` names the source.
+pub const IS_CROSSPOST_FLAG: u64 = 1 << 1;
 /// `SUPPRESS_EMBEDS`: link previews of the message are hidden.
 pub const SUPPRESS_EMBEDS_FLAG: u64 = 1 << 2;
 
@@ -637,6 +642,21 @@ impl Message {
         (self.message_reference.as_ref()?.kind == FORWARD_REFERENCE)
             .then(|| self.message_snapshots.first().map(|s| &s.message))
             .flatten()
+    }
+
+    /// Whether the announcement was already published (Discord set the flag).
+    pub fn is_crossposted(&self) -> bool {
+        self.flags & CROSSPOSTED_FLAG != 0
+    }
+
+    /// The source channel of a received crosspost: only the flag together with
+    /// a channel reference counts. The message and its `author` (the follower
+    /// webhook, named after the source server and channel) are Discord's.
+    pub fn crosspost_source(&self) -> Option<&MessageReference> {
+        (self.flags & IS_CROSSPOST_FLAG != 0)
+            .then_some(self.message_reference.as_ref())
+            .flatten()
+            .filter(|reference| reference.channel_id.is_some())
     }
 
     /// Whether the message's link previews are hidden.

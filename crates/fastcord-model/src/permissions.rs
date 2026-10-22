@@ -23,6 +23,7 @@ impl Permissions {
     pub const MANAGE_CHANNELS: Self = Self(1 << 4);
     pub const MANAGE_GUILD: Self = Self(1 << 5);
     pub const MANAGE_ROLES: Self = Self(1 << 28);
+    pub const MANAGE_WEBHOOKS: Self = Self(1 << 29);
     pub const REQUEST_TO_SPEAK: Self = Self(1 << 32);
     pub const MUTE_MEMBERS: Self = Self(1 << 22);
     pub const DEAFEN_MEMBERS: Self = Self(1 << 23);

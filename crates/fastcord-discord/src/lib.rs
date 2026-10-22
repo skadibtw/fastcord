@@ -12,6 +12,7 @@
 
 mod account_security;
 mod ack;
+mod announce;
 mod attachment;
 mod call;
 mod clock;
@@ -61,6 +62,7 @@ mod ws;
 pub use account_security::{
     AuthSession, MAX_SESSIONS, MFA_REQUIRED, SecurityOverview, is_mfa_required, logout_body,
 };
+pub use announce::{Follower, MAX_FOLLOWERS, parse_followers};
 pub use attachment::{RefreshedAttachmentUrl, decode_waveform};
 pub use call::CallSignal;
 pub use clock::{Clock, MonotonicClock};

@@ -945,6 +945,15 @@ fn main_pane<'a>(
                                 )),
                             ));
                         }
+                        if selection.kind == ChannelKind::Announcement {
+                            tools.push((
+                                "Follow",
+                                Message::Announce(crate::announce::Event::OpenFollow(
+                                    selection.guild_id,
+                                    selection.channel_id,
+                                )),
+                            ));
+                        }
                         if permissions.manage_channel {
                             tools.push((
                                 "Edit channel",

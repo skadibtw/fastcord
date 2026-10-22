@@ -556,6 +556,8 @@ struct Request {
     admin: Option<Snowflake>,
     /// The member the roles panel or permission inspection describes.
     admin_member: Option<Snowflake>,
+    /// The announcement channel (server, channel) the follow picker is for.
+    follow: Option<(Snowflake, Snowflake)>,
     /// Bumped when the local list layout (`organize`) changed.
     layout_rev: u64,
     timeline: crate::history::Request,
@@ -1467,6 +1469,18 @@ impl NavigationBridge {
                 return false;
             }
             request.admin = guild;
+            true
+        });
+    }
+
+    /// The announcement channel the follow picker is open for, `None` once it
+    /// closes; the reducer then lists where it may be followed.
+    pub fn follow_source(&self, source: Option<(Snowflake, Snowflake)>) {
+        self.requests.send_if_modified(|request| {
+            if request.follow == source {
+                return false;
+            }
+            request.follow = source;
             true
         });
     }
@@ -3026,6 +3040,9 @@ impl Worker {
         navigation.admin = request.admin.and_then(|guild| {
             fastcord_discord::state::navigation::guild_admin(&self.tracker.store, guild)
         });
+        navigation.follow = request.follow.and_then(|(guild, source)| {
+            fastcord_discord::state::navigation::follow_targets(&self.tracker.store, guild, source)
+        });
         navigation.admin_member = request.admin_member.and_then(|user| {
             fastcord_discord::state::navigation::admin_member(
                 &self.tracker.store,
@@ -3729,6 +3746,13 @@ impl GatewayPanel {
                 .filter(|(channel, _)| self.timeline.channel_id == Some(*channel))
                 .map(|(_, message)| message),
             can_pin: self.can_pin(),
+            publish: self
+                .timeline
+                .channel_id
+                .map_or(timeline::Publish::No, |open| {
+                    crate::announce::right(self.navigation.selection.as_ref(), open)
+                }),
+            publishing: None,
             can_thread: self.can_thread(),
             can_suppress_embeds: self.can_suppress_embeds(),
             more: self
