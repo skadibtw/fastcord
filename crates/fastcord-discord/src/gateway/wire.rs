@@ -261,7 +261,7 @@ mod tests {
         use reqwest::header::{AUTHORIZATION, USER_AGENT};
 
         use crate::UserToken;
-        use crate::gateway::{BUNDLED_BUILD_NUMBER, CLIENT_FINGERPRINT};
+        use crate::gateway::BUNDLED_BUILD_NUMBER;
         use crate::rest::auth_headers;
 
         let fixtures: Vec<Value> = serde_json::from_str(REST_IDENTITY_FIXTURE).unwrap();
@@ -297,7 +297,7 @@ mod tests {
                 headers["x-discord-locale"].to_str().unwrap(),
                 rest["system_locale"].as_str().unwrap()
             );
-            assert_eq!(headers["x-fingerprint"], CLIENT_FINGERPRINT);
+            assert!(!headers.contains_key("x-fingerprint"));
             assert_eq!(headers[AUTHORIZATION], token.expose_secret());
             assert!(headers[AUTHORIZATION].is_sensitive());
             // An identical profile stays identical across requests/reconnects.

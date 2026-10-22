@@ -3,9 +3,9 @@
 //! and the notification settings of a server or one conversation
 //! (`PATCH /users/@me/guilds/{guild|@me}/settings`: mute with a duration,
 //! `message_notifications`, `suppress_everyone`/`suppress_roles`, issue #106).
-//! Both are sent once, on the user's request only; repeating a setting sets
-//! the same state, so there is no hidden retry.
-//! Unverified live (`docs/TESTING.md`).
+//! Notification writes are currently quarantined after an account-restriction
+//! incident reported while using Alerts. The cause is unconfirmed. Mention
+//! reads are unchanged; the settings wire helpers remain for offline validation.
 
 use fastcord_model::{Message, Snowflake};
 use reqwest::Method;
@@ -15,6 +15,10 @@ use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route};
 
 /// Mentions per request (the `limit` asked for).
 pub const MENTIONS_PAGE_SIZE: usize = 25;
+
+/// Re-enable only after notification requests have been independently validated.
+/// There is intentionally no runtime bypass for this quarantine.
+pub const NOTIFICATION_WRITES_ENABLED: bool = false;
 
 /// Which mentions the list includes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +227,9 @@ impl<C: Clock> RestClient<C> {
         if (guild.is_none() && channel.is_none()) || (server_only && channel.is_some()) {
             return Err(RestError::InvalidJson);
         }
+        if !NOTIFICATION_WRITES_ENABLED {
+            return Err(RestError::NotificationWritesPaused);
+        }
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let request = RestRequest::new(mute_route(guild)?, Priority::UserWrite)
             .json(&setting_body(channel, setting, now))?;
@@ -233,6 +240,36 @@ impl<C: Clock> RestClient<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn notification_writes_are_rejected_before_any_dispatch() {
+        use crate::UserToken;
+        use crate::gateway::{ClientProperties, HostOs};
+
+        let client = RestClient::new(
+            UserToken::new("offline-test-credential".to_owned()),
+            ClientProperties::web(HostOs::Linux, "en-US", 1),
+        )
+        .unwrap();
+        for (guild, channel) in [
+            (Some(Snowflake(1)), None),
+            (Some(Snowflake(1)), Some(Snowflake(2))),
+            (None, Some(Snowflake(2))),
+        ] {
+            assert_eq!(
+                client
+                    .set_notification(guild, channel, NotifySetting::Mute(MuteFor::Forever))
+                    .await,
+                Err(RestError::NotificationWritesPaused),
+            );
+            if let Some(channel) = channel {
+                assert_eq!(
+                    client.set_channel_muted(guild, channel, false).await,
+                    Err(RestError::NotificationWritesPaused)
+                );
+            }
+        }
+    }
 
     const PAGE: &str = include_str!("../../../fixtures/rest/mentions-page.json");
 

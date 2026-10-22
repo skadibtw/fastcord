@@ -52,7 +52,6 @@ pub use event::{
     ThreadMembersUpdate, TypingStart, VoiceStateUpdate,
 };
 pub use event::{MAX_PRESENCES, MAX_RELATIONSHIPS, PresenceUpdate};
-pub(crate) use profile::CLIENT_FINGERPRINT;
 pub use profile::{
     BUNDLED_BUILD_NUMBER, BuildNumber, BuildSource, ClientProperties, HostOs, PROFILE_VERSION,
     resolve_build_number,

@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
 /// Bump whenever the properties below change shape or meaning.
-pub const PROFILE_VERSION: u32 = 1;
+pub const PROFILE_VERSION: u32 = 2;
 /// Chrome stable at the time this profile was last reviewed (2026-10-07). The
 /// UA and `browser_version` must agree; Chrome's reduced UA fixes the minor
 /// components to zero.
@@ -17,9 +17,6 @@ const CHROME_MAJOR: u32 = 155;
 /// `client_build_number` of discord.com's web client observed on 2026-10-07.
 /// Used only when the live value cannot be fetched.
 pub const BUNDLED_BUILD_NUMBER: u32 = 631_730;
-/// The web client's REST fingerprint bundled with this versioned profile.
-/// Stable per fastcord build; review alongside the bundled build number and UA.
-pub(crate) const CLIENT_FINGERPRINT: &str = "1559116650832339032.2xwTQ4DcyLTfBV0bgPCx75HgxTw";
 
 const APP_URL: &str = "https://discord.com/app";
 const BUILD_MARKER: &[u8] = b"\"BUILD_NUMBER\":\"";

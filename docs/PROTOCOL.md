@@ -73,7 +73,7 @@ VOICE_SERVER_UPDATE (`{token, guild_id, channel_id?, endpoint}`) is decoded for 
 - `x-super-properties`: the `ClientProperties` JSON, standard-base64 encoded — the exact same object Identify sends under `properties`.
 - `user-agent`: the `browser_user_agent` of the profile (Chrome 155 reduced UA for the host OS).
 - `x-discord-locale`: the profile's `system_locale`.
-- `x-fingerprint`: the web client's client fingerprint constant, stable per fastcord build and defined once as `CLIENT_FINGERPRINT` in the versioned Gateway/REST profile module.
+- `x-fingerprint` is omitted. Profile version 2 removes the captured constant previously shared by every installation/account. No replacement is fabricated; fingerprint/session metadata must not be treated as versioned client metadata. Compatibility without this header still needs independent validation.
 
 Offline consistency tests use `fixtures/rest/client-identity-profiles.json` for Windows, macOS, Linux, and a non-en-US locale, comparing REST user-agent/locale and decoded `x-super-properties` against the actual Gateway Identify properties.
 
@@ -829,6 +829,12 @@ Implemented by `fastcord-discord::account_security` and the app's `account_panel
 - Unverified: the exact route and field names, whether the logout needs MFA for every account, whether the current session can be told apart from the others (it cannot here), and whether Discord limits how many hashes one request may carry.
 
 ### Conversation organization and notification settings (#106)
+
+**Safety hold, 2026-10-22:** notification-setting writes are disabled at `RestClient::set_notification`, including inbox mute. A maintainer reported a suspicious-activity account disable after using Alerts; there is no captured request establishing causation. Opening Alerts is local and sends no request. The panel now shows held settings read-only; hide-muted remains local. The wire shapes below are retained for offline validation, not sent. Re-enable only after independent validation of this route.
+
+**Account stop:** any authenticated 4xx carrying account verification codes 40002/50178, connection revocation code 40012, or a CAPTCHA challenge stops the shared REST scheduler. Queued and in-flight reads/writes are canceled, and Gateway observes the same stop signal, so it cannot reconnect. HTTP 401 retains the same behavior. Ordinary resource permission errors do not stop the account. Recovery belongs in the official client, including Account Standing and any required password reset. This cannot prevent a server-side restriction that occurs before the response. Codes: [Discord's reference](https://docs.discord.com/developers/topics/opcodes-and-status-codes#json-json-error-codes).
+
+This supersedes earlier references in this document to a write-only pause after a challenge. READY's required action also tears down the account and its open panels in the application.
 
 Evidence: Userdoccers/docs.discord.food descriptions of `user_guild_settings`, `PreloadedUserSettings` and `guild_folders`; no live capture exists. Everything below is **unverified** until the alt-account checks in `docs/TESTING.md` are done.
 

@@ -1,18 +1,23 @@
 //! The alerts panel (issue #106): per-server and per-conversation notification
 //! level, mute durations and mention suppression, plus the local "hide muted
-//! channels" choice. Every change is one explicit click, checked against what
+//! channels" choice. Remote writes are quarantined pending validation; opening
+//! the panel is local and the hide-muted choice stays available. When enabled,
+//! every change is one explicit click, checked against what
 //! is open right now, and sent once as `PATCH /users/@me/guilds/{g|@me}/settings`
 //! (`RestClient::set_notification`); the panel shows what Discord's
 //! `USER_GUILD_SETTINGS_UPDATE` echo says, never its own guess.
 
 use fastcord_discord::gateway::NotifyLevel;
 use fastcord_discord::state::navigation::NotificationView;
-use fastcord_discord::{MuteFor, NotifySetting, RestClient, RestError};
+use fastcord_discord::{
+    MuteFor, NOTIFICATION_WRITES_ENABLED, NotifySetting, RestClient, RestError,
+};
 use fastcord_model::Snowflake;
 use iced::widget::{button, checkbox, column, container, pick_list, row, space, text};
 use iced::{Color, Element, Length, Task};
 
 const WARN: Color = Color::from_rgb8(0xf2, 0x3f, 0x42);
+const PAUSED: &str = "Notification changes are paused pending validation. Use the official Discord client to change them. Opening Alerts sends no request.";
 
 /// What a setting applies to: the server, or one conversation (`None` guild
 /// for a DM or group DM).
@@ -62,6 +67,10 @@ pub struct State {
 
 fn describe(error: RestError) -> &'static str {
     match error {
+        RestError::NotificationWritesPaused => PAUSED,
+        RestError::AccountVerificationRequired => {
+            "Discord requires an account check. All account requests have stopped; open the official Discord client."
+        }
         RestError::PermissionDenied => "Discord does not allow this.",
         RestError::ResourceGone => "That server or conversation is gone.",
         RestError::AuthenticationRequired => "Discord no longer accepts this login.",
@@ -124,6 +133,10 @@ impl State {
                 self.notice = None;
             }
             Event::Set(target, setting) => {
+                if !NOTIFICATION_WRITES_ENABLED {
+                    self.notice = Some(PAUSED);
+                    return Task::none();
+                }
                 if self.busy
                     || !Self::current(view, target)
                     || Self::redundant(view, target, setting)
@@ -157,19 +170,30 @@ pub fn view<'a>(
     notifications: &NotificationView,
     directs: bool,
 ) -> Element<'a, Event> {
-    let busy = state.busy;
+    let busy = state.busy || !NOTIFICATION_WRITES_ENABLED;
     let mut body = column![row![
         text("Notifications").size(16),
         space::horizontal(),
         button(text("Close").size(13)).on_press(Event::Toggle),
     ]]
     .spacing(10);
+    if !NOTIFICATION_WRITES_ENABLED {
+        body = body.push(text(PAUSED).size(12).color(WARN));
+    }
     if let Some(notice) = state.notice {
         body = body.push(text(notice).size(12).color(WARN));
     }
     let n = notifications;
     // One block per target: level, then mute.
     let block = |title: &'static str, target: Target, level: Option<NotifyLevel>, muted: bool| {
+        if !NOTIFICATION_WRITES_ENABLED {
+            return column![
+                text(title).size(14),
+                text(format!("Notify for: {}", Choice(level))).size(13),
+                text(if muted { "Muted" } else { "Not muted" }).size(13),
+            ]
+            .spacing(6);
+        }
         let pick = pick_list(CHOICES, Some(Choice(level)), move |c: Choice| {
             Event::Set(target, NotifySetting::Level(c.0))
         })
@@ -267,12 +291,14 @@ mod tests {
     }
 
     #[test]
-    fn one_write_at_a_time_and_only_for_what_is_open_and_changes_something() {
+    fn alerts_and_quarantined_changes_never_start_network_tasks() {
         let (client, view) = (client(), view());
         let mut state = State::default();
         let server = Target::Server(Snowflake(1));
         let set = |target, setting| Event::Set(target, setting);
-        // A setting of something no longer open, or already in force, sends nothing.
+        assert_eq!(state.update(Event::Toggle, &view, &client).units(), 0);
+        assert!(state.is_open());
+        // This also covers stale events and callers bypassing the read-only UI.
         for event in [
             set(Target::Server(Snowflake(9)), NotifySetting::Unmute),
             set(
@@ -281,32 +307,21 @@ mod tests {
             ),
             set(server, NotifySetting::Level(None)),
             set(server, NotifySetting::SuppressRoles(false)),
+            set(server, NotifySetting::Unmute),
+            set(server, NotifySetting::Mute(MuteFor::Minutes15)),
+            set(server, NotifySetting::Level(Some(NotifyLevel::Nothing))),
+            set(server, NotifySetting::SuppressEveryone(true)),
             set(
                 Target::Channel(Some(Snowflake(1)), Snowflake(2)),
                 NotifySetting::Unmute,
             ),
         ] {
-            let _ = state.update(event, &view, &client);
+            assert_eq!(state.update(event, &view, &client).units(), 0);
             assert!(!state.busy);
+            assert_eq!(state.notice, Some(PAUSED));
         }
-        let _ = state.update(set(server, NotifySetting::Unmute), &view, &client);
-        assert!(state.busy);
-        // While it is in flight another click is ignored, not queued.
-        let _ = state.update(
-            set(server, NotifySetting::Level(Some(NotifyLevel::Nothing))),
-            &view,
-            &client,
-        );
-        state.notice = Some("stale");
-        let _ = state.update(
-            Event::Done(Err(RestError::PermissionDenied)),
-            &view,
-            &client,
-        );
-        assert!(!state.busy);
-        assert_eq!(state.notice, Some("Discord does not allow this."));
-        let _ = state.update(Event::Done(Ok(())), &view, &client);
-        assert_eq!(state.notice, None);
+        assert_eq!(state.update(Event::Toggle, &view, &client).units(), 0);
+        assert!(!state.is_open());
     }
 
     #[test]

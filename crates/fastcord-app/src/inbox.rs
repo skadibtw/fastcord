@@ -155,6 +155,9 @@ impl Default for State {
 
 pub fn describe(error: RestError) -> &'static str {
     match error {
+        RestError::NotificationWritesPaused => {
+            "Notification changes are paused pending validation. Use the official Discord client."
+        }
         RestError::PermissionDenied => "Discord does not allow this.",
         RestError::ResourceGone => "That conversation is gone.",
         RestError::AuthenticationRequired => "Discord no longer accepts this login.",

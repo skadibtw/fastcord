@@ -1,5 +1,13 @@
 # Testing
 
+### Account restriction and Alerts regression (2026-10-22)
+
+- A suspicious-activity disable and password-reset email were reported after using Alerts. No live reproduction was attempted and no captured request proves which action caused it.
+- Offline coverage: opening/closing Alerts creates no network task; every remote settings event is quarantined, including inbox mute at the REST boundary; CAPTCHA and codes 40002/40012/50178 cancel shared queued reads and future reads/writes; ordinary guild permissions leave the account running. Existing 401 cancellation coverage remains. READY required-action also tears down the account and its panels. Profile/header fixtures verify that no shared `x-fingerprint` is sent.
+- Native smoke check: `fastcord --alerts-preview` starts before account restoration, with no credentials or Discord workers, and draws the real sidebar and read-only Alerts pane. Verify the bell and report icons fit beside a long server name and the bell closes/reopens the panel.
+- Account recovery and absence of future restrictions cannot be verified offline; use the official Discord client for Account Standing and any required password reset.
+- Windows results: `cargo test --release -p fastcord-discord -p fastcord-app --locked --offline -j 2 --no-fail-fast` passed (751 app tests, 585 Discord tests; 12 live/hardware tests ignored). `cargo clippy --release -p fastcord-discord -p fastcord-app --all-targets --locked --offline -j 2 -- -D warnings` and workspace formatting passed. Release checks used `CARGO_PROFILE_RELEASE_DEBUG=0`. MSVC archive replacement and local-loopback fixtures required execution outside the sandbox.
+
 ## Automated (CI, every push)
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Windows, Linux, and macOS. Tests are deterministic and offline: protocol fixtures in `fixtures/`, injected clocks, crypto/media vectors. No live credentials in CI.
 

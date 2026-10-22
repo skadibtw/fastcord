@@ -148,6 +148,11 @@ fn call_signal(session: &Session, channel: Snowflake, signal: CallSignal) -> Tas
 }
 
 fn main() -> iced::Result {
+    // An offline UI check: runs before account restoration and single-instance
+    // hand-off, with no session, credential access or Discord workers.
+    if std::env::args_os().any(|arg| arg == "--alerts-preview") {
+        return navigation::alerts_preview();
+    }
     #[cfg(debug_assertions)]
     if std::env::args_os().any(|arg| arg == "--icon-gallery") {
         return icons::gallery();
@@ -1552,20 +1557,20 @@ impl App {
             }
             Message::Gateway(id, status) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == id) =>
             {
-                if status == GatewayStatus::AuthenticationRequired {
-                    // Discord rejected the token: stop all of this account's
-                    // work and return to login.
-                    let cache = if let Phase::Account { gateway, .. } = &self.phase {
-                        gateway.attachments.clone()
-                    } else {
-                        None
-                    };
-                    if let Phase::Account { session, .. } = &self.phase {
-                        session.client.stop_authenticated_work();
-                    }
+                if status == GatewayStatus::AuthenticationRequired
+                    || matches!(
+                        &status,
+                        GatewayStatus::Stopped(
+                            fastcord_discord::gateway::StopReason::ActionRequired(_)
+                        )
+                    )
+                {
+                    // Cancel panels and their in-flight tasks as on logout,
+                    // including requests outside the Gateway subscription.
+                    let cache = self.teardown_account().and_then(|(_, cache)| cache);
                     self.reset_login();
                     self.notice = Some(
-                        "Discord no longer accepts this login (the token was revoked, expired, or reset). Log in again. A saved copy of the old token can be removed with Forget saved login.".to_owned(),
+                        "Discord no longer accepts this login, or requires an account check. All account connections and requests have stopped. Open the official Discord client to check Account Standing and complete any verification or password reset before signing in here again. A saved copy of the old token can be removed with Forget saved login.".to_owned(),
                     );
                     return cache.map_or(Task::none(), |cache| {
                         Task::perform(async move { cache.purge().await }, |result| {
@@ -6013,9 +6018,42 @@ mod tests {
         client.authentication_required().await;
         assert!(matches!(app.phase, Phase::Login));
         assert!(app.notice.as_deref().unwrap().contains("no longer accepts"));
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap()
+                .contains("official Discord client")
+        );
+        assert!(app.notice.as_deref().unwrap().contains("password reset"));
         assert!(app.token.expose_secret().is_empty());
         // The saved credential is not silently deleted; the user decides.
         assert!(app.saved_accounts.contains(&account));
+    }
+
+    #[tokio::test]
+    async fn a_gateway_account_check_tears_down_panels_and_requests() {
+        let mut app = login_app();
+        let session = authenticate(&mut app, Persistence::Saved);
+        let client = session.client.clone();
+        let (id, _) = gateway_status(&app);
+        let task = app.update(Message::NotifySettings(notify_settings::Event::Toggle));
+        assert_eq!(task.units(), 0);
+        assert!(app.notify_settings.is_open());
+        let _ = app.update(Message::Gateway(
+            id,
+            GatewayStatus::Stopped(fastcord_discord::gateway::StopReason::ActionRequired(
+                "REQUIRE_VERIFIED_EMAIL".to_owned(),
+            )),
+        ));
+        client.authentication_required().await;
+        assert!(matches!(app.phase, Phase::Login));
+        assert!(!app.notify_settings.is_open());
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap()
+                .contains("official Discord client")
+        );
     }
 
     #[tokio::test]

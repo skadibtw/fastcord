@@ -15,7 +15,7 @@ use serde::de::DeserializeOwned;
 
 use crate::attachment::{RefreshRequest, RefreshResponse, RefreshedAttachmentUrl};
 use crate::error::{ERROR_BODY_BYTE_BUDGET, Refusal, status_error};
-use crate::gateway::{CLIENT_FINGERPRINT, ClientProperties};
+use crate::gateway::ClientProperties;
 use crate::rate_limit::{RateLimiter, ResponseLimits};
 use crate::{Clock, MonotonicClock, NetworkFailure, RestError, RetryableFailure, Route, UserToken};
 
@@ -149,7 +149,8 @@ impl fmt::Debug for RestResponse {
 
 /// Fixed-origin, rustls-backed REST transport. Cloning does not create another
 /// account scheduler. Create a new client only after obtaining a new credential.
-/// A 401 (or explicit stop) permanently cancels queued and in-flight work.
+/// A 401, account verification/challenge, or explicit stop permanently cancels
+/// queued and in-flight work, including reads and Gateway reconnection.
 pub struct RestClient<C = MonotonicClock> {
     http: reqwest::Client,
     limiter: RateLimiter<C>,
@@ -220,19 +221,20 @@ impl<C: Clock> RestClient<C> {
     fn observe_refusal(&self, status: StatusCode, body: &[u8]) -> bool {
         let value: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
         let challenge = status.is_client_error()
-            && (value["code"].as_u64() == Some(40002)
+            && (matches!(value["code"].as_u64(), Some(40002 | 40012 | 50178))
                 || value.get("captcha_key").is_some_and(|key| !key.is_null())
                 || value
                     .get("captcha_sitekey")
                     .is_some_and(|key| !key.is_null()));
         if challenge {
             self.writes_restricted.store(true, Ordering::Release);
+            self.limiter.stop();
         }
         challenge
     }
 
     /// Lets the account coordinator tear down other authenticated workers after
-    /// REST observes a 401. Also completes after explicit logout/stop.
+    /// REST observes a 401 or account restriction. Also completes after stop.
     pub async fn authentication_required(&self) {
         self.limiter.authentication_required().await;
     }
@@ -313,6 +315,10 @@ impl<C: Clock> RestClient<C> {
                 self.limiter
                     .pause_from_headers(request.route.key(), &limits);
                 let body = read_body(response, RATE_LIMIT_BODY_BYTE_BUDGET).await?;
+                if self.observe_refusal(status, &body) {
+                    reservation.complete(limits, None);
+                    return Err(RestError::AccountVerificationRequired);
+                }
                 let throttle = limits.throttle(&body)?;
                 reservation.complete(limits, Some(throttle));
                 continue;
@@ -388,10 +394,9 @@ pub(crate) fn identity_headers(properties: &ClientProperties) -> Result<HeaderMa
         HeaderValue::from_str(&properties.browser_user_agent)
             .map_err(|_| RestError::ClientConfiguration)?,
     );
-    headers.insert(
-        "x-fingerprint",
-        HeaderValue::from_static(CLIENT_FINGERPRINT),
-    );
+    // A fingerprint is a server-issued installation/session identifier, not
+    // versioned client metadata. Do not reuse a captured value across accounts
+    // or invent one. Omit it until a supported per-installation flow exists.
 
     Ok(headers)
 }
@@ -499,8 +504,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_join_challenge_pauses_writes_but_not_lookups() {
+    #[tokio::test]
+    async fn an_account_challenge_stops_reads_writes_and_clones() {
         let client = RestClient::new(
             UserToken::new("offline-test-credential".to_owned()),
             ClientProperties::web(HostOs::Linux, "en-US", 1),
@@ -523,7 +528,63 @@ mod tests {
             client.check_write(&join()),
             Err(RestError::AccountVerificationRequired)
         );
-        assert!(client.check_write(&lookup).is_ok());
+        let clone = client.clone();
+        clone.authentication_required().await;
+        assert!(matches!(
+            clone.execute(lookup).await,
+            Err(RestError::AuthenticationRequired)
+        ));
+        assert!(matches!(
+            clone.execute(join()).await,
+            Err(RestError::AuthenticationRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn verification_and_revocation_codes_cancel_queued_reads_without_dispatch() {
+        use std::task::{Context, Poll, Waker};
+
+        for code in [40002, 40012, 50178] {
+            let client = RestClient::new(
+                UserToken::new("offline-test-credential".to_owned()),
+                ClientProperties::web(HostOs::Linux, "en-US", 1),
+            )
+            .unwrap();
+            let route = Route::new(Method::GET, "/users/@me").unwrap();
+            let active = client
+                .limiter
+                .acquire(route.key().clone(), Priority::UserRead, 1024)
+                .await
+                .unwrap();
+            let clone = client.clone();
+            let mut queued = Box::pin(clone.execute(RestRequest::new(route, Priority::UserRead)));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(queued.as_mut().poll(&mut context).is_pending());
+            let body = format!("{{\"code\":{code}}}");
+            assert!(client.observe_refusal(StatusCode::FORBIDDEN, body.as_bytes()));
+            assert!(matches!(
+                queued.as_mut().poll(&mut context),
+                Poll::Ready(Err(RestError::AuthenticationRequired))
+            ));
+            drop(active);
+        }
+    }
+
+    #[test]
+    fn resource_permissions_do_not_stop_the_account() {
+        let client = RestClient::new(
+            UserToken::new("offline-test-credential".to_owned()),
+            ClientProperties::web(HostOs::Linux, "en-US", 1),
+        )
+        .unwrap();
+        for body in [
+            br#"{"code":50013}"#.as_slice(),
+            br#"{"code":40007}"#,
+            b"invalid JSON",
+        ] {
+            assert!(!client.observe_refusal(StatusCode::FORBIDDEN, body));
+        }
+        assert!(!client.writes_restricted());
     }
 
     #[test]

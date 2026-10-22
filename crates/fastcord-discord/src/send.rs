@@ -513,6 +513,7 @@ impl SendError {
             RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection))
             // Refusals, and failures before anything was dispatched.
             | RestError::AccountVerificationRequired
+            | RestError::NotificationWritesPaused
             | RestError::AuthenticationRequired
             | RestError::PermissionDenied
             | RestError::Refused(_)

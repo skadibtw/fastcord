@@ -27,6 +27,73 @@ pub const RAIL_ROW: f32 = 56.0;
 const RAIL_WIDTH: f32 = 72.0;
 pub(crate) const SIDEBAR_WIDTH: f32 = 240.0;
 
+/// Native offline smoke check of the real sidebar and read-only Alerts pane.
+pub fn alerts_preview() -> iced::Result {
+    struct Preview {
+        navigation: NavigationSnapshot,
+        avatars: HashMap<AvatarKey, image::Handle>,
+        alerts: bool,
+    }
+    fn view(state: &Preview) -> Element<'_, Message> {
+        let sidebar = sidebar(
+            &state.navigation,
+            PrivateConversation {
+                recipients: "",
+                notice: None,
+            },
+            false,
+            space::vertical().into(),
+            &state.avatars,
+            Vec::new(),
+        );
+        let panel = if state.alerts {
+            crate::notify_settings::view(
+                &crate::notify_settings::State::default(),
+                &state.navigation.notifications,
+                false,
+            )
+            .map(Message::NotifySettings)
+        } else {
+            container(text("Offline preview. Open Alerts with the bell icon."))
+                .padding(16)
+                .into()
+        };
+        row![sidebar, panel].into()
+    }
+    crate::render::application(
+        || Preview {
+            navigation: NavigationSnapshot {
+                selected_guild: Some(fastcord_model::Snowflake(1)),
+                selected_guild_name: "A server with a very long name".to_owned(),
+                notifications: fastcord_discord::state::navigation::NotificationView {
+                    guild: Some(fastcord_model::Snowflake(1)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            avatars: HashMap::new(),
+            alerts: true,
+        },
+        |state: &mut Preview, event: Message| {
+            if matches!(
+                event,
+                Message::NotifySettings(crate::notify_settings::Event::Toggle)
+            ) {
+                state.alerts = !state.alerts;
+            }
+        },
+        view,
+    )
+    .title("fastcord — offline Alerts preview")
+    .theme(|_: &Preview| style::theme())
+    .window(iced::window::Settings {
+        size: iced::Size::new(700.0, 540.0),
+        icon: icons::window_icon(),
+        ..Default::default()
+    })
+    .run()
+}
+
 pub struct PrivateConversation<'a> {
     pub recipients: &'a str,
     pub notice: Option<&'a str>,
@@ -519,23 +586,33 @@ fn sidebar<'a>(
     let can_report = !directs && snapshot.selected_guild.is_some();
     let header = container(
         row![
-            text(title)
-                .size(15)
-                .font(BOLD)
-                .wrapping(text::Wrapping::None)
-                .width(Length::Fill),
-            button(text("Alerts").size(11))
-                .on_press_maybe((directs || snapshot.selected_guild.is_some()).then_some(
-                    Message::NotifySettings(crate::notify_settings::Event::Toggle)
-                ))
-                .padding([2, 6])
-                .style(style::tool_button(false, false)),
-            button(text("Report").size(11))
-                .on_press_maybe(
-                    can_report.then_some(Message::Report(crate::report::Event::OpenServer))
-                )
-                .padding([2, 6])
-                .style(style::tool_button(false, false)),
+            container(
+                text(title)
+                    .size(15)
+                    .font(BOLD)
+                    .wrapping(text::Wrapping::None)
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .clip(true),
+            icons::action(icons::Action {
+                icon: Icon::Bell,
+                tip: "Alerts".to_owned(),
+                on_press: (directs || snapshot.selected_guild.is_some()).then_some(
+                    Message::NotifySettings(crate::notify_settings::Event::Toggle),
+                ),
+                active: false,
+                danger: false,
+                badge: 0,
+            }),
+            icons::action(icons::Action {
+                icon: Icon::Report,
+                tip: "Report server".to_owned(),
+                on_press: can_report.then_some(Message::Report(crate::report::Event::OpenServer)),
+                active: false,
+                danger: false,
+                badge: 0,
+            }),
         ]
         .spacing(6)
         .align_y(alignment::Vertical::Center),
@@ -1112,6 +1189,44 @@ mod occupant_tests {
     use super::*;
     use crate::variable_list::harness::Ui;
     use fastcord_model::Snowflake;
+
+    #[test]
+    fn long_server_name_keeps_alerts_and_report_reachable_as_separate_tools() {
+        let snapshot = NavigationSnapshot {
+            selected_guild: Some(Snowflake(1)),
+            selected_guild_name: "A server whose name is much too long for this sidebar".into(),
+            ..Default::default()
+        };
+        let avatars = HashMap::new();
+        let mut ui = Ui::new(
+            SIDEBAR_WIDTH,
+            300.0,
+            sidebar(
+                &snapshot,
+                PrivateConversation {
+                    recipients: "",
+                    notice: None,
+                },
+                false,
+                space::vertical().into(),
+                &avatars,
+                Vec::new(),
+            ),
+        );
+        ui.draw();
+        let (mut alerts, mut reports) = (false, false);
+        for x in (0..SIDEBAR_WIDTH as i32).step_by(2) {
+            for event in ui.click(x as f32, 28.0) {
+                match event {
+                    Message::NotifySettings(crate::notify_settings::Event::Toggle) => alerts = true,
+                    Message::Report(crate::report::Event::OpenServer) => reports = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(alerts, "Alerts is clipped by the server name");
+        assert!(reports, "Report is clipped by the server name");
+    }
 
     fn member(streaming: bool, video: bool) -> Occupant {
         Occupant::Member {
