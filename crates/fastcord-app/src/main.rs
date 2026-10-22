@@ -20,6 +20,7 @@ mod friends;
 mod gateway;
 mod gif;
 mod group_dm;
+mod guild_admin;
 mod history;
 mod icons;
 mod inbox;
@@ -160,6 +161,7 @@ struct App {
     inbox: inbox::State,
     group: group_dm::State,
     invite: invite::State,
+    guild_admin: guild_admin::State,
     discover: discover::State,
     onboarding: onboarding::State,
     events: scheduled_events::State,
@@ -342,6 +344,7 @@ enum Message {
     Inbox(inbox::Event),
     Group(group_dm::Event),
     Invite(invite::Event),
+    GuildAdmin(guild_admin::Event),
     Discover(discover::Event),
     Onboarding(onboarding::Event),
     Events(scheduled_events::Event),
@@ -424,6 +427,7 @@ impl App {
                 inbox: inbox::State::default(),
                 group: group_dm::State::default(),
                 invite: invite::State::default(),
+                guild_admin: guild_admin::State::default(),
                 discover: discover::State::default(),
                 onboarding: onboarding::State::default(),
                 events: scheduled_events::State::default(),
@@ -479,6 +483,8 @@ impl App {
         let mut task = self.handle(message);
         if let Phase::Account { gateway, .. } = &self.phase {
             gateway.controls.quick_query(self.switcher.wanted());
+            self.guild_admin.sync(&gateway.navigation);
+            gateway.controls.admin_guild(self.guild_admin.wanted());
         }
         // Window full screen belongs to the call view: without it there is no
         // button to leave it, so it ends with the view.
@@ -1364,6 +1370,7 @@ impl App {
             Message::Shortcut(shortcut) => return self.navigation_shortcut(shortcut),
             Message::Group(event) => return self.group_event(event),
             Message::Invite(event) => return self.invite_event(event),
+            Message::GuildAdmin(event) => return self.guild_admin_event(event),
             Message::Discover(event) => return self.discover_event(event),
             Message::Onboarding(event) => return self.onboarding_event(event),
             Message::Events(event) => return self.events_event(event),
@@ -2478,6 +2485,7 @@ impl App {
                 self.inbox.clear();
                 self.group.clear();
                 self.invite.clear();
+                self.guild_admin.clear();
                 self.discover.clear();
                 self.onboarding.clear();
                 self.events.clear();
@@ -2793,6 +2801,7 @@ impl App {
         self.inbox.clear();
         self.group.clear();
         self.invite.clear();
+        self.guild_admin.clear();
         self.discover.clear();
         self.onboarding.clear();
         self.events.clear();
@@ -2879,7 +2888,7 @@ impl App {
             threads::Event::Created(Ok(thread)) => {
                 self.threads.close();
                 if let Some(guild) = thread.guild_id {
-                    gateway.controls.open_thread(guild, thread);
+                    gateway.controls.open_thread(guild, *thread);
                 }
                 Task::none()
             }
@@ -3354,6 +3363,34 @@ impl App {
             ));
         }
         task.map(Message::Invite)
+    }
+
+    fn guild_admin_event(&mut self, event: guild_admin::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        if let guild_admin::Event::Leave(guild) = event {
+            // The menu hands over to the leave confirmation of the invite module.
+            let _ = self
+                .guild_admin
+                .update(event, &gateway.navigation, &session.client);
+            return self.invite_event(invite::Event::AskLeave(guild));
+        }
+        let rejected = guild_admin::State::is_rejected(&event);
+        let task = self
+            .guild_admin
+            .update(event, &gateway.navigation, &session.client);
+        if rejected {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::GuildAdmin)
     }
 
     fn identity_event(&mut self, event: profile_edit::Event) -> Task<Message> {
@@ -4051,6 +4088,9 @@ impl App {
             }
             if let Some(panel) = scheduled_events::view(&self.events, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::Events));
+            }
+            if let Some(panel) = guild_admin::view(&self.guild_admin, &gateway.navigation) {
+                banner_column = banner_column.push(panel.map(Message::GuildAdmin));
             }
             if let Some(panel) = invite::view(&self.invite, localtime::now()) {
                 banner_column = banner_column.push(panel.map(Message::Invite));

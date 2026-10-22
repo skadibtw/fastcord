@@ -354,6 +354,8 @@ pub struct GuildUpdate {
     pub roles: Vec<Role>,
     pub roles_present: bool,
     pub member_count: Option<u32>,
+    /// Present when the update carries the guild's settings (`features`).
+    pub settings: Option<fastcord_model::GuildSettings>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

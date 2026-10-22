@@ -809,6 +809,13 @@ fn large_ready() -> Ready {
                             flags: 0,
                             message_count: None,
                             default_sort_order: None,
+                            topic: None,
+                            nsfw: false,
+                            rate_limit_per_user: 0,
+                            bitrate: 0,
+                            user_limit: 0,
+                            rtc_region: None,
+                            video_quality_mode: None,
                         })
                         .collect(),
                     members: vec![GuildMember {
@@ -823,6 +830,7 @@ fn large_ready() -> Ready {
                     member_count: 1,
                     stage_instances: Vec::new(),
                     scheduled_events: Vec::new(),
+                    settings: Default::default(),
                 }
             })
             .collect(),
@@ -2438,4 +2446,186 @@ fn scheduled_events_are_bounded_and_the_snapshot_orders_them() {
     // A new session replaces everything.
     store.apply(event(Dispatch::Ready(Box::new(ready(NAV_READY)))));
     assert!(store.guild(id(100)).unwrap().scheduled_events().is_empty());
+}
+
+// ----- server and channel management (issue #93) -----
+
+const GUILD_ADMIN: &str = include_str!("../../../../../fixtures/rest/guild-admin-synthetic.json");
+const ADMIN_GUILD: u64 = 9001;
+
+fn admin_fixture(key: &str) -> Value {
+    serde_json::from_str::<Value>(GUILD_ADMIN).unwrap()[key].clone()
+}
+
+fn admin_store(guild: &Value) -> Store {
+    let (mut store, _) = setup(READY);
+    apply(&mut store, "GUILD_CREATE", &guild.to_string());
+    store
+}
+
+fn names(admin: &GuildAdmin) -> Vec<&str> {
+    admin.channels.iter().map(|c| c.name.as_str()).collect()
+}
+
+#[test]
+fn a_user_form_guild_carries_its_settings_and_channel_details() {
+    let store = admin_store(&admin_fixture("guild_create_user_form"));
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(admin.owner && admin.community && admin.can_manage_guild && admin.can_manage_channels);
+    assert_eq!(admin.description, "A synthetic description");
+    assert_eq!(
+        (admin.system_channel, admin.afk_channel, admin.afk_timeout),
+        (Some(id(9101)), None, 900)
+    );
+    assert_eq!((admin.notifications, admin.content_filter), (1, 2));
+    assert_eq!(names(&admin), ["Talk", "general", "Lounge"]);
+    let general = admin.channel(id(9101)).unwrap();
+    assert_eq!(general.parent_id, Some(id(9100)));
+    assert_eq!(
+        (general.topic.as_str(), general.nsfw, general.slowmode),
+        ("Say hello", true, 30)
+    );
+    let lounge = admin.channel(id(9102)).unwrap();
+    assert_eq!(lounge.kind, AdminKind::Voice);
+    assert_eq!(
+        (lounge.bitrate, lounge.user_limit, lounge.video_quality),
+        (96_000, 5, 2)
+    );
+    assert_eq!(lounge.rtc_region.as_deref(), Some("us-east"));
+    assert!(lounge.can_manage);
+    assert!(guild_admin(&store, id(1)).is_none());
+}
+
+#[test]
+fn guild_updates_replace_settings_and_a_partial_one_keeps_them() {
+    let mut store = admin_store(&admin_fixture("guild_create_user_form"));
+    let update = admin_fixture("guild_update");
+    apply(&mut store, "GUILD_UPDATE", &update.to_string());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert_eq!(admin.name, "Renamed server");
+    assert!(!admin.community);
+    assert_eq!(admin.description, "");
+    assert_eq!(
+        (admin.system_channel, admin.afk_channel, admin.afk_timeout),
+        (None, Some(id(9102)), 300)
+    );
+    assert_eq!((admin.notifications, admin.content_filter), (0, 0));
+    // A replay changes nothing; an update without `features` keeps the settings.
+    apply(&mut store, "GUILD_UPDATE", &update.to_string());
+    apply(
+        &mut store,
+        "GUILD_UPDATE",
+        &json!({"id": "9001", "name": "Third"}).to_string(),
+    );
+    let again = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert_eq!(again.name, "Third");
+    assert_eq!(
+        (again.afk_channel, again.afk_timeout),
+        (Some(id(9102)), 300)
+    );
+}
+
+#[test]
+fn channel_events_change_the_list_and_stale_ones_do_nothing() {
+    let mut store = admin_store(&admin_fixture("guild_create_user_form"));
+    let channel = |id: u64, kind: u8, name: &str, position: i32, parent: Option<u64>| {
+        json!({"id": id.to_string(), "type": kind, "guild_id": "9001", "name": name,
+            "position": position, "parent_id": parent.map(|p| p.to_string()),
+            "topic": "New topic", "rate_limit_per_user": 21600})
+    };
+    apply(
+        &mut store,
+        "CHANNEL_CREATE",
+        &channel(9200, 4, "Other", 1, None).to_string(),
+    );
+    apply(
+        &mut store,
+        "CHANNEL_CREATE",
+        &channel(9201, 0, "news", 0, Some(9200)).to_string(),
+    );
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert_eq!(
+        names(&admin),
+        ["Talk", "general", "Lounge", "Other", "news"]
+    );
+    // An edit and a move arrive as CHANNEL_UPDATE; a replay is idempotent.
+    let moved = channel(9101, 0, "general-2", 5, Some(9100));
+    apply(&mut store, "CHANNEL_UPDATE", &moved.to_string());
+    apply(&mut store, "CHANNEL_UPDATE", &moved.to_string());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    let edited = admin.channel(id(9101)).unwrap();
+    assert_eq!(
+        (
+            edited.name.as_str(),
+            edited.topic.as_str(),
+            edited.slowmode,
+            edited.position
+        ),
+        ("general-2", "New topic", 21_600, 5)
+    );
+    assert_eq!(
+        names(&admin),
+        ["Talk", "general-2", "Lounge", "Other", "news"]
+    );
+    // Deleting a category removes it; a stale second delete is harmless.
+    let gone = channel(9200, 4, "Other", 1, None);
+    apply(&mut store, "CHANNEL_DELETE", &gone.to_string());
+    apply(&mut store, "CHANNEL_DELETE", &gone.to_string());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    // A child of a category that is gone is listed as loose, never under a stale parent.
+    assert_eq!(names(&admin), ["news", "Talk", "general-2", "Lounge"]);
+    assert_eq!(store.bytes(), store.recount());
+}
+
+#[test]
+fn management_follows_the_accounts_roles_and_never_guesses() {
+    let mut guild = admin_fixture("guild_create_user_form");
+    guild["properties"]["owner_id"] = json!("42");
+    guild["roles"] = json!([
+        {"id": "9001", "name": "@everyone", "permissions": "1024", "position": 0},
+        {"id": "9300", "name": "Mod", "permissions": "16", "position": 1}
+    ]);
+    // Not the owner and not a held member: no permission is assumed.
+    let store = admin_store(&guild);
+    assert!(guild_admin(&store, id(ADMIN_GUILD)).is_none());
+    guild["members"] = json!([{"user": {"id": ME.to_string()}, "roles": ["9300"]}]);
+    let store = admin_store(&guild);
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(!admin.owner && !admin.can_manage_guild);
+    assert!(admin.can_manage_channels && admin.channel(id(9101)).unwrap().can_manage);
+    guild["roles"][1]["permissions"] = json!("0");
+    let store = admin_store(&guild);
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(!admin.can_manage_channels && !admin.channel(id(9101)).unwrap().can_manage);
+}
+
+#[test]
+fn moving_swaps_siblings_and_renumbers_only_what_changes() {
+    let store = admin_store(&admin_fixture("guild_create_user_form"));
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    // The text channel is alone in its list (voice is a separate one), and a
+    // lone category has nowhere to go.
+    assert!(admin.plan_move(id(9101), true).is_none());
+    assert!(admin.plan_move(id(9100), false).is_none());
+    assert!(admin.plan_move(id(1), true).is_none());
+    let mut crowded = admin.clone();
+    let mut extra = crowded.channel(id(9101)).unwrap().clone();
+    extra.id = id(9103);
+    crowded.channels.insert(2, extra); // ties at position 0, ordered by ID
+    assert_eq!(
+        crowded.plan_move(id(9101), true).unwrap(),
+        [crate::Placement {
+            id: id(9101),
+            position: 1
+        }]
+    );
+    // Moving the other one up is the same swap.
+    assert_eq!(
+        crowded.plan_move(id(9103), false).unwrap(),
+        [crate::Placement {
+            id: id(9101),
+            position: 1
+        }]
+    );
+    assert!(crowded.plan_move(id(9101), false).is_none());
 }

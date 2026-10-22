@@ -187,9 +187,11 @@ fn rail<'a>(
             selected,
             guild.available.then_some(Message::SelectGuild(guild.id)),
         ));
-        // Right click asks to leave the server (a confirmation follows).
+        // Right click opens the server menu (settings, create channel, leave).
         mouse_area(container(cell).height(RAIL_ROW))
-            .on_right_press(Message::Invite(crate::invite::Event::AskLeave(guild.id)))
+            .on_right_press(Message::GuildAdmin(crate::guild_admin::Event::Menu(
+                guild.id,
+            )))
             .into()
     });
     let rail_tool = |kind, label: String, selected, message, count: Option<String>| {
@@ -242,6 +244,12 @@ fn rail<'a>(
                 false,
                 Message::Discover(crate::discover::Event::Toggle),
                 None,
+            ),
+            icon(
+                "+".to_owned(),
+                None,
+                false,
+                Some(Message::GuildAdmin(crate::guild_admin::Event::NewServer))
             ),
             container(space())
                 .width(32)
@@ -864,6 +872,16 @@ fn main_pane<'a>(
                                 )),
                             ));
                         }
+                        if permissions.manage_channel {
+                            tools.push((
+                                "Edit channel",
+                                Message::GuildAdmin(crate::guild_admin::Event::EditChannel(
+                                    selection.guild_id,
+                                    selection.channel_id,
+                                    selection.kind == ChannelKind::Voice,
+                                )),
+                            ));
+                        }
                         tools.push((
                             "Events",
                             Message::Events(crate::scheduled_events::Event::Open(
@@ -920,11 +938,21 @@ fn main_pane<'a>(
                     (true, false) => "You cannot post here",
                     (true, true) => "",
                 };
-                let tools = if can_post {
+                let mut tools = if can_post {
                     vec![("New post", Message::Forum(crate::forum::Event::New))]
                 } else {
                     Vec::new()
                 };
+                if permissions.manage_channel {
+                    tools.push((
+                        "Edit channel",
+                        Message::GuildAdmin(crate::guild_admin::Event::EditChannel(
+                            selection.guild_id,
+                            selection.channel_id,
+                            false,
+                        )),
+                    ));
+                }
                 body = body.push(header_with(
                     format!("\u{2630} {}", selection.name),
                     note,

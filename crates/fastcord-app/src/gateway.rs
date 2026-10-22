@@ -534,6 +534,8 @@ struct Request {
     inbox: usize,
     /// The quick switcher's query while it is open (`None`: closed).
     quick: Option<String>,
+    /// The server the management panel shows (`None`: closed).
+    admin: Option<Snowflake>,
     timeline: crate::history::Request,
     emoji: emoji_picker::Request,
 }
@@ -1428,6 +1430,17 @@ impl NavigationBridge {
                 return false;
             }
             request.quick = query.map(str::to_owned);
+            true
+        });
+    }
+
+    /// The server the management panel is open for, `None` once it closes.
+    pub fn admin_guild(&self, guild: Option<Snowflake>) {
+        self.requests.send_if_modified(|request| {
+            if request.admin == guild {
+                return false;
+            }
+            request.admin = guild;
             true
         });
     }
@@ -2952,6 +2965,9 @@ impl Worker {
                 query,
                 fastcord_discord::state::navigation::MAX_QUICK_RESULTS,
             )
+        });
+        navigation.admin = request.admin.and_then(|guild| {
+            fastcord_discord::state::navigation::guild_admin(&self.tracker.store, guild)
         });
         self.bridge.clear_private_notice_on_selection_change(
             navigation
@@ -4741,6 +4757,7 @@ mod tests {
             member_count: 0,
             stage_instances: Vec::new(),
             scheduled_events: Vec::new(),
+            settings: Default::default(),
         };
         let dm = |id| Channel {
             id: Snowflake(id),
@@ -4764,6 +4781,13 @@ mod tests {
             flags: 0,
             message_count: None,
             default_sort_order: None,
+            topic: None,
+            nsfw: false,
+            rate_limit_per_user: 0,
+            bitrate: 0,
+            user_limit: 0,
+            rtc_region: None,
+            video_quality_mode: None,
         };
         GatewayEvent::Dispatch {
             sequence: 1,
@@ -4880,6 +4904,13 @@ mod tests {
             flags: 0,
             message_count: None,
             default_sort_order: None,
+            topic: None,
+            nsfw: false,
+            rate_limit_per_user: 0,
+            bitrate: 0,
+            user_limit: 0,
+            rtc_region: None,
+            video_quality_mode: None,
         }
     }
 

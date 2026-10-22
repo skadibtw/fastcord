@@ -43,7 +43,7 @@ pub enum Event {
     CancelCreate,
     ArchivedDone(u64, Result<ArchivedThreads, RestError>),
     Membership(Result<(), RestError>),
-    Created(Result<Channel, ThreadError>),
+    Created(Result<Box<Channel>, ThreadError>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,7 +294,12 @@ impl State {
                 let (client, name) = (client.clone(), draft.name.clone());
                 let (guild, channel, message) = (draft.guild, draft.channel, draft.message);
                 return Task::perform(
-                    async move { client.create_thread(guild, channel, message, &name).await },
+                    async move {
+                        client
+                            .create_thread(guild, channel, message, &name)
+                            .await
+                            .map(Box::new)
+                    },
                     Event::Created,
                 );
             }

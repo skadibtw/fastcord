@@ -162,6 +162,55 @@ pub struct Channel {
     /// Forum sort order: 0 latest activity, 1 creation date.
     #[serde(default)]
     pub default_sort_order: Option<u8>,
+    /// Text, announcement and forum topic (capped at [`MAX_TOPIC_BYTES`]).
+    #[serde(default, deserialize_with = "topic_capped")]
+    pub topic: Option<Box<str>>,
+    #[serde(default)]
+    pub nsfw: bool,
+    /// Slowmode in seconds (0 = off).
+    #[serde(default)]
+    pub rate_limit_per_user: u16,
+    /// Voice bitrate in bits per second, as the server reports it.
+    #[serde(default)]
+    pub bitrate: u32,
+    /// Voice user limit (0 = none).
+    #[serde(default)]
+    pub user_limit: u16,
+    /// Voice region override; `None` is automatic.
+    #[serde(default, deserialize_with = "region_capped")]
+    pub rtc_region: Option<Box<str>>,
+    /// Voice video quality: 1 auto, 2 full.
+    #[serde(default)]
+    pub video_quality_mode: Option<u8>,
+}
+
+/// Longest channel topic kept (Discord allows 1024 characters, 4096 in forums).
+pub const MAX_TOPIC_BYTES: usize = 4096 * 4;
+const MAX_REGION_BYTES: usize = 64;
+
+fn capped<'de, D: serde::Deserializer<'de>>(
+    d: D,
+    max: usize,
+) -> Result<Option<Box<str>>, D::Error> {
+    let mut text = <Option<String> as serde::Deserialize>::deserialize(d)?;
+    if let Some(text) = &mut text
+        && text.len() > max
+    {
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    Ok(text.map(String::into_boxed_str))
+}
+
+fn topic_capped<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Box<str>>, D::Error> {
+    capped(d, MAX_TOPIC_BYTES)
+}
+
+fn region_capped<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Box<str>>, D::Error> {
+    capped(d, MAX_REGION_BYTES)
 }
 
 /// Most tags a forum defines.
@@ -247,3 +296,37 @@ pub struct ThreadMetadata {
 /// Marks the current user as a member of a thread.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadMember {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn management_fields_default_off_and_texts_are_capped() {
+        let plain: Channel = serde_json::from_str(r#"{"id":"1","type":0}"#).unwrap();
+        assert_eq!(
+            (
+                plain.topic.as_deref(),
+                plain.nsfw,
+                plain.rate_limit_per_user
+            ),
+            (None, false, 0)
+        );
+        let long = "\u{e9}".repeat(MAX_TOPIC_BYTES);
+        let raw = format!(
+            r#"{{"id":"1","type":2,"topic":"{long}","rtc_region":"{}","bitrate":96000,"user_limit":5,"video_quality_mode":2}}"#,
+            "r".repeat(200)
+        );
+        let channel: Channel = serde_json::from_str(&raw).unwrap();
+        assert!(channel.topic.as_deref().unwrap().len() <= MAX_TOPIC_BYTES);
+        assert_eq!(channel.rtc_region.as_deref().unwrap().len(), 64);
+        assert_eq!(
+            (
+                channel.bitrate,
+                channel.user_limit,
+                channel.video_quality_mode
+            ),
+            (96_000, 5, Some(2))
+        );
+    }
+}

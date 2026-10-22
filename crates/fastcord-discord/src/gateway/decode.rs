@@ -18,9 +18,10 @@ use std::collections::HashMap;
 
 use fastcord_model::{
     CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildEmoji, GuildMember,
-    MAX_REACTION_EMOJI_NAME_BYTES, Message, MessageUpdate, Relationship, RelationshipKind, Role,
-    ScheduledEvent, ScheduledEventKey, ScheduledEventUser, Snowflake, StageInstance, StreamCreate,
-    StreamDelete, StreamServerUpdate, StreamUpdate, User, VoiceServerUpdate, VoiceState,
+    GuildSettings, MAX_DESCRIPTION_BYTES, MAX_REACTION_EMOJI_NAME_BYTES, Message, MessageUpdate,
+    Relationship, RelationshipKind, Role, ScheduledEvent, ScheduledEventKey, ScheduledEventUser,
+    Snowflake, StageInstance, StreamCreate, StreamDelete, StreamServerUpdate, StreamUpdate, User,
+    VoiceServerUpdate, VoiceState,
 };
 use serde::{Deserialize, Deserializer};
 
@@ -105,6 +106,20 @@ struct GuildProperties {
     icon: Option<String>,
     #[serde(default)]
     owner_id: Option<Snowflake>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
+    features: Vec<String>,
+    #[serde(default)]
+    system_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    afk_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    afk_timeout: Option<u32>,
+    #[serde(default)]
+    default_message_notifications: Option<u8>,
+    #[serde(default)]
+    explicit_content_filter: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +135,20 @@ struct GuildWire {
     owner_id: Option<Snowflake>,
     #[serde(default)]
     properties: Option<GuildProperties>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
+    features: Vec<String>,
+    #[serde(default)]
+    system_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    afk_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    afk_timeout: Option<u32>,
+    #[serde(default)]
+    default_message_notifications: Option<u8>,
+    #[serde(default)]
+    explicit_content_filter: Option<u8>,
     #[serde(default, deserialize_with = "null_default")]
     roles: Vec<Role>,
     #[serde(default, deserialize_with = "null_default")]
@@ -162,10 +191,26 @@ struct GuildUpdateWire {
     roles: Vec<Role>,
     #[serde(default)]
     member_count: Option<u32>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
+    features: Vec<String>,
+    #[serde(default)]
+    system_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    afk_channel_id: Option<Snowflake>,
+    #[serde(default)]
+    afk_timeout: Option<u32>,
+    #[serde(default)]
+    default_message_notifications: Option<u8>,
+    #[serde(default)]
+    explicit_content_filter: Option<u8>,
 }
 
 #[derive(Deserialize)]
 struct GuildUpdatePresence {
+    #[serde(default, deserialize_with = "field_present")]
+    features: bool,
     #[serde(default, deserialize_with = "field_present")]
     name: bool,
     #[serde(default, deserialize_with = "field_present")]
@@ -528,6 +573,26 @@ impl Normalizer {
             member_count: wire.member_count,
             stage_instances: wire.stage_instances,
             scheduled_events: wire.guild_scheduled_events,
+            settings: {
+                let p = properties.as_ref();
+                guild_settings(
+                    wire.description
+                        .or_else(|| p.and_then(|p| p.description.clone())),
+                    if wire.features.is_empty() {
+                        p.map_or(&[][..], |p| &p.features)
+                    } else {
+                        &wire.features
+                    },
+                    wire.system_channel_id
+                        .or(p.and_then(|p| p.system_channel_id)),
+                    wire.afk_channel_id.or(p.and_then(|p| p.afk_channel_id)),
+                    wire.afk_timeout.or(p.and_then(|p| p.afk_timeout)),
+                    wire.default_message_notifications
+                        .or(p.and_then(|p| p.default_message_notifications)),
+                    wire.explicit_content_filter
+                        .or(p.and_then(|p| p.explicit_content_filter)),
+                )
+            },
         }))
     }
 }
@@ -864,6 +929,39 @@ fn decode_guild_create(raw: &str) -> Result<GuildCreate, Malformed> {
     })
 }
 
+/// The settings of a guild object whose fields sit at the top level or, for
+/// the user-client form, under `properties`. Texts are capped.
+#[allow(clippy::too_many_arguments)]
+fn guild_settings(
+    description: Option<String>,
+    features: &[String],
+    system_channel_id: Option<Snowflake>,
+    afk_channel_id: Option<Snowflake>,
+    afk_timeout: Option<u32>,
+    notifications: Option<u8>,
+    content_filter: Option<u8>,
+) -> GuildSettings {
+    let mut description = description;
+    if let Some(text) = &mut description
+        && text.len() > MAX_DESCRIPTION_BYTES
+    {
+        let mut end = MAX_DESCRIPTION_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    GuildSettings {
+        description,
+        community: features.iter().any(|f| f == "COMMUNITY"),
+        system_channel_id,
+        afk_channel_id,
+        afk_timeout: afk_timeout.unwrap_or(0),
+        notifications: notifications.unwrap_or(0),
+        content_filter: content_filter.unwrap_or(0),
+    }
+}
+
 fn decode_guild_update(raw: &str) -> Result<GuildUpdate, Malformed> {
     let wire: GuildUpdateWire = json(raw)?;
     let presence: GuildUpdatePresence = json(raw)?;
@@ -878,6 +976,17 @@ fn decode_guild_update(raw: &str) -> Result<GuildUpdate, Malformed> {
         roles: wire.roles,
         roles_present: presence.roles,
         member_count: wire.member_count,
+        settings: presence.features.then(|| {
+            guild_settings(
+                wire.description,
+                &wire.features,
+                wire.system_channel_id,
+                wire.afk_channel_id,
+                wire.afk_timeout,
+                wire.default_message_notifications,
+                wire.explicit_content_filter,
+            )
+        }),
     })
 }
 

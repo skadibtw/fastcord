@@ -19,6 +19,7 @@ mod error;
 pub mod gateway;
 mod gif;
 mod group_dm;
+mod guild_admin;
 pub mod history;
 mod image_data;
 mod inbox;
@@ -62,6 +63,13 @@ pub use gateway::{ConnectionState, Gateway, GatewayEvent};
 pub use gif::{GIF_RESULTS, GifResult, MAX_GIF_QUERY_CHARS};
 pub use group_dm::{
     GroupEdit, GroupError, GroupRequestError, IconImage, MAX_GROUP_NAME_CHARS, MAX_ICON_BYTES,
+};
+pub use guild_admin::{
+    AFK_TIMEOUTS, AdminError, AdminRequestError, BASE_BITRATE, CONTENT_FILTERS, ChannelEdit,
+    GuildEdit, GuildIcon, MAX_CHANNEL_NAME_CHARS, MAX_CHANNEL_TOPIC_CHARS,
+    MAX_GUILD_DESCRIPTION_CHARS, MAX_GUILD_NAME_CHARS, MAX_PLACEMENTS, MAX_VOICE_USER_LIMIT,
+    MIN_BITRATE, MIN_GUILD_NAME_CHARS, NOTIFICATION_LEVELS, NewChannel, Placement, SLOWMODE,
+    VoiceRegion, bitrate_ceiling, needs_community, parse_regions,
 };
 pub use inbox::{MENTIONS_PAGE_SIZE, MentionFilter, MentionsPage};
 pub use invite::{

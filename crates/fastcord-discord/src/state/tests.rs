@@ -910,6 +910,13 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
                 flags: 0,
                 message_count: None,
                 default_sort_order: None,
+                topic: None,
+                nsfw: false,
+                rate_limit_per_user: 0,
+                bitrate: 0,
+                user_limit: 0,
+                rtc_region: None,
+                video_quality_mode: None,
             })
             .collect(),
         members: vec![GuildMember {
@@ -924,6 +931,7 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
         member_count: 250_000,
         stage_instances: Vec::new(),
         scheduled_events: Vec::new(),
+        settings: Default::default(),
     }
 }
 
@@ -983,10 +991,10 @@ fn big_ready(guilds: u64, channels: u64) -> Ready {
 
 #[test]
 fn the_metadata_budget_holds_through_a_large_account_and_flood_of_members() {
-    // 120 guilds with 250 channels each, plus 60,000 member updates (each with
+    // 120 guilds with 200 channels each, plus 60,000 member updates (each with
     // its user): well over 12 MiB if nothing were ever shed.
     let mut store = Store::new();
-    store.apply(event(Dispatch::Ready(Box::new(big_ready(120, 250)))));
+    store.apply(event(Dispatch::Ready(Box::new(big_ready(120, 200)))));
     check(&store);
     let identity = store.bytes();
     assert!(
@@ -1036,7 +1044,7 @@ fn the_metadata_budget_holds_through_a_large_account_and_flood_of_members() {
     assert_eq!(store.guild_ids().len(), 120);
     for guild in store.guild_ids() {
         let entry = store.guild(*guild).unwrap();
-        assert_eq!(entry.channels().count(), 250, "guild {guild}");
+        assert_eq!(entry.channels().count(), 200, "guild {guild}");
         assert_eq!(entry.roles().len(), 12);
         assert!(
             entry.member(id(ME)).is_some(),

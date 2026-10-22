@@ -1,0 +1,39 @@
+{
+  "regions": [
+    {"id": "us-east", "name": "US East", "optimal": true, "deprecated": false, "custom": false},
+    {"id": "old-region", "name": "Old", "optimal": false, "deprecated": true, "custom": false},
+    {"id": "vip-region", "name": "Special", "optimal": false, "deprecated": false, "custom": true}
+  ],
+  "guild_create_user_form": {
+    "id": "9001",
+    "properties": {
+      "name": "Synthetic server",
+      "owner_id": "175928847299117063",
+      "description": "A synthetic description",
+      "features": ["COMMUNITY", "NEWS"],
+      "system_channel_id": "9101",
+      "afk_channel_id": null,
+      "afk_timeout": 900,
+      "default_message_notifications": 1,
+      "explicit_content_filter": 2
+    },
+    "channels": [
+      {"id": "9100", "type": 4, "name": "Talk", "position": 0},
+      {"id": "9101", "type": 0, "name": "general", "position": 0, "parent_id": "9100", "topic": "Say hello", "nsfw": true, "rate_limit_per_user": 30},
+      {"id": "9102", "type": 2, "name": "Lounge", "position": 1, "parent_id": "9100", "bitrate": 96000, "user_limit": 5, "rtc_region": "us-east", "video_quality_mode": 2}
+    ],
+    "roles": [{"id": "9001", "name": "@everyone", "permissions": "1024", "position": 0}],
+    "members": []
+  },
+  "guild_update": {
+    "id": "9001",
+    "name": "Renamed server",
+    "description": null,
+    "features": [],
+    "system_channel_id": null,
+    "afk_channel_id": "9102",
+    "afk_timeout": 300,
+    "default_message_notifications": 0,
+    "explicit_content_filter": 0
+  }
+}

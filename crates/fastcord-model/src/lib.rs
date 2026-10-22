@@ -26,7 +26,7 @@ pub use channel::{
 pub use embed::{
     Embed, EmbedField, EmbedFooter, EmbedMedia, EmbedText, MAX_EMBED_FIELDS, MAX_EMBEDS,
 };
-pub use guild::{Guild, GuildEmoji, GuildMember, Role};
+pub use guild::{Guild, GuildEmoji, GuildMember, GuildSettings, MAX_DESCRIPTION_BYTES, Role};
 pub use message::{
     Attachment, Emoji, FORWARD_REFERENCE, MAX_MESSAGE_SNAPSHOTS, MAX_REACTION_EMOJI_NAME_BYTES,
     MAX_REACTIONS, MAX_STICKER_ITEMS, MAX_STICKER_NAME_CHARS, MAX_WAVEFORM_CHARS, Message,

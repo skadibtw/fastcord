@@ -48,8 +48,9 @@ use std::fmt;
 use std::mem::size_of;
 
 use fastcord_model::{
-    Channel, Guild, GuildEmoji, GuildMember, Message, OverwriteKind, PermissionOverwrite, Role,
-    ScheduledEvent, Snowflake, StageInstance, ThreadMember, User, VoiceState,
+    Channel, Guild, GuildEmoji, GuildMember, GuildSettings, Message, OverwriteKind,
+    PermissionOverwrite, Role, ScheduledEvent, Snowflake, StageInstance, ThreadMember, User,
+    VoiceState,
 };
 
 use crate::stage::MAX_TOPIC_CHARS;
@@ -120,6 +121,8 @@ fn channel_bytes(channel: &Channel) -> usize {
     size_of::<Channel>()
         + text(&channel.name)
         + text(&channel.icon)
+        + channel.topic.as_ref().map_or(0, |t| t.len())
+        + channel.rtc_region.as_ref().map_or(0, |t| t.len())
         + channel.permission_overwrites.capacity() * size_of::<PermissionOverwrite>()
         + (channel.recipients.capacity() - channel.recipients.len()) * size_of::<User>()
         + channel.recipients.iter().map(user_bytes).sum::<usize>()
@@ -199,6 +202,7 @@ pub struct GuildEntry {
     roles: Vec<Role>,
     channels: Vec<Channel>,
     emojis: Vec<GuildEmoji>,
+    settings: GuildSettings,
     members: HashMap<Snowflake, MemberSlot>,
     voice: HashMap<Snowflake, VoiceState>,
     stages: Vec<StageInstance>,
@@ -223,6 +227,7 @@ impl GuildEntry {
             roles: sorted_roles(guild.roles),
             channels: sorted_channels(guild.channels),
             emojis: sorted_emojis(guild.emojis),
+            settings: guild.settings,
             members: HashMap::new(),
             voice: HashMap::new(),
             stages: guild
@@ -269,6 +274,10 @@ impl GuildEntry {
 
     pub fn roles(&self) -> &[Role] {
         &self.roles
+    }
+
+    pub fn settings(&self) -> &GuildSettings {
+        &self.settings
     }
 
     pub fn emojis(&self) -> &[GuildEmoji] {
@@ -358,6 +367,7 @@ impl GuildEntry {
             + self.emojis.iter().map(emoji_bytes).sum::<usize>()
             + self.stages.iter().map(stage_bytes).sum::<usize>()
             + self.events.iter().map(events::event_bytes).sum::<usize>()
+            + text(&self.settings.description)
             + self
                 .members
                 .values()
@@ -372,7 +382,8 @@ impl GuildEntry {
             + self.channels.iter().map(channel_bytes).sum::<usize>()
             + self.emojis.iter().map(emoji_bytes).sum::<usize>()
             + self.stages.iter().map(stage_bytes).sum::<usize>()
-            + self.events.iter().map(events::event_bytes).sum::<usize>();
+            + self.events.iter().map(events::event_bytes).sum::<usize>()
+            + text(&self.settings.description);
     }
 
     fn put_member(&mut self, mut member: GuildMember, tick: u64) {
@@ -1440,6 +1451,9 @@ impl Store {
             if let Some(count) = update.member_count {
                 entry.member_count = count;
             }
+            if let Some(settings) = update.settings {
+                entry.settings = settings;
+            }
             entry.recompute_meta();
         });
         if known.is_some() {
@@ -1470,6 +1484,7 @@ impl Store {
             entry.member_count = guild.member_count;
             entry.roles = sorted_roles(guild.roles);
             entry.emojis = sorted_emojis(guild.emojis);
+            entry.settings = guild.settings;
             let mut channels = sorted_channels(guild.channels);
             for channel in &mut channels {
                 if let Some(old) = entry.channel(channel.id) {

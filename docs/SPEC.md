@@ -515,6 +515,18 @@ A Stage channel (type 13) is a voice channel with a role per person: speakers (`
 - **UI.** Sidebar: speakers then audience under headings, hands first (earliest request first), counted in the existing 8-person cap. Seat controls above the voice panel; moderator actions in the member menu; the topic header and the hand list above the conversation. One write at a time; a late answer after leaving or changing Stage is ignored.
 - **Not offered:** scheduled-event linkage, public Stages, the audience's own video or screen share rules beyond what the call already allows, and automatic acceptance of anything.
 
+### 8.17 Server and channel management (#93)
+
+Implemented in `fastcord-discord::guild_admin` (validated request bodies, presets), the reducer read model `state/navigation/admin.rs` (`guild_admin`, `GuildAdmin::plan_move`) and `fastcord-app::guild_admin` (one panel). Routes are in `docs/PROTOCOL.md` and are all unverified.
+
+- **State.** `fastcord-model::GuildSettings` (description, Community flag, system and AFK channels, AFK timeout, default notifications, explicit-content filter) is read from `GUILD_CREATE` (top level or `properties`) and replaced by `GUILD_UPDATE` only when that event carries `features`; `Channel` gained topic, nsfw, slowmode, bitrate, user limit, region and video quality, with texts capped. Create, update (also a reorder) and delete of channels already flow through `CHANNEL_CREATE/UPDATE/DELETE` in the reducer; nothing is shown from a request's own answer.
+- **Read model.** The panel asks the bridge for one server (`admin_guild`); the snapshot then carries its settings, whether the account owns it, guild-wide Manage Server / Manage Channels, each channel with its settings and its own Manage Channels, and up to 256 held non-bot members for a transfer. When the account's roles are not established there is no model, so no permission is guessed.
+- **Writes.** One explicit click, re-checked against the current model (permission, owner, Community, exact typed name, the target is a held member), one request in flight, never retried. Delete server needs the typed name, transfer and channel delete a Confirm that names the target. A request body carries only changed fields.
+- **Bitrate.** Discord does not report a server's maximum, and boosted values are not hard-coded: the choices run to 64 kbps or the channel's current value if higher.
+- **Community.** Shown on or off. Announcement, Stage and forum creation is refused with the reason when it is off. Turning it on or off is not offered (rules and updates channels, verification level).
+- **Reorder.** Move up/down swaps a channel with its sibling in the same category and list (categories, text-like, voice) and sends only the positions that change.
+- **Not offered:** Community toggle, billing, boosts, vanity URL, monetization, paid media channels, roles and overwrites (#94).
+
 ## 10. iced UI architecture
 
 Use iced's `Application`-style builder with `update`, `view`, `Task`, and `Subscription` concepts as provided by 0.14. UI messages are typed intents/results. Long-lived gateway/media workers feed stable subscriptions; creating a view must never reconnect a socket or recreate audio state.

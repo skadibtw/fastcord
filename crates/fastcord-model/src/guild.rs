@@ -46,6 +46,26 @@ fn emoji_available() -> bool {
     true
 }
 
+/// Server settings a conversation depends on, as the Gateway reports them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GuildSettings {
+    /// At most [`MAX_DESCRIPTION_BYTES`].
+    pub description: Option<String>,
+    /// The `COMMUNITY` feature is on.
+    pub community: bool,
+    pub system_channel_id: Option<Snowflake>,
+    pub afk_channel_id: Option<Snowflake>,
+    /// Seconds; 0 when Discord did not say.
+    pub afk_timeout: u32,
+    /// `default_message_notifications`: 0 all messages, 1 only mentions.
+    pub notifications: u8,
+    /// `explicit_content_filter`: 0 off, 1 members without roles, 2 everyone.
+    pub content_filter: u8,
+}
+
+/// Longest server description kept.
+pub const MAX_DESCRIPTION_BYTES: usize = 512;
+
 /// A normalized, available guild as delivered by the Gateway.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Guild {
@@ -65,4 +85,5 @@ pub struct Guild {
     pub stage_instances: Vec<StageInstance>,
     /// Scheduled events delivered with the guild.
     pub scheduled_events: Vec<ScheduledEvent>,
+    pub settings: GuildSettings,
 }

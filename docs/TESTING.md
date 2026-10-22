@@ -667,3 +667,16 @@ Automated: tone length/amplitude bounds, event-to-sound mapping, deafen suppress
 ### Persistent avatar and server icon cache
 Automated: `thumbs::tests` (stable file names, new hash or size is a new file, restart read, corrupt file dropped, LRU eviction by bytes keeping the new entry) and `attachments::tests::a_restarted_cache_shows_avatars_without_the_network_and_purge_forgets_them` (new cache instance on the same directory answers with the network unreachable, a new hash misses, purge removes the thumbnails).
 Manual (Windows, alt account only): open a server with many members, quit fastcord, start it again: avatars and server icons are drawn as soon as the rows appear, with no letter circles first. Switch between two servers back and forth: no pop-in. `%LOCALAPPDATA%\fastcord\attachments\images\<account>` stays under 64 MiB. Forget saved login removes that folder.
+
+### Server and channel management (#93)
+
+- **Automated:** `fastcord-discord` `guild_admin::tests` (request bodies, Community gate, name/topic/icon/preset validation, bitrate ceiling, regions), `state::navigation::tests` (user-form `GUILD_CREATE` settings, `GUILD_UPDATE` replace/replay/partial, `CHANNEL_CREATE/UPDATE/DELETE` list changes with stale replays, role-derived permissions that never guess, reorder planning); `fastcord-model` `channel::tests`; `fastcord-app` `guild_admin::tests` (diff-only bodies, one request in flight, re-checked permissions, typed-name delete, transfer target, Community refusal, kind-specific channel edit, stale answers, failure texts including 403, 429, MFA and ambiguous writes).
+- **Outstanding gates (alt account only, unchecked, unverified routes):**
+  - [ ] "+" creates a server with `POST /guilds`; it appears on `GUILD_CREATE`; a name below 2 characters and an animated icon are refused locally.
+  - [ ] The right-click menu shows Server settings and Create channel only with the permission; Leave server still asks its own confirmation.
+  - [ ] Editing the name, icon, description, system and inactive channels, timeout, notifications and filter sends one `PATCH /guilds/{id}` with only the changed fields; a second client sees the change through `GUILD_UPDATE`.
+  - [ ] Transfer ownership to a held member sends `owner_id`; a two-factor or verification challenge is displayed and nothing is bypassed. Delete server needs the exact name and, with two-factor on, Discord's challenge is displayed.
+  - [ ] Creating text, voice, category, forum (Community), announcement (Community) and Stage (Community) channels works; a server without Community explains why the last three are unavailable.
+  - [ ] Editing slowmode, user limit, bitrate (the server accepts every offered value), region and video quality; each is seen by a second client; topic and age restriction on text channels.
+  - [ ] Move up/down on channels and categories matches the official client's order in two clients without stale rows; deleting a channel and a category with children leaves the sidebar and open channel consistent.
+  - [ ] `GET /guilds/{id}/regions` shape; `GUILD_CREATE` field names for the settings (top level or `properties`).
