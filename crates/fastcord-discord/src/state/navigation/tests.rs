@@ -465,6 +465,10 @@ fn duplicate_role_snapshot_ids_are_last_write_wins_not_stale_admin_grants() {
             name: "obsolete admin grant".to_owned(),
             permissions: Permissions::ADMINISTRATOR,
             position: 1,
+            color: 0,
+            hoist: false,
+            mentionable: false,
+            managed: false,
         },
     );
     replace(&mut store, duplicated);
@@ -785,6 +789,10 @@ fn large_ready() -> Ready {
                             | Permissions::CONNECT
                             | Permissions::SPEAK,
                         position: 0,
+                        color: 0,
+                        hoist: false,
+                        mentionable: false,
+                        managed: false,
                     }],
                     channels: (0..if index == 0 { 3000 } else { 20 })
                         .map(|channel| Channel {
@@ -2628,4 +2636,245 @@ fn moving_swaps_siblings_and_renumbers_only_what_changes() {
         }]
     );
     assert!(crowded.plan_move(id(9101), false).is_none());
+}
+
+// ----- roles and channel access (issue #94) -----
+
+const MANAGE_ROLES: &str = "268435456";
+
+/// A server where the account holds "Mod" (position 5, Manage Roles) and is not
+/// the owner: "Helper" (2) and a bot role (3, managed) are below it, "Boss" (8)
+/// is above it. The category and its text channel carry the same overwrite.
+fn roles_guild() -> Value {
+    let mut guild = admin_fixture("guild_create_user_form");
+    guild["properties"]["owner_id"] = json!("42");
+    guild["roles"] = json!([
+        {"id": "9001", "name": "@everyone", "permissions": "3072", "position": 0},
+        {"id": "9300", "name": "Helper", "permissions": "0", "position": 2, "color": 255, "hoist": true},
+        {"id": "9301", "name": "Mod", "permissions": MANAGE_ROLES, "position": 5, "mentionable": true},
+        {"id": "9302", "name": "Boss", "permissions": "8", "position": 8},
+        {"id": "9303", "name": "Bot", "permissions": "0", "position": 3, "managed": true}
+    ]);
+    let deny_send = json!([{"id": "9300", "type": 0, "allow": "0", "deny": "2048"}]);
+    guild["channels"][0]["permission_overwrites"] = deny_send.clone();
+    guild["channels"][1]["permission_overwrites"] = deny_send;
+    guild["members"] = json!([
+        {"user": {"id": ME.to_string(), "username": "me"}, "roles": ["9301"]},
+        {"user": {"id": "9500", "username": "helper-person"}, "roles": ["9300"]},
+        {"user": {"id": "9501", "username": "boss-person"}, "roles": ["9302"]},
+        {"user": {"id": "42", "username": "owner-person"}, "roles": []}
+    ]);
+    guild
+}
+
+fn role_names(admin: &GuildAdmin) -> Vec<&str> {
+    admin.roles.iter().map(|r| r.name.as_str()).collect()
+}
+
+#[test]
+fn the_role_list_follows_the_hierarchy_and_says_why_a_role_is_locked() {
+    let store = admin_store(&roles_guild());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(admin.can_manage_roles && !admin.grant_all && !admin.owner);
+    assert_eq!(admin.top_position, 5);
+    assert_eq!(
+        role_names(&admin),
+        ["Boss", "Mod", "Bot", "Helper", "@everyone"]
+    );
+    let lock = |role: u64| {
+        let role = admin.role(id(role)).unwrap();
+        (role.edit_lock, role.move_lock, role.assign_lock)
+    };
+    assert_eq!(
+        lock(9302),
+        (
+            Some(ABOVE_YOUR_ROLE),
+            Some(ABOVE_YOUR_ROLE),
+            Some(ABOVE_YOUR_ROLE)
+        )
+    );
+    // Its own highest role is not below it either.
+    assert_eq!(lock(9301).0, Some(ABOVE_YOUR_ROLE));
+    assert_eq!(lock(9300), (None, None, None));
+    assert_eq!(lock(9303), (None, Some(MANAGED_ROLE), Some(MANAGED_ROLE)));
+    assert_eq!(lock(9001), (None, Some(EVERYONE_ROLE), Some(EVERYONE_ROLE)));
+    let helper = admin.role(id(9300)).unwrap();
+    assert_eq!(
+        (helper.color, helper.hoist, helper.mentionable),
+        (255, true, false)
+    );
+    // A managed neighbour blocks the swap; nothing is moved past @everyone.
+    assert!(admin.plan_role_move(id(9300), false).is_none());
+    assert!(admin.plan_role_move(id(9300), true).is_none());
+    assert!(admin.plan_role_move(id(9001), false).is_none());
+    // The account cannot hand out what it lacks.
+    assert!(admin.can_grant(admin.mine, Permissions::VIEW_CHANNEL));
+    assert!(!admin.can_grant(admin.mine, Permissions::BAN_MEMBERS));
+}
+
+#[test]
+fn without_manage_roles_every_role_is_locked() {
+    let mut guild = roles_guild();
+    guild["roles"][2]["permissions"] = json!("0");
+    let store = admin_store(&guild);
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(!admin.can_manage_roles);
+    assert!(
+        admin
+            .roles
+            .iter()
+            .all(|r| r.edit_lock == Some(NEEDS_MANAGE_ROLES))
+    );
+    assert!(admin.channels.iter().all(|c| !c.can_manage_permissions));
+}
+
+#[test]
+fn the_owner_may_edit_and_move_any_role_but_everyone() {
+    let mut guild = roles_guild();
+    guild["properties"]["owner_id"] = json!(ME.to_string());
+    let store = admin_store(&guild);
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(admin.owner && admin.grant_all && admin.can_manage_roles);
+    assert!(admin.roles.iter().all(|r| r.edit_lock.is_none()));
+    assert_eq!(admin.role(id(9302)).unwrap().move_lock, None);
+    assert_eq!(
+        admin.plan_role_move(id(9301), false).unwrap(),
+        [
+            crate::Placement {
+                id: id(9301),
+                position: 8
+            },
+            crate::Placement {
+                id: id(9302),
+                position: 5
+            },
+        ]
+    );
+    assert!(
+        admin.plan_role_move(id(9302), false).is_none(),
+        "already on top"
+    );
+    assert!(admin.can_grant(Permissions::NONE, Permissions::BAN_MEMBERS));
+}
+
+#[test]
+fn an_administrator_may_grant_anything_but_still_obeys_the_hierarchy() {
+    let mut guild = roles_guild();
+    guild["roles"][2]["permissions"] = json!("8");
+    let store = admin_store(&guild);
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(admin.grant_all && !admin.owner);
+    assert!(admin.can_grant(Permissions::NONE, Permissions::BAN_MEMBERS));
+    assert_eq!(
+        admin.role(id(9302)).unwrap().edit_lock,
+        Some(ABOVE_YOUR_ROLE)
+    );
+}
+
+#[test]
+fn a_members_roles_are_locked_by_the_same_hierarchy() {
+    let store = admin_store(&roles_guild());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    let member = |user: u64| admin_member(&store, &admin, id(user)).unwrap();
+    let helper = member(9500);
+    assert_eq!((helper.lock, helper.roles.clone()), (None, vec![id(9300)]));
+    assert_eq!(helper.name, "helper-person");
+    assert_eq!(member(9501).lock, Some(MEMBER_ABOVE_YOU));
+    assert_eq!(member(42).lock, Some(MEMBER_IS_OWNER));
+    let own = member(ME);
+    assert!(own.me && own.lock.is_none());
+    assert!(
+        admin_member(&store, &admin, id(1)).is_none(),
+        "not a held member"
+    );
+}
+
+#[test]
+fn the_inspection_applies_the_members_roles_and_the_channels_overwrites() {
+    let store = admin_store(&roles_guild());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    let helper = admin_member(&store, &admin, id(9500)).unwrap();
+    let text = helper.effective_in(id(9101)).unwrap();
+    assert!(text.contains(Permissions::VIEW_CHANNEL) && !text.contains(Permissions::SEND_MESSAGES));
+    // The voice channel has no overwrite.
+    let voice = helper.effective_in(id(9102)).unwrap();
+    assert!(voice.contains(Permissions::SEND_MESSAGES));
+    // Administrators see everything.
+    let boss = admin_member(&store, &admin, id(9501)).unwrap();
+    assert_eq!(boss.effective_in(id(9101)), Some(Permissions::ALL));
+    assert!(helper.effective_in(id(1)).is_none());
+}
+
+#[test]
+fn a_channel_knows_whether_it_is_synced_with_its_category() {
+    let mut store = admin_store(&roles_guild());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert_eq!(admin.channel(id(9100)).unwrap().synced, None);
+    assert_eq!(admin.channel(id(9101)).unwrap().synced, Some(true));
+    assert_eq!(admin.channel(id(9102)).unwrap().synced, Some(false));
+    assert!(admin.channel(id(9101)).unwrap().can_manage_permissions);
+    assert_eq!(admin.channel(id(9101)).unwrap().overwrites.len(), 1);
+    // Diverging by one bit un-syncs it, on Discord's CHANNEL_UPDATE alone.
+    let update = json!({"id": "9101", "guild_id": "9001", "type": 0, "name": "general",
+        "parent_id": "9100", "permission_overwrites": [
+            {"id": "9300", "type": 0, "allow": "1024", "deny": "2048"}]});
+    apply(&mut store, "CHANNEL_UPDATE", &update.to_string());
+    apply(&mut store, "CHANNEL_UPDATE", &update.to_string());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert_eq!(admin.channel(id(9101)).unwrap().synced, Some(false));
+    assert_eq!(store.bytes(), store.recount());
+}
+
+#[test]
+fn role_events_replay_without_duplicating_or_resurrecting_anything() {
+    let mut store = admin_store(&roles_guild());
+    let create = json!({"guild_id": "9001", "role": {"id": "9304", "name": "New", "permissions": "0",
+        "position": 1, "color": 16711680, "hoist": true, "mentionable": true}});
+    apply(&mut store, "GUILD_ROLE_CREATE", &create.to_string());
+    apply(&mut store, "GUILD_ROLE_CREATE", &create.to_string());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert_eq!(admin.roles.len(), 6);
+    let new = admin.role(id(9304)).unwrap();
+    assert_eq!(
+        (new.color, new.hoist, new.mentionable),
+        (0xFF0000, true, true)
+    );
+    let update = json!({"guild_id": "9001", "role": {"id": "9300", "name": "Helpers",
+        "permissions": "2048", "position": 2}});
+    apply(&mut store, "GUILD_ROLE_UPDATE", &update.to_string());
+    apply(&mut store, "GUILD_ROLE_UPDATE", &update.to_string());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert_eq!(admin.roles.len(), 6);
+    let helper = admin.role(id(9300)).unwrap();
+    assert_eq!(
+        (helper.name.as_str(), helper.permissions),
+        ("Helpers", Permissions::SEND_MESSAGES)
+    );
+    // Deleting a role also drops it from members and overwrites; a replay does nothing.
+    let delete = json!({"guild_id": "9001", "role_id": "9300"});
+    apply(&mut store, "GUILD_ROLE_DELETE", &delete.to_string());
+    apply(&mut store, "GUILD_ROLE_DELETE", &delete.to_string());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(admin.role(id(9300)).is_none());
+    assert!(
+        admin_member(&store, &admin, id(9500))
+            .unwrap()
+            .roles
+            .is_empty()
+    );
+    assert!(admin.channel(id(9101)).unwrap().overwrites.is_empty());
+    assert_eq!(admin.channel(id(9101)).unwrap().synced, Some(true));
+    assert_eq!(store.bytes(), store.recount());
+}
+
+#[test]
+fn losing_manage_roles_takes_effect_with_the_members_own_update() {
+    let mut store = admin_store(&roles_guild());
+    let update =
+        json!({"guild_id": "9001", "user": {"id": ME.to_string(), "username": "me"}, "roles": []});
+    apply(&mut store, "GUILD_MEMBER_UPDATE", &update.to_string());
+    let admin = guild_admin(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(!admin.can_manage_roles);
+    assert!(admin.roles.iter().all(|r| r.edit_lock.is_some()));
+    assert!(admin.channels.iter().all(|c| !c.can_manage_permissions));
 }

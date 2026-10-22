@@ -536,6 +536,8 @@ struct Request {
     quick: Option<String>,
     /// The server the management panel shows (`None`: closed).
     admin: Option<Snowflake>,
+    /// The member the roles panel or permission inspection describes.
+    admin_member: Option<Snowflake>,
     timeline: crate::history::Request,
     emoji: emoji_picker::Request,
 }
@@ -1445,6 +1447,17 @@ impl NavigationBridge {
                 return false;
             }
             request.admin = guild;
+            true
+        });
+    }
+
+    /// The member the management panel describes, `None` when it needs none.
+    pub fn admin_member(&self, user: Option<Snowflake>) {
+        self.requests.send_if_modified(|request| {
+            if request.admin_member == user {
+                return false;
+            }
+            request.admin_member = user;
             true
         });
     }
@@ -2980,6 +2993,13 @@ impl Worker {
         });
         navigation.admin = request.admin.and_then(|guild| {
             fastcord_discord::state::navigation::guild_admin(&self.tracker.store, guild)
+        });
+        navigation.admin_member = request.admin_member.and_then(|user| {
+            fastcord_discord::state::navigation::admin_member(
+                &self.tracker.store,
+                navigation.admin.as_ref()?,
+                user,
+            )
         });
         self.bridge.clear_private_notice_on_selection_change(
             navigation

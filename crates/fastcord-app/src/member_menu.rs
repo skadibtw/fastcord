@@ -91,6 +91,18 @@ pub fn view<'a>(
                 ),
             ]
             .spacing(5);
+            if let Some(guild) = target
+                .guild
+                .filter(|id| Some(*id) == navigation.selected_guild)
+            {
+                card = card.push(action(
+                    "Roles\u{2026}",
+                    Some(Message::GuildAdmin(crate::guild_admin::Event::MemberRoles(
+                        guild, user,
+                    ))),
+                    false,
+                ));
+            }
             if !own {
                 card = card.push(action(
                     "Message",

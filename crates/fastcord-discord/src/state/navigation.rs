@@ -433,6 +433,8 @@ pub struct NavigationSnapshot {
     pub quick: Vec<QuickEntry>,
     /// The management view of the guild the panel asked for.
     pub admin: Option<GuildAdmin>,
+    /// The member the role and inspection panels ask about, in that guild.
+    pub admin_member: Option<AdminMember>,
     /// Message requests awaiting an explicit accept or decline.
     pub requests: MessageRequests,
     /// Ignored and blocked users (shared, rebuilt only when it changes).
@@ -1023,6 +1025,7 @@ impl Navigation {
             presences: store.presences(),
             inbox: Inbox::default(),
             admin: None,
+            admin_member: None,
             quick: Vec::new(),
             requests: self.message_requests(store),
             suppressed: store.suppressed(),
@@ -1408,7 +1411,9 @@ fn visible_channels<'a>(
 
 mod admin;
 pub use admin::{
-    AdminChannel, AdminKind, GuildAdmin, MAX_ADMIN_CHANNELS, MAX_ADMIN_PEOPLE, guild_admin,
+    ABOVE_YOUR_ROLE, AdminChannel, AdminKind, AdminMember, AdminRole, EVERYONE_ROLE, GuildAdmin,
+    MANAGED_ROLE, MAX_ADMIN_CHANNELS, MAX_ADMIN_PEOPLE, MAX_ADMIN_ROLES, MEMBER_ABOVE_YOU,
+    MEMBER_IS_OWNER, MEMBER_ROLES_UNKNOWN, NEEDS_MANAGE_ROLES, admin_member, guild_admin,
 };
 mod inbox;
 pub use inbox::{Inbox, InboxRow, MAX_INBOX_ROWS};

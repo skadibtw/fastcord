@@ -514,6 +514,9 @@ impl App {
             gateway.controls.quick_query(self.switcher.wanted());
             self.guild_admin.sync(&gateway.navigation);
             gateway.controls.admin_guild(self.guild_admin.wanted());
+            gateway
+                .controls
+                .admin_member(self.guild_admin.wanted_member());
         }
         // Window full screen belongs to the call view: without it there is no
         // button to leave it, so it ends with the view.
@@ -1418,7 +1421,12 @@ impl App {
             Message::Shortcut(shortcut) => return self.navigation_shortcut(shortcut),
             Message::Group(event) => return self.group_event(event),
             Message::Invite(event) => return self.invite_event(event),
-            Message::GuildAdmin(event) => return self.guild_admin_event(event),
+            Message::GuildAdmin(event) => {
+                if matches!(event, guild_admin::Event::MemberRoles(..)) {
+                    self.member_menu.close();
+                }
+                return self.guild_admin_event(event);
+            }
             Message::Discover(event) => return self.discover_event(event),
             Message::Onboarding(event) => return self.onboarding_event(event),
             Message::Events(event) => return self.events_event(event),

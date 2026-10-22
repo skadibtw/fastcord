@@ -877,6 +877,10 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
                 name: format!("role-{n}"),
                 permissions: Permissions(1024),
                 position: n as i32,
+                color: 0,
+                hoist: false,
+                mentionable: false,
+                managed: false,
             })
             .collect(),
         channels: (0..channels)
@@ -1297,6 +1301,10 @@ fn entity_costs_charge_owned_capacity_instead_of_logical_lengths() {
         name: allocated_text("r", 256),
         permissions: Permissions(0),
         position: 0,
+        color: 0,
+        hoist: false,
+        mentionable: false,
+        managed: false,
     };
     assert_eq!(role_bytes(&role), size_of::<Role>() + role.name.capacity());
 

@@ -42,6 +42,7 @@ mod relationship;
 mod remote_auth;
 mod report;
 mod rest;
+mod role_admin;
 mod route;
 mod scheduled_event;
 mod search;
@@ -121,6 +122,7 @@ pub use report::{
 };
 pub use reqwest::{Method, StatusCode};
 pub use rest::{Priority, RestClient, RestRequest, RestResponse};
+pub use role_admin::{MAX_OVERWRITES, MAX_ROLE_COLOR, MAX_ROLE_NAME_CHARS, RoleEdit};
 pub use route::{MajorParameter, Route, RouteKey};
 pub use scheduled_event::{DraftError, EventAction, EventDraft, EventPermissions};
 pub use search::{

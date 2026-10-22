@@ -16,9 +16,13 @@
 //! ownership need an explicit Confirm (deleting a server also the typed name).
 //! A CAPTCHA or verification answer pauses every write and a two-factor
 //! challenge is shown as such; neither is ever answered here. Billing, boosts,
-//! vanity URLs, monetization, paid media channels, roles and permission
-//! overwrites (#94) are not part of this panel.
+//! vanity URLs, monetization and paid media channels are not part of this
+//! panel. Roles, member roles, channel permission overwrites and the read-only
+//! permission inspection (#94) live in the `access` submodule.
 
+mod access;
+
+use access::{Access, RolesForm, Tri};
 use fastcord_discord::state::navigation::{
     AdminChannel, AdminKind, GuildAdmin, NavigationSnapshot,
 };
@@ -28,7 +32,7 @@ use fastcord_discord::{
     MAX_GUILD_NAME_CHARS, MAX_VOICE_USER_LIMIT, MIN_BITRATE, NOTIFICATION_LEVELS, NewChannel,
     RestClient, RestError, SLOWMODE, VoiceRegion, bitrate_ceiling, needs_community,
 };
-use fastcord_model::Snowflake;
+use fastcord_model::{OverwriteKind, Snowflake};
 use iced::widget::{
     button, checkbox, column, container, pick_list, row, scrollable, space, text, text_input,
 };
@@ -44,10 +48,22 @@ pub enum Action {
     SaveChannel,
     DeleteChannel,
     Move,
+    SaveRole,
+    CreateRole,
+    DeleteRole,
+    MoveRole,
+    MemberRole,
+    PutOverwrite,
+    DeleteOverwrite,
+    SyncOverwrites,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
+    RoleName,
+    RoleColor,
+    TargetFilter,
+    InspectFilter,
     NewServerName,
     ServerName,
     Description,
@@ -82,10 +98,30 @@ pub enum Ask {
     DeleteServer,
     Transfer,
     DeleteChannel,
+    DeleteRole,
+    RemoveOverwrite,
 }
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    /// "Roles" of a server's settings.
+    Roles(Snowflake),
+    /// "Roles\u{2026}" of a member: the server and the member.
+    MemberRoles(Snowflake, Snowflake),
+    PickRole(Snowflake),
+    NewRole,
+    /// Flips one permission bit of the role being edited.
+    Bit(u8),
+    Hoist(bool),
+    Mentionable(bool),
+    Color(u32),
+    MoveRole(Snowflake, bool),
+    ToggleMemberRole(Snowflake, bool),
+    PickTarget(Option<(Snowflake, OverwriteKind)>),
+    Tri(u8, Tri),
+    SaveOverwrite,
+    Sync,
+    Inspect(Option<Snowflake>),
     /// "+" in the server rail.
     NewServer,
     /// Right click on a server in the rail.
@@ -231,6 +267,7 @@ struct ChannelForm {
     region: Option<String>,
     parent: Option<Snowflake>,
     confirm_delete: bool,
+    access: Access,
 }
 
 const fn has_topic(kind: AdminKind) -> bool {
@@ -256,6 +293,7 @@ impl ChannelForm {
             region: None,
             parent: None,
             confirm_delete: false,
+            access: Access::default(),
         }
     }
 
@@ -330,6 +368,9 @@ enum Panel {
     Server(Box<ServerForm>),
     NewChannel(NewChannelForm),
     Channel(Box<ChannelForm>),
+    Roles(Box<RolesForm>),
+    /// The roles of one member: the server and the member.
+    MemberRoles(Snowflake, Snowflake),
 }
 
 #[derive(Default)]
@@ -376,7 +417,7 @@ fn community_note() -> String {
 
 fn describe_rest(error: RestError) -> String {
     match error {
-        RestError::PermissionDenied => "Discord refused: you lack the permission for this (Manage Server, Manage Channels, or being the owner).".to_owned(),
+        RestError::PermissionDenied => "Discord refused: you lack the permission for this (Manage Server, Manage Channels, Manage Roles, a role above the one involved, or being the owner).".to_owned(),
         RestError::ResourceGone => "That server or channel no longer exists.".to_owned(),
         RestError::Retryable(_) => "Discord did not confirm. The change may have been applied; check the list before trying again.".to_owned(),
         RestError::Refused(refusal) if refusal.code == Some(60003) => "Discord asks for two-factor verification for this change. fastcord does not answer that challenge: complete it in the official Discord client. Nothing was changed here.".to_owned(),
@@ -430,6 +471,8 @@ impl State {
             Panel::Server(form) => Some(form.guild),
             Panel::NewChannel(form) => Some(form.guild),
             Panel::Channel(form) => Some(form.guild),
+            Panel::Roles(form) => Some(form.guild),
+            Panel::MemberRoles(guild, _) => Some(*guild),
         }
     }
 
@@ -496,6 +539,8 @@ impl State {
             Event::NewServer => self.open(Panel::NewServer(NewServer::default())),
             Event::Menu(guild) => self.open(Panel::Menu(guild)),
             Event::Settings(guild) => self.open(Panel::Server(Box::new(ServerForm::new(guild)))),
+            Event::Roles(guild) => self.open(Panel::Roles(Box::new(RolesForm::new(guild)))),
+            Event::MemberRoles(guild, user) => self.open(Panel::MemberRoles(guild, user)),
             Event::CreateChannel(guild, parent) => self.open(Panel::NewChannel(NewChannelForm {
                 guild,
                 kind: AdminKind::Text,
@@ -562,12 +607,23 @@ impl State {
                     form.nsfw = on;
                 }
             }
-            Event::Cancel => match &mut self.panel {
-                Some(Panel::Server(form)) => form.danger = Danger::None,
-                Some(Panel::Channel(form)) => form.confirm_delete = false,
-                _ => {}
-            },
+            Event::Cancel => {
+                match &mut self.panel {
+                    Some(Panel::Server(form)) => form.danger = Danger::None,
+                    Some(Panel::Channel(form)) => form.confirm_delete = false,
+                    _ => {}
+                }
+                self.access_cancel();
+            }
             Event::Ask(ask) => self.ask(ask, admin),
+            Event::PickRole(_)
+            | Event::Bit(_)
+            | Event::Hoist(_)
+            | Event::Mentionable(_)
+            | Event::Color(_)
+            | Event::PickTarget(_)
+            | Event::Tri(..)
+            | Event::Inspect(_) => self.access_local(event, admin),
             _ if self.busy.is_some() => {
                 self.notice = Some("Wait for the previous change to finish.".to_owned());
             }
@@ -598,6 +654,11 @@ impl State {
                 Some(Panel::Server(form)) => form.icon = IconChange::Remove,
                 _ => {}
             },
+            Event::NewRole
+            | Event::MoveRole(..)
+            | Event::ToggleMemberRole(..)
+            | Event::SaveOverwrite
+            | Event::Sync => return self.access_write(event, navigation, client),
             Event::Create => return self.create(admin, client),
             Event::Save => return self.save(admin, client),
             Event::Confirm => return self.confirm(admin, client),
@@ -642,10 +703,27 @@ impl State {
                 self.notice = Some(SENT.to_owned());
             }
             Action::SaveChannel | Action::Move => self.notice = Some(SENT.to_owned()),
+            Action::SaveRole
+            | Action::CreateRole
+            | Action::DeleteRole
+            | Action::MoveRole
+            | Action::MemberRole
+            | Action::PutOverwrite
+            | Action::DeleteOverwrite
+            | Action::SyncOverwrites => {
+                self.access_finished(action);
+                self.notice = Some(SENT.to_owned());
+            }
         }
     }
 
     fn input(&mut self, field: Field, value: String) {
+        if matches!(
+            field,
+            Field::RoleName | Field::RoleColor | Field::TargetFilter | Field::InspectFilter
+        ) {
+            return self.access_input(field, value);
+        }
         match (&mut self.panel, field) {
             (Some(Panel::NewServer(form)), Field::NewServerName) => form.name = value,
             (Some(Panel::Server(form)), Field::ServerName) => form.name = value,
@@ -695,6 +773,9 @@ impl State {
 
     /// Opens a confirmation; nothing is sent.
     fn ask(&mut self, ask: Ask, admin: Option<&GuildAdmin>) {
+        if self.access_ask(ask) {
+            return;
+        }
         match (&mut self.panel, ask) {
             (Some(Panel::Server(form)), Ask::DeleteServer) if admin.is_some_and(|a| a.owner) => {
                 form.danger = Danger::Delete(String::new());
@@ -755,6 +836,9 @@ impl State {
     }
 
     fn save(&mut self, admin: Option<&GuildAdmin>, client: &RestClient) -> Task<Event> {
+        if matches!(self.panel, Some(Panel::Roles(_))) {
+            return self.save_role(admin, client);
+        }
         match &self.panel {
             Some(Panel::Server(form)) if form.loaded => {
                 let Some(admin) = admin.filter(|a| a.id == form.guild && a.can_manage_guild) else {
@@ -805,6 +889,9 @@ impl State {
 
     /// The Confirm of a pending delete or transfer, checked once more.
     fn confirm(&mut self, admin: Option<&GuildAdmin>, client: &RestClient) -> Task<Event> {
+        if let Some(task) = self.confirm_access(admin, client) {
+            return task;
+        }
         match &self.panel {
             Some(Panel::Server(form)) => match &form.danger {
                 Danger::Delete(typed) => {
@@ -1042,6 +1129,7 @@ fn server_view<'a>(
     panel = panel.push(
         row![
             button(text("Save settings").size(13)).on_press_maybe(edit.then_some(Event::Save)),
+            button(text("Roles").size(13)).on_press_maybe(idle.then_some(Event::Roles(admin.id))),
             small(if admin.community {
                 "Community is on."
             } else {
@@ -1269,6 +1357,7 @@ fn channel_view<'a>(
     form: &'a ChannelForm,
     admin: Option<&'a GuildAdmin>,
     regions: Option<&'a [VoiceRegion]>,
+    member: Option<&'a fastcord_discord::state::navigation::AdminMember>,
     idle: bool,
 ) -> Element<'a, Event> {
     let Some(admin) = admin.filter(|a| a.id == form.guild) else {
@@ -1394,6 +1483,7 @@ fn channel_view<'a>(
     }
     panel =
         panel.push(button(text("Save").size(13)).on_press_maybe(enabled.then_some(Event::Save)));
+    panel = panel.push(access::access_view(form, current, admin, member, idle));
     panel = if form.confirm_delete {
         panel.push(
             row![
@@ -1462,7 +1552,12 @@ fn menu_view<'a>(
             )
             .push(button(text("Create channel").size(13)).on_press_maybe(
                 (idle && admin.can_manage_channels).then_some(Event::CreateChannel(guild, None)),
-            ));
+            ))
+            .push(
+                button(text("Roles").size(13)).on_press_maybe(
+                    (idle && admin.can_manage_roles).then_some(Event::Roles(guild)),
+                ),
+            );
     }
     buttons = buttons.push(
         button(text("Leave server").size(13))
@@ -1505,7 +1600,23 @@ pub fn view<'a>(
                 .as_ref()
                 .filter(|(g, _)| *g == form.guild)
                 .map(|(_, r)| r.as_slice());
-            panel = panel.push(channel_view(form, admin, regions, idle));
+            panel = panel.push(channel_view(
+                form,
+                admin,
+                regions,
+                navigation.admin_member.as_ref(),
+                idle,
+            ));
+        }
+        Some(Panel::Roles(form)) => panel = panel.push(access::roles_view(form, admin, idle)),
+        Some(Panel::MemberRoles(guild, user)) => {
+            panel = panel.push(access::member_roles_view(
+                *guild,
+                *user,
+                admin,
+                navigation.admin_member.as_ref(),
+                idle,
+            ));
         }
         None => {}
     }
@@ -1531,6 +1642,10 @@ mod tests {
     use super::*;
     use fastcord_discord::Refusal;
     use fastcord_discord::StatusCode;
+    use fastcord_discord::state::navigation::{
+        ABOVE_YOUR_ROLE, AdminMember, AdminRole, EVERYONE_ROLE,
+    };
+    use fastcord_model::{PermissionOverwrite, Permissions};
 
     fn client() -> RestClient {
         RestClient::new(
@@ -1559,10 +1674,44 @@ mod tests {
             rtc_region: None,
             video_quality: 1,
             can_manage: true,
+            overwrites: Vec::new(),
+            can_manage_permissions: true,
+            mine: Permissions(VIEW | SEND | MANAGE_ROLES),
+            synced: None,
         }
     }
 
-    fn admin(
+    const VIEW: u64 = 1 << 10;
+    const SEND: u64 = 1 << 11;
+    const MANAGE_ROLES: u64 = 1 << 28;
+
+    fn role(id: u64, position: i32, permissions: u64) -> AdminRole {
+        AdminRole {
+            id: Snowflake(id),
+            name: format!("role-{id}"),
+            color: 0,
+            hoist: false,
+            mentionable: false,
+            permissions: Permissions(permissions),
+            position,
+            managed: false,
+            everyone: id == 1,
+            edit_lock: None,
+            move_lock: (id == 1).then_some(EVERYONE_ROLE),
+            assign_lock: (id == 1).then_some(EVERYONE_ROLE),
+        }
+    }
+
+    fn overwrite(id: u64, kind: OverwriteKind, allow: u64, deny: u64) -> PermissionOverwrite {
+        PermissionOverwrite {
+            id: Snowflake(id),
+            kind,
+            allow: Permissions(allow),
+            deny: Permissions(deny),
+        }
+    }
+
+    pub(super) fn admin(
         owner: bool,
         manage_guild: bool,
         manage_channels: bool,
@@ -1588,6 +1737,23 @@ mod tests {
                 channel(12, AdminKind::Voice, "Lounge", Some(10)),
             ],
             people: vec![(Snowflake(7), "Nell".into())],
+            can_manage_roles: true,
+            // Highest first, as the reducer lists them: 23 is above the
+            // account's top role (5) and locked, 20 and 24 are below it.
+            roles: vec![
+                AdminRole {
+                    edit_lock: Some(ABOVE_YOUR_ROLE),
+                    move_lock: Some(ABOVE_YOUR_ROLE),
+                    assign_lock: Some(ABOVE_YOUR_ROLE),
+                    ..role(23, 8, 0)
+                },
+                role(20, 2, SEND),
+                role(24, 1, 0),
+                role(1, 0, VIEW | SEND),
+            ],
+            mine: Permissions(VIEW | SEND | MANAGE_ROLES),
+            grant_all: owner,
+            top_position: 5,
         }
     }
 
@@ -1924,5 +2090,390 @@ mod tests {
         assert_eq!(state.wanted(), Some(Snowflake(1)));
         state.clear();
         assert!(view(&state, &nav).is_none() && state.wanted().is_none());
+    }
+
+    // ----- roles and channel access (issue #94) -----
+
+    fn roles(nav: &NavigationSnapshot) -> State {
+        let mut state = State::default();
+        let _ = state.update(Event::Roles(Snowflake(1)), nav, &client());
+        state
+    }
+
+    fn done(state: &mut State, action: Action, result: Result<(), AdminRequestError>) {
+        let nav = NavigationSnapshot::default();
+        let serial = state.serial;
+        let _ = state.update(Event::Done(serial, action, result), &nav, &client());
+    }
+
+    #[test]
+    fn a_role_edit_is_sent_once_with_only_what_changed() {
+        let nav = nav(admin(false, false, false, false));
+        let mut state = roles(&nav);
+        let _ = state.update(Event::PickRole(Snowflake(20)), &nav, &client());
+        // Nothing changed: nothing is sent.
+        assert_eq!(state.update(Event::Save, &nav, &client()).units(), 0);
+        assert_eq!(state.notice.as_deref(), Some("Nothing to change."));
+        type_into(&mut state, Field::RoleName, " Helpers ", &nav);
+        let _ = state.update(Event::Hoist(true), &nav, &client());
+        let _ = state.update(Event::Bit(1), &nav, &client());
+        assert_eq!(state.update(Event::Save, &nav, &client()).units(), 1);
+        assert_eq!(state.busy, Some(Action::SaveRole));
+        assert_eq!(state.update(Event::Save, &nav, &client()).units(), 0);
+        assert!(state.notice.as_deref().unwrap().contains("Wait"));
+        // A rejection keeps the form, says why, and leaves it free again.
+        done(
+            &mut state,
+            Action::SaveRole,
+            Err(AdminRequestError::Rest(RestError::PermissionDenied)),
+        );
+        assert!(state.busy.is_none());
+        assert!(state.notice.as_deref().unwrap().contains("refused"));
+        let Some(Panel::Roles(form)) = &state.panel else {
+            panic!()
+        };
+        assert_eq!(form.name, " Helpers ");
+    }
+
+    #[test]
+    fn the_role_form_cannot_grant_what_the_account_lacks_or_touch_locked_roles() {
+        let nav = nav(admin(false, false, false, false));
+        let mut state = roles(&nav);
+        let _ = state.update(Event::PickRole(Snowflake(20)), &nav, &client());
+        // Ban Members (bit 2) is not held: the toggle does nothing.
+        let _ = state.update(Event::Bit(2), &nav, &client());
+        let Some(Panel::Roles(form)) = &state.panel else {
+            panic!()
+        };
+        assert_eq!(form.perms, Permissions(SEND));
+        // A role above the account is loaded but cannot be saved.
+        let _ = state.update(Event::PickRole(Snowflake(23)), &nav, &client());
+        type_into(&mut state, Field::RoleName, "Mine now", &nav);
+        assert_eq!(state.update(Event::Save, &nav, &client()).units(), 0);
+        assert_eq!(state.notice.as_deref(), Some(ABOVE_YOUR_ROLE));
+        // Permission lost between loading and the click: refused again.
+        let mut weaker = admin(false, false, false, false);
+        weaker.can_manage_roles = false;
+        for role in &mut weaker.roles {
+            role.edit_lock = Some("You need Manage Roles.");
+        }
+        let weaker = self::nav(weaker);
+        let _ = state.update(Event::PickRole(Snowflake(20)), &nav, &client());
+        type_into(&mut state, Field::RoleName, "Other", &nav);
+        assert_eq!(state.update(Event::Save, &weaker, &client()).units(), 0);
+        assert!(state.busy.is_none());
+    }
+
+    #[test]
+    fn deleting_a_role_needs_a_confirm_and_never_applies_to_everyone() {
+        let nav = nav(admin(false, false, false, false));
+        let mut state = roles(&nav);
+        let _ = state.update(Event::PickRole(Snowflake(20)), &nav, &client());
+        assert_eq!(state.update(Event::Confirm, &nav, &client()).units(), 0);
+        let _ = state.update(Event::Ask(Ask::DeleteRole), &nav, &client());
+        let _ = state.update(Event::Cancel, &nav, &client());
+        assert_eq!(state.update(Event::Confirm, &nav, &client()).units(), 0);
+        let _ = state.update(Event::Ask(Ask::DeleteRole), &nav, &client());
+        assert_eq!(state.update(Event::Confirm, &nav, &client()).units(), 1);
+        done(&mut state, Action::DeleteRole, Ok(()));
+        let Some(Panel::Roles(form)) = &state.panel else {
+            panic!()
+        };
+        assert!(form.selected.is_none());
+        // @everyone is refused locally even if a confirm were forced.
+        let _ = state.update(Event::PickRole(Snowflake(1)), &nav, &client());
+        let _ = state.update(Event::Ask(Ask::DeleteRole), &nav, &client());
+        assert_eq!(state.update(Event::Confirm, &nav, &client()).units(), 0);
+        assert_eq!(state.notice.as_deref(), Some(EVERYONE_ROLE));
+    }
+
+    #[test]
+    fn roles_move_only_between_unlocked_neighbours_and_new_roles_need_manage_roles() {
+        let nav = nav(admin(false, false, false, false));
+        let mut state = roles(&nav);
+        // 20 and 24 swap; 23 (above the account) and @everyone cannot move.
+        assert_eq!(
+            state
+                .update(Event::MoveRole(Snowflake(20), true), &nav, &client())
+                .units(),
+            1
+        );
+        done(&mut state, Action::MoveRole, Ok(()));
+        for locked in [23, 1] {
+            assert_eq!(
+                state
+                    .update(Event::MoveRole(Snowflake(locked), true), &nav, &client())
+                    .units(),
+                0
+            );
+        }
+        assert_eq!(state.update(Event::NewRole, &nav, &client()).units(), 1);
+        done(&mut state, Action::CreateRole, Ok(()));
+        let mut weaker = admin(false, false, false, false);
+        weaker.can_manage_roles = false;
+        assert_eq!(
+            state
+                .update(Event::NewRole, &self::nav(weaker), &client())
+                .units(),
+            0
+        );
+    }
+
+    fn member_nav(roles: Vec<u64>, lock: Option<&'static str>) -> NavigationSnapshot {
+        let mut nav = nav(admin(false, false, false, false));
+        nav.admin_member = Some(AdminMember {
+            user: Snowflake(7),
+            name: "Nell".into(),
+            me: false,
+            roles: roles.into_iter().map(Snowflake).collect(),
+            lock,
+            effective: vec![(Snowflake(11), Permissions(VIEW))],
+        });
+        nav
+    }
+
+    #[test]
+    fn one_click_gives_or_takes_one_member_role_and_the_hierarchy_applies() {
+        let nav = member_nav(vec![20], None);
+        let mut state = State::default();
+        let _ = state.update(
+            Event::MemberRoles(Snowflake(1), Snowflake(7)),
+            &nav,
+            &client(),
+        );
+        assert_eq!(state.wanted_member(), Some(Snowflake(7)));
+        // Taking a role the member has, and giving one they lack: one request each.
+        assert_eq!(
+            state
+                .update(
+                    Event::ToggleMemberRole(Snowflake(20), false),
+                    &nav,
+                    &client()
+                )
+                .units(),
+            1
+        );
+        assert_eq!(state.busy, Some(Action::MemberRole));
+        assert_eq!(
+            state
+                .update(
+                    Event::ToggleMemberRole(Snowflake(24), true),
+                    &nav,
+                    &client()
+                )
+                .units(),
+            0,
+            "the next click waits for the answer"
+        );
+        done(
+            &mut state,
+            Action::MemberRole,
+            Err(AdminRequestError::Rest(RestError::Retryable(
+                fastcord_discord::RetryableFailure::Network(
+                    fastcord_discord::NetworkFailure::Connection,
+                ),
+            ))),
+        );
+        assert!(
+            state
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("may have been applied")
+        );
+        assert_eq!(
+            state
+                .update(
+                    Event::ToggleMemberRole(Snowflake(24), true),
+                    &nav,
+                    &client()
+                )
+                .units(),
+            1
+        );
+        done(&mut state, Action::MemberRole, Ok(()));
+        // Already in the asked state, above the account, or a locked member: nothing.
+        for (role, give) in [(20, true), (23, true), (1, true)] {
+            assert_eq!(
+                state
+                    .update(
+                        Event::ToggleMemberRole(Snowflake(role), give),
+                        &nav,
+                        &client()
+                    )
+                    .units(),
+                0
+            );
+        }
+        let locked = member_nav(
+            vec![],
+            Some("This member's highest role is not below yours."),
+        );
+        assert_eq!(
+            state
+                .update(
+                    Event::ToggleMemberRole(Snowflake(24), true),
+                    &locked,
+                    &client()
+                )
+                .units(),
+            0
+        );
+    }
+
+    fn channel_nav(channel_overwrites: Vec<PermissionOverwrite>) -> NavigationSnapshot {
+        let mut admin = admin(false, false, true, false);
+        admin.channels[0].overwrites = vec![
+            overwrite(20, OverwriteKind::Role, 0, SEND),
+            overwrite(24, OverwriteKind::Role, 0, VIEW),
+        ];
+        admin.channels[1].overwrites = channel_overwrites;
+        admin.channels[1].synced = Some(false);
+        nav(admin)
+    }
+
+    fn editing(nav: &NavigationSnapshot) -> State {
+        let mut state = State::default();
+        let _ = state.update(
+            Event::EditChannel(Snowflake(1), Snowflake(11), false),
+            nav,
+            &client(),
+        );
+        state.sync(nav);
+        state
+    }
+
+    #[test]
+    fn an_overwrite_is_edited_per_bit_and_written_with_one_request() {
+        let nav = channel_nav(vec![overwrite(20, OverwriteKind::Role, 0, SEND)]);
+        let mut state = editing(&nav);
+        let target = Some((Snowflake(20), OverwriteKind::Role));
+        let _ = state.update(Event::PickTarget(target), &nav, &client());
+        // Nothing changed yet.
+        assert_eq!(
+            state.update(Event::SaveOverwrite, &nav, &client()).units(),
+            0
+        );
+        assert_eq!(state.notice.as_deref(), Some("Nothing to change."));
+        // Deny becomes Allow for a bit the account holds, and Allow of one it lacks stays neutral.
+        let _ = state.update(Event::Tri(11, Tri::Allow), &nav, &client());
+        let _ = state.update(Event::Tri(2, Tri::Allow), &nav, &client());
+        let Some(Panel::Channel(form)) = &state.panel else {
+            panic!()
+        };
+        assert_eq!(
+            (form.access.allow, form.access.deny),
+            (Permissions(SEND), Permissions::NONE)
+        );
+        assert_eq!(
+            state.update(Event::SaveOverwrite, &nav, &client()).units(),
+            1
+        );
+        assert_eq!(state.busy, Some(Action::PutOverwrite));
+        assert_eq!(
+            state.update(Event::SaveOverwrite, &nav, &client()).units(),
+            0
+        );
+        done(&mut state, Action::PutOverwrite, Ok(()));
+        assert!(state.notice.as_deref().unwrap().starts_with("Sent"));
+    }
+
+    #[test]
+    fn adding_removing_and_syncing_overwrites_are_gated_and_confirmed() {
+        let nav = channel_nav(Vec::new());
+        let mut state = editing(&nav);
+        // A new target starts empty; saving it empty sends nothing.
+        let target = Some((Snowflake(24), OverwriteKind::Role));
+        let _ = state.update(Event::PickTarget(target), &nav, &client());
+        assert_eq!(
+            state.update(Event::SaveOverwrite, &nav, &client()).units(),
+            0
+        );
+        let _ = state.update(Event::Tri(10, Tri::Deny), &nav, &client());
+        assert_eq!(
+            state.update(Event::SaveOverwrite, &nav, &client()).units(),
+            1
+        );
+        done(&mut state, Action::PutOverwrite, Ok(()));
+        // Removing needs an existing overwrite and a Confirm.
+        let existing = channel_nav(vec![overwrite(24, OverwriteKind::Role, 0, VIEW)]);
+        let _ = state.update(Event::Confirm, &existing, &client());
+        assert!(state.busy.is_none());
+        let _ = state.update(Event::Ask(Ask::RemoveOverwrite), &existing, &client());
+        let _ = state.update(Event::Cancel, &existing, &client());
+        assert_eq!(
+            state.update(Event::Confirm, &existing, &client()).units(),
+            0
+        );
+        let _ = state.update(Event::Ask(Ask::RemoveOverwrite), &existing, &client());
+        assert_eq!(
+            state.update(Event::Confirm, &existing, &client()).units(),
+            1
+        );
+        done(&mut state, Action::DeleteOverwrite, Ok(()));
+        // Sync sends the category's overwrites once, only when they differ.
+        assert_eq!(state.update(Event::Sync, &nav, &client()).units(), 1);
+        done(&mut state, Action::SyncOverwrites, Ok(()));
+        let mut synced = admin(false, false, true, false);
+        synced.channels[1].synced = Some(true);
+        assert_eq!(
+            state
+                .update(Event::Sync, &self::nav(synced), &client())
+                .units(),
+            0
+        );
+        assert!(state.notice.as_deref().unwrap().contains("Already synced"));
+    }
+
+    #[test]
+    fn overwrites_need_manage_roles_in_the_channel_at_the_click() {
+        let nav = channel_nav(vec![overwrite(20, OverwriteKind::Role, 0, SEND)]);
+        let mut state = editing(&nav);
+        let _ = state.update(
+            Event::PickTarget(Some((Snowflake(20), OverwriteKind::Role))),
+            &nav,
+            &client(),
+        );
+        let _ = state.update(Event::Tri(10, Tri::Deny), &nav, &client());
+        let mut denied = admin(false, false, true, false);
+        denied.channels[1].can_manage_permissions = false;
+        denied.channels[1].synced = Some(false);
+        let denied = self::nav(denied);
+        for event in [Event::SaveOverwrite, Event::Sync] {
+            assert_eq!(state.update(event, &denied, &client()).units(), 0);
+        }
+        assert!(state.busy.is_none());
+    }
+
+    #[test]
+    fn inspecting_a_member_asks_the_reducer_and_sends_nothing() {
+        let nav = member_nav(vec![20], None);
+        let mut state = editing(&nav);
+        assert_eq!(state.wanted_member(), None);
+        let task = state.update(Event::Inspect(Some(Snowflake(7))), &nav, &client());
+        assert_eq!(task.units(), 0);
+        assert_eq!(state.wanted_member(), Some(Snowflake(7)));
+        let _ = state.update(Event::Inspect(None), &nav, &client());
+        assert_eq!(state.wanted_member(), None);
+        assert!(state.busy.is_none());
+    }
+
+    #[test]
+    fn a_stale_answer_after_clear_changes_nothing() {
+        let nav = nav(admin(false, false, false, false));
+        let mut state = roles(&nav);
+        let _ = state.update(Event::NewRole, &nav, &client());
+        let stale = state.serial;
+        state.clear();
+        let _ = state.update(
+            Event::Done(
+                stale,
+                Action::CreateRole,
+                Err(AdminRequestError::Rest(RestError::PermissionDenied)),
+            ),
+            &nav,
+            &client(),
+        );
+        assert!(state.notice.is_none() && state.panel.is_none());
     }
 }

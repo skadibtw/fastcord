@@ -692,6 +692,19 @@ Manual (Windows, alt account only): open a server with many members, quit fastco
   - [ ] Move up/down on channels and categories matches the official client's order in two clients without stale rows; deleting a channel and a category with children leaves the sidebar and open channel consistent.
   - [ ] `GET /guilds/{id}/regions` shape; `GUILD_CREATE` field names for the settings (top level or `properties`).
 
+### Roles and channel access (#94)
+
+- **Automated:** `fastcord-discord` `role_admin::tests` (role bodies, create needs a name, overwrite body and the shared-bit refusal, sync body and bound), `state::navigation::tests` (hierarchy locks with reasons, owner/Administrator/Manage Roles cases, role order and move planning, member locks, effective-permission inspection, `synced` with category and its change on `CHANNEL_UPDATE`, replayed `GUILD_ROLE_CREATE/UPDATE/DELETE` and `GUILD_MEMBER_UPDATE` effects); `fastcord-model` permission catalog; `fastcord-app` `guild_admin::tests` and `guild_admin::access::tests` (diff-only role edits, one request in flight, bits the account lacks, locked roles, delete Confirm, `@everyone` refusal, role moves, one-click member roles with the ambiguous-failure text, overwrite save/remove/sync gating re-checked at the click, inspection asks only the reducer, stale answers).
+- **Outstanding gates (alt account only, unchecked, unverified routes):**
+  - [ ] Create, rename, recolour (preset and hex), hoist and mention-toggle a role; a second client sees each through `GUILD_ROLE_UPDATE`; role icons and gradients stay absent.
+  - [ ] Permission checkboxes match the official client's names and bits; a role above the account's highest is locked with the reason; Administrator and the owner can grant everything.
+  - [ ] Move up/down reorders roles to the same order the official client shows; managed roles and `@everyone` do not move; delete needs a Confirm and `@everyone` has none.
+  - [ ] Member menu "Roles\…": each tick sends one `PUT`/`DELETE`; a member whose highest role is above yours, the owner, and managed roles are locked; the box changes on `GUILD_MEMBER_UPDATE`.
+  - [ ] Channel Permissions: add a role and a held member overwrite, set Allow/Deny/Neutral, remove with Confirm; a second client's access changes immediately (sidebar, composer, voice join); "Allow" is refused for bits you lack.
+  - [ ] **Sync with category:** compare what the official client's "Sync now" sends (`permission_overwrites` or `lock_permissions`) with this client's `permission_overwrites` copy of the category; "synced" must agree with the official indicator.
+  - [ ] Inspection of a held member in a channel matches the official "View server as role" / permission display, including a member overwrite and a timeout.
+  - [ ] Losing Manage Roles in another client removes the controls here without a restart.
+
 ## Accounts, sessions and security overview (#107)
 Automated: `accounts::tests` (index round trip, migration by reconcile, bounds), `account_security::tests` (session list parse, logout body, overview booleans, 60003 recognised in 401 and 403), `account_panel::tests` (Confirm gating, one request in flight, MFA refusal shown and not retried, ambiguous failure text, stale answers), and the `main.rs` state-machine tests for switching (teardown before the next sign-in, saved login kept, memory-only refused).
 Manual (Windows, alt account only, not run offline):

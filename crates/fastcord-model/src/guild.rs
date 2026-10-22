@@ -7,6 +7,17 @@ pub struct Role {
     pub permissions: Permissions,
     #[serde(default)]
     pub position: i32,
+    /// RGB colour; 0 is no colour.
+    #[serde(default)]
+    pub color: u32,
+    /// Listed apart in the member list.
+    #[serde(default)]
+    pub hoist: bool,
+    #[serde(default)]
+    pub mentionable: bool,
+    /// Owned by an integration or bot: it cannot be given to a member by hand.
+    #[serde(default)]
+    pub managed: bool,
 }
 
 /// A guild member, referencing its user by ID; the user object is stored once

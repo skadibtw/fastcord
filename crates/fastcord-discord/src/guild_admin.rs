@@ -379,7 +379,7 @@ pub struct Placement {
     pub position: i32,
 }
 
-fn placements_body(placements: &[Placement]) -> Result<serde_json::Value, AdminError> {
+pub(crate) fn placements_body(placements: &[Placement]) -> Result<serde_json::Value, AdminError> {
     if placements.is_empty() || placements.len() > MAX_PLACEMENTS {
         return Err(AdminError::BadValue);
     }

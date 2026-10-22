@@ -41,8 +41,8 @@ pub use message::{
     StickerItem, VOICE_MESSAGE_FLAG,
 };
 pub use permissions::{
-    GuildScope, MemberScope, OverwriteKind, PermissionOverwrite, Permissions, channel_permissions,
-    guild_permissions,
+    GuildScope, MemberScope, OverwriteKind, PERMISSION_GROUPS, PermissionInfo, PermissionOverwrite,
+    Permissions, channel_permissions, guild_permissions, scope as permission_scope,
 };
 pub use poll::{
     AnswerCount, MAX_POLL_ANSWER_CHARS, MAX_POLL_ANSWERS, MAX_POLL_QUESTION_CHARS, Poll,
