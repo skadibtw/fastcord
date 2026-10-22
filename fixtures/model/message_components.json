@@ -1,0 +1,26 @@
+{
+  "id": "1290000000000000030",
+  "channel_id": "500",
+  "guild_id": "100",
+  "author": {"id": "9000000000000000001", "username": "dice-app", "bot": true},
+  "content": "Pick one",
+  "timestamp": "2026-10-20T12:00:00.000000+00:00",
+  "type": 20,
+  "flags": 64,
+  "components": [
+    {"type": 1, "id": 1, "components": [
+      {"type": 2, "id": 2, "style": 1, "label": "Roll", "custom_id": "roll-again"},
+      {"type": 2, "id": 3, "style": 5, "label": "Rules", "url": "https://example.test/rules"},
+      {"type": 2, "id": 4, "style": 6, "sku_id": "1500000000000000001", "custom_id": "premium"}
+    ]},
+    {"type": 1, "id": 5, "components": [
+      {"type": 3, "id": 6, "custom_id": "die", "placeholder": "Choose a die",
+       "min_values": 1, "max_values": 1,
+       "options": [
+         {"label": "Six sided", "value": "d6", "default": true},
+         {"label": "Twenty sided", "value": "d20", "description": "Big"}
+       ]}
+    ]},
+    {"type": 1, "id": 7, "components": [{"type": 5, "id": 8, "custom_id": "who"}]}
+  ]
+}

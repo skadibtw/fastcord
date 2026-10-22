@@ -24,6 +24,7 @@ mod guild_admin;
 pub mod history;
 mod image_data;
 mod inbox;
+mod interaction;
 mod invite;
 mod member;
 pub mod message_store;
@@ -76,6 +77,14 @@ pub use guild_admin::{
     VoiceRegion, bitrate_ceiling, needs_community, parse_regions,
 };
 pub use inbox::{MENTIONS_PAGE_SIZE, MentionFilter, MentionsPage};
+pub use interaction::{
+    AppCommand, ArgError, CommandArg, CommandIndex, CommandOption, IndexScope, InteractionContext,
+    InteractionModal, InteractionOutcome, InteractionRequest, MAX_COMMAND_TEXT_CHARS, MAX_COMMANDS,
+    MAX_INDEX_BYTES, ModalInput, OPTION_ATTACHMENT, OPTION_BOOLEAN, OPTION_CHANNEL, OPTION_INTEGER,
+    OPTION_MENTIONABLE, OPTION_NUMBER, OPTION_ROLE, OPTION_STRING, OPTION_SUB_COMMAND, OPTION_USER,
+    OptionChoice, parse_index as parse_command_index, parse_modal as parse_interaction_modal,
+    parse_outcome as parse_interaction_outcome,
+};
 pub use invite::{
     CREATE_AGES, CREATE_USES, CREATED_MAX_AGE_SECONDS, DISCOVERY_PAGE, DiscoveredGuild, Expiry,
     Invite, InviteScope, MAX_CODES_PER_MESSAGE, MAX_LISTED, ManagedInvite, created_code,

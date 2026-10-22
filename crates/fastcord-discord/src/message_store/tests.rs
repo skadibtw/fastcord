@@ -2284,3 +2284,45 @@ fn poll_bytes_are_counted_and_a_vote_flood_stays_bounded() {
     assert!(store.tracked_bytes() <= held + 8 * size_of::<fastcord_model::AnswerCount>());
     check(&store);
 }
+
+#[test]
+fn components_are_charged_to_the_budget_and_an_update_replaces_and_recounts_them() {
+    let mut store = MessageStore::new();
+    assert_eq!(
+        applied(load(&mut store, HistoryCursor::Latest, 1..=3)),
+        (3, 3, 0)
+    );
+    let before = store.tracked_bytes();
+    let buttons: Vec<serde_json::Value> = (0..4)
+        .map(|n| {
+            serde_json::json!({"type": 1, "components": [
+                {"type": 2, "style": 1, "label": "x".repeat(80), "custom_id": format!("b{n}")}
+            ]})
+        })
+        .collect();
+    let mut with = message(4);
+    with.components = fastcord_model::parse_components(&buttons);
+    store.apply_dispatch(&Dispatch::MessageCreate(Box::new(with)));
+    check(&store);
+    let held = store.get(CHANNEL, id(4)).unwrap();
+    assert_eq!(held.components.len(), 4);
+    assert!(
+        store.tracked_bytes() >= before + 4 * 80,
+        "the labels are charged"
+    );
+    // A bot disabling its buttons replaces them, and the ledger follows.
+    let disabled = r#","components":[{"type":1,"components":[{"type":2,"label":"Done","custom_id":"d","disabled":true}]}]"#;
+    store.apply_dispatch(&update(CHANNEL, 4, disabled));
+    check(&store);
+    assert_eq!(store.get(CHANNEL, id(4)).unwrap().components.len(), 1);
+    let revision = store.revision(CHANNEL, id(4));
+    store.apply_dispatch(&update(CHANNEL, 4, disabled));
+    assert_eq!(
+        store.revision(CHANNEL, id(4)),
+        revision,
+        "a repeat is no change"
+    );
+    store.apply_dispatch(&update(CHANNEL, 4, r#","components":[]"#));
+    check(&store);
+    assert!(store.get(CHANNEL, id(4)).unwrap().components.is_empty());
+}

@@ -191,6 +191,7 @@ pub fn edit_response_update(held: Option<&Message>, answer: Message) -> Option<M
         mention_everyone: Some(answer.mention_everyone),
         embeds: Some(answer.embeds),
         poll: None,
+        components: Some(answer.components),
     })
 }
 

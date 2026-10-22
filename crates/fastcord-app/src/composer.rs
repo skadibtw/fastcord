@@ -296,6 +296,24 @@ impl Composer {
         self.recount();
     }
 
+    /// The command name typed after a leading `/`, while a new single-word
+    /// message is being written (so the command list may open). Nothing is
+    /// sent by this: the text stays an ordinary draft.
+    pub fn slash_query(&self) -> Option<String> {
+        if self.editing.is_some() || self.channel.is_none() || self.chars > 1 + MAX_QUERY_CHARS {
+            return None;
+        }
+        let text = self.content.text();
+        let name = text.strip_prefix('/')?;
+        (!name.contains(char::is_whitespace)).then(|| name.to_owned())
+    }
+
+    /// Empties the editor text only (a command was chosen from its slash).
+    pub fn clear_text(&mut self) {
+        self.content = Content::new();
+        self.recount();
+    }
+
     /// Forgets every draft and what the composer holds (logout).
     pub fn clear(&mut self) {
         self.drafts.clear();
@@ -1932,6 +1950,7 @@ mod tests {
                 sticker_items: Vec::new(),
                 message_snapshots: Vec::new(),
                 poll: None,
+                components: Vec::new(),
                 mentions: Vec::new(),
                 mention_roles: Vec::new(),
                 mention_everyone: false,
@@ -1947,6 +1966,7 @@ mod tests {
             reply: None,
             reactions: Vec::new(),
             poll_saving: false,
+            component_pending: None,
             hidden: None,
         }
     }

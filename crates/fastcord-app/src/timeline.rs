@@ -81,6 +81,9 @@ pub struct Row {
     pub reactions: Vec<Pending>,
     /// A vote or ending of the row's poll Discord has not answered yet.
     pub poll_saving: bool,
+    /// The `custom_id` of the row's component whose interaction Discord has
+    /// not settled yet.
+    pub component_pending: Option<String>,
     /// The message mentions the account (set by the worker from the store).
     pub mentions_me: bool,
     /// The author is ignored or blocked: `message` is then an empty stand-in
@@ -99,6 +102,7 @@ impl Row {
             reply: None,
             reactions: Vec::new(),
             poll_saving: false,
+            component_pending: None,
             mentions_me: false,
             hidden: None,
         }
@@ -128,6 +132,7 @@ fn stand_in(message: &Message) -> Message {
     hidden.sticker_items.clear();
     hidden.message_snapshots.clear();
     hidden.poll = None;
+    hidden.components.clear();
     hidden.mentions.clear();
     hidden.mention_roles.clear();
     hidden.mention_everyone = false;
@@ -165,6 +170,7 @@ pub fn hide_suppressed(
             row.reply = None;
             row.reactions.clear();
             row.poll_saving = false;
+            row.component_pending = None;
             row.revision |= HIDDEN_REVISION;
         }
     }
@@ -358,6 +364,8 @@ pub struct Snapshot {
     pub candidates: Vec<crate::composer::Candidate>,
     /// Display names of the other people typing here, longest-typing first.
     pub typing: Vec<String>,
+    /// Slash commands and forms of applications (see [`crate::interactions`]).
+    pub interaction: crate::history::InteractionView,
 }
 
 /// A decoded preview: shared RGBA pixels (a clone shares the buffer) and the
@@ -590,6 +598,19 @@ pub enum Event {
         channel_id: Snowflake,
         message_id: Snowflake,
         answer_id: u32,
+    },
+    /// A button was pressed or a select option chosen on a message. The worker
+    /// checks it against the message as stored and sends one interaction.
+    Component {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        custom_id: String,
+        values: Vec<String>,
+    },
+    /// Remove a message only the user sees (local only, nothing is sent).
+    DismissEphemeral {
+        channel_id: Snowflake,
+        message_id: Snowflake,
     },
     /// A link in a message or embed was clicked; the target is http(s) only.
     OpenLink(String),
@@ -1271,6 +1292,27 @@ fn message_view<'a>(
     if let Some(poll) = message.poll.as_deref() {
         body = body.push(poll_view(row, poll, channel_id));
     }
+    if !message.components.is_empty() {
+        body = body.push(crate::component_view::view(row, channel_id));
+    }
+    if message.is_ephemeral() {
+        body = body.push(
+            row![
+                text("Only you can see this")
+                    .size(12)
+                    .style(text::secondary),
+                row_button(
+                    "Dismiss",
+                    Event::DismissEphemeral {
+                        channel_id,
+                        message_id,
+                    },
+                ),
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center),
+        );
+    }
     for attachment in &message.attachments {
         let key = AttachmentKey {
             account: account_id,
@@ -1893,6 +1935,7 @@ fn placeholder(message: &Message) -> Option<String> {
         || !message.sticker_items.is_empty()
         || message.forwarded().is_some()
         || message.poll.is_some()
+        || !message.components.is_empty()
     {
         return None;
     }

@@ -8,6 +8,7 @@
 //! explicit commands and are checked here against the store, never against
 //! what a possibly stale UI showed.
 mod embeds;
+mod interact;
 mod poll;
 
 use std::collections::{HashMap, VecDeque};
@@ -31,6 +32,8 @@ use iced::futures::future::{AbortHandle, Abortable};
 use iced::futures::stream::FuturesUnordered;
 
 use self::embeds::EmbedsDone;
+use self::interact::InteractionEvent;
+pub use self::interact::InteractionView;
 use self::poll::PollDone;
 use crate::changes::{self, ChangeKind, ChangeRequest, Changes};
 use crate::outbox::{Finished, MAX_REPLY_AUTHOR_CHARS, OpId, Outbox, Reply, SendFailure, Slots};
@@ -70,6 +73,7 @@ type ChangeFuture = Pin<Box<dyn Future<Output = ChangeDone> + Send>>;
 type AckFuture =
     Pin<Box<dyn Future<Output = (Snowflake, Snowflake, Result<(), RestError>)> + Send>>;
 type ReactionFuture = Pin<Box<dyn Future<Output = ReactionDone> + Send>>;
+type InteractionFuture = Pin<Box<dyn Future<Output = InteractionEvent> + Send>>;
 type PollFuture = Pin<Box<dyn Future<Output = PollDone> + Send>>;
 type EmbedFuture = Pin<Box<dyn Future<Output = EmbedsDone> + Send>>;
 type UsersFuture =
@@ -154,6 +158,7 @@ pub enum Completed {
     ReactionUsers(u64, Result<Vec<ReactionUser>, RestError>),
     Poll(PollDone),
     Embeds(EmbedsDone),
+    Interaction(InteractionEvent),
 }
 
 /// An explicit user action from the timeline.
@@ -264,6 +269,15 @@ pub struct History {
     /// Poll votes and endings the user asked for that Discord has not answered.
     polls: Polls,
     poll_requests: FuturesUnordered<PollFuture>,
+    /// The Gateway session ID (from READY) interactions are made in.
+    session: Option<String>,
+    /// The open channel's server, when it is one.
+    guild: Option<Snowflake>,
+    /// Interactions the user started that Discord has not settled.
+    interactions: crate::interactions::Ledger,
+    interaction_requests: FuturesUnordered<InteractionFuture>,
+    /// The form an application asked the user to fill in.
+    modal: Option<Arc<fastcord_discord::InteractionModal>>,
     /// (channel, message) pairs whose link-preview change is unanswered.
     embed_ops: Vec<(Snowflake, Snowflake)>,
     embed_requests: FuturesUnordered<EmbedFuture>,
@@ -306,6 +320,9 @@ impl History {
         self.highlight = None;
         self.inspection = None;
         self.users_pending = None;
+        // Ephemeral messages and forms belong to the conversation they were
+        // shown in: leaving it purges them with the rest of the store.
+        self.modal = None;
         self.store.clear();
         self.list = VariableList::default();
         self.channel = None;
@@ -371,6 +388,7 @@ impl History {
     /// An update carrying a failed edit's text, or a deletion, settles that
     /// message's change.
     pub fn apply(&mut self, event: &Dispatch) {
+        self.apply_interaction_event(event);
         match event {
             Dispatch::Ready(ready) => {
                 self.user = Some(ready.user.id);
@@ -1205,6 +1223,9 @@ impl History {
                     .filter(|selection| Some(selection.channel_id) == selected)
                     .map(|selection| selection.channel_id)
             });
+        self.guild = guild_selection
+            .filter(|selection| Some(selection.channel_id) == selected)
+            .map(|selection| selection.guild_id);
         self.reactable = guild_selection
             .filter(|selection| {
                 Some(selection.channel_id) == selected && selection.permissions.add_reactions
@@ -1278,6 +1299,29 @@ impl History {
         }
         let Some(newest) = self.store.ids(channel).last() else {
             return;
+        };
+        // A message only this account sees (an interaction's answer) has no
+        // place in the read cursor: acknowledge the newest ordinary one.
+        let newest = if self
+            .store
+            .get(channel, newest)
+            .is_some_and(|message| message.is_ephemeral())
+        {
+            let store = &self.store;
+            let Some(ordinary) = store
+                .ids(channel)
+                .filter(|id| {
+                    store
+                        .get(channel, *id)
+                        .is_none_or(|message| !message.is_ephemeral())
+                })
+                .last()
+            else {
+                return;
+            };
+            ordinary
+        } else {
+            newest
         };
         if newest <= acked || self.ack_last == Some((channel, newest)) {
             return;
@@ -1516,6 +1560,12 @@ impl History {
                 None => std::future::pending().await,
             }
         };
+        let interaction = async {
+            match self.interaction_requests.next().await {
+                Some(done) => done,
+                None => std::future::pending().await,
+            }
+        };
         let users = async {
             match &mut self.users_pending {
                 Some(future) => future.await,
@@ -1531,6 +1581,7 @@ impl History {
             done = reaction => Completed::Reaction(done),
             done = poll => Completed::Poll(done),
             done = embeds => Completed::Embeds(done),
+            done = interaction => Completed::Interaction(done),
             (serial, result) = users => Completed::ReactionUsers(serial, result),
         }
     }
@@ -1548,6 +1599,7 @@ impl History {
             Completed::Reaction(done) => self.finish_reaction(done),
             Completed::ReactionUsers(serial, result) => self.finish_reaction_users(serial, result),
             Completed::Poll(done) => self.finish_poll(done),
+            Completed::Interaction(done) => self.finish_interaction(done),
             Completed::Embeds(done) => self.finish_embeds(done),
         }
     }
@@ -1820,7 +1872,12 @@ impl History {
                 let reply = self.reply_line(channel, &message);
                 let reactions = self.reactions.of(channel, message.id);
                 let poll_saving = self.polls.busy(channel, message.id);
+                let component_pending = self
+                    .interactions
+                    .component(channel, message.id)
+                    .map(str::to_owned);
                 Row {
+                    component_pending,
                     hidden: None,
                     mentions_me: false,
                     poll_saving,
@@ -1854,6 +1911,7 @@ impl History {
             highlight: self.highlight,
             deleted,
             notice: self.notice,
+            interaction: self.interaction_view(channel),
             can_react: self.reactable == Some(channel),
             names: Default::default(),
             candidates: Vec::new(),
@@ -1947,6 +2005,7 @@ mod tests {
             sticker_items: Vec::new(),
             message_snapshots: Vec::new(),
             poll: None,
+            components: Vec::new(),
             mentions: Vec::new(),
             mention_roles: Vec::new(),
             mention_everyone: false,
@@ -2482,6 +2541,7 @@ mod tests {
             mention_everyone: None,
             embeds: None,
             poll: None,
+            components: None,
         })));
         assert!(history.dirty());
         let snapshot = history.snapshot();
@@ -2891,6 +2951,7 @@ mod tests {
             mention_everyone: None,
             embeds: None,
             poll: None,
+            components: None,
         }))
     }
 
@@ -4321,6 +4382,405 @@ mod tests {
             mention_everyone: None,
             embeds: None,
             poll: None,
+            components: None,
         }
+    }
+
+    // ----- interactions -----
+
+    use super::interact::InteractionEvent;
+    use crate::interactions::{self as interactions, Action as Interact};
+    use fastcord_discord::{InteractionOutcome, Nonce};
+
+    const APP: Snowflake = Snowflake(9_000);
+
+    /// An open, sendable channel holding the application's message `n` with
+    /// these components, and a Gateway session.
+    fn interacting_history(flags: u64, components: serde_json::Value) -> (History, Snowflake) {
+        let mut history = sending_history();
+        history.session = Some("fixture-session".to_owned());
+        let mut message = message_with(NEWEST + 1, String::new());
+        message.author.id = APP;
+        message.flags = flags;
+        message.components = fastcord_model::parse_components(components.as_array().unwrap());
+        history.apply(&Dispatch::MessageCreate(Box::new(message)));
+        history.refresh(&rest(), &navigation_reacting(true), &Request::default());
+        (history, Snowflake(NEWEST + 1))
+    }
+
+    fn controls() -> serde_json::Value {
+        serde_json::json!([{"type": 1, "components": [
+            {"type": 2, "style": 1, "label": "Yes", "custom_id": "yes"},
+            {"type": 2, "style": 1, "label": "Other", "custom_id": "other"},
+            {"type": 2, "style": 6, "sku_id": "1", "custom_id": "buy"},
+            {"type": 2, "style": 5, "label": "Docs", "url": "https://example.test/"},
+            {"type": 2, "style": 2, "label": "Off", "custom_id": "off", "disabled": true}
+        ]}, {"type": 1, "components": [
+            {"type": 3, "custom_id": "pick", "max_values": 1, "options": [
+                {"label": "A", "value": "a"}, {"label": "B", "value": "b"}]}
+        ]}, {"type": 1, "components": [{"type": 6, "custom_id": "roles"}]}])
+    }
+
+    fn press(history: &mut History, id: Snowflake, custom_id: &str, values: &[&str]) {
+        history.interact(
+            &rest(),
+            Interact::Component {
+                channel: CHANNEL,
+                message: id,
+                custom_id: custom_id.to_owned(),
+                values: values.iter().map(|v| (*v).to_owned()).collect(),
+            },
+        );
+    }
+
+    fn take_interactions(history: &mut History) -> usize {
+        // Each request is queued with its timer.
+        std::mem::take(&mut history.interaction_requests).len() / 2
+    }
+
+    fn pending_nonce(history: &History) -> Nonce {
+        history.interactions.last_nonce().unwrap()
+    }
+
+    fn outcome(nonce: Nonce) -> InteractionOutcome {
+        fastcord_discord::parse_interaction_outcome(&format!(r#"{{"nonce":"{nonce}"}}"#)).unwrap()
+    }
+
+    fn pending_of(history: &mut History, id: Snowflake) -> Option<String> {
+        history.refresh(&rest(), &navigation_reacting(true), &Request::default());
+        history
+            .snapshot()
+            .rows
+            .into_iter()
+            .find(|row| row.message.id == id)
+            .unwrap()
+            .component_pending
+    }
+
+    #[test]
+    fn a_press_sends_one_request_shows_pending_and_the_gateway_settles_it_once() {
+        let (mut history, id) = interacting_history(0, controls());
+        press(&mut history, id, "yes", &[]);
+        assert_eq!(history.interaction_requests.len(), 2);
+        assert_eq!(pending_of(&mut history, id).as_deref(), Some("yes"));
+        // Another click while one waits sends nothing.
+        press(&mut history, id, "other", &[]);
+        assert_eq!(history.snapshot().notice, Some(interactions::BUSY));
+        assert_eq!(history.interaction_requests.len(), 2);
+        history.notice = None;
+        let nonce = pending_nonce(&history);
+        // The REST answer alone does not settle it.
+        assert!(!history.finish_interaction(InteractionEvent::Sent(nonce, Ok(()))));
+        assert_eq!(pending_of(&mut history, id).as_deref(), Some("yes"));
+        history.apply(&Dispatch::InteractionSuccess(outcome(nonce)));
+        assert_eq!(pending_of(&mut history, id), None);
+        assert_eq!(history.snapshot().notice, None);
+        // A replay, a late timer and a stranger's nonce change nothing.
+        history.apply(&Dispatch::InteractionSuccess(outcome(nonce)));
+        history.apply(&Dispatch::InteractionFailure(outcome(nonce)));
+        assert!(!history.finish_interaction(InteractionEvent::Expired(nonce)));
+        assert_eq!(history.snapshot().notice, None);
+        assert_eq!(take_interactions(&mut history), 1, "one click, one request");
+    }
+
+    #[test]
+    fn a_failure_or_a_timeout_ends_the_wait_with_a_sentence_and_is_never_repeated() {
+        let (mut history, id) = interacting_history(0, controls());
+        press(&mut history, id, "yes", &[]);
+        let nonce = pending_nonce(&history);
+        history.apply(&Dispatch::InteractionFailure(outcome(nonce)));
+        assert_eq!(history.snapshot().notice, Some(interactions::FAILED));
+        assert_eq!(pending_of(&mut history, id), None);
+
+        press(&mut history, id, "yes", &[]);
+        let nonce = pending_nonce(&history);
+        history.finish_interaction(InteractionEvent::Expired(nonce));
+        assert_eq!(history.snapshot().notice, Some(interactions::NO_RESPONSE));
+        assert_eq!(pending_of(&mut history, id), None);
+        // The application answers after the timer: ignored.
+        history.apply(&Dispatch::InteractionSuccess(outcome(nonce)));
+        assert_eq!(history.snapshot().notice, Some(interactions::NO_RESPONSE));
+
+        press(&mut history, id, "yes", &[]);
+        let nonce = pending_nonce(&history);
+        for (error, text) in [
+            (RestError::PermissionDenied, "permission"),
+            (RestError::ResourceGone, "no longer"),
+            (
+                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout)),
+                "may have been received",
+            ),
+        ] {
+            history
+                .interactions
+                .restore_for_test(nonce, CHANNEL, id, "yes");
+            assert!(!history.finish_interaction(InteractionEvent::Sent(nonce, Err(error))));
+            assert!(history.snapshot().notice.is_some_and(|n| n.contains(text)));
+            assert_eq!(pending_of(&mut history, id), None);
+        }
+        history
+            .interactions
+            .restore_for_test(nonce, CHANNEL, id, "yes");
+        assert!(history.finish_interaction(InteractionEvent::Sent(
+            nonce,
+            Err(RestError::AuthenticationRequired)
+        )));
+        assert_eq!(
+            take_interactions(&mut history),
+            3,
+            "three clicks, three requests, no retry"
+        );
+    }
+
+    #[test]
+    fn stale_disabled_premium_link_and_unsupported_controls_send_nothing() {
+        let (mut history, id) = interacting_history(0, controls());
+        for (custom_id, values, notice) in [
+            ("gone", vec![], interactions::STALE),
+            ("off", vec![], interactions::DISABLED),
+            ("buy", vec![], interactions::PREMIUM),
+            ("pick", vec!["z"], interactions::BAD_CHOICE),
+            ("pick", vec![], interactions::BAD_CHOICE),
+            ("pick", vec!["a", "b"], interactions::BAD_CHOICE),
+            ("roles", vec!["1"], interactions::BAD_CHOICE),
+        ] {
+            press(&mut history, id, custom_id, &values);
+            assert_eq!(history.snapshot().notice, Some(notice), "{custom_id}");
+        }
+        press(&mut history, Snowflake(5), "yes", &[]);
+        assert_eq!(history.snapshot().notice, Some(NOT_LOADED));
+        history.interact(
+            &rest(),
+            Interact::Component {
+                channel: Snowflake(1),
+                message: id,
+                custom_id: "yes".into(),
+                values: vec![],
+            },
+        );
+        assert_eq!(history.snapshot().notice, Some(NOT_OPEN));
+        history.session = None;
+        press(&mut history, id, "yes", &[]);
+        assert_eq!(history.snapshot().notice, Some(interactions::NOT_READY));
+        history.session = Some("fixture-session".into());
+        // Permission to send revoked: nothing is sent.
+        let mut closed = navigation_reacting(true);
+        closed.selection.as_mut().unwrap().permissions.send_messages = false;
+        history.refresh(&rest(), &closed, &Request::default());
+        press(&mut history, id, "yes", &[]);
+        assert_eq!(history.snapshot().notice, Some(interactions::NOT_ALLOWED));
+        assert_eq!(take_interactions(&mut history), 0, "nothing was asked");
+    }
+
+    #[test]
+    fn a_select_choice_sends_its_value_once() {
+        let (mut history, id) = interacting_history(0, controls());
+        press(&mut history, id, "pick", &["b"]);
+        assert_eq!(pending_of(&mut history, id).as_deref(), Some("pick"));
+        assert_eq!(take_interactions(&mut history), 1);
+    }
+
+    #[test]
+    fn a_command_is_sent_once_waits_per_channel_and_checks_its_arguments() {
+        let (mut history, _) = interacting_history(0, controls());
+        let index = fastcord_discord::parse_command_index(include_bytes!(
+            "../../../fixtures/rest/application-command-index.json"
+        ))
+        .unwrap();
+        let roll = index.commands[0].clone();
+        let run = |history: &mut History, sides: &str| {
+            history.interact(
+                &rest(),
+                Interact::Command {
+                    channel: CHANNEL,
+                    command: Box::new(roll.clone()),
+                    subcommand: None,
+                    args: vec![fastcord_discord::CommandArg {
+                        name: "sides".into(),
+                        kind: fastcord_discord::OPTION_INTEGER,
+                        text: sides.into(),
+                    }],
+                },
+            );
+        };
+        run(&mut history, "six");
+        assert_eq!(
+            history.snapshot().notice,
+            Some("An option needs a whole number.")
+        );
+        assert_eq!(take_interactions(&mut history), 0);
+        run(&mut history, "6");
+        assert_eq!(
+            history.snapshot().interaction.waiting.as_deref(),
+            Some("roll")
+        );
+        run(&mut history, "20");
+        assert_eq!(history.snapshot().notice, Some(interactions::COMMAND_BUSY));
+        assert_eq!(history.interaction_requests.len(), 2);
+        history.apply(&Dispatch::InteractionSuccess(outcome(pending_nonce(
+            &history,
+        ))));
+        assert_eq!(history.snapshot().interaction.waiting, None);
+    }
+
+    fn other_nonce() -> Nonce {
+        fastcord_discord::NonceGenerator::default().next(1_700_000_000_000, 1)
+    }
+
+    fn modal_for(nonce: Nonce) -> Dispatch {
+        let raw = include_str!("../../../fixtures/gateway/interaction_modal_create.json")
+            .replace("1320000000000000001", &nonce.to_string())
+            .replace(
+                r#""channel_id": "500""#,
+                &format!(r#""channel_id": "{CHANNEL}""#),
+            );
+        Dispatch::InteractionModalCreate(Box::new(
+            fastcord_discord::parse_interaction_modal(&raw).unwrap(),
+        ))
+    }
+
+    #[test]
+    fn a_modal_opens_only_for_a_waiting_interaction_and_is_answered_once() {
+        let (mut history, id) = interacting_history(0, controls());
+        // An unsolicited or replayed modal is ignored.
+        history.apply(&modal_for(other_nonce()));
+        assert!(history.snapshot().interaction.modal.is_none());
+        press(&mut history, id, "yes", &[]);
+        let nonce = pending_nonce(&history);
+        history.apply(&modal_for(nonce));
+        let shown = history.snapshot().interaction;
+        assert_eq!(shown.modal.as_ref().unwrap().title, "Report a problem");
+        assert_eq!(pending_of(&mut history, id), None, "the press is settled");
+        history.apply(&modal_for(nonce));
+        // A required field empty or too short sends nothing.
+        history.interact(
+            &rest(),
+            Interact::Modal {
+                values: vec![String::new(), String::new()],
+            },
+        );
+        assert_eq!(
+            history.snapshot().notice,
+            Some("A required field is empty.")
+        );
+        history.interact(
+            &rest(),
+            Interact::Modal {
+                values: vec!["ab".into(), String::new()],
+            },
+        );
+        assert!(history.snapshot().notice.unwrap().contains("shorter"));
+        history.interact(
+            &rest(),
+            Interact::Modal {
+                values: vec!["x".into()],
+            },
+        );
+        assert_eq!(history.snapshot().notice, Some(interactions::NO_MODAL));
+        assert_eq!(take_interactions(&mut history), 1, "only the press so far");
+        history.interact(
+            &rest(),
+            Interact::Modal {
+                values: vec!["Title".into(), "Body".into()],
+            },
+        );
+        assert!(history.snapshot().interaction.modal_sending);
+        history.interact(
+            &rest(),
+            Interact::Modal {
+                values: vec!["Title".into(), "Body".into()],
+            },
+        );
+        assert_eq!(take_interactions(&mut history), 1, "no second submit");
+        let nonce = pending_nonce(&history);
+        history.finish_interaction(InteractionEvent::Sent(nonce, Ok(())));
+        assert!(history.snapshot().interaction.modal.is_none());
+        // Closing, and leaving the conversation, forget a form.
+        press(&mut history, id, "other", &[]);
+        history.apply(&modal_for(pending_nonce(&history)));
+        assert!(history.modal.is_some());
+        history.interact(&rest(), Interact::CloseModal);
+        assert!(history.modal.is_none());
+        press(&mut history, id, "yes", &[]);
+        history.apply(&modal_for(pending_nonce(&history)));
+        history.reset();
+        assert!(history.modal.is_none());
+    }
+
+    #[test]
+    fn ephemeral_messages_dismiss_locally_and_never_move_the_read_cursor() {
+        let (mut history, id) = interacting_history(fastcord_model::EPHEMERAL_FLAG, controls());
+        assert!(held(&history, id).is_ephemeral());
+        // Nothing else is sent: dismissing is local.
+        history.interact(
+            &rest(),
+            Interact::Dismiss {
+                channel: CHANNEL,
+                message: id,
+            },
+        );
+        assert!(history.store.get(CHANNEL, id).is_none());
+        assert_eq!(take_interactions(&mut history), 0);
+        assert!(history.ack_wanted.is_empty() && history.ack_inflight.is_none());
+        // An ordinary message is not dismissable.
+        history.apply(&Dispatch::MessageCreate(Box::new(message_with(
+            NEWEST + 5,
+            "plain".into(),
+        ))));
+        history.interact(
+            &rest(),
+            Interact::Dismiss {
+                channel: CHANNEL,
+                message: Snowflake(NEWEST + 5),
+            },
+        );
+        assert_eq!(history.snapshot().notice, Some(interactions::NOT_EPHEMERAL));
+        assert!(history.store.get(CHANNEL, Snowflake(NEWEST + 5)).is_some());
+        // Ephemeral answers arrive in the channel they belong to and leave with it.
+        let (mut history, id) = interacting_history(fastcord_model::EPHEMERAL_FLAG, controls());
+        history.reset();
+        assert!(history.store.get(CHANNEL, id).is_none());
+    }
+
+    #[test]
+    fn the_auto_acknowledgement_skips_an_ephemeral_newest_message() {
+        let rest = rest();
+        let (mut history, id) = interacting_history(fastcord_model::EPHEMERAL_FLAG, controls());
+        history.viewing = true;
+        history.auto_ack(&rest, Some(Snowflake(1)));
+        let asked = history.ack_inflight.as_ref().unwrap();
+        assert!(
+            asked.message < id,
+            "the ephemeral message was not acknowledged"
+        );
+    }
+
+    #[test]
+    fn a_new_session_forgets_waiting_interactions_and_takes_its_session_id() {
+        use fastcord_discord::gateway::{Ready, SessionId};
+        let (mut history, id) = interacting_history(0, controls());
+        press(&mut history, id, "yes", &[]);
+        assert_eq!(pending_of(&mut history, id).as_deref(), Some("yes"));
+        let user = User {
+            id: SELF,
+            username: "me".into(),
+            global_name: None,
+            avatar: None,
+            bot: false,
+        };
+        history.apply(&Dispatch::Ready(Box::new(Ready {
+            session_id: SessionId::new("second-session".to_owned()),
+            user,
+            users: Vec::new(),
+            guilds: Vec::new(),
+            unavailable_guilds: Vec::new(),
+            private_channels: Vec::new(),
+            relationships: Vec::new(),
+            ignored: Vec::new(),
+            presences: Vec::new(),
+            read: Default::default(),
+        })));
+        assert_eq!(history.session.as_deref(), Some("second-session"));
+        assert!(history.interactions.last_nonce().is_none());
     }
 }

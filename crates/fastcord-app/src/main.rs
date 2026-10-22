@@ -12,6 +12,7 @@ mod call_ui;
 mod captcha;
 mod changes;
 mod chat_prefs;
+mod component_view;
 mod composer;
 mod discover;
 mod drafts;
@@ -27,6 +28,7 @@ mod guild_admin;
 mod history;
 mod icons;
 mod inbox;
+mod interactions;
 mod invite;
 mod localtime;
 mod login;
@@ -54,6 +56,7 @@ mod safety;
 mod scheduled_events;
 mod search;
 mod shortcuts;
+mod slash;
 mod soundboard;
 mod stage;
 mod status;
@@ -73,7 +76,7 @@ mod voice_settings;
 use crate::attachments::AttachmentKey;
 use std::sync::Arc;
 
-use fastcord_discord::{CallSignal, RemoteAuthEvent, RestError, UserToken};
+use fastcord_discord::{CallSignal, IndexScope, RemoteAuthEvent, RestError, UserToken};
 use fastcord_model::{Snowflake, VoiceStateRequest};
 use fastcord_platform::{NativeCredentialStore, StoreError};
 use gateway::{AttachmentAction, GatewayPanel, GatewayStatus};
@@ -181,6 +184,7 @@ struct App {
     stage: stage::State,
     forward: forward::State,
     poll: poll_create::State,
+    slash: slash::State,
     voice: voice_record::State,
     /// Microphone gain, level meter and checks in the audio settings.
     mic_panel: mic_panel::State,
@@ -372,6 +376,7 @@ enum Message {
     Stage(stage::Event),
     Forward(forward::Event),
     Poll(poll_create::Event),
+    Slash(slash::Event),
     Voice(voice_record::Event),
     MicPanel(mic_panel::Event),
     VoiceRecordingToggled(bool),
@@ -458,6 +463,7 @@ impl App {
                 stage: stage::State::default(),
                 forward: forward::State::default(),
                 poll: poll_create::State::default(),
+                slash: slash::State::default(),
                 voice: voice_record::State::default(),
                 mic_panel: mic_panel::State::default(),
                 friends: friends::State::default(),
@@ -1378,6 +1384,9 @@ impl App {
                             timeline::is_retained(&gateway.timeline, channel, message)
                         }));
                     self.poll.sync(gateway.timeline.channel_id);
+                    self.slash.sync(gateway.timeline.channel_id);
+                    self.slash
+                        .modal_shown(gateway.timeline.interaction.modal.as_ref());
                     self.voice.sync(gateway.timeline.channel_id);
                 }
                 // A navigation the user started (keys, switcher, sidebar) has
@@ -1422,6 +1431,7 @@ impl App {
             Message::Stage(event) => return self.stage_event(event),
             Message::Forward(event) => return self.forward_event(event),
             Message::Poll(event) => return self.poll_event(event),
+            Message::Slash(event) => return self.slash_event(event),
             Message::Voice(event) => return self.voice_event(event),
             Message::VoiceRecordingToggled(on) => {
                 self.audio_preferences.voice_recording = on;
@@ -2429,6 +2439,8 @@ impl App {
                         | timeline::Event::SetEmbeds { .. }
                         | timeline::Event::More(_)
                         | timeline::Event::PollVoters { .. }
+                        | timeline::Event::Component { .. }
+                        | timeline::Event::DismissEphemeral { .. }
                         | timeline::Event::React { .. }) => {
                             if gateway.message_action(action) {
                                 return iced::widget::operation::focus(composer::EDITOR_ID);
@@ -2508,9 +2520,14 @@ impl App {
                     if let Some(channel) = typing {
                         gateway.controls.typing(channel);
                     }
+                    let slash = self.slash_typed();
                     if refocus {
-                        return iced::widget::operation::focus(composer::EDITOR_ID);
+                        return Task::batch([
+                            iced::widget::operation::focus(composer::EDITOR_ID),
+                            slash,
+                        ]);
                     }
+                    return slash;
                 }
             }
             Message::Logout => {
@@ -2773,6 +2790,7 @@ impl App {
         self.stage.reset();
         self.forward = forward::State::default();
         self.poll = poll_create::State::default();
+        self.slash.reset();
         self.voice.reset();
         self.threads.drop_all();
         self.forum.drop_all();
@@ -2948,6 +2966,7 @@ impl App {
         self.sticker = sticker::State::default();
         self.forward = forward::State::default();
         self.poll = poll_create::State::default();
+        self.slash.reset();
         self.voice.reset();
         self.threads.drop_all();
         self.forum.drop_all();
@@ -3070,6 +3089,74 @@ impl App {
         self.forward
             .update(event, &candidates, &session.client)
             .map(Message::Forward)
+    }
+
+    /// The scope whose application commands the open conversation can use.
+    fn slash_scope(gateway: &gateway::GatewayPanel, channel: Snowflake) -> IndexScope {
+        match gateway.navigation.selected_guild {
+            Some(guild) if gateway.navigation.selection.is_some() => IndexScope::Guild(guild),
+            _ => IndexScope::Channel(channel),
+        }
+    }
+
+    /// The draft changed: a leading slash loads the command list.
+    fn slash_typed(&mut self) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        let Some(channel) = gateway.timeline.channel_id else {
+            return Task::none();
+        };
+        let env = slash::Env {
+            channel,
+            scope: Self::slash_scope(gateway, channel),
+            can_send: gateway.timeline.can_send,
+            client: &session.client,
+            bridge: &gateway.controls,
+            interaction: &gateway.timeline.interaction,
+            now: std::time::Instant::now(),
+        };
+        self.slash
+            .typed(gateway.composer.slash_query().is_some(), &env)
+            .map(Message::Slash)
+    }
+
+    fn slash_event(&mut self, event: slash::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &mut self.phase
+        else {
+            return Task::none();
+        };
+        let Some(channel) = gateway.timeline.channel_id else {
+            return Task::none();
+        };
+        let env = slash::Env {
+            channel,
+            scope: Self::slash_scope(gateway, channel),
+            can_send: gateway.timeline.can_send,
+            client: &session.client,
+            bridge: &gateway.controls,
+            interaction: &gateway.timeline.interaction,
+            now: std::time::Instant::now(),
+        };
+        let rejected = slash::State::is_rejected(&event);
+        let (task, used) = self.slash.update(event, &env);
+        if used {
+            gateway.composer.clear_text();
+        }
+        if rejected {
+            // Discord rejected the login: stop the account like any other 401.
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Slash)
     }
 
     fn poll_event(&mut self, event: poll_create::Event) -> Task<Message> {
@@ -4210,6 +4297,21 @@ impl App {
                 && let Some(panel) = sticker::view(&self.sticker)
             {
                 banner_column = banner_column.push(panel.map(Message::Sticker));
+            }
+            if let Some(channel) = gateway.timeline.channel_id
+                && let Some(panel) = slash::view(
+                    &self.slash,
+                    gateway
+                        .composer
+                        .slash_query()
+                        .filter(|_| gateway.timeline.can_send)
+                        .as_deref(),
+                    Self::slash_scope(gateway, channel),
+                    &gateway.timeline.interaction,
+                    std::time::Instant::now(),
+                )
+            {
+                banner_column = banner_column.push(panel.map(Message::Slash));
             }
             if let Some(channel) = gateway.timeline.channel_id
                 && self.poll.is_open_for(channel)

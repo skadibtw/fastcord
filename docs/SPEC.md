@@ -526,6 +526,9 @@ Implemented in `fastcord-discord::guild_admin` (validated request bodies, preset
 - **Community.** Shown on or off. Announcement, Stage and forum creation is refused with the reason when it is off. Turning it on or off is not offered (rules and updates channels, verification level).
 - **Reorder.** Move up/down swaps a channel with its sibling in the same category and list (categories, text-like, voice) and sends only the positions that change.
 - **Not offered:** Community toggle, billing, boosts, vanity URL, monetization, paid media channels, roles and overwrites (#94).
+### Apps: commands and components (#100)
+
+A message's buttons and selects, the Components V2 layout pieces and slash commands of installed applications. Ownership: `fastcord-model` holds the bounded component tree (`component`); `fastcord-discord` holds the wire (`interaction`: request bodies, the command index, the modal and outcome events) and the byte-accounted store; the history worker (`history/interact.rs`, rules in `interactions.rs`) owns the session ID, the ledger of unsettled interactions, the open modal and the 15-second timers; the UI draws components (`component_view`) and the command list, option form and modal (`slash`). One click is one request, re-checked against the store, the open channel, the send permission and the session when it reaches the worker, sent once at user-write priority and never retried. The ledger allows one pending component per message and one pending command per channel (8 in all). Premium buttons are disabled with "not available in this client"; nothing here purchases, schedules or automates anything. Ephemeral messages (flag 64) are labelled, dismissable locally and purged with the conversation. Route and event details, and what is left, are in docs/PROTOCOL.md.
 
 ### 8.18 Accounts, sessions and security overview (#107)
 

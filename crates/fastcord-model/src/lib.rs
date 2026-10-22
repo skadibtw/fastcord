@@ -4,6 +4,7 @@
 
 mod call;
 mod channel;
+mod component;
 mod embed;
 mod guild;
 pub mod markup;
@@ -22,6 +23,11 @@ pub use call::{CallCreate, CallDelete, CallUpdate};
 pub use channel::{
     Channel, ChannelKind, FLAG_PINNED, FLAG_REQUIRE_TAG, ForumTag, MAX_APPLIED_TAGS,
     MAX_FORUM_TAGS, ThreadMember, ThreadMetadata,
+};
+pub use component::{
+    BUTTON_LINK, BUTTON_PREMIUM, Button, Component, EPHEMERAL_FLAG, MAX_COMPONENT_DEPTH,
+    MAX_COMPONENTS, MAX_SELECT_OPTIONS, Select, SelectOption, compact_components,
+    components_heap_bytes, parse_components,
 };
 pub use embed::{
     Embed, EmbedField, EmbedFooter, EmbedMedia, EmbedText, MAX_EMBED_FIELDS, MAX_EMBEDS,

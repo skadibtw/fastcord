@@ -57,7 +57,8 @@ use std::sync::Arc;
 
 use fastcord_model::{
     Attachment, Embed, Message, MessageSnapshot, MessageUpdate, Poll, Reaction, ReactionChange,
-    Referenced, ReplyPreview, SnapshotMessage, Snowflake, StickerItem, User,
+    Referenced, ReplyPreview, SnapshotMessage, Snowflake, StickerItem, User, compact_components,
+    components_heap_bytes,
 };
 
 use crate::gateway::{Dispatch, MessagePollVote};
@@ -162,6 +163,7 @@ fn message_heap(message: &Message) -> usize {
         + message.embeds.capacity() * size_of::<Embed>()
         + message.embeds.iter().map(Embed::heap_bytes).sum::<usize>()
         + message.poll.as_deref().map_or(0, Poll::heap_bytes)
+        + components_heap_bytes(&message.components)
         + message.reactions.capacity() * size_of::<Reaction>()
         + message
             .reactions
@@ -195,6 +197,10 @@ fn update_heap(update: &MessageUpdate) -> usize {
             .as_ref()
             .map_or(0, |roles| roles.capacity() * size_of::<Snowflake>())
         + update.poll.as_deref().map_or(0, Poll::heap_bytes)
+        + update
+            .components
+            .as_deref()
+            .map_or(0, components_heap_bytes)
         + update.attachments.as_ref().map_or(0, |attachments| {
             attachments.capacity() * size_of::<Attachment>()
                 + attachments.iter().map(attachment_heap).sum::<usize>()
@@ -283,6 +289,7 @@ fn compact(message: &mut Message) {
     if let Some(poll) = message.poll.as_deref_mut() {
         poll.compact();
     }
+    compact_components(&mut message.components);
     message.reactions.shrink_to_fit();
     for reaction in &mut message.reactions {
         shrink_text(&mut reaction.emoji.name);

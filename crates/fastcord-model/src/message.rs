@@ -4,6 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Embed;
 use crate::Poll;
+use crate::component::{Component, EPHEMERAL_FLAG, lenient_components, lenient_some_components};
 use crate::embed::lenient_embeds;
 use crate::wire::{double_option, lenient_nonce};
 use crate::{Snowflake, User};
@@ -245,6 +246,7 @@ impl SnapshotMessage {
             message_reference: None,
             message_snapshots: Vec::new(),
             poll: None,
+            components: Vec::new(),
             referenced_message: Referenced::Unknown,
             nonce: None,
             call: None,
@@ -305,6 +307,9 @@ pub struct Message {
     /// The poll this message carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<Box<Poll>>,
+    /// Buttons, selects and layout pieces (see [`Component`]); never written back.
+    #[serde(default, deserialize_with = "lenient_components", skip_serializing)]
+    pub components: Vec<Component>,
     /// Users this message mentions (their names resolve `<@id>`).
     #[serde(default)]
     pub mentions: Vec<User>,
@@ -492,6 +497,13 @@ pub struct MessageUpdate {
     /// A poll's new state (votes, or its end).
     #[serde(default)]
     pub poll: Option<Box<Poll>>,
+    /// The message's new components (a bot disabling its buttons, say).
+    #[serde(
+        default,
+        deserialize_with = "lenient_some_components",
+        skip_serializing
+    )]
+    pub components: Option<Vec<Component>>,
 }
 
 fn lenient_some_embeds<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<Embed>>, D::Error> {
@@ -514,6 +526,7 @@ impl MessageUpdate {
             mention_everyone: None,
             embeds: None,
             poll: Some(Box::new(poll)),
+            components: None,
         }
     }
 
@@ -532,6 +545,7 @@ impl MessageUpdate {
             // latter still applies to a cached message through `alters`.
             || self.embeds.as_ref().is_some_and(|e| !e.is_empty())
             || self.poll.is_some()
+            || self.components.as_ref().is_some_and(|c| !c.is_empty())
     }
 
     /// Whether [`Message::apply`] would change `message`. An update that only
@@ -561,6 +575,10 @@ impl MessageUpdate {
                 .mention_everyone
                 .is_some_and(|v| v != message.mention_everyone)
             || self.embeds.as_ref().is_some_and(|v| *v != message.embeds)
+            || self
+                .components
+                .as_ref()
+                .is_some_and(|v| *v != message.components)
             || self.poll.as_deref().is_some_and(|newer| {
                 message
                     .poll
@@ -601,6 +619,9 @@ impl Message {
         if let Some(embeds) = update.embeds {
             self.embeds = embeds;
         }
+        if let Some(components) = update.components {
+            self.components = components;
+        }
         if let (Some(newer), Some(held)) = (update.poll, self.poll.as_mut()) {
             held.replace(*newer);
         }
@@ -617,6 +638,11 @@ impl Message {
     /// Whether the message's link previews are hidden.
     pub fn embeds_suppressed(&self) -> bool {
         self.flags & SUPPRESS_EMBEDS_FLAG != 0
+    }
+
+    /// Whether only the recipient sees this message (an interaction answer).
+    pub fn is_ephemeral(&self) -> bool {
+        self.flags & EPHEMERAL_FLAG != 0
     }
 
     /// Whether Discord marked this as a voice message.
@@ -878,6 +904,7 @@ mod tests {
             sticker_items: Vec::new(),
             message_snapshots: Vec::new(),
             poll: None,
+            components: Vec::new(),
             id: Snowflake(1),
             channel_id: Snowflake(2),
             guild_id: None,

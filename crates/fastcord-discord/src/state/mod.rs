@@ -1139,7 +1139,11 @@ impl Store {
             | Dispatch::MessageReactionRemoveAll(_)
             | Dispatch::MessageReactionRemoveEmoji(_)
             | Dispatch::MessagePollVoteAdd(_)
-            | Dispatch::MessagePollVoteRemove(_) => {}
+            | Dispatch::MessagePollVoteRemove(_)
+            // Interactions are tracked by the message worker.
+            | Dispatch::InteractionSuccess(_)
+            | Dispatch::InteractionFailure(_)
+            | Dispatch::InteractionModalCreate(_) => {}
             Dispatch::GuildCreate(created) => self.guild_create(*created, &mut changes),
             Dispatch::GuildUpdate(updated) => self.guild_update(*updated, &mut changes),
             Dispatch::GuildEmojisUpdate(update) => {

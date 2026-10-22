@@ -672,6 +672,9 @@ pub enum Command {
         message: Snowflake,
         answer: u32,
     },
+    /// An interaction the user started: a button, a select, a slash command or
+    /// a modal answer (the worker validates it).
+    Interact(Box<crate::interactions::Action>),
     /// The user is composing in this channel (the worker throttles and validates).
     Typing(Snowflake),
     OpenPrivate(Vec<Snowflake>),
@@ -850,6 +853,7 @@ impl fmt::Debug for Command {
                 .field("message", message)
                 .field("answer", answer)
                 .finish(),
+            Self::Interact(action) => f.debug_tuple("Interact").field(action).finish(),
             Self::Typing(channel) => f.debug_tuple("Typing").field(channel).finish(),
             Self::OpenPrivate(_) => f.write_str("OpenPrivate([selected recipients])"),
             Self::Stream(intent) => f.debug_tuple("Stream").field(intent).finish(),
@@ -1591,6 +1595,13 @@ impl NavigationBridge {
                 suppressed,
                 others,
             })
+            .is_ok()
+    }
+
+    /// Queues an interaction the user started.
+    pub fn interact(&self, action: crate::interactions::Action) -> bool {
+        self.commands
+            .try_send(Command::Interact(Box::new(action)))
             .is_ok()
     }
 
@@ -2348,6 +2359,7 @@ impl Worker {
                 message,
                 answer,
             } => history.poll_voters(&self.rest, channel, message, answer),
+            Command::Interact(action) => history.interact(&self.rest, *action),
             Command::Typing(channel) => {
                 let now = self.tracker.clock.now();
                 if history.can_send_in(channel) && self.typing_send.permit(now, channel) {
@@ -3769,6 +3781,30 @@ impl GatewayPanel {
                 channel_id,
                 message_id,
             } if open == Some(channel_id) => self.controls.poll_end(channel_id, message_id),
+            Event::Component {
+                channel_id,
+                message_id,
+                custom_id,
+                values,
+            } if open == Some(channel_id) => {
+                self.controls
+                    .interact(crate::interactions::Action::Component {
+                        channel: channel_id,
+                        message: message_id,
+                        custom_id,
+                        values,
+                    })
+            }
+            Event::DismissEphemeral {
+                channel_id,
+                message_id,
+            } if open == Some(channel_id) => {
+                self.controls
+                    .interact(crate::interactions::Action::Dismiss {
+                        channel: channel_id,
+                        message: message_id,
+                    })
+            }
             Event::PollVoters {
                 channel_id,
                 message_id,
@@ -4303,6 +4339,61 @@ mod bridge_tests {
         assert!(!bridge.poll_vote(channel_id, message_id, 1));
         assert!(!bridge.poll_end(channel_id, message_id));
         assert!(!bridge.poll_voters(channel_id, message_id, 1));
+    }
+
+    #[test]
+    fn interaction_actions_are_queued_for_the_open_channel_only() {
+        use crate::interactions::Action;
+        use timeline::Event;
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut panel = panel(&bridge);
+        let (channel_id, message_id) = (Snowflake(500), Snowflake(7));
+        let press = |channel_id| Event::Component {
+            channel_id,
+            message_id,
+            custom_id: "yes".to_owned(),
+            values: vec!["a".to_owned()],
+        };
+        panel.message_action(press(Snowflake(501)));
+        panel.message_action(Event::DismissEphemeral {
+            channel_id: Snowflake(501),
+            message_id,
+        });
+        assert!(commands.try_recv().is_err(), "another channel asks nothing");
+        panel.message_action(press(channel_id));
+        panel.message_action(Event::DismissEphemeral {
+            channel_id,
+            message_id,
+        });
+        let Ok(Command::Interact(first)) = commands.try_recv() else {
+            panic!("nothing queued");
+        };
+        assert_eq!(
+            *first,
+            Action::Component {
+                channel: channel_id,
+                message: message_id,
+                custom_id: "yes".to_owned(),
+                values: vec!["a".to_owned()],
+            }
+        );
+        let Ok(Command::Interact(second)) = commands.try_recv() else {
+            panic!("no dismissal");
+        };
+        assert_eq!(
+            *second,
+            Action::Dismiss {
+                channel: channel_id,
+                message: message_id
+            }
+        );
+        // Typed answers never reach a log through Debug.
+        assert!(!format!("{first:?}").contains("yes"));
+        for _ in 0..COMMAND_QUEUE {
+            assert!(bridge.interact(Action::CloseModal));
+        }
+        assert!(!bridge.interact(Action::CloseModal));
     }
 
     #[test]

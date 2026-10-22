@@ -449,3 +449,38 @@ fn call_messages_keep_who_joined_and_when_it_ended() {
     let again: Message = serde_json::from_str(&serde_json::to_string(&running).unwrap()).unwrap();
     assert_eq!(again, running);
 }
+
+#[test]
+fn components_decode_from_a_fixture_and_an_update_replaces_them() {
+    use fastcord_model::{BUTTON_PREMIUM, Component};
+    let mut message: Message = serde_json::from_str(&fixture("message_components.json")).unwrap();
+    assert!(message.is_ephemeral());
+    assert_eq!(message.components.len(), 3);
+    let Some(Component::Button(roll)) = Component::find(&message.components, "roll-again") else {
+        panic!("no button");
+    };
+    assert_eq!(roll.label, "Roll");
+    let Some(Component::Button(premium)) = Component::find(&message.components, "premium") else {
+        panic!("no premium button");
+    };
+    assert!(premium.premium && premium.style == BUTTON_PREMIUM);
+    assert!(matches!(
+        Component::find(&message.components, "die"),
+        Some(Component::Select(s)) if s.options.len() == 2 && s.options[0].default
+    ));
+    // A bot disabling its buttons, or an unfurl that repeats the same list.
+    let update = |components: &str| -> MessageUpdate {
+        serde_json::from_str(&format!(
+            r#"{{"id":"1290000000000000030","channel_id":"500","components":{components}}}"#
+        ))
+        .unwrap()
+    };
+    let off = r#"[{"type":1,"components":[{"type":2,"style":1,"label":"Roll","custom_id":"roll-again","disabled":true}]}]"#;
+    let disabled = update(off);
+    assert!(disabled.has_fields() && disabled.alters(&message));
+    assert!(!update("[]").has_fields(), "an empty list is no field");
+    message.apply(disabled);
+    assert_eq!(message.components.len(), 1);
+    assert!(!update(off).alters(&message), "a repeat changes nothing");
+    assert!(update("[]").alters(&message), "a removal still applies");
+}

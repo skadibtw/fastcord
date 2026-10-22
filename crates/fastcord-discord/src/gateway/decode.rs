@@ -1307,6 +1307,15 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         }
         "MESSAGE_REACTION_REMOVE_EMOJI" => decode_reaction_emoji_removed(raw)
             .map(|r| Dispatch::MessageReactionRemoveEmoji(Box::new(r))),
+        "INTERACTION_SUCCESS" => crate::interaction::parse_outcome(raw)
+            .map(Dispatch::InteractionSuccess)
+            .ok_or(Malformed),
+        "INTERACTION_FAILURE" => crate::interaction::parse_outcome(raw)
+            .map(Dispatch::InteractionFailure)
+            .ok_or(Malformed),
+        "INTERACTION_MODAL_CREATE" => crate::interaction::parse_modal(raw)
+            .map(|modal| Dispatch::InteractionModalCreate(Box::new(modal)))
+            .ok_or(Malformed),
         "MESSAGE_POLL_VOTE_ADD" => json(raw).map(Dispatch::MessagePollVoteAdd),
         "MESSAGE_POLL_VOTE_REMOVE" => json(raw).map(Dispatch::MessagePollVoteRemove),
         "GUILD_CREATE" => decode_guild_create(raw).map(|g| Dispatch::GuildCreate(Box::new(g))),
@@ -2690,6 +2699,45 @@ mod tests {
                     Decoded::Malformed
                 ),
                 "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn interaction_events_decode_their_fixtures_and_reject_what_cannot_be_matched() {
+        let ok = include_str!("../../../../fixtures/gateway/interaction_success.json");
+        let failed = include_str!("../../../../fixtures/gateway/interaction_failure.json");
+        let modal = include_str!("../../../../fixtures/gateway/interaction_modal_create.json");
+        let Dispatch::InteractionSuccess(done) = reaction_event("INTERACTION_SUCCESS", ok) else {
+            panic!("not a success");
+        };
+        assert_eq!(done.nonce, "1320000000000000002");
+        let Dispatch::InteractionFailure(lost) = reaction_event("INTERACTION_FAILURE", failed)
+        else {
+            panic!("not a failure");
+        };
+        assert_eq!(
+            (lost.nonce.as_str(), lost.reason),
+            ("1320000000000000003", Some(3))
+        );
+        let Dispatch::InteractionModalCreate(form) =
+            reaction_event("INTERACTION_MODAL_CREATE", modal)
+        else {
+            panic!("not a modal");
+        };
+        assert_eq!(form.inputs.len(), 2);
+        assert_eq!(form.nonce.as_deref(), Some("1320000000000000001"));
+        for (name, raw) in [
+            ("INTERACTION_SUCCESS", r#"{"id":"1"}"#),
+            ("INTERACTION_FAILURE", r#"{"nonce":7}"#),
+            (
+                "INTERACTION_MODAL_CREATE",
+                r#"{"id":"1","application_id":"2","components":[]}"#,
+            ),
+        ] {
+            assert!(
+                matches!(decode_dispatch(name, raw), Decoded::Malformed),
+                "{name}"
             );
         }
     }

@@ -576,6 +576,12 @@ pub enum Dispatch {
     MessageReactionRemove(Box<MessageReaction>),
     MessageReactionRemoveAll(MessageReactionRemoveAll),
     MessageReactionRemoveEmoji(Box<MessageReactionRemoveEmoji>),
+    /// Discord settled an interaction the account started.
+    InteractionSuccess(crate::interaction::InteractionOutcome),
+    /// Discord refused or lost an interaction the account started.
+    InteractionFailure(crate::interaction::InteractionOutcome),
+    /// An app asks the account to fill in a form.
+    InteractionModalCreate(Box<crate::interaction::InteractionModal>),
     /// A user voted for a poll answer.
     MessagePollVoteAdd(MessagePollVote),
     /// A user withdrew a vote for a poll answer.
@@ -657,6 +663,9 @@ impl Dispatch {
             Self::MessageReactionRemove(_) => "MESSAGE_REACTION_REMOVE",
             Self::MessageReactionRemoveAll(_) => "MESSAGE_REACTION_REMOVE_ALL",
             Self::MessageReactionRemoveEmoji(_) => "MESSAGE_REACTION_REMOVE_EMOJI",
+            Self::InteractionSuccess(_) => "INTERACTION_SUCCESS",
+            Self::InteractionFailure(_) => "INTERACTION_FAILURE",
+            Self::InteractionModalCreate(_) => "INTERACTION_MODAL_CREATE",
             Self::MessagePollVoteAdd(_) => "MESSAGE_POLL_VOTE_ADD",
             Self::MessagePollVoteRemove(_) => "MESSAGE_POLL_VOTE_REMOVE",
             Self::GuildCreate(_) => "GUILD_CREATE",
