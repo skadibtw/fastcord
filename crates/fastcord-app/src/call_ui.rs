@@ -267,6 +267,9 @@ pub fn panel<'a>(
     if let Some(notice) = notice.filter(|notice| !notice.is_empty()) {
         content = content.push(text(notice.to_owned()).size(12));
     }
+    if let Some(note) = activity_note(voice) {
+        content = content.push(text(note).size(12));
+    }
     if let Some(refusal) = plan.refusal() {
         content = content.push(text(refusal).size(12).style(text::danger));
     }
@@ -344,6 +347,25 @@ pub fn panel<'a>(
             ..Default::default()
         })
         .into()
+}
+
+/// The call view's line when an embedded Activity runs in the call's channel.
+/// There is no join or launch: Activities need the official client.
+pub fn activity_note(voice: &VoiceControls) -> Option<String> {
+    if voice.activities.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = voice
+        .activities
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !name.is_empty())
+        .collect();
+    let mut note = "Running an Activity — join it in the official Discord client".to_owned();
+    if !names.is_empty() {
+        note = format!("{note} ({})", names.join(", "));
+    }
+    Some(note)
 }
 
 /// What the voice panel shows. Each button is `Some((state, enabled))` only
@@ -725,6 +747,20 @@ mod tests {
         input.can_leave = false;
         let mut ui = Ui::new(WIDTH, 120.0, bar(input));
         assert!(!reachable(&mut ui, 0, WIDTH as i32, 120).contains("LeaveVoice"));
+    }
+
+    #[test]
+    fn an_activity_shows_a_read_only_note_with_no_join_action() {
+        let mut voice = VoiceControls::default();
+        assert_eq!(activity_note(&voice), None);
+        voice.activities = vec![String::new()];
+        assert_eq!(
+            activity_note(&voice).as_deref(),
+            Some("Running an Activity — join it in the official Discord client")
+        );
+        voice.activities = vec!["Watch".into(), String::new(), "Draw".into()];
+        let note = activity_note(&voice).unwrap();
+        assert!(note.ends_with("(Watch, Draw)"), "{note}");
     }
 
     #[test]

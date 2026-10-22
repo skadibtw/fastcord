@@ -36,6 +36,23 @@ pub struct VoiceState {
     pub request_to_speak_timestamp: Option<String>,
 }
 
+/// Most characters kept of an embedded activity's name.
+pub const MAX_ACTIVITY_NAME_CHARS: usize = 64;
+
+/// An embedded Activity (a shared app run inside a voice channel) started,
+/// changed or ended. Read-only awareness: this client cannot run or join one.
+/// Wire shape unverified (docs/PROTOCOL.md).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityUpdate {
+    pub guild_id: Snowflake,
+    pub channel_id: Snowflake,
+    pub application_id: Snowflake,
+    /// Capped at [`MAX_ACTIVITY_NAME_CHARS`]; empty when the payload had none.
+    pub name: String,
+    /// `false`: the activity ended (no participants left).
+    pub running: bool,
+}
+
 /// A live Stage: the topic of a Stage channel while a session runs. The topic
 /// is user text, capped by the reducer.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]

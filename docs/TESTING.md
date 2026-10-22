@@ -815,3 +815,12 @@ Manual (Windows, alt account only, not run offline):
   - [ ] "Add an app" opens the official consent page in the browser for a test client id and nothing is authorized until consent is accepted there.
   - [ ] Connections list matches the official one; visibility and show-activity toggles apply there too.
   - [ ] Webhooks: create, rename, move and delete match the official channel Integrations page; Copy webhook URL gives a working URL (do not post to it from fastcord); the token is in no log; closing the panel drops it.
+
+## Embedded Activities awareness (#102)
+
+- **Automated:** `fastcord-discord` `state::activities::tests` (both payload shapes, name bounds, replay, end, per-channel cap, byte accounting) and `fastcord-app` `call_ui::tests::an_activity_shows_a_read_only_note_with_no_join_action`.
+- **Outstanding gates (alt account only, unchecked, unverified):**
+  - [ ] Start an Activity in a voice channel from the official client: the channel row shows "ACTIVITY" with its name, and the call view shows the Activity note when this account is in that call.
+  - [ ] Ending the Activity in the official client removes both within a few seconds; no join or launch control exists.
+  - [ ] Record whether `EMBEDDED_ACTIVITY_UPDATE`/`_V2` reaches this client at all and the real field names.
+  - [ ] Native Activity join/leave interoperation (the rest of #102) remains outstanding.

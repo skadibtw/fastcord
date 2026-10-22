@@ -17,8 +17,8 @@
 use std::collections::HashMap;
 
 use fastcord_model::{
-    CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildEmoji, GuildMember,
-    GuildSettings, MAX_DESCRIPTION_BYTES, MAX_FEATURE_BYTES, MAX_FEATURES,
+    ActivityUpdate, CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildEmoji,
+    GuildMember, GuildSettings, MAX_DESCRIPTION_BYTES, MAX_FEATURE_BYTES, MAX_FEATURES,
     MAX_REACTION_EMOJI_NAME_BYTES, Message, MessageUpdate, Relationship, RelationshipKind, Role,
     ScheduledEvent, ScheduledEventKey, ScheduledEventUser, Snowflake, StageInstance, StreamCreate,
     StreamDelete, StreamServerUpdate, StreamUpdate, User, VoiceServerUpdate, VoiceState,
@@ -935,6 +935,47 @@ struct SoundboardGuildWire {
     guild_id: Snowflake,
 }
 
+/// EMBEDDED_ACTIVITY_UPDATE and its V2 form, read leniently (unverified):
+/// the channel is `channel_id` or `location.channel_id`; the application and
+/// name come from `embedded_activity` or the top level; the activity runs
+/// while `participants` (V2: `connections`) is non-empty, or, with neither
+/// array, while `embedded_activity` is present.
+fn decode_activity(raw: &str) -> Option<ActivityUpdate> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let inner = value.get("embedded_activity").filter(|v| v.is_object());
+    let pick = |key: &str| {
+        inner
+            .and_then(|inner| inner.get(key))
+            .or_else(|| value.get(key))
+    };
+    let channel_id = snowflake_of(
+        value
+            .get("channel_id")
+            .or_else(|| value.get("location")?.get("channel_id"))?,
+    )?;
+    let running = match value
+        .get("participants")
+        .or_else(|| value.get("connections"))
+        .and_then(serde_json::Value::as_array)
+    {
+        Some(users) => !users.is_empty(),
+        None => inner.is_some(),
+    };
+    Some(ActivityUpdate {
+        guild_id: snowflake_of(value.get("guild_id")?)?,
+        channel_id,
+        application_id: snowflake_of(pick("application_id")?)?,
+        name: pick("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(fastcord_model::MAX_ACTIVITY_NAME_CHARS)
+            .collect(),
+        running,
+    })
+}
+
 /// `None` for an effect that is not a soundboard sound (an emoji burst).
 fn decode_sound_effect(raw: &str) -> Result<Option<Dispatch>, Malformed> {
     let wire: SoundEffectWire = json(raw)?;
@@ -1505,6 +1546,12 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         }
         "GUILD_STICKERS_UPDATE" => {
             json::<SoundboardGuildWire>(raw).map(|wire| Dispatch::StickersChanged(wire.guild_id))
+        }
+        "EMBEDDED_ACTIVITY_UPDATE" | "EMBEDDED_ACTIVITY_UPDATE_V2" => {
+            return match decode_activity(raw) {
+                Some(update) => Decoded::Event(Dispatch::EmbeddedActivity(update)),
+                None => Decoded::Malformed,
+            };
         }
         "STAGE_INSTANCE_CREATE" | "STAGE_INSTANCE_UPDATE" => {
             json::<StageInstance>(raw).map(Dispatch::StageInstanceUpsert)

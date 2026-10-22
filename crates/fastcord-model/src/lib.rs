@@ -61,7 +61,7 @@ pub use scheduled_event::{
 pub use snowflake::{DISCORD_EPOCH_MS, ParseSnowflakeError, Snowflake};
 pub use user::User;
 pub use voice::{
-    StageInstance, StreamCreate, StreamCreateRequest, StreamDelete, StreamDeleteReason, StreamKey,
-    StreamServerUpdate, StreamType, StreamUpdate, VoiceServerUpdate, VoiceState, VoiceStateRequest,
-    VoiceToken,
+    ActivityUpdate, MAX_ACTIVITY_NAME_CHARS, StageInstance, StreamCreate, StreamCreateRequest,
+    StreamDelete, StreamDeleteReason, StreamKey, StreamServerUpdate, StreamType, StreamUpdate,
+    VoiceServerUpdate, VoiceState, VoiceStateRequest, VoiceToken,
 };

@@ -25,6 +25,7 @@
 //! measurements. [`Store::recount`] recomputes the total from scratch so tests
 //! can prove the incremental ledger never drifts.
 
+mod activities;
 mod calls;
 mod events;
 mod list_id;
@@ -48,7 +49,7 @@ use std::fmt;
 use std::mem::size_of;
 
 use fastcord_model::{
-    Channel, Guild, GuildEmoji, GuildMember, GuildSettings, Message, OverwriteKind,
+    ActivityUpdate, Channel, Guild, GuildEmoji, GuildMember, GuildSettings, Message, OverwriteKind,
     PermissionOverwrite, Role, ScheduledEvent, Snowflake, StageInstance, ThreadMember, User,
     VoiceState,
 };
@@ -205,6 +206,7 @@ pub struct GuildEntry {
     members: HashMap<Snowflake, MemberSlot>,
     voice: HashMap<Snowflake, VoiceState>,
     stages: Vec<StageInstance>,
+    activities: Vec<ActivityUpdate>,
     events: Vec<ScheduledEvent>,
     /// Ids of recently deleted events, so a late update cannot revive one.
     gone_events: Vec<Snowflake>,
@@ -235,6 +237,7 @@ impl GuildEntry {
                 .take(MAX_STAGES)
                 .map(capped_stage)
                 .collect(),
+            activities: Vec::new(),
             events: Vec::new(),
             gone_events: Vec::new(),
             lists: Vec::new(),
@@ -365,6 +368,7 @@ impl GuildEntry {
             + self.channels.iter().map(channel_bytes).sum::<usize>()
             + self.emojis.iter().map(emoji_bytes).sum::<usize>()
             + self.stages.iter().map(stage_bytes).sum::<usize>()
+            + self.activities.iter().map(activities::bytes).sum::<usize>()
             + self.events.iter().map(events::event_bytes).sum::<usize>()
             + text(&self.settings.description)
             + self
@@ -381,6 +385,7 @@ impl GuildEntry {
             + self.channels.iter().map(channel_bytes).sum::<usize>()
             + self.emojis.iter().map(emoji_bytes).sum::<usize>()
             + self.stages.iter().map(stage_bytes).sum::<usize>()
+            + self.activities.iter().map(activities::bytes).sum::<usize>()
             + self.events.iter().map(events::event_bytes).sum::<usize>()
             + text(&self.settings.description);
     }
@@ -1346,6 +1351,7 @@ impl Store {
             }
             Dispatch::GuildRoleDelete(event) => self.role_remove(event, &mut changes),
             Dispatch::VoiceStateUpdate(update) => self.voice_update(*update, &mut changes),
+            Dispatch::EmbeddedActivity(update) => self.activity_event(update, &mut changes),
             Dispatch::StageInstanceUpsert(stage) => self.stage_event(stage, true, &mut changes),
             Dispatch::StageInstanceDelete(stage) => self.stage_event(stage, false, &mut changes),
             Dispatch::ScheduledEventUpsert(event) => self.event_upsert(*event, &mut changes),

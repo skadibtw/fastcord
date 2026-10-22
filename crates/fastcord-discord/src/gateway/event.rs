@@ -4,9 +4,10 @@ use std::fmt;
 use std::time::Duration;
 
 use fastcord_model::{
-    CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildMember, Message, MessageUpdate,
-    Relationship, RelationshipKind, Role, ScheduledEvent, ScheduledEventKey, ScheduledEventUser,
-    Snowflake, StageInstance, User, VoiceServerUpdate, VoiceState,
+    ActivityUpdate, CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildMember,
+    Message, MessageUpdate, Relationship, RelationshipKind, Role, ScheduledEvent,
+    ScheduledEventKey, ScheduledEventUser, Snowflake, StageInstance, User, VoiceServerUpdate,
+    VoiceState,
 };
 
 /// The Gateway session ID. Not a credential on its own (resuming also needs the
@@ -649,6 +650,8 @@ pub enum Dispatch {
     VoiceStateUpdate(Box<VoiceStateUpdate>),
     /// A soundboard sound was played in a voice channel.
     VoiceChannelSound(SoundboardPlay),
+    /// An embedded Activity started, changed or ended in a voice channel.
+    EmbeddedActivity(ActivityUpdate),
     /// A Stage session started or its topic changed.
     StageInstanceUpsert(StageInstance),
     /// A Stage session ended.
@@ -732,6 +735,7 @@ impl Dispatch {
             Self::GuildRoleDelete(_) => "GUILD_ROLE_DELETE",
             Self::VoiceStateUpdate(_) => "VOICE_STATE_UPDATE",
             Self::VoiceChannelSound(_) => "VOICE_CHANNEL_EFFECT_SEND",
+            Self::EmbeddedActivity(_) => "EMBEDDED_ACTIVITY_UPDATE",
             Self::StageInstanceUpsert(_) => "STAGE_INSTANCE_UPDATE",
             Self::StageInstanceDelete(_) => "STAGE_INSTANCE_DELETE",
             Self::ScheduledEventUpsert(_) => "GUILD_SCHEDULED_EVENT_UPDATE",

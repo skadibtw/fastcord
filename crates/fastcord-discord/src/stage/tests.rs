@@ -353,6 +353,7 @@ fn a_stage_lists_speakers_then_the_audience_with_raised_hands_first() {
             Occupant::Heading(text) => (*text).to_owned(),
             Occupant::Member { user_id, seat, .. } => format!("{}:{seat:?}", user_id.0),
             Occupant::More(n) => format!("+{n}"),
+            Occupant::Activity(name) => format!("activity:{name}"),
         })
         .collect();
     assert_eq!(

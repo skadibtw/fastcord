@@ -344,6 +344,8 @@ pub enum Occupant {
     },
     /// "Speakers" or "Audience" above that group of a Stage.
     Heading(&'static str),
+    /// An embedded Activity runs in this channel (name capped, may be empty).
+    Activity(String),
     More(usize),
 }
 
@@ -865,7 +867,10 @@ impl Navigation {
                     s.user_id,
                 )
             });
-            let mut lines = Vec::new();
+            let mut lines: Vec<Occupant> = guild
+                .activities(row.channel.id)
+                .map(|name| Occupant::Activity(name.to_owned()))
+                .collect();
             let mut group = None;
             for state in here.iter().take(MAX_VOICE_OCCUPANTS) {
                 if stage && group != Some(state.suppress) {

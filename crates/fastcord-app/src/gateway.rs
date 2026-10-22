@@ -84,6 +84,9 @@ impl StageControls {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VoiceControls {
     pub stage: StageControls,
+    /// Names of the embedded Activities running in the call's channel (read-only awareness,
+    /// issue #102; empty string when unnamed), at most `MAX_PER_CHANNEL`.
+    pub activities: Vec<String>,
     pub self_muted: bool,
     pub deafened: bool,
     pub server_muted: bool,
@@ -2713,10 +2716,19 @@ impl Worker {
 
     fn refresh_stage(&self) {
         let stage = self.stage_controls();
+        let request = *self.voice_requests.borrow();
+        let activities: Vec<String> = request
+            .and_then(|r| r.guild_id.zip(r.channel_id))
+            .and_then(|(guild, channel)| {
+                let guild = self.tracker.store.guild(guild)?;
+                Some(guild.activities(channel).map(str::to_owned).collect())
+            })
+            .unwrap_or_default();
         self.bridge.voice_controls.send_if_modified(|controls| {
-            let changed = controls.stage != stage;
+            let changed = controls.stage != stage || controls.activities != activities;
             if changed {
                 controls.stage = stage;
+                controls.activities = activities;
             }
             changed
         });

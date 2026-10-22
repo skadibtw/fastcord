@@ -476,6 +476,15 @@ pub(crate) fn occupant_row<'a>(
             .size(12)
             .style(text::secondary)
             .into(),
+        Occupant::Activity(name) => text(if name.is_empty() {
+            "ACTIVITY".to_owned()
+        } else {
+            format!("ACTIVITY: {name}")
+        })
+        .size(10)
+        .font(BOLD)
+        .style(text::secondary)
+        .into(),
         Occupant::Heading(label) => text(label.to_uppercase())
             .size(10)
             .font(BOLD)
