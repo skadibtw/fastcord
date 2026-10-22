@@ -127,7 +127,7 @@ pub struct State {
 
 /// What a failed request tells the user. `what` names the change a write
 /// may have made.
-fn failure(error: RestError, what: &str) -> String {
+pub(crate) fn failure(error: RestError, what: &str) -> String {
     match error {
         RestError::Retryable(_) => format!(
             "Discord did not confirm. {what} may have been applied; it was not retried. Check in the official client before trying again."

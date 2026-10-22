@@ -47,6 +47,7 @@ mod render;
 mod report;
 mod rich;
 mod safety;
+mod scheduled_events;
 mod search;
 mod shortcuts;
 mod soundboard;
@@ -161,6 +162,7 @@ struct App {
     invite: invite::State,
     discover: discover::State,
     onboarding: onboarding::State,
+    events: scheduled_events::State,
     identity: profile_edit::State,
     safety: safety::State,
     report: report::State,
@@ -342,6 +344,7 @@ enum Message {
     Invite(invite::Event),
     Discover(discover::Event),
     Onboarding(onboarding::Event),
+    Events(scheduled_events::Event),
     Identity(profile_edit::Event),
     Safety(safety::Event),
     Report(report::Event),
@@ -423,6 +426,7 @@ impl App {
                 invite: invite::State::default(),
                 discover: discover::State::default(),
                 onboarding: onboarding::State::default(),
+                events: scheduled_events::State::default(),
                 identity: profile_edit::State::default(),
                 safety: safety::State::default(),
                 report: report::State::default(),
@@ -1362,6 +1366,7 @@ impl App {
             Message::Invite(event) => return self.invite_event(event),
             Message::Discover(event) => return self.discover_event(event),
             Message::Onboarding(event) => return self.onboarding_event(event),
+            Message::Events(event) => return self.events_event(event),
             Message::Identity(event) => return self.identity_event(event),
             Message::Safety(event) => return self.safety_event(event),
             Message::Report(event) => return self.report_event(event),
@@ -2475,6 +2480,7 @@ impl App {
                 self.invite.clear();
                 self.discover.clear();
                 self.onboarding.clear();
+                self.events.clear();
                 self.identity.clear();
                 self.safety.clear();
                 self.report.clear();
@@ -2789,6 +2795,7 @@ impl App {
         self.invite.clear();
         self.discover.clear();
         self.onboarding.clear();
+        self.events.clear();
         self.identity.clear();
         self.safety.clear();
         self.report.clear();
@@ -3275,6 +3282,38 @@ impl App {
             ));
         }
         task.map(Message::Onboarding)
+    }
+
+    fn events_event(&mut self, event: scheduled_events::Event) -> Task<Message> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return Task::none();
+        };
+        if let scheduled_events::Event::Join(guild, channel) = event {
+            // Only an event that is still held and not over, in a channel the
+            // account may connect to, joins; the join path checks the channel again.
+            if scheduled_events::joinable(&gateway.navigation, guild, channel) {
+                return self.handle(Message::JoinVoice(guild, channel));
+            }
+            return Task::none();
+        }
+        let rejected = scheduled_events::State::is_rejected(&event);
+        let task = self.events.update(
+            event,
+            &gateway.navigation,
+            &session.client,
+            &gateway.controls,
+        );
+        if rejected {
+            let id = gateway.id;
+            return self.handle(Message::Gateway(
+                id,
+                gateway::GatewayStatus::AuthenticationRequired,
+            ));
+        }
+        task.map(Message::Events)
     }
 
     fn discover_event(&mut self, event: discover::Event) -> Task<Message> {
@@ -4009,6 +4048,9 @@ impl App {
                 onboarding::view(&self.onboarding, &gateway.navigation, &gateway.revealed)
             {
                 banner_column = banner_column.push(panel.map(Message::Onboarding));
+            }
+            if let Some(panel) = scheduled_events::view(&self.events, &gateway.navigation) {
+                banner_column = banner_column.push(panel.map(Message::Events));
             }
             if let Some(panel) = invite::view(&self.invite, localtime::now()) {
                 banner_column = banner_column.push(panel.map(Message::Invite));

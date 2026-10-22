@@ -26,6 +26,7 @@
 //! can prove the incremental ledger never drifts.
 
 mod calls;
+mod events;
 mod list_id;
 mod member_list;
 pub mod navigation;
@@ -37,6 +38,7 @@ mod relationships;
 #[cfg(test)]
 mod safety_tests;
 pub use calls::{CallInfo, MAX_CALL_USERS, MAX_CALLS};
+pub use events::MAX_EVENTS;
 pub use relationships::Suppression;
 #[cfg(test)]
 mod tests;
@@ -47,7 +49,7 @@ use std::mem::size_of;
 
 use fastcord_model::{
     Channel, Guild, GuildEmoji, GuildMember, Message, OverwriteKind, PermissionOverwrite, Role,
-    Snowflake, StageInstance, ThreadMember, User, VoiceState,
+    ScheduledEvent, Snowflake, StageInstance, ThreadMember, User, VoiceState,
 };
 
 use crate::stage::MAX_TOPIC_CHARS;
@@ -200,6 +202,9 @@ pub struct GuildEntry {
     members: HashMap<Snowflake, MemberSlot>,
     voice: HashMap<Snowflake, VoiceState>,
     stages: Vec<StageInstance>,
+    events: Vec<ScheduledEvent>,
+    /// Ids of recently deleted events, so a late update cannot revive one.
+    gone_events: Vec<Snowflake>,
     lists: Vec<MemberList>,
     /// Cached sizes of the parts that change one element at a time.
     meta_bytes: usize,
@@ -226,13 +231,15 @@ impl GuildEntry {
                 .take(MAX_STAGES)
                 .map(capped_stage)
                 .collect(),
+            events: Vec::new(),
+            gone_events: Vec::new(),
             lists: Vec::new(),
             meta_bytes: 0,
             members_bytes: 0,
             voice_bytes: 0,
         };
         entry.trim_threads();
-        entry.recompute_meta();
+        entry.set_events(guild.scheduled_events);
         for member in guild.members {
             entry.put_member(member, tick);
         }
@@ -331,6 +338,8 @@ impl GuildEntry {
             + map_overhead(&self.members)
             + map_overhead(&self.voice)
             + (self.lists.capacity() - self.lists.len()) * size_of::<MemberList>()
+            + (self.events.capacity() - self.events.len()) * size_of::<ScheduledEvent>()
+            + self.gone_events.capacity() * size_of::<Snowflake>()
     }
 
     fn bytes(&self) -> usize {
@@ -348,6 +357,7 @@ impl GuildEntry {
             + self.channels.iter().map(channel_bytes).sum::<usize>()
             + self.emojis.iter().map(emoji_bytes).sum::<usize>()
             + self.stages.iter().map(stage_bytes).sum::<usize>()
+            + self.events.iter().map(events::event_bytes).sum::<usize>()
             + self
                 .members
                 .values()
@@ -361,7 +371,8 @@ impl GuildEntry {
         self.meta_bytes = self.roles.iter().map(role_bytes).sum::<usize>()
             + self.channels.iter().map(channel_bytes).sum::<usize>()
             + self.emojis.iter().map(emoji_bytes).sum::<usize>()
-            + self.stages.iter().map(stage_bytes).sum::<usize>();
+            + self.stages.iter().map(stage_bytes).sum::<usize>()
+            + self.events.iter().map(events::event_bytes).sum::<usize>();
     }
 
     fn put_member(&mut self, mut member: GuildMember, tick: u64) {
@@ -1254,6 +1265,11 @@ impl Store {
             Dispatch::VoiceStateUpdate(update) => self.voice_update(*update, &mut changes),
             Dispatch::StageInstanceUpsert(stage) => self.stage_event(stage, true, &mut changes),
             Dispatch::StageInstanceDelete(stage) => self.stage_event(stage, false, &mut changes),
+            Dispatch::ScheduledEventUpsert(event) => self.event_upsert(*event, &mut changes),
+            Dispatch::ScheduledEventDelete(key) => self.event_delete(key, &mut changes),
+            Dispatch::ScheduledEventUser { user, added } => {
+                self.event_user(user, added, &mut changes);
+            }
             // Voice connection state is owned by the voice layer.
             Dispatch::VoiceServerUpdate(_)
             | Dispatch::StreamCreate(_)
@@ -1468,7 +1484,7 @@ impl Store {
                 .map(capped_stage)
                 .collect();
             entry.trim_threads();
-            entry.recompute_meta();
+            entry.set_events(guild.scheduled_events);
             for member in guild.members {
                 entry.put_member(member, tick);
             }
@@ -1911,6 +1927,9 @@ impl Store {
         }
         let target = self.budget / 100 * LOW_WATER_PERCENT;
         self.shed_lists();
+        if self.bytes() > target {
+            self.shed_events();
+        }
         // Unread markers are optional detail: under pressure they go before
         // members do, and READY brings them back.
         if self.bytes() > target {

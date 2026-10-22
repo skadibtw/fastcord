@@ -40,6 +40,7 @@ mod remote_auth;
 mod report;
 mod rest;
 mod route;
+mod scheduled_event;
 mod search;
 mod secret;
 mod send;
@@ -100,6 +101,7 @@ pub use report::{
 pub use reqwest::{Method, StatusCode};
 pub use rest::{Priority, RestClient, RestRequest, RestResponse};
 pub use route::{MajorParameter, Route, RouteKey};
+pub use scheduled_event::{DraftError, EventAction, EventDraft, EventPermissions};
 pub use search::{
     MAX_SEARCH_CHARS, MAX_SEARCH_OFFSET, SEARCH_PAGE_SIZE, SearchHas, SearchOutcome, SearchPage,
     SearchQuery, SearchScope,

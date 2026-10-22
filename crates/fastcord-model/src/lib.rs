@@ -12,6 +12,7 @@ mod permissions;
 mod poll;
 mod presence;
 mod relationship;
+mod scheduled_event;
 mod snowflake;
 mod user;
 mod voice;
@@ -43,6 +44,10 @@ pub use poll::{
 };
 pub use presence::{MAX_CUSTOM_STATUS_CHARS, Presence, Status};
 pub use relationship::{Relationship, RelationshipKind};
+pub use scheduled_event::{
+    EventKind, EventStatus, MAX_DESCRIPTION_CHARS, MAX_LOCATION_CHARS, MAX_NAME_CHARS,
+    ScheduledEvent, ScheduledEventKey, ScheduledEventUser,
+};
 pub use snowflake::{DISCORD_EPOCH_MS, ParseSnowflakeError, Snowflake};
 pub use user::User;
 pub use voice::{

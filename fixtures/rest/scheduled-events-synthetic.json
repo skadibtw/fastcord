@@ -1,0 +1,25 @@
+{
+  "_note": "Synthetic. Shapes follow the documented guild scheduled event object; user-client routes are unverified.",
+  "list": [
+    {
+      "id": "900", "guild_id": "41771983423143937", "channel_id": "41771983423143939",
+      "creator_id": "7", "creator": {"id": "7", "username": "host", "global_name": "Host"},
+      "name": "Movie night", "description": "Bring snacks.",
+      "scheduled_start_time": "2026-10-30T18:00:00.000000+00:00", "scheduled_end_time": null,
+      "privacy_level": 2, "status": 1, "entity_type": 2, "entity_id": null,
+      "entity_metadata": null, "user_count": 12
+    },
+    {
+      "id": "901", "guild_id": "41771983423143937", "channel_id": null,
+      "creator_id": "8",
+      "name": "Meetup", "description": null,
+      "scheduled_start_time": "2026-11-02T10:00:00+00:00",
+      "scheduled_end_time": "2026-11-02T12:00:00+00:00",
+      "privacy_level": 2, "status": 2, "entity_type": 3,
+      "entity_metadata": {"location": "Town hall"}, "user_count": 3,
+      "recurrence_rule": {"start": "2026-11-02T10:00:00+00:00", "frequency": 2, "interval": 1, "by_weekday": [0]}
+    },
+    {"id": "902", "guild_id": "41771983423143937", "name": "Unknown kind",
+     "scheduled_start_time": "2026-11-03T10:00:00+00:00", "status": 1, "entity_type": 9}
+  ]
+}

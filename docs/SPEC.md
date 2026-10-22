@@ -486,6 +486,16 @@ A message that contains an invite link (`discord.gg/<code>`, `discord.com/invite
 - **Discovery.** The Ex button at the top of the server rail opens a read-only list of public servers (`GET /discoverable-guilds`, unverified): icon, name, description and approximate counts, 24 per page, Show more up to 4 pages. It states that a server is joined with an invite link; no join route is invented.
 - **Not implemented:** discovery search, joining straight from the discovery list, and a joined-server verification or onboarding flow beyond the pause above.
 
+### 8.16 Scheduled community events (#92)
+
+Implemented in `fastcord-model::scheduled_event` (the event, bounded text, recurrence description), `fastcord-discord::scheduled_event` (list and write requests, draft validation, `Store::event_permissions`/`event_allows`), `fastcord-discord` `state/events.rs` (the reducer part) and `fastcord-app::scheduled_events` (panel and banner). Routes and events are in `docs/PROTOCOL.md` and are all unverified.
+
+- **State.** The reducer keeps at most 100 events per guild, counted in the guild's metadata bytes; under memory pressure every guild but the focused one gives its events up first (a list request brings them back). Gateway events settle on the last one seen and a late update of a deleted event is ignored. The list answer (an explicit request from the panel, handed to the reducer as a command) replaces the guild's events. The navigation snapshot carries the selected guild's events, soonest first with ended ones last, and the account's event permissions.
+- **Panel.** The header's "Events" opens the list (name, status, local start with the relative time, kind, interested count), a detail view (description, end, place or channel, recurrence, creator), interest, Copy link and Join. People with MANAGE_EVENTS, or CREATE_EVENTS for their own events, also get New event, Edit, Start now, End event, Cancel event and Delete. Times are typed as `YYYY-MM-DD HH:MM` and shown in the local offset read at start-up.
+- **Writes.** One at a time, one request each, rechecked by the reducer against permissions and the event's current status, never retried; cancel and delete ask first; the list and the detail change only when the Gateway confirms. A refused request shows Discord's 403/404/429 text; an ambiguous one reads "may have been applied".
+- **Banner.** A voice or Stage event that is live, or due within 15 minutes (and not more than an hour late), shows "Starting soon" / "Live now" with Join, Details and Hide above the chat. It is evaluated when the view is drawn, with no timer.
+- **Not implemented:** creating or changing recurrence, attendee lists (only the interested count), event cover images, and a desktop notification when an event the account is interested in starts (the toast path of #57 is driven by messages only, and whether the account is interested is known only for changes made in this session).
+
 ### 8.15 Rules screening, onboarding and server guide (#91)
 
 The member side only (configuration is #97). Implemented in `fastcord-discord::onboarding` (bounded parsing, request bodies) and `fastcord-app::onboarding` (one panel at a time, banners). Routes are in `docs/PROTOCOL.md` and are all unverified.

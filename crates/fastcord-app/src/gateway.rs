@@ -574,6 +574,17 @@ pub enum Command {
         action: fastcord_discord::StageAction,
         reply: tokio::sync::oneshot::Sender<Result<(), fastcord_discord::RestError>>,
     },
+    /// One scheduled-event write.
+    Event {
+        guild: Snowflake,
+        action: fastcord_discord::EventAction,
+        reply: tokio::sync::oneshot::Sender<Result<(), fastcord_discord::RestError>>,
+    },
+    /// The complete event list of a guild that a list request returned.
+    EventsLoaded {
+        guild: Snowflake,
+        events: Vec<fastcord_model::ScheduledEvent>,
+    },
     Send {
         channel: Snowflake,
         content: String,
@@ -731,6 +742,16 @@ impl fmt::Debug for Command {
                 .field(guild)
                 .field(channel)
                 .field(&std::mem::discriminant(action))
+                .finish(),
+            Self::Event { guild, action, .. } => f
+                .debug_tuple("Event")
+                .field(guild)
+                .field(&std::mem::discriminant(action))
+                .finish(),
+            Self::EventsLoaded { guild, events } => f
+                .debug_tuple("EventsLoaded")
+                .field(guild)
+                .field(&events.len())
                 .finish(),
             Self::Send {
                 channel, everyone, ..
@@ -906,6 +927,36 @@ impl NavigationBridge {
         answer
             .await
             .unwrap_or(Err(fastcord_discord::RestError::AuthenticationRequired))
+    }
+    /// One explicit scheduled-event write; the reducer rechecks permissions and
+    /// the event's state immediately before handing the request to the transport.
+    pub async fn scheduled_event(
+        &self,
+        guild: Snowflake,
+        action: fastcord_discord::EventAction,
+    ) -> Result<(), fastcord_discord::RestError> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.commands
+            .try_send(Command::Event {
+                guild,
+                action,
+                reply,
+            })
+            .map_err(|_| fastcord_discord::RestError::SchedulerCapacityExceeded)?;
+        answer
+            .await
+            .unwrap_or(Err(fastcord_discord::RestError::AuthenticationRequired))
+    }
+    /// Hands a guild's freshly listed events to the reducer. Dropped when the
+    /// queue is full: the list can be loaded again.
+    pub fn set_scheduled_events(
+        &self,
+        guild: Snowflake,
+        events: Vec<fastcord_model::ScheduledEvent>,
+    ) {
+        let _ = self
+            .commands
+            .try_send(Command::EventsLoaded { guild, events });
     }
     pub fn new() -> Self {
         let (requests, _) = watch::channel(Request::default());
@@ -2183,6 +2234,31 @@ impl Worker {
                         let now = fastcord_discord::iso8601(unix);
                         let _ = reply.send(rest.stage_action(guild, channel, &action, &now).await);
                     });
+                }
+            }
+            Command::Event {
+                guild,
+                action,
+                reply,
+            } => {
+                if !self.tracker.store.event_allows(guild, &action) {
+                    let _ = reply.send(Err(fastcord_discord::RestError::PermissionDenied));
+                } else {
+                    let rest = self.rest.clone();
+                    tokio::spawn(async move {
+                        let _ = reply.send(rest.scheduled_event_action(guild, &action).await);
+                    });
+                }
+            }
+            Command::EventsLoaded { guild, events } => {
+                if !self
+                    .tracker
+                    .store
+                    .replace_scheduled_events(guild, events)
+                    .is_empty()
+                {
+                    self.tracker.navigation_dirty = true;
+                    self.tracker.navigation.reconcile(&self.tracker.store);
                 }
             }
             Command::Send {
@@ -4664,6 +4740,7 @@ mod tests {
             members: Vec::new(),
             member_count: 0,
             stage_instances: Vec::new(),
+            scheduled_events: Vec::new(),
         };
         let dm = |id| Channel {
             id: Snowflake(id),

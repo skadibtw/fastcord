@@ -415,6 +415,10 @@ pub struct NavigationSnapshot {
     pub own_pending: bool,
     /// The account's member flags in the selected guild (0 when unknown).
     pub own_flags: u32,
+    /// The selected guild's scheduled events, soonest first (ended ones last).
+    pub events: Vec<fastcord_model::ScheduledEvent>,
+    /// What the account may do with events in the selected guild.
+    pub event_permissions: crate::EventPermissions,
     /// Friends, blocks and pending requests (shared, rebuilt per change).
     pub relationships: std::sync::Arc<[fastcord_model::Relationship]>,
     /// Presence of referenced users (shared, copied on write).
@@ -982,6 +986,17 @@ impl Navigation {
                 .and_then(|member| member.nick.clone()),
             own_pending: own_member.is_some_and(|m| m.pending == Some(true)),
             own_flags: own_member.and_then(|m| m.flags).unwrap_or(0),
+            events: selected_guild
+                .and_then(|id| store.guild(id))
+                .map(|guild| {
+                    let mut events = guild.scheduled_events().to_vec();
+                    events.sort_by_key(|e| (e.status.is_over(), e.start_ms, e.id));
+                    events
+                })
+                .unwrap_or_default(),
+            event_permissions: selected_guild
+                .map(|id| store.event_permissions(id))
+                .unwrap_or_default(),
             selected_guild,
             forum: self.forum_view(store),
             selection: self.selection(store),

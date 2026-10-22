@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use fastcord_model::{
     CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildEmoji, GuildMember,
     MAX_REACTION_EMOJI_NAME_BYTES, Message, MessageUpdate, Relationship, RelationshipKind, Role,
-    Snowflake, StageInstance, StreamCreate, StreamDelete, StreamServerUpdate, StreamUpdate, User,
-    VoiceServerUpdate, VoiceState,
+    ScheduledEvent, ScheduledEventKey, ScheduledEventUser, Snowflake, StageInstance, StreamCreate,
+    StreamDelete, StreamServerUpdate, StreamUpdate, User, VoiceServerUpdate, VoiceState,
 };
 use serde::{Deserialize, Deserializer};
 
@@ -135,6 +135,18 @@ struct GuildWire {
     member_count: u32,
     #[serde(default, deserialize_with = "null_default")]
     stage_instances: Vec<StageInstance>,
+    /// Events that fail to decode are skipped one by one, not the guild.
+    #[serde(default, deserialize_with = "lenient_events")]
+    guild_scheduled_events: Vec<ScheduledEvent>,
+}
+
+fn lenient_events<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ScheduledEvent>, D::Error> {
+    let raw: Option<Vec<serde_json::Value>> = Deserialize::deserialize(d)?;
+    Ok(raw
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
 }
 
 #[derive(Deserialize)]
@@ -515,6 +527,7 @@ impl Normalizer {
             members,
             member_count: wire.member_count,
             stage_instances: wire.stage_instances,
+            scheduled_events: wire.guild_scheduled_events,
         }))
     }
 }
@@ -1271,6 +1284,18 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
             json::<StageInstance>(raw).map(Dispatch::StageInstanceUpsert)
         }
         "STAGE_INSTANCE_DELETE" => json::<StageInstance>(raw).map(Dispatch::StageInstanceDelete),
+        "GUILD_SCHEDULED_EVENT_CREATE" | "GUILD_SCHEDULED_EVENT_UPDATE" => {
+            json::<ScheduledEvent>(raw).map(|e| Dispatch::ScheduledEventUpsert(Box::new(e)))
+        }
+        "GUILD_SCHEDULED_EVENT_DELETE" => {
+            json::<ScheduledEventKey>(raw).map(Dispatch::ScheduledEventDelete)
+        }
+        "GUILD_SCHEDULED_EVENT_USER_ADD" | "GUILD_SCHEDULED_EVENT_USER_REMOVE" => {
+            json::<ScheduledEventUser>(raw).map(|u| Dispatch::ScheduledEventUser {
+                user: u,
+                added: name == "GUILD_SCHEDULED_EVENT_USER_ADD",
+            })
+        }
         "CALL_CREATE" => json::<CallCreate>(raw).map(|c| Dispatch::CallCreate(Box::new(c))),
         "CALL_UPDATE" => json::<CallUpdate>(raw).map(Dispatch::CallUpdate),
         "CALL_DELETE" => json::<CallDelete>(raw).map(Dispatch::CallDelete),

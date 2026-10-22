@@ -923,6 +923,7 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
         }],
         member_count: 250_000,
         stage_instances: Vec::new(),
+        scheduled_events: Vec::new(),
     }
 }
 

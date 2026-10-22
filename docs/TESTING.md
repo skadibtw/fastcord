@@ -601,6 +601,18 @@ Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, wind
   - [ ] The time left matches the official client's expiry.
   - [ ] `GET /discoverable-guilds?offset=0&limit=24` answers for a user account and the response shape matches `docs/PROTOCOL.md`; Show more loads pages 2 to 4 and then stops; icons, descriptions and counts show; a joined server reads Joined; a 403/404 shows an error and not a crash.
 
+### Scheduled community events (#92)
+
+- **Automated:** `fastcord-model` `scheduled_event::tests` (decoding, external location, unknown kinds, bounded text, recurrence text); `fastcord-discord` `scheduled_event::tests` (list parsing from the synthetic fixture, routes and bodies of every write, draft checks, permission and state gating of every action, CREATE_EVENTS limited to own events) and `state::navigation::tests` (`GUILD_CREATE` events, create/update/delete replay and stale handling, interest add/remove counted once, a late list not reviving a deleted event, 100-per-guild bound with ended events first, snapshot order, byte ledger); `fastcord-app` `scheduled_events::tests` (local time parsing, one write in flight, confirmations, 403/404/429/network/401 handling, stale answers after logout or for another server, form checks, banner selection, join gating).
+- **Outstanding gates (alt account only, unchecked, unverified routes):**
+  - [ ] `GET /guilds/{id}/scheduled-events?with_user_count=true` answers for a user account and the shape matches `docs/PROTOCOL.md`; READY/`GUILD_CREATE` does or does not carry `guild_scheduled_events`.
+  - [ ] `PUT`/`DELETE .../users/@me` change interest and `GUILD_SCHEDULED_EVENT_USER_ADD`/`REMOVE` echo the account; the count follows.
+  - [ ] Creating a voice, a Stage and an external event (location and end time) works with MANAGE_EVENTS and with CREATE_EVENTS alone; `GUILD_SCHEDULED_EVENT_CREATE` shows it; editing, Start now, End event, Cancel event and Delete each end in the matching Gateway event.
+  - [ ] A Stage event needs more permissions than the 403 text suggests (or not).
+  - [ ] Local start times match the official client across the machine's time zone; a time across a DST change is off by the offset difference.
+  - [ ] A recurring event shows its repeat text; the banner appears for an event due within 15 minutes and Join enters its channel.
+  - [ ] A deleted or canceled event cannot be joined from an open panel.
+
 ### Rules screening, onboarding and server guide (#91)
 
 - **Automated:** `fastcord-discord` `onboarding::tests` (screening, onboarding and guide parsing from the synthetic fixtures with entry and string bounds, accept/submit request bodies, application status, flag rule, routes), `gateway::decode::tests::member_screening_and_onboarding_fields_decode_only_when_present`, `state::navigation::tests::a_pending_member_cannot_write_until_the_gateway_says_so` (pending from Gateway dispatches, replays, omitted fields, composer and reaction gate); `fastcord-app` `onboarding::tests` (single/multi choice, required blocks submit, one request in flight, 403/429/network/401 handling, stale answers after logout, role preselection, guide links limited to visible channels, banner follows the Gateway).

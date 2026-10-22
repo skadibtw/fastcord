@@ -1,4 +1,4 @@
-use crate::{Channel, Permissions, Snowflake, StageInstance};
+use crate::{Channel, Permissions, ScheduledEvent, Snowflake, StageInstance};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Role {
@@ -63,4 +63,6 @@ pub struct Guild {
     pub member_count: u32,
     /// Live Stage sessions delivered with the guild.
     pub stage_instances: Vec<StageInstance>,
+    /// Scheduled events delivered with the guild.
+    pub scheduled_events: Vec<ScheduledEvent>,
 }

@@ -865,6 +865,12 @@ fn main_pane<'a>(
                             ));
                         }
                         tools.push((
+                            "Events",
+                            Message::Events(crate::scheduled_events::Event::Open(
+                                selection.guild_id,
+                            )),
+                        ));
+                        tools.push((
                             "Guide",
                             Message::Onboarding(crate::onboarding::Event::OpenGuide(
                                 selection.guild_id,

@@ -43,6 +43,8 @@ impl Permissions {
     pub const USE_VAD: Self = Self(1 << 25);
     pub const USE_SOUNDBOARD: Self = Self(1 << 42);
     pub const MANAGE_THREADS: Self = Self(1 << 34);
+    pub const MANAGE_EVENTS: Self = Self(1 << 33);
+    pub const CREATE_EVENTS: Self = Self(1 << 44);
     pub const CREATE_PUBLIC_THREADS: Self = Self(1 << 35);
     pub const SEND_MESSAGES_IN_THREADS: Self = Self(1 << 38);
 

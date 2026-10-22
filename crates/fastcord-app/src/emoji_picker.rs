@@ -623,6 +623,7 @@ mod tests {
             emojis,
             member_count: 1,
             stage_instances: Vec::new(),
+            scheduled_events: Vec::new(),
             members: vec![GuildMember {
                 user_id: Snowflake(1),
                 nick: None,

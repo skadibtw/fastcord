@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use fastcord_model::{
     CallCreate, CallDelete, CallUpdate, Channel, Emoji, Guild, GuildMember, Message, MessageUpdate,
-    Relationship, RelationshipKind, Role, Snowflake, StageInstance, User, VoiceServerUpdate,
-    VoiceState,
+    Relationship, RelationshipKind, Role, ScheduledEvent, ScheduledEventKey, ScheduledEventUser,
+    Snowflake, StageInstance, User, VoiceServerUpdate, VoiceState,
 };
 
 /// The Gateway session ID. Not a credential on its own (resuming also needs the
@@ -607,6 +607,14 @@ pub enum Dispatch {
     StageInstanceUpsert(StageInstance),
     /// A Stage session ended.
     StageInstanceDelete(StageInstance),
+    /// A scheduled event was created or changed.
+    ScheduledEventUpsert(Box<ScheduledEvent>),
+    ScheduledEventDelete(ScheduledEventKey),
+    /// A member became (`added`) or stopped being interested in an event.
+    ScheduledEventUser {
+        user: ScheduledEventUser,
+        added: bool,
+    },
     /// A server's soundboard sounds were created, edited, deleted or replaced.
     SoundboardChanged(Snowflake),
     /// A DM or group-DM call started, with who is ringing and connected.
@@ -674,6 +682,10 @@ impl Dispatch {
             Self::VoiceChannelSound(_) => "VOICE_CHANNEL_EFFECT_SEND",
             Self::StageInstanceUpsert(_) => "STAGE_INSTANCE_UPDATE",
             Self::StageInstanceDelete(_) => "STAGE_INSTANCE_DELETE",
+            Self::ScheduledEventUpsert(_) => "GUILD_SCHEDULED_EVENT_UPDATE",
+            Self::ScheduledEventDelete(_) => "GUILD_SCHEDULED_EVENT_DELETE",
+            Self::ScheduledEventUser { added: true, .. } => "GUILD_SCHEDULED_EVENT_USER_ADD",
+            Self::ScheduledEventUser { .. } => "GUILD_SCHEDULED_EVENT_USER_REMOVE",
             Self::SoundboardChanged(_) => "GUILD_SOUNDBOARD_SOUNDS_UPDATE",
             Self::CallCreate(_) => "CALL_CREATE",
             Self::CallUpdate(_) => "CALL_UPDATE",

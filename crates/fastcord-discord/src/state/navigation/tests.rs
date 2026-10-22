@@ -1,4 +1,7 @@
-use fastcord_model::{Guild, GuildMember, PermissionOverwrite, Role, User};
+use crate::state::MAX_EVENTS;
+use fastcord_model::{
+    EventStatus, Guild, GuildMember, PermissionOverwrite, Role, ScheduledEvent, User,
+};
 use serde_json::{Value, json};
 
 use super::*;
@@ -819,6 +822,7 @@ fn large_ready() -> Ready {
                     }],
                     member_count: 1,
                     stage_instances: Vec::new(),
+                    scheduled_events: Vec::new(),
                 }
             })
             .collect(),
@@ -2287,4 +2291,151 @@ fn a_pending_member_cannot_write_until_the_gateway_says_so() {
     assert!(!snapshot.own_pending && snapshot.own_flags == 2);
     assert_eq!(write(&mut navigation, &store), (true, true, true));
     assert_eq!(store.bytes(), store.recount());
+}
+
+fn scheduled(event: u64, status: u8, start: &str) -> Value {
+    json!({"id": event.to_string(), "guild_id": "100", "channel_id": "2000", "creator_id": "9",
+           "name": format!("Event {event}"), "scheduled_start_time": start,
+           "status": status, "entity_type": 2, "user_count": 5})
+}
+
+fn held(store: &Store) -> Vec<(u64, EventStatus, Option<u32>, Option<bool>)> {
+    let mut held: Vec<_> = store
+        .guild(id(100))
+        .unwrap()
+        .scheduled_events()
+        .iter()
+        .map(|e| (e.id.0, e.status, e.user_count, e.interested))
+        .collect();
+    held.sort_by_key(|e| e.0);
+    held
+}
+
+#[test]
+fn scheduled_events_arrive_with_a_guild_and_a_bad_one_is_skipped() {
+    let (mut store, _) = setup(NAV_READY);
+    apply(
+        &mut store,
+        "GUILD_CREATE",
+        &json!({"id": "300", "name": "New", "guild_scheduled_events": [
+            {"id": "5", "guild_id": "300", "name": "ok", "scheduled_start_time": "2026-11-01T10:00:00+00:00",
+             "status": 1, "entity_type": 3, "entity_metadata": {"location": "x"}},
+            {"id": "6", "guild_id": "300", "status": 9}
+        ]})
+        .to_string(),
+    );
+    let guild = store.guild(id(300)).unwrap();
+    assert_eq!(guild.scheduled_events().len(), 1);
+    assert_eq!(guild.scheduled_events()[0].location, "x");
+}
+
+#[test]
+fn scheduled_event_gateway_events_settle_on_the_last_one_seen() {
+    let (mut store, _) = setup(NAV_READY);
+    let send = |store: &mut Store, name: &str, raw: Value| apply(store, name, &raw.to_string());
+    let create = scheduled(1, 1, "2026-11-01T10:00:00+00:00");
+    assert!(
+        send(&mut store, "GUILD_SCHEDULED_EVENT_CREATE", create.clone())
+            .guilds
+            .contains(&id(100))
+    );
+    // A replay changes nothing.
+    assert!(send(&mut store, "GUILD_SCHEDULED_EVENT_CREATE", create).is_empty());
+    // An update replaces it but keeps the count it does not carry.
+    let mut update = scheduled(1, 2, "2026-11-01T10:00:00+00:00");
+    update.as_object_mut().unwrap().remove("user_count");
+    send(&mut store, "GUILD_SCHEDULED_EVENT_UPDATE", update);
+    assert_eq!(held(&store), vec![(1, EventStatus::Active, Some(5), None)]);
+
+    // Interest: the account's own add counts once; others count every time.
+    let user = |event: u64, who: &str| json!({"guild_id": "100", "guild_scheduled_event_id": event.to_string(), "user_id": who});
+    send(&mut store, "GUILD_SCHEDULED_EVENT_USER_ADD", user(1, "1"));
+    assert!(send(&mut store, "GUILD_SCHEDULED_EVENT_USER_ADD", user(1, "1")).is_empty());
+    send(&mut store, "GUILD_SCHEDULED_EVENT_USER_ADD", user(1, "2"));
+    assert_eq!(
+        held(&store),
+        vec![(1, EventStatus::Active, Some(7), Some(true))]
+    );
+    send(
+        &mut store,
+        "GUILD_SCHEDULED_EVENT_USER_REMOVE",
+        user(1, "1"),
+    );
+    assert_eq!(
+        held(&store),
+        vec![(1, EventStatus::Active, Some(6), Some(false))]
+    );
+    // An unknown event changes nothing.
+    assert!(send(&mut store, "GUILD_SCHEDULED_EVENT_USER_ADD", user(77, "2")).is_empty());
+
+    // Delete, then a late update and a REST list that still has it.
+    let key = json!({"id": "1", "guild_id": "100"});
+    assert!(
+        send(&mut store, "GUILD_SCHEDULED_EVENT_DELETE", key.clone())
+            .guilds
+            .contains(&id(100))
+    );
+    assert!(send(&mut store, "GUILD_SCHEDULED_EVENT_DELETE", key).is_empty());
+    let late = scheduled(1, 2, "2026-11-01T10:00:00+00:00");
+    assert!(send(&mut store, "GUILD_SCHEDULED_EVENT_UPDATE", late).is_empty());
+    let listed: Vec<ScheduledEvent> = [
+        scheduled(1, 1, "2026-11-01T10:00:00+00:00"),
+        scheduled(2, 1, "2026-11-02T10:00:00+00:00"),
+    ]
+    .into_iter()
+    .map(|v| serde_json::from_value(v).unwrap())
+    .collect();
+    store.replace_scheduled_events(id(100), listed);
+    assert_eq!(store.bytes(), store.recount());
+    assert_eq!(
+        held(&store),
+        vec![(2, EventStatus::Scheduled, Some(5), None)]
+    );
+
+    // An event of an unknown guild is not held.
+    let mut foreign = scheduled(3, 1, "2026-11-01T10:00:00+00:00");
+    foreign["guild_id"] = json!("999");
+    assert!(send(&mut store, "GUILD_SCHEDULED_EVENT_CREATE", foreign).is_empty());
+}
+
+#[test]
+fn scheduled_events_are_bounded_and_the_snapshot_orders_them() {
+    let (mut store, mut navigation) = setup(NAV_READY);
+    assert!(navigation.select_channel(&store, id(1000)));
+    let mut events: Vec<ScheduledEvent> = (1..=MAX_EVENTS as u64 + 20)
+        .map(|n| {
+            // The first 30 are over.
+            let status = if n <= 30 { 3 } else { 1 };
+            let start = format!("2026-12-{:02}T10:00:00+00:00", 1 + (n % 28));
+            serde_json::from_value(scheduled(n, status, &start)).unwrap()
+        })
+        .collect();
+    events.push(events[50].clone());
+    store.replace_scheduled_events(id(100), events);
+    assert_eq!(store.bytes(), store.recount());
+    let kept = held(&store);
+    assert_eq!(kept.len(), MAX_EVENTS);
+    assert!(
+        kept.iter().filter(|e| e.1.is_over()).count() <= 10,
+        "ended events are dropped first"
+    );
+
+    let snapshot = navigation.snapshot(&store, 0, 10, 0, 10);
+    assert_eq!(snapshot.events.len(), MAX_EVENTS);
+    let order: Vec<_> = snapshot
+        .events
+        .iter()
+        .map(|e| (e.status.is_over(), e.start_ms))
+        .collect();
+    assert!(
+        order.windows(2).all(|w| w[0] <= w[1]),
+        "upcoming first, ended last"
+    );
+    assert_eq!(
+        snapshot.event_permissions,
+        crate::EventPermissions::default()
+    );
+    // A new session replaces everything.
+    store.apply(event(Dispatch::Ready(Box::new(ready(NAV_READY)))));
+    assert!(store.guild(id(100)).unwrap().scheduled_events().is_empty());
 }
