@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=fastcord
+Comment=Lightweight native Discord client
+Exec=fastcord
+Icon=fastcord
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+StartupWMClass=fastcord

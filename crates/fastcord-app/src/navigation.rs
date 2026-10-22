@@ -4,7 +4,9 @@
 //! navigation windows, never full state.
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot, Occupant, StageSeat};
 use iced::font::Weight;
-use iced::widget::{button, column, container, image, mouse_area, row, space, text, text_input};
+use iced::widget::{
+    button, column, container, image, mouse_area, row, space, text, text_input, tooltip,
+};
 use iced::{Element, Font, Length, Padding, alignment};
 use std::collections::HashMap;
 
@@ -190,25 +192,56 @@ fn rail<'a>(
             .on_right_press(Message::Invite(crate::invite::Event::AskLeave(guild.id)))
             .into()
     });
+    let rail_tool = |kind, label: String, selected, message, count: Option<String>| {
+        let mut face = column![icons::sized(kind, style::TEXT, 24.0)]
+            .spacing(2)
+            .align_x(alignment::Horizontal::Center);
+        if let Some(count) = count {
+            face = face.push(text(count).size(10));
+        }
+        container(tooltip(
+            button(container(face).center(48))
+                .on_press(message)
+                .padding(0)
+                .style(style::server_button(selected)),
+            container(text(label).size(12))
+                .padding(6)
+                .style(style::card),
+            tooltip::Position::Right,
+        ))
+        .center_x(Length::Fill)
+        .center_y(RAIL_ROW)
+    };
+    let inbox_count = (snapshot.inbox.total > 0).then(|| {
+        let total = snapshot.inbox.total.min(999);
+        if snapshot.inbox.mentions > 0 {
+            format!("{total} @{}", snapshot.inbox.mentions.min(99))
+        } else {
+            total.to_string()
+        }
+    });
     container(
         column![
-            icon(
-                "DM".to_owned(),
-                None,
+            rail_tool(
+                Icon::Brand,
+                "Direct Messages".to_owned(),
                 directs,
-                Some(Message::ShowDirects(true))
+                Message::ShowDirects(true),
+                None,
             ),
-            icon(
+            rail_tool(
+                Icon::Inbox,
                 inbox_label(&snapshot.inbox),
-                None,
                 inbox_open,
-                Some(Message::Inbox(crate::inbox::Event::Toggle))
+                Message::Inbox(crate::inbox::Event::Toggle),
+                inbox_count,
             ),
-            icon(
-                "Ex".to_owned(),
-                None,
+            rail_tool(
+                Icon::Discover,
+                "Discover servers".to_owned(),
                 false,
-                Some(Message::Discover(crate::discover::Event::Toggle))
+                Message::Discover(crate::discover::Event::Toggle),
+                None,
             ),
             container(space())
                 .width(32)
@@ -236,7 +269,9 @@ fn rail<'a>(
 }
 
 /// A row of the sidebar: a label with an optional red mention count.
+#[allow(clippy::too_many_arguments)]
 fn sidebar_row<'a>(
+    kind: Icon,
     label: String,
     selected: bool,
     unread: bool,
@@ -247,6 +282,7 @@ fn sidebar_row<'a>(
 ) -> Element<'a, Message> {
     // Clipped so a long name never draws under the badge or the Chat button.
     let mut line = row![
+        icons::sized(kind, if unread { style::TEXT } else { style::MUTED }, 18.0),
         container(
             text(label)
                 .size(15)
@@ -284,16 +320,9 @@ fn sidebar_row<'a>(
         .style(style::row_button(selected, unread));
     // A voice or Stage row: the row joins the call, this opens its text chat.
     let content: Element<'a, Message> = match chat {
-        Some(open) => row![
-            main,
-            button(text("Chat").size(11))
-                .on_press(open)
-                .height(ROW_HEIGHT - 2.0)
-                .padding([4, 6])
-                .style(style::tool_button(selected, false)),
-        ]
-        .spacing(4)
-        .into(),
+        Some(open) => row![main, icons::tool(Icon::Chat, "Open channel chat", open),]
+            .spacing(4)
+            .into(),
         None => main.into(),
     };
     container(content)
@@ -456,7 +485,12 @@ fn sidebar<'a>(
     let list: Element<'a, Message> = if directs {
         let rows = snapshot.private_channels.rows.iter().map(|channel| {
             sidebar_row(
-                format!("@ {}", channel.label),
+                if channel.recipient.is_some() {
+                    Icon::Profile
+                } else {
+                    Icon::Group
+                },
+                channel.label.clone(),
                 channel.selected,
                 channel.unread,
                 channel.mentions,
@@ -470,6 +504,7 @@ fn sidebar<'a>(
         });
         column![
             sidebar_row(
+                Icon::Friends,
                 "Friends".to_owned(),
                 false,
                 false,
@@ -521,17 +556,17 @@ fn sidebar<'a>(
                 .clip(true)
                 .into();
             }
-            let prefix = match channel.kind {
-                ChannelKind::Text => "# ",
-                ChannelKind::Announcement => "\u{25B6} ",
-                ChannelKind::Voice if channel.stage => "\u{266B} ",
-                ChannelKind::Voice => "\u{266A} ",
-                ChannelKind::Thread => "    \u{21B3} ",
-                ChannelKind::Forum => "\u{2630} ",
-                ChannelKind::Category => "",
+            let kind = match channel.kind {
+                ChannelKind::Text => Icon::Channel,
+                ChannelKind::Announcement => Icon::Announcement,
+                ChannelKind::Voice if channel.stage => Icon::Stage,
+                ChannelKind::Voice => Icon::Audio,
+                ChannelKind::Thread => Icon::Thread,
+                ChannelKind::Forum => Icon::Forum,
+                ChannelKind::Category => Icon::ChevronDown,
             };
             let label = format!(
-                "{prefix}{}{}",
+                "{}{}",
                 channel.name,
                 if channel.kind == ChannelKind::Voice && !channel.permissions.connect {
                     " (no access)"
@@ -558,6 +593,7 @@ fn sidebar<'a>(
                 .filter(|_| voice)
                 .map(|guild| Message::SelectChannel(guild, channel.id));
             sidebar_row(
+                kind,
                 label,
                 channel.selected,
                 channel.unread,
@@ -611,7 +647,7 @@ fn header_with<'a>(
     .align_y(alignment::Vertical::Center);
     if let Some((label, message)) = call {
         line = line.push(
-            button(text(label).size(13))
+            button(icons::labeled(Icon::Call, label, 13))
                 .on_press(message)
                 .style(style::action_button(false)),
         );
@@ -624,33 +660,33 @@ fn header_with<'a>(
         );
     }
     if pins {
-        line = line.push(
-            button(text("Pins").size(13))
-                .on_press(Message::Pins(crate::pins::Event::Toggle))
-                .style(style::tool_button(true, false)),
-        );
+        line = line.push(icons::tool(
+            Icon::Pin,
+            "Pinned messages",
+            Message::Pins(crate::pins::Event::Toggle),
+        ));
     }
     if emoji {
-        line = line.push(
-            button(text("Emoji").size(13))
-                .on_press(Message::EmojiPicker(crate::emoji_picker::Event::Toggle))
-                .style(style::tool_button(true, false)),
-        );
-        line = line.push(
-            button(text("GIF").size(13))
-                .on_press(Message::Gif(crate::gif::Event::Toggle))
-                .style(style::tool_button(true, false)),
-        );
-        line = line.push(
-            button(text("Sticker").size(13))
-                .on_press(Message::Sticker(crate::sticker::Event::Toggle))
-                .style(style::tool_button(true, false)),
-        );
-        line = line.push(
-            button(text("Poll").size(13))
-                .on_press(Message::Poll(crate::poll_create::Event::Toggle))
-                .style(style::tool_button(true, false)),
-        );
+        line = line.push(icons::tool(
+            Icon::Emoji,
+            "Emoji",
+            Message::EmojiPicker(crate::emoji_picker::Event::Toggle),
+        ));
+        line = line.push(icons::tool(
+            Icon::Gif,
+            "GIF",
+            Message::Gif(crate::gif::Event::Toggle),
+        ));
+        line = line.push(icons::tool(
+            Icon::Sticker,
+            "Sticker",
+            Message::Sticker(crate::sticker::Event::Toggle),
+        ));
+        line = line.push(icons::tool(
+            Icon::Poll,
+            "Create poll",
+            Message::Poll(crate::poll_create::Event::Toggle),
+        ));
     }
     container(line)
         .padding([10, 16])

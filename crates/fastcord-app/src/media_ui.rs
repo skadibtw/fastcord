@@ -442,7 +442,7 @@ pub fn view(
     let length = metadata_duration_ms(attachment);
     let ids = (key.channel, key.message, key.attachment);
     let play = |label: &'static str| {
-        button(text(label).size(13))
+        button(crate::icons::labeled(crate::icons::Icon::Play, label, 13))
             .padding([2, 8])
             .on_press(Event::PlayAttachment {
                 channel_id: ids.0,
@@ -451,7 +451,16 @@ pub fn view(
             })
     };
     let small = |label: &'static str, control: Control| {
-        button(text(label).size(13))
+        use crate::icons::{self, Icon};
+        let kind = match label {
+            "Pause" => Icon::Pause,
+            "Replay" => Icon::Refresh,
+            "Play" => Icon::Play,
+            "Mute" => Icon::Audio,
+            "Unmute" => Icon::AudioMuted,
+            _ => Icon::Close,
+        };
+        button(icons::labeled(kind, label, 13))
             .padding([2, 8])
             .on_press(Event::Media(control))
     };

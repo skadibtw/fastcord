@@ -77,16 +77,20 @@ fn tile<'a>(
     let mut controls = row![text(label(tile, voice)).size(text_size).width(Length::Fill)]
         .spacing(6)
         .align_y(iced::alignment::Vertical::Center);
-    controls = controls.push(
-        button(text(if pinned { "Unpin" } else { "Pin" }).size(11))
-            .on_press(Message::PinTile(id.clone()))
-            .style(style::tool_button(pinned, false)),
-    );
-    controls = controls.push(
-        button(text(if full { "Exit full view" } else { "Full view" }).size(11))
-            .on_press(Message::FullTile((!full).then(|| id.clone())))
-            .style(style::tool_button(full, false)),
-    );
+    controls = controls.push(icons::tool(
+        if pinned { Icon::Unpin } else { Icon::Pin },
+        if pinned { "Unpin" } else { "Pin" },
+        Message::PinTile(id.clone()),
+    ));
+    controls = controls.push(icons::tool(
+        if full {
+            Icon::Restore
+        } else {
+            Icon::Fullscreen
+        },
+        if full { "Exit full view" } else { "Full view" },
+        Message::FullTile((!full).then(|| id.clone())),
+    ));
     if let TileId::Stream(key) = &id {
         if tile.session.failed() {
             controls = controls.push(
@@ -96,7 +100,7 @@ fn tile<'a>(
             );
         }
         controls = controls.push(
-            button(text("Stop watching").size(11))
+            button(icons::labeled(Icon::EyeOff, "Stop watching", 11))
                 .on_press(Message::UnwatchStream(key.clone()))
                 .style(style::action_button(true)),
         );
@@ -254,7 +258,8 @@ pub fn panel<'a>(
         )
         .on_press(Message::SetWindowFullscreen(!window_fullscreen))
         .style(style::tool_button(window_fullscreen, false)),
-        button(text("Back to messages").size(12)).on_press(Message::ShowStream(false)),
+        button(icons::labeled(Icon::Chat, "Back to messages", 12))
+            .on_press(Message::ShowStream(false)),
     ]
     .spacing(10)
     .align_y(iced::alignment::Vertical::Center);

@@ -11,3 +11,13 @@
 Dry run without publishing: `gh workflow run release.yml`; download the `release-dry-run` artifact.
 
 Artifacts are unsigned and unnotarized until signing secrets exist.
+
+Application artwork is committed in `assets/icons/` (sources and regeneration
+instructions in its README). Windows builds embed a multi-size ICO with the
+Windows SDK resource compiler; set `RC` if the SDK is installed outside the
+usual location. macOS archives include `fastcord.app/Contents/Resources/fastcord.icns`.
+Linux archives include `share/applications/fastcord.desktop` and hicolor PNG/SVG
+icons. For a user-local Linux installation, place the executable in
+`~/.local/bin/fastcord` (on PATH), copy `share/applications/fastcord.desktop` into
+`~/.local/share/applications/` and merge `share/icons/hicolor/` into
+`~/.local/share/icons/hicolor/`. The archive does not modify desktop settings.

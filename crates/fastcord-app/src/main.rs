@@ -110,13 +110,21 @@ fn call_signal(session: &Session, channel: Snowflake, signal: CallSignal) -> Tas
 }
 
 fn main() -> iced::Result {
+    #[cfg(debug_assertions)]
+    if std::env::args_os().any(|arg| arg == "--icon-gallery") {
+        return icons::gallery();
+    }
     // Before any thread exists: `time` refuses the local offset afterwards on Unix.
     localtime::init();
     render::application(App::boot, App::update, App::view)
         .title("fastcord")
         .theme(App::theme)
         .subscription(App::subscription)
-        .window_size((1080, 640))
+        .window(iced::window::Settings {
+            size: iced::Size::new(1080.0, 640.0),
+            icon: icons::window_icon(),
+            ..iced::window::Settings::default()
+        })
         .run()
 }
 
@@ -4396,7 +4404,10 @@ impl App {
 
     fn login_view(&self) -> Element<'_, Message> {
         let mut content = column![
-            text("fastcord").size(36),
+            row![
+                icons::sized(icons::Icon::Brand, style::BLURPLE, 40.0),
+                text("fastcord").size(36),
+            ].spacing(12).align_y(iced::Alignment::Center),
             text("Warning: third-party Discord clients violate Discord’s Terms of Service and may get your account banned. Use an alternate account. Never share your token; it grants access to your account. Never share your password or token with anyone but Discord and this app."),
             checkbox(self.acknowledged).label("I understand the risk and am using an alternate account").on_toggle(Message::Acknowledge),
             checkbox(self.memory_only).label("Memory-only session (do not save this login)").on_toggle(Message::MemoryOnly),

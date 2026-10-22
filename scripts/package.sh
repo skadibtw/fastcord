@@ -35,13 +35,22 @@ case "$target" in
     ;;
   *-apple-darwin)
     app="$stage/fastcord.app/Contents"
-    mkdir -p "$app/MacOS"
+    mkdir -p "$app/MacOS" "$app/Resources"
     cp "${bin_dir}/fastcord" "$app/MacOS/"
+    cp assets/icons/app/fastcord.icns "$app/Resources/"
     sed "s/@VERSION@/${version}/g" packaging/macos/Info.plist > "$app/Info.plist"
     tar -C "$(dirname "$stage")" -czf "${out}/${name}.tar.gz" "$name"
     ;;
   *-linux-gnu)
     cp "${bin_dir}/fastcord" "$stage/"
+    mkdir -p "$stage/share/applications" "$stage/share/icons/hicolor/scalable/apps"
+    cp packaging/linux/fastcord.desktop "$stage/share/applications/"
+    cp assets/icons/app/fastcord.svg "$stage/share/icons/hicolor/scalable/apps/fastcord.svg"
+    for size in 16 24 32 48 64 128 256 512; do
+      mkdir -p "$stage/share/icons/hicolor/${size}x${size}/apps"
+      cp "assets/icons/app/fastcord-${size}.png" \
+        "$stage/share/icons/hicolor/${size}x${size}/apps/fastcord.png"
+    done
     tar -C "$(dirname "$stage")" -czf "${out}/${name}.tar.gz" "$name"
     ;;
   *)

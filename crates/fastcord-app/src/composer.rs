@@ -877,7 +877,16 @@ fn reply_preview(content: &str) -> String {
 }
 
 fn small_button(label: &'static str, event: Event) -> Element<'static, Event> {
-    button(text(label).size(12))
+    use crate::icons::{self, Icon};
+    let kind = match label {
+        "Attach files" => Icon::Attach,
+        "Paste image" => Icon::Paste,
+        "Retry" | "Retry send" => Icon::Refresh,
+        "Edit" => Icon::Edit,
+        "Discard" => Icon::Delete,
+        _ => Icon::Close,
+    };
+    button(icons::labeled(kind, label, 12))
         .on_press(event)
         .padding(Padding {
             top: 2.0,
@@ -1202,9 +1211,17 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         controls = controls.push(text(note).size(12).style(text::secondary));
     }
     controls = controls.push(
-        button(text(label).size(13))
-            .on_press_maybe(submittable.then_some(Event::Send))
-            .padding([4, 14]),
+        button(crate::icons::labeled(
+            if editing {
+                crate::icons::Icon::Check
+            } else {
+                crate::icons::Icon::Send
+            },
+            label,
+            13,
+        ))
+        .on_press_maybe(submittable.then_some(Event::Send))
+        .padding([4, 14]),
     );
     layout.push(controls).into()
 }

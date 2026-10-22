@@ -525,6 +525,21 @@ Implement a reusable variable-height virtual list for message history and a fixe
 
 Caches are centralized with shared immutable assets; clones of lightweight handles must not clone decoded pixel arrays. Avatar/emoji/image decoding and disk access are asynchronous. Settings include token management, devices, suppression, and local media preferences. Connection and media errors are actionable inline state, not modal-error loops.
 
+### Application and interface icons
+
+Original fastcord artwork lives in `assets/icons/`. Its generator is the single
+source for 90 SVG glyphs and the compiled iced canvas catalog, on a 20 px grid
+with 1.7 px rounded strokes. Both wgpu and tiny-skia draw the same paths, without
+an icon font, runtime SVG decoder, network access or animation timer. Use 14 px
+for participant indicators, 16 px beside captions, 20 px for tools and 24 px in
+the rail. Compact actions retain tooltips; confirmation and file controls keep
+visible captions. Slash states remain distinguishable without color. The
+original speech/bolt mark identifies the app, login and Direct Messages rail
+entry. Windows embeds a multi-size ICO; macOS bundles declare an ICNS; Linux
+archives carry a desktop entry and hicolor PNG/SVG icons. The 64 px window icon
+is decoded once before the event loop starts. See `assets/icons/README.md` for
+regeneration and the offline native gallery (`--icon-gallery`, debug builds).
+
 No fixed 60 Hz subscription. Enable animation ticks only for currently visible animated emoji or ongoing media, and stop them on occlusion/inactivity. Baseline text navigation must remain usable while voice/video workers are busy.
 
 ## 11. Login and token storage

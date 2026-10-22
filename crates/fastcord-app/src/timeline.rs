@@ -901,7 +901,23 @@ fn row_state(row: &Row, interaction: Interaction) -> RowState {
 }
 
 fn row_button(label: &'static str, event: Event) -> button::Button<'static, Event> {
-    button(text(label).size(12))
+    use crate::icons::{self, Icon};
+    let kind = match label {
+        "Download" => Some(Icon::Download),
+        "Open" | "Open file" => Some(Icon::External),
+        "Load preview" | "View larger" => Some(Icon::Image),
+        "Delete" | "Discard" => Some(Icon::Delete),
+        "Retry" | "Retry send" => Some(Icon::Refresh),
+        "Edit" => Some(Icon::Edit),
+        "Close" | "Cancel" => Some(Icon::Close),
+        "Open thread" => Some(Icon::Thread),
+        _ => None,
+    };
+    let content = match kind {
+        Some(kind) => icons::labeled(kind, label, 12),
+        None => text(label).size(12).into(),
+    };
+    button(content)
         .on_press(event)
         .padding(Padding {
             top: 2.0,
@@ -910,6 +926,37 @@ fn row_button(label: &'static str, event: Event) -> button::Button<'static, Even
             left: 8.0,
         })
         .style(button::secondary)
+}
+
+/// Hover actions stay compact; confirmation and attachment buttons keep captions.
+fn message_tool(label: &'static str, event: Event) -> Element<'static, Event> {
+    use crate::icons::{self, Icon};
+    let kind = match label {
+        "Edit" => Icon::Edit,
+        "Delete" => Icon::Delete,
+        "Reply" => Icon::Reply,
+        "React" => Icon::React,
+        "Pin" => Icon::Pin,
+        "Unpin" => Icon::Unpin,
+        "Forward" => Icon::Forward,
+        "Thread" => Icon::Thread,
+        "Copy text" => Icon::Copy,
+        "Copy link" => Icon::Link,
+        "Copy ID" => Icon::Id,
+        "Show embeds" => Icon::Eye,
+        "Hide embeds" => Icon::EyeOff,
+        "Report" => Icon::Report,
+        "Back" => Icon::ChevronLeft,
+        _ => Icon::More,
+    };
+    icons::action(icons::Action {
+        icon: kind,
+        on_press: Some(event),
+        active: false,
+        danger: label == "Delete" || label == "Report",
+        tip: label.to_owned(),
+        badge: 0,
+    })
 }
 
 /// Size of the emoji image on a reaction chip.
@@ -1388,17 +1435,17 @@ fn message_view<'a>(
     let mut actions = row![].spacing(4);
     if interaction.more == Some(message_id) {
         actions = actions
-            .push(row_button(
+            .push(message_tool(
                 "Copy link",
                 Event::CopyLink {
                     channel_id,
                     message_id,
                 },
             ))
-            .push(row_button("Copy ID", Event::CopyId { message_id }));
+            .push(message_tool("Copy ID", Event::CopyId { message_id }));
         if show_embeds {
             let suppressed = message.embeds_suppressed();
-            actions = actions.push(row_button(
+            actions = actions.push(message_tool(
                 if suppressed {
                     "Show embeds"
                 } else {
@@ -1412,7 +1459,7 @@ fn message_view<'a>(
             ));
         }
         if show_report {
-            actions = actions.push(row_button(
+            actions = actions.push(message_tool(
                 "Report",
                 Event::Report {
                     channel_id,
@@ -1420,11 +1467,11 @@ fn message_view<'a>(
                 },
             ));
         }
-        actions = actions.push(row_button("Back", Event::More(None)));
+        actions = actions.push(message_tool("Back", Event::More(None)));
         return hover(base, actions_overlay(actions));
     }
     if show_own_actions {
-        actions = actions.push(row_button("Edit", edit)).push(row_button(
+        actions = actions.push(message_tool("Edit", edit)).push(message_tool(
             "Delete",
             Event::Delete {
                 channel_id,
@@ -1433,7 +1480,7 @@ fn message_view<'a>(
         ));
     }
     if show_reply {
-        actions = actions.push(row_button(
+        actions = actions.push(message_tool(
             "Reply",
             Event::Reply {
                 channel_id,
@@ -1442,7 +1489,7 @@ fn message_view<'a>(
         ));
     }
     if show_react {
-        actions = actions.push(row_button(
+        actions = actions.push(message_tool(
             "React",
             Event::React {
                 channel_id,
@@ -1451,7 +1498,7 @@ fn message_view<'a>(
         ));
     }
     if show_pin {
-        actions = actions.push(row_button(
+        actions = actions.push(message_tool(
             if message.pinned { "Unpin" } else { "Pin" },
             Event::SetPinned {
                 channel_id,
@@ -1461,7 +1508,7 @@ fn message_view<'a>(
         ));
     }
     if show_forward {
-        actions = actions.push(row_button(
+        actions = actions.push(message_tool(
             "Forward",
             Event::Forward {
                 channel_id,
@@ -1470,7 +1517,7 @@ fn message_view<'a>(
         ));
     }
     if show_thread {
-        actions = actions.push(row_button(
+        actions = actions.push(message_tool(
             "Thread",
             Event::StartThread {
                 channel_id,
@@ -1479,7 +1526,7 @@ fn message_view<'a>(
         ));
     }
     if show_copy {
-        actions = actions.push(row_button(
+        actions = actions.push(message_tool(
             "Copy text",
             Event::CopyText {
                 channel_id,
@@ -1487,7 +1534,7 @@ fn message_view<'a>(
             },
         ));
     }
-    actions = actions.push(row_button("More", Event::More(Some(message_id))));
+    actions = actions.push(message_tool("More", Event::More(Some(message_id))));
     hover(base, actions_overlay(actions))
 }
 
