@@ -164,6 +164,7 @@ fn describe(error: PostError) -> String {
                 refusal.message()
             ),
         },
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED.to_owned(),
         _ => "Discord did not accept the post. Try again.".to_owned(),
     }
 }

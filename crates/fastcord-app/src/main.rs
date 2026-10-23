@@ -82,6 +82,7 @@ mod threads;
 mod thumbs;
 mod timeline;
 mod ui_sound;
+mod unverified;
 mod variable_list;
 mod virtual_list;
 mod voice_log;
@@ -243,6 +244,8 @@ struct App {
     audio_preferences: audio_devices::Preferences,
     audio_settings: audio_devices::Settings,
     chat_settings_open: bool,
+    /// The unverified-writes list in the chat settings is expanded.
+    unverified_open: bool,
     /// Installed speech voices, listed when the chat settings open.
     speech_voices: Vec<fastcord_platform::speech::Voice>,
     audio_saving: Option<audio_devices::Preferences>,
@@ -430,6 +433,10 @@ enum Message {
     CloseAudioSettings,
     OpenChatSettings,
     CloseChatSettings,
+    /// Settings, Advanced: show or hide the unverified-writes list.
+    ToggleUnverifiedList,
+    /// Turns one group of unverified writes on or off for this session.
+    UnverifiedWrite(fastcord_discord::WriteGroup, bool),
     ChatPrefs(chat_prefs::Prefs),
     SpeechPrefs(speech::Prefs),
     SpeechVoices(Vec<fastcord_platform::speech::Voice>),
@@ -572,6 +579,7 @@ impl App {
                 audio_preferences: audio_devices::Preferences::default(),
                 audio_settings: audio_devices::Settings::default(),
                 chat_settings_open: false,
+                unverified_open: false,
                 speech_voices: Vec::new(),
                 audio_saving: None,
                 camera_list: gateway::CameraList::default(),
@@ -1394,6 +1402,12 @@ impl App {
             Message::SpeechTest => speech::speak("This is how messages will sound.".to_owned()),
             Message::StopSpeech => speech::stop(),
             Message::CloseChatSettings => self.chat_settings_open = false,
+            Message::ToggleUnverifiedList => self.unverified_open = !self.unverified_open,
+            Message::UnverifiedWrite(group, on) => {
+                if let Phase::Account { session, .. } = &self.phase {
+                    session.client.set_write_group(group, on);
+                }
+            }
             Message::ChatPrefs(prefs) => {
                 self.audio_preferences.chat = prefs;
                 chat_prefs::apply(prefs);
@@ -2001,9 +2015,10 @@ impl App {
                 }
             }
             Message::CallSignalled(result) => {
-                self.notice = result
-                    .err()
-                    .map(|_| "The call request failed; try again.".to_owned());
+                self.notice = result.err().map(|error| match error {
+                    RestError::WriteNotVerified(_) => error.to_string(),
+                    _ => "The call request failed; try again.".to_owned(),
+                });
             }
             Message::LeaveVoice => {
                 self.stage.reset();
@@ -3202,6 +3217,8 @@ impl App {
     ) -> Option<(Snowflake, Option<crate::attachments::AttachmentCache>)> {
         self.switcher = switcher::State::default();
         self.nav_pending = false;
+        // The switch lives in the account's client, which is dropped with it.
+        self.unverified_open = false;
         if let Phase::Account { gateway, .. } = &mut self.phase {
             // Drafts live in memory only; logout forgets them at once.
             gateway.composer.clear();
@@ -3382,6 +3399,9 @@ impl App {
     fn enter_account(&mut self, session: Arc<Session>, persistence: Persistence) -> Task<Message> {
         self.gateway_sessions += 1;
         let id = self.gateway_sessions;
+        if fake_mode() {
+            unverified::enable_all(&session.client);
+        }
         let controls = gateway::NavigationBridge::new();
         controls.set_account_id(session.user.id);
         controls.set_volume_settings(voice_settings::load(session.user.id));
@@ -4844,6 +4864,13 @@ impl App {
                         error: speech::error(),
                         speaking: speech::speaking(),
                     },
+                    unverified::view(
+                        match &self.phase {
+                            Phase::Account { session, .. } => Some(&session.client),
+                            _ => None,
+                        },
+                        self.unverified_open,
+                    ),
                 )]
                 .padding(12),
             ))
@@ -6437,6 +6464,27 @@ mod tests {
                 .unwrap()
                 .contains("official Discord client")
         );
+    }
+
+    #[tokio::test]
+    async fn the_unverified_write_switch_is_session_only_and_resets_on_logout() {
+        use fastcord_discord::WriteGroup;
+        let mut app = login_app();
+        let session = authenticate(&mut app, Persistence::Saved);
+        let _ = app.update(Message::UnverifiedWrite(WriteGroup::Reports, true));
+        let _ = app.update(Message::UnverifiedWrite(WriteGroup::Typing, false));
+        assert!(session.client.write_group_enabled(WriteGroup::Reports));
+        assert!(!session.client.write_group_enabled(WriteGroup::Typing));
+        drop(session);
+        let _ = app.update(Message::ToggleUnverifiedList);
+        assert!(app.unverified_open);
+        let _ = app.update(Message::Logout);
+        assert!(!app.unverified_open);
+        let _ = app.update(Message::Deleted(Ok(())));
+        // The next sign-in has a new client with the defaults, not the old switch.
+        let next = authenticate(&mut app, Persistence::MemoryOnly);
+        assert!(!next.client.write_group_enabled(WriteGroup::Reports));
+        assert!(next.client.write_group_enabled(WriteGroup::Typing));
     }
 
     #[tokio::test]

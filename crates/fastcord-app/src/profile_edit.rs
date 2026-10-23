@@ -133,6 +133,7 @@ fn describe(error: ProfileRequestError, action: Action) -> String {
             "Discord did not confirm. The change may have been applied; reopen this panel to check before trying again. What you typed is kept."
                 .to_owned()
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED.to_owned(),
         other => format!("The request failed: {other}."),
     }
 }

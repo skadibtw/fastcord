@@ -321,7 +321,11 @@ fn speech_rows<'a>(speech: &SpeechView<'a>) -> Element<'a, Message> {
     .into()
 }
 
-pub fn view<'a>(prefs: Prefs, speech: &SpeechView<'a>) -> Element<'a, Message> {
+pub fn view<'a>(
+    prefs: Prefs,
+    speech: &SpeechView<'a>,
+    advanced: Element<'a, Message>,
+) -> Element<'a, Message> {
     let set = move |edit: fn(&mut Prefs, bool)| {
         move |on| {
             let mut next = prefs;
@@ -357,6 +361,7 @@ pub fn view<'a>(prefs: Prefs, speech: &SpeechView<'a>) -> Element<'a, Message> {
             ]
             .spacing(12),
             speech_rows(speech),
+            advanced,
             text("Tab moves between these controls and Space toggles them. The interface has no screen-reader support yet (the toolkit exposes no accessibility tree), and spellcheck is not available in the message box.").size(12),
             button("Close").on_press(Message::CloseChatSettings),
         ]

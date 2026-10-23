@@ -9,7 +9,7 @@ use fastcord_model::Snowflake;
 use reqwest::Method;
 
 use crate::image_data::{ImageError, MAX_IMAGE_BYTES, data_uri};
-use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route};
+use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route, WriteGroup};
 
 /// Longest group name Discord accepts.
 pub const MAX_GROUP_NAME_CHARS: usize = 100;
@@ -136,6 +136,7 @@ impl<C: Clock> RestClient<C> {
             Route::new(Method::PATCH, &format!("/channels/{channel}"))?,
             Priority::UserWrite,
         )
+        .in_group(WriteGroup::GroupDm)
         .json(&body)?;
         self.execute(request).await?;
         Ok(())
@@ -148,7 +149,8 @@ impl<C: Clock> RestClient<C> {
         channel: Snowflake,
         silent: bool,
     ) -> Result<(), RestError> {
-        let request = RestRequest::new(close_route(channel, silent)?, Priority::UserWrite);
+        let request = RestRequest::new(close_route(channel, silent)?, Priority::UserWrite)
+            .in_group(WriteGroup::GroupDm);
         self.execute(request).await.map(drop)
     }
 }

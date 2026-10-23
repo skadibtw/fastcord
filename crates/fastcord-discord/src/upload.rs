@@ -97,6 +97,7 @@ impl UploadError {
             }
             Self::Rejected(413) => "The file is larger than your account or this server allows.",
             Self::Rejected(_) => "The upload service refused the file.",
+            Self::Rest(RestError::WriteNotVerified(_)) => crate::WRITE_NOT_VERIFIED,
             Self::Rest(RestError::PermissionDenied) => "You cannot attach files in this channel.",
             Self::Rest(RestError::AuthenticationRequired) => {
                 "Discord no longer accepts this login."

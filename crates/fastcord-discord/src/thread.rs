@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::send::{MAX_CONTENT_CHARS, MentionPolicy, SendError, WireAttachment, wire_attachments};
 use crate::upload::UploadedFile;
-use crate::{Clock, Method, Priority, RestClient, RestError, RestRequest, Route};
+use crate::{Clock, Method, Priority, RestClient, RestError, RestRequest, Route, WriteGroup};
 
 /// Archived threads per page (the `limit` asked for, and the most accepted).
 pub const ARCHIVED_PAGE_SIZE: usize = 25;
@@ -343,6 +343,7 @@ impl<C: Clock> RestClient<C> {
             Route::new(Method::PATCH, &format!("/channels/{thread}"))?,
             Priority::UserWrite,
         )
+        .in_group(WriteGroup::Threads)
         .with_error_detail()
         .json(&body)?;
         self.execute(request).await.map(drop)

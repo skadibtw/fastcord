@@ -120,6 +120,7 @@ pub fn edit_failure(error: RestError) -> &'static str {
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
             "Discord did not confirm the edit; it may have been saved. Retrying is safe."
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
         _ => "The edit could not be saved.",
     }
 }
@@ -135,6 +136,7 @@ pub fn delete_failure(error: RestError) -> &'static str {
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge => {
             "Discord did not confirm the deletion; it may already be gone. Retrying is safe."
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
         _ => "The message could not be deleted.",
     }
 }

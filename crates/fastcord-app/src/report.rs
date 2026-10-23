@@ -163,6 +163,7 @@ fn describe(error: ReportRequestError, submitting: bool) -> Failure {
     };
     match rest {
         RestError::AuthenticationRequired => refused("Your session has expired. Log in again.", false),
+        RestError::WriteNotVerified(_) => refused(fastcord_discord::WRITE_NOT_VERIFIED, false),
         RestError::PermissionDenied => refused(
             "Discord refused this report for this account; it may need a verification or age check only the official client can complete.",
             true,

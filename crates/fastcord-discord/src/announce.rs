@@ -13,7 +13,7 @@ use fastcord_model::Snowflake;
 use reqwest::Method;
 use serde::Deserialize;
 
-use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route};
+use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route, WriteGroup};
 
 /// Followed destinations kept from one answer.
 pub const MAX_FOLLOWERS: usize = 100;
@@ -135,7 +135,8 @@ impl<C: Clock> RestClient<C> {
 
     /// Unfollows by deleting the follower webhook.
     pub async fn delete_follower(&self, webhook: Snowflake) -> Result<(), RestError> {
-        let request = write(Method::DELETE, &webhook_path(webhook))?;
+        let request =
+            write(Method::DELETE, &webhook_path(webhook))?.in_group(WriteGroup::Announcements);
         self.execute(request).await.map(drop)
     }
 }

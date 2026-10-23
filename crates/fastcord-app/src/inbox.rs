@@ -165,6 +165,7 @@ pub fn describe(error: RestError) -> &'static str {
             "Discord is rate limiting this. Try again shortly."
         }
         RestError::Retryable(_) | RestError::Http(_) => "Discord failed. Try again.",
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
         _ => "The inbox request failed.",
     }
 }

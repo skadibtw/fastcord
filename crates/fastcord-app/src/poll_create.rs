@@ -90,7 +90,12 @@ impl Default for State {
 }
 
 fn describe_send(error: SendError) -> &'static str {
-    if error.is_ambiguous() {
+    if matches!(
+        error.cause(),
+        fastcord_discord::RestError::WriteNotVerified(_)
+    ) {
+        fastcord_discord::WRITE_NOT_VERIFIED
+    } else if error.is_ambiguous() {
         "The poll may have been created. Check the conversation; pressing Create again will not make a second copy of the same poll."
     } else {
         "Discord did not create the poll. You may lack the permission to create polls here."

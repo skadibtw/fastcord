@@ -514,6 +514,7 @@ impl SendError {
             // Refusals, and failures before anything was dispatched.
             | RestError::AccountVerificationRequired
             | RestError::NotificationWritesPaused
+            | RestError::WriteNotVerified(_)
             | RestError::AuthenticationRequired
             | RestError::PermissionDenied
             | RestError::Refused(_)

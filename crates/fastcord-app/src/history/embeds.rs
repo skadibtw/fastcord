@@ -50,6 +50,7 @@ pub fn failure(error: RestError) -> &'static str {
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
             "Discord did not confirm the change; it may have been applied. Trying again is safe."
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
         _ => "The link previews could not be changed.",
     }
 }

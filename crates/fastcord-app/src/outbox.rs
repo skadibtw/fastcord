@@ -246,6 +246,7 @@ fn reason(error: SendError, reply: bool) -> &'static str {
             RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
                 "Could not reach Discord; the message was not sent."
             }
+            RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
             _ => "The message could not be sent.",
         },
         SendError::Ambiguous(error) => match error {

@@ -2237,8 +2237,14 @@ impl Worker {
                 self.tracker.navigation_dirty = true;
             }
             Err(error) => {
+                let detail = match error {
+                    PrivateChannelError::Rest(
+                        error @ fastcord_discord::RestError::WriteNotVerified(_),
+                    ) => error.to_string(),
+                    other => format!("{other:?}"),
+                };
                 self.bridge
-                    .set_private_notice(format!("Could not open direct conversation: {error:?}"));
+                    .set_private_notice(format!("Could not open direct conversation: {detail}"));
                 self.tracker.navigation_dirty = true;
             }
         }

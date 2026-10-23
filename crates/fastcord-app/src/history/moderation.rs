@@ -88,6 +88,7 @@ pub fn failure(error: BulkRequestError) -> &'static str {
         RestError::AccountVerificationRequired => {
             "Discord requires an account check. Requests are paused."
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
         _ => "Discord did not accept the request.",
     }
 }

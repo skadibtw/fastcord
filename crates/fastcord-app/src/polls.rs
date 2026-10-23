@@ -59,6 +59,7 @@ pub fn failure(kind: &Kind, error: RestError) -> &'static str {
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
             "Discord did not confirm the change; it may have been applied. Check the poll before trying again."
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
         _ => "The poll could not be changed.",
     }
 }

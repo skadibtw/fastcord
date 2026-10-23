@@ -67,6 +67,7 @@ mod thread;
 mod typing;
 mod upload;
 pub mod user_settings;
+mod write_group;
 mod ws;
 
 pub use account_security::{
@@ -103,7 +104,7 @@ pub use community_admin::{
     enable_community_body, fresh_id,
 };
 pub use edit::{EditedMessage, edit_response_update, is_own_message};
-pub use error::{NetworkFailure, Refusal, RestError, RetryableFailure};
+pub use error::{NetworkFailure, Refusal, RestError, RetryableFailure, WRITE_NOT_VERIFIED};
 pub use gateway::{ConnectionState, Gateway, GatewayEvent};
 pub use gif::{GIF_RESULTS, GifResult, MAX_GIF_QUERY_CHARS};
 pub use group_dm::{
@@ -194,3 +195,4 @@ pub use upload::{
     CHUNK as UPLOAD_CHUNK, MAX_FILENAME_CHARS, MAX_UPLOAD_BYTES, MAX_UPLOAD_FILES, UploadError,
     UploadFile, UploadProgress, UploadedFile, Uploader,
 };
+pub use write_group::WriteGroup;

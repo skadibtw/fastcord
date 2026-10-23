@@ -227,6 +227,7 @@ pub fn failure(error: RestError) -> &'static str {
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
             "Discord did not confirm the request; it may have been received. Check the conversation before trying again."
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
         _ => "The request could not be sent.",
     }
 }

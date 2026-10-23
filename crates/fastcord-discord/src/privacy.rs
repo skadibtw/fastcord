@@ -20,7 +20,7 @@ use reqwest::Method;
 use serde::Deserialize;
 
 use crate::history::{HistoryCursor, page_route, parse_page};
-use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route};
+use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route, WriteGroup};
 
 /// Messages shown when previewing a request.
 pub const PREVIEW_MESSAGES: usize = 5;
@@ -279,7 +279,8 @@ impl<C: Clock> RestClient<C> {
 
     /// Declines a message request by closing it.
     pub async fn decline_message_request(&self, channel: Snowflake) -> Result<(), RestError> {
-        let request = RestRequest::new(decline_route(channel)?, Priority::UserWrite);
+        let request = RestRequest::new(decline_route(channel)?, Priority::UserWrite)
+            .in_group(WriteGroup::Relationships);
         self.execute(request).await.map(drop)
     }
 

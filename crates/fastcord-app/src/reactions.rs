@@ -78,6 +78,7 @@ pub fn failure(action: Action, error: RestError) -> &'static str {
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
             "Discord did not confirm the reaction change; it may have been applied."
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
         _ => "The reaction could not be changed.",
     }
 }

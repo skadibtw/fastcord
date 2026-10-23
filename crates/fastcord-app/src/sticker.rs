@@ -87,7 +87,9 @@ fn describe(error: RestError) -> &'static str {
 }
 
 fn describe_send(error: SendError) -> &'static str {
-    if error.is_ambiguous() {
+    if matches!(error.cause(), RestError::WriteNotVerified(_)) {
+        fastcord_discord::WRITE_NOT_VERIFIED
+    } else if error.is_ambiguous() {
         "The sticker may have been delivered. Check the conversation before sending again."
     } else {
         "Discord did not send the sticker: it may be unavailable, or you may lack permission here."

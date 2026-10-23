@@ -140,6 +140,7 @@ pub fn failure(error: RestError) -> String {
         RestError::Retryable(_) => {
             "Discord did not answer. Check the list before trying again.".to_owned()
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED.to_owned(),
         other => format!("The request failed: {other}."),
     }
 }

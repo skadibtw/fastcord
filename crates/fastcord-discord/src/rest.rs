@@ -3,7 +3,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
 
@@ -17,7 +17,10 @@ use crate::attachment::{RefreshRequest, RefreshResponse, RefreshedAttachmentUrl}
 use crate::error::{ERROR_BODY_BYTE_BUDGET, Refusal, status_error};
 use crate::gateway::ClientProperties;
 use crate::rate_limit::{RateLimiter, ResponseLimits};
-use crate::{Clock, MonotonicClock, NetworkFailure, RestError, RetryableFailure, Route, UserToken};
+use crate::{
+    Clock, MonotonicClock, NetworkFailure, RestError, RetryableFailure, Route, UserToken,
+    WriteGroup,
+};
 
 const REQUEST_BODY_BYTE_BUDGET: usize = 1024 * 1024;
 const RESPONSE_BODY_BYTE_BUDGET: usize = 8 * 1024 * 1024;
@@ -40,6 +43,8 @@ pub struct RestRequest {
     content_type: Option<String>,
     error_detail: bool,
     audit_reason: Option<HeaderValue>,
+    /// Set by a caller whose route is shared with another feature.
+    group: Option<WriteGroup>,
 }
 
 /// Discord's audit-log reasons hold at most 512 characters.
@@ -73,6 +78,30 @@ impl RestRequest {
         self
     }
 
+    /// Names the write group of a route that several features share
+    /// (`PATCH /channels/{c}`, `PATCH /guilds/{g}`, `DELETE /webhooks/{id}`).
+    pub fn in_group(mut self, group: WriteGroup) -> Self {
+        self.group = Some(group);
+        self
+    }
+
+    /// The write group this request belongs to; meaningful for non-GET only.
+    pub fn write_group(&self) -> WriteGroup {
+        self.group.unwrap_or_else(|| {
+            // Only a JSON body is inspected; a multipart one is never a message.
+            let body = if self.content_type.is_none() {
+                self.body.as_deref()
+            } else {
+                None
+            };
+            WriteGroup::classify(
+                self.route.key().method(),
+                self.route.key().normalized(),
+                body,
+            )
+        })
+    }
+
     pub fn new(route: Route, priority: Priority) -> Self {
         let priority =
             if route.key().method() == Method::GET || route.key().method() == Method::HEAD {
@@ -87,6 +116,7 @@ impl RestRequest {
             content_type: None,
             error_detail: false,
             audit_reason: None,
+            group: None,
         }
     }
 
@@ -193,6 +223,8 @@ pub struct RestClient<C = MonotonicClock> {
     http: reqwest::Client,
     limiter: RateLimiter<C>,
     writes_restricted: Arc<AtomicBool>,
+    /// Bitmask of enabled `WriteGroup`s, shared by clones.
+    enabled_writes: Arc<AtomicU64>,
 }
 
 impl<C> Clone for RestClient<C> {
@@ -201,6 +233,7 @@ impl<C> Clone for RestClient<C> {
             http: self.http.clone(),
             limiter: self.limiter.clone(),
             writes_restricted: self.writes_restricted.clone(),
+            enabled_writes: self.enabled_writes.clone(),
         }
     }
 }
@@ -240,7 +273,13 @@ impl<C: Clock> RestClient<C> {
             http,
             limiter: RateLimiter::new(clock),
             writes_restricted: Arc::new(AtomicBool::new(false)),
+            enabled_writes: Arc::new(AtomicU64::new(WriteGroup::default_mask())),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn limiter(&self) -> &RateLimiter<C> {
+        &self.limiter
     }
 
     pub fn stop_authenticated_work(&self) {
@@ -251,13 +290,34 @@ impl<C: Clock> RestClient<C> {
         self.writes_restricted.load(Ordering::Acquire)
     }
 
+    /// Whether writes of `group` are sent (session-only; see `WriteGroup`).
+    pub fn write_group_enabled(&self, group: WriteGroup) -> bool {
+        group.in_mask(self.enabled_writes.load(Ordering::Acquire))
+    }
+
+    /// Turns one group of unverified writes on or off for this client and its clones.
+    pub fn set_write_group(&self, group: WriteGroup, on: bool) {
+        let _ = self
+            .enabled_writes
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |mask| {
+                Some(group.set_in(mask, on))
+            });
+    }
+
+    /// The one choke point for every non-GET request: a refused account stops
+    /// all writes, and a group that is not enabled fails before the limiter.
     fn check_write(&self, request: &RestRequest) -> Result<(), RestError> {
-        if self.writes_restricted()
-            && !matches!(*request.route.key().method(), Method::GET | Method::HEAD)
-        {
-            Err(RestError::AccountVerificationRequired)
-        } else {
+        if matches!(*request.route.key().method(), Method::GET | Method::HEAD) {
+            return Ok(());
+        }
+        if self.writes_restricted() {
+            return Err(RestError::AccountVerificationRequired);
+        }
+        let group = request.write_group();
+        if self.write_group_enabled(group) {
             Ok(())
+        } else {
+            Err(RestError::WriteNotVerified(group))
         }
     }
 
@@ -571,6 +631,11 @@ mod tests {
             Route::new(Method::GET, "/invites/abc123?with_counts=true").unwrap(),
             Priority::SpeculativeRead,
         );
+        assert_eq!(
+            client.check_write(&join()),
+            Err(RestError::WriteNotVerified(WriteGroup::InviteJoin))
+        );
+        client.set_write_group(WriteGroup::InviteJoin, true);
         assert!(client.check_write(&join()).is_ok());
         let captcha = br#"{"captcha_key":["captcha-required"],"captcha_sitekey":"k"}"#;
         assert!(client.observe_refusal(StatusCode::BAD_REQUEST, captcha));

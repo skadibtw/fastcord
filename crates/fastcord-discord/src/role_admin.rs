@@ -16,7 +16,7 @@ use reqwest::Method;
 use crate::guild_admin::placements_body;
 use crate::{
     AdminError, AdminRequestError, Clock, Placement, Priority, RestClient, RestError, RestRequest,
-    Route,
+    Route, WriteGroup,
 };
 
 pub const MAX_ROLE_NAME_CHARS: usize = 100;
@@ -225,7 +225,9 @@ impl<C: Clock> RestClient<C> {
         category: &[PermissionOverwrite],
     ) -> Result<(), AdminRequestError> {
         let body = sync_body(category).map_err(AdminRequestError::Invalid)?;
-        let request = write(Method::PATCH, &format!("/channels/{channel}"))?.json(&body)?;
+        let request = write(Method::PATCH, &format!("/channels/{channel}"))?
+            .in_group(WriteGroup::Roles)
+            .json(&body)?;
         self.execute(request).await?;
         Ok(())
     }

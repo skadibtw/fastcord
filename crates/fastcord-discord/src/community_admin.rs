@@ -17,7 +17,7 @@ use reqwest::Method;
 use serde_json::{Map, Value, json};
 
 use crate::invite::cut_at;
-use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route, Screening};
+use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route, Screening, WriteGroup};
 
 /// Rules a screening may list, and the characters of one rule.
 pub const MAX_RULES_EDITED: usize = 16;
@@ -998,7 +998,9 @@ impl<C: Clock> RestClient<C> {
         guild: Snowflake,
         body: &Value,
     ) -> Result<(), CommunityRequestError> {
-        let request = write(Method::PATCH, guild, "")?.json(body)?;
+        let request = write(Method::PATCH, guild, "")?
+            .in_group(WriteGroup::CommunityConfig)
+            .json(body)?;
         self.execute(request).await?;
         Ok(())
     }

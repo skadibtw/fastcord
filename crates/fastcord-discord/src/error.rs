@@ -116,6 +116,9 @@ impl fmt::Debug for Refusal {
     }
 }
 
+/// What a blocked write says; shown wherever a panel shows its refusal.
+pub const WRITE_NOT_VERIFIED: &str = "Not yet verified on a live account. Enable it under Settings → Advanced → Test unverified actions (alt account only).";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestError {
     /// Discord requires account verification or a challenge. All authenticated
@@ -123,6 +126,8 @@ pub enum RestError {
     AccountVerificationRequired,
     /// Notification-setting writes are quarantined pending live validation.
     NotificationWritesPaused,
+    /// The write's group is off: not yet verified on a live account. Nothing was sent.
+    WriteNotVerified(crate::WriteGroup),
     /// A 4xx refusal whose Discord error body was kept; only requests that
     /// opt in (`RestRequest::with_error_detail`) produce it.
     Refused(Refusal),
@@ -146,6 +151,7 @@ impl fmt::Display for RestError {
         match self {
             Self::AccountVerificationRequired => f.write_str("Discord requires account verification; open the official client before reconnecting"),
             Self::NotificationWritesPaused => f.write_str("Notification changes are paused pending validation; use the official Discord client"),
+            Self::WriteNotVerified(_) => f.write_str(WRITE_NOT_VERIFIED),
             Self::AuthenticationRequired => f.write_str("authentication is required"),
             Self::Refused(r) => write!(f, "request refused ({})", r.status),
             Self::PermissionDenied => f.write_str("permission denied for this resource"),

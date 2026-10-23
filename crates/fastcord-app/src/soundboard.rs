@@ -244,6 +244,7 @@ fn describe_play(error: &RestError) -> &'static str {
         RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting sounds. Wait a moment, then click again."
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
         _ => "The sound may have played. It is not sent again automatically.",
     }
 }

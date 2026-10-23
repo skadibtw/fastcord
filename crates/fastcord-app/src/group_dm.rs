@@ -100,6 +100,7 @@ fn describe(error: RestError) -> String {
             "Discord did not confirm. The change may have been applied; check the list before trying again."
                 .to_owned()
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED.to_owned(),
         other => format!("The request failed: {other}."),
     }
 }

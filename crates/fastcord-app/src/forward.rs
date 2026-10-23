@@ -106,6 +106,7 @@ fn describe(error: SendError) -> Outcome {
         RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this. Try again shortly."
         }
+        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
         _ => "Discord did not forward the message.",
     })
 }
