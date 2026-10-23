@@ -17,6 +17,7 @@ pub enum Command {
     Quit,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 impl Command {
     fn id(self) -> usize {
         self as usize + 1
@@ -99,12 +100,14 @@ pub fn set_state(state: State) {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn state() -> State {
     STATE.lock().map(|s| *s).unwrap_or_default()
 }
 
 /// The data of the ICO entry that is `size` pixels wide (the first if none is),
 /// as `CreateIconFromResourceEx` takes it (PNG or DIB bytes of one image).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn ico_entry(ico: &[u8], size: u8) -> Option<&[u8]> {
     let count = usize::from(u16::from_le_bytes([*ico.get(4)?, *ico.get(5)?]));
     let entry = |n: usize| -> Option<(u8, &[u8])> {

@@ -6583,7 +6583,9 @@ mod tests {
 
     #[tokio::test]
     async fn switching_tears_down_the_account_before_the_other_one_signs_in() {
-        let Ok(store) = NativeCredentialStore::new() else {
+        // The Linux Secret Service client blocks on its own runtime, which may not
+        // start inside this test's runtime.
+        let Ok(store) = std::thread::spawn(NativeCredentialStore::new).join().unwrap() else {
             return; // no native store on this machine
         };
         let mut app = login_app();
