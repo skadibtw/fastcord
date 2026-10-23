@@ -145,7 +145,7 @@ fn end_text(end: &ShareEnd) -> String {
         ShareEnd::Capture(CaptureError::SourceClosed) => {
             "The shared window or screen was closed, so sharing stopped.".to_owned()
         }
-        ShareEnd::Capture(CaptureError::PermissionDenied) => {
+        ShareEnd::Capture(CaptureError::PermissionDenied) if cfg!(windows) => {
             "Windows refused to capture this source (a privacy setting, a policy, or a protected window). Choose another window or screen.".to_owned()
         }
         ShareEnd::Capture(CaptureError::Unsupported(detail)) => (*detail).to_owned(),
@@ -733,7 +733,7 @@ mod tests {
         let Step::End(text) = session.on_progress(&progress) else {
             panic!("the share must end");
         };
-        assert!(text.starts_with("Windows refused to capture"), "{text}");
+        assert!(text.contains("refused to capture"), "{text}");
         assert!(
             !session.stream_created(),
             "no opcode 19 for a stream never created"

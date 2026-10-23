@@ -10,15 +10,17 @@
 //! stops and joins the thread, so no capture worker outlives a share.
 //!
 //! Windows.Graphics.Capture on Windows and xdg-desktop-portal ScreenCast with
-//! PipeWire on Linux (milestone 33; the portal's own dialog picks the source);
-//! macOS follows in milestone 34. Elsewhere every entry point reports
+//! PipeWire on Linux (milestone 33; the portal's own dialog picks the source),
+//! ScreenCaptureKit on macOS (milestone 34). Elsewhere every entry point reports
 //! [`CaptureError::Unsupported`].
 
 pub mod camera;
 pub mod convert;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod unsupported;
 #[cfg(windows)]
 pub mod windows;
@@ -32,7 +34,9 @@ use parking_lot::Mutex;
 
 #[cfg(target_os = "linux")]
 use linux as native;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+use macos as native;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 use unsupported as native;
 #[cfg(windows)]
 use windows as native;
@@ -251,6 +255,8 @@ impl fmt::Display for CaptureError {
             Self::Cancelled => f.write_str("no screen or window was chosen"),
             Self::PermissionDenied => f.write_str(if cfg!(windows) {
                 "Windows refused to capture this source (a privacy setting, a policy, or a protected window)"
+            } else if cfg!(target_os = "macos") {
+                "macOS refused to capture the screen: allow fastcord under System Settings, Privacy & Security, Screen Recording, then restart it"
             } else {
                 "the system refused to capture this source"
             }),
@@ -297,7 +303,10 @@ pub type StateObserver = Arc<dyn Fn(&CaptureState) + Send + Sync>;
 pub struct CaptureStatus {
     slot: Arc<Mutex<(u64, CaptureState)>>,
     // Only a backend notifies it.
-    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(windows, target_os = "linux", target_os = "macos")),
+        allow(dead_code)
+    )]
     observer: Option<StateObserver>,
 }
 
@@ -314,7 +323,10 @@ impl CaptureStatus {
         self.slot.lock().clone()
     }
 
-    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(windows, target_os = "linux", target_os = "macos")),
+        allow(dead_code)
+    )]
     fn set(&self, state: CaptureState) {
         {
             let mut current = self.slot.lock();
@@ -458,7 +470,10 @@ impl Control {
         }
     }
 
-    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(windows, target_os = "linux", target_os = "macos")),
+        allow(dead_code)
+    )]
     pub(crate) fn min_interval(&self) -> Duration {
         Duration::from_micros(self.min_interval_micros.load(Ordering::Relaxed))
     }
