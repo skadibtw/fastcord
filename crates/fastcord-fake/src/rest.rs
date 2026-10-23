@@ -117,7 +117,9 @@ pub fn handle(world: &mut World, req: &Request, ctx: &Ctx) -> Outcome {
                 tail @ ..,
             ],
         ) => react(world, method == "PUT", channel, message, emoji, tail),
-        ("POST", ["channels", channel, "messages", message, "ack"]) => ack(world, channel, message),
+        ("POST", ["channels", channel, "messages", message, "ack"]) => {
+            ack(world, channel, message, body.as_ref())
+        }
         ("POST", ["channels", channel, "typing"]) => match world.channel(channel) {
             Some(_) => no_content(Vec::new()),
             None => unknown_channel(),
@@ -419,10 +421,23 @@ fn react(
     no_content(vec![event(name, data)])
 }
 
-fn ack(world: &mut World, channel: &str, message: &str) -> Outcome {
+fn ack(world: &mut World, channel: &str, message: &str, body: Option<&Value>) -> Outcome {
     if world.channel(channel).is_none() {
         return unknown_channel();
     }
+    // Every answer carries a fresh token the next automatic ack must send
+    // back. A mismatch is counted, not refused, so a client that restarted its
+    // session can carry on.
+    let issued = world.ack_tokens.get(channel).copied();
+    let sent = body
+        .and_then(|body| body.get("token"))
+        .and_then(Value::as_str);
+    let manual = body.is_some_and(|body| body.get("manual").is_some());
+    if !manual && sent != issued.map(|n| format!("fake-ack-{n}")).as_deref() {
+        world.ack_token_mismatches += 1;
+    }
+    let next = issued.unwrap_or(0) + 1;
+    world.ack_tokens.insert(channel.to_owned(), next);
     match world
         .read_state
         .iter_mut()
@@ -437,7 +452,7 @@ fn ack(world: &mut World, channel: &str, message: &str) -> Outcome {
             .push(json!({"id": channel, "last_acked_id": message, "mention_count": 0})),
     }
     done(
-        Response::json(200, &json!({"token": null})),
+        Response::json(200, &json!({"token": format!("fake-ack-{next}")})),
         vec![event(
             "MESSAGE_ACK",
             json!({"channel_id": channel, "message_id": message, "version": 1, "mention_count": 0}),

@@ -38,6 +38,45 @@ pub(crate) fn invalid_session_delay(unit: f64) -> Duration {
     Duration::from_millis(1_000 + (4_000.0 * unit.clamp(0.0, 1.0)) as u64)
 }
 
+/// Identifies allowed in one rolling day. Resumes are not counted; a client
+/// that needs more is looping, so reconnecting stops until the user asks.
+pub(crate) const MAX_IDENTIFIES_PER_DAY: usize = 20;
+const IDENTIFY_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+/// Consecutive failed connection attempts before reconnecting stops.
+pub(crate) const MAX_FAILED_ATTEMPTS: u32 = 10;
+/// `GET /gateway` answers 403 this many times in a row before reconnecting
+/// stops (Cloudflare or a ban: asking again does not help).
+pub(crate) const MAX_DISCOVERY_FORBIDDEN: u32 = 2;
+
+/// Identifies sent in the last 24 hours, in memory only.
+#[derive(Default)]
+pub(crate) struct IdentifyBudget {
+    sent: VecDeque<Instant>,
+}
+
+impl IdentifyBudget {
+    fn prune(&mut self, now: Instant) {
+        while self
+            .sent
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= IDENTIFY_WINDOW)
+        {
+            self.sent.pop_front();
+        }
+    }
+
+    pub(crate) fn record(&mut self, now: Instant) {
+        self.prune(now);
+        self.sent.push_back(now);
+    }
+
+    /// Whether one more Identify stays within the daily allowance.
+    pub(crate) fn allows_another(&mut self, now: Instant) -> bool {
+        self.prune(now);
+        self.sent.len() < MAX_IDENTIFIES_PER_DAY
+    }
+}
+
 /// Documented ceiling: 120 commands per connection per 60 seconds.
 pub(crate) const SEND_LIMIT: usize = 120;
 pub(crate) const SEND_WINDOW: Duration = Duration::from_secs(60);
@@ -126,6 +165,22 @@ mod tests {
             assert!(delay >= previous);
             previous = delay;
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_identify_allowance_is_twenty_in_a_rolling_day() {
+        let mut budget = IdentifyBudget::default();
+        for _ in 0..MAX_IDENTIFIES_PER_DAY {
+            assert!(budget.allows_another(Instant::now()));
+            budget.record(Instant::now());
+            tokio::time::advance(Duration::from_secs(60)).await;
+        }
+        assert!(!budget.allows_another(Instant::now()));
+        // The first one leaves the window a day after it was sent.
+        tokio::time::advance(IDENTIFY_WINDOW - Duration::from_secs(60 * 20)).await;
+        assert!(budget.allows_another(Instant::now()));
+        budget.record(Instant::now());
+        assert!(!budget.allows_another(Instant::now()));
     }
 
     #[test]

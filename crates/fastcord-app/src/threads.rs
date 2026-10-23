@@ -110,7 +110,9 @@ fn describe(error: RestError) -> &'static str {
         RestError::PermissionDenied => "You are not allowed to do that with this thread.",
         RestError::ResourceGone => "That thread or message is gone.",
         RestError::AuthenticationRequired => "Discord no longer accepts this login.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this. Try again shortly."
         }
         RestError::Retryable(_) | RestError::Http(_) => "Discord failed. Try again.",

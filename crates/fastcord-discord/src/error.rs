@@ -118,9 +118,23 @@ impl fmt::Debug for Refusal {
 
 /// What a blocked write says; shown wherever a panel shows its refusal.
 pub const WRITE_NOT_VERIFIED: &str = "Not yet verified on a live account. Enable it under Settings → Advanced → Test unverified actions (alt account only).";
+/// Why writes are paused for a while (reads continue).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PauseReason {
+    /// Code 40003: direct messages are being opened too fast.
+    OpeningDirectMessagesTooFast,
+    /// Code 40062: a service resource is rate limited.
+    ServiceRateLimited,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestError {
+    /// Discord answered 429 five times in a row to one request; it was not
+    /// sent again.
+    RateLimited,
+    /// Writes (or only opening DMs) are paused for a while after a "slow down"
+    /// refusal; nothing was sent.
+    WritesPaused(PauseReason),
     /// Discord requires account verification or a challenge. All authenticated
     /// work stops for this client; use the official client before reconnecting.
     AccountVerificationRequired,
@@ -152,6 +166,9 @@ impl fmt::Display for RestError {
             Self::AccountVerificationRequired => f.write_str("Discord requires account verification; open the official client before reconnecting"),
             Self::NotificationWritesPaused => f.write_str("Notification changes are paused pending validation; use the official Discord client"),
             Self::WriteNotVerified(_) => f.write_str(WRITE_NOT_VERIFIED),
+            Self::RateLimited => f.write_str("Discord kept rate limiting this request"),
+            Self::WritesPaused(PauseReason::OpeningDirectMessagesTooFast) => f.write_str("Discord says direct messages are being opened too fast; opening DMs is paused for a while"),
+            Self::WritesPaused(PauseReason::ServiceRateLimited) => f.write_str("Discord is rate limiting changes; writes are paused for a minute"),
             Self::AuthenticationRequired => f.write_str("authentication is required"),
             Self::Refused(r) => write!(f, "request refused ({})", r.status),
             Self::PermissionDenied => f.write_str("permission denied for this resource"),

@@ -157,7 +157,9 @@ fn describe(error: RestError) -> &'static str {
         RestError::PermissionDenied => "You cannot search here.",
         RestError::ResourceGone => "This conversation is no longer available.",
         RestError::AuthenticationRequired => "Discord no longer accepts this login.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting searches. Try again shortly."
         }
         RestError::Retryable(_) | RestError::Http(_) => {

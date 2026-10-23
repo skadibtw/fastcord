@@ -37,8 +37,9 @@ mod tests;
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 pub use capabilities::{Capability, SELECTED as SELECTED_CAPABILITIES, selected_value};
 pub use event::{
@@ -76,6 +77,31 @@ pub struct Gateway {
     stream: StreamControl,
     /// Dropping the sender is the shutdown signal.
     _shutdown: oneshot::Sender<()>,
+    closer: GatewayCloser,
+}
+
+/// Closes the Gateway cleanly (close code 1000, so the session ends at once)
+/// and waits for the connection task to finish. Clones share one connection;
+/// holding one does not keep it alive.
+#[derive(Clone)]
+pub struct GatewayCloser {
+    request: Arc<watch::Sender<bool>>,
+    done: watch::Receiver<bool>,
+}
+
+impl GatewayCloser {
+    /// Asks the connection to close and waits up to `wait` for its task to end.
+    /// Returns whether it ended in time. Safe to call again or after the end.
+    pub async fn close(&self, wait: Duration) -> bool {
+        self.request.send_replace(true);
+        let mut done = self.done.clone();
+        // A dropped sender means the task is gone too.
+        tokio::time::timeout(wait, async {
+            done.wait_for(|ended| *ended).await.map(|_| ())
+        })
+        .await
+        .is_ok()
+    }
 }
 
 impl fmt::Debug for Gateway {
@@ -121,6 +147,11 @@ impl Gateway {
     pub fn streams(&self) -> StreamControl {
         self.stream.clone()
     }
+
+    /// The handle that closes this connection cleanly on Quit.
+    pub fn closer(&self) -> GatewayCloser {
+        self.closer.clone()
+    }
 }
 
 /// Decodes a recorded payload the way the connection would, for reducer tests.
@@ -144,7 +175,9 @@ fn start_with<T: Transport, J: JitterSource>(
     let (voice, voice_wanted) = VoiceStateControl::new();
     let (stream, stream_wanted) = StreamControl::new();
     let (shutdown, shutdown_signal) = oneshot::channel();
-    tokio::spawn(connection::run(
+    let (request, close) = watch::channel(false);
+    let (ended, done) = watch::channel(false);
+    let task = connection::run(
         transport,
         token,
         properties,
@@ -154,10 +187,19 @@ fn start_with<T: Transport, J: JitterSource>(
             subscriptions: wanted,
             voice: voice_wanted,
             stream: stream_wanted,
+            close,
         },
         shutdown_signal,
-    ));
+    );
+    tokio::spawn(async move {
+        task.await;
+        let _ = ended.send(true);
+    });
     Gateway {
+        closer: GatewayCloser {
+            request: Arc::new(request),
+            done,
+        },
         events,
         subscriptions,
         voice,

@@ -40,7 +40,10 @@ use super::decode::{Decoded, decode_dispatch, is_ready_family};
 use super::event::{ConnectionState, ReconnectReason, StopReason};
 use super::event::{Dispatch, GatewayEvent};
 use super::outbox::Outbox;
-use super::pacing::{JitterSource, SEND_WINDOW, SendBudget, backoff_delay, invalid_session_delay};
+use super::pacing::{
+    IdentifyBudget, JitterSource, MAX_DISCOVERY_FORBIDDEN, MAX_FAILED_ATTEMPTS, SEND_WINDOW,
+    SendBudget, backoff_delay, invalid_session_delay,
+};
 use super::profile::ClientProperties;
 use super::stream::StreamCommand;
 use super::subscription::{CONTROL_RESERVE, Subscriber, SubscriptionTarget};
@@ -93,11 +96,14 @@ type InterruptFuture = Pin<Box<dyn Future<Output = Interrupt> + Send>>;
 fn make_interrupt<T: Transport>(
     transport: Arc<T>,
     shutdown: oneshot::Receiver<()>,
+    mut close: watch::Receiver<bool>,
 ) -> InterruptFuture {
     Box::pin(async move {
         tokio::select! {
             biased;
             _ = shutdown => Interrupt::Shutdown,
+            // An explicit close (Quit) ends the session like dropping the handle.
+            Ok(()) = async { close.wait_for(|requested| *requested).await.map(|_| ()) } => Interrupt::Shutdown,
             () = transport.authentication_required() => Interrupt::AuthenticationRequired,
         }
     })
@@ -133,6 +139,8 @@ struct Driver<T: Transport, J: JitterSource> {
     subscriber: Subscriber,
     session: Option<Session>,
     identify_rejections: u32,
+    /// Identifies of the last 24 hours (not Resumes).
+    identifies: IdentifyBudget,
     stream: mpsc::Receiver<StreamCommand>,
     stream_pending: Option<StreamCommand>,
     /// The last opcode 4 this session accepted from us, across reconnects.
@@ -145,6 +153,8 @@ pub(crate) struct Wanted {
     pub(crate) subscriptions: watch::Receiver<SubscriptionTarget>,
     pub(crate) voice: watch::Receiver<Option<VoiceStateRequest>>,
     pub(crate) stream: mpsc::Receiver<StreamCommand>,
+    /// Becomes true when the owner asks for a clean close (Quit).
+    pub(crate) close: watch::Receiver<bool>,
 }
 
 pub(crate) async fn run<T: Transport, J: JitterSource>(
@@ -160,8 +170,9 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
         subscriptions,
         voice,
         stream,
+        close,
     } = wanted;
-    let interrupt = make_interrupt(Arc::clone(&transport), shutdown);
+    let interrupt = make_interrupt(Arc::clone(&transport), shutdown, close);
     let mut driver = Driver {
         transport,
         token,
@@ -173,6 +184,7 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
         subscriber: Subscriber::new(),
         session: None,
         identify_rejections: 0,
+        identifies: IdentifyBudget::default(),
         stream,
         stream_pending: None,
         voice,
@@ -201,8 +213,13 @@ async fn drive<T: Transport, J: JitterSource>(
 ) -> Result<Infallible, Terminal> {
     // The profile is fixed at Gateway start and passed in; reused by every Identify.
     let mut failures = 0u32;
+    let mut forbidden = 0u32;
     let mut base_url: Option<GatewayUrl> = None;
     loop {
+        // A fresh Identify past the daily allowance waits for the user.
+        if driver.session.is_none() && !driver.identifies.allows_another(Instant::now()) {
+            return Err(Terminal::Stop(StopReason::IdentifyBudget));
+        }
         driver.outbox.push(
             GatewayEvent::State(ConnectionState::Connecting { attempt: failures }),
             STATE_COST,
@@ -220,13 +237,21 @@ async fn drive<T: Transport, J: JitterSource>(
                             return Err(Terminal::Stop(StopReason::InvalidGatewayUrl));
                         };
                         base_url = Some(url.clone());
+                        forbidden = 0;
                         url
                     }
                     Err(DiscoverError::AuthenticationRequired) => {
                         return Err(Terminal::AuthenticationRequired);
                     }
-                    Err(DiscoverError::Failed) => {
+                    Err(error) => {
+                        if error == DiscoverError::Forbidden {
+                            forbidden += 1;
+                            if forbidden >= MAX_DISCOVERY_FORBIDDEN {
+                                return Err(Terminal::Stop(StopReason::DiscoveryForbidden));
+                            }
+                        }
                         failures = failures.saturating_add(1);
+                        give_up_after_failures(failures)?;
                         wait(driver, failures, ReconnectReason::DiscoveryFailed).await?;
                         continue;
                     }
@@ -238,6 +263,7 @@ async fn drive<T: Transport, J: JitterSource>(
                 Ok(socket) => socket,
                 Err(_) => {
                     failures = failures.saturating_add(1);
+                    give_up_after_failures(failures)?;
                     if driver.session.is_none() {
                         // Ask Discord for a fresh address after a failed connect.
                         base_url = None;
@@ -255,7 +281,16 @@ async fn drive<T: Transport, J: JitterSource>(
         } else {
             failures.saturating_add(1)
         };
+        give_up_after_failures(failures)?;
         wait(driver, failures, ended.reason).await?;
+    }
+}
+
+fn give_up_after_failures(failures: u32) -> Result<(), Terminal> {
+    if failures >= MAX_FAILED_ATTEMPTS {
+        Err(Terminal::Stop(StopReason::ReconnectFailures))
+    } else {
+        Ok(())
     }
 }
 
@@ -268,8 +303,9 @@ fn reconnect_delay(
         ReconnectReason::InvalidSession { resumable: false } => {
             invalid_session_delay(jitter.unit())
         }
-        // A connection that was healthy before it dropped resumes at once.
-        _ if failures == 0 => Duration::ZERO,
+        // Even a connection that was healthy before it dropped waits 1 to 5 s,
+        // so a server that closes on a timer is never answered instantly.
+        _ if failures == 0 => invalid_session_delay(jitter.unit()),
         _ => backoff_delay(failures, jitter.unit()),
     }
 }
@@ -480,6 +516,7 @@ async fn connection<T: Transport, J: JitterSource>(
         subscriber,
         session,
         identify_rejections,
+        identifies,
         stream,
         stream_pending,
         voice,
@@ -681,6 +718,9 @@ async fn connection<T: Transport, J: JitterSource>(
                         let payload = Zeroizing::new(payload);
                         outbox.push(GatewayEvent::State(state), STATE_COST);
                         conn.sent = sent;
+                        if sent == Sent::Identify {
+                            identifies.record(Instant::now());
+                        }
                         budget.record(Instant::now());
                         if !send(&mut socket, &payload).await {
                             break Ok((ReconnectReason::Network, true));
@@ -991,7 +1031,7 @@ mod tests {
     #[test]
     fn reconnect_delays_follow_the_reason_and_the_failure_streak() {
         let mut jitter = Fixed(1.0);
-        // A healthy connection that dropped resumes immediately.
+        // A healthy connection that dropped still waits 1 to 5 s, never zero.
         for reason in [
             ReconnectReason::ServerRequested,
             ReconnectReason::HeartbeatTimeout,
@@ -999,7 +1039,14 @@ mod tests {
             ReconnectReason::Network,
             ReconnectReason::InvalidSession { resumable: true },
         ] {
-            assert_eq!(reconnect_delay(reason, 0, &mut jitter), Duration::ZERO);
+            assert_eq!(
+                reconnect_delay(reason, 0, &mut jitter),
+                Duration::from_secs(5)
+            );
+            assert_eq!(
+                reconnect_delay(reason, 0, &mut Fixed(0.0)),
+                Duration::from_secs(1)
+            );
             assert_eq!(
                 reconnect_delay(reason, 3, &mut jitter),
                 Duration::from_secs(4)

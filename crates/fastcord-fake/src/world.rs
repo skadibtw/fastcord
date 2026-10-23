@@ -39,6 +39,10 @@ pub struct World {
     pub chatter: Chatter,
     /// Message id to the time it was pinned.
     pub pins: HashMap<String, String>,
+    /// Channel id to how many ack tokens were issued for it.
+    pub ack_tokens: HashMap<String, u64>,
+    /// Automatic acks that did not carry the token last issued for the channel.
+    pub ack_token_mismatches: u64,
     last_id: u64,
     invite_seq: u64,
 }
@@ -118,6 +122,8 @@ impl World {
                 friend: self::text(&chatter, "friend").to_owned(),
             },
             pins: HashMap::new(),
+            ack_tokens: HashMap::new(),
+            ack_token_mismatches: 0,
             last_id: 0,
             invite_seq: 0,
         };

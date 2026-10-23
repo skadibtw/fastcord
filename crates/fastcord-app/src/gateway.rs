@@ -954,6 +954,8 @@ pub struct NavigationBridge {
     voice_audio: watch::Sender<VoiceAudioState>,
     voice_controls: watch::Sender<VoiceControls>,
     account_id: Arc<Mutex<Option<Snowflake>>>,
+    /// Closes the live Gateway cleanly on Quit; set when the connection starts.
+    closer: Arc<Mutex<Option<fastcord_discord::gateway::GatewayCloser>>>,
     latest: Arc<Mutex<Latest>>,
     commands: mpsc::Sender<Command>,
     command_receiver: Arc<Mutex<Option<mpsc::Receiver<Command>>>>,
@@ -1050,6 +1052,7 @@ impl NavigationBridge {
             voice_audio,
             voice_controls,
             account_id: Arc::new(Mutex::new(None)),
+            closer: Arc::new(Mutex::new(None)),
             latest: Arc::default(),
             commands,
             command_receiver: Arc::new(Mutex::new(Some(receiver))),
@@ -1137,6 +1140,20 @@ impl NavigationBridge {
     pub fn voice_controls(&self) -> VoiceControls {
         self.voice_controls.borrow().clone()
     }
+    /// Closes the Gateway with code 1000 and waits up to `wait` for its task
+    /// to finish, so a quit never leaves a session open server-side. Does
+    /// nothing before the connection starts or after it ended.
+    pub async fn close_gateway(&self, wait: Duration) {
+        let closer = self
+            .closer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(closer) = closer {
+            closer.close(wait).await;
+        }
+    }
+
     pub fn set_account_id(&self, account_id: Snowflake) {
         *self.account_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(account_id);
     }
@@ -2162,16 +2179,22 @@ impl Worker {
         event: GatewayEvent,
         start_private_list: impl FnOnce(&mut Self),
     ) -> Option<GatewayStatus> {
-        let ready = matches!(
-            &event,
+        // READY that already lists the DMs makes the REST list redundant.
+        let ready = match &event {
             GatewayEvent::Dispatch {
-                event: Dispatch::Ready(_),
+                event: Dispatch::Ready(ready),
                 ..
-            }
-        );
+            } => Some(!ready.private_channels.is_empty()),
+            _ => None,
+        };
         let status = self.tracker.apply(event);
-        if ready {
-            start_private_list(self);
+        match ready {
+            Some(true) => {
+                let generation = self.begin_private_list_fetch();
+                self.private_list_loaded_generation = Some(generation);
+            }
+            Some(false) => start_private_list(self),
+            None => {}
         }
         status
     }
@@ -2237,14 +2260,14 @@ impl Worker {
                 self.tracker.navigation_dirty = true;
             }
             Err(error) => {
-                let detail = match error {
+                let notice = match error {
                     PrivateChannelError::Rest(
-                        error @ fastcord_discord::RestError::WriteNotVerified(_),
-                    ) => error.to_string(),
-                    other => format!("{other:?}"),
+                        error @ (fastcord_discord::RestError::WriteNotVerified(_)
+                        | fastcord_discord::RestError::WritesPaused(_)),
+                    ) => format!("Could not open direct conversation: {error}"),
+                    other => format!("Could not open direct conversation: {other:?}"),
                 };
-                self.bridge
-                    .set_private_notice(format!("Could not open direct conversation: {detail}"));
+                self.bridge.set_private_notice(notice);
                 self.tracker.navigation_dirty = true;
             }
         }
@@ -3288,7 +3311,13 @@ pub fn status_stream(
             Some(gateway) => gateway,
             None => {
                 let (rest, token, properties) = worker.start.take()?;
-                Gateway::start(rest, token, properties)
+                let gateway = Gateway::start(rest, token, properties);
+                *worker
+                    .bridge
+                    .closer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(gateway.closer());
+                gateway
             }
         };
         loop {
@@ -5264,6 +5293,21 @@ mod tests {
                 .is_some()
         );
         assert!(worker.bridge.consume().private_notice.is_none());
+    }
+
+    #[test]
+    fn ready_with_private_channels_skips_the_rest_list_and_without_them_fetches() {
+        let started = std::cell::Cell::new(0);
+        let mut worker = worker();
+        worker.apply_gateway_event(ready_event(0, 0, 2), |_| started.set(started.get() + 1));
+        assert_eq!(started.get(), 0, "READY already carried the DMs");
+        assert!(worker.private_list_task.is_none());
+        assert_eq!(
+            worker.private_list_loaded_generation,
+            Some(worker.private_list_generation)
+        );
+        worker.apply_gateway_event(ready_event(0, 0, 0), |_| started.set(started.get() + 1));
+        assert_eq!(started.get(), 1, "READY without DMs still fetches the list");
     }
 
     #[tokio::test]

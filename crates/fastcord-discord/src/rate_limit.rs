@@ -23,6 +23,9 @@ pub(crate) struct ResponseLimits {
     observed_at: Duration,
 }
 
+/// The wait after a 429 whose stated delay is zero.
+pub(crate) const MIN_RETRY_AFTER: Duration = Duration::from_secs(1);
+
 fn seconds(value: f64) -> Option<Duration> {
     Duration::try_from_secs_f64(value).ok()
 }
@@ -70,6 +73,12 @@ impl ResponseLimits {
         let delay = retry
             .max(self.header_retry())
             .ok_or(RestError::InvalidRateLimit)?;
+        // A stated delay of zero would make the reschedule loop spin.
+        let delay = if delay.is_zero() {
+            MIN_RETRY_AFTER
+        } else {
+            delay
+        };
         let until = self
             .observed_at
             .checked_add(delay)

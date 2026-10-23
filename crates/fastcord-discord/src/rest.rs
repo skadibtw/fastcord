@@ -2,7 +2,7 @@ use base64::Engine;
 use std::fmt;
 use std::io::{self, Write};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::attachment::{RefreshRequest, RefreshResponse, RefreshedAttachmentUrl};
-use crate::error::{ERROR_BODY_BYTE_BUDGET, Refusal, status_error};
+use crate::error::{ERROR_BODY_BYTE_BUDGET, PauseReason, Refusal, status_error};
 use crate::gateway::ClientProperties;
 use crate::rate_limit::{RateLimiter, ResponseLimits};
 use crate::{
@@ -25,6 +25,24 @@ use crate::{
 const REQUEST_BODY_BYTE_BUDGET: usize = 1024 * 1024;
 const RESPONSE_BODY_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 const RATE_LIMIT_BODY_BYTE_BUDGET: usize = 64 * 1024;
+
+/// One request is not rescheduled after this many 429s in a row.
+const MAX_CONSECUTIVE_429: u32 = 5;
+/// How long writes pause after a "slow down" refusal that names no delay. A
+/// minute is conservative for 40062 (the whole write side) and short enough
+/// not to look like a freeze; reads are never paused by it.
+const DEFAULT_WRITE_PAUSE: Duration = Duration::from_secs(60);
+/// Opening DMs stays blocked this long after 40003 when Discord names no delay.
+const DEFAULT_DM_PAUSE: Duration = Duration::from_secs(600);
+/// A stated delay is honoured up to this long.
+const MAX_PAUSE: Duration = Duration::from_secs(3600);
+
+/// Write pauses as monotonic deadlines on the limiter's clock.
+#[derive(Default)]
+struct WritePause {
+    all: Option<(Duration, PauseReason)>,
+    direct_messages: Option<Duration>,
+}
 
 /// FIFO within each priority; blocked writes do not stall unrelated reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -225,6 +243,7 @@ pub struct RestClient<C = MonotonicClock> {
     writes_restricted: Arc<AtomicBool>,
     /// Bitmask of enabled `WriteGroup`s, shared by clones.
     enabled_writes: Arc<AtomicU64>,
+    write_pause: Arc<Mutex<WritePause>>,
 }
 
 impl<C> Clone for RestClient<C> {
@@ -234,6 +253,7 @@ impl<C> Clone for RestClient<C> {
             limiter: self.limiter.clone(),
             writes_restricted: self.writes_restricted.clone(),
             enabled_writes: self.enabled_writes.clone(),
+            write_pause: self.write_pause.clone(),
         }
     }
 }
@@ -274,6 +294,7 @@ impl<C: Clock> RestClient<C> {
             limiter: RateLimiter::new(clock),
             writes_restricted: Arc::new(AtomicBool::new(false)),
             enabled_writes: Arc::new(AtomicU64::new(WriteGroup::default_mask())),
+            write_pause: Arc::default(),
         })
     }
 
@@ -307,11 +328,27 @@ impl<C: Clock> RestClient<C> {
     /// The one choke point for every non-GET request: a refused account stops
     /// all writes, and a group that is not enabled fails before the limiter.
     fn check_write(&self, request: &RestRequest) -> Result<(), RestError> {
-        if matches!(*request.route.key().method(), Method::GET | Method::HEAD) {
+        let method = request.route.key().method();
+        if matches!(*method, Method::GET | Method::HEAD) {
             return Ok(());
         }
         if self.writes_restricted() {
             return Err(RestError::AccountVerificationRequired);
+        }
+        let now = self.limiter.now();
+        let pause = self.write_pause.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((until, reason)) = pause.all
+            && now < until
+        {
+            return Err(RestError::WritesPaused(reason));
+        }
+        if let Some(until) = pause.direct_messages
+            && now < until
+            && request.route.key().normalized() == "/users/@me/channels"
+        {
+            return Err(RestError::WritesPaused(
+                PauseReason::OpeningDirectMessagesTooFast,
+            ));
         }
         let group = request.write_group();
         if self.write_group_enabled(group) {
@@ -319,6 +356,29 @@ impl<C: Clock> RestClient<C> {
         } else {
             Err(RestError::WriteNotVerified(group))
         }
+    }
+
+    /// 40003 and 40062 mean "slow down", not "stop": writes pause for a while
+    /// (40003 also keeps DM opens blocked longer), reads carry on. Returns the
+    /// error the refused request itself should report.
+    fn observe_slow_down(&self, body: &[u8]) -> Option<RestError> {
+        let value: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+        let named = value["retry_after"]
+            .as_f64()
+            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+            .map(|wait| wait.min(MAX_PAUSE));
+        let reason = match value["code"].as_u64()? {
+            40003 => PauseReason::OpeningDirectMessagesTooFast,
+            40062 => PauseReason::ServiceRateLimited,
+            _ => return None,
+        };
+        let now = self.limiter.now();
+        let mut pause = self.write_pause.lock().unwrap_or_else(|p| p.into_inner());
+        pause.all = Some((now + named.unwrap_or(DEFAULT_WRITE_PAUSE), reason));
+        if reason == PauseReason::OpeningDirectMessagesTooFast {
+            pause.direct_messages = Some(now + named.unwrap_or(DEFAULT_DM_PAUSE));
+        }
+        Some(RestError::WritesPaused(reason))
     }
 
     fn observe_refusal(&self, status: StatusCode, body: &[u8]) -> bool {
@@ -379,6 +439,7 @@ impl<C: Clock> RestClient<C> {
     }
 
     async fn execute_scheduled(&self, request: RestRequest) -> Result<RestResponse, RestError> {
+        let mut rate_limited = 0;
         loop {
             self.check_write(&request)?;
             let reservation = self
@@ -407,6 +468,8 @@ impl<C: Clock> RestClient<C> {
                 {
                     if self.observe_refusal(status, &body) {
                         error = RestError::AccountVerificationRequired;
+                    } else if let Some(paused) = self.observe_slow_down(&body) {
+                        error = paused;
                     } else if request.error_detail {
                         error = RestError::Refused(Refusal::from_body(status, &body));
                     }
@@ -422,8 +485,16 @@ impl<C: Clock> RestClient<C> {
                     reservation.complete(limits, None);
                     return Err(RestError::AccountVerificationRequired);
                 }
+                if let Some(paused) = self.observe_slow_down(&body) {
+                    reservation.complete(limits, None);
+                    return Err(paused);
+                }
                 let throttle = limits.throttle(&body)?;
                 reservation.complete(limits, Some(throttle));
+                rate_limited += 1;
+                if rate_limited >= MAX_CONSECUTIVE_429 {
+                    return Err(RestError::RateLimited);
+                }
                 continue;
             }
             let body = read_body(response, RESPONSE_BODY_BYTE_BUDGET).await?;
@@ -700,6 +771,90 @@ mod tests {
             assert!(!client.observe_refusal(StatusCode::FORBIDDEN, body));
         }
         assert!(!client.writes_restricted());
+    }
+
+    #[derive(Clone, Default)]
+    struct ManualClock(Arc<std::sync::atomic::AtomicU64>);
+
+    impl Clock for ManualClock {
+        fn now(&self) -> Duration {
+            Duration::from_secs(self.0.load(Ordering::SeqCst))
+        }
+
+        async fn sleep_until(&self, _deadline: Duration) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[test]
+    fn slow_down_codes_pause_writes_not_reads_and_40003_also_blocks_dm_opens() {
+        let clock = ManualClock::default();
+        let client = RestClient::with_clock(
+            UserToken::new("offline-test-credential".to_owned()),
+            clock.clone(),
+            ClientProperties::web(HostOs::Linux, "en-US", 1),
+        )
+        .unwrap();
+        // A plain text message (on by default); opening DMs needs its group.
+        client.set_write_group(crate::WriteGroup::OpenDm, true);
+        let write = |path: &str| {
+            RestRequest::new(Route::new(Method::POST, path).unwrap(), Priority::UserWrite)
+                .json(&serde_json::json!({"content": "hi"}))
+                .unwrap()
+        };
+        let read = RestRequest::new(
+            Route::new(Method::GET, "/users/@me").unwrap(),
+            Priority::UserRead,
+        );
+        // 40062: every write waits a minute; reads and the account carry on.
+        assert_eq!(
+            client.observe_slow_down(br#"{"code":40062}"#),
+            Some(RestError::WritesPaused(PauseReason::ServiceRateLimited))
+        );
+        assert!(!client.writes_restricted());
+        assert_eq!(
+            client.check_write(&write("/channels/1/messages")),
+            Err(RestError::WritesPaused(PauseReason::ServiceRateLimited))
+        );
+        assert!(client.check_write(&read).is_ok());
+        clock.0.store(59, Ordering::SeqCst);
+        assert!(client.check_write(&write("/channels/1/messages")).is_err());
+        clock.0.store(61, Ordering::SeqCst);
+        assert!(client.check_write(&write("/channels/1/messages")).is_ok());
+
+        // 40003: writes pause briefly, opening DMs stays blocked for 10 minutes.
+        assert_eq!(
+            client.observe_slow_down(br#"{"code":40003,"message":"too fast"}"#),
+            Some(RestError::WritesPaused(
+                PauseReason::OpeningDirectMessagesTooFast
+            ))
+        );
+        let open = write("/users/@me/channels");
+        assert!(client.check_write(&open).is_err());
+        clock.0.store(61 + 120, Ordering::SeqCst);
+        assert!(client.check_write(&write("/channels/1/messages")).is_ok());
+        assert_eq!(
+            client.check_write(&open),
+            Err(RestError::WritesPaused(
+                PauseReason::OpeningDirectMessagesTooFast
+            ))
+        );
+        clock.0.store(61 + 601, Ordering::SeqCst);
+        assert!(client.check_write(&open).is_ok());
+
+        // A stated retry_after replaces both defaults.
+        client.observe_slow_down(br#"{"code":40003,"retry_after":5.5}"#);
+        clock.0.store(61 + 601 + 6, Ordering::SeqCst);
+        assert!(client.check_write(&open).is_ok());
+        // Other codes and unreadable bodies are not slow-down signals.
+        for body in [
+            br#"{"code":50013}"#.as_slice(),
+            br#"{"code":40002}"#,
+            b"nope",
+            b"",
+        ] {
+            assert_eq!(client.observe_slow_down(body), None);
+        }
     }
 
     #[test]

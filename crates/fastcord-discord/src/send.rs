@@ -515,6 +515,8 @@ impl SendError {
             | RestError::AccountVerificationRequired
             | RestError::NotificationWritesPaused
             | RestError::WriteNotVerified(_)
+            | RestError::WritesPaused(_)
+            | RestError::RateLimited
             | RestError::AuthenticationRequired
             | RestError::PermissionDenied
             | RestError::Refused(_)

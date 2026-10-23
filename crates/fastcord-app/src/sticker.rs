@@ -78,7 +78,9 @@ fn describe(error: RestError) -> &'static str {
             "Discord did not let this account list stickers here."
         }
         RestError::ResourceGone => "This server's stickers are no longer available.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this request. Try again shortly."
         }
         RestError::Retryable(_) | RestError::Http(_) => "Stickers could not be loaded. Try again.",

@@ -145,7 +145,9 @@ fn describe(error: PostError) -> String {
         }
         RestError::ResourceGone => "This forum no longer exists.".to_owned(),
         RestError::AuthenticationRequired => "Discord no longer accepts this login.".to_owned(),
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this. Try again shortly.".to_owned()
         }
         RestError::RequestBodyTooLarge => "The post is too large.".to_owned(),

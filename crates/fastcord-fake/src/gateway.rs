@@ -242,8 +242,16 @@ pub(crate) async fn serve(shared: Arc<Shared>, stream: TcpStream) {
     {
         return;
     }
+    let close_after = shared.switches.close_gateway_every;
+    let close_timer = tokio::time::sleep(close_after.unwrap_or(Duration::MAX));
+    tokio::pin!(close_timer);
     loop {
         tokio::select! {
+            () = &mut close_timer, if close_after.is_some() => {
+                // Resumable: the session survives, the client must come back.
+                connection.close(4000, "fake: scheduled close").await;
+                break;
+            }
             message = connection.socket.next() => match message {
                 Some(Ok(Message::Text(raw))) => {
                     if !connection.on_text(raw.as_str()).await {

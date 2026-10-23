@@ -40,7 +40,9 @@ pub fn failure(error: RestError) -> &'static str {
             "Discord did not allow changing this message's link previews."
         }
         RestError::ResourceGone => "That message is no longer available.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this. Try again shortly."
         }
         RestError::Http(_) => "Discord rejected the change to the link previews.",

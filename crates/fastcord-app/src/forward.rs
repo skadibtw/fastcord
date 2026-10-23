@@ -103,7 +103,9 @@ fn describe(error: SendError) -> Outcome {
             "The destination or the original message is no longer available."
         }
         RestError::AuthenticationRequired => "Sign-in is required again.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this. Try again shortly."
         }
         RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,

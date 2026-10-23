@@ -161,7 +161,9 @@ pub fn describe(error: RestError) -> &'static str {
         RestError::PermissionDenied => "Discord does not allow this.",
         RestError::ResourceGone => "That conversation is gone.",
         RestError::AuthenticationRequired => "Discord no longer accepts this login.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this. Try again shortly."
         }
         RestError::Retryable(_) | RestError::Http(_) => "Discord failed. Try again.",

@@ -106,6 +106,8 @@ use zeroize::Zeroize;
 
 const MAX_PRIVATE_RECIPIENT_INPUT_BYTES: usize = 256;
 const MAX_PRIVATE_RECIPIENTS: usize = fastcord_discord::MAX_PRIVATE_RECIPIENTS;
+/// How long Quit waits for the Gateway to close before exiting anyway.
+const QUIT_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Lands an inbox jump in the open conversation `channel`.
 fn inbox_jump(controls: &gateway::NavigationBridge, channel: Snowflake, target: inbox::Target) {
@@ -534,9 +536,12 @@ enum Message {
     Forwarded(fastcord_platform::instance::Forwarded),
     /// The window's close button: hide to the tray or quit, per the setting.
     CloseRequested,
-    /// Leave any call and exit.
+    /// Leave any call, close the Gateway cleanly and exit.
     Quit,
     Exit,
+    /// The Reconnect button after fastcord's own reconnect limits stopped the
+    /// Gateway: a fresh connection with fresh counters.
+    ReconnectGateway,
     CloseToTrayToggled(bool),
     AutostartToggled(bool),
     /// Enter or leave compact call mode (small, always on top).
@@ -1248,20 +1253,56 @@ impl App {
             }
             Message::Quit => {
                 // Leaving the call first lets the server drop the voice state at
-                // once; the process exit then releases every device and socket.
-                if !self.call_active() {
+                // once. The Gateway then closes with 1000 (waiting at most 2 s
+                // for its task) so the session ends instead of lingering until a
+                // heartbeat times out; the process exit releases the rest.
+                let in_call = self.call_active();
+                let controls = match &self.phase {
+                    Phase::Account { gateway, .. } => Some(gateway.controls.clone()),
+                    _ => None,
+                };
+                if !in_call && controls.is_none() {
                     return iced::exit();
                 }
-                let leave = self.handle(Message::LeaveVoice);
+                let leave = if in_call {
+                    self.handle(Message::LeaveVoice)
+                } else {
+                    Task::none()
+                };
                 return Task::batch([
                     leave,
                     Task::perform(
-                        tokio::time::sleep(std::time::Duration::from_millis(300)),
+                        async move {
+                            if in_call {
+                                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            }
+                            if let Some(controls) = controls {
+                                controls.close_gateway(QUIT_CLOSE_WAIT).await;
+                            }
+                        },
                         |()| Message::Exit,
                     ),
                 ]);
             }
             Message::Exit => return iced::exit(),
+            Message::ReconnectGateway => {
+                let stopped = match &self.phase {
+                    Phase::Account {
+                        session,
+                        persistence,
+                        gateway,
+                    } => matches!(
+                        &gateway.status,
+                        GatewayStatus::Stopped(reason) if reason.allows_manual_reconnect()
+                    )
+                    .then(|| (Arc::clone(session), *persistence)),
+                    _ => None,
+                };
+                if let Some((session, persistence)) = stopped {
+                    // A new Gateway task starts with empty reconnect counters.
+                    return self.enter_account(session, persistence);
+                }
+            }
             Message::CloseToTrayToggled(on) => {
                 self.audio_preferences.close_to_tray = on;
                 if self.audio_saving.is_none() {
@@ -5082,7 +5123,10 @@ impl App {
                 }
             };
             if !matches!(gateway.status, gateway::GatewayStatus::Ready(_)) {
-                say(gateway.status.describe(), false);
+                say(
+                    gateway.status.describe(),
+                    matches!(gateway.status, gateway::GatewayStatus::Stopped(_)),
+                );
             }
             if let Some(error) = voice_controls.input_error {
                 say(
@@ -5232,6 +5276,16 @@ impl App {
                 } else {
                     line.style(text::secondary)
                 });
+            }
+            if matches!(
+                &gateway.status,
+                gateway::GatewayStatus::Stopped(reason) if reason.allows_manual_reconnect()
+            ) {
+                banner_column = banner_column.push(
+                    button(text("Reconnect").size(12))
+                        .on_press(Message::ReconnectGateway)
+                        .style(style::action_button(false)),
+                );
             }
             for call in &gateway.navigation.incoming_calls {
                 // Answering joins voice; a call already joined has no prompt.
@@ -6383,6 +6437,34 @@ mod tests {
         app.phase = Phase::Login;
         drop(authenticate(&mut app, Persistence::MemoryOnly));
         assert_ne!(gateway_status(&app).0, id);
+    }
+
+    #[test]
+    fn a_limit_stop_offers_reconnect_which_starts_a_fresh_gateway_and_other_stops_do_not() {
+        use fastcord_discord::gateway::StopReason;
+        let mut app = login_app();
+        drop(authenticate(&mut app, Persistence::Saved));
+        let (id, _) = gateway_status(&app);
+        // A reason that reconnecting cannot fix offers nothing.
+        let _ = app.update(Message::Gateway(
+            id,
+            GatewayStatus::Stopped(StopReason::EventTooLarge),
+        ));
+        let _ = app.update(Message::ReconnectGateway);
+        assert_eq!(gateway_status(&app).0, id);
+        // fastcord's own limits do: the screen stays, with a new Gateway.
+        let _ = app.update(Message::Gateway(
+            id,
+            GatewayStatus::Stopped(StopReason::ReconnectFailures),
+        ));
+        assert!(gateway_status(&app).1.describe().contains("Ten connection"));
+        drop(app.update(Message::ReconnectGateway));
+        let (new_id, status) = gateway_status(&app);
+        assert_ne!(new_id, id);
+        assert_eq!(status, GatewayStatus::Connecting { attempt: 0 });
+        // Nothing to reconnect once connecting again.
+        let _ = app.update(Message::ReconnectGateway);
+        assert_eq!(gateway_status(&app).0, new_id);
     }
 
     #[test]

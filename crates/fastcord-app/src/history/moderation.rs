@@ -79,7 +79,9 @@ pub fn failure(error: BulkRequestError) -> &'static str {
         RestError::Refused(refusal) if refusal.status.as_u16() == 404 => {
             "That message is already gone."
         }
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this. Try again shortly."
         }
         RestError::Http(status) if status.as_u16() == 429 => {

@@ -85,6 +85,24 @@ pub enum StopReason {
     StreamSignalTooLarge,
     /// Required normalized state could not fit the metadata safety ceiling.
     StateTooLarge,
+    /// Ten connection attempts in a row failed. The user can reconnect.
+    ReconnectFailures,
+    /// Twenty Identifies in 24 hours were used. The user can reconnect.
+    IdentifyBudget,
+    /// `GET /gateway` answered 403 twice in a row (Cloudflare or a ban). The
+    /// user can reconnect.
+    DiscoveryForbidden,
+}
+
+impl StopReason {
+    /// Stopped by fastcord's own reconnect limits: nothing is wrong with the
+    /// account, and a manual Reconnect starts again with fresh counters.
+    pub fn allows_manual_reconnect(&self) -> bool {
+        matches!(
+            self,
+            Self::ReconnectFailures | Self::IdentifyBudget | Self::DiscoveryForbidden
+        )
+    }
 }
 
 impl fmt::Display for StopReason {
@@ -99,6 +117,9 @@ impl fmt::Display for StopReason {
             Self::InvalidGatewayUrl => f.write_str("Discord returned a Gateway address that is not a Discord Gateway. fastcord refused to send the login token there."),
             Self::SubscriptionTooLarge => f.write_str("A guild subscription could not be encoded within Discord's 15 KiB Gateway payload limit. Automatic attempts have stopped."),
             Self::StreamSignalTooLarge => f.write_str("A Go Live signal could not be encoded within Discord's 15 KiB Gateway payload limit. Automatic attempts have stopped."),
+            Self::ReconnectFailures => f.write_str("Ten connection attempts in a row failed, so fastcord stopped trying. Check the network, then reconnect."),
+            Self::IdentifyBudget => f.write_str("fastcord signed in to Discord 20 times in 24 hours and stopped to avoid hammering it. Reconnect when you are ready."),
+            Self::DiscoveryForbidden => f.write_str("Discord (or the network in front of it) refused to name a Gateway address twice in a row. Reconnect later."),
             Self::StateTooLarge => f.write_str("Required account state exceeds fastcord's 12 MiB metadata safety limit. The connection has stopped rather than silently dropping guild identity or permission data."),
         }
     }

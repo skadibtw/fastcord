@@ -41,6 +41,21 @@ pub struct Config {
     pub echo: bool,
     /// A friend writes every this often.
     pub chatter: Option<Duration>,
+    /// Test switches for the client's traffic limits; all off by default.
+    pub switches: Switches,
+}
+
+/// Faults the fake can be told to produce, so the client's limits can be
+/// tested end to end.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Switches {
+    /// Every REST request is answered 429 with `retry_after: 0`.
+    pub zero_retry_429: bool,
+    /// Each Gateway connection is closed (code 4000, resumable) this long
+    /// after it opens.
+    pub close_gateway_every: Option<Duration>,
+    /// `GET /gateway` answers 403, as a Cloudflare block or a ban would.
+    pub forbid_gateway_discovery: bool,
 }
 
 pub(crate) struct Shared {
@@ -52,6 +67,7 @@ pub(crate) struct Shared {
     rate_limited: AtomicU64,
     sessions: Mutex<std::collections::HashMap<String, u64>>,
     session_counter: AtomicU64,
+    switches: Switches,
 }
 
 impl Shared {
@@ -70,6 +86,20 @@ impl Shared {
 
     fn answer(&self, req: &Request) -> (Response, Option<&'static str>) {
         let rate_key = ratelimit::route_key(&req.method, &req.path);
+        if req.path.starts_with(rest::PREFIX) && self.switches.zero_retry_429 {
+            self.rate_limited.fetch_add(1, Ordering::Relaxed);
+            let mut response = Response::json(
+                429,
+                &json!({"message": "You are being rate limited.", "retry_after": 0, "global": false}),
+            );
+            response.headers.push(("Retry-After", "0".to_owned()));
+            return (response, Some("RATE_LIMITED"));
+        }
+        if self.switches.forbid_gateway_discovery && req.path == format!("{}/gateway", rest::PREFIX)
+        {
+            let response = Response::json(403, &json!({"message": "fake: forbidden", "code": 0}));
+            return (response, None);
+        }
         if req.path.starts_with(rest::PREFIX) {
             let limited = self
                 .limiter
@@ -207,6 +237,12 @@ impl Handle {
     pub fn rate_limited(&self) -> u64 {
         self.shared.rate_limited.load(Ordering::Relaxed)
     }
+
+    /// Automatic acknowledgements that did not carry the token last issued
+    /// for their channel.
+    pub fn ack_token_mismatches(&self) -> u64 {
+        self.shared.world().ack_token_mismatches
+    }
 }
 
 impl Drop for Handle {
@@ -239,6 +275,7 @@ pub async fn start(config: Config) -> Result<Handle, String> {
         rate_limited: AtomicU64::new(0),
         sessions: Mutex::default(),
         session_counter: AtomicU64::new(0),
+        switches: config.switches,
     });
     let mut tasks = Vec::new();
     let accept = Arc::clone(&shared);

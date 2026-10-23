@@ -218,7 +218,9 @@ pub fn failure(error: RestError) -> &'static str {
             "Discord rejected the request. The control may be out of date."
         }
         RestError::Http(_) => "Discord rejected the request.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this. Try again shortly."
         }
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {

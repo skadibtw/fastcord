@@ -574,7 +574,7 @@ async fn resume_replay_is_deduplicated_and_applied_in_order() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_healthy_connection_resumes_immediately_on_server_reconnect() {
+async fn a_healthy_connection_still_waits_one_to_five_seconds_on_server_reconnect() {
     let (mut gateway, transport, mut first) = ready(0.5).await;
     let mut second = transport.accept().await;
     // Ready for longer than the stability window.
@@ -582,7 +582,11 @@ async fn a_healthy_connection_resumes_immediately_on_server_reconnect() {
     first.send_json(json!({"op": 7, "d": null})).await;
     let (attempt, delay, reason) = expect_reconnecting(&mut gateway).await;
     assert_eq!(reason, ReconnectReason::ServerRequested);
-    assert_eq!((attempt, delay), (0, Duration::ZERO));
+    assert_eq!(
+        (attempt, delay),
+        (0, Duration::from_millis(3_000)),
+        "never zero: 1-5 s, at 0.5 jitter"
+    );
     assert_eq!(second.handshake_resume().await["d"]["seq"], 1);
 }
 
@@ -727,6 +731,148 @@ async fn failed_discovery_and_connects_back_off_exponentially_then_recover() {
     server.handshake().await;
     // A failed connect asks Discord for a fresh address each time.
     assert_eq!(transport.discovered.load(Ordering::SeqCst), 5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_reconnect_delay_is_never_zero_for_any_jitter() {
+    for jitter in [0.0, 0.5, 0.999] {
+        let (mut gateway, transport, mut first) = ready(jitter).await;
+        let _second = transport.accept().await;
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        first.send_json(json!({"op": 7, "d": null})).await;
+        let (_, delay, _) = expect_reconnecting(&mut gateway).await;
+        assert!(
+            (Duration::from_secs(1)..=Duration::from_secs(5)).contains(&delay),
+            "{delay:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ten_failed_attempts_in_a_row_stop_reconnecting_with_a_manual_reconnect_state() {
+    let transport = FakeTransport::new();
+    for _ in 0..12 {
+        transport.refuse();
+    }
+    let mut gateway = start(&transport, 0.5);
+    assert_eq!(
+        drain(&mut gateway).await,
+        Some(GatewayEvent::State(ConnectionState::Stopped(
+            StopReason::ReconnectFailures
+        )))
+    );
+    assert_eq!(transport.connected().len(), 10);
+    assert!(StopReason::ReconnectFailures.allows_manual_reconnect());
+    assert!(!StopReason::Rejected(4014).allows_manual_reconnect());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_gateway_discovery_403_in_a_row_stops_but_one_does_not() {
+    let transport = FakeTransport::new();
+    {
+        let mut discoveries = transport.discoveries.lock();
+        discoveries.push_back(Err(DiscoverError::Forbidden));
+        discoveries.push_back(Err(DiscoverError::Forbidden));
+    }
+    let mut gateway = start(&transport, 0.5);
+    assert_eq!(
+        drain(&mut gateway).await,
+        Some(GatewayEvent::State(ConnectionState::Stopped(
+            StopReason::DiscoveryForbidden
+        )))
+    );
+    assert_eq!(transport.discovered.load(Ordering::SeqCst), 2);
+    assert!(transport.connected().is_empty());
+
+    // One 403 between good answers does not count.
+    let transport = FakeTransport::new();
+    {
+        let mut discoveries = transport.discoveries.lock();
+        discoveries.push_back(Err(DiscoverError::Forbidden));
+        discoveries.push_back(Ok("wss://gateway.discord.gg".to_owned()));
+    }
+    let mut server = transport.accept().await;
+    let _gateway = start(&transport, 0.5);
+    server.handshake().await;
+    assert_eq!(transport.discovered.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_twenty_first_identify_in_a_day_is_not_sent() {
+    let transport = FakeTransport::new();
+    let mut servers = Vec::new();
+    for _ in 0..22 {
+        servers.push(transport.accept().await);
+    }
+    let mut gateway = start(&transport, 0.5);
+    for (index, server) in servers.iter_mut().take(20).enumerate() {
+        server.handshake().await;
+        server.dispatch("READY", 1, READY).await;
+        loop {
+            if next(&mut gateway).await == GatewayEvent::State(ConnectionState::Ready) {
+                break;
+            }
+        }
+        // Healthy for longer than the stability window, then the session ends.
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        server.close_with(4007).await;
+        if index < 19 {
+            loop {
+                if matches!(
+                    next(&mut gateway).await,
+                    GatewayEvent::State(ConnectionState::Reconnecting { .. })
+                ) {
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        drain(&mut gateway).await,
+        Some(GatewayEvent::State(ConnectionState::Stopped(
+            StopReason::IdentifyBudget
+        )))
+    );
+    assert_eq!(transport.connected().len(), 20, "no 21st connection");
+}
+
+#[tokio::test(start_paused = true)]
+async fn resumes_are_not_counted_against_the_identify_allowance() {
+    let (mut gateway, transport, mut server) = ready(0.5).await;
+    for round in 0..25u64 {
+        let mut next_server = transport.accept().await;
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        server.send_json(json!({"op": 7, "d": null})).await;
+        loop {
+            if matches!(
+                next(&mut gateway).await,
+                GatewayEvent::State(ConnectionState::Reconnecting { .. })
+            ) {
+                break;
+            }
+        }
+        next_server.hello(HEARTBEAT_MS).await;
+        assert_eq!(next_server.recv().await["op"], 6);
+        next_server.dispatch("RESUMED", 2 + round, "{}").await;
+        loop {
+            if next(&mut gateway).await == GatewayEvent::State(ConnectionState::Ready) {
+                break;
+            }
+        }
+        server = next_server;
+    }
+    assert_eq!(transport.connected().len(), 26);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_requested_close_sends_1000_and_finishes_the_task_within_the_wait() {
+    let (gateway, _transport, mut server) = ready(0.5).await;
+    let closer = gateway.closer();
+    let closing = tokio::spawn(async move { closer.close(Duration::from_secs(2)).await });
+    assert_eq!(server.recv_close_code().await, Some(1000));
+    assert!(closing.await.unwrap(), "the task ended in time");
+    // Asking again after the end is harmless.
+    assert!(gateway.closer().close(Duration::from_secs(2)).await);
 }
 
 #[tokio::test(start_paused = true)]

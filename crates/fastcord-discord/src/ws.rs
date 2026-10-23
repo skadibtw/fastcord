@@ -164,7 +164,10 @@ async fn connect_inner(
         .connect(server_name, tcp)
         .await
         .map_err(|_| ConnectError)?;
-    let (socket, _response) = client_async_with_config(request, tls.into(), Some(config))
+    // With `fake-discord` the stream is a TLS/plain wrapper; without it, TLS itself.
+    #[allow(clippy::useless_conversion)]
+    let stream = tls.into();
+    let (socket, _response) = client_async_with_config(request, stream, Some(config))
         .await
         .map_err(|_| ConnectError)?;
     Ok(socket)

@@ -118,6 +118,7 @@ pub struct State {
 pub fn failure(error: RestError) -> String {
     match error {
         RestError::AccountVerificationRequired => "Discord requires an account check. Requests are paused. Open the official Discord client, complete its verification, then reconnect fastcord.".to_owned(),
+        RestError::WritesPaused(_) => format!("{error}. Try again later."),
         RestError::Refused(refusal) => format!("Discord refused ({}{}): {}", refusal.status.as_u16(), refusal.code.map_or_else(String::new, |code| format!(", code {code}")), refusal.message()),
         RestError::AuthenticationRequired => "Your session has expired. Log in again.".to_owned(),
         RestError::PermissionDenied => {
@@ -125,7 +126,7 @@ pub fn failure(error: RestError) -> String {
                 .to_owned()
         }
         RestError::ResourceGone => "Discord could not find that user.".to_owned(),
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
         }
         RestError::Http(status) if status.as_u16() == 429 => {

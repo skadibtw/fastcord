@@ -39,6 +39,7 @@ async fn the_real_client_talks_to_the_fake() {
         log: Some(log_path.clone()),
         echo: false,
         chatter: None,
+        switches: Default::default(),
     })
     .await
     .unwrap();

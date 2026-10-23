@@ -228,7 +228,9 @@ fn describe_list(error: &RestError) -> &'static str {
             "Discord did not let this account list the sounds here."
         }
         RestError::ResourceGone => "This server's sounds are no longer available.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this request. Try again shortly."
         }
         _ => "The sounds could not be loaded. Try again.",
@@ -241,7 +243,9 @@ fn describe_play(error: &RestError) -> &'static str {
             "Discord did not let this account play that sound here (permission, or the call has ended)."
         }
         RestError::ResourceGone => "That sound or voice channel no longer exists.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting sounds. Wait a moment, then click again."
         }
         RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,

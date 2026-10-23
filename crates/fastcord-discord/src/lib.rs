@@ -104,7 +104,9 @@ pub use community_admin::{
     enable_community_body, fresh_id,
 };
 pub use edit::{EditedMessage, edit_response_update, is_own_message};
-pub use error::{NetworkFailure, Refusal, RestError, RetryableFailure, WRITE_NOT_VERIFIED};
+pub use error::{
+    NetworkFailure, PauseReason, Refusal, RestError, RetryableFailure, WRITE_NOT_VERIFIED,
+};
 pub use gateway::{ConnectionState, Gateway, GatewayEvent};
 pub use gif::{GIF_RESULTS, GifResult, MAX_GIF_QUERY_CHARS};
 pub use group_dm::{

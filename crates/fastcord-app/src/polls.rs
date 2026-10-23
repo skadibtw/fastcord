@@ -50,7 +50,9 @@ pub fn failure(kind: &Kind, error: RestError) -> &'static str {
         }
         RestError::Http(_) if ending => "Discord rejected ending the poll.",
         RestError::Http(_) => "Discord rejected the vote.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting this. Try again shortly."
         }
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {

@@ -65,7 +65,9 @@ fn describe(error: RestError) -> &'static str {
             "Discord refused the GIF search."
         }
         RestError::ResourceGone => "Discord has no GIF search for this account.",
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit
+        | RestError::RateLimited
+        | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting GIF searches. Try again shortly."
         }
         RestError::Retryable(_) | RestError::Http(_) => "GIF search failed. Try again.",

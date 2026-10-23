@@ -15,6 +15,7 @@ mod poll;
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use fastcord_discord::gateway::{Dispatch, MessageDelete, MessageReaction};
 use fastcord_discord::history::HistoryCursor;
@@ -75,7 +76,7 @@ type ReferenceFuture =
 type SendFuture = Pin<Box<dyn Future<Output = (OpId, Result<Box<Message>, SendFailure>)> + Send>>;
 type ChangeFuture = Pin<Box<dyn Future<Output = ChangeDone> + Send>>;
 type AckFuture =
-    Pin<Box<dyn Future<Output = (Snowflake, Snowflake, Result<(), RestError>)> + Send>>;
+    Pin<Box<dyn Future<Output = (Snowflake, Snowflake, Result<Option<String>, RestError>)> + Send>>;
 type ReactionFuture = Pin<Box<dyn Future<Output = ReactionDone> + Send>>;
 type InteractionFuture = Pin<Box<dyn Future<Output = InteractionEvent> + Send>>;
 type ModFuture = Pin<Box<dyn Future<Output = ModDone> + Send>>;
@@ -86,6 +87,33 @@ type UsersFuture =
 
 /// Acknowledgements kept waiting (the inbox marks up to its row cap at once).
 const MAX_ACKS_WANTED: usize = 128;
+
+/// Automatic acknowledgements of one channel are at least this far apart; the
+/// newest message seen goes out when the interval ends.
+const ACK_INTERVAL: Duration = Duration::from_secs(3);
+/// A new channel's first page is fetched this long after the last selection
+/// change, so stepping through channels fetches only where the user stops.
+const FETCH_DEBOUNCE: Duration = Duration::from_millis(200);
+/// Channels whose last acknowledgement and token are remembered.
+const MAX_ACK_CHANNELS: usize = 128;
+
+/// What the last acknowledgement of a channel left behind.
+struct AckChannel {
+    /// The newest message acknowledged (or asked for) so far.
+    last: Snowflake,
+    /// When it was sent.
+    at: Instant,
+    /// The token Discord's last answer for this channel carried, sent back
+    /// with the next automatic acknowledgement.
+    token: Option<String>,
+}
+
+/// The newest message seen while the interval of its channel was running.
+struct PendingAck {
+    channel: Snowflake,
+    message: Snowflake,
+    due: Instant,
+}
 
 /// An acknowledgement to send: the channel's cursor to this message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,7 +189,9 @@ pub enum Completed {
     Reference(Snowflake, Box<Result<Option<Message>, RestError>>),
     Send(OpId, Result<Box<Message>, SendFailure>),
     /// An acknowledgement of (channel, message) was answered.
-    Ack(Snowflake, Snowflake, Result<(), RestError>),
+    Ack(Snowflake, Snowflake, Result<Option<String>, RestError>),
+    /// The debounce or acknowledgement interval ended.
+    Tick,
     Change(ChangeDone),
     Reaction(ReactionDone),
     ReactionUsers(u64, Result<Vec<ReactionUser>, RestError>),
@@ -257,6 +287,17 @@ pub struct History {
     /// The last automatic acknowledgement tried, so one that fails is not
     /// repeated until a newer message is on screen.
     ack_last: Option<(Snowflake, Snowflake)>,
+    /// Per channel: when the last acknowledgement went out and its token.
+    ack_channels: HashMap<Snowflake, AckChannel>,
+    /// The automatic acknowledgement waiting for its channel's interval.
+    ack_pending: Option<PendingAck>,
+    /// The open channel's first page, waiting for the selection to settle.
+    fetch_due: Option<Instant>,
+    /// How long the selection must settle; zero in tests that fetch at once.
+    debounce: Duration,
+    /// Added to the clock so tests can pass time.
+    #[cfg(test)]
+    skew: Duration,
     /// Acknowledgements Discord accepted, for the reducer to apply locally.
     acked_done: Vec<(Snowflake, Snowflake)>,
     viewing: bool,
@@ -313,7 +354,40 @@ impl History {
     pub fn new(slots: Slots) -> Self {
         Self {
             outbox: Outbox::new(slots),
+            debounce: if cfg!(test) {
+                Duration::ZERO
+            } else {
+                FETCH_DEBOUNCE
+            },
             ..Self::default()
+        }
+    }
+
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        return Instant::now() + self.skew;
+        #[cfg(not(test))]
+        Instant::now()
+    }
+
+    /// The earliest moment [`History::fire_due`] has something to do.
+    fn next_deadline(&self) -> Option<Instant> {
+        [self.fetch_due, self.ack_pending.as_ref().map(|ack| ack.due)]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    /// Runs the debounced page fetch and the coalesced acknowledgement whose
+    /// time has come.
+    fn fire_due(&mut self, rest: &RestClient) {
+        let now = self.now();
+        if self.fetch_due.is_some_and(|due| due <= now) {
+            self.fetch_due = None;
+            self.start(rest, HistoryCursor::Latest);
+        }
+        if self.ack_pending.as_ref().is_some_and(|ack| ack.due <= now) {
+            self.flush_ack(rest);
         }
     }
 
@@ -356,6 +430,7 @@ impl History {
         self.failed = None;
         self.notice = None;
         self.check_paging = false;
+        self.fetch_due = None;
         // Only the user's explicit "mark read" outlives the open conversation.
         self.ack_wanted.retain(|ack| ack.manual);
         self.ack_last = None;
@@ -419,6 +494,10 @@ impl History {
             Dispatch::Ready(ready) => {
                 self.user = Some(ready.user.id);
                 self.reset();
+                // A new session: nothing of the old one is acknowledged, and
+                // its tokens are void.
+                self.ack_pending = None;
+                self.ack_channels.clear();
                 self.store.set_user(ready.user.id);
                 return;
             }
@@ -1291,9 +1370,16 @@ impl History {
         if selected != self.channel {
             // Revisits fetch a fresh page instead of keeping hidden histories.
             self.reset();
+            // Leaving sends what was read last once, unless that is covered.
+            self.flush_ack(rest);
             self.channel = selected;
             if selected.is_some() {
-                self.start(rest, HistoryCursor::Latest);
+                if self.debounce.is_zero() {
+                    self.start(rest, HistoryCursor::Latest);
+                } else {
+                    self.fetch_due = Some(self.now() + self.debounce);
+                    self.dirty = true;
+                }
             }
         }
         self.synchronize();
@@ -1379,7 +1465,34 @@ impl History {
             return;
         }
         self.ack_last = Some((channel, newest));
-        self.want_ack(rest, channel, newest, false);
+        // At most one acknowledgement per channel per interval: the first goes
+        // out at once, later ones wait and the newest message seen goes last.
+        let now = self.now();
+        match self.ack_channels.get(&channel) {
+            Some(sent) if sent.at + ACK_INTERVAL > now => {
+                self.ack_pending = Some(PendingAck {
+                    channel,
+                    message: newest,
+                    due: sent.at + ACK_INTERVAL,
+                });
+            }
+            _ => self.want_ack(rest, channel, newest, false),
+        }
+    }
+
+    /// Sends the waiting automatic acknowledgement now, unless one at least as
+    /// new went out meanwhile.
+    fn flush_ack(&mut self, rest: &RestClient) {
+        let Some(pending) = self.ack_pending.take() else {
+            return;
+        };
+        let covered = self
+            .ack_channels
+            .get(&pending.channel)
+            .is_some_and(|sent| sent.last >= pending.message);
+        if !covered {
+            self.want_ack(rest, pending.channel, pending.message, false);
+        }
     }
 
     fn want_ack(
@@ -1415,9 +1528,33 @@ impl History {
             return;
         };
         self.ack_inflight = Some(ack);
+        let token = self
+            .ack_channels
+            .get(&ack.channel)
+            .and_then(|sent| sent.token.clone());
+        let now = self.now();
+        if !self.ack_channels.contains_key(&ack.channel)
+            && self.ack_channels.len() >= MAX_ACK_CHANNELS
+            && let Some(oldest) = self
+                .ack_channels
+                .iter()
+                .min_by_key(|(_, sent)| sent.at)
+                .map(|(channel, _)| *channel)
+        {
+            self.ack_channels.remove(&oldest);
+        }
+        let sent = self.ack_channels.entry(ack.channel).or_insert(AckChannel {
+            last: ack.message,
+            at: now,
+            token: None,
+        });
+        sent.last = sent.last.max(ack.message);
+        sent.at = now;
         let rest = rest.clone();
         self.acks.push(Box::pin(async move {
-            let result = rest.ack_message(ack.channel, ack.message, ack.manual).await;
+            let result = rest
+                .ack_message(ack.channel, ack.message, ack.manual, token.as_deref())
+                .await;
             (ack.channel, ack.message, result)
         }));
     }
@@ -1440,11 +1577,14 @@ impl History {
         rest: &RestClient,
         channel: Snowflake,
         message: Snowflake,
-        result: Result<(), RestError>,
+        result: Result<Option<String>, RestError>,
     ) -> bool {
         self.ack_inflight = None;
         let rejected = result == Err(RestError::AuthenticationRequired);
-        if result.is_ok() {
+        if let Ok(token) = result {
+            if let Some(sent) = self.ack_channels.get_mut(&channel) {
+                sent.token = token;
+            }
             self.acked_done.push((channel, message));
         }
         self.start_ack(rest);
@@ -1564,6 +1704,7 @@ impl History {
     /// Resolves when an in-flight page, reply preview, send, change, reaction
     /// request, or list of who reacted does.
     pub async fn next_completed(&mut self) -> Completed {
+        let deadline = self.next_deadline();
         let page = async {
             match &mut self.pending {
                 Some((_, future)) => future.await,
@@ -1630,7 +1771,14 @@ impl History {
                 None => std::future::pending().await,
             }
         };
+        let tick = async {
+            match deadline {
+                Some(at) => tokio::time::sleep_until(at.into()).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
+            () = tick => Completed::Tick,
             page = page => Completed::Page(page),
             (target, result) = reference => Completed::Reference(target, Box::new(result)),
             (id, result) = send => Completed::Send(id, result),
@@ -1653,6 +1801,10 @@ impl History {
             Completed::Send(id, result) => self.finish_send(rest, id, result),
             Completed::Ack(channel, message, result) => {
                 self.finish_ack(rest, channel, message, result)
+            }
+            Completed::Tick => {
+                self.fire_due(rest);
+                false
             }
             Completed::Change(done) => self.finish_change(done),
             Completed::Reaction(done) => self.finish_reaction(done),
@@ -1961,7 +2113,7 @@ impl History {
             rows,
             window,
             scroll: self.list.scroll_request(),
-            loading: self.pending.is_some(),
+            loading: self.pending.is_some() || self.fetch_due.is_some(),
             has_older: bounds.is_some_and(|window| window.older.is_some()),
             has_newer: bounds.is_some_and(|window| window.newer.is_some()),
             error: self.error,
@@ -2206,7 +2358,7 @@ mod tests {
         assert_eq!(history.acks.len(), 1, "no duplicate while one is in flight");
 
         // Discord accepted it: the reducer is told, and nothing is repeated.
-        assert!(!history.complete(&rest, Completed::Ack(CHANNEL, Snowflake(NEWEST), Ok(()))));
+        assert!(!history.complete(&rest, Completed::Ack(CHANNEL, Snowflake(NEWEST), Ok(None))));
         assert_eq!(history.take_acked(), [(CHANNEL, Snowflake(NEWEST))]);
         history.refresh(&rest, &navigation, &watching());
         assert_eq!(
@@ -2214,6 +2366,123 @@ mod tests {
             1,
             "the same newest message is not re-sent"
         );
+    }
+
+    /// A new message in the open channel, read live.
+    fn read_new(history: &mut History, rest: &RestClient, navigation: &NavigationSnapshot, n: u64) {
+        history.apply(&Dispatch::MessageCreate(Box::new(message(NEWEST + n))));
+        history.refresh(rest, navigation, &watching());
+    }
+
+    #[test]
+    fn twenty_incoming_messages_send_two_acknowledgements_with_the_newest_last() {
+        let rest = rest();
+        let mut history = sending_history();
+        let navigation = navigation_acked(NEWEST - 5);
+        history.refresh(&rest, &navigation, &watching());
+        assert_eq!(history.acks.len(), 1, "the first goes out at once");
+        // Discord's answer carries the token the next acknowledgement sends.
+        let answered = Completed::Ack(CHANNEL, Snowflake(NEWEST), Ok(Some("token-1".to_owned())));
+        assert!(!history.complete(&rest, answered));
+        assert_eq!(
+            history.ack_channels[&CHANNEL].token.as_deref(),
+            Some("token-1")
+        );
+        for n in 1..=20 {
+            read_new(&mut history, &rest, &navigation, n);
+            history.skew += Duration::from_millis(100);
+            history.fire_due(&rest);
+        }
+        assert_eq!(
+            history.acks.len(),
+            1,
+            "two seconds of messages: still waiting"
+        );
+        assert_eq!(
+            history.ack_pending.as_ref().map(|ack| ack.message),
+            Some(Snowflake(NEWEST + 20))
+        );
+        history.skew += Duration::from_millis(1100);
+        history.fire_due(&rest);
+        assert_eq!(history.acks.len(), 2, "20 messages, 2 acknowledgements");
+        assert_eq!(
+            history.ack_inflight.map(|ack| (ack.message, ack.manual)),
+            Some((Snowflake(NEWEST + 20), false))
+        );
+        assert!(history.ack_pending.is_none());
+        // A closed interval opens the next: a lone new message waits again.
+        assert!(!history.complete(
+            &rest,
+            Completed::Ack(CHANNEL, Snowflake(NEWEST + 20), Ok(None))
+        ));
+        assert_eq!(history.ack_channels[&CHANNEL].token, None);
+        read_new(&mut history, &rest, &navigation, 21);
+        assert_eq!(history.acks.len(), 2);
+        history.skew += ACK_INTERVAL;
+        history.fire_due(&rest);
+        assert_eq!(history.acks.len(), 3);
+    }
+
+    #[test]
+    fn leaving_a_channel_sends_the_waiting_acknowledgement_once_or_drops_it_when_covered() {
+        let rest = rest();
+        let leave = |history: &mut History| {
+            history.refresh(&rest, &NavigationSnapshot::default(), &Request::default());
+        };
+        let mut history = sending_history();
+        let navigation = navigation_acked(NEWEST - 5);
+        history.refresh(&rest, &navigation, &watching());
+        history.complete(&rest, Completed::Ack(CHANNEL, Snowflake(NEWEST), Ok(None)));
+        read_new(&mut history, &rest, &navigation, 1);
+        read_new(&mut history, &rest, &navigation, 2);
+        assert!(history.ack_pending.is_some());
+        leave(&mut history);
+        assert_eq!(history.acks.len(), 2, "flushed on leaving");
+        assert_eq!(
+            history.ack_inflight.map(|ack| ack.message),
+            Some(Snowflake(NEWEST + 2))
+        );
+        assert!(history.ack_pending.is_none());
+        history.skew += ACK_INTERVAL;
+        history.fire_due(&rest);
+        assert_eq!(history.acks.len(), 2, "and only once");
+
+        // A mark-as-read newer than the waiting one covers it.
+        let mut history = sending_history();
+        history.refresh(&rest, &navigation, &watching());
+        history.complete(&rest, Completed::Ack(CHANNEL, Snowflake(NEWEST), Ok(None)));
+        read_new(&mut history, &rest, &navigation, 1);
+        assert!(history.ack_pending.is_some());
+        history.mark_read(&rest, CHANNEL, Snowflake(NEWEST + 9));
+        assert_eq!(history.acks.len(), 2, "mark as read is immediate");
+        leave(&mut history);
+        assert_eq!(history.acks.len(), 2, "the covered one is dropped");
+    }
+
+    #[test]
+    fn flicking_through_five_channels_fetches_only_the_last() {
+        let rest = rest();
+        let mut history = History::new(Slots::default());
+        history.debounce = FETCH_DEBOUNCE;
+        let select = |history: &mut History, channel: u64| {
+            let mut navigation = navigation(true);
+            navigation.selection.as_mut().unwrap().channel_id = Snowflake(channel);
+            history.refresh(&rest, &navigation, &Request::default());
+        };
+        for channel in 1..=5 {
+            select(&mut history, channel);
+            assert!(history.pending.is_none(), "channel {channel}: no fetch yet");
+            assert!(history.snapshot().loading);
+            history.skew += Duration::from_millis(50);
+            history.fire_due(&rest);
+        }
+        assert!(history.pending.is_none(), "still inside the settle time");
+        history.skew += FETCH_DEBOUNCE;
+        history.fire_due(&rest);
+        assert_eq!(history.channel, Some(Snowflake(5)));
+        assert_eq!(cursor(&history), Some(HistoryCursor::Latest));
+        // Staying still: the one fetch is the only one, and it is not repeated.
+        assert!(history.fetch_due.is_none());
     }
 
     #[test]

@@ -59,7 +59,7 @@ pub fn failure(error: RestError) -> String {
         RestError::ResourceGone => "That member, message or channel no longer exists.".to_owned(),
         RestError::Retryable(_) => "Discord did not confirm. The action may have been applied; check before trying again.".to_owned(),
         RestError::AuthenticationRequired => "Your session has expired. Log in again.".to_owned(),
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
         }
         RestError::Http(status) if status.as_u16() == 429 => {

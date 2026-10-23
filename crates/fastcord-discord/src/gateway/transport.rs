@@ -24,6 +24,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) enum DiscoverError {
     /// `GET /gateway` answered 401: the token is dead.
     AuthenticationRequired,
+    /// `GET /gateway` answered 403 (Cloudflare or a ban).
+    Forbidden,
     Failed,
 }
 
@@ -88,6 +90,7 @@ impl Transport for LiveTransport {
             Err(RestError::AuthenticationRequired | RestError::InvalidToken) => {
                 Err(DiscoverError::AuthenticationRequired)
             }
+            Err(RestError::PermissionDenied) => Err(DiscoverError::Forbidden),
             Err(_) => Err(DiscoverError::Failed),
         }
     }

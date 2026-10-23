@@ -172,7 +172,7 @@ fn describe(error: ReportRequestError, submitting: bool) -> Failure {
             "Discord can no longer find it; it was deleted or you can no longer see it.",
             false,
         ),
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
             refused("Discord is rate limiting requests. Try again later.", false)
         }
         RestError::Http(status) if status.as_u16() == 429 => {

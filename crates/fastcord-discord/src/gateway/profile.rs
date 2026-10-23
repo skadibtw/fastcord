@@ -63,16 +63,31 @@ impl BuildNumber {
 
 /// Fetches the current build number from discord.com's web client, falling
 /// back to the bundled value on any failure (offline, page drift, redirect).
-/// The request is unauthenticated and carries no account data.
+/// The request is unauthenticated and carries no account data. The page is
+/// fetched at most once per process: the answer, fetched or fallback, is kept
+/// for every later validate, restore, account switch and login step.
 pub async fn resolve_build_number() -> BuildNumber {
+    static RESOLVED: tokio::sync::OnceCell<BuildNumber> = tokio::sync::OnceCell::const_new();
     #[cfg(feature = "fake-discord")]
     if crate::fake_origin::active() {
         return BuildNumber::bundled();
     }
-    match fetch_build_number().await {
-        Some(value) => BuildNumber::fetched(value),
-        None => BuildNumber::bundled(),
-    }
+    resolve_once(&RESOLVED, fetch_build_number()).await
+}
+
+/// The cached value, or `fetch` run once (concurrent callers share that run).
+async fn resolve_once(
+    cell: &tokio::sync::OnceCell<BuildNumber>,
+    fetch: impl Future<Output = Option<u32>>,
+) -> BuildNumber {
+    *cell
+        .get_or_init(|| async {
+            match fetch.await {
+                Some(value) => BuildNumber::fetched(value),
+                None => BuildNumber::bundled(),
+            }
+        })
+        .await
 }
 
 async fn fetch_build_number() -> Option<u32> {
@@ -221,6 +236,33 @@ impl ClientProperties {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn the_build_number_is_fetched_once_whether_it_succeeds_or_falls_back() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let fetches = AtomicU32::new(0);
+        let counted = |answer| {
+            let fetches = &fetches;
+            async move {
+                fetches.fetch_add(1, Ordering::Relaxed);
+                answer
+            }
+        };
+        let cell = tokio::sync::OnceCell::new();
+        let first = resolve_once(&cell, counted(Some(123_456))).await;
+        let second = resolve_once(&cell, counted(Some(999_999))).await;
+        assert_eq!((first.value, first.source), (123_456, BuildSource::Fetched));
+        assert_eq!(second, first);
+        // A failure is cached too: no refetch on every login step.
+        let failed = tokio::sync::OnceCell::new();
+        let fallback = resolve_once(&failed, counted(None)).await;
+        assert_eq!(fallback.source, BuildSource::Bundled);
+        assert_eq!(
+            resolve_once(&failed, counted(Some(123_456))).await,
+            fallback
+        );
+        assert_eq!(fetches.load(Ordering::Relaxed), 2, "one fetch per cell");
+    }
+
     use super::*;
 
     const PAGE: &str = include_str!("../../../../fixtures/gateway/app-page-excerpt.html");

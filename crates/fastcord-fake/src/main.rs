@@ -3,10 +3,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use fastcord_fake::{Config, start};
+use fastcord_fake::{Config, Switches, start};
 
-const USAGE: &str =
-    "usage: fastcord-fake [--port N] [--world PATH] [--log PATH] [--chatter SECONDS]";
+const USAGE: &str = "usage: fastcord-fake [--port N] [--world PATH] [--log PATH] [--chatter SECONDS]\n       [--zero-retry-429] [--close-gateway-every SECONDS] [--forbid-gateway-discovery]";
 
 fn parse(args: impl Iterator<Item = String>) -> Result<Config, String> {
     let mut config = Config {
@@ -15,9 +14,22 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Config, String> {
         log: Some(PathBuf::from("fake-requests.jsonl")),
         echo: true,
         chatter: None,
+        switches: Switches::default(),
     };
     let mut args = args;
     while let Some(flag) = args.next() {
+        // Switches without a value.
+        match flag.as_str() {
+            "--zero-retry-429" => {
+                config.switches.zero_retry_429 = true;
+                continue;
+            }
+            "--forbid-gateway-discovery" => {
+                config.switches.forbid_gateway_discovery = true;
+                continue;
+            }
+            _ => {}
+        }
         let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--port" => config.port = value.parse().map_err(|_| "bad --port".to_owned())?,
@@ -29,6 +41,15 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Config, String> {
                     return Err("--chatter must be at least 1 second".to_owned());
                 }
                 config.chatter = Some(Duration::from_secs(seconds));
+            }
+            "--close-gateway-every" => {
+                let seconds: u64 = value
+                    .parse()
+                    .map_err(|_| "bad --close-gateway-every".to_owned())?;
+                if seconds == 0 {
+                    return Err("--close-gateway-every must be at least 1 second".to_owned());
+                }
+                config.switches.close_gateway_every = Some(Duration::from_secs(seconds));
             }
             other => return Err(format!("unknown option {other}")),
         }

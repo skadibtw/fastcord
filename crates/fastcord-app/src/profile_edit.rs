@@ -113,7 +113,7 @@ fn describe(error: ProfileRequestError, action: Action) -> String {
             _ => "Discord refused this change for this account.".to_owned(),
         },
         RestError::ResourceGone => "Discord could not find that server or connection.".to_owned(),
-        RestError::InvalidRateLimit | RestError::SchedulerCapacityExceeded => {
+        RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
             "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
         }
         RestError::Http(status) if status.as_u16() == 429 => {
