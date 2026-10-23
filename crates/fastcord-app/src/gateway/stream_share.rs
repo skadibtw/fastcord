@@ -149,6 +149,9 @@ fn end_text(end: &ShareEnd) -> String {
             "Windows refused to capture this source (a privacy setting, a policy, or a protected window). Choose another window or screen.".to_owned()
         }
         ShareEnd::Capture(CaptureError::Unsupported(detail)) => (*detail).to_owned(),
+        ShareEnd::Capture(CaptureError::Cancelled) => {
+            "No screen or window was chosen, so nothing was shared.".to_owned()
+        }
         ShareEnd::Capture(error) => format!("Screen capture stopped: {error}."),
         ShareEnd::Encoder(detail) => format!("Video encoding failed: {detail}."),
         ShareEnd::SinkClosed => "The stream connection closed.".to_owned(),
@@ -740,6 +743,9 @@ mod tests {
     #[test]
     fn endings_say_what_the_user_can_do_about_them() {
         assert!(end_text(&ShareEnd::Capture(CaptureError::SourceClosed)).contains("closed"));
+        assert!(
+            end_text(&ShareEnd::Capture(CaptureError::Cancelled)).contains("nothing was shared")
+        );
         assert!(
             end_text(&ShareEnd::Capture(CaptureError::SourceTooLarge {
                 width: 7680,

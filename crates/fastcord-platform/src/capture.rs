@@ -9,13 +9,16 @@
 //! duration of its callback and must copy what it keeps. Dropping the session
 //! stops and joins the thread, so no capture worker outlives a share.
 //!
-//! Windows.Graphics.Capture is the only backend so far (SPEC milestones 33 and
-//! 34 add Linux and macOS); elsewhere every entry point reports
+//! Windows.Graphics.Capture on Windows and xdg-desktop-portal ScreenCast with
+//! PipeWire on Linux (milestone 33; the portal's own dialog picks the source);
+//! macOS follows in milestone 34. Elsewhere every entry point reports
 //! [`CaptureError::Unsupported`].
 
 pub mod camera;
 pub mod convert;
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(not(any(windows, target_os = "linux")))]
 mod unsupported;
 #[cfg(windows)]
 pub mod windows;
@@ -27,7 +30,9 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+use linux as native;
+#[cfg(not(any(windows, target_os = "linux")))]
 use unsupported as native;
 #[cfg(windows)]
 use windows as native;
@@ -208,6 +213,8 @@ impl fmt::Debug for VideoSample<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaptureError {
     InvalidConfig,
+    /// The user closed the system's source picker without choosing.
+    Cancelled,
     /// Capture is not available on this operating system, build or machine.
     Unsupported(&'static str),
     /// The system refused to capture this source (a privacy setting, policy or
@@ -241,9 +248,12 @@ impl fmt::Display for CaptureError {
             Self::Unsupported(detail) | Self::InvalidSample(detail) | Self::Worker(detail) => {
                 f.write_str(detail)
             }
-            Self::PermissionDenied => f.write_str(
-                "Windows refused to capture this source (a privacy setting, a policy, or a protected window)",
-            ),
+            Self::Cancelled => f.write_str("no screen or window was chosen"),
+            Self::PermissionDenied => f.write_str(if cfg!(windows) {
+                "Windows refused to capture this source (a privacy setting, a policy, or a protected window)"
+            } else {
+                "the system refused to capture this source"
+            }),
             Self::SourceClosed => f.write_str("the captured window, display or camera closed"),
             Self::DeviceNotFound => f.write_str("the selected camera is not connected"),
             Self::SourceTooLarge { width, height } => write!(
@@ -286,8 +296,8 @@ pub type StateObserver = Arc<dyn Fn(&CaptureState) + Send + Sync>;
 #[derive(Clone)]
 pub struct CaptureStatus {
     slot: Arc<Mutex<(u64, CaptureState)>>,
-    // Only a backend notifies it; Windows is the only one so far.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    // Only a backend notifies it.
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     observer: Option<StateObserver>,
 }
 
@@ -304,7 +314,7 @@ impl CaptureStatus {
         self.slot.lock().clone()
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     fn set(&self, state: CaptureState) {
         {
             let mut current = self.slot.lock();
@@ -448,7 +458,7 @@ impl Control {
         }
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     pub(crate) fn min_interval(&self) -> Duration {
         Duration::from_micros(self.min_interval_micros.load(Ordering::Relaxed))
     }

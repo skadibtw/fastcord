@@ -10,7 +10,7 @@ The approved delivery order and issue links are in [docs/ROADMAP.md](docs/ROADMA
 
 ## Build
 
-Requires Rust (pinned by `rust-toolchain.toml`), CMake (the audio engine builds the bundled libopus), on Windows Visual Studio Build Tools with the C++ workload, and on Linux the ALSA development headers (`libasound2-dev`).
+Requires Rust (pinned by `rust-toolchain.toml`), CMake (the audio engine builds the bundled libopus), on Windows Visual Studio Build Tools with the C++ workload, and on Linux the ALSA, VA-API and PipeWire development headers plus clang (`libasound2-dev libva-dev libpipewire-0.3-dev clang`).
 
 ```sh
 cargo run -p fastcord-app          # debug

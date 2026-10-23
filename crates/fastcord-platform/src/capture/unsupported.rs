@@ -1,5 +1,4 @@
-//! Capture on operating systems that have no backend yet (SPEC milestones 33
-//! and 34): every entry point reports why, so the UI can say so instead of
+//! Capture on operating systems that have no backend yet (SPEC milestone 34): every entry point reports why, so the UI can say so instead of
 //! offering a share that cannot work.
 
 use std::sync::Arc;
@@ -10,7 +9,7 @@ use super::{
 };
 
 const UNSUPPORTED: CaptureError =
-    CaptureError::Unsupported("screen capture is only implemented for Windows so far");
+    CaptureError::Unsupported("screen capture is only implemented for Windows and Linux so far");
 
 /// No session can exist here.
 pub(super) enum Native {}

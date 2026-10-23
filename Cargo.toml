@@ -26,6 +26,10 @@ fastcord-audio = { path = "crates/fastcord-audio" }
 fastcord-video = { path = "crates/fastcord-video" }
 cc = "1"
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }
+# Linux screen capture (milestone 33): the ScreenCast portal (already in the
+# tree through rfd) and PipeWire, which links the system libpipewire-0.3.
+ashpd = { version = "0.11.1", default-features = false, features = ["tokio"] }
+pipewire = "0.10.1"
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain"] }
 base64 = "0.22"
 bytes = "1"

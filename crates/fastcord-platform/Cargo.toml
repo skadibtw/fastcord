@@ -69,7 +69,14 @@ windows = { workspace = true, features = [
 apple-native-keyring-store.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ashpd.workspace = true
+pipewire.workspace = true
+tokio.workspace = true
 zbus-secret-service-keyring-store.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The PipeWire capture test drives its own video source (trigger_process).
+pipewire = { workspace = true, features = ["v0_3_44"] }
 
 [lints]
 workspace = true

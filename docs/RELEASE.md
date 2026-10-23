@@ -21,3 +21,11 @@ icons. For a user-local Linux installation, place the executable in
 `~/.local/bin/fastcord` (on PATH), copy `share/applications/fastcord.desktop` into
 `~/.local/share/applications/` and merge `share/icons/hicolor/` into
 `~/.local/share/icons/hicolor/`. The archive does not modify desktop settings.
+
+The Linux executable links the system PipeWire client library
+(`libpipewire-0.3.so.0`, present on current GNOME and
+KDE Plasma distributions). Screen sharing additionally needs a running PipeWire
+daemon and xdg-desktop-portal with a ScreenCast backend for the desktop
+(`xdg-desktop-portal-gnome`, `-kde` or `-wlr`); without them the share picker
+explains what is missing and everything else works. The build host needs
+`libpipewire-0.3-dev` and `clang` (bindgen).
