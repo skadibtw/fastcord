@@ -46,6 +46,7 @@ pub(super) async fn run(
 ) {
     let initial = controls.borrow().clone();
     let capture_enabled = initial.capture_enabled();
+    let bitrate = initial.send_bitrate();
     run_with(
         credentials,
         cancel_rx,
@@ -60,7 +61,7 @@ pub(super) async fn run(
                 noise_suppression: initial.noise_suppression,
                 echo_cancellation: !initial.echo_cancellation_off,
                 capture_enabled,
-                ..EngineConfig::default()
+                bitrate,
             })
         },
     )
@@ -93,6 +94,7 @@ struct EngineSync {
     sensitivity: Option<u8>,
     input_gain: fastcord_audio::InputGain,
     diagnostics: bool,
+    bitrate: u32,
 }
 
 impl EngineSync {
@@ -112,6 +114,7 @@ impl EngineSync {
             sensitivity: None,
             input_gain: fastcord_audio::InputGain::default(),
             diagnostics: false,
+            bitrate: fastcord_audio::DEFAULT_BITRATE,
         }
     }
 
@@ -226,6 +229,18 @@ impl EngineSync {
                 .is_ok()
             {
                 self.diagnostics = controls.diagnostics_open;
+            } else {
+                self.retry = true;
+            }
+        }
+        let bitrate = controls.send_bitrate();
+        if self.bitrate != bitrate {
+            if self
+                .controls
+                .try_send(EngineControl::Bitrate(bitrate))
+                .is_ok()
+            {
+                self.bitrate = bitrate;
             } else {
                 self.retry = true;
             }
@@ -1192,6 +1207,27 @@ mod tests {
             rx.try_recv(),
             Ok(EngineControl::Diagnostics(false))
         ));
+    }
+
+    #[test]
+    fn a_channel_bitrate_change_reaches_the_engine_once() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut sync = EngineSync::new(tx);
+        let mut controls = ptt_controls(true, 0, 0);
+        sync.apply(&controls, false);
+        let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            !sent.iter().any(|c| matches!(c, EngineControl::Bitrate(_))),
+            "a DM call keeps the 64 kbps the engine starts with: {sent:?}"
+        );
+        controls.channel_bitrate = 96_000;
+        sync.apply(&controls, false);
+        sync.apply(&controls, false);
+        let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(sent, vec![EngineControl::Bitrate(96_000)]);
+        controls.channel_bitrate = 1;
+        sync.apply(&controls, false);
+        assert_eq!(rx.try_recv().ok(), Some(EngineControl::Bitrate(8_000)));
     }
 }
 

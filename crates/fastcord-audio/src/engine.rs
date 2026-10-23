@@ -169,6 +169,9 @@ pub enum EngineControl {
     /// Start or stop measuring the microphone level and echo-canceller state for
     /// [`AudioEngine::input_diagnostics`]. Off, nothing is measured.
     Diagnostics(bool),
+    /// Retarget the microphone encoder (bits/s, clamped by the encoder) without reopening
+    /// either device; later device replacements keep it.
+    Bitrate(u32),
     /// Replace only this direction, on the owner thread. IDs are bounded to 512 bytes.
     SelectDevice {
         direction: Direction,
@@ -234,6 +237,8 @@ struct Shared {
     pipeline: PipelineCounters,
     /// Echo-canceller state packed by [`pack_echo`]; 0 = none.
     echo_diagnostics: std::sync::atomic::AtomicU64,
+    /// The microphone encoder's target in bits/s, for the diagnostics.
+    send_bitrate: std::sync::atomic::AtomicU32,
     input_format: std::sync::atomic::AtomicU64,
     output_format: std::sync::atomic::AtomicU64,
     #[cfg(test)]
@@ -336,6 +341,7 @@ impl AudioEngine {
         shared
             .capture_enabled
             .store(config.capture_enabled, Ordering::Release);
+        shared.send_bitrate.store(config.bitrate, Ordering::Relaxed);
         let has_input = config.input.is_some();
         let has_output = config.output.is_some();
         let thread_shared = Arc::clone(&shared);
@@ -404,6 +410,7 @@ impl AudioEngine {
     pub fn input_diagnostics(&self) -> crate::InputDiagnostics {
         let mut diagnostics = self.shared.pipeline.take_input();
         diagnostics.echo = unpack_echo(self.shared.echo_diagnostics.load(Ordering::Acquire));
+        diagnostics.send_bitrate = self.shared.send_bitrate.load(Ordering::Relaxed);
         diagnostics
     }
 
@@ -613,6 +620,13 @@ fn run_owner<B: Backend>(
                     }
                 }
                 EngineControl::EchoCancellation(enabled) => echo_enabled = enabled,
+                EngineControl::Bitrate(bitrate) => {
+                    config.bitrate = bitrate;
+                    shared.send_bitrate.store(bitrate, Ordering::Relaxed);
+                    if let Some((_, pipeline)) = capture.as_mut() {
+                        pipeline.set_bitrate(bitrate);
+                    }
+                }
                 EngineControl::InputGain(gain) => shared
                     .pipeline
                     .gain_bits
@@ -2523,6 +2537,46 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         while captured.try_recv().is_ok() {}
         assert_eq!(engine.input_diagnostics().frames, before);
+    }
+
+    #[test]
+    fn bitrate_control_resizes_packets_without_reopening_or_dropping_frames() {
+        let fake = host(48_000, 48_000);
+        let backend = fake.clone();
+        let config = EngineConfig {
+            bitrate: 8_000,
+            echo_cancellation: false,
+            noise_suppression: NoiseSuppression::Off,
+            ..EngineConfig::default()
+        };
+        let (engine, mut channels) = AudioEngine::start_with(config, move || backend).unwrap();
+        let mut captured = channels.captured.take().unwrap();
+        let opened = fake.opened.lock().len();
+        assert_eq!(engine.input_diagnostics().send_bitrate, 8_000);
+        let mut sequences = Vec::new();
+        let mut average = |captured: &mut mpsc::Receiver<CapturedFrame>, count: usize| {
+            let mut bytes = 0;
+            for _ in 0..count {
+                let frame = captured.blocking_recv().unwrap();
+                bytes += frame.packet.as_bytes().len();
+                sequences.push(frame.sequence);
+            }
+            bytes / count
+        };
+        // Skip the encoder's first frames, then measure the steady size.
+        average(&mut captured, 10);
+        let low = average(&mut captured, 20);
+        channels
+            .controls
+            .blocking_send(EngineControl::Bitrate(128_000))
+            .unwrap();
+        average(&mut captured, 20);
+        let high = average(&mut captured, 20);
+        assert!(high > low * 4, "8 kbps {low} bytes, 128 kbps {high} bytes");
+        assert_eq!(engine.input_diagnostics().send_bitrate, 128_000);
+        assert_eq!(fake.opened.lock().len(), opened, "no device was reopened");
+        assert!(sequences.windows(2).all(|pair| pair[1] == pair[0] + 1));
+        assert_eq!(engine.stats().frames_dropped, 0);
     }
 
     #[test]

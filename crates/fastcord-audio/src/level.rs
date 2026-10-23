@@ -161,6 +161,8 @@ pub struct InputDiagnostics {
     pub gain_tenths_db: i16,
     /// Present while echo cancellation is running.
     pub echo: Option<EchoDiagnostics>,
+    /// The microphone encoder's target bitrate in bits/s (0 outside a call).
+    pub send_bitrate: u32,
 }
 
 impl InputDiagnostics {

@@ -175,7 +175,7 @@ impl PipelineCounters {
         self.meter_frames.fetch_add(1, Ordering::Release);
     }
 
-    /// Level since the previous call (the maxima are consumed), without the echo part.
+    /// Level since the previous call (the maxima are consumed), without the echo part or the bitrate.
     pub(crate) fn take_input(&self) -> InputDiagnostics {
         let tenths = |value: u32| (value as i32 - METER_OFFSET) as i16;
         InputDiagnostics {
@@ -185,6 +185,7 @@ impl PipelineCounters {
             clipped_frames: self.meter_clipped.load(Ordering::Relaxed),
             gain_tenths_db: tenths(self.meter_gain.load(Ordering::Relaxed)),
             echo: None,
+            send_bitrate: 0,
         }
     }
 }
@@ -340,6 +341,11 @@ impl CapturePipeline {
             },
             ring,
         })
+    }
+
+    /// Retargets the encoder between frames; a refused value keeps the previous one.
+    pub(crate) fn set_bitrate(&mut self, bitrate: u32) {
+        let _ = self.frames.encoder.set_bitrate(bitrate);
     }
 
     /// Discards device samples without downmixing, resampling, encoding, or inference.

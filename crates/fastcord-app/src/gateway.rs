@@ -130,6 +130,9 @@ pub struct VoiceControls {
     pub input_mode: InputMode,
     /// The channel withholds "use voice activity", so push-to-talk is forced.
     pub vad_forbidden: bool,
+    /// The joined guild voice or Stage channel's `bitrate` as the server reports it; 0 in
+    /// a DM call or while unknown. [`Self::send_bitrate`] is what the microphone uses.
+    pub channel_bitrate: u32,
     /// The push-to-talk key is held now.
     pub ptt_down: bool,
     /// Counts forced releases (focus, listener, device or session loss); the call worker
@@ -190,6 +193,15 @@ impl VoiceControls {
     pub fn avatar_key(&self, user: Snowflake) -> crate::avatars::AvatarKey {
         let hash = self.avatars.iter().find(|(id, _)| *id == user);
         crate::avatars::AvatarKey::user(user, hash.map(|(_, hash)| hash.as_str()))
+    }
+
+    /// The microphone encoder's target: the channel's bitrate, clamped because it is
+    /// network input, or 64 kbps for DM calls and channels without one.
+    pub fn send_bitrate(&self) -> u32 {
+        match self.channel_bitrate {
+            0 => fastcord_audio::DEFAULT_BITRATE,
+            bitrate => bitrate.clamp(8_000, 384_000),
+        }
     }
 
     /// The mode in force: a channel without "use voice activity" always needs push-to-talk.
@@ -2188,6 +2200,7 @@ impl Worker {
             _ => None,
         };
         let status = self.tracker.apply(event);
+        self.resolve_voice_bitrate();
         match ready {
             Some(true) => {
                 let generation = self.begin_private_list_fetch();
@@ -2596,6 +2609,25 @@ impl Worker {
             return Some(leave);
         }
         None
+    }
+
+    /// The bitrate of the guild channel the account's voice state is in (the requested one
+    /// until Discord reports it), so a move or a `CHANNEL_UPDATE` retargets the microphone.
+    fn resolve_voice_bitrate(&self) {
+        let bitrate = (*self.voice_requests.borrow())
+            .and_then(|request| {
+                let guild = self.tracker.store.guild(request.guild_id?)?;
+                let me = self.tracker.store.current_user().map(|user| user.id);
+                let channel = me
+                    .and_then(|me| guild.voice_state(me))
+                    .and_then(|state| state.channel_id)
+                    .or(request.channel_id)?;
+                Some(guild.channel(channel)?.bitrate)
+            })
+            .unwrap_or(0);
+        self.bridge.voice_controls.send_if_modified(|controls| {
+            replace_if_changed(&mut controls.channel_bitrate, bitrate)
+        });
     }
 
     /// Looks up who is in the call (and who streams) in the state store. The
@@ -5247,6 +5279,81 @@ mod tests {
             rtc_region: None,
             video_quality_mode: None,
         }
+    }
+
+    #[test]
+    fn the_joined_channel_bitrate_follows_updates_and_moves_only() {
+        let channel = |id: u64, bitrate: u32| {
+            serde_json::from_str::<Channel>(&format!(
+                r#"{{"id":"{id}","type":2,"guild_id":"0","bitrate":{bitrate}}}"#
+            ))
+            .unwrap()
+        };
+        let dispatch = |event| GatewayEvent::Dispatch { sequence: 2, event };
+        let mut worker = worker();
+        let mut ready = ready_event(1, 0, 0);
+        if let GatewayEvent::Dispatch {
+            event: Dispatch::Ready(ready),
+            ..
+        } = &mut ready
+        {
+            ready.guilds[0].channels = vec![channel(10, 96_000), channel(11, 32_000)];
+        }
+        worker.apply_gateway_event(ready, |_| {});
+        let bitrate = |worker: &Worker| worker.bridge.voice_controls.borrow().send_bitrate();
+        assert_eq!(bitrate(&worker), fastcord_audio::DEFAULT_BITRATE, "no call");
+
+        worker
+            .bridge
+            .voice_requests
+            .send_replace(Some(VoiceStateRequest::join(
+                Some(Snowflake(0)),
+                Snowflake(10),
+                false,
+                false,
+            )));
+        worker.apply_gateway_event(dispatch(Dispatch::Resumed), |_| {});
+        assert_eq!(bitrate(&worker), 96_000);
+
+        // Another channel's update leaves the call alone; the joined one's is applied.
+        let mut seen = worker.bridge.voice_controls.subscribe();
+        seen.mark_unchanged();
+        worker.apply_gateway_event(
+            dispatch(Dispatch::ChannelUpdate(Box::new(channel(11, 64_000)))),
+            |_| {},
+        );
+        assert!(!seen.has_changed().unwrap());
+        worker.apply_gateway_event(
+            dispatch(Dispatch::ChannelUpdate(Box::new(channel(10, 1_000_000)))),
+            |_| {},
+        );
+        assert_eq!(bitrate(&worker), 384_000, "network input is clamped");
+
+        // A move reported by Discord wins over the requested channel.
+        let moved = r#"{"guild_id":"0","channel_id":"11","user_id":"1","session_id":"s"}"#;
+        let moved = fastcord_discord::gateway::VoiceStateUpdate {
+            state: serde_json::from_str(moved).unwrap(),
+            member: None,
+            users: Vec::new(),
+        };
+        worker.apply_gateway_event(
+            dispatch(Dispatch::VoiceStateUpdate(Box::new(moved))),
+            |_| {},
+        );
+        assert_eq!(bitrate(&worker), 64_000);
+
+        // A DM call keeps the default.
+        worker
+            .bridge
+            .voice_requests
+            .send_replace(Some(VoiceStateRequest::join(
+                None,
+                Snowflake(99),
+                false,
+                false,
+            )));
+        worker.apply_gateway_event(dispatch(Dispatch::Resumed), |_| {});
+        assert_eq!(bitrate(&worker), fastcord_audio::DEFAULT_BITRATE);
     }
 
     #[test]

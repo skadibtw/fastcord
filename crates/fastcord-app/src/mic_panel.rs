@@ -90,6 +90,8 @@ pub struct State {
     level: Option<Level>,
     peak_hold: f32,
     echo: Option<EchoDiagnostics>,
+    /// The call's microphone encoder target in bits/s.
+    send_bitrate: Option<u32>,
     notice: Option<String>,
 }
 
@@ -104,6 +106,7 @@ impl Default for State {
             level: None,
             peak_hold: FLOOR_DB,
             echo: None,
+            send_bitrate: None,
             notice: None,
         }
     }
@@ -214,6 +217,7 @@ impl State {
             }
         } else if let Some(call) = call {
             self.echo = call.echo;
+            self.send_bitrate = (call.send_bitrate > 0).then_some(call.send_bitrate);
             if call.frames == 0 {
                 self.level = None;
             } else {
@@ -228,6 +232,7 @@ impl State {
         } else {
             self.level = None;
             self.echo = None;
+            self.send_bitrate = None;
         }
     }
 
@@ -348,6 +353,15 @@ pub fn view<'a>(
         }
     }
     parts.push(text(echo_text(state.echo, in_call)).into());
+    if let Some(bitrate) = state.send_bitrate.filter(|_| in_call) {
+        parts.push(
+            text(format!(
+                "Sending your voice at {} kbps (the channel's bitrate).",
+                bitrate / 1000
+            ))
+            .into(),
+        );
+    }
     let can_start = !in_call && !state.running();
     parts.push(
         row![
