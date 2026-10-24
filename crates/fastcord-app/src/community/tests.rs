@@ -5,6 +5,7 @@ use fastcord_model::Permissions;
 
 fn client() -> RestClient {
     RestClient::new(
+        fastcord_net::NetworkContext::off(),
         fastcord_discord::UserToken::new("offline-test-credential".to_owned()),
         fastcord_discord::gateway::ClientProperties::web(
             fastcord_discord::gateway::HostOs::Linux,

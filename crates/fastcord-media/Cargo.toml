@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+fastcord-net.workspace = true
 fastcord-model.workspace = true
 davey.workspace = true
 aes-gcm.workspace = true

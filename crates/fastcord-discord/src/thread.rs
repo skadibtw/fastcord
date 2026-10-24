@@ -596,7 +596,12 @@ mod tests {
         use crate::UserToken;
         use crate::gateway::{ClientProperties, HostOs};
         let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
-        let client = RestClient::new(UserToken::new("dummy".into()), properties).unwrap();
+        let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
+            UserToken::new("dummy".into()),
+            properties,
+        )
+        .unwrap();
         assert_eq!(
             client
                 .create_thread(GUILD, PARENT, Snowflake(9), "  ")

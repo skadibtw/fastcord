@@ -17,11 +17,12 @@ pub enum Step {
 }
 
 pub async fn attempt(
+    network: fastcord_net::NetworkContext,
     login: String,
     password: Arc<UserToken>,
     captcha: Option<CaptchaSolution>,
 ) -> Result<Step, PasswordAuthError> {
-    let auth = PasswordAuth::new(&crate::login::client_properties().await)?;
+    let auth = PasswordAuth::new(&network, &crate::login::client_properties(&network).await)?;
     Ok(
         match auth
             .login(login.trim(), password.expose_secret(), captcha.as_ref())
@@ -35,10 +36,11 @@ pub async fn attempt(
 }
 
 pub async fn second_factor(
+    network: fastcord_net::NetworkContext,
     challenge: MfaChallenge,
     code: Arc<UserToken>,
 ) -> Result<Arc<UserToken>, PasswordAuthError> {
-    let auth = PasswordAuth::new(&crate::login::client_properties().await)?;
+    let auth = PasswordAuth::new(&network, &crate::login::client_properties(&network).await)?;
     auth.totp(&challenge, code.expose_secret().trim())
         .await
         .map(Arc::new)

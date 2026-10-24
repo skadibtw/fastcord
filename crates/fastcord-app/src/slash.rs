@@ -603,6 +603,7 @@ mod tests {
 
     fn client() -> RestClient {
         RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-slash-credential".into()),
             ClientProperties::web(HostOs::Linux, "en-US", 1),
         )

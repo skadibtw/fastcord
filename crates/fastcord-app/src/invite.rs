@@ -1504,6 +1504,7 @@ mod tests {
             ..NavigationSnapshot::default()
         };
         let client = fastcord_discord::RestClient::new(
+            fastcord_net::NetworkContext::off(),
             fastcord_discord::UserToken::new("offline-test-credential".to_owned()),
             fastcord_discord::gateway::ClientProperties::web(
                 fastcord_discord::gateway::HostOs::Linux,
@@ -1594,6 +1595,7 @@ mod tests {
             ..NavigationSnapshot::default()
         };
         let client = fastcord_discord::RestClient::new(
+            fastcord_net::NetworkContext::off(),
             fastcord_discord::UserToken::new("offline-test-credential".to_owned()),
             fastcord_discord::gateway::ClientProperties::web(
                 fastcord_discord::gateway::HostOs::Linux,
@@ -1631,6 +1633,7 @@ mod tests {
     #[test]
     fn an_opened_invite_is_looked_up_but_never_joined() {
         let client = fastcord_discord::RestClient::new(
+            fastcord_net::NetworkContext::off(),
             fastcord_discord::UserToken::new("offline-test-credential".to_owned()),
             fastcord_discord::gateway::ClientProperties::web(
                 fastcord_discord::gateway::HostOs::Linux,

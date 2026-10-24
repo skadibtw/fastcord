@@ -17,6 +17,7 @@ path = "src/main.rs"
 fake-discord = ["fastcord-discord/fake-discord"]
 
 [dependencies]
+fastcord-net.workspace = true
 fastcord-model.workspace = true
 fastcord-discord.workspace = true
 fastcord-platform.workspace = true

@@ -936,3 +936,23 @@ Every non-GET request passes `RestClient::check_write` (`fastcord-discord/src/wr
 **Off by default (turn on one at a time under Settings, Advanced, Test unverified actions; session only, fake mode turns all on):** Message extras; File uploads (`POST /channels/{c}/attachments`); Pins; Poll votes; Application interactions (`POST /interactions`); Ring a call; Soundboard play; Open a DM by typed ID (`POST /users/@me/channels`); Group DM management; Relationships, ignore and message requests; Friend request by username (`POST /users/@me/relationships`); Join or leave a server (`POST /invites/{code}`, `DELETE /users/@me/guilds/{g}`); Create and revoke invites; Profile and connections; Status and privacy settings (`PATCH /users/@me/settings`, `/users/@me/guilds/{g}/settings`); Log out sessions; Deauthorize an app; Reports; Server administration; Channels; Roles and permission overwrites; Moderation (members, bans, bulk delete, others' reactions); AutoMod; Community and onboarding setup; Accept rules and onboarding answers; Scheduled events; Announcements; Emoji, stickers and sounds; Webhooks and integrations; Stage voice states and instances; Threads and forum posts; Other, unclassified writes. The exact routes of each group are listed in the switch and in `WriteGroup::routes`.
 
 The refusal text is "Not yet verified on a live account. Enable it under Settings → Advanced → Test unverified actions (alt account only)." (`WRITE_NOT_VERIFIED`).
+
+## Application-local TLS recovery (M92)
+
+All production HTTP/socket creation enters fastcord-net through the app-owned
+NetworkContext: REST; password/QR ticket exchange; profile fetch; Gateway and
+remote-auth WS; voice/stream WS; upload storage; CDN and manually checked
+redirects; media UDP. The clients retain separate credentials and feature URL
+allowlists. Auto HTTP enters an authenticated ephemeral loopback CONNECT bridge;
+origin TLS, ALPN and HTTP/2 cross it unchanged. The bridge is neither a MITM nor a
+system proxy. There is no direct fallback if it fails. Off skips the bridge.
+
+Catalog v1 rewrites only plaintext ClientHello record/write boundaries at the
+structurally parsed SNI position after the first hostname byte. Handshake bytes
+(including ALPN/PSK binders) are identical; at most two hellos including HRR.
+WriteSplit/Combined set NODELAY and wait 10 ms once per split; these are writes,
+not a claim about TCP segments. Protected TLS ends shaping. Limits, categorical
+errors and demand-only TLS probe budgets are in SPEC �5.4. Probes send no HTTP,
+WebSocket Upgrade, discovery, Identify, headers or token. A TLS candidate is not
+DPI detection or service/session health. No captured hello or ambiguous request
+is replayed on another socket. Network-change hints do not disconnect sessions.

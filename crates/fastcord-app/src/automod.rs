@@ -1125,6 +1125,7 @@ mod tests {
 
     fn client() -> RestClient {
         RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-test-credential".to_owned()),
             ClientProperties::web(HostOs::Linux, "en-US", 1),
         )

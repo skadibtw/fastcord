@@ -507,11 +507,14 @@ impl fmt::Debug for VoiceSession {
 }
 
 /// Starts an audio-only voice connection on the current Tokio runtime.
-pub fn connect(credentials: VoiceCredentials) -> VoiceSession {
+pub fn connect(
+    network: fastcord_net::NetworkContext,
+    credentials: VoiceCredentials,
+) -> VoiceSession {
     let options = driver::Options::live(aes_accelerated());
     start(
-        transport::LiveSignaling,
-        transport::LiveNetwork,
+        transport::LiveSignaling(network.clone(), fastcord_net::Role::Voice),
+        transport::LiveNetwork(network),
         credentials,
         options,
     )
@@ -521,14 +524,20 @@ pub fn connect(credentials: VoiceCredentials) -> VoiceSession {
 /// ([`VideoOptions::watch`]) or owner ([`VideoOptions::share`]). Fails before
 /// anything is sent if the offer is inconsistent.
 pub fn connect_with_video(
+    network: fastcord_net::NetworkContext,
     credentials: VoiceCredentials,
     video: VideoOptions,
 ) -> Result<VoiceSession, VideoError> {
     video.validate()?;
+    let role = if video.camera {
+        fastcord_net::Role::Voice
+    } else {
+        fastcord_net::Role::Stream
+    };
     let options = driver::Options::live(aes_accelerated()).with_video(video);
     Ok(start(
-        transport::LiveSignaling,
-        transport::LiveNetwork,
+        transport::LiveSignaling(network.clone(), role),
+        transport::LiveNetwork(network),
         credentials,
         options,
     ))

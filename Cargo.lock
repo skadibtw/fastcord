@@ -2065,6 +2065,7 @@ dependencies = [
  "fastcord-discord",
  "fastcord-media",
  "fastcord-model",
+ "fastcord-net",
  "fastcord-platform",
  "fastcord-video",
  "filetime",
@@ -2116,6 +2117,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "fastcord-model",
+ "fastcord-net",
  "flate2",
  "futures-util",
  "parking_lot 0.12.5",
@@ -2140,6 +2142,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "fastcord-discord",
  "fastcord-model",
+ "fastcord-net",
  "flate2",
  "futures-util",
  "serde_json",
@@ -2155,6 +2158,7 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "davey",
  "fastcord-model",
+ "fastcord-net",
  "futures-util",
  "openmls",
  "openmls_basic_credential",
@@ -2183,6 +2187,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastcord-net"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "base64 0.22.1",
+ "http",
+ "rand_core 0.6.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots",
+ "zeroize",
+]
+
+[[package]]
 name = "fastcord-platform"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2192,6 +2212,7 @@ dependencies = [
  "block2 0.6.2",
  "dispatch2",
  "fastcord-model",
+ "fastcord-net",
  "futures-util",
  "keyring-core",
  "objc2 0.6.5",

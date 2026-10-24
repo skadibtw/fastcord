@@ -267,7 +267,7 @@ pub(crate) async fn run<S: Signaling, N: Network>(
     let reason = driver.drive().await;
     // Sockets and keys go before anyone hears that the connection is closed.
     driver.reset_session();
-    driver.ch.status.send_replace(VoiceStatus::Closed(reason));
+    driver.set_status(VoiceStatus::Closed(reason));
 }
 
 fn backoff(failures: u32) -> Duration {
@@ -384,6 +384,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
     }
 
     fn set_status(&self, status: VoiceStatus) {
+        self.signaling.note_status(status);
         self.ch.status.send_replace(status);
     }
 

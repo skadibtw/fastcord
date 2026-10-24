@@ -441,6 +441,7 @@ mod tests {
     async fn a_stopped_account_never_edits_or_deletes() {
         let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-test-credential".to_owned()),
             properties,
         )

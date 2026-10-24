@@ -1126,7 +1126,7 @@ impl History {
         }
         for (id, channel, post) in self.outbox.take_ready_files() {
             let Some(uploader) = self.uploader.clone().or_else(|| {
-                self.uploader = Uploader::new().ok();
+                self.uploader = Uploader::new(rest.network()).ok();
                 self.uploader.clone()
             }) else {
                 self.outbox.fail(
@@ -2194,6 +2194,7 @@ mod tests {
     fn rest() -> RestClient {
         let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
         RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-fixture-credential".to_owned()),
             properties,
         )

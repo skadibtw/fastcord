@@ -18,6 +18,8 @@ license = "GPL-3.0-only"
 repository = "https://github.com/skadibtw/fastcord"
 
 [workspace.dependencies]
+http = "1"
+fastcord-net = { path = "crates/fastcord-net" }
 fastcord-model = { path = "crates/fastcord-model" }
 fastcord-discord = { path = "crates/fastcord-discord" }
 fastcord-platform = { path = "crates/fastcord-platform" }

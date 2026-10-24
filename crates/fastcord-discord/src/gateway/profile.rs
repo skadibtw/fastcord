@@ -66,13 +66,13 @@ impl BuildNumber {
 /// The request is unauthenticated and carries no account data. The page is
 /// fetched at most once per process: the answer, fetched or fallback, is kept
 /// for every later validate, restore, account switch and login step.
-pub async fn resolve_build_number() -> BuildNumber {
+pub async fn resolve_build_number(network: &fastcord_net::NetworkContext) -> BuildNumber {
     static RESOLVED: tokio::sync::OnceCell<BuildNumber> = tokio::sync::OnceCell::const_new();
     #[cfg(feature = "fake-discord")]
     if crate::fake_origin::active() {
         return BuildNumber::bundled();
     }
-    resolve_once(&RESOLVED, fetch_build_number()).await
+    resolve_once(&RESOLVED, fetch_build_number(network)).await
 }
 
 /// The cached value, or `fetch` run once (concurrent callers share that run).
@@ -90,8 +90,10 @@ async fn resolve_once(
         .await
 }
 
-async fn fetch_build_number() -> Option<u32> {
-    let client = reqwest::Client::builder()
+async fn fetch_build_number(network: &fastcord_net::NetworkContext) -> Option<u32> {
+    let client = network
+        .http_builder(fastcord_net::Role::Profile)
+        .ok()?
         .use_rustls_tls()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -358,7 +360,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "contacts discord.com"]
     async fn live_build_number_is_fetched_from_the_web_client() {
-        let build = resolve_build_number().await;
+        let build = resolve_build_number(&fastcord_net::NetworkContext::off()).await;
         println!("client_build_number {} ({:?})", build.value, build.source);
         assert_eq!(build.source, BuildSource::Fetched);
         assert!(BUILD_RANGE.contains(&build.value));

@@ -7,6 +7,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod instance;
 pub mod loopback;
+pub mod network;
 pub mod notify;
 pub mod realtime;
 pub mod shortcut;

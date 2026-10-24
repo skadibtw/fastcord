@@ -75,7 +75,12 @@ mod tests {
     #[tokio::test]
     async fn open_requires_a_bounded_unique_explicit_recipient_selection() {
         let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
-        let client = RestClient::new(UserToken::new("dummy".into()), properties).unwrap();
+        let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
+            UserToken::new("dummy".into()),
+            properties,
+        )
+        .unwrap();
         assert_eq!(
             client.open_private_channel(&[]).await,
             Err(PrivateChannelError::InvalidRecipients)

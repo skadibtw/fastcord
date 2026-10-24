@@ -49,6 +49,7 @@ mod message_link;
 mod mic_panel;
 mod moderation;
 mod navigation;
+mod network_ui;
 mod notify;
 mod notify_settings;
 mod onboarding;
@@ -178,6 +179,10 @@ fn window_title() -> &'static str {
 }
 
 fn main() -> iced::Result {
+    #[cfg(debug_assertions)]
+    if std::env::args_os().any(|arg| arg == "--network-preview") {
+        return network_ui::preview();
+    }
     // An offline UI check: runs before account restoration and single-instance
     // hand-off, with no session, credential access or Discord workers.
     if std::env::args_os().any(|arg| arg == "--alerts-preview") {
@@ -229,6 +234,8 @@ fn main() -> iced::Result {
 }
 
 struct App {
+    network: fastcord_net::NetworkContext,
+    network_settings: network_ui::State,
     phase: Phase,
     token: Arc<UserToken>,
     acknowledged: bool,
@@ -459,7 +466,14 @@ enum Message {
     StopSpeech,
     RefreshAudioDevices,
     AudioDevicesListed(audio_devices::Inventory),
-    Initialized(audio_devices::Preferences, Result<StoreReady, StoreError>),
+    Initialized(
+        audio_devices::Preferences,
+        fastcord_net::settings::Settings,
+        Result<StoreReady, StoreError>,
+    ),
+    Network(network_ui::Action),
+    NetworkChanged,
+    NetworkProgress,
     SelectAudioDevice(fastcord_audio::Direction, audio_devices::DeviceOption),
     NoiseSuppressionChanged(fastcord_audio::NoiseSuppression),
     EchoCancellationChanged(bool),
@@ -581,6 +595,8 @@ impl App {
         (
             Self {
                 phase: Phase::Starting,
+                network: fastcord_net::NetworkContext::off(),
+                network_settings: network_ui::State::default(),
                 token: Arc::new(UserToken::new(String::new())),
                 acknowledged: false,
                 memory_only: false,
@@ -660,9 +676,13 @@ impl App {
                     paste::purge_stale();
                     voice_record::purge_stale();
                     let preferences = audio_devices::load().await;
-                    (preferences, login::initialize_store().await)
+                    (
+                        preferences,
+                        network_ui::load().await,
+                        login::initialize_store().await,
+                    )
                 },
-                |(preferences, store)| Message::Initialized(preferences, store),
+                |(preferences, network, store)| Message::Initialized(preferences, network, store),
             ),
         )
     }
@@ -862,6 +882,12 @@ impl App {
         });
         iced::Subscription::batch([
             activity,
+            iced::Subscription::run(network_ui::changes).map(|()| Message::NetworkChanged),
+            iced::Subscription::run_with(
+                network_ui::Updates(self.network.controller().clone()),
+                network_ui::updates,
+            )
+            .map(|()| Message::NetworkProgress),
             self.animation_subscription(),
             self.video_subscription(),
             self.media_subscription(),
@@ -1215,7 +1241,47 @@ impl App {
 
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Initialized(preferences, store) => {
+            Message::NetworkProgress => {}
+            Message::NetworkChanged => {
+                self.network.controller().network_changed();
+            }
+            Message::Network(action) => match action {
+                network_ui::Action::Open => self.network_settings.open = true,
+                network_ui::Action::Close => self.network_settings.open = false,
+                network_ui::Action::Retry => {
+                    let context = self.network.clone();
+                    return Task::perform(
+                        async move {
+                            context.wait_for_recovery().await;
+                        },
+                        |()| Message::Network(network_ui::Action::Retried),
+                    );
+                }
+                network_ui::Action::Retried => {
+                    self.network_settings.notice =
+                        Some("Pending check finished. Ordinary reconnect limits still apply.")
+                }
+                network_ui::Action::Mode(mode) => {
+                    if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                        self.network_settings.saving = true;
+                        self.network.controller().network_changed();
+                        self.network_settings.settings.mode = mode;
+                        self.network = self.network.with_mode(mode);
+                        return Task::perform(
+                            network_ui::save(self.network_settings.settings.clone()),
+                            |result| Message::Network(network_ui::Action::Saved(result)),
+                        );
+                    }
+                }
+                network_ui::Action::Saved(result) => {
+                    self.network_settings.saving = false;
+                    self.network_settings.notice =
+                        Some(result.err().unwrap_or("Network settings saved."))
+                }
+            },
+            Message::Initialized(preferences, network, store) => {
+                self.network = self.network.with_mode(network.mode);
+                self.network_settings.settings = network;
                 notify::set_enabled(!preferences.notifications_off);
                 notify::set_previews(!preferences.notification_previews_off);
                 self.soundboard.set_prefs(preferences.soundboard.clone());
@@ -1233,6 +1299,7 @@ impl App {
                     };
                     return Task::perform(
                         login::token_login(
+                            self.network.clone(),
                             Arc::new(UserToken::new(fake::TOKEN.to_owned())),
                             None,
                             false,
@@ -1564,7 +1631,12 @@ impl App {
                     };
                     self.notice = None;
                     return Task::perform(
-                        login::token_login(token, self.store.clone(), !self.memory_only),
+                        login::token_login(
+                            self.network.clone(),
+                            token,
+                            self.store.clone(),
+                            !self.memory_only,
+                        ),
                         Message::LoginFinished,
                     );
                 }
@@ -1590,7 +1662,12 @@ impl App {
                     Ok(password::Step::Token(token)) => {
                         self.clear_password();
                         return Task::perform(
-                            login::token_login(token, self.store.clone(), !self.memory_only),
+                            login::token_login(
+                                self.network.clone(),
+                                token,
+                                self.store.clone(),
+                                !self.memory_only,
+                            ),
                             Message::LoginFinished,
                         );
                     }
@@ -1644,7 +1721,10 @@ impl App {
                     return Task::none();
                 };
                 let code = self.take_input_token();
-                return Task::perform(password::second_factor(challenge, code), Message::MfaResult);
+                return Task::perform(
+                    password::second_factor(self.network.clone(), challenge, code),
+                    Message::MfaResult,
+                );
             }
             Message::CancelMfa if matches!(self.phase, Phase::Mfa(_)) => {
                 self.clear_token();
@@ -1654,7 +1734,12 @@ impl App {
                 match result {
                     Ok(token) => {
                         return Task::perform(
-                            login::token_login(token, self.store.clone(), !self.memory_only),
+                            login::token_login(
+                                self.network.clone(),
+                                token,
+                                self.store.clone(),
+                                !self.memory_only,
+                            ),
                             Message::LoginFinished,
                         );
                     }
@@ -1684,7 +1769,12 @@ impl App {
                     saved_account: None,
                 };
                 return Task::perform(
-                    login::token_login(token, self.store.clone(), !self.memory_only),
+                    login::token_login(
+                        self.network.clone(),
+                        token,
+                        self.store.clone(),
+                        !self.memory_only,
+                    ),
                     Message::LoginFinished,
                 );
             }
@@ -3367,6 +3457,7 @@ impl App {
     ) -> Task<Message> {
         Task::perform(
             password::attempt(
+                self.network.clone(),
                 self.password_login.clone(),
                 Arc::clone(&self.password),
                 captcha,
@@ -3509,7 +3600,10 @@ impl App {
         self.phase = Phase::Authenticating {
             saved_account: Some(account),
         };
-        Task::perform(login::restore(store, account), Message::LoginFinished)
+        Task::perform(
+            login::restore(self.network.clone(), store, account),
+            Message::LoginFinished,
+        )
     }
 
     fn start_delete(&mut self, account: Snowflake) -> Task<Message> {
@@ -3528,8 +3622,10 @@ impl App {
         self.clear_token();
         self.qr_attempts += 1;
         let id = self.qr_attempts;
-        let (task, worker) =
-            Task::run(qr::events(), move |event| Message::Qr(id, event)).abortable();
+        let (task, worker) = Task::run(qr::events(self.network.clone()), move |event| {
+            Message::Qr(id, event)
+        })
+        .abortable();
         self.phase = Phase::Qr(QrAttempt::new(id, worker));
         task
     }
@@ -3594,7 +3690,7 @@ impl App {
         );
         let (task, worker) = Task::run(stream, move |()| Message::Navigation(id)).abortable();
         let attachment_cache =
-            crate::attachments::AttachmentCache::default_root(session.user.id).ok();
+            crate::attachments::AttachmentCache::default_root(&self.network, session.user.id).ok();
         self.search = search::State::default();
         self.pins = pins::State::default();
         self.inbox.clear();
@@ -5027,6 +5123,14 @@ impl App {
     }
 
     fn view_body(&self) -> Element<'_, Message> {
+        if self.network_settings.open {
+            return center(scrollable(network_ui::view(
+                &self.network_settings,
+                &self.network,
+                matches!(self.phase, Phase::Login),
+            )))
+            .into();
+        }
         if self.compact_call
             && let Phase::Account { gateway, .. } = &self.phase
         {
@@ -5034,22 +5138,25 @@ impl App {
         }
         if self.chat_settings_open {
             return center(scrollable(
-                column![chat_prefs::view(
-                    self.audio_preferences.chat,
-                    &chat_prefs::SpeechView {
-                        prefs: &self.audio_preferences.speech,
-                        voices: &self.speech_voices,
-                        error: speech::error(),
-                        speaking: speech::speaking(),
-                    },
-                    unverified::view(
-                        match &self.phase {
-                            Phase::Account { session, .. } => Some(&session.client),
-                            _ => None,
+                column![
+                    button("Network recovery").on_press(Message::Network(network_ui::Action::Open)),
+                    chat_prefs::view(
+                        self.audio_preferences.chat,
+                        &chat_prefs::SpeechView {
+                            prefs: &self.audio_preferences.speech,
+                            voices: &self.speech_voices,
+                            error: speech::error(),
+                            speaking: speech::speaking(),
                         },
-                        self.unverified_open,
-                    ),
-                )]
+                        unverified::view(
+                            match &self.phase {
+                                Phase::Account { session, .. } => Some(&session.client),
+                                _ => None,
+                            },
+                            self.unverified_open,
+                        ),
+                    )
+                ]
                 .padding(12),
             ))
             .into();
@@ -5840,6 +5947,7 @@ impl App {
                 .padding(12),
             button("Log in with token").on_press_maybe(self.can_login().then_some(Message::Login)),
             button("Audio devices").on_press(Message::OpenAudioSettings),
+            button("Network recovery").on_press(Message::Network(network_ui::Action::Open)),
         ].spacing(16).width(Length::Fill);
         if let Some(notice) = &self.notice {
             content = content.push(text(notice));

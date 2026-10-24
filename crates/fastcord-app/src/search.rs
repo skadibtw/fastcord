@@ -461,6 +461,7 @@ mod tests {
         use fastcord_discord::UserToken;
         use fastcord_discord::gateway::{ClientProperties, HostOs};
         RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-search-credential".into()),
             ClientProperties::web(HostOs::Linux, "en-US", 1),
         )

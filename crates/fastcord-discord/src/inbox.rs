@@ -247,6 +247,7 @@ mod tests {
         use crate::gateway::{ClientProperties, HostOs};
 
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-test-credential".to_owned()),
             ClientProperties::web(HostOs::Linux, "en-US", 1),
         )

@@ -929,3 +929,7 @@ Only the groups listed under "On by default" in PROTOCOL.md "Write allowlist" se
 ### Voice channel bitrate (#118)
 - **Automated:** `fastcord-audio` `engine::tests::bitrate_control_resizes_packets_without_reopening_or_dropping_frames` (8 to 128 kbit/s mid-call: packets grow more than four times, no device reopened, frame sequence unbroken, nothing dropped; the callback allocation audit is unchanged because the control is handled on the owner thread); `fastcord-app` `gateway::tests::the_joined_channel_bitrate_follows_updates_and_moves_only` (READY channels with 96 and 32 kbit/s, an update of another channel changes nothing, the joined channel's update is clamped to 384 kbit/s, a move reported by `VOICE_STATE_UPDATE` wins, a DM call keeps 64 kbit/s) and `gateway::voice_audio::tests::a_channel_bitrate_change_reaches_the_engine_once`.
 - [ ] Alt account, Windows: join channels set to 64 and 96 kbit/s (and a boosted one if available) with the audio dialog open: "Sending your voice at N kbps" follows the channel. Change the joined channel's bitrate in the official client: the line changes without an audio gap. The voice sounds right in the official client.
+## Network recovery extension
+
+Implementation, deterministic tests, the Windows UI launch and outstanding live
+gates for M92–M95 are recorded in [NETWORK_TESTING.md](NETWORK_TESTING.md).

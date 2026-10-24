@@ -15,6 +15,7 @@ test-support = []
 [dependencies]
 audio_thread_priority.workspace = true
 fastcord-model.workspace = true
+fastcord-net.workspace = true
 keyring-core.workspace = true
 parking_lot.workspace = true
 sys-locale.workspace = true
@@ -28,6 +29,7 @@ windows = { workspace = true, features = [
     "Wdk_System_SystemServices",
     "Foundation",
     "Foundation_Collections",
+    "Networking_Connectivity",
     "Media_Core",
     "Media_Playback",
     "Media_SpeechSynthesis",

@@ -46,7 +46,7 @@ impl Transport for Unauthenticated {
     }
 
     async fn connect(&self, url: &GatewayUrl) -> Result<TlsSocket, ConnectError> {
-        connect_tls(url).await
+        connect_tls(&fastcord_net::NetworkContext::off(), url).await
     }
 
     async fn authentication_required(&self) {
@@ -181,7 +181,12 @@ async fn live_real_gateway_negotiates_zlib_stream_and_rejects_a_bogus_token() {
 async fn live_account_identifies_and_resumes_after_a_forced_reconnect() {
     let token = std::env::var("FASTCORD_LIVE_TOKEN").expect("set FASTCORD_LIVE_TOKEN for this run");
     let properties = ClientProperties::web(HostOs::current(), "en-US", BUNDLED_BUILD_NUMBER);
-    let rest = RestClient::new(UserToken::new(token.clone()), properties.clone()).unwrap();
+    let rest = RestClient::new(
+        fastcord_net::NetworkContext::off(),
+        UserToken::new(token.clone()),
+        properties.clone(),
+    )
+    .unwrap();
     let (cut, _) = watch::channel(0u64);
     let transport = Arc::new(Severable {
         inner: LiveTransport::new(rest),

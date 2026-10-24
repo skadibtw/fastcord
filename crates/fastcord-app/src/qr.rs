@@ -14,12 +14,15 @@ use iced::widget::qr_code;
 /// A worker stream for one attempt. The attempt starts when the stream is first
 /// polled (inside iced's Tokio runtime) and ends, closing its socket and
 /// dropping its keys, when the stream is dropped, which `Handle::abort` does.
-pub fn events() -> impl Stream<Item = RemoteAuthEvent> {
-    stream::unfold(None::<RemoteAuth>, |attempt| async move {
-        let mut attempt = attempt.unwrap_or_else(RemoteAuth::start);
-        let event = attempt.next_event().await?;
-        Some((event, Some(attempt)))
-    })
+pub fn events(network: fastcord_net::NetworkContext) -> impl Stream<Item = RemoteAuthEvent> {
+    stream::unfold(
+        (None::<RemoteAuth>, network),
+        |(attempt, network)| async move {
+            let mut attempt = attempt.unwrap_or_else(|| RemoteAuth::start(network.clone()));
+            let event = attempt.next_event().await?;
+            Some((event, (Some(attempt), network)))
+        },
+    )
 }
 
 pub enum QrStage {

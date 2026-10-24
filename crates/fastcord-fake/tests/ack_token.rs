@@ -22,6 +22,7 @@ async fn the_next_ack_sends_back_the_token_of_the_last_answer() {
     .unwrap();
     fake_origin::set_origin(&format!("127.0.0.1:{}", fake.port())).unwrap();
     let client = RestClient::new(
+        fastcord_net::NetworkContext::off(),
         UserToken::new("fake-token".to_owned()),
         ClientProperties::web(HostOs::Linux, "en-US", BUNDLED_BUILD_NUMBER),
     )

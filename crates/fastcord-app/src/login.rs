@@ -112,8 +112,8 @@ pub async fn initialize_store() -> Result<StoreReady, StoreError> {
 }
 
 /// The web-client identity shared by password login and the validated session.
-pub async fn client_properties() -> ClientProperties {
-    let build = fastcord_discord::gateway::resolve_build_number().await;
+pub async fn client_properties(network: &fastcord_net::NetworkContext) -> ClientProperties {
+    let build = fastcord_discord::gateway::resolve_build_number(network).await;
     ClientProperties::web(
         HostOs::current(),
         &fastcord_platform::system_locale(),
@@ -125,14 +125,16 @@ pub async fn client_properties() -> ClientProperties {
 /// Exactly one validation request before an authenticated account is displayed.
 /// Tokens and raw error bodies never enter a displayable diagnostic.
 pub async fn validate(
+    network: fastcord_net::NetworkContext,
     token: Arc<UserToken>,
     expected_account: Option<Snowflake>,
 ) -> Result<Arc<Session>, LoginError> {
     if token.expose_secret().is_empty() || token.expose_secret().len() > MAX_TOKEN_BYTES {
         return Err(LoginError::InvalidInput);
     }
-    let properties = client_properties().await;
+    let properties = client_properties(&network).await;
     let client = RestClient::new(
+        network,
         UserToken::new(token.expose_secret().to_owned()),
         properties.clone(),
     )
@@ -182,15 +184,17 @@ pub async fn persist(
 }
 
 pub async fn token_login(
+    network: fastcord_net::NetworkContext,
     token: Arc<UserToken>,
     store: Option<NativeCredentialStore>,
     remember: bool,
 ) -> Result<LoginOutcome, LoginError> {
-    let session = validate(token, None).await?;
+    let session = validate(network, token, None).await?;
     Ok(persist(session, store, remember).await)
 }
 
 pub async fn restore(
+    network: fastcord_net::NetworkContext,
     store: NativeCredentialStore,
     account: Snowflake,
 ) -> Result<LoginOutcome, LoginError> {
@@ -201,7 +205,7 @@ pub async fn restore(
         .ok_or(LoginError::CredentialMissing)?;
     let mut secret = credential.into_secret();
     let token = Arc::new(UserToken::new(std::mem::take(&mut *secret)));
-    let session = validate(token, Some(account)).await?;
+    let session = validate(network, token, Some(account)).await?;
     Ok(LoginOutcome::Authenticated(session, Persistence::Saved))
 }
 
@@ -232,6 +236,7 @@ pub(crate) fn fixture_session() -> Arc<Session> {
         user: serde_json::from_str(include_str!("../../../fixtures/rest/current-user.json"))
             .unwrap(),
         client: RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("dummy-offline-secret".to_owned()),
             properties.clone(),
         )
@@ -283,7 +288,12 @@ mod tests {
             "x".repeat(MAX_TOKEN_BYTES + 1),
             "bad\r\nheader".to_owned(),
         ] {
-            let outcome = validate(Arc::new(UserToken::new(value)), None).await;
+            let outcome = validate(
+                fastcord_net::NetworkContext::off(),
+                Arc::new(UserToken::new(value)),
+                None,
+            )
+            .await;
             assert!(matches!(
                 outcome,
                 Err(LoginError::InvalidInput | LoginError::Rest(RestError::InvalidToken))

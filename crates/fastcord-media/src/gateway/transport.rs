@@ -4,17 +4,14 @@
 //! UDP socket; tests substitute in-process fakes.
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::net::SocketAddr;
+
 use std::time::Duration;
 
 use futures_util::{Sink, Stream};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::UdpSocket;
 use tokio::time::timeout;
-use tokio_rustls::TlsConnector;
-use tokio_rustls::client::TlsStream;
-use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::{ClientConfig, RootCertStore, crypto};
+
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -30,13 +27,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 18) stay far below this.
 pub(crate) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
-pub(crate) type TlsSocket = WebSocketStream<TlsStream<TcpStream>>;
+pub(crate) type TlsSocket = WebSocketStream<fastcord_net::BoxedIo>;
 
 /// Categorical: endpoints and TLS details never reach logs or messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ConnectError;
 
 pub(crate) trait Signaling: Send + Sync + 'static {
+    fn note_status(&self, _status: super::VoiceStatus) {}
     type Socket: Stream<Item = Result<Message, WsError>>
         + Sink<Message, Error = WsError>
         + Unpin
@@ -92,19 +90,37 @@ pub(crate) fn websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_MESSAGE_BYTES))
 }
 
-pub(crate) struct LiveSignaling;
+pub(crate) struct LiveSignaling(
+    pub(crate) fastcord_net::NetworkContext,
+    pub(crate) fastcord_net::Role,
+);
 
 impl Signaling for LiveSignaling {
     type Socket = TlsSocket;
 
+    fn note_status(&self, status: super::VoiceStatus) {
+        match status {
+            super::VoiceStatus::Identifying => self.0.controller().note_service_reachable(self.1),
+            super::VoiceStatus::Connected { .. } => {
+                self.0.controller().note_session_healthy(self.1)
+            }
+            super::VoiceStatus::Closed(super::CloseReason::UdpUnreachable) => {
+                self.0.controller().note_udp_unreachable(self.1)
+            }
+            _ => {}
+        }
+    }
+
     async fn connect(&self, url: &str) -> Result<TlsSocket, ConnectError> {
-        timeout(CONNECT_TIMEOUT, connect_tls(url))
-            .await
-            .map_err(|_| ConnectError)?
+        connect_tls(&self.0, self.1, url).await
     }
 }
 
-async fn connect_tls(url: &str) -> Result<TlsSocket, ConnectError> {
+async fn connect_tls(
+    network: &fastcord_net::NetworkContext,
+    role: fastcord_net::Role,
+    url: &str,
+) -> Result<TlsSocket, ConnectError> {
     let mut request = url.into_client_request().map_err(|_| ConnectError)?;
     let uri = request.uri().clone();
     if uri.scheme_str() != Some("wss") {
@@ -115,46 +131,41 @@ async fn connect_tls(url: &str) -> Result<TlsSocket, ConnectError> {
     request
         .headers_mut()
         .insert("Origin", HeaderValue::from_static(ORIGIN));
-    let tcp = TcpStream::connect((host.as_str(), port))
+    let tls = network
+        .connect_tls(&host, port, role)
         .await
         .map_err(|_| ConnectError)?;
-    tcp.set_nodelay(true).map_err(|_| ConnectError)?;
-    let server_name = ServerName::try_from(host).map_err(|_| ConnectError)?;
-    let tls = TlsConnector::from(tls_config()?)
-        .connect(server_name, tcp)
-        .await
-        .map_err(|_| ConnectError)?;
-    let (socket, _response) = client_async_with_config(request, tls, Some(websocket_config()))
-        .await
-        .map_err(|_| ConnectError)?;
+    let (socket, _response) = timeout(
+        CONNECT_TIMEOUT,
+        client_async_with_config(
+            request,
+            Box::new(tls) as fastcord_net::BoxedIo,
+            Some(websocket_config()),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        network
+            .controller()
+            .note_failure(role, fastcord_net::NetworkError::WebSocketUpgrade);
+        ConnectError
+    })?
+    .map_err(|_| {
+        network
+            .controller()
+            .note_failure(role, fastcord_net::NetworkError::WebSocketUpgrade);
+        ConnectError
+    })?;
     Ok(socket)
 }
 
-fn tls_config() -> Result<Arc<ClientConfig>, ConnectError> {
-    let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = ClientConfig::builder_with_provider(Arc::new(crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(|_| ConnectError)?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(Arc::new(config))
-}
-
-pub(crate) struct LiveNetwork;
-
+pub(crate) struct LiveNetwork(pub(crate) fastcord_net::NetworkContext);
 impl Network for LiveNetwork {
     type Udp = UdpSocket;
-
     async fn bind(&self, server: SocketAddr) -> io::Result<UdpSocket> {
-        let local: SocketAddr = if server.is_ipv4() {
-            (Ipv4Addr::UNSPECIFIED, 0).into()
-        } else {
-            (Ipv6Addr::UNSPECIFIED, 0).into()
-        };
-        UdpSocket::bind(local).await
+        self.0.bind_udp(server).await
     }
 }
-
 impl UdpLink for UdpSocket {
     async fn send_to(&self, datagram: &[u8], to: SocketAddr) -> io::Result<()> {
         let sent = UdpSocket::send_to(self, datagram, to).await?;
@@ -200,24 +211,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tls_configuration_builds_with_the_bundled_roots() {
-        assert!(tls_config().is_ok());
-    }
-
     #[tokio::test]
     async fn live_signaling_refuses_plaintext_urls() {
         assert_eq!(
-            LiveSignaling.connect("ws://127.0.0.1:9/?v=8").await.err(),
+            LiveSignaling(
+                fastcord_net::NetworkContext::off(),
+                fastcord_net::Role::Voice
+            )
+            .connect("ws://127.0.0.1:9/?v=8")
+            .await
+            .err(),
             Some(ConnectError)
         );
     }
 
     #[tokio::test]
     async fn live_udp_sockets_exchange_datagrams() {
-        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let server = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let address = server.local_addr().unwrap();
-        let client = LiveNetwork.bind(address).await.unwrap();
+        let client = fastcord_net::NetworkContext::off()
+            .debug_bind_udp(address)
+            .await
+            .unwrap();
         UdpLink::send_to(&client, b"ping", address).await.unwrap();
         let mut buffer = [0; 16];
         let (len, from) = UdpSocket::recv_from(&server, &mut buffer).await.unwrap();

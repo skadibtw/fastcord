@@ -246,17 +246,22 @@ struct CaptchaResponse {
 }
 
 pub struct PasswordAuth {
-    http: reqwest::Client,
+    http: fastcord_net::HttpClient,
 }
 
 impl PasswordAuth {
-    pub fn new(properties: &ClientProperties) -> Result<Self, PasswordAuthError> {
+    pub fn new(
+        network: &fastcord_net::NetworkContext,
+        properties: &ClientProperties,
+    ) -> Result<Self, PasswordAuthError> {
         #[cfg(feature = "fake-discord")]
         if crate::fake_origin::active() {
             return Err(PasswordAuthError::Configuration);
         }
         let headers = identity_headers(properties).map_err(|_| PasswordAuthError::Configuration)?;
-        let http = reqwest::Client::builder()
+        let http = network
+            .http_builder(fastcord_net::Role::Login)
+            .map_err(|_| PasswordAuthError::Configuration)?
             .use_rustls_tls()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
@@ -335,7 +340,7 @@ impl PasswordAuth {
 }
 
 async fn send(
-    request: reqwest::RequestBuilder,
+    request: fastcord_net::HttpRequestBuilder,
 ) -> Result<(StatusCode, Vec<u8>), PasswordAuthError> {
     let mut response = request
         .header(reqwest::header::CONTENT_TYPE, "application/json")

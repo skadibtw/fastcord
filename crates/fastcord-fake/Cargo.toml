@@ -16,6 +16,7 @@ name = "fastcord-fake"
 path = "src/main.rs"
 
 [dependencies]
+fastcord-net.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
 serde_json.workspace = true

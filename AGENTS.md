@@ -9,14 +9,15 @@ fastcord is a native, lightweight third-party Discord desktop client in Rust. Go
 Cargo workspace under `crates/`. Dependency direction is strict and acyclic (SPEC §3):
 
 ```
-model  <-  discord
-model  <-  media              (voice WS, UDP/RTP, AEAD, DAVE; no cpal/iced)
+model, net <- discord
+model, net <- media              (voice WS, UDP/RTP, AEAD, DAVE; no cpal/iced)
 model, media, platform <- audio   (cpal, Opus, nnnoiseless, DeepFilterNet, jitter, mixing)
 model, media, platform <- video   (capture, codecs, packetization)
 all    <-  app                (binary `fastcord`, iced UI, orchestration)
 ```
 
-- `fastcord-model`, `fastcord-discord`, `fastcord-media`, `fastcord-platform`, `fastcord-audio`, `fastcord-video`, and `fastcord-app` exist so far; create other crates in the milestone that first needs them, never as empty placeholders.
+- `fastcord-net` (no workspace-crate dependencies; shared socket/HTTP policy), `fastcord-model`, `fastcord-discord`, `fastcord-media`, `fastcord-platform`, `fastcord-audio`, `fastcord-video`, and `fastcord-app` exist so far; create other crates in the milestone that first needs them, never as empty placeholders.
+- `platform -> model, net` implements net-defined interfaces; `net` never depends on platform. The app owns one shared `NetworkContext` across account workers.
 - One reducer task owns mutable Discord state; UI receives deltas/read models, never clones of full state.
 - Networking, decoding, and audio never run on the UI thread. Audio callbacks: no locks, allocation, I/O, or inference.
 - Every queue/cache is **byte-bounded**.

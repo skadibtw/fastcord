@@ -22,16 +22,18 @@ pub(crate) trait TicketExchange: Send + Sync {
 }
 
 pub(crate) struct HttpTicketExchange {
-    http: reqwest::Client,
+    http: fastcord_net::HttpClient,
 }
 
 impl HttpTicketExchange {
-    pub(crate) fn new() -> Result<Self, RemoteAuthError> {
+    pub(crate) fn new(network: &fastcord_net::NetworkContext) -> Result<Self, RemoteAuthError> {
         #[cfg(feature = "fake-discord")]
         if crate::fake_origin::active() {
             return Err(RemoteAuthError::Connect);
         }
-        let http = reqwest::Client::builder()
+        let http = network
+            .http_builder(fastcord_net::Role::Login)
+            .map_err(|_| RemoteAuthError::Connect)?
             .use_rustls_tls()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())

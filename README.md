@@ -8,6 +8,16 @@ Status: early development. See [docs/SPEC.md](docs/SPEC.md) for the design and m
 
 The approved delivery order and issue links are in [docs/ROADMAP.md](docs/ROADMAP.md): finish and verify the three-platform MVP, then add everyday messaging and community features. Implemented features and passed live/native acceptance are tracked separately.
 
+## Network recovery
+
+**Network recovery** on the login screen selects Off or Auto before sign-in.
+Auto uses bounded TLS-only checks of a failed required service and application-local
+TLS splitting. It preserves certificate verification and all account retry limits.
+It changes no system network settings. TCP write boundaries are best effort;
+fragmentation is not universal and blocked-network effectiveness is unverified.
+Network settings use `network-settings.json` beside the audio settings, with a
+separate fake-mode namespace. See SPEC §5.4 and TESTING for limits and evidence.
+
 ## Build
 
 Requires Rust (pinned by `rust-toolchain.toml`), CMake (the audio engine builds the bundled libopus), on Windows Visual Studio Build Tools with the C++ workload, and on Linux the ALSA, VA-API and PipeWire development headers plus clang (`libasound2-dev libva-dev libpipewire-0.3-dev clang`).

@@ -970,7 +970,12 @@ mod tests {
             endpoint: "127.0.0.1:9".into(),
             dave_group_id: None,
         };
-        let session = connect_with_video(credentials, call_options()).unwrap();
+        let session = connect_with_video(
+            fastcord_net::NetworkContext::off(),
+            credentials,
+            call_options(),
+        )
+        .unwrap();
         let (controls, observer) = watch::channel(VoiceControls::default());
         let video = CallVideo::new(session.media(), Arc::default(), controls);
         (video, session, observer)

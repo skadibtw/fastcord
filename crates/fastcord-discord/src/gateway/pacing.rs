@@ -1,6 +1,7 @@
 //! Reconnect delays, heartbeat jitter, and the Gateway send ceiling.
 
 use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use rand_core::{OsRng, RngCore};
@@ -47,6 +48,103 @@ pub(crate) const MAX_FAILED_ATTEMPTS: u32 = 10;
 /// `GET /gateway` answers 403 this many times in a row before reconnecting
 /// stops (Cloudflare or a ban: asking again does not help).
 pub(crate) const MAX_DISCOVERY_FORBIDDEN: u32 = 2;
+
+/// Account safety accounting owned by the validated REST client, rather than a
+/// disposable Gateway driver. Reconnect, TLS recovery, proxy/strategy changes
+/// and OS network hints cannot refill it. No credential or account ID is kept.
+#[derive(Default)]
+pub(crate) struct RetryLedger {
+    state: Mutex<RetryState>,
+}
+
+#[derive(Default)]
+struct RetryState {
+    identifies: IdentifyBudget,
+    failures: u32,
+    forbidden: u32,
+    retry_not_before: Option<Instant>,
+}
+
+impl RetryLedger {
+    pub(crate) fn failures(&self) -> u32 {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .failures
+    }
+
+    pub(crate) fn forbidden(&self) -> u32 {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .forbidden
+    }
+
+    pub(crate) fn failed_attempt(&self) -> u32 {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.failures = state.failures.saturating_add(1);
+        state.failures
+    }
+
+    pub(crate) fn discovery_forbidden(&self) -> u32 {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.forbidden = state.forbidden.saturating_add(1);
+        state.forbidden
+    }
+
+    pub(crate) fn discovery_succeeded(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .forbidden = 0;
+    }
+
+    pub(crate) fn connection_ended(&self, healthy: bool) -> u32 {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        // Preserve the existing health rule: only 30 seconds of normal READY
+        // session operation resets consecutive failures, never a TLS probe.
+        state.failures = if healthy {
+            0
+        } else {
+            state.failures.saturating_add(1)
+        };
+        state.failures
+    }
+
+    pub(crate) fn allows_identify(&self, now: Instant) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .identifies
+            .allows_another(now)
+    }
+
+    /// Reserve before attempting the write, including ambiguous failed writes.
+    pub(crate) fn reserve_identify(&self, now: Instant) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if !state.identifies.allows_another(now) {
+            return false;
+        }
+        state.identifies.record(now);
+        true
+    }
+
+    pub(crate) fn retry_not_before(&self) -> Option<Instant> {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retry_not_before
+    }
+
+    pub(crate) fn schedule_retry(&self, deadline: Instant) -> Instant {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let deadline = state
+            .retry_not_before
+            .map_or(deadline, |old| old.max(deadline));
+        state.retry_not_before = Some(deadline);
+        deadline
+    }
+}
 
 /// Identifies sent in the last 24 hours, in memory only.
 #[derive(Default)]
@@ -145,6 +243,48 @@ impl SendBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_ledger_caps_identifies_and_only_normal_health_resets_failures() {
+        let ledger = std::sync::Arc::new(RetryLedger::default());
+        let clone = ledger.clone();
+        for _ in 0..20 {
+            assert!(ledger.reserve_identify(Instant::now()));
+        }
+        assert!(!clone.reserve_identify(Instant::now()));
+        assert!(!clone.allows_identify(Instant::now()));
+        assert_eq!(ledger.failed_attempt(), 1);
+        assert_eq!(clone.connection_ended(false), 2);
+        assert_eq!(clone.discovery_forbidden(), 1);
+        assert_eq!(ledger.forbidden(), 1);
+        assert_eq!(ledger.connection_ended(true), 0);
+        assert_eq!(clone.failures(), 0);
+        assert_eq!(
+            clone.forbidden(),
+            1,
+            "session health does not clear discovery counters"
+        );
+        clone.discovery_succeeded();
+        assert_eq!(ledger.forbidden(), 0);
+        assert!(
+            !ledger.allows_identify(Instant::now()),
+            "normal health never refills Identify quota"
+        );
+        tokio::time::advance(IDENTIFY_WINDOW).await;
+        assert!(clone.allows_identify(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retained_backoff_cannot_be_shortened_by_driver_replacement() {
+        let ledger = RetryLedger::default();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert_eq!(ledger.schedule_retry(deadline), deadline);
+        assert_eq!(
+            ledger.schedule_retry(Instant::now() + Duration::from_millis(1)),
+            deadline
+        );
+        assert_eq!(ledger.retry_not_before(), Some(deadline));
+    }
 
     #[test]
     fn backoff_doubles_with_jitter_and_is_capped() {

@@ -26,6 +26,8 @@ jobs:
           toolchain: 1.99.0
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: Audit application network boundary
+        run: python3 scripts/check_network_boundary.py
 
   check:
     strategy:
