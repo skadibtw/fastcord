@@ -56,6 +56,12 @@ Those remain acceptance gates; localhost interoperability proves only that the
 shaping preserves valid unfiltered TLS. Unsupported network-change backends
 return Unsupported and use demand/manual reassessment, with no polling.
 
+The current Windows integration has network-change notifications but no stable
+network-identity provider. It therefore uses the specified process-only generation
+fallback: learned confirmations do not survive a restart. The bounded, versioned
+persisted role-hint schema is covered offline; stable salted identity acquisition
+and persisted-profile reuse are not claimed as production evidence.
+
 The app-managed buffer bound is an explicit code budget: shared 32 tunnel slots,
 64 KiB forwarding per tunnel, 8 KiB bounded header staging, four <=96 KiB TLS
 stages, 16 remembered connection endpoints and bounded selector/settings state.
@@ -137,3 +143,51 @@ laboratory candidate, never a supported arbitrary-payload bypass claim. The
 experiment remains off by default and unavailable on proxy routes. The feature
 adds no OS interception, TTL adjustment, extra voice Identify for rotation,
 post-selection strategy change or real-time audio callback work.
+
+## M95: separate SOCKS5 UDP media routing
+
+Windows offline evidence, 2026-10-24:
+
+- Ten real loopback UDP/control fixtures cover authenticated association,
+  fragmented replies, wildcard/domain BND addresses, IPv4 and IPv6 inner media
+  destinations, source/address-family checks, malformed headers, unsupported
+  fragments, spoofed outer and inner sources, MTU accounting and oversized
+  datagrams. The source hint in CMD=3 is a family-matched wildcard with port zero
+  because a private local socket does not establish the proxy-visible NAT source;
+  fixtures independently observe the actual nonzero UDP source port.
+- EOF or unexpected control data stops sends and receives. Cancellation and
+  negotiation deadlines release control sockets. Eight association permits are
+  shared across mode/configuration views; dropping a socket releases its permit.
+  Unsupported CONNECT proxies and unavailable SOCKS5 proxies cannot produce a
+  direct media socket.
+- An independent media fixture runs the production datagram adapter under fake
+  signaling: discovery crosses a real local relay, Select Protocol uses the
+  response's external address/port, and control loss closes media without another
+  signaling connection or Identify/Resume. Public fixture destinations are only
+  encoded inside loopback packets; these tests send no traffic to those hosts.
+- Final net/media suites passed: 76/179 tests, respectively. The existing Windows
+  IPv6 proxy-host test remains ignored; IPv6 destination encapsulation through an
+  IPv4 relay is exercised. The app suite includes an explicit SOCKS5 call-intent
+  regression, while CONNECT media joins still explain the limitation first.
+- The private bridge's random credential is now shared for the application
+  lifetime across context views. A regression verifies this, and the constructor
+  audit rejects direct TLS dependencies outside net as well as raw sockets.
+- Full workspace tests (2,201 passed, 52 existing live/hardware/platform gates
+  ignored), Clippy with warnings denied, formatting, the network
+  boundary audit and third-party license checks passed. No new third-party crate
+  was added. The final Windows binary was built and its isolated network preview
+  was visually checked; no credentials were loaded and no account was connected.
+
+`MANAGED_BUFFER_RESERVATION_BYTES` reserves 3.5 MiB against a compile-time 4 MiB
+budget: 32 tunnels with 64 KiB forwarding and 8 KiB header staging each, four
+96 KiB TLS stages, eight reused 64 KiB relay receive buffers, two 64 KiB settings
+buffers and 256 KiB for bounded control metadata/scratch. This is a code budget,
+not a total process-memory measurement. Kernel sockets and existing HTTP/TLS and
+feature-media allocations require separate measurement.
+
+Still required: real configured-proxy login/Gateway/CDN/upload, native IPv6 proxy
+hosts, proxy NAT interoperability, thirty-minute Windows bidirectional voice and
+screen-share send/watch with direct routing unavailable, filtered-network A/B,
+and Linux/macOS native checks. UDP to the proxy must itself be reachable. These
+gates remain open; neither SOCKS5 UDP nor the experimental direct preludes are
+claimed to repair every blocked media path.

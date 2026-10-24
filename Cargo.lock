@@ -2129,10 +2129,8 @@ dependencies = [
  "sha2 0.10.9",
  "time",
  "tokio",
- "tokio-rustls",
  "tokio-tungstenite",
  "uuid",
- "webpki-roots",
  "zeroize",
 ]
 
@@ -2170,9 +2168,7 @@ dependencies = [
  "serde_json",
  "tls_codec",
  "tokio",
- "tokio-rustls",
  "tokio-tungstenite",
- "webpki-roots",
  "zeroize",
 ]
 

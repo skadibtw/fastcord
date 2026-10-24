@@ -19,9 +19,12 @@ HTTP/HTTPS CONNECT and SOCKS5 send destination names to the selected proxy.
 Origin TLS verification remains on; failures never fall back directly. Proxy
 passwords live in native credential storage, bound to the exact proxy settings.
 CONNECT is TCP-only; the UI explains media limitations before joining. SOCKS5
-itself does not encrypt the connection to the proxy.
+uses a separate UDP association for voice, camera and Go Live. The proxy must
+support UDP and UDP to it must be reachable; this does not carry media over TCP.
+Control loss stops media, with no direct fallback. SOCKS5 itself does not encrypt
+the connection to the proxy. Real relay interoperability/NAT checks are pending.
 Network settings use `network-settings.json` beside the audio settings, with a
-separate fake-mode namespace. See SPEC ง5.4 and TESTING for limits and evidence.
+separate fake-mode namespace. See SPEC ยง5.4 and TESTING for limits and evidence.
 
 **Experimental UDP discovery preludes** are a separate opt-in, off by default.
 They try at most three direct UDP flows before voice protocol selection, with

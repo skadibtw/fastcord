@@ -22,6 +22,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 
 mod discovery;
+mod relay;
 mod video;
 
 use super::driver::Options;

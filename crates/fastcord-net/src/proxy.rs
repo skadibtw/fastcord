@@ -226,7 +226,7 @@ pub(crate) async fn dial_with_tls(
     .map_err(|_| NetworkError::ProxyTimeout)?
 }
 
-async fn connect_proxy(config: &ProxyConfig) -> Result<TcpStream, NetworkError> {
+pub(crate) async fn connect_proxy(config: &ProxyConfig) -> Result<TcpStream, NetworkError> {
     let host = config.host.trim_start_matches('[').trim_end_matches(']');
     let addresses = timeout(DNS_TIMEOUT, lookup_host((host, config.port)))
         .await
@@ -370,6 +370,15 @@ async fn socks_connect(
     port: u16,
     credentials: &ProxyCredentials,
 ) -> Result<(), NetworkError> {
+    socks_auth(io, credentials).await?;
+    socks_request(io, 1, host, port).await?;
+    Ok(())
+}
+
+pub(crate) async fn socks_auth<S: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut S,
+    credentials: &ProxyCredentials,
+) -> Result<(), NetworkError> {
     let method = if credentials.config.username.is_some() {
         2
     } else {
@@ -412,8 +421,31 @@ async fn socks_connect(
             return Err(NetworkError::ProxyAuthentication);
         }
     }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) enum SocksHost {
+    Ip(IpAddr),
+    Domain(String),
+}
+#[derive(Debug)]
+pub(crate) struct SocksBound {
+    pub(crate) host: SocksHost,
+    pub(crate) port: u16,
+}
+
+pub(crate) async fn socks_request<S: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut S,
+    command: u8,
+    host: &str,
+    port: u16,
+) -> Result<SocksBound, NetworkError> {
+    if !matches!(command, 1 | 3) {
+        return Err(NetworkError::ProxyProtocol);
+    }
     let mut request = Vec::with_capacity(262);
-    request.extend_from_slice(&[5, 1, 0]);
+    request.extend_from_slice(&[5, command, 0]);
     encode_address(&mut request, host)?;
     request.extend_from_slice(&port.to_be_bytes());
     io.write_all(&request)
@@ -449,7 +481,25 @@ async fn socks_connect(
     io.read_exact(&mut address[..length + 2])
         .await
         .map_err(|_| NetworkError::ProxyProtocol)?;
-    Ok(())
+    let port = u16::from_be_bytes([address[length], address[length + 1]]);
+    let host = match header[3] {
+        1 => SocksHost::Ip(IpAddr::V4(std::net::Ipv4Addr::new(
+            address[0], address[1], address[2], address[3],
+        ))),
+        4 => SocksHost::Ip(IpAddr::V6(std::net::Ipv6Addr::from(
+            <[u8; 16]>::try_from(&address[..16]).map_err(|_| NetworkError::ProxyProtocol)?,
+        ))),
+        3 => {
+            let name =
+                std::str::from_utf8(&address[..length]).map_err(|_| NetworkError::ProxyProtocol)?;
+            if !valid_host(name) {
+                return Err(NetworkError::ProxyProtocol);
+            }
+            SocksHost::Domain(name.to_owned())
+        }
+        _ => return Err(NetworkError::ProxyProtocol),
+    };
+    Ok(SocksBound { host, port })
 }
 
 fn encode_address(buffer: &mut Vec<u8>, host: &str) -> Result<(), NetworkError> {

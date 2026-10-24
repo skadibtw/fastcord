@@ -1245,7 +1245,7 @@ impl App {
         if matches!(
             message,
             Message::JoinVoice(..) | Message::StartCall(_) | Message::AcceptCall(_)
-        ) && self.network.mode() == fastcord_net::settings::Mode::Proxy
+        ) && !self.network.media_supported()
         {
             self.network_settings.open = true;
             self.network_settings.notice = Some(
@@ -5523,6 +5523,10 @@ impl App {
                     status,
                     fastcord_net::selector::ServiceStatus::UdpDiscovering { .. }
                         | fastcord_net::selector::ServiceStatus::UdpUnreachable
+                        | fastcord_net::selector::ServiceStatus::Failed(
+                            fastcord_net::NetworkError::ProxyUdpClosed
+                                | fastcord_net::NetworkError::ProxyUdpUnavailable
+                        )
                 ) {
                     banner_column = banner_column.push(
                         row![
@@ -6437,6 +6441,34 @@ mod tests {
             UserToken::new("proxy-canary-secret".into()),
         )));
         assert!(!format!("{message:?}").contains("proxy-canary-secret"));
+    }
+
+    #[test]
+    fn a_configured_socks5_proxy_allows_an_explicit_call_intent() {
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        app.network = app
+            .network
+            .with_proxy(
+                fastcord_net::ProxyConfig {
+                    kind: fastcord_net::ProxyKind::Socks5,
+                    host: "127.0.0.1".into(),
+                    port: 1080,
+                    username: None,
+                },
+                zeroize::Zeroizing::new(String::new()),
+            )
+            .unwrap();
+        drop(app.update(Message::StartCall(Snowflake(3))));
+        assert!(!app.network_settings.open);
+        let Phase::Account { gateway, .. } = &app.phase else {
+            panic!("account expected")
+        };
+        assert_eq!(gateway.voice_call, Some(Snowflake(3)));
+        assert_eq!(
+            gateway.controls.voice_audio_state(),
+            gateway::VoiceAudioState::Connecting
+        );
     }
 
     #[test]

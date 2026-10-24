@@ -952,7 +952,7 @@ structurally parsed SNI position after the first hostname byte. Handshake bytes
 (including ALPN/PSK binders) are identical; at most two hellos including HRR.
 WriteSplit/Combined set NODELAY and wait 10 ms once per split; these are writes,
 not a claim about TCP segments. Protected TLS ends shaping. Limits, categorical
-errors and demand-only TLS probe budgets are in SPEC �5.4. Probes send no HTTP,
+errors and demand-only TLS probe budgets are in SPEC §5.4. Probes send no HTTP,
 WebSocket Upgrade, discovery, Identify, headers or token. A TLS candidate is not
 DPI detection or service/session health. No captured hello or ambiguous request
 is replayed on another socket. Network-change hints do not disconnect sessions.
@@ -994,3 +994,33 @@ Session Description, AEAD/DAVE/nonces and post-establishment Resume stay intact.
 A TLS-reachable service with unanswered UDP is reported separately. Proxy routes
 do not enable direct experimental traffic. See NETWORK_TESTING for actual
 fixture coverage and outstanding filtered-network evidence.
+
+## SOCKS5 UDP media relay (M95)
+
+SOCKS5 TCP and UDP are distinct. After authentication, CMD=3 UDP ASSOCIATE uses
+a family-matched wildcard address and zero port because the proxy-visible UDP
+source behind NAT is unknown. The
+actual local UDP socket is bound to a nonzero port and stays alive with its TCP
+control socket. This follows [RFC 1928 §6](https://www.rfc-editor.org/rfc/rfc1928.html#section-6);
+the local socket is not evidence of the external NAT mapping.
+The bounded BND address determines the relay (same-family wildcard uses the
+control peer). Relay domain DNS has a three-second deadline/sixteen-answer cap;
+total setup is ten seconds. Control EOF, unexpected data or I/O failure closes
+the association. There is no direct fallback or media-over-TCP implementation.
+
+Datagrams to the relay contain RSV=0, FRAG=0, ATYP=1/4, numeric media destination,
+port, then the unchanged discovery/AEAD-protected media datagram. Reception
+requires the exact relay source and enclosed expected media endpoint; domains,
+fragments, nonzero reserved bytes, malformed/oversized packets and spoofed
+sources are discarded. IP discovery returns through that path; its validated
+external address/port is used in Select Protocol, without rewriting AEAD/DAVE,
+SSRC, nonce or established Resume rules. A dead relay closes media instead of
+repeatedly resuming an unusable UDP path.
+
+Outer UDP payload caps (1472 IPv4, 1452 IPv6) assume a 1500-byte IP MTU; SOCKS5
+header overhead is subtracted from the media payload allowance. Existing
+1200-byte video datagrams fit. A path's actual MTU and proxy NAT behavior still
+require live validation. Eight shared associations each use one reused bounded
+64 KiB receive buffer to discard oversized datagrams portably. HTTP/HTTPS
+CONNECT has no UDP capability; SOCKS5 UDP cannot work if UDP to the proxy is
+blocked. Experimental direct preludes are disabled on all proxy routes.

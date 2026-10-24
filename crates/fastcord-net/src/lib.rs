@@ -8,11 +8,25 @@ pub mod proxy;
 pub mod selector;
 pub mod settings;
 pub mod tls;
+pub mod udp;
 
 pub use broker::{BoxedIo, NetworkContext, SocketBroker, TlsStream};
 pub use http::{HttpBuilder, HttpClient, HttpError, HttpRequestBuilder};
 pub use proxy::{ProxyConfig, ProxyKind};
 use serde::{Deserialize, Serialize};
+pub use udp::DatagramSocket;
+
+/// Explicit reservations for the new subsystem. Kernel socket buffers and
+/// existing HTTP/TLS/feature-media allocations require separate measurements.
+pub const MANAGED_BUFFER_BUDGET_BYTES: usize = 4 * 1024 * 1024;
+pub const MANAGED_BUFFER_RESERVATION_BYTES: usize = bridge::TUNNEL_LIMIT * (2 * bridge::FORWARD_BUFFER + bridge::HEADER_LIMIT)
+    + 4 * tls::MAX_STAGING_BYTES
+    + udp::MAX_ASSOCIATIONS * 65_536
+    // Bounded settings input/serialization and conservative room for control
+    // tasks, endpoint/controller metadata and remaining small scratch buffers.
+    + 2 * settings::MAX_SETTINGS_BYTES
+    + 256 * 1024;
+const _: () = assert!(MANAGED_BUFFER_RESERVATION_BYTES <= MANAGED_BUFFER_BUDGET_BYTES);
 
 /// Authorization and TLS profile are attached to a feature, never to a token,
 /// URL path, query, account or request body.
@@ -77,6 +91,8 @@ pub enum NetworkError {
     ProxyCertificateRejected,
     ProxyAuthentication,
     ProxyProtocol,
+    ProxyUdpClosed,
+    ProxyUdpUnavailable,
     BudgetExhausted,
     Unsupported,
     BridgeUnavailable,
@@ -112,6 +128,10 @@ impl std::fmt::Display for NetworkError {
             Self::ProxyCertificateRejected => "The HTTPS proxy certificate was rejected.",
             Self::ProxyAuthentication => "The proxy rejected its login details.",
             Self::ProxyProtocol => "The proxy returned an invalid response.",
+            Self::ProxyUdpClosed => "The SOCKS5 UDP relay control connection closed.",
+            Self::ProxyUdpUnavailable => {
+                "The configured SOCKS5 proxy could not establish a UDP relay."
+            }
             Self::BudgetExhausted => "The network recovery budget is exhausted.",
             Self::Unsupported => "This network configuration is unsupported.",
             Self::BridgeUnavailable => "The private network bridge is unavailable.",

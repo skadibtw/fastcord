@@ -16,4 +16,4 @@ Path("fixtures/voice/udp-prelude-v1.bin").write_bytes(bytes(1200))
 
 It is used only after explicit opt-in, once per fresh direct UDP flow (three,
 then six datagrams), before normal IP discovery and never after Select Protocol.
-See SPEC ง5.4 and NETWORK_TESTING.md for all per-user-join limits and open gates.
+See SPEC ยง5.4 and NETWORK_TESTING.md for all per-user-join limits and open gates.

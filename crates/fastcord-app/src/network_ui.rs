@@ -209,7 +209,7 @@ pub fn view<'a>(
         checkbox(state.settings.experimental_udp)
             .label("Experimental UDP discovery preludes (unverified)")
             .on_toggle_maybe((editable && !state.saving && state.settings.mode != Mode::Proxy).then_some(|value| crate::Message::Network(Action::ExperimentalUdp(value)))),
-        text("Separate opt-in for direct media routes. Tries up to three UDP flows before protocol selection. Effectiveness on filtered networks is unverified; proxy routing does not enable it."),
+        text(if state.settings.mode == Mode::Proxy { "Experimental preludes are disabled in Proxy mode. SOCKS5 UDP uses ordinary discovery." } else { "Separate opt-in for direct media routes. Tries up to three UDP flows before protocol selection. Effectiveness on filtered networks is unverified; proxy routing does not enable it." }),
         text("Auto checks only a required service after an eligible connection failure. TLS reachability does not establish that Discord or media works. Recovery is bounded; it never bypasses certificate verification."),
         text("TLS splitting is best effort. TCP writes do not guarantee packet boundaries. UDP media has a separate connection path."),
         text(if editable { "Changes apply to the next connection." } else { "Sign out before changing routing. Healthy sessions remain connected." }),
@@ -225,7 +225,7 @@ pub fn view<'a>(
             (editable && !state.saving).then_some(crate::Message::Network(Action::ProxyKind(kind))),
         )
     };
-    body = body.push(text("TCP proxy").size(22))
+    body = body.push(text("Proxy").size(22))
         .push(row![proxy_choice("HTTP CONNECT", ProxyKind::Http), proxy_choice("HTTPS CONNECT", ProxyKind::Https), proxy_choice("SOCKS5", ProxyKind::Socks5)].spacing(8))
         .push(text(format!("Type: {}", state.proxy_kind.unwrap_or(ProxyKind::Http))))
         .push(text_input("Proxy host (no scheme or path)", &state.proxy_host).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyHost(value)))))
@@ -233,7 +233,7 @@ pub fn view<'a>(
         .push(text_input("Username (optional)", &state.proxy_username).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyUsername(value)))))
         .push(text_input("Password", password).secure(true).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyPassword(Arc::new(UserToken::new(value)))))))
         .push(button("Save and use proxy").on_press_maybe((editable && !state.saving).then_some(crate::Message::Network(Action::ApplyProxy))))
-        .push(text("Proxy mode never falls back to a direct connection. CONNECT proxies carry TCP only: voice, camera and screen sharing cannot join through them. SOCKS5 does not encrypt traffic to the proxy; UDP support is a separate capability. Passwords are saved in native credential storage."));
+        .push(text("Proxy mode never falls back to a direct connection. CONNECT proxies carry TCP only: voice, camera and screen sharing cannot join through them. SOCKS5 UDP requires a UDP-capable proxy and a working UDP route to that proxy. It does not carry media over TCP and does not encrypt the client-to-proxy transport. Passwords are saved in native credential storage."));
     for (label, role) in [
         ("API", fastcord_net::Role::Rest),
         ("Gateway", fastcord_net::Role::Gateway),

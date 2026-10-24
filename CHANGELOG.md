@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add separate SOCKS5 UDP ASSOCIATE media routing (M95) for voice/camera and
+  Go Live, with retained control TCP, source/header/MTU validation, eight shared
+  association slots and fail-closed control-loss handling. HTTP CONNECT remains
+  TCP-only; proxy mode never leaks media direct. Real proxy NAT and 30-minute
+  Windows voice/share interoperability gates remain pending.
+
 - Add separately opt-in experimental UDP discovery preludes (M94): three bounded
   direct flows inside one signaling connection, per-join byte/request/deadline
   limits, retained old ports and visible variant progress. The original zero

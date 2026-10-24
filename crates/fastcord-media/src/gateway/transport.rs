@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{Sink, Stream};
+#[cfg(test)]
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
@@ -47,6 +48,9 @@ pub(crate) trait Signaling: Send + Sync + 'static {
 
 /// One UDP socket, used only with the voice server's address.
 pub(crate) trait UdpLink: Send + Sync + 'static {
+    fn is_relay(&self) -> bool {
+        false
+    }
     /// The bound local port, where the transport can expose it. Used to refuse
     /// reuse during an experimental discovery campaign; fixtures may omit it.
     fn local_port(&self) -> Option<u16> {
@@ -70,6 +74,9 @@ pub(crate) trait Network: Send + Sync + 'static {
     type Udp: UdpLink;
 
     fn experimental_udp(&self) -> bool {
+        false
+    }
+    fn relay_configured(&self) -> bool {
         false
     }
 
@@ -116,6 +123,16 @@ impl Signaling for LiveSignaling {
             }
             super::VoiceStatus::Closed(super::CloseReason::UdpUnreachable) => {
                 self.0.controller().note_udp_unreachable(self.1)
+            }
+            super::VoiceStatus::Closed(super::CloseReason::UdpRelayUnavailable) => {
+                self.0
+                    .controller()
+                    .note_failure(self.1, fastcord_net::NetworkError::ProxyUdpUnavailable);
+            }
+            super::VoiceStatus::Closed(super::CloseReason::UdpRelayClosed) => {
+                self.0
+                    .controller()
+                    .note_failure(self.1, fastcord_net::NetworkError::ProxyUdpClosed);
             }
             super::VoiceStatus::DiscoveringExperimental { variant } => {
                 self.0.controller().note_udp_discovery(self.1, variant)
@@ -183,22 +200,29 @@ async fn connect_tls(
 
 pub(crate) struct LiveNetwork(pub(crate) fastcord_net::NetworkContext);
 impl Network for LiveNetwork {
-    type Udp = UdpSocket;
+    type Udp = fastcord_net::DatagramSocket;
 
     fn experimental_udp(&self) -> bool {
         self.0.experimental_udp()
     }
-    async fn bind(&self, server: SocketAddr) -> io::Result<UdpSocket> {
+    fn relay_configured(&self) -> bool {
+        self.0.mode() == fastcord_net::settings::Mode::Proxy && self.0.media_supported()
+    }
+
+    async fn bind(&self, server: SocketAddr) -> io::Result<Self::Udp> {
         self.0.bind_udp(server).await
     }
 }
-impl UdpLink for UdpSocket {
+impl UdpLink for fastcord_net::DatagramSocket {
+    fn is_relay(&self) -> bool {
+        self.is_relay()
+    }
     fn local_port(&self) -> Option<u16> {
         self.local_addr().ok().map(|address| address.port())
     }
 
     async fn send_to(&self, datagram: &[u8], to: SocketAddr) -> io::Result<()> {
-        let sent = UdpSocket::send_to(self, datagram, to).await?;
+        let sent = self.send_to(datagram, to).await?;
         if sent == datagram.len() {
             Ok(())
         } else {
@@ -207,7 +231,7 @@ impl UdpLink for UdpSocket {
     }
 
     async fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        UdpSocket::recv_from(self, buffer).await
+        self.recv_from(buffer).await
     }
 }
 

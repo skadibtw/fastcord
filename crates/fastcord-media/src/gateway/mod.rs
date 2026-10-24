@@ -114,6 +114,10 @@ pub enum CloseReason {
     /// UDP IP discovery did not answer. This alone does not identify filtering
     /// or distinguish it from routing, NAT or server failure.
     UdpUnreachable,
+    /// The configured SOCKS5 UDP association failed or lost its TCP control
+    /// connection. No direct media fallback is permitted.
+    UdpRelayUnavailable,
+    UdpRelayClosed,
     /// READY offered no transport mode fastcord implements.
     NoSupportedMode,
     /// Every transport nonce of this key was used; a new session is needed.
@@ -138,6 +142,12 @@ impl fmt::Display for CloseReason {
             Self::RateLimited => f.write_str("voice server rate limit reached"),
             Self::ServerNotFound => f.write_str("voice server not found"),
             Self::UdpUnreachable => f.write_str("UDP discovery did not answer"),
+            Self::UdpRelayUnavailable => {
+                f.write_str("SOCKS5 UDP relay is unavailable; media stopped")
+            }
+            Self::UdpRelayClosed => {
+                f.write_str("SOCKS5 UDP control connection closed; media stopped")
+            }
             Self::NoSupportedMode => f.write_str("no supported voice encryption mode"),
             Self::KeyExhausted => f.write_str("voice encryption key exhausted"),
             Self::InvalidEndpoint => f.write_str("invalid voice server endpoint"),

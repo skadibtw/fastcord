@@ -15,7 +15,7 @@ RAW = re.compile(r"\b(?:TcpStream|TcpSocket|UdpSocket|TcpListener|Client|ClientB
 # These complete source modules are cfg(test) in their parents. The fake
 # service is publish=false, debug/test only and binds only 127.0.0.1.
 TEST_MODULES = {"crates/fastcord-discord/src/gateway/live.rs"}
-TRANSPORT_LIBS = {"hyper", "hyper-util", "socket2", "socks", "async-socks5", "hickory-resolver", "native-tls"}
+TRANSPORT_LIBS = {"hyper", "hyper-util", "socket2", "socks", "async-socks5", "hickory-resolver", "native-tls", "tokio-rustls", "webpki-roots"}
 
 def masked(source):
     # Preserve offsets/newlines while ignoring comments, string and char

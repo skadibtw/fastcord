@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -19,7 +19,7 @@ use crate::selector::{
 };
 use crate::settings::Mode;
 use crate::tls::{ShapedStream, Strategy};
-use crate::{HttpBuilder, NetworkError, Role};
+use crate::{DatagramSocket, HttpBuilder, NetworkError, Role};
 
 pub trait NetworkIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> NetworkIo for T {}
@@ -32,12 +32,14 @@ struct Shared {
     proxy: Option<Arc<ProxyCredentials>>,
     controller: Controller,
     bridge: Mutex<Option<Bridge>>,
+    bridge_secret: Arc<OnceLock<Result<Arc<zeroize::Zeroizing<String>>, NetworkError>>>,
     transforms: Arc<Semaphore>,
     tunnels: Arc<Semaphore>,
     pending: Arc<Mutex<Option<Demand>>>,
     connected: Arc<Mutex<VecDeque<Connected>>>,
     connection_epoch: Arc<AtomicU64>,
     recovery_gate: Arc<tokio::sync::Mutex<()>>,
+    associations: Arc<Semaphore>,
 }
 
 struct Demand {
@@ -174,12 +176,14 @@ impl NetworkContext {
             proxy: None,
             controller: Controller::default(),
             bridge: Mutex::new(None),
+            bridge_secret: Arc::new(OnceLock::new()),
             transforms: Arc::new(Semaphore::new(4)),
             tunnels: Arc::new(Semaphore::new(crate::bridge::TUNNEL_LIMIT)),
             pending: Arc::new(Mutex::new(None)),
             connected: Arc::new(Mutex::new(VecDeque::new())),
             connection_epoch: Arc::new(AtomicU64::new(0)),
             recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
+            associations: Arc::new(Semaphore::new(crate::udp::MAX_ASSOCIATIONS)),
         }))
     }
 
@@ -190,12 +194,14 @@ impl NetworkContext {
             proxy: self.0.proxy.clone(),
             controller: self.0.controller.clone(),
             bridge: Mutex::new(None),
+            bridge_secret: self.0.bridge_secret.clone(),
             transforms: self.0.transforms.clone(),
             tunnels: self.0.tunnels.clone(),
             pending: self.0.pending.clone(),
             connected: self.0.connected.clone(),
             connection_epoch: self.0.connection_epoch.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
+            associations: self.0.associations.clone(),
         }))
     }
 
@@ -215,12 +221,14 @@ impl NetworkContext {
             proxy: self.0.proxy.clone(),
             controller: self.0.controller.clone(),
             bridge: Mutex::new(None),
+            bridge_secret: self.0.bridge_secret.clone(),
             transforms: self.0.transforms.clone(),
             tunnels: self.0.tunnels.clone(),
             pending: self.0.pending.clone(),
             connected: self.0.connected.clone(),
             connection_epoch: self.0.connection_epoch.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
+            associations: self.0.associations.clone(),
         }))
     }
     pub fn with_proxy(
@@ -235,16 +243,24 @@ impl NetworkContext {
             proxy: Some(proxy),
             controller: self.0.controller.clone(),
             bridge: Mutex::new(None),
+            bridge_secret: self.0.bridge_secret.clone(),
             transforms: self.0.transforms.clone(),
             tunnels: self.0.tunnels.clone(),
             pending: self.0.pending.clone(),
             connected: self.0.connected.clone(),
             connection_epoch: self.0.connection_epoch.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
+            associations: self.0.associations.clone(),
         })))
     }
     pub fn proxy_config(&self) -> Option<&ProxyConfig> {
         self.0.proxy.as_ref().map(|proxy| &proxy.config)
+    }
+    pub fn media_supported(&self) -> bool {
+        self.mode() != Mode::Proxy
+            || self
+                .proxy_config()
+                .is_some_and(|proxy| proxy.kind == crate::ProxyKind::Socks5)
     }
     pub(crate) fn proxy_credentials(&self) -> Option<Arc<ProxyCredentials>> {
         self.0.proxy.clone()
@@ -255,6 +271,13 @@ impl NetworkContext {
     pub fn broker(&self) -> SocketBroker {
         SocketBroker(self.clone())
     }
+    pub(crate) fn bridge_secret(&self) -> Result<Arc<zeroize::Zeroizing<String>>, NetworkError> {
+        self.0
+            .bridge_secret
+            .get_or_init(crate::bridge::new_secret)
+            .clone()
+    }
+
     pub(crate) fn transforms(&self) -> Arc<Semaphore> {
         self.0.transforms.clone()
     }
@@ -302,12 +325,12 @@ impl NetworkContext {
         .map_err(|error| tcp_error(&error))
     }
 
-    pub async fn bind_udp(&self, server: SocketAddr) -> io::Result<UdpSocket> {
+    pub async fn bind_udp(&self, server: SocketAddr) -> io::Result<DatagramSocket> {
         self.broker().bind_udp(server).await
     }
 
     #[cfg(debug_assertions)]
-    pub async fn debug_bind_udp(&self, server: SocketAddr) -> io::Result<UdpSocket> {
+    pub async fn debug_bind_udp(&self, server: SocketAddr) -> io::Result<DatagramSocket> {
         if !server.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -319,7 +342,7 @@ impl NetworkContext {
         } else {
             (Ipv6Addr::LOCALHOST, 0).into()
         };
-        UdpSocket::bind(local).await
+        UdpSocket::bind(local).await.map(DatagramSocket::Direct)
     }
 
     pub(crate) fn bridge_proxy(&self, role: Role) -> Result<reqwest::Proxy, NetworkError> {
@@ -542,14 +565,15 @@ impl SocketBroker {
         .map_err(|error| tls_error(&error))
     }
 
-    pub async fn bind_udp(&self, server: SocketAddr) -> io::Result<UdpSocket> {
+    pub async fn bind_udp(&self, server: SocketAddr) -> io::Result<DatagramSocket> {
         if self.0.mode() == Mode::Proxy {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "The configured proxy does not provide UDP media.",
-            ));
+            let proxy = self
+                .0
+                .proxy_credentials()
+                .ok_or_else(|| io::Error::other(NetworkError::ProxyConfiguration))?;
+            return DatagramSocket::associate(proxy, server, self.0.0.associations.clone()).await;
         }
-        if !public_ip(server.ip()) {
+        if !public_ip(server.ip()) || server.port() == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 NetworkError::InvalidTarget,
@@ -560,7 +584,7 @@ impl SocketBroker {
         } else {
             (Ipv6Addr::UNSPECIFIED, 0).into()
         };
-        UdpSocket::bind(local).await
+        UdpSocket::bind(local).await.map(DatagramSocket::Direct)
     }
 }
 
@@ -874,6 +898,30 @@ impl AsyncWrite for CountedIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_bridge_credential_lasts_across_all_application_context_views() {
+        let context = NetworkContext::off();
+        let first = context.bridge_secret().unwrap();
+        let view = context
+            .with_mode(Mode::Auto)
+            .with_experimental_udp(true)
+            .with_proxy(
+                ProxyConfig {
+                    kind: crate::ProxyKind::Socks5,
+                    host: "127.0.0.1".into(),
+                    port: 1080,
+                    username: None,
+                },
+                zeroize::Zeroizing::new(String::new()),
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &view.bridge_secret().unwrap()));
+        assert!(!Arc::ptr_eq(
+            &first,
+            &NetworkContext::off().bridge_secret().unwrap()
+        ));
+    }
     #[test]
     fn experimental_udp_requires_separate_opt_in_preserves_budgets_and_never_leaks_past_proxy() {
         let context = NetworkContext::off();
@@ -890,6 +938,10 @@ mod tests {
         ));
         assert!(Arc::ptr_eq(&context.0.transforms, &enabled.0.transforms));
         assert!(Arc::ptr_eq(&context.0.tunnels, &enabled.0.tunnels));
+        assert!(Arc::ptr_eq(
+            &context.0.associations,
+            &enabled.0.associations
+        ));
         context.controller().network_changed();
         assert_eq!(
             context.controller().generation(),

@@ -34,8 +34,18 @@ struct Upstream {
 
 pub(crate) struct Bridge {
     address: SocketAddr,
-    secret: Zeroizing<String>,
+    secret: Arc<Zeroizing<String>>,
     stop: Option<oneshot::Sender<()>>,
+}
+
+pub(crate) fn new_secret() -> Result<Arc<Zeroizing<String>>, NetworkError> {
+    let mut random = Zeroizing::new([0u8; 32]);
+    OsRng
+        .try_fill_bytes(random.as_mut())
+        .map_err(|_| NetworkError::BridgeUnavailable)?;
+    Ok(Arc::new(Zeroizing::new(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random.as_ref()),
+    )))
 }
 
 impl Drop for Bridge {
@@ -56,13 +66,7 @@ impl Bridge {
         let address = listener
             .local_addr()
             .map_err(|_| NetworkError::BridgeUnavailable)?;
-        let mut random = Zeroizing::new([0u8; 32]);
-        OsRng
-            .try_fill_bytes(random.as_mut())
-            .map_err(|_| NetworkError::BridgeUnavailable)?;
-        let secret = Zeroizing::new(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random.as_ref()),
-        );
+        let secret = context.bridge_secret()?;
         let credentials: Arc<Vec<(Role, Zeroizing<String>)>> = Arc::new(
             Role::ALL
                 .into_iter()

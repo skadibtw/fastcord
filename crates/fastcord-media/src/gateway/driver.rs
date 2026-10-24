@@ -209,7 +209,9 @@ enum UdpResult<L> {
         preludes: u8,
     },
     Sent,
-    Failed,
+    Failed {
+        relay: bool,
+    },
 }
 type UdpWork<L> = Pin<Box<dyn Future<Output = UdpResult<L>> + Send>>;
 async fn udp_work<L>(work: &mut Option<UdpWork<L>>) -> UdpResult<L> {
@@ -376,9 +378,10 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         self.udp = None;
         let network = self.network.clone();
         let held = self.held_udp.clone();
+        let relay = self.network.relay_configured();
         self.udp_work = Some(Box::pin(async move {
             let Ok(link) = network.bind(server).await else {
-                return UdpResult::Failed;
+                return UdpResult::Failed { relay };
             };
             let link = Arc::new(link);
             let mut held = held.lock().unwrap_or_else(|p| p.into_inner());
@@ -387,7 +390,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     .local_port()
                     .is_some_and(|port| held.iter().any(|old| old.local_port() == Some(port)))
             {
-                return UdpResult::Failed;
+                return UdpResult::Failed { relay };
             }
             held.push(link.clone());
             UdpResult::Bound {
@@ -430,7 +433,13 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 self.queue_discovery(conn, preludes)?;
             }
             UdpResult::Sent => conn.deadline = Some(Instant::now() + DISCOVERY_RETRY),
-            UdpResult::Failed => return Err(End::Close(CloseReason::Network)),
+            UdpResult::Failed { relay } => {
+                return Err(End::Close(if relay {
+                    CloseReason::UdpRelayUnavailable
+                } else {
+                    CloseReason::Network
+                }));
+            }
         }
         Ok(())
     }
@@ -629,6 +638,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     }
                     // ICMP errors surface as receive errors on some systems;
                     // a dead route shows up as missing discovery or pings.
+                    Err(error) if error.kind() == io::ErrorKind::ConnectionAborted && self.udp.as_ref().is_some_and(|udp| udp.link.is_relay()) => Err(End::Close(CloseReason::UdpRelayClosed)),
                     Err(_) => Ok(()),
                 },
                 command = self.ch.media.recv(), if media_open => match command {
