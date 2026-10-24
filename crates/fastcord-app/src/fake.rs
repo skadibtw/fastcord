@@ -8,7 +8,8 @@
 //! `--script <file>` runs a UI script for layout checks without a person at
 //! the screen: one step per line, `wait <seconds>`, `open <link>` (as a second
 //! launch would), `size <width> <height>`, `toggle <panel>` (open or close one
-//! of [`PANELS`] as its button would), `snap <name>` (the window's own pixels
+//! of [`PANELS`] as its button would), `join <guild> <channel>` (join a voice
+//! channel; the fake answers no voice, so it stays connecting), `snap <name>` (the window's own pixels
 //! to `<name>.png` beside the script) and `quit`.
 
 use std::path::PathBuf;
@@ -36,6 +37,8 @@ pub enum Step {
     Size(f32, f32),
     /// One of [`PANELS`].
     Toggle(&'static str),
+    /// A voice channel of a server.
+    Join(u64, u64),
     /// Where the window's pixels go.
     Snap(PathBuf),
     Quit,
@@ -79,6 +82,16 @@ fn parse_script(text: &str, dir: &std::path::Path) -> Vec<(Duration, Step)> {
                 Some(panel) => Step::Toggle(panel),
                 None => {
                     eprintln!("script: unknown panel: {line}");
+                    continue;
+                }
+            },
+            "join" => match rest
+                .split_once(' ')
+                .and_then(|(g, c)| Some((g.trim().parse().ok()?, c.trim().parse().ok()?)))
+            {
+                Some((guild, channel)) => Step::Join(guild, channel),
+                None => {
+                    eprintln!("script: bad join: {line}");
                     continue;
                 }
             },
@@ -202,7 +215,7 @@ mod tests {
     fn scripts_parse_steps_with_their_pauses() {
         let dir = std::path::Path::new("shots");
         let steps = parse_script(
-            "# comment\nwait 2\nopen discord://-/channels/@me\nsize 1080 672\nwait 0.5\nwait 0.5\nsnap home\nsnap ../x\nbogus\ntoggle pins\ntoggle nothing\nquit\n",
+            "# comment\nwait 2\nopen discord://-/channels/@me\nsize 1080 672\nwait 0.5\nwait 0.5\nsnap home\nsnap ../x\nbogus\ntoggle pins\ntoggle nothing\njoin 5001 6009\nquit\n",
             dir,
         );
         assert_eq!(
@@ -215,6 +228,7 @@ mod tests {
                 (Duration::ZERO, Step::Size(1080.0, 672.0)),
                 (Duration::from_secs(1), Step::Snap(dir.join("home.png"))),
                 (Duration::ZERO, Step::Toggle("pins")),
+                (Duration::ZERO, Step::Join(5001, 6009)),
                 (Duration::ZERO, Step::Quit),
             ]
         );

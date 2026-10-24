@@ -1265,6 +1265,9 @@ impl App {
                         "chat" => Message::OpenChatSettings,
                         _ => Message::Account(account_panel::Event::Toggle),
                     }),
+                    fake::Step::Join(guild, channel) => {
+                        self.handle(Message::JoinVoice(Snowflake(guild), Snowflake(channel)))
+                    }
                     fake::Step::Quit => self.handle(Message::Quit),
                 };
             }
