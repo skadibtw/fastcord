@@ -360,19 +360,6 @@ fn rail<'a>(
                 Message::Inbox(crate::inbox::Event::Toggle),
                 inbox_count,
             ),
-            rail_tool(
-                Icon::Discover,
-                "Discover servers".to_owned(),
-                false,
-                Message::Discover(crate::discover::Event::Toggle),
-                None,
-            ),
-            icon(
-                "+".to_owned(),
-                None,
-                false,
-                Some(Message::GuildAdmin(crate::guild_admin::Event::NewServer))
-            ),
             container(space())
                 .width(32)
                 .height(2)
@@ -387,6 +374,21 @@ fn rail<'a>(
                 guilds,
                 Message::GuildViewport,
                 RAIL_ROW,
+            ),
+            // As in Discord, adding and finding servers close the list.
+            rail_tool(
+                Icon::Plus,
+                "Add a server".to_owned(),
+                false,
+                Message::GuildAdmin(crate::guild_admin::Event::NewServer),
+                None,
+            ),
+            rail_tool(
+                Icon::Discover,
+                "Discover servers".to_owned(),
+                false,
+                Message::Discover(crate::discover::Event::Toggle),
+                None,
             ),
         ]
         .align_x(alignment::Horizontal::Center)
@@ -789,18 +791,43 @@ fn sidebar<'a>(
 fn header<'a>(
     title: String,
     note: &'static str,
-    emoji: bool,
     pins: bool,
     call: Option<(&'static str, Message)>,
 ) -> Element<'a, Message> {
-    header_with(title, note, emoji, pins, call, Vec::new())
+    header_with(title, note, pins, call, Vec::new())
 }
 
-/// [`header`] with extra tool buttons (thread controls) before the usual ones.
+/// The glyph of a header tool; its label becomes the tooltip.
+fn tool_icon(label: &str) -> Icon {
+    match label {
+        "Posts" => Icon::Forum,
+        "Leave" => Icon::Exit,
+        "Join" | "New post" => Icon::Plus,
+        "Archive" | "Unarchive" => Icon::Folder,
+        "Lock" => Icon::Lock,
+        "Unlock" => Icon::Unlock,
+        "Threads" => Icon::Thread,
+        "Invite" => Icon::Invite,
+        "Follow" => Icon::Announcement,
+        "Edit channel" => Icon::Settings,
+        "Events" => Icon::Calendar,
+        "Guide" => Icon::Info,
+        "Channels & Roles" => Icon::Grid,
+        "Select messages" => Icon::Check,
+        "Members" => Icon::Group,
+        "Conversation" => Icon::Profile,
+        _ => Icon::More,
+    }
+}
+
+/// A conversation header: title, note, then compact icon tools with
+/// tooltips (so a narrow window never pushes any of them out of reach),
+/// extra ones (thread controls) before the usual ones. `pins` is whether the
+/// conversation's history can be read: it also brings the search tool. The
+/// emoji, GIF, sticker and poll tools sit in the composer line.
 fn header_with<'a>(
     title: String,
     note: &'static str,
-    emoji: bool,
     pins: bool,
     call: Option<(&'static str, Message)>,
     tools: Vec<(&'static str, Message)>,
@@ -820,39 +847,18 @@ fn header_with<'a>(
         );
     }
     for (label, intent) in tools {
-        line = line.push(
-            button(text(label).size(13))
-                .on_press(intent)
-                .style(style::tool_button(true, false)),
-        );
+        line = line.push(icons::tool(tool_icon(label), label, intent));
     }
     if pins {
+        line = line.push(icons::tool(
+            Icon::Search,
+            "Search messages",
+            Message::Search(crate::search::Event::Toggle),
+        ));
         line = line.push(icons::tool(
             Icon::Pin,
             "Pinned messages",
             Message::Pins(crate::pins::Event::Toggle),
-        ));
-    }
-    if emoji {
-        line = line.push(icons::tool(
-            Icon::Emoji,
-            "Emoji",
-            Message::EmojiPicker(crate::emoji_picker::Event::Toggle),
-        ));
-        line = line.push(icons::tool(
-            Icon::Gif,
-            "GIF",
-            Message::Gif(crate::gif::Event::Toggle),
-        ));
-        line = line.push(icons::tool(
-            Icon::Sticker,
-            "Sticker",
-            Message::Sticker(crate::sticker::Event::Toggle),
-        ));
-        line = line.push(icons::tool(
-            Icon::Poll,
-            "Create poll",
-            Message::Poll(crate::poll_create::Event::Toggle),
         ));
     }
     container(line)
@@ -893,7 +899,7 @@ fn main_pane<'a>(
             body.push(timeline::view(history, interaction, attachments).map(Message::Timeline))
                 .push(
                     container(composer::view(composer, history).map(Message::Composer))
-                        .padding([0, 16]),
+                        .padding(Padding::new(0.0).left(16.0).right(16.0).bottom(16.0)),
                 )
         } else {
             body.push(
@@ -915,7 +921,6 @@ fn main_pane<'a>(
         body = body.push(header_with(
             format!("@ {}", selection.name),
             "",
-            true,
             true,
             call,
             vec![(
@@ -939,7 +944,7 @@ fn main_pane<'a>(
         );
         body = conversation(body, selection.channel_id, bar);
     } else if directs {
-        body = body.push(header("Direct Messages".to_owned(), "", false, false, None));
+        body = body.push(header("Direct Messages".to_owned(), "", false, None));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
         }
@@ -952,7 +957,7 @@ fn main_pane<'a>(
             .center(Length::Fill),
         );
     } else if snapshot.permissions_pending {
-        body = body.push(header("Loading".to_owned(), "", false, false, None)).push(
+        body = body.push(header("Loading".to_owned(), "", false, None)).push(
             container(
                 text("Waiting for your membership and permissions. Channels stay closed until Discord supplies them.")
                     .size(14)
@@ -1111,7 +1116,6 @@ fn main_pane<'a>(
                 body = body.push(header_with(
                     title,
                     note,
-                    history.can_send || composer.editing().is_some(),
                     permissions.read_history,
                     None,
                     tools,
@@ -1156,7 +1160,6 @@ fn main_pane<'a>(
                     format!("\u{2630} {}", selection.name),
                     note,
                     false,
-                    false,
                     None,
                     tools,
                 ));
@@ -1172,13 +1175,13 @@ fn main_pane<'a>(
             ChannelKind::Category => {}
         }
     } else {
-        body = body.push(header("fastcord".to_owned(), "", false, false, None));
+        body = body.push(header("fastcord".to_owned(), "", false, None));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
         }
         body = body.push(
             container(
-                text("Select a channel. Permission loss closes it; your selection survives server updates by ID.")
+                text("Select a channel to start chatting.")
                     .size(14)
                     .style(text::secondary),
             )

@@ -4,8 +4,15 @@
 //! It signs in at once with [`TOKEN`], memory-only, so no account, credential
 //! store, tray, autostart or single-instance hand-off is involved, and it keeps
 //! its settings and caches under `fastcord-fake` (see `audio_devices::app_dir_name`).
+//!
+//! `--script <file>` runs a UI script for layout checks without a person at
+//! the screen: one step per line, `wait <seconds>`, `open <link>` (as a second
+//! launch would), `size <width> <height>`, `snap <name>` (the window's own
+//! pixels to `<name>.png` beside the script) and `quit`.
 
+use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use iced::widget::{container, text};
 use iced::{Element, Length};
@@ -14,6 +21,101 @@ use iced::{Element, Length};
 pub const TOKEN: &str = "fake-token";
 
 static PORT: OnceLock<u16> = OnceLock::new();
+static SCRIPT: OnceLock<PathBuf> = OnceLock::new();
+
+/// One step of a `--script`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Step {
+    Open(String),
+    Size(f32, f32),
+    /// Where the window's pixels go.
+    Snap(PathBuf),
+    Quit,
+}
+
+/// The script's steps with the pause before each; a bad line is skipped
+/// with a message on standard error.
+fn parse_script(text: &str, dir: &std::path::Path) -> Vec<(Duration, Step)> {
+    let mut steps = Vec::new();
+    let mut pause = Duration::ZERO;
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let rest = rest.trim();
+        let step = match verb {
+            "wait" => {
+                match rest.parse::<f32>() {
+                    Ok(seconds) if seconds >= 0.0 => pause += Duration::from_secs_f32(seconds),
+                    _ => eprintln!("script: bad wait: {line}"),
+                }
+                continue;
+            }
+            "open" => Step::Open(rest.to_owned()),
+            "size" => match rest
+                .split_once(' ')
+                .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
+            {
+                Some((width, height)) => Step::Size(width, height),
+                None => {
+                    eprintln!("script: bad size: {line}");
+                    continue;
+                }
+            },
+            "snap" if !rest.is_empty() && !rest.contains(['/', '\\']) => {
+                Step::Snap(dir.join(format!("{rest}.png")))
+            }
+            "quit" => Step::Quit,
+            _ => {
+                eprintln!("script: unknown step: {line}");
+                continue;
+            }
+        };
+        steps.push((std::mem::take(&mut pause), step));
+    }
+    steps
+}
+
+/// The steps of `--script`, each after its pause; nothing without one.
+pub fn script() -> impl iced::futures::Stream<Item = Step> {
+    iced::stream::channel(1, async move |mut output| {
+        use iced::futures::SinkExt;
+        let Some(path) = SCRIPT.get() else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        let text = std::fs::read_to_string(path).unwrap_or_else(|_| {
+            eprintln!("script: cannot read {}", path.display());
+            String::new()
+        });
+        let dir = path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_owned();
+        for (pause, step) in parse_script(&text, &dir) {
+            tokio::time::sleep(pause).await;
+            let _ = output.send(step).await;
+        }
+        std::future::pending::<()>().await;
+    })
+}
+
+/// Writes a window screenshot as an RGBA PNG.
+pub fn save(path: &std::path::Path, shot: &iced::window::Screenshot) {
+    let saved = image::save_buffer(
+        path,
+        &shot.rgba,
+        shot.size.width,
+        shot.size.height,
+        image::ExtendedColorType::Rgba8,
+    );
+    match saved {
+        Ok(()) => eprintln!("script: saved {}", path.display()),
+        Err(error) => eprintln!("script: {}: {error}", path.display()),
+    }
+}
 
 pub fn active() -> bool {
     PORT.get().is_some()
@@ -24,6 +126,12 @@ pub fn active() -> bool {
 pub fn init() {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
+        if arg == "--script" {
+            if let Some(path) = args.next() {
+                let _ = SCRIPT.set(PathBuf::from(path));
+            }
+            continue;
+        }
         if arg != "--fake-discord" {
             continue;
         }
@@ -37,7 +145,6 @@ pub fn init() {
             std::process::exit(2);
         }
         let _ = PORT.set(port);
-        return;
     }
 }
 
@@ -75,6 +182,27 @@ pub fn banner<'a, Message: 'a>() -> Option<Element<'a, Message>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scripts_parse_steps_with_their_pauses() {
+        let dir = std::path::Path::new("shots");
+        let steps = parse_script(
+            "# comment\nwait 2\nopen discord://-/channels/@me\nsize 1080 672\nwait 0.5\nwait 0.5\nsnap home\nsnap ../x\nbogus\nquit\n",
+            dir,
+        );
+        assert_eq!(
+            steps,
+            [
+                (
+                    Duration::from_secs(2),
+                    Step::Open("discord://-/channels/@me".into())
+                ),
+                (Duration::ZERO, Step::Size(1080.0, 672.0)),
+                (Duration::from_secs(1), Step::Snap(dir.join("home.png"))),
+                (Duration::ZERO, Step::Quit),
+            ]
+        );
+    }
 
     #[test]
     fn only_a_bare_nonzero_port_is_accepted() {

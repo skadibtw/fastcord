@@ -144,6 +144,17 @@ pub enum Event {
     CancelEdit,
     /// Dismiss the note that older drafts were discarded.
     DismissDropped,
+    /// Open or close one of the pickers beside the text.
+    Toggle(Picker),
+}
+
+/// The pickers in the composer line, as in Discord: right of the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Picker {
+    Gif,
+    Sticker,
+    Emoji,
+    Poll,
 }
 
 /// A draft the user chose to send.
@@ -209,6 +220,8 @@ pub struct Composer {
     trimmed_chars: usize,
     /// Nothing but whitespace.
     blank: bool,
+    /// The text names `@everyone` or `@here`, so the choice is offered.
+    mass_mention: bool,
     /// The user's choice for the message being written; never carried over.
     everyone: bool,
     /// Files chosen for the message being written (at most
@@ -233,6 +246,7 @@ impl Default for Composer {
             chars: 0,
             trimmed_chars: 0,
             blank: true,
+            mass_mention: false,
             everyone: false,
             files: Vec::new(),
             replying: None,
@@ -250,6 +264,7 @@ impl Composer {
         self.chars = text.chars().count();
         self.trimmed_chars = text.trim().chars().count();
         self.blank = text.trim().is_empty();
+        self.mass_mention = text.contains("@everyone") || text.contains("@here");
     }
 
     /// The channel to announce typing in after an editor action: only while
@@ -775,8 +790,9 @@ pub fn update(
         Event::ReplyMention(allowed) => composer.set_reply_mention(allowed),
         Event::CancelReply => composer.cancel_reply(),
         Event::DismissDropped => composer.dropped = 0,
-        // The dialog is opened by the window; the files come back as `attach`.
-        Event::Attach | Event::PasteImage => {}
+        // The dialog and the pickers are opened by the window; files come
+        // back as `attach`.
+        Event::Attach | Event::PasteImage | Event::Toggle(_) => {}
         Event::Detach(index) => composer.detach(index),
         Event::KeepAttachment(index, kept) => composer.set_attachment_kept(index, kept),
         Event::Spoiler(index, spoiler) => composer.set_spoiler(index, spoiler),
@@ -1108,7 +1124,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         .placeholder(if editing {
             "Edited message (Enter to save, Escape to cancel)"
         } else {
-            "Message (Enter to send, Shift+Enter for a new line, start with @silent for no notification)"
+            "Message (@silent sends without a ping)"
         })
         .on_action(|action| Event::Action(Act(action)))
         .key_binding(move |press| {
@@ -1203,14 +1219,80 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
             .wrap(),
         );
     }
-    layout = layout.push(editor);
+    // One line like Discord's: attach and paste before the text, send after it.
+    let (label, icon, submittable) = if editing {
+        ("Save", crate::icons::Icon::Check, composer.edit_ready())
+    } else {
+        (
+            "Send",
+            crate::icons::Icon::Send,
+            composer.ready(snapshot.can_send, snapshot.outbox.len())
+                && !composer.reply_deleted(snapshot),
+        )
+    };
+    let mut line = row![].spacing(4).align_y(iced::alignment::Vertical::Center);
+    if !editing {
+        line = line
+            .push(crate::icons::tool(
+                crate::icons::Icon::Attach,
+                "Attach files",
+                Event::Attach,
+            ))
+            .push(crate::icons::tool(
+                crate::icons::Icon::Paste,
+                "Paste image",
+                Event::PasteImage,
+            ));
+    }
+    line = line.push(editor);
+    let can_send = snapshot.can_send;
+    for (picker, icon, tip, shown) in [
+        (
+            Picker::Gif,
+            crate::icons::Icon::Gif,
+            "GIF",
+            can_send && !editing,
+        ),
+        (
+            Picker::Sticker,
+            crate::icons::Icon::Sticker,
+            "Sticker",
+            can_send && !editing,
+        ),
+        (
+            Picker::Emoji,
+            crate::icons::Icon::Emoji,
+            "Emoji",
+            can_send || editing,
+        ),
+        (
+            Picker::Poll,
+            crate::icons::Icon::Poll,
+            "Create poll",
+            can_send && !editing,
+        ),
+    ] {
+        if shown {
+            line = line.push(crate::icons::tool(icon, tip, Event::Toggle(picker)));
+        }
+    }
+    line = line.push(crate::icons::action(crate::icons::Action {
+        icon,
+        on_press: submittable.then_some(Event::Send),
+        active: submittable,
+        danger: false,
+        tip: label.to_owned(),
+        badge: 0,
+    }));
+    layout = layout.push(line);
 
+    // Below it only what applies now: the @everyone choice once the text
+    // names it (or it is already on), and why sending is held back.
     let mut controls = row![]
         .spacing(12)
         .align_y(iced::alignment::Vertical::Center);
-    let (label, submittable) = if editing {
-        ("Save", composer.edit_ready())
-    } else {
+    let mut any = false;
+    if !editing && (composer.mass_mention || composer.everyone) {
         controls = controls.push(
             checkbox(composer.everyone)
                 .label("Allow @everyone and @here to notify")
@@ -1218,35 +1300,18 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
                 .size(14)
                 .text_size(12),
         );
-        (
-            "Send",
-            composer.ready(snapshot.can_send, snapshot.outbox.len())
-                && !composer.reply_deleted(snapshot),
-        )
-    };
-    if !editing {
-        controls = controls
-            .push(small_button("Attach files", Event::Attach))
-            .push(small_button("Paste image", Event::PasteImage));
+        any = true;
     }
-    controls = controls.push(space::horizontal());
     if let Some(note) = length_note(composer, snapshot.outbox.len()) {
-        controls = controls.push(text(note).size(12).style(text::secondary));
+        controls = controls
+            .push(space::horizontal())
+            .push(text(note).size(12).style(text::secondary));
+        any = true;
     }
-    controls = controls.push(
-        button(crate::icons::labeled(
-            if editing {
-                crate::icons::Icon::Check
-            } else {
-                crate::icons::Icon::Send
-            },
-            label,
-            13,
-        ))
-        .on_press_maybe(submittable.then_some(Event::Send))
-        .padding([4, 14]),
-    );
-    layout.push(controls).into()
+    if any {
+        layout = layout.push(controls);
+    }
+    layout.into()
 }
 
 /// A short line about why Send is unavailable or what to watch, if any.

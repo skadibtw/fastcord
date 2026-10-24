@@ -352,6 +352,10 @@ type ShareSourceList = (
 
 #[derive(Debug, Clone)]
 enum Message {
+    #[cfg(feature = "fake-discord")]
+    FakeStep(fake::Step),
+    #[cfg(feature = "fake-discord")]
+    FakeShot(std::path::PathBuf, iced::window::Screenshot),
     TokenEdited(Arc<UserToken>),
     InputTooLong,
     Acknowledge(bool),
@@ -872,6 +876,8 @@ impl App {
                 iced::Subscription::run(desktop::tray_stream).map(Message::Tray)
             },
             iced::Subscription::run(desktop::forwarded_stream).map(Message::Forwarded),
+            #[cfg(feature = "fake-discord")]
+            iced::Subscription::run(fake::script).map(Message::FakeStep),
         ])
     }
 
@@ -1236,6 +1242,24 @@ impl App {
                 return self.handle(Message::StoreReady(store));
             }
             Message::VoiceInput(event) => return self.voice_input_event(event),
+            #[cfg(feature = "fake-discord")]
+            Message::FakeStep(step) => {
+                return match step {
+                    fake::Step::Open(text) => {
+                        self.pending_link = desktop::parse(&text);
+                        Task::none()
+                    }
+                    fake::Step::Size(width, height) => iced::window::latest().and_then(move |id| {
+                        iced::window::resize(id, iced::Size::new(width, height))
+                    }),
+                    fake::Step::Snap(path) => iced::window::latest()
+                        .and_then(iced::window::screenshot)
+                        .map(move |shot| Message::FakeShot(path.clone(), shot)),
+                    fake::Step::Quit => self.handle(Message::Quit),
+                };
+            }
+            #[cfg(feature = "fake-discord")]
+            Message::FakeShot(path, shot) => fake::save(&path, &shot),
             Message::Tray(event) => match event {
                 desktop::TrayEvent::Started => self.tray = Ok(()),
                 desktop::TrayEvent::Failed(error) => self.tray = Err(error),
@@ -3001,6 +3025,14 @@ impl App {
                         Err(reason) => gateway.composer.paste_failed(reason),
                     }
                 }
+            }
+            Message::Composer(composer::Event::Toggle(picker)) => {
+                return self.handle(match picker {
+                    composer::Picker::Gif => Message::Gif(gif::Event::Toggle),
+                    composer::Picker::Sticker => Message::Sticker(sticker::Event::Toggle),
+                    composer::Picker::Emoji => Message::EmojiPicker(emoji_picker::Event::Toggle),
+                    composer::Picker::Poll => Message::Poll(poll_create::Event::Toggle),
+                });
             }
             Message::Composer(composer::Event::PasteImage) => {
                 if matches!(self.phase, Phase::Account { .. }) {
@@ -5222,7 +5254,8 @@ impl App {
             }
             say(self.notice.clone().unwrap_or_default(), false);
             say(gateway.attachment_notice.unwrap_or("").to_owned(), false);
-            let has_search = !search_bar_is_empty(gateway);
+            // Closed, search is a tool in the conversation header.
+            let has_search = self.search.open && !search_bar_is_empty(gateway);
             let mut banner_column = column![].spacing(2);
             if has_search {
                 banner_column = banner_column.push(search_bar);

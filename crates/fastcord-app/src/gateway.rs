@@ -365,6 +365,20 @@ fn describe_delay(delay: Duration) -> String {
     }
 }
 
+/// Opens `channel` of `guild`. A link, notification or search result may name
+/// another server (or arrive from the DMs), so that server is opened first;
+/// the channel is then checked against it as for any click.
+fn open_guild_channel(
+    navigation: &mut Navigation,
+    store: &Store,
+    guild: Snowflake,
+    channel: Snowflake,
+) {
+    if navigation.selected_guild() == Some(guild) || navigation.select_guild(store, guild) {
+        navigation.select_channel(store, channel);
+    }
+}
+
 /// Folds ordered Gateway events into the single-writer reducer. Navigation
 /// commands are also validated here, never against a stale UI snapshot.
 #[derive(Default)]
@@ -3133,12 +3147,13 @@ impl Worker {
                         .navigation
                         .select_guild(&self.tracker.store, guild);
                 }
-                Some(SelectionIntent::Channel(guild, channel))
-                    if self.tracker.navigation.selected_guild() == Some(guild) =>
-                {
-                    self.tracker
-                        .navigation
-                        .select_channel(&self.tracker.store, channel);
+                Some(SelectionIntent::Channel(guild, channel)) => {
+                    open_guild_channel(
+                        &mut self.tracker.navigation,
+                        &self.tracker.store,
+                        guild,
+                        channel,
+                    );
                 }
                 Some(SelectionIntent::PrivateChannel(channel)) => {
                     self.tracker
@@ -5182,6 +5197,39 @@ mod tests {
             })),
         }
     }
+    #[test]
+    fn a_channel_of_another_server_opens_that_server_first() {
+        let mut tracker = Tracker::default();
+        let GatewayEvent::Dispatch {
+            event: Dispatch::Ready(mut ready),
+            ..
+        } = ready_event(2, 0, 1)
+        else {
+            unreachable!()
+        };
+        for guild in &mut ready.guilds {
+            guild.owner_id = Some(Snowflake(1));
+        }
+        ready.guilds[1].channels.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "50", "type": 0, "guild_id": "1", "name": "general"
+            }))
+            .unwrap(),
+        );
+        tracker.apply(GatewayEvent::Dispatch {
+            sequence: 1,
+            event: Dispatch::Ready(ready),
+        });
+        let (store, navigation) = (&tracker.store, &mut tracker.navigation);
+        assert!(navigation.select_private_channel(store, Snowflake(0)));
+        open_guild_channel(navigation, store, Snowflake(1), Snowflake(50));
+        assert_eq!(navigation.selected_guild(), Some(Snowflake(1)));
+        assert_eq!(navigation.selected_channel(), Some(Snowflake(50)));
+        // A channel that is not in the named server is still refused.
+        open_guild_channel(navigation, store, Snowflake(0), Snowflake(50));
+        assert_ne!(navigation.selected_channel(), Some(Snowflake(50)));
+    }
+
     use fastcord_discord::gateway::{ClientProperties, HostOs};
     fn worker() -> Worker {
         let bridge = NavigationBridge::new();
