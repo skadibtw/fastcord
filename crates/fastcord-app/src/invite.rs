@@ -985,7 +985,7 @@ fn manage_view(manage: &Manage, now: i64) -> Element<'_, Event> {
     column![
         row![
             text(scope).size(13).width(Length::Fill),
-            button(text("Close").size(13)).on_press(Event::CloseManage),
+            crate::icons::close(Some(Event::CloseManage)),
         ],
         scrollable(list).height(Length::Fixed(240.0)),
     ]
@@ -1050,7 +1050,7 @@ fn opened_view<'a>(cache: &'a Cache, code: &str) -> Element<'a, Event> {
                 .style(button::success),
         );
     }
-    line.push(button(text("Close").size(13)).on_press(Event::CloseOpened))
+    line.push(crate::icons::close(Some(Event::CloseOpened)))
         .into()
 }
 
@@ -1069,7 +1069,7 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
                 )
                 .size(12)
                 .style(text::secondary),
-                button(text("Close").size(13)).on_press(Event::CancelLeave),
+                crate::icons::close(Some(Event::CancelLeave)),
             ]
             .spacing(6)
         } else {
@@ -1130,7 +1130,7 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
             panel = panel.push(
                 row![
                     line.width(Length::Fill),
-                    button(text("Close").size(13)).on_press(Event::DismissCreated),
+                    crate::icons::close(Some(Event::DismissCreated)),
                 ]
                 .spacing(6),
             );
@@ -1147,7 +1147,7 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
                     row![
                         text(link(code)).size(14).width(Length::Fill),
                         button(text("Copy").size(13)).on_press(Event::CopyLink),
-                        button(text("Close").size(13)).on_press(Event::DismissCreated),
+                        crate::icons::close(Some(Event::DismissCreated)),
                     ]
                     .spacing(6)
                     .align_y(iced::Alignment::Center),
@@ -1163,7 +1163,7 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
                         .size(12)
                         .style(text::danger)
                         .width(Length::Fill),
-                    button(text("Close").size(13)).on_press(Event::DismissCreated),
+                    crate::icons::close(Some(Event::DismissCreated)),
                 ]
                 .spacing(6),
             );

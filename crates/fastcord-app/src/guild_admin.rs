@@ -1088,7 +1088,7 @@ fn header<'a>(title: String, idle: bool) -> Element<'a, Event> {
     row![
         text(title).size(14),
         space::horizontal(),
-        button(text("Close").size(13)).on_press_maybe(idle.then_some(Event::Close)),
+        crate::icons::close(idle.then_some(Event::Close)),
     ]
     .align_y(iced::Alignment::Center)
     .into()

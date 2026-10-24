@@ -19,6 +19,10 @@ pub const BLURPLE: Color = Color::from_rgb(0.345, 0.396, 0.949); // #5865f2
 pub const GREEN: Color = Color::from_rgb(0.137, 0.647, 0.349); // #23a559
 pub const RED: Color = Color::from_rgb(0.949, 0.247, 0.263); // #f23f43
 pub const YELLOW: Color = Color::from_rgb(0.941, 0.698, 0.196); // #f0b232
+/// Secondary labels inside panels (dates, counts): lighter than [`MUTED`].
+pub const SUBTLE: Color = Color::from_rgb(0.710, 0.729, 0.757); // #b5bac1
+/// Filled secondary buttons.
+pub const SECONDARY: Color = Color::from_rgb(0.306, 0.314, 0.345); // #4e5058
 
 /// The high-contrast variant (`chat_prefs`): near-black panes, white text.
 fn high_contrast() -> bool {
@@ -262,6 +266,27 @@ pub fn action_button(danger: bool) -> impl Fn(&Theme, button::Status) -> button:
                 base
             })),
             text_color: BRIGHT,
+            border: Border {
+                radius: 4.0.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
+/// A filled grey button for secondary actions (Refresh, Clear, Mark read);
+/// `selected` marks the current tab.
+pub fn secondary_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let base = if selected { SELECTED } else { SECONDARY };
+        button::Style {
+            background: Some(Background::Color(match status {
+                button::Status::Hovered | button::Status::Pressed => HOVER,
+                button::Status::Disabled => Color { a: 0.4, ..base },
+                button::Status::Active => base,
+            })),
+            text_color: if selected { BRIGHT } else { TEXT },
             border: Border {
                 radius: 4.0.into(),
                 ..Border::default()

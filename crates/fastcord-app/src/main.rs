@@ -1255,6 +1255,16 @@ impl App {
                     fake::Step::Snap(path) => iced::window::latest()
                         .and_then(iced::window::screenshot)
                         .map(move |shot| Message::FakeShot(path.clone(), shot)),
+                    fake::Step::Toggle(panel) => self.handle(match panel {
+                        "search" => Message::Search(search::Event::Toggle),
+                        "pins" => Message::Pins(pins::Event::Toggle),
+                        "inbox" => Message::Inbox(inbox::Event::Toggle),
+                        "friends" => Message::Friends(friends::Event::Open),
+                        "emoji" => Message::EmojiPicker(emoji_picker::Event::Toggle),
+                        "audio" => Message::OpenAudioSettings,
+                        "chat" => Message::OpenChatSettings,
+                        _ => Message::Account(account_panel::Event::Toggle),
+                    }),
                     fake::Step::Quit => self.handle(Message::Quit),
                 };
             }

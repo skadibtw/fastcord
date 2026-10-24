@@ -363,7 +363,7 @@ pub fn view<'a>(
         column![
             row![
                 text("Accounts and security").size(13).width(Length::Fill),
-                button(text("Close").size(13)).on_press(Event::Toggle),
+                crate::icons::close(Some(Event::Toggle)),
             ],
             scrollable(body).height(Length::Fixed(320.0)),
         ]

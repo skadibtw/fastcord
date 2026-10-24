@@ -363,7 +363,7 @@ pub fn view<'a>(
             speech_rows(speech),
             advanced,
             text("Tab moves between these controls and Space toggles them. The interface has no screen-reader support yet (the toolkit exposes no accessibility tree), and spellcheck is not available in the message box.").size(12),
-            button("Close").on_press(Message::CloseChatSettings),
+            crate::icons::close(Some(Message::CloseChatSettings)),
         ]
         .spacing(12),
     )

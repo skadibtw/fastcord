@@ -606,7 +606,7 @@ pub fn view<'a>(
     let busy = state.pending.is_some();
     let head = row![
         text("Events").size(13).width(Length::Fill),
-        button(text("Close").size(13)).on_press(Event::Close),
+        crate::icons::close(Some(Event::Close)),
     ]
     .spacing(6);
     let body = match &state.screen {

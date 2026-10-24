@@ -235,7 +235,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
     let controls = row![
         text("Stickers of this server").size(13),
         iced::widget::space::horizontal(),
-        button(text("Close").size(13)).on_press(Event::Toggle),
+        crate::icons::close(Some(Event::Toggle)),
     ]
     .align_y(iced::Alignment::Center);
     let note = |line: &'static str| text(line).size(12).style(text::secondary);

@@ -619,7 +619,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
     let controls = row![
         text("Soundboard of this server").size(13),
         iced::widget::space::horizontal(),
-        button(text("Close").size(13)).on_press(Event::Close),
+        crate::icons::close(Some(Event::Close)),
     ]
     .align_y(iced::Alignment::Center);
     let listening = row![

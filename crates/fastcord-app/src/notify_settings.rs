@@ -16,7 +16,7 @@ use fastcord_model::Snowflake;
 use iced::widget::{button, checkbox, column, container, pick_list, row, space, text};
 use iced::{Color, Element, Length, Task};
 
-const WARN: Color = Color::from_rgb8(0xf2, 0x3f, 0x42);
+const WARN: Color = crate::style::RED;
 const PAUSED: &str = "Notification changes are paused pending validation. Use the official Discord client to change them. Opening Alerts sends no request.";
 
 /// What a setting applies to: the server, or one conversation (`None` guild
@@ -176,7 +176,7 @@ pub fn view<'a>(
     let mut body = column![row![
         text("Notifications").size(16),
         space::horizontal(),
-        button(text("Close").size(13)).on_press(Event::Toggle),
+        crate::icons::close(Some(Event::Toggle)),
     ]]
     .spacing(10);
     if !NOTIFICATION_WRITES_ENABLED {

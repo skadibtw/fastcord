@@ -455,7 +455,7 @@ pub fn view<'a>(
         tab_button(Tab::Pending, "Pending"),
         tab_button(Tab::Blocked, "Blocked"),
         space::horizontal(),
-        small_button("Close", Some(Event::Close), false, false),
+        crate::icons::close(Some(Event::Close)),
     ]
     .spacing(10)
     .align_y(alignment::Vertical::Center);

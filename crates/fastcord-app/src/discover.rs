@@ -194,7 +194,7 @@ pub fn view<'a>(
         column![
             row![
                 text("Explore public servers").size(13).width(Length::Fill),
-                button(text("Close").size(13)).on_press(Event::Toggle),
+                crate::icons::close(Some(Event::Toggle)),
             ],
             text(
                 "To join a server, open an invite link to it. Searching the list is not available."

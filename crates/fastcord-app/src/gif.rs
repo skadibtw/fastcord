@@ -179,7 +179,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             .on_submit(Event::Submit)
             .width(Length::Fill),
         button(text("Search").size(13)).on_press(Event::Submit),
-        button(text("Close").size(13)).on_press(Event::Toggle),
+        crate::icons::close(Some(Event::Toggle)),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);

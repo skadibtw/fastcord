@@ -547,7 +547,7 @@ pub fn view<'a>(
             .into(),
     };
     let body = column![
-        row![text(if picker.reaction.is_some() { "React with emoji" } else { "Emoji" }).size(20), button("Close").on_press(Message::EmojiPicker(Event::Close))].spacing(12),
+        row![text(if picker.reaction.is_some() { "React with emoji" } else { "Emoji" }).size(20), crate::icons::close(Some(Message::EmojiPicker(Event::Close)))].spacing(12),
         text_input("Search names, aliases or emoji", &picker.request.query)
             .id("emoji-search").on_input(|query| Message::EmojiPicker(Event::Search(query))),
         pick_list(categories, Some(picker.request.category), |category| Message::EmojiPicker(Event::Category(category))),

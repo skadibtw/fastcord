@@ -7,8 +7,9 @@
 //!
 //! `--script <file>` runs a UI script for layout checks without a person at
 //! the screen: one step per line, `wait <seconds>`, `open <link>` (as a second
-//! launch would), `size <width> <height>`, `snap <name>` (the window's own
-//! pixels to `<name>.png` beside the script) and `quit`.
+//! launch would), `size <width> <height>`, `toggle <panel>` (open or close one
+//! of [`PANELS`] as its button would), `snap <name>` (the window's own pixels
+//! to `<name>.png` beside the script) and `quit`.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -23,11 +24,18 @@ pub const TOKEN: &str = "fake-token";
 static PORT: OnceLock<u16> = OnceLock::new();
 static SCRIPT: OnceLock<PathBuf> = OnceLock::new();
 
+/// Panels a script can open or close.
+pub const PANELS: &[&str] = &[
+    "search", "pins", "inbox", "friends", "emoji", "audio", "chat", "account",
+];
+
 /// One step of a `--script`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     Open(String),
     Size(f32, f32),
+    /// One of [`PANELS`].
+    Toggle(&'static str),
     /// Where the window's pixels go.
     Snap(PathBuf),
     Quit,
@@ -67,6 +75,13 @@ fn parse_script(text: &str, dir: &std::path::Path) -> Vec<(Duration, Step)> {
             "snap" if !rest.is_empty() && !rest.contains(['/', '\\']) => {
                 Step::Snap(dir.join(format!("{rest}.png")))
             }
+            "toggle" => match PANELS.iter().find(|panel| **panel == rest) {
+                Some(panel) => Step::Toggle(panel),
+                None => {
+                    eprintln!("script: unknown panel: {line}");
+                    continue;
+                }
+            },
             "quit" => Step::Quit,
             _ => {
                 eprintln!("script: unknown step: {line}");
@@ -187,7 +202,7 @@ mod tests {
     fn scripts_parse_steps_with_their_pauses() {
         let dir = std::path::Path::new("shots");
         let steps = parse_script(
-            "# comment\nwait 2\nopen discord://-/channels/@me\nsize 1080 672\nwait 0.5\nwait 0.5\nsnap home\nsnap ../x\nbogus\nquit\n",
+            "# comment\nwait 2\nopen discord://-/channels/@me\nsize 1080 672\nwait 0.5\nwait 0.5\nsnap home\nsnap ../x\nbogus\ntoggle pins\ntoggle nothing\nquit\n",
             dir,
         );
         assert_eq!(
@@ -199,6 +214,7 @@ mod tests {
                 ),
                 (Duration::ZERO, Step::Size(1080.0, 672.0)),
                 (Duration::from_secs(1), Step::Snap(dir.join("home.png"))),
+                (Duration::ZERO, Step::Toggle("pins")),
                 (Duration::ZERO, Step::Quit),
             ]
         );

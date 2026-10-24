@@ -286,7 +286,7 @@ pub fn help_view<'a>() -> Element<'a, Event> {
             .size(11)
             .color(style::MUTED),
     );
-    lines = lines.push(button(text("Close").size(13)).on_press(Event::Close));
+    lines = lines.push(crate::icons::close(Some(Event::Close)));
     backdrop(
         container(lines)
             .padding(16)

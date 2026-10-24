@@ -481,7 +481,7 @@ pub fn view<'a>(
         row![
             text(format!("Report {}", subject.label)).size(13),
             space::horizontal(),
-            button(text("Close").size(13)).on_press_maybe(idle.then_some(Event::Close)),
+            crate::icons::close(idle.then_some(Event::Close)),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),

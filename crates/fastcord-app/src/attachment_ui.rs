@@ -479,7 +479,7 @@ pub fn viewer_view(viewer: &AttachmentViewer) -> Element<'_, Message> {
             },
         )));
     }
-    header = header.push(button("Close").on_press(Message::CloseViewer));
+    header = header.push(crate::icons::close(Some(Message::CloseViewer)));
     let body: Element<'_, Message> = match &viewer.state {
         AttachmentView::Ready(preview) => image(preview.handle.clone())
             .content_fit(ContentFit::Contain)

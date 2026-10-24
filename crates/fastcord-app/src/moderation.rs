@@ -404,7 +404,7 @@ fn header<'a>(title: &str) -> Element<'a, Event> {
     row![
         text(title.to_owned()).size(14),
         space::horizontal(),
-        button(text("Close").size(13)).on_press(Event::Close),
+        crate::icons::close(Some(Event::Close)),
     ]
     .align_y(iced::Alignment::Center)
     .into()

@@ -16,17 +16,17 @@
 
 use fastcord_discord::{ArchivedThreads, RestClient, RestError, ThreadError, thread_name};
 use fastcord_model::{Channel, Snowflake};
-use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length, Task};
 
 pub const MAX_ARCHIVED: usize = 200;
 pub const MAX_ARCHIVED_BYTES: usize = 64 * 1024;
 const NAME_CHARS: usize = 100;
 
-const PANEL: Color = Color::from_rgb8(0x2b, 0x2d, 0x31);
-const ROW: Color = Color::from_rgb8(0x31, 0x33, 0x38);
-const MUTED: Color = Color::from_rgb8(0xb5, 0xba, 0xc1);
-const WARN: Color = Color::from_rgb8(0xf2, 0x3f, 0x42);
+const PANEL: Color = crate::style::SIDEBAR;
+const ROW: Color = crate::style::CHAT;
+const MUTED: Color = crate::style::SUBTLE;
+const WARN: Color = crate::style::RED;
 
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -446,12 +446,11 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
                 .on_press(Event::OpenArchived(index)),
             );
         }
-        body = body.push(row![
-            text("Archived threads").size(14),
-            space::horizontal(),
-            button(text("Close").size(13))
-                .on_press(Event::ToggleArchived(archived.guild, archived.channel)),
-        ]);
+        body = body.push(crate::icons::panel_title(
+            "Archived threads",
+            Vec::new(),
+            Event::ToggleArchived(archived.guild, archived.channel),
+        ));
         body = body.push(status);
         if !archived.items.is_empty() {
             body = body.push(scrollable(list).height(Length::Fixed(180.0)));

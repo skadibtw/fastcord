@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use fastcord_discord::state::navigation::{Inbox, InboxRow};
 use fastcord_discord::{MentionFilter, MentionsPage, RestClient, RestError};
 use fastcord_model::{Message, Snowflake};
-use iced::widget::{button, column, container, row, scrollable, space, text};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Color, Element, Length, Task};
 
 pub const MAX_MENTIONS: usize = 100;
@@ -27,10 +27,10 @@ const PREVIEW_CHARS: usize = 200;
 const AUTHOR_CHARS: usize = 64;
 const JUMP_PATIENCE: Duration = Duration::from_secs(10);
 
-const PANEL: Color = Color::from_rgb8(0x2b, 0x2d, 0x31);
-const ROW: Color = Color::from_rgb8(0x31, 0x33, 0x38);
-const MUTED: Color = Color::from_rgb8(0xb5, 0xba, 0xc1);
-const WARN: Color = Color::from_rgb8(0xf2, 0x3f, 0x42);
+const PANEL: Color = crate::style::SIDEBAR;
+const ROW: Color = crate::style::CHAT;
+const MUTED: Color = crate::style::SUBTLE;
+const WARN: Color = crate::style::RED;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -398,23 +398,19 @@ fn unread_row<'a>(index: usize, item: &'a InboxRow) -> Element<'a, Event> {
 }
 
 pub fn view<'a>(state: &'a State, inbox: &'a Inbox) -> Element<'a, Event> {
-    let tab = |label: &'static str, tab: Tab| {
-        let mut b = button(text(label).size(13));
-        if state.tab != tab {
-            b = b.on_press(Event::Tab(tab));
-        }
-        b
+    let tab = |label: &'static str, tab: Tab| -> Element<'a, Event> {
+        let selected = state.tab == tab;
+        button(text(label).size(13))
+            .on_press_maybe((!selected).then_some(Event::Tab(tab)))
+            .padding([4, 10])
+            .style(crate::style::secondary_button(selected))
+            .into()
     };
-    let mut body = column![
-        row![
-            text("Inbox").size(16),
-            tab("Unread", Tab::Unread),
-            tab("Mentions", Tab::Mentions),
-            space::horizontal(),
-            button(text("Close").size(13)).on_press(Event::Toggle),
-        ]
-        .spacing(8)
-    ]
+    let mut body = column![crate::icons::panel_title(
+        "Inbox",
+        vec![tab("Unread", Tab::Unread), tab("Mentions", Tab::Mentions)],
+        Event::Toggle,
+    )]
     .spacing(8);
     if let Some(notice) = state.notice {
         body = body.push(text(notice).size(12).color(WARN));

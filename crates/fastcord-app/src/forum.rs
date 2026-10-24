@@ -43,8 +43,8 @@ const BOLD: iced::Font = iced::Font {
 pub const MAX_DRAFTS: usize = 8;
 const TITLE_CHARS: usize = 100;
 
-const MUTED: Color = Color::from_rgb8(0xb5, 0xba, 0xc1);
-const WARN: Color = Color::from_rgb8(0xf2, 0x3f, 0x42);
+const MUTED: Color = crate::style::SUBTLE;
+const WARN: Color = crate::style::RED;
 
 /// Why a post did not reach Discord or was not confirmed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

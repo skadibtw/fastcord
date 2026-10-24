@@ -511,7 +511,7 @@ pub fn view<'a>(
     let title = |label: &'static str, busy: bool| {
         row![
             text(label).size(13).width(Length::Fill),
-            button(text("Close").size(13)).on_press_maybe((!busy).then_some(Event::Close)),
+            crate::icons::close((!busy).then_some(Event::Close)),
         ]
     };
     let body: Element<'a, Event> = match panel {

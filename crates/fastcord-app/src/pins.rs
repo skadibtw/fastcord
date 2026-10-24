@@ -7,7 +7,7 @@
 
 use fastcord_discord::{PinsPage, RestClient, RestError};
 use fastcord_model::{Message, Snowflake};
-use iced::widget::{button, column, container, row, scrollable, space, text};
+use iced::widget::{button, column, container, scrollable, text};
 use iced::{Color, Element, Length, Task};
 
 /// Discord allows 250 pins per channel.
@@ -16,10 +16,10 @@ pub const MAX_PIN_BYTES: usize = 128 * 1024;
 const PREVIEW_CHARS: usize = 200;
 const AUTHOR_CHARS: usize = 64;
 
-const PANEL: Color = Color::from_rgb8(0x2b, 0x2d, 0x31);
-const ROW: Color = Color::from_rgb8(0x31, 0x33, 0x38);
-const MUTED: Color = Color::from_rgb8(0xb5, 0xba, 0xc1);
-const WARN: Color = Color::from_rgb8(0xf2, 0x3f, 0x42);
+const PANEL: Color = crate::style::SIDEBAR;
+const ROW: Color = crate::style::CHAT;
+const MUTED: Color = crate::style::SUBTLE;
+const WARN: Color = crate::style::RED;
 
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -278,13 +278,11 @@ pub fn view(state: &State) -> Element<'_, Event> {
         );
     }
     let mut body = column![
-        row![
-            text("Pinned messages").size(14),
-            space::horizontal(),
-            button(text("Refresh").size(13)).on_press(Event::Refresh),
-            button(text("Close").size(13)).on_press(Event::Toggle),
-        ]
-        .spacing(8),
+        crate::icons::panel_title(
+            "Pinned messages",
+            vec![crate::icons::secondary("Refresh", Event::Refresh)],
+            Event::Toggle,
+        ),
         status
     ]
     .spacing(6);

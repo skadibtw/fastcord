@@ -73,6 +73,49 @@ pub fn tool<'a, M: Clone + 'a>(kind: Icon, label: &'a str, message: M) -> Elemen
     })
 }
 
+/// The title line of a panel (search, pins, inbox, threads): its name, its
+/// actions, and a close icon at the right edge.
+pub fn panel_title<'a, M: Clone + 'a>(
+    title: &'a str,
+    actions: Vec<Element<'a, M>>,
+    close: M,
+) -> Element<'a, M> {
+    let mut line = row![text(title).size(15).font(iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..iced::Font::DEFAULT
+    })]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center);
+    for action in actions {
+        line = line.push(action);
+    }
+    line.push(iced::widget::space::horizontal())
+        .push(self::close(Some(close)))
+        .into()
+}
+
+/// The close control of a panel or dialog: an X with a tooltip, disabled
+/// (`None`) while the panel is busy.
+pub fn close<'a, M: Clone + 'a>(message: Option<M>) -> Element<'a, M> {
+    action(Action {
+        icon: Icon::Close,
+        on_press: message,
+        active: false,
+        danger: false,
+        tip: "Close".to_owned(),
+        badge: 0,
+    })
+}
+
+/// A secondary action of a panel: a filled grey button.
+pub fn secondary<'a, M: Clone + 'a>(label: &'a str, message: M) -> Element<'a, M> {
+    button(text(label).size(13))
+        .on_press(message)
+        .padding([4, 10])
+        .style(style::secondary_button(false))
+        .into()
+}
+
 /// Decode the fixed, small window artwork once, before the event loop starts.
 pub fn window_icon() -> Option<iced::window::Icon> {
     let image =

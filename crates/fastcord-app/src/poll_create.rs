@@ -233,7 +233,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
     let controls = row![
         text("Create a poll").size(13),
         iced::widget::space::horizontal(),
-        button(text("Close").size(13)).on_press(Event::Toggle),
+        crate::icons::close(Some(Event::Toggle)),
     ]
     .align_y(iced::Alignment::Center);
     let question = text_input("Question", &state.question)

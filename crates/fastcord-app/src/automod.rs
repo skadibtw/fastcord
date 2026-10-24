@@ -1082,7 +1082,7 @@ pub fn view<'a>(
             text("AutoMod").size(14),
             space::horizontal(),
             button(text("Reload").size(13)).on_press_maybe(idle.then_some(Event::Reload)),
-            button(text("Close").size(13)).on_press(Event::Close),
+            crate::icons::close(Some(Event::Close)),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),

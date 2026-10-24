@@ -292,7 +292,7 @@ pub fn view<'a>(state: &'a State, candidates: &[Candidate]) -> Option<Element<'a
     let controls = row![
         text("Forward message").size(13),
         iced::widget::space::horizontal(),
-        button(text("Close").size(13)).on_press_maybe((!busy).then_some(Event::Close)),
+        crate::icons::close((!busy).then_some(Event::Close)),
     ]
     .align_y(iced::Alignment::Center);
     let preview = text(if open.preview.is_empty() {

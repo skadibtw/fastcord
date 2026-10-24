@@ -23,10 +23,10 @@ const MAX_INDEX_WAITS: u8 = 5;
 const JUMP_PATIENCE: Duration = Duration::from_secs(10);
 
 // Discord-style dark palette.
-const PANEL: Color = Color::from_rgb8(0x2b, 0x2d, 0x31);
-const ROW: Color = Color::from_rgb8(0x31, 0x33, 0x38);
-const MUTED: Color = Color::from_rgb8(0xb5, 0xba, 0xc1);
-const WARN: Color = Color::from_rgb8(0xf2, 0x3f, 0x42);
+const PANEL: Color = crate::style::SIDEBAR;
+const ROW: Color = crate::style::CHAT;
+const MUTED: Color = crate::style::SUBTLE;
+const WARN: Color = crate::style::RED;
 
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -371,7 +371,10 @@ pub fn view(state: &State, in_guild: bool) -> Element<'_, Event> {
             .on_submit(Event::Submit)
             .width(Length::Fill),
         button(text("Search").size(13)).on_press(Event::Submit),
-        button(text(has_label(state.has)).size(13)).on_press(Event::CycleHas),
+        button(text(has_label(state.has)).size(13))
+            .on_press(Event::CycleHas)
+            .padding([4, 10])
+            .style(crate::style::secondary_button(false)),
         checkbox(state.from_me)
             .label("From me")
             .on_toggle(Event::FromMe),
@@ -386,8 +389,12 @@ pub fn view(state: &State, in_guild: bool) -> Element<'_, Event> {
         );
     }
     controls = controls
-        .push(button(text("Clear").size(13)).on_press(Event::Clear))
-        .push(button(text("Close").size(13)).on_press(Event::Toggle));
+        .push(crate::icons::secondary("Clear", Event::Clear))
+        .push(crate::icons::tool(
+            crate::icons::Icon::Close,
+            "Close search",
+            Event::Toggle,
+        ));
     let status: Element<'_, Event> = match &state.status {
         Status::Idle => text("").size(12).into(),
         Status::Loading => text("Searching…").size(12).color(MUTED).into(),
