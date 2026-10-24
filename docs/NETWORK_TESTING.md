@@ -227,3 +227,14 @@ including transport-vs-server login notices; app Clippy with warnings denied,
 formatting and the network boundary audit passed. The Windows binary was rebuilt
 and the isolated native preview launched. This validates the diagnostic change;
 direct login remains unresolved on the reported route.
+
+The user then explicitly supplied a test credential. A temporary debug harness
+inside the same `fastcord.exe` invoked the production `login::validate` once in
+Auto, with a ninety-second outer deadline. Input was bounded, provided through
+a private stdin pipe from a masked prompt and kept only in memory, with zeroizing
+Rust input/token owners;
+no credential, account identifier or response body was printed or written to a
+file. The attempt returned the typed API `TcpTimeout`, without an HTTP response.
+It therefore did not establish whether the credential was accepted or rejected.
+No account was persisted and no Gateway was opened. The temporary harness was
+removed and the normal binary rebuilt; the direct-login failure remains open.
