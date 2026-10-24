@@ -35,12 +35,14 @@ pipewire = "0.10.1"
 block2 = "0.6.2"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 objc2 = "0.6.5"
+# macOS menu-bar icon (#105); the same objc2-app-kit 0.3 that winit uses.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSButton", "NSControl", "NSView", "NSResponder", "NSMenu", "NSMenuItem", "NSImage", "objc2-core-foundation"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString", "CFCGTypes"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGDirectDisplay", "CGDisplayStream", "CGWindow"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "CMBase", "CMBlockBuffer", "objc2-core-audio-types", "objc2-core-video"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSEnumerator", "NSError", "NSString", "NSObject"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSEnumerator", "NSError", "NSGeometry", "NSString", "NSObject"] }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "SCStream", "SCShareableContent", "SCError", "block2", "dispatch2", "libc", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "bitflags", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain"] }
@@ -91,6 +93,8 @@ time = { version = "0.3", default-features = false, features = ["std", "parsing"
 tar = { version = "0.4", default-features = false }
 # The ONNX runtime DeepFilterNet already pulls in; the camera background model uses it too (ADR 0010).
 tract-onnx = "=0.19.16"
+# Linux tray icon pixmaps (#105); already in the tree through `image`.
+png = { version = "0.18.1", default-features = false }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 tao = { version = "0.37", default-features = false, features = ["rwh_06"] }
 wry = { version = "0.57", default-features = false, features = ["os-webview"] }
@@ -103,6 +107,8 @@ windows-core = "0.62"
 zeroize = { version = "1", features = ["serde"] }
 unicode-segmentation = "=1.13.3"
 windows-native-keyring-store = "1.1.0"
+# Linux tray icon objects (#105); the zbus 5 that ashpd and the keyring use.
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 zbus-secret-service-keyring-store = { version = "1.0.1", default-features = false, features = ["crypto-rust"] }
 
 [workspace.lints.rust]

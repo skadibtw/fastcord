@@ -613,8 +613,9 @@ impl App {
                 window_hidden: false,
                 compact_call: false,
                 window_size: iced::Size::new(1080.0, 640.0),
-                autostart: (cfg!(windows) && !fake_mode())
-                    .then(fastcord_platform::autostart::is_enabled),
+                autostart: (cfg!(any(windows, target_os = "linux", target_os = "macos"))
+                    && !fake_mode())
+                .then(fastcord_platform::autostart::is_enabled),
                 pending_link: desktop::take_startup(),
                 window_fullscreen: false,
                 voice_details: false,

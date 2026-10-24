@@ -17,7 +17,7 @@ use crate::Message;
 use crate::call_layout::{CallView, Mode, Plan, Tile, TileId, TileSize, stream_owner};
 use crate::gateway::{CameraChoice, VoiceAudioState, VoiceControls, preview_caption};
 use crate::icons::{self, Action, Icon};
-use crate::{playback, style};
+use crate::{desktop, playback, style};
 
 const BOLD: iced::Font = iced::Font {
     weight: iced::font::Weight::Bold,
@@ -493,7 +493,7 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
         on_press: Some(Message::ToggleCompact),
         active: false,
         danger: false,
-        tip: "Compact call window (small, always on top)".to_owned(),
+        tip: desktop::compact_tip().to_owned(),
         badge: 0,
     }));
     buttons = buttons.push(icons::action(Action {

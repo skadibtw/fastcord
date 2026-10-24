@@ -3,14 +3,18 @@
 //! owns a hidden message-only window; a later launch finds that window, hands
 //! its command-line argument over with `WM_COPYDATA`, and tells the caller to
 //! exit. The window thread blocks in `GetMessageW`, so the guard costs no idle
-//! CPU. Where it cannot be built (a non-Windows target), [`acquire`] reports a
-//! primary instance without a guard.
+//! CPU. Linux and macOS use a Unix socket in the per-user runtime directory
+//! instead: the first process listens on it (a thread blocked in `accept`), a
+//! later launch connects and writes its argument. Where neither exists,
+//! [`acquire`] reports a primary instance without a guard.
 
+#[cfg(windows)]
 use std::thread::JoinHandle;
 
 /// Longest forwarded argument, in bytes (a deep link is far shorter).
 pub const MAX_ARG_BYTES: usize = 2048;
-/// `COPYDATASTRUCT::dwData` tag of a fastcord hand-off ("FC" + version 1).
+/// `COPYDATASTRUCT::dwData` tag of a fastcord hand-off ("FC" + version 1);
+/// the Unix socket has no tag field and passes it implicitly.
 const TAG: usize = 0x4643_0001;
 
 /// What a second launch asked the running instance to do.
@@ -51,8 +55,11 @@ fn valid(bytes: &[u8]) -> bool {
 
 /// The running instance's guard; keep it alive until the process exits.
 pub struct Instance {
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg(windows)]
     thread: Option<(u32, JoinHandle<()>)>,
+    /// The socket file, removed when the guard is dropped.
+    #[cfg(unix)]
+    socket: Option<std::path::PathBuf>,
 }
 
 pub enum Start {
@@ -257,13 +264,110 @@ mod sys {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+mod sys {
+    use std::io::{ErrorKind, Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use super::{Forwarded, Instance, MAX_ARG_BYTES, Start, TAG, decode, encode};
+
+    type Sink = Box<dyn FnMut(Forwarded) + Send>;
+
+    /// How long a connected launch may take to write its argument.
+    const READ_WAIT: Duration = Duration::from_secs(1);
+
+    /// The socket in the per-user runtime directory (`XDG_RUNTIME_DIR` on
+    /// Linux, the per-user `TMPDIR` on macOS; both are private to the user),
+    /// falling back to the home directory.
+    fn socket_path() -> Option<PathBuf> {
+        ["XDG_RUNTIME_DIR", "TMPDIR", "HOME"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from)
+            .find(|dir| dir.is_absolute() && dir.is_dir())
+            .map(|dir| dir.join(".fastcord-instance.sock"))
+    }
+
+    pub fn acquire(arg: Option<&str>, sink: Sink) -> Start {
+        match socket_path() {
+            Some(path) => acquire_at(&path, arg, sink),
+            // Nowhere to put the socket; refuse to run a session nothing guards.
+            None => Start::Secondary,
+        }
+    }
+
+    pub(super) fn acquire_at(path: &Path, arg: Option<&str>, sink: Sink) -> Start {
+        // Two tries: a socket left by a crashed process refuses the connection
+        // and is replaced once; losing a bind race means another launch won.
+        for _ in 0..2 {
+            if let Ok(stream) = UnixStream::connect(path) {
+                forward(stream, arg);
+                return Start::Secondary;
+            }
+            match UnixListener::bind(path) {
+                Ok(listener) => {
+                    let spawned = std::thread::Builder::new()
+                        .name("fastcord-instance".into())
+                        .spawn(move || serve(listener, sink));
+                    return Start::Primary(Instance {
+                        socket: spawned.is_ok().then(|| path.to_owned()),
+                    });
+                }
+                Err(error) if error.kind() == ErrorKind::AddrInUse => {
+                    if UnixStream::connect(path).is_err() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        Start::Secondary
+    }
+
+    /// Writes `arg` to the primary. A failure is not retried: the caller exits
+    /// either way, because starting a second session is the worse outcome.
+    fn forward(mut stream: UnixStream, arg: Option<&str>) {
+        if let Some(payload) = encode(arg) {
+            let _ = stream.set_write_timeout(Some(READ_WAIT));
+            let _ = stream.write_all(&payload);
+        }
+    }
+
+    /// Blocks in `accept`: no CPU while nothing is forwarded. The thread ends
+    /// with the process.
+    fn serve(listener: UnixListener, mut sink: Sink) {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let _ = stream.set_read_timeout(Some(READ_WAIT));
+            let mut payload = Vec::new();
+            if stream
+                .take(MAX_ARG_BYTES as u64 + 1)
+                .read_to_end(&mut payload)
+                .is_ok()
+                && let Some(request) = decode(TAG, &payload)
+            {
+                sink(request);
+            }
+        }
+    }
+
+    impl Drop for Instance {
+        fn drop(&mut self) {
+            if let Some(path) = self.socket.take() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
 mod sys {
     use super::{Forwarded, Instance, Start};
 
     pub fn acquire(_: Option<&str>, _: Box<dyn FnMut(Forwarded) + Send>) -> Start {
-        // ponytail: no guard off Windows yet (a lock file or D-Bus name per target).
-        Start::Primary(Instance { thread: None })
+        Start::Primary(Instance {})
     }
 }
 
@@ -295,5 +399,45 @@ mod tests {
         assert_eq!(decode(TAG, long.as_bytes()), None);
         assert_eq!(encode(Some(&long)), None);
         assert!(encode(Some(&"a".repeat(MAX_ARG_BYTES))).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_launch_hands_its_link_over_a_socket_and_a_stale_socket_is_replaced() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir().join(format!("fastcord-instance-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("i.sock");
+        // A socket file nobody listens on, as a crashed process leaves it.
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+
+        let (tx, rx) = mpsc::channel();
+        let Start::Primary(guard) = sys::acquire_at(
+            &path,
+            None,
+            Box::new(move |r| {
+                let _ = tx.send(r);
+            }),
+        ) else {
+            panic!("the stale socket must not make this a second launch");
+        };
+        let link = "discord://-/channels/1/2";
+        let ignore = |_| {};
+        assert!(matches!(
+            sys::acquire_at(&path, Some(link), Box::new(ignore)),
+            Start::Secondary
+        ));
+        let wait = Duration::from_secs(5);
+        assert_eq!(rx.recv_timeout(wait), Ok(Forwarded::Open(link.to_owned())));
+        assert!(matches!(
+            sys::acquire_at(&path, None, Box::new(ignore)),
+            Start::Secondary
+        ));
+        assert_eq!(rx.recv_timeout(wait), Ok(Forwarded::Raise));
+        drop(guard);
+        assert!(!path.exists(), "the guard removes its socket");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

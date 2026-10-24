@@ -1,6 +1,9 @@
 //! Start-at-sign-in (issue #105). Windows writes or removes one value under
-//! `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; it is touched only when
-//! the user toggles the setting. Elsewhere [`AutostartError::Unsupported`].
+//! `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, Linux one XDG autostart
+//! entry (`~/.config/autostart/fastcord.desktop`), macOS one launch agent
+//! (`~/Library/LaunchAgents/io.github.skadibtw.fastcord.plist`, read at the
+//! next login). Each is touched only when the user toggles the setting.
+//! Elsewhere [`AutostartError::Unsupported`].
 
 use std::fmt;
 use std::path::Path;
@@ -17,7 +20,7 @@ pub enum AutostartError {
 impl fmt::Display for AutostartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Unsupported => "Starting at sign-in is only supported on Windows in this build.",
+            Self::Unsupported => "Starting at sign-in is not supported on this operating system.",
             Self::Failed => "The operating system refused the start-at-sign-in change.",
         })
     }
@@ -34,18 +37,65 @@ pub fn run_value(exe: &Path) -> Option<String> {
         .then(|| format!("\"{path}\""))
 }
 
-/// Whether the `Run` value exists.
+/// The XDG autostart entry for `exe`. `None` for a path the `Exec` key would
+/// have to escape (quote, backslash, `$`, backtick, `%`) or that is not UTF-8,
+/// is empty, or holds a control character.
+pub fn desktop_entry(exe: &Path) -> Option<String> {
+    let path = exe.to_str()?;
+    (!path.is_empty()
+        && !path
+            .chars()
+            .any(|c| matches!(c, '"' | '\\' | '$' | '`' | '%') || c.is_control()))
+    .then(|| {
+        format!(
+            "[Desktop Entry]\nType=Application\nName=fastcord\nExec=\"{path}\"\n\
+             X-GNOME-Autostart-enabled=true\n"
+        )
+    })
+}
+
+/// The launch agent property list for `exe`, which runs it once at login in
+/// the graphical session. `None` for a path that is not UTF-8, is empty, or
+/// holds a control character.
+pub fn launch_agent(exe: &Path) -> Option<String> {
+    let path = exe.to_str()?;
+    if path.is_empty() || path.chars().any(char::is_control) {
+        return None;
+    }
+    let path = path
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    Some(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{AGENT_LABEL}</string>
+  <key>ProgramArguments</key><array><string>{path}</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>
+"#
+    ))
+}
+
+/// The launch agent's label and file name (the bundle identifier).
+pub const AGENT_LABEL: &str = "io.github.skadibtw.fastcord";
+
+/// Whether the start-at-sign-in entry exists.
 pub fn is_enabled() -> bool {
     sys::is_enabled()
 }
 
-/// Writes (for the running executable) or removes the `Run` value.
+/// Writes (for the running executable) or removes the start-at-sign-in entry.
 pub fn set(enabled: bool) -> Result<(), AutostartError> {
     if !enabled {
         return sys::remove();
     }
     let exe = std::env::current_exe().map_err(|_| AutostartError::Failed)?;
-    sys::write(&run_value(&exe).ok_or(AutostartError::Failed)?)
+    sys::write(&sys::value(&exe).ok_or(AutostartError::Failed)?)
 }
 
 #[cfg(windows)]
@@ -61,6 +111,8 @@ mod sys {
     use windows::core::{HSTRING, PCWSTR};
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+    pub use super::run_value as value;
 
     fn open() -> Result<HKEY, AutostartError> {
         let mut key = HKEY::default();
@@ -137,10 +189,73 @@ mod sys {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod sys {
+    use std::io::ErrorKind;
+    use std::path::PathBuf;
+
     use super::AutostartError;
 
+    #[cfg(target_os = "linux")]
+    pub use super::desktop_entry as value;
+    #[cfg(target_os = "macos")]
+    pub use super::launch_agent as value;
+
+    fn home() -> Option<PathBuf> {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn file() -> Option<PathBuf> {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .or_else(|| home().map(|home| home.join(".config")))?;
+        Some(config.join("autostart").join("fastcord.desktop"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn file() -> Option<PathBuf> {
+        Some(
+            home()?
+                .join("Library/LaunchAgents")
+                .join(format!("{}.plist", super::AGENT_LABEL)),
+        )
+    }
+
+    pub fn is_enabled() -> bool {
+        file().is_some_and(|file| file.is_file())
+    }
+
+    pub fn write(value: &str) -> Result<(), AutostartError> {
+        let file = file().ok_or(AutostartError::Failed)?;
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir).map_err(|_| AutostartError::Failed)?;
+        }
+        std::fs::write(file, value).map_err(|_| AutostartError::Failed)
+    }
+
+    pub fn remove() -> Result<(), AutostartError> {
+        let file = file().ok_or(AutostartError::Failed)?;
+        match std::fs::remove_file(file) {
+            // An entry that is already gone is the wanted state.
+            Err(error) if error.kind() != ErrorKind::NotFound => Err(AutostartError::Failed),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+mod sys {
+    use std::path::Path;
+
+    use super::AutostartError;
+
+    pub fn value(_: &Path) -> Option<String> {
+        None
+    }
     pub fn is_enabled() -> bool {
         false
     }
@@ -165,5 +280,28 @@ mod tests {
         for bad in ["", "C:\\a\"b.exe", "C:\\a\nb.exe"] {
             assert_eq!(run_value(Path::new(bad)), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_desktop_entry_quotes_the_path_and_refuses_what_exec_would_escape() {
+        let entry = desktop_entry(Path::new("/opt/fast cord/fastcord")).unwrap();
+        assert!(entry.starts_with("[Desktop Entry]\nType=Application\n"));
+        assert!(entry.contains("\nExec=\"/opt/fast cord/fastcord\"\n"));
+        for bad in ["", "/a\"b", "/a\\b", "/a$b", "/a`b", "/a%b", "/a\nb"] {
+            assert_eq!(desktop_entry(Path::new(bad)), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_launch_agent_runs_the_escaped_path_at_login() {
+        let plist =
+            launch_agent(Path::new("/Applications/a&b.app/Contents/MacOS/fastcord")).unwrap();
+        assert!(plist.contains(
+            "<array><string>/Applications/a&amp;b.app/Contents/MacOS/fastcord</string></array>"
+        ));
+        assert!(plist.contains("<key>RunAtLoad</key><true/>"));
+        assert!(plist.contains("<string>io.github.skadibtw.fastcord</string>"));
+        assert_eq!(launch_agent(Path::new("/a\nb")), None);
+        assert_eq!(launch_agent(Path::new("")), None);
     }
 }

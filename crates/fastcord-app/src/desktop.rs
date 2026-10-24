@@ -198,11 +198,27 @@ pub fn view<'a>(
     if let Some(on) = autostart {
         content = content.push(
             checkbox(on)
-                .label("Start fastcord when I sign in to Windows")
+                .label("Start fastcord when I sign in")
                 .on_toggle(Message::AutostartToggled),
         );
     }
     content.into()
+}
+
+/// Whether the window runs on Wayland, which gives applications no way to keep
+/// a window above the others (winit picks Wayland whenever it is available).
+static WAYLAND: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
+});
+
+/// The compact window's description; on Wayland it is not advertised as
+/// staying on top, because the compositor decides that.
+pub fn compact_tip() -> &'static str {
+    if *WAYLAND {
+        "Compact call window (small; Wayland does not let it stay on top)"
+    } else {
+        "Compact call window (small, always on top)"
+    }
 }
 
 /// Window size of the compact call mode.

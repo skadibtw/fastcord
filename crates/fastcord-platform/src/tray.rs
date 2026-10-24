@@ -1,6 +1,8 @@
 //! The notification-area icon (issue #105). Windows runs `Shell_NotifyIcon` on
 //! its own thread with a hidden window, like the shortcut hook: it blocks in
-//! `GetMessageW`, so it uses no CPU while nothing happens. The icon's menu and
+//! `GetMessageW`, so it uses no CPU while nothing happens. Linux publishes a
+//! StatusNotifierItem on the session bus (`tray/linux.rs`), macOS an
+//! `NSStatusItem` in the menu bar (`tray/macos.rs`). The icon's menu and
 //! tooltip follow a small [`State`] pushed with [`set_state`]; clicks come back
 //! as [`Command`]s through the sink given to [`Tray::start`]. Elsewhere
 //! [`TrayError::Unsupported`].
@@ -17,7 +19,10 @@ pub enum Command {
     Quit,
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 impl Command {
     fn id(self) -> usize {
         self as usize + 1
@@ -69,13 +74,18 @@ pub fn menu(state: State) -> Vec<(Command, &'static str)> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayError {
     Unsupported,
+    /// The desktop runs no tray host (Linux without a StatusNotifierWatcher).
+    NoHost,
     Failed,
 }
 
 impl fmt::Display for TrayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Unsupported => "The tray icon is only supported on Windows in this build.",
+            Self::Unsupported => "The tray icon is not supported on this operating system.",
+            Self::NoHost => {
+                "This desktop shows no tray icons (on GNOME, the AppIndicator extension adds them)."
+            }
             Self::Failed => "The operating system refused the tray icon.",
         })
     }
@@ -100,14 +110,20 @@ pub fn set_state(state: State) {
     }
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 fn state() -> State {
     STATE.lock().map(|s| *s).unwrap_or_default()
 }
 
 /// The data of the ICO entry that is `size` pixels wide (the first if none is),
 /// as `CreateIconFromResourceEx` takes it (PNG or DIB bytes of one image).
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 fn ico_entry(ico: &[u8], size: u8) -> Option<&[u8]> {
     let count = usize::from(u16::from_le_bytes([*ico.get(4)?, *ico.get(5)?]));
     let entry = |n: usize| -> Option<(u8, &[u8])> {
@@ -400,7 +416,16 @@ mod sys {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as sys;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as sys;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod sys {
     use super::{Command, TrayError};
 

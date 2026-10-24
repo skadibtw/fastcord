@@ -852,7 +852,7 @@ Manual (Windows, alt account only, not run offline):
 
 ### Desktop communication integration (#105)
 
-- **Automated:** `desktop::tests` (deep links in every form and the rejects), platform `instance::tests` (hand-off encode/decode, foreign/oversize/malformed), `autostart::tests` (quoted value, refused paths), `tray::tests` (menu per state, id mapping, tooltip, icon entry), `main::tests` (closing quits by default and hides only with the tray chosen and up; a forwarded link waits for sign-in), `invite::tests` (an opened invite is looked up, never joined). None touches the registry or starts a window.
+- **Automated:** `desktop::tests` (deep links in every form and the rejects), platform `instance::tests` (hand-off encode/decode, foreign/oversize/malformed; on Unix a real socket hand-off of a link and of a bare launch, a stale socket replaced, the socket removed with the guard), `autostart::tests` (quoted `Run` value, XDG entry and launch agent text, refused paths), `tray::tests` (menu per state, id mapping, tooltip, icon entry), `tray::linux::tests` (ARGB pixmaps of 24/32/48 px, dbusmenu layout; the ignored `the_icon_registers_with_a_watcher_and_its_menu_clicks_come_back` against a stand-in `org.kde.StatusNotifierWatcher`), `main::tests` (closing quits by default and hides only with the tray chosen and up; a forwarded link waits for sign-in), `invite::tests` (an opened invite is looked up, never joined). None touches the registry or starts a window.
 - **Outstanding gates (manual, unchecked; never run two instances on one token):**
   - [ ] Windows: the tray icon appears with the app icon, shows the mention count in its tooltip, survives an Explorer restart, and left click/Open raise the window.
   - [ ] In a call the menu shows Mute/Unmute microphone and Disconnect and they work; outside a call they are absent. Quit leaves the call and exits; no process remains in Task Manager.
@@ -861,7 +861,11 @@ Manual (Windows, alt account only, not run offline):
   - [ ] The autostart checkbox adds and removes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\fastcord`; the next sign-in starts fastcord once.
   - [ ] `fastcord.exe discord://-/channels/{g}/{c}/{m}`, the https form and a pasted link in Ctrl+K open the right conversation/message; an invite link shows the invite and joins only on Join.
   - [ ] Compact call mode stays above a full-screen-windowed app, shows speaking rings for another account, and ends when the call ends.
-  - [ ] Linux and macOS report the tray and autostart as unsupported instead of failing silently.
+  - [ ] Linux, KDE Plasma (X11 and Wayland): the tray icon shows the app mark, the tooltip the mention count, the menu follows the call state and its entries work; restarting `plasmashell` brings the icon back. GNOME without the AppIndicator extension: the desktop settings say there is no tray host and closing the window quits.
+  - [ ] Linux: the autostart checkbox creates and removes `~/.config/autostart/fastcord.desktop`; the next login starts fastcord once. A second `fastcord` (with and without a link) forwards to the first and exits; after `kill -9` of the first the next start still works (stale socket replaced).
+  - [ ] Linux Wayland: the compact-window tooltip says it cannot stay on top; on X11 it stays on top.
+  - [ ] macOS (packaged `.app`): the menu-bar icon appears, its menu follows the call state and works, and it disappears on Quit; the autostart checkbox creates and removes `~/Library/LaunchAgents/io.github.skadibtw.fastcord.plist` and the next login starts fastcord once; a second launch from Terminal forwards and exits.
+- **Linux, real D-Bus (2026-10-24, WSL Ubuntu 24.04, dbus-daemon 1.14):** `cargo clippy --workspace --all-targets --locked -- -D warnings` passed; `dbus-run-session -- cargo test -p fastcord-platform --lib -- tray instance autostart --include-ignored` passed (13/13), including the stand-in watcher test (registration, `Properties.Get`, `GetLayout`, a `clicked` event returned as Quit) and the Unix socket hand-off. A real tray host (Plasma, waybar, the GNOME extension) is not covered. macOS: `cargo clippy -p fastcord-platform --target aarch64-apple-darwin --all-targets -- -D warnings` passed from Windows; never run.
 
 ### Manual moderation and audit log (#95)
 
