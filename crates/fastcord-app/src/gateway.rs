@@ -760,8 +760,9 @@ pub enum Command {
     StartShare {
         source: CaptureSource,
         request: StreamCreateRequest,
-        /// Also send the shared application's or the system's audio.
-        audio: bool,
+        /// Also send this audio (the shared application's, the system's, or
+        /// a chosen PipeWire node).
+        audio: Option<fastcord_platform::loopback::LoopbackScope>,
     },
     /// End the screen share and its stream.
     StopShare,
@@ -1425,7 +1426,7 @@ impl NavigationBridge {
         &self,
         source: CaptureSource,
         request: StreamCreateRequest,
-        audio: bool,
+        audio: Option<fastcord_platform::loopback::LoopbackScope>,
     ) -> bool {
         let text = format!("Starting capture of “{}”…", source.title);
         let queued = self
@@ -3541,6 +3542,10 @@ pub struct GatewayPanel {
     pub share_picker: SharePicker,
     /// The picker's "Share audio" choice (on by default).
     pub share_audio: bool,
+    /// Where the audio may come from when the user chooses (Linux), listed
+    /// when the picker opens, and the choice.
+    pub share_audio_sources: Vec<fastcord_platform::loopback::AudioSource>,
+    pub share_audio_target: Option<fastcord_platform::loopback::AudioTarget>,
     _worker: Handle,
     pub attachments: Option<AttachmentCache>,
     /// Render state for the account's cached/downloaded attachment previews.
@@ -3759,6 +3764,8 @@ impl GatewayPanel {
             call_view: crate::call_layout::CallView::default(),
             share_picker: SharePicker::default(),
             share_audio: true,
+            share_audio_sources: Vec::new(),
+            share_audio_target: None,
             voice_guild: None,
             voice_call: None,
             composer: Composer::default(),

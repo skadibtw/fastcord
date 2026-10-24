@@ -1,5 +1,6 @@
-//! Owner-side stream audio (SPEC §8.7, milestone 35): the loopback capture of
-//! the shared application or system, the Opus encoder thread, and the slot
+//! Owner-side stream audio (SPEC §8.7, milestones 35 and 36): the loopback
+//! capture of the shared application or system (or, on Linux, the PipeWire
+//! node the user chose), the Opus encoder thread, and the slot
 //! that connects the encoder to the stream's RTC connection once it exists.
 //!
 //! The microphone is never involved: it stays on the parent voice connection,
@@ -13,7 +14,9 @@ use std::sync::Arc;
 use fastcord_audio::soundshare::{self, ShareFrame, SoundShare};
 use fastcord_media::MediaSender;
 use fastcord_platform::capture::SourceId;
-use fastcord_platform::loopback::{self, Loopback, LoopbackError, LoopbackScope, LoopbackSupport};
+use fastcord_platform::loopback::{
+    self, AudioTarget, Loopback, LoopbackError, LoopbackScope, LoopbackSupport,
+};
 use parking_lot::Mutex;
 
 /// The stream connection's sender, set by the stream task once it is connected
@@ -30,11 +33,16 @@ pub enum AudioOffer {
     PerApplication,
     /// Only whole-device capture: the call is part of it.
     Broad,
+    /// The user picks an output or input (Linux): an output carries the call
+    /// when fastcord plays through it.
+    Choose,
 }
 
 impl AudioOffer {
     pub fn from_support(support: LoopbackSupport) -> Self {
-        if support.process_loopback {
+        if support.chosen_target {
+            Self::Choose
+        } else if support.process_loopback {
             Self::PerApplication
         } else if support.system_loopback {
             Self::Broad
@@ -63,6 +71,19 @@ impl AudioOffer {
             Self::Broad => {
                 "Broad capture: this Windows version can only capture everything your speakers play, including your call, so viewers may hear the people in your call. Turn this off to share the picture only."
             }
+            Self::Choose => {
+                "Choose what viewers hear. An output shares everything it plays, including your call if fastcord plays there; to share one application only, route it to a separate output (for example with pavucontrol) and choose that one. Your microphone stays separate."
+            }
+        }
+    }
+
+    /// What a share of `source` captures, or `None` when nothing can be (or
+    /// nothing was chosen).
+    pub fn scope(self, source: SourceId, chosen: Option<AudioTarget>) -> Option<LoopbackScope> {
+        match self {
+            Self::Unavailable => None,
+            Self::Choose => chosen.map(LoopbackScope::Target),
+            Self::PerApplication | Self::Broad => loopback::scope_for(source, loopback::support()),
         }
     }
 }
@@ -73,6 +94,10 @@ pub(super) fn scope_text(scope: LoopbackScope) -> &'static str {
         LoopbackScope::Application { .. } => "app audio",
         LoopbackScope::SystemExcludingFastcord => "system audio without fastcord",
         LoopbackScope::SystemIncludingFastcord => "all system audio (viewers may hear your call)",
+        LoopbackScope::Target(AudioTarget {
+            whole_output: true, ..
+        }) => "the chosen output's audio (viewers may hear your call)",
+        LoopbackScope::Target(_) => "the chosen input's audio",
     }
 }
 
@@ -90,10 +115,8 @@ pub(super) struct AudioShare {
     pub(super) scope: LoopbackScope,
 }
 
-/// Starts capturing the audio that goes with `source`. Blocks briefly.
-pub(super) fn start(source: SourceId) -> Result<AudioShare, String> {
-    let scope = loopback::scope_for(source, loopback::support())
-        .ok_or_else(|| AudioOffer::Unavailable.note().to_owned())?;
+/// Starts capturing `scope`. Blocks briefly.
+pub(super) fn start(scope: LoopbackScope) -> Result<AudioShare, String> {
     let slot: AudioSlot = Arc::new(Mutex::new(None));
     let sink_slot = Arc::clone(&slot);
     let (encoder, mut input) = soundshare::start(move |frame| {
@@ -126,11 +149,42 @@ mod tests {
         let process = LoopbackSupport {
             process_loopback: true,
             system_loopback: true,
+            chosen_target: false,
         };
         let broad = LoopbackSupport {
             process_loopback: false,
             system_loopback: true,
+            chosen_target: false,
         };
+        let chosen = LoopbackSupport {
+            chosen_target: true,
+            ..LoopbackSupport::default()
+        };
+        assert_eq!(AudioOffer::from_support(chosen), AudioOffer::Choose);
+        assert!(!AudioOffer::Choose.warns());
+        assert!(AudioOffer::Choose.note().contains("including your call"));
+        let display = SourceId::from_raw(fastcord_platform::capture::SourceKind::Display, 0);
+        assert_eq!(
+            AudioOffer::Choose.scope(display, None),
+            None,
+            "nothing chosen"
+        );
+        let output = AudioTarget {
+            serial: 3,
+            whole_output: true,
+        };
+        assert_eq!(
+            AudioOffer::Choose.scope(display, Some(output)),
+            Some(LoopbackScope::Target(output))
+        );
+        assert!(scope_text(LoopbackScope::Target(output)).contains("may hear your call"));
+        assert!(
+            !scope_text(LoopbackScope::Target(AudioTarget {
+                whole_output: false,
+                ..output
+            }))
+            .contains("call")
+        );
         assert_eq!(
             AudioOffer::from_support(process),
             AudioOffer::PerApplication
@@ -158,7 +212,10 @@ mod tests {
     #[ignore = "needs a Windows audio session"]
     fn a_screen_share_audio_starts_and_stops_without_leftovers() {
         use fastcord_platform::capture::SourceKind;
-        let audio = start(SourceId::from_raw(SourceKind::Display, 0)).expect("audio starts");
+        let scope = AudioOffer::current()
+            .scope(SourceId::from_raw(SourceKind::Display, 0), None)
+            .expect("this machine captures audio");
+        let audio = start(scope).expect("audio starts");
         assert_eq!(audio.scope, LoopbackScope::SystemExcludingFastcord);
         assert!(audio.slot.lock().is_none());
         std::thread::sleep(std::time::Duration::from_millis(300));

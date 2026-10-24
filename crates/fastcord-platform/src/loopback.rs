@@ -1,5 +1,6 @@
-//! Audio a screen share carries (SPEC §8.4, §8.7; milestone 35): WASAPI
-//! loopback on Windows, delivered as 48 kHz interleaved stereo `f32`.
+//! Audio a screen share carries (SPEC §8.4, §8.7; milestones 35 and 36):
+//! WASAPI loopback on Windows and a PipeWire capture stream on Linux, both
+//! delivered as 48 kHz interleaved stereo `f32`.
 //!
 //! One [`Loopback`] owns one dedicated native thread. Everything that touches
 //! the operating system's audio objects, and the handler, runs there; the
@@ -18,19 +19,29 @@
 //!   the call included ([`LoopbackScope::SystemIncludingFastcord`]); the UI
 //!   must call it the broad one.
 //!
+//! Linux has no notion of "what the shared window plays": the screen portal
+//! carries no audio, so the user picks a PipeWire node explicitly
+//! ([`list_targets`], [`LoopbackScope::Target`]): an output's monitor, which is
+//! everything that output plays (the call too, if fastcord plays there), or an
+//! input such as a virtual source an application was routed to.
+//!
 //! Elsewhere every entry point reports [`LoopbackError::Unsupported`] (SPEC
-//! milestones 36 and 37).
+//! milestone 37).
 
 use std::fmt;
 
 use crate::capture::{SourceId, SourceKind};
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(not(any(windows, target_os = "linux")))]
 mod unsupported;
 #[cfg(windows)]
 mod windows;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+use linux as native;
+#[cfg(not(any(windows, target_os = "linux")))]
 use unsupported as native;
 #[cfg(windows)]
 use windows as native;
@@ -48,13 +59,43 @@ pub enum LoopbackScope {
     SystemExcludingFastcord,
     /// Everything the default output plays, fastcord's call included.
     SystemIncludingFastcord,
+    /// One PipeWire node the user chose (Linux), by its `object.serial`.
+    Target(AudioTarget),
 }
 
 impl LoopbackScope {
     /// Whether viewers could hear the call through this capture.
     pub fn includes_fastcord(self) -> bool {
-        matches!(self, Self::SystemIncludingFastcord)
+        match self {
+            Self::SystemIncludingFastcord => true,
+            Self::Target(target) => target.whole_output,
+            Self::Application { .. } | Self::SystemExcludingFastcord => false,
+        }
     }
+}
+
+/// A PipeWire node audio can be shared from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AudioTarget {
+    /// The node's `object.serial`.
+    pub serial: u32,
+    /// An output's monitor: everything it plays, the call included when
+    /// fastcord plays through it.
+    pub whole_output: bool,
+}
+
+/// A choice for the share picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioSource {
+    pub target: AudioTarget,
+    /// The node's description, at most [`crate::capture::MAX_TITLE_CHARS`].
+    pub title: String,
+}
+
+/// The outputs and inputs audio can be shared from, outputs first; empty
+/// where the user does not choose. May block briefly: call it on a worker.
+pub fn list_targets() -> Result<Vec<AudioSource>, LoopbackError> {
+    native::list_targets()
 }
 
 /// Which mechanisms this machine offers.
@@ -62,6 +103,8 @@ impl LoopbackScope {
 pub struct LoopbackSupport {
     pub process_loopback: bool,
     pub system_loopback: bool,
+    /// The user picks a node from [`list_targets`] (Linux).
+    pub chosen_target: bool,
 }
 
 /// Cheap; never opens a device.
@@ -170,6 +213,7 @@ mod tests {
         let broad = LoopbackSupport {
             process_loopback: false,
             system_loopback: true,
+            chosen_target: false,
         };
         let scope = scope_for(window(), broad).unwrap();
         assert_eq!(scope, LoopbackScope::SystemIncludingFastcord);
@@ -177,6 +221,7 @@ mod tests {
         let full = LoopbackSupport {
             process_loopback: true,
             system_loopback: true,
+            chosen_target: false,
         };
         let display = SourceId::from_raw(SourceKind::Display, 1);
         assert_eq!(
@@ -185,5 +230,18 @@ mod tests {
         );
         // A window that has no process (stale handle) still excludes fastcord.
         assert!(!scope_for(window(), full).unwrap().includes_fastcord());
+        // A chosen output monitor carries the call; a chosen input does not.
+        let monitor = AudioTarget {
+            serial: 7,
+            whole_output: true,
+        };
+        assert!(LoopbackScope::Target(monitor).includes_fastcord());
+        assert!(
+            !LoopbackScope::Target(AudioTarget {
+                whole_output: false,
+                ..monitor
+            })
+            .includes_fastcord()
+        );
     }
 }

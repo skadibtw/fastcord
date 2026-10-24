@@ -478,7 +478,7 @@ impl super::Worker {
         &mut self,
         source: CaptureSource,
         request: StreamCreateRequest,
-        with_audio: bool,
+        audio: Option<fastcord_platform::loopback::LoopbackScope>,
     ) {
         if self.share.is_some() {
             // The UI offers no second share; keep the running one.
@@ -498,16 +498,13 @@ impl super::Worker {
         };
         // The audio source first: a refused or missing one is an error shown
         // before anything is captured or created on Discord.
-        let audio = if with_audio {
-            match share_audio::start(source.id) {
-                Ok(audio) => Some(audio),
-                Err(text) => {
-                    self.publish_share(ShareView::failed(text));
-                    return;
-                }
+        let audio = match audio.map(share_audio::start) {
+            None => None,
+            Some(Ok(audio)) => Some(audio),
+            Some(Err(text)) => {
+                self.publish_share(ShareView::failed(text));
+                return;
             }
-        } else {
-            None
         };
         match start_worker(&source) {
             Ok((worker, sender, progress)) => {
@@ -868,7 +865,7 @@ mod tests {
             primary: false,
         };
         assert_eq!(bridge.share_view(), ShareView::idle());
-        assert!(bridge.start_share(source, request(), false));
+        assert!(bridge.start_share(source, request(), None));
         assert_eq!(
             bridge.share_view(),
             ShareView::active("Starting capture of “Secret plans”…".to_owned())

@@ -41,7 +41,9 @@ use windows::Win32::System::Variant::VT_BLOB;
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use windows::core::{Error, IUnknown, Interface, PCWSTR, implement};
 
-use super::{CHANNELS, Handler, LoopbackError, LoopbackScope, LoopbackSupport, SAMPLE_RATE};
+use super::{
+    AudioSource, CHANNELS, Handler, LoopbackError, LoopbackScope, LoopbackSupport, SAMPLE_RATE,
+};
 use crate::capture::SourceId;
 
 /// HRESULT_FROM_WIN32(ERROR_NOT_FOUND): no default output device.
@@ -140,6 +142,7 @@ pub(super) fn support() -> LoopbackSupport {
     LoopbackSupport {
         process_loopback: build >= PROCESS_LOOPBACK_BUILD,
         system_loopback: true,
+        chosen_target: false,
     }
 }
 
@@ -153,6 +156,11 @@ pub(super) fn window_process(source: SourceId) -> Option<u32> {
         )
     };
     (process != 0).then_some(process)
+}
+
+/// Windows decides the scope from the shared source; nothing is chosen.
+pub(super) fn list_targets() -> Result<Vec<AudioSource>, LoopbackError> {
+    Ok(Vec::new())
 }
 
 pub(super) fn start(scope: LoopbackScope, handler: Handler) -> Result<Native, LoopbackError> {
@@ -332,6 +340,9 @@ fn activate(scope: LoopbackScope) -> Result<IAudioClient, LoopbackError> {
             let own = unsafe { GetCurrentProcessId() };
             activate_process(own, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE)
         }
+        LoopbackScope::Target(_) => Err(LoopbackError::Unsupported(
+            "choosing an audio node is only possible on Linux",
+        )),
     }
 }
 

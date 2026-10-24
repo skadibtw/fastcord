@@ -343,6 +343,12 @@ enum Phase {
 
 // Every message containing a token uses the redacted wrapper; Debug cannot
 // expose text-input edits, worker results, or an authenticated session.
+/// The share picker's screens and windows, and the audio nodes to choose from.
+type ShareSourceList = (
+    Vec<fastcord_platform::capture::CaptureSource>,
+    Vec<fastcord_platform::loopback::AudioSource>,
+);
+
 #[derive(Debug, Clone)]
 enum Message {
     TokenEdited(Arc<UserToken>),
@@ -417,9 +423,11 @@ enum Message {
     SelectCameraEffect(fastcord_video::effect::Effect),
     SetMirrorPreview(bool),
     OpenSharePicker,
-    ShareSources(Result<Vec<fastcord_platform::capture::CaptureSource>, String>),
+    ShareSources(Result<ShareSourceList, String>),
     CloseSharePicker,
     ToggleShareAudio(bool),
+    /// The output or input the share's audio comes from (Linux).
+    ChooseShareAudio(fastcord_platform::loopback::AudioTarget),
     StartShare(fastcord_platform::capture::SourceId),
     StopShare,
     GuildViewport(virtual_list::Window),
@@ -2258,7 +2266,17 @@ impl App {
                         async {
                             tokio::task::spawn_blocking(|| {
                                 fastcord_platform::capture::availability()?;
-                                fastcord_platform::capture::list_sources()
+                                let sources = fastcord_platform::capture::list_sources()?;
+                                // Only where the user chooses; a missing daemon
+                                // just leaves the list empty.
+                                let audio = if gateway::AudioOffer::current()
+                                    == gateway::AudioOffer::Choose
+                                {
+                                    fastcord_platform::loopback::list_targets().unwrap_or_default()
+                                } else {
+                                    Vec::new()
+                                };
+                                Ok::<_, fastcord_platform::capture::CaptureError>((sources, audio))
                             })
                             .await
                             .map_err(|_| "Listing screens and windows failed.".to_owned())
@@ -2273,7 +2291,16 @@ impl App {
                     && matches!(gateway.share_picker, gateway::SharePicker::Loading)
                 {
                     gateway.share_picker = match result {
-                        Ok(sources) => gateway::SharePicker::Listed(sources),
+                        Ok((sources, audio)) => {
+                            if !audio
+                                .iter()
+                                .any(|source| Some(source.target) == gateway.share_audio_target)
+                            {
+                                gateway.share_audio_target = None;
+                            }
+                            gateway.share_audio_sources = audio;
+                            gateway::SharePicker::Listed(sources)
+                        }
                         Err(error) => gateway::SharePicker::Failed(error),
                     };
                 }
@@ -2281,6 +2308,11 @@ impl App {
             Message::ToggleShareAudio(on) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.share_audio = on;
+                }
+            }
+            Message::ChooseShareAudio(target) => {
+                if let Phase::Account { gateway, .. } = &mut self.phase {
+                    gateway.share_audio_target = Some(target);
                 }
             }
             Message::CloseSharePicker => {
@@ -2307,10 +2339,18 @@ impl App {
                             }
                             None => fastcord_model::StreamCreateRequest::call(channel),
                         };
-                        let audio = gateway.share_audio
-                            && gateway::AudioOffer::current() != gateway::AudioOffer::Unavailable;
+                        let offer = gateway::AudioOffer::current();
+                        let audio = gateway
+                            .share_audio
+                            .then(|| offer.scope(source.id, gateway.share_audio_target))
+                            .flatten();
+                        self.notice = (gateway.share_audio
+                            && offer == gateway::AudioOffer::Choose
+                            && audio.is_none())
+                        .then(|| {
+                            "No audio source was chosen, so only the picture is shared.".into()
+                        });
                         gateway.controls.start_share(source, request, audio);
-                        self.notice = None;
                     } else {
                         self.notice =
                             Some("Join a voice channel before sharing your screen.".into());
@@ -3125,7 +3165,12 @@ impl App {
         Some((open, Message::Soundboard(event)))
     }
 
-    fn share_picker_view(picker: &gateway::SharePicker, share_audio: bool) -> Element<'_, Message> {
+    fn share_picker_view<'a>(
+        picker: &'a gateway::SharePicker,
+        share_audio: bool,
+        audio_sources: &'a [fastcord_platform::loopback::AudioSource],
+        audio_target: Option<fastcord_platform::loopback::AudioTarget>,
+    ) -> Element<'a, Message> {
         use fastcord_platform::capture::SourceKind;
         let mut content = column![
             row![
@@ -3133,7 +3178,14 @@ impl App {
                 button("Cancel").on_press(Message::CloseSharePicker),
             ]
             .spacing(12),
-            text("Choose a screen or a window. Windows draws a border around what is shared, and your voice stays connected.").size(12),
+            text(if cfg!(windows) {
+                "Choose a screen or a window. Windows draws a border around what is shared, and your voice stays connected."
+            } else if cfg!(target_os = "linux") {
+                "Choose a screen or a window; your desktop then asks which one in its own dialog. Your voice stays connected."
+            } else {
+                "Choose a screen or a window. Your voice stays connected."
+            })
+            .size(12),
         ]
         .spacing(12);
         match picker {
@@ -3172,7 +3224,23 @@ impl App {
                     ]
                     .spacing(4);
                     audio = audio.push(text(offer.note()).size(12));
-                    if offer.warns() {
+                    if offer == gateway::AudioOffer::Choose && share_audio {
+                        if audio_sources.is_empty() {
+                            audio = audio
+                                .push(text("No PipeWire outputs or inputs were found.").size(12));
+                        }
+                        for source in audio_sources {
+                            audio = audio.push(iced::widget::radio(
+                                source.title.as_str(),
+                                source.target,
+                                audio_target,
+                                Message::ChooseShareAudio,
+                            ));
+                        }
+                    }
+                    let chosen_carries_call =
+                        audio_target.is_some_and(|target| target.whole_output);
+                    if offer.warns() || (share_audio && chosen_carries_call) {
                         audio = audio.push(
                             text("Warning: viewers may hear your call while this is on.")
                                 .size(12)
@@ -5584,7 +5652,12 @@ impl App {
                 None if gateway.share_picker.is_open() && !gateway.emoji_picker.request.open => {
                     iced::widget::stack![
                         account,
-                        Self::share_picker_view(&gateway.share_picker, gateway.share_audio)
+                        Self::share_picker_view(
+                            &gateway.share_picker,
+                            gateway.share_audio,
+                            &gateway.share_audio_sources,
+                            gateway.share_audio_target,
+                        )
                     ]
                     .into()
                 }
