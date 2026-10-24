@@ -1783,7 +1783,7 @@ impl NavigationBridge {
             .is_ok()
     }
 
-    fn publish(
+    pub(crate) fn publish(
         &self,
         snapshot: NavigationSnapshot,
         timeline: timeline::Snapshot,

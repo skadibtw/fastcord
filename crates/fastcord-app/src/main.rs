@@ -1831,8 +1831,14 @@ impl App {
                 } else {
                     None
                 };
+                // Every snapshot carries the last status, so applying it must not
+                // end the update: the follow-up below runs unless it ended the account.
+                let mut status_task = Task::none();
                 if let Some(status) = status {
-                    return self.handle(Message::Gateway(id, status));
+                    status_task = self.handle(Message::Gateway(id, status));
+                    if !matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == id) {
+                        return status_task;
+                    }
                 }
                 if let Phase::Account { gateway, .. } = &self.phase
                     && let Some(message) =
@@ -1899,6 +1905,7 @@ impl App {
                 }
                 self.observe_ui_sound();
                 return Task::batch([
+                    status_task,
                     refocus,
                     self.soundboard_follow(),
                     self.assets_follow(),
@@ -3087,7 +3094,13 @@ impl App {
             }
             Message::Composer(event) => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
-                    let refocus = matches!(event, composer::Event::Send | composer::Event::Edit(_));
+                    // A clicked completion leaves the focus on its button; take it back.
+                    let refocus = matches!(
+                        event,
+                        composer::Event::Send
+                            | composer::Event::Edit(_)
+                            | composer::Event::Complete { .. }
+                    );
                     // Typing is announced only by a focused window's edits.
                     let typing = self
                         .window_active
@@ -6937,6 +6950,48 @@ mod tests {
             panic!("account");
         };
         assert!(gateway.emoji.views.is_empty());
+    }
+
+    #[test]
+    fn a_snapshot_carrying_the_last_status_still_looks_up_visible_invites() {
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        let (_, worker) = iced::Task::<()>::none().abortable();
+        let id = gateway.id;
+        **gateway = GatewayPanel::new(id, worker, gateway::NavigationBridge::new());
+        let message: fastcord_model::Message = serde_json::from_value(serde_json::json!({
+            "id": "42",
+            "channel_id": "500",
+            "author": {"id": "2", "username": "alt"},
+            "content": "join https://discord.gg/abc123",
+            "timestamp": "2026-10-24T12:00:00.000000+00:00",
+        }))
+        .unwrap();
+        // Every snapshot after sign-in carries the last status; it must not
+        // cut short the rest of the update.
+        gateway.controls.publish(
+            fastcord_discord::state::navigation::NavigationSnapshot::default(),
+            timeline::Snapshot {
+                channel_id: Some(Snowflake(500)),
+                rows: vec![timeline::Row::new(Arc::new(message), 1)],
+                ..timeline::Snapshot::default()
+            },
+            emoji_picker::Snapshot::default(),
+            Some(GatewayStatus::SigningIn),
+        );
+        let _ = app.update(Message::Navigation(id));
+        let Phase::Account { gateway, .. } = &app.phase else {
+            panic!("the status must not end the account");
+        };
+        assert_eq!(gateway.status, GatewayStatus::SigningIn);
+        assert_eq!(
+            app.invite.cache.get("abc123").map(|entry| &entry.card),
+            Some(&invite::Card::Loading),
+            "the invite is looked up"
+        );
     }
 
     #[test]

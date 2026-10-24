@@ -16,6 +16,7 @@ use iced::{Background, Color, Element, Length};
 
 use crate::avatars::AvatarKey;
 use crate::emoji::{self, Asset, MAX_INLINE_ASSETS, Origin, View};
+use crate::style::{MENTION, MENTION_BG};
 use crate::timeline::Event;
 
 /// Most role and channel names one snapshot carries.
@@ -26,8 +27,6 @@ pub const MAX_REVEALED: usize = 256;
 const LINK: Color = Color::from_rgb(0.18, 0.5, 0.88);
 const SPOILER: Color = Color::from_rgb(0.5, 0.5, 0.5);
 const FAINT: Color = Color::from_rgba(0.5, 0.5, 0.5, 0.25);
-const MENTION_BG: Color = Color::from_rgba(0.35, 0.4, 0.95, 0.2);
-const MENTION: Color = Color::from_rgb(0.3, 0.35, 0.85);
 
 /// Role and channel names the open channel's rows mention.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

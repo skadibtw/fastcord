@@ -1119,6 +1119,11 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
             .align_y(iced::alignment::Vertical::Center),
         );
     }
+    // Tab takes the first completion, as in Discord.
+    let first_pick = composer
+        .completions(snapshot)
+        .first()
+        .map(|(candidate, replaced)| (*replaced, candidate.reference()));
     let editor = text_editor(&composer.content)
         .id(EDITOR_ID)
         .placeholder(if editing {
@@ -1132,6 +1137,17 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
             match press.key.as_ref() {
                 keyboard::Key::Named(key::Named::Enter) if focused && !press.modifiers.shift() => {
                     Some(Binding::Custom(Event::Send))
+                }
+                keyboard::Key::Named(key::Named::Tab) if focused && !press.modifiers.shift() => {
+                    first_pick
+                        .as_ref()
+                        .map(|(replaced, insertion)| {
+                            Binding::Custom(Event::Complete {
+                                replaced: *replaced,
+                                insertion: insertion.clone(),
+                            })
+                        })
+                        .or_else(|| Binding::from_key_press(press))
                 }
                 keyboard::Key::Named(key::Named::Escape) if focused && editing => {
                     Some(Binding::Custom(Event::CancelEdit))

@@ -21,6 +21,10 @@ pub const RED: Color = Color::from_rgb(0.949, 0.247, 0.263); // #f23f43
 pub const YELLOW: Color = Color::from_rgb(0.941, 0.698, 0.196); // #f0b232
 /// Secondary labels inside panels (dates, counts): lighter than [`MUTED`].
 pub const SUBTLE: Color = Color::from_rgb(0.710, 0.729, 0.757); // #b5bac1
+/// Mention and timestamp pills in messages: Discord's light text on a
+/// translucent blurple, readable on the chat background.
+pub const MENTION: Color = Color::from_rgb(0.788, 0.804, 0.984); // #c9cdfb
+pub const MENTION_BG: Color = Color::from_rgba(0.345, 0.396, 0.949, 0.3);
 /// Filled secondary buttons.
 pub const SECONDARY: Color = Color::from_rgb(0.306, 0.314, 0.345); // #4e5058
 
@@ -350,5 +354,17 @@ mod tests {
         assert!(strong >= 7.0, "{strong}");
         assert!(strong > normal);
         assert!(ratio(BRIGHT, Color::BLACK) >= 7.0);
+    }
+
+    #[test]
+    fn mention_pills_are_readable_on_the_chat_background() {
+        let a = MENTION_BG.a;
+        let pill = Color::from_rgb(
+            CHAT.r * (1.0 - a) + MENTION_BG.r * a,
+            CHAT.g * (1.0 - a) + MENTION_BG.g * a,
+            CHAT.b * (1.0 - a) + MENTION_BG.b * a,
+        );
+        let contrast = ratio(MENTION, pill);
+        assert!(contrast >= 4.5, "{contrast}");
     }
 }
