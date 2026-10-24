@@ -5,7 +5,7 @@
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot, Occupant, StageSeat};
 use iced::font::Weight;
 use iced::widget::{
-    button, column, container, image, mouse_area, row, space, text, text_input, tooltip,
+    button, column, container, image, mouse_area, row, space, stack, text, text_input, tooltip,
 };
 use iced::{Element, Font, Length, Padding, alignment};
 use std::collections::HashMap;
@@ -195,6 +195,19 @@ fn centered_label<'a>(label: impl text::IntoFragment<'a>, size: f32) -> Element<
         .into()
 }
 
+/// The red mention count of a channel row or a server icon.
+fn mention_badge<'a>(count: u32) -> Element<'a, Message> {
+    let label = if count > 99 {
+        "99+".to_owned()
+    } else {
+        count.to_string()
+    };
+    container(text(label).size(11).font(BOLD))
+        .padding([1, 6])
+        .style(style::badge)
+        .into()
+}
+
 fn rail<'a>(
     snapshot: &'a NavigationSnapshot,
     directs: bool,
@@ -204,23 +217,36 @@ fn rail<'a>(
     let icon = |label: String,
                 picture: Option<&AvatarKey>,
                 selected: bool,
+                mentions: u32,
                 intent: Option<Message>|
      -> Element<'a, Message> {
         let face = match picture {
             Some(key) => avatars::view(avatars, key, 48.0, || centered_label(label.clone(), 15.0)),
             None => centered_label(label, 15.0),
         };
-        container(
-            button(face)
-                .on_press_maybe(intent)
-                .width(48)
-                .height(48)
-                .padding(0)
-                .style(style::server_button(selected)),
-        )
-        .center_x(Length::Fill)
-        .center_y(RAIL_ROW)
-        .into()
+        let face: Element<'a, Message> = button(face)
+            .on_press_maybe(intent)
+            .width(48)
+            .height(48)
+            .padding(0)
+            .style(style::server_button(selected))
+            .into();
+        // Mentions sit on the icon's lower right corner, as in the web client.
+        let face = if mentions > 0 {
+            stack![
+                face,
+                container(mention_badge(mentions))
+                    .align_right(48)
+                    .align_bottom(48)
+            ]
+            .into()
+        } else {
+            face
+        };
+        container(face)
+            .center_x(Length::Fill)
+            .center_y(RAIL_ROW)
+            .into()
     };
     let guilds = snapshot.guilds.rows.iter().map(|guild| {
         let selected = guild.selected && !directs;
@@ -291,6 +317,7 @@ fn rail<'a>(
                         initials(&guild.name),
                         picture.as_ref(),
                         selected,
+                        guild.mentions,
                         guild.available.then_some(Message::SelectGuild(guild.id)),
                     ))
                     .padding(Padding::new(0.0).left(8.0))
@@ -302,6 +329,7 @@ fn rail<'a>(
                     initials(&guild.name),
                     picture.as_ref(),
                     selected,
+                    guild.mentions,
                     guild.available.then_some(Message::SelectGuild(guild.id)),
                 ));
             }
@@ -430,19 +458,7 @@ fn sidebar_row<'a>(
         line = line.push(crate::status::dot(presence));
     }
     if mention_count > 0 {
-        line = line.push(
-            container(
-                text(if mention_count > 99 {
-                    "99+".to_owned()
-                } else {
-                    mention_count.to_string()
-                })
-                .size(11)
-                .font(BOLD),
-            )
-            .padding([1, 6])
-            .style(style::badge),
-        );
+        line = line.push(mention_badge(mention_count));
     }
     let main = button(line)
         .on_press_maybe(intent)

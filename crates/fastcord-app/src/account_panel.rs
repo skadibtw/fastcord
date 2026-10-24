@@ -88,6 +88,9 @@ fn describe(error: RestError) -> String {
         RestError::PermissionDenied => {
             "Discord refused this. Confirm in the official client.".to_owned()
         }
+        RestError::ResourceGone => {
+            "Discord did not find that session list or session. Reload the list.".to_owned()
+        }
         other => crate::invite::describe(other),
     }
 }
@@ -413,6 +416,12 @@ mod tests {
             sessions: Some(vec![session("a"), session("b")]),
             ..State::default()
         }
+    }
+
+    #[test]
+    fn a_missing_session_is_not_described_as_an_invite() {
+        let text = describe(RestError::ResourceGone);
+        assert!(text.contains("session") && !text.contains("invite"));
     }
 
     #[test]
