@@ -664,14 +664,15 @@ Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, wind
 
 ### Text-to-speech and read-aloud (#104)
 
-- **Automated:** `speech::tests` (platform: queue bound and text clip, Stop; app: plain text, announcements, which received messages are spoken under each setting, replay filter, settings round trip), `send::tests` (`/tts` flag and prefix removal), `history::tests` (`can_tts` follows SEND_TTS_MESSAGES), `composer::tests` (refused without the permission), `audio_devices` persistence round trip including `speech`. `speech::tests::manual_native_synthesizer_speaks` is `#[ignore]`; run it on Windows with sound.
+- **Automated:** `speech::tests` (platform: queue bound and text clip, Stop; app: plain text, announcements, which received messages are spoken under each setting, replay filter, settings round trip), `send::tests` (`/tts` flag and prefix removal), `history::tests` (`can_tts` follows SEND_TTS_MESSAGES), `composer::tests` (refused without the permission), `audio_devices` persistence round trip including `speech`. `speech::tests::manual_native_synthesizer_speaks` is `#[ignore]`; run it with sound on each OS. Linux: `speech::linux::tests` cover SSIP data escaping, the rate mapping and, against a stand-in speech-dispatcher on a real Unix socket, the setup commands, voice listing, voice and rate per message and the next message starting on the end event (passed in WSL Ubuntu 24.04, 2026-10-24). macOS: `speech::macos::tests` parse `say -v ?` (names with spaces); type-checked for `aarch64-apple-darwin` from Windows only.
 - **Outstanding gates (manual, unchecked):**
   - [ ] Windows: the voice list shows the installed voices, Test voice speaks with the chosen voice and rate, Stop silences at once and clears the queue.
   - [ ] Read aloud on a message with mentions, a spoiler, a code block and custom emoji sounds right; Stop reading appears while speaking.
   - [ ] Alt account: a `/tts hello` message is sent with `tts: true` and the official client reads it (where the channel permits and the user's own setting is on); without SEND_TTS_MESSAGES the composer refuses it.
   - [ ] Alt account: a received TTS message is spoken under "All channels", only in the open channel under "For the selected channel only", never under "Never", and not when the channel is muted or the status is Do Not Disturb.
   - [ ] Logging out or switching accounts silences narration immediately.
-  - [ ] Linux and macOS report that speech is unsupported instead of failing silently.
+  - [ ] Linux with speech-dispatcher and espeak-ng (or another module): voice list, Test voice, rate, Stop; Orca keeps speaking when fastcord's Stop is used. Without speech-dispatcher installed the panel says speech is unsupported.
+  - [ ] macOS: the voice list matches System Settings → Spoken Content, Test voice and rate work, Stop silences at once.
 
 ### Chat & accessibility preferences (#103)
 

@@ -1,7 +1,8 @@
 //! Native local speech synthesis for read-aloud and TTS messages (issue #104).
 //! Nothing leaves the machine: Windows uses the on-device WinRT
-//! `SpeechSynthesizer` and plays its stream through a `MediaPlayer`; other
-//! systems report [`SpeechError::Unsupported`] until their adapters exist.
+//! `SpeechSynthesizer` and plays its stream through a `MediaPlayer`; Linux
+//! speaks through the speech-dispatcher daemon (`speech/linux.rs`, SSIP over
+//! its Unix socket); macOS through the system `say` tool (`speech/macos.rs`).
 //! All speech runs on one dedicated thread fed by a bounded queue; no method
 //! here blocks on synthesis, so none stalls the UI thread (`voices` and `start`
 //! may block briefly and belong on a worker).
@@ -9,8 +10,17 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use std::sync::mpsc;
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as native;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as native;
 
 use parking_lot::Mutex;
 
@@ -89,28 +99,46 @@ struct Shared {
     busy: bool,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 enum Cmd {
     /// The queue changed.
     Wake,
-    /// The player of generation `.0` finished or failed.
+    /// Utterance `.0` (a generation, or speech-dispatcher's message ID)
+    /// finished or failed.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Ended(u64),
+    /// The connection to the speech service closed.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Lost,
     /// Stop now; the queue was already cleared.
     Stop,
     Shutdown,
 }
 
+/// The next utterance to start, marking the speaker busy; `None` while one
+/// is already busy or nothing waits.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn next_utterance(shared: &Mutex<Shared>) -> Option<Utterance> {
+    let mut shared = shared.lock();
+    if shared.busy {
+        return None;
+    }
+    let next = shared.queue.0.pop_front();
+    shared.busy = next.is_some();
+    next
+}
+
 /// Handle to the speech thread. Dropping it stops speech and the thread.
 pub struct Speaker {
     shared: Arc<Mutex<Shared>>,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     tx: mpsc::Sender<Cmd>,
 }
 
 impl Speaker {
     /// Starts the speech thread.
     pub fn start() -> Result<Self, SpeechError> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         {
             let shared = Arc::new(Mutex::new(Shared::default()));
             let (tx, rx) = mpsc::channel();
@@ -123,14 +151,14 @@ impl Speaker {
             ready_rx.recv().map_err(|_| SpeechError::Failed)??;
             Ok(Self { shared, tx })
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         Err(SpeechError::Unsupported)
     }
 
     /// Queues one utterance behind what is already waiting.
     pub fn speak(&self, utterance: Utterance) -> Result<(), SpeechError> {
         self.shared.lock().queue.push(utterance)?;
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         let _ = self.tx.send(Cmd::Wake);
         Ok(())
     }
@@ -142,7 +170,7 @@ impl Speaker {
             shared.queue.0.clear();
             shared.busy = false;
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         let _ = self.tx.send(Cmd::Stop);
     }
 
@@ -152,7 +180,7 @@ impl Speaker {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 impl Drop for Speaker {
     fn drop(&mut self) {
         self.stop();
@@ -162,9 +190,9 @@ impl Drop for Speaker {
 
 /// Installed voices, for the settings choice. May block briefly.
 pub fn voices() -> Result<Vec<Voice>, SpeechError> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     return native::voices();
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     Err(SpeechError::Unsupported)
 }
 
@@ -273,23 +301,13 @@ mod native {
                     shared.lock().busy = false;
                 }
                 Cmd::Ended(_) => continue,
-                Cmd::Wake => {}
+                Cmd::Wake | Cmd::Lost => {}
             }
             // Start the next utterance when idle.
             if player.is_some() {
                 continue;
             }
-            loop {
-                let next = {
-                    let mut shared = shared.lock();
-                    if shared.busy {
-                        break;
-                    }
-                    let next = shared.queue.0.pop_front();
-                    shared.busy = next.is_some();
-                    next
-                };
-                let Some(utterance) = next else { break };
+            while let Some(utterance) = next_utterance(&shared) {
                 generation += 1;
                 match begin(&synth, &utterance, generation, &tx) {
                     // A Stop that raced with synthesis cleared `busy`; honor it.
@@ -347,12 +365,12 @@ mod tests {
     #[test]
     fn stop_clears_the_queue() {
         let shared = Arc::new(Mutex::new(Shared::default()));
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         let speaker = Speaker {
             shared: Arc::clone(&shared),
             tx: mpsc::channel().0,
         };
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         let speaker = Speaker {
             shared: Arc::clone(&shared),
         };
@@ -363,8 +381,9 @@ mod tests {
         assert!(!speaker.is_speaking() && shared.lock().queue.0.is_empty());
     }
 
-    /// Manual: speaks through the real engine. Run with `--ignored` on a Windows
-    /// box with sound; needs at least one installed voice.
+    /// Manual: speaks through the real engine. Run with `--ignored` on a box
+    /// with sound and at least one installed voice (on Linux, speech-dispatcher
+    /// with a synthesizer such as espeak-ng).
     #[test]
     #[ignore = "needs an audio device and an installed voice"]
     fn manual_native_synthesizer_speaks() {
