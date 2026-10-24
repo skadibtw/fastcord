@@ -2,7 +2,7 @@
 use fastcord_discord::UserToken;
 use fastcord_net::proxy::{ProxyConfig, ProxyKind};
 use fastcord_net::settings::{Mode, Settings};
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, checkbox, column, container, row, text, text_input};
 use iced::{Element, Length};
 use std::sync::Arc;
 
@@ -42,6 +42,7 @@ pub enum Action {
     Retry,
     Retried,
     Mode(Mode),
+    ExperimentalUdp(bool),
     Saved(Result<(), &'static str>),
     ProxyKind(ProxyKind),
     ProxyHost(String),
@@ -122,7 +123,7 @@ pub fn configure(
     context: &fastcord_net::NetworkContext,
     loaded: &Loaded,
 ) -> Result<fastcord_net::NetworkContext, fastcord_net::NetworkError> {
-    if loaded.settings.mode == Mode::Proxy {
+    let context = if loaded.settings.mode == Mode::Proxy {
         let config = loaded
             .settings
             .proxy
@@ -134,10 +135,11 @@ pub fn configure(
         context.with_proxy(
             config,
             zeroize::Zeroizing::new(loaded.password.expose_secret().to_owned()),
-        )
+        )?
     } else {
-        Ok(context.with_mode(loaded.settings.mode))
-    }
+        context.with_mode(loaded.settings.mode)
+    };
+    Ok(context.with_experimental_udp(loaded.settings.experimental_udp))
 }
 
 pub async fn apply_proxy(
@@ -204,6 +206,10 @@ pub fn view<'a>(
         text("Network recovery").size(26),
         text(format!("Mode: {:?}", state.settings.mode)),
         row![choose("Off", Mode::Off), choose("Auto", Mode::Auto)].spacing(12),
+        checkbox(state.settings.experimental_udp)
+            .label("Experimental UDP discovery preludes (unverified)")
+            .on_toggle_maybe((editable && !state.saving && state.settings.mode != Mode::Proxy).then_some(|value| crate::Message::Network(Action::ExperimentalUdp(value)))),
+        text("Separate opt-in for direct media routes. Tries up to three UDP flows before protocol selection. Effectiveness on filtered networks is unverified; proxy routing does not enable it."),
         text("Auto checks only a required service after an eligible connection failure. TLS reachability does not establish that Discord or media works. Recovery is bounded; it never bypasses certificate verification."),
         text("TLS splitting is best effort. TCP writes do not guarantee packet boundaries. UDP media has a separate connection path."),
         text(if editable { "Changes apply to the next connection." } else { "Sign out before changing routing. Healthy sessions remain connected." }),
@@ -253,7 +259,7 @@ pub fn view<'a>(
         .into()
 }
 
-fn status_text(status: fastcord_net::selector::ServiceStatus) -> String {
+pub(crate) fn status_text(status: fastcord_net::selector::ServiceStatus) -> String {
     use fastcord_net::selector::ServiceStatus;
     match status {
         ServiceStatus::Unknown => "Not checked".into(),
@@ -262,6 +268,9 @@ fn status_text(status: fastcord_net::selector::ServiceStatus) -> String {
         ServiceStatus::ServiceReachable => "Service answered".into(),
         ServiceStatus::SessionHealthy => "Session connected".into(),
         ServiceStatus::UdpUnreachable => "UDP media did not answer; TLS is separate".into(),
+        ServiceStatus::UdpDiscovering { variant } => {
+            format!("Experimental UDP discovery: variant {variant}/3")
+        }
         ServiceStatus::Failed(error) => error.to_string(),
     }
 }
@@ -333,14 +342,31 @@ pub fn preview() -> iced::Result {
         || Preview {
             state: State {
                 open: true,
+                notice: Some(
+                    "Offline preview: changes stay in memory; no account or network traffic.",
+                ),
                 ..State::default()
             },
             context: fastcord_net::NetworkContext::off(),
         },
         |state: &mut Preview, message: crate::Message| {
-            if let crate::Message::Network(Action::Mode(mode)) = message {
-                state.state.settings.mode = mode;
-                state.context = state.context.with_mode(mode);
+            if let crate::Message::Network(action) = message {
+                match action {
+                    Action::Mode(mode) => {
+                        state.state.settings.mode = mode;
+                        state.context = state.context.with_mode(mode);
+                    }
+                    Action::ExperimentalUdp(enabled) => {
+                        state.state.settings.experimental_udp = enabled;
+                        state.context = state.context.with_experimental_udp(enabled);
+                    }
+                    Action::ProxyKind(kind) => state.state.proxy_kind = Some(kind),
+                    Action::ProxyHost(value) => state.state.proxy_host = value,
+                    Action::ProxyPort(value) => state.state.proxy_port = value,
+                    Action::ProxyUsername(value) => state.state.proxy_username = value,
+                    Action::ProxyPassword(value) => state.state.proxy_password = Some(value),
+                    _ => {}
+                }
             }
         },
         view,

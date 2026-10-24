@@ -23,6 +23,12 @@ itself does not encrypt the connection to the proxy.
 Network settings use `network-settings.json` beside the audio settings, with a
 separate fake-mode namespace. See SPEC §5.4 and TESTING for limits and evidence.
 
+**Experimental UDP discovery preludes** are a separate opt-in, off by default.
+They try at most three direct UDP flows before voice protocol selection, with
+visible progress and fixed request/byte/deadline limits. The bundled zero-filled
+laboratory payload has no proven blocked-network effectiveness. Proxy mode keeps
+this experiment disabled; it never opens a direct media route behind a proxy.
+
 ## Build
 
 Requires Rust (pinned by `rust-toolchain.toml`), CMake (the audio engine builds the bundled libopus), on Windows Visual Studio Build Tools with the C++ workload, and on Linux the ALSA, VA-API and PipeWire development headers plus clang (`libasound2-dev libva-dev libpipewire-0.3-dev clang`).

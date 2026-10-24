@@ -1286,6 +1286,20 @@ impl App {
                         );
                     }
                 }
+                network_ui::Action::ExperimentalUdp(enabled) => {
+                    if matches!(self.phase, Phase::Login)
+                        && !self.network_settings.saving
+                        && self.network.mode() != fastcord_net::settings::Mode::Proxy
+                    {
+                        self.network_settings.saving = true;
+                        self.network_settings.settings.experimental_udp = enabled;
+                        self.network = self.network.with_experimental_udp(enabled);
+                        return Task::perform(
+                            network_ui::save(self.network_settings.settings.clone()),
+                            |result| Message::Network(network_ui::Action::Saved(result)),
+                        );
+                    }
+                }
                 network_ui::Action::ProxyKind(kind) => {
                     if matches!(self.phase, Phase::Login) {
                         self.network_settings.proxy_kind = Some(kind);
@@ -5500,6 +5514,26 @@ impl App {
             // Closed, search is a tool in the conversation header.
             let has_search = self.search.open && !search_bar_is_empty(gateway);
             let mut banner_column = column![].spacing(2);
+            for (label, role) in [
+                ("Voice", fastcord_net::Role::Voice),
+                ("Stream", fastcord_net::Role::Stream),
+            ] {
+                let status = self.network.controller().service_status(role);
+                if matches!(
+                    status,
+                    fastcord_net::selector::ServiceStatus::UdpDiscovering { .. }
+                        | fastcord_net::selector::ServiceStatus::UdpUnreachable
+                ) {
+                    banner_column = banner_column.push(
+                        row![
+                            text(format!("{label}: {}", network_ui::status_text(status))).size(13),
+                            button("Network recovery")
+                                .on_press(Message::Network(network_ui::Action::Open)),
+                        ]
+                        .spacing(8),
+                    );
+                }
+            }
             if has_search {
                 banner_column = banner_column.push(search_bar);
             }

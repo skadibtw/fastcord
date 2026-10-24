@@ -47,6 +47,12 @@ pub(crate) trait Signaling: Send + Sync + 'static {
 
 /// One UDP socket, used only with the voice server's address.
 pub(crate) trait UdpLink: Send + Sync + 'static {
+    /// The bound local port, where the transport can expose it. Used to refuse
+    /// reuse during an experimental discovery campaign; fixtures may omit it.
+    fn local_port(&self) -> Option<u16> {
+        None
+    }
+
     fn send_to(
         &self,
         datagram: &[u8],
@@ -62,6 +68,10 @@ pub(crate) trait UdpLink: Send + Sync + 'static {
 
 pub(crate) trait Network: Send + Sync + 'static {
     type Udp: UdpLink;
+
+    fn experimental_udp(&self) -> bool {
+        false
+    }
 
     /// A fresh socket able to reach `server`.
     fn bind(&self, server: SocketAddr) -> impl Future<Output = io::Result<Self::Udp>> + Send;
@@ -106,6 +116,18 @@ impl Signaling for LiveSignaling {
             }
             super::VoiceStatus::Closed(super::CloseReason::UdpUnreachable) => {
                 self.0.controller().note_udp_unreachable(self.1)
+            }
+            super::VoiceStatus::DiscoveringExperimental { variant } => {
+                self.0.controller().note_udp_discovery(self.1, variant)
+            }
+            super::VoiceStatus::Negotiating => self.0.controller().note_service_reachable(self.1),
+            super::VoiceStatus::Closed(_)
+                if matches!(
+                    self.0.controller().service_status(self.1),
+                    fastcord_net::selector::ServiceStatus::UdpDiscovering { .. }
+                ) =>
+            {
+                self.0.controller().note_service_reachable(self.1)
             }
             _ => {}
         }
@@ -162,11 +184,19 @@ async fn connect_tls(
 pub(crate) struct LiveNetwork(pub(crate) fastcord_net::NetworkContext);
 impl Network for LiveNetwork {
     type Udp = UdpSocket;
+
+    fn experimental_udp(&self) -> bool {
+        self.0.experimental_udp()
+    }
     async fn bind(&self, server: SocketAddr) -> io::Result<UdpSocket> {
         self.0.bind_udp(server).await
     }
 }
 impl UdpLink for UdpSocket {
+    fn local_port(&self) -> Option<u16> {
+        self.local_addr().ok().map(|address| address.port())
+    }
+
     async fn send_to(&self, datagram: &[u8], to: SocketAddr) -> io::Result<()> {
         let sent = UdpSocket::send_to(self, datagram, to).await?;
         if sent == datagram.len() {

@@ -1240,6 +1240,9 @@ fn describe_status(status: &VoiceStatus) -> String {
         VoiceStatus::Connecting => "connecting".into(),
         VoiceStatus::Identifying => "identifying".into(),
         VoiceStatus::Discovering => "discovering address".into(),
+        VoiceStatus::DiscoveringExperimental { variant } => {
+            format!("experimental UDP discovery, variant {variant}/3")
+        }
         VoiceStatus::Negotiating => "negotiating transport".into(),
         VoiceStatus::Rekeying { transition_id } => match transition_id {
             Some(id) => format!(

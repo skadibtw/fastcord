@@ -972,3 +972,25 @@ for names, ATYP=1/4 for numeric IPv4/IPv6. Destination names are not resolved
 locally. The bounded reply validates version/reserved/type/status before exposing
 the stream. No direct socket is opened on proxy failure; no request body is
 replayed. M93 sends no UDP ASSOCIATE and refuses proxy media joins explicitly.
+
+## Experimental UDP discovery preludes (M94)
+
+Only an explicit experimental opt-in changes discovery. The first flow sends
+ordinary 74-byte Discord discovery requests. If it does not answer, the next
+fresh bound flow sends three 1200-byte zero datagrams once, then ordinary
+discovery; the final fresh flow sends six once, then discovery. Preludes are
+never per-retry and never sent after Select Protocol. They contain no token,
+DAVE key, account data or copied packet. No TTL/Hop Limit/raw-packet technique is
+used. Zeros are an invalid-discovery/STUN/RTP laboratory candidate, not a known
+working arbitrary payload. The fixture is original work; no zapret payload or
+third-party license is involved.
+
+Each round has at most five discovery requests at existing one-second spacing;
+the user join has three sockets, fifteen requests, 10,800 prelude payload bytes
+and a sixteen-second discovery deadline across signaling retries. Old sockets
+stay bound and their late replies are ignored. Response source and SSRC must
+match before the single Select Protocol uses its external address/port. Ordinary
+Session Description, AEAD/DAVE/nonces and post-establishment Resume stay intact.
+A TLS-reachable service with unanswered UDP is reported separately. Proxy routes
+do not enable direct experimental traffic. See NETWORK_TESTING for actual
+fixture coverage and outstanding filtered-network evidence.

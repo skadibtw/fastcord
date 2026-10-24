@@ -28,6 +28,7 @@ pub type TlsStream = tokio_rustls::client::TlsStream<ShapedStream<BoxedIo>>;
 
 struct Shared {
     mode: Mode,
+    experimental_udp: bool,
     proxy: Option<Arc<ProxyCredentials>>,
     controller: Controller,
     bridge: Mutex<Option<Bridge>>,
@@ -169,6 +170,7 @@ impl NetworkContext {
     pub fn new(mode: Mode) -> Self {
         Self(Arc::new(Shared {
             mode,
+            experimental_udp: false,
             proxy: None,
             controller: Controller::default(),
             bridge: Mutex::new(None),
@@ -184,6 +186,7 @@ impl NetworkContext {
     pub fn with_mode(&self, mode: Mode) -> Self {
         Self(Arc::new(Shared {
             mode,
+            experimental_udp: self.0.experimental_udp,
             proxy: self.0.proxy.clone(),
             controller: self.0.controller.clone(),
             bridge: Mutex::new(None),
@@ -199,6 +202,27 @@ impl NetworkContext {
     pub fn mode(&self) -> Mode {
         self.0.mode
     }
+    /// Experimental discovery applies only to a direct UDP flow. A proxy
+    /// requires an explicit relay and must never leak preludes directly.
+    pub fn experimental_udp(&self) -> bool {
+        self.0.experimental_udp && self.mode() != Mode::Proxy
+    }
+
+    pub fn with_experimental_udp(&self, enabled: bool) -> Self {
+        Self(Arc::new(Shared {
+            mode: self.0.mode,
+            experimental_udp: enabled,
+            proxy: self.0.proxy.clone(),
+            controller: self.0.controller.clone(),
+            bridge: Mutex::new(None),
+            transforms: self.0.transforms.clone(),
+            tunnels: self.0.tunnels.clone(),
+            pending: self.0.pending.clone(),
+            connected: self.0.connected.clone(),
+            connection_epoch: self.0.connection_epoch.clone(),
+            recovery_gate: self.0.recovery_gate.clone(),
+        }))
+    }
     pub fn with_proxy(
         &self,
         config: ProxyConfig,
@@ -207,6 +231,7 @@ impl NetworkContext {
         let proxy = Arc::new(ProxyCredentials::new(config, password)?);
         Ok(Self(Arc::new(Shared {
             mode: Mode::Proxy,
+            experimental_udp: self.0.experimental_udp,
             proxy: Some(proxy),
             controller: self.0.controller.clone(),
             bridge: Mutex::new(None),
@@ -849,6 +874,50 @@ impl AsyncWrite for CountedIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn experimental_udp_requires_separate_opt_in_preserves_budgets_and_never_leaks_past_proxy() {
+        let context = NetworkContext::off();
+        assert!(!context.experimental_udp());
+        assert!(!context.with_mode(Mode::Auto).experimental_udp());
+        let enabled = context.with_experimental_udp(true);
+        assert!(enabled.experimental_udp());
+        assert!(enabled.with_mode(Mode::Auto).experimental_udp());
+        assert!(!enabled.with_experimental_udp(false).experimental_udp());
+        assert!(Arc::ptr_eq(&context.0.pending, &enabled.0.pending));
+        assert!(Arc::ptr_eq(
+            &context.0.recovery_gate,
+            &enabled.0.recovery_gate
+        ));
+        assert!(Arc::ptr_eq(&context.0.transforms, &enabled.0.transforms));
+        assert!(Arc::ptr_eq(&context.0.tunnels, &enabled.0.tunnels));
+        context.controller().network_changed();
+        assert_eq!(
+            context.controller().generation(),
+            enabled.controller().generation()
+        );
+        let proxy = enabled
+            .with_proxy(
+                ProxyConfig {
+                    kind: crate::ProxyKind::Socks5,
+                    host: "127.0.0.1".into(),
+                    port: 1080,
+                    username: None,
+                },
+                zeroize::Zeroizing::new(String::new()),
+            )
+            .unwrap();
+        assert!(!proxy.experimental_udp());
+        assert!(!proxy.with_experimental_udp(true).experimental_udp());
+        assert!(proxy.with_mode(Mode::Off).experimental_udp());
+        assert_eq!(
+            proxy.with_experimental_udp(false).proxy_config(),
+            proxy.proxy_config()
+        );
+        assert_eq!(
+            proxy.controller().generation(),
+            context.controller().generation()
+        );
+    }
     #[test]
     fn public_address_policy_covers_mapped_and_special_ranges() {
         for address in [

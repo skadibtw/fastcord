@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add separately opt-in experimental UDP discovery preludes (M94): three bounded
+  direct flows inside one signaling connection, per-join byte/request/deadline
+  limits, retained old ports and visible variant progress. The original zero
+  fixture is a laboratory candidate with unverified filtered-network effectiveness;
+  the experiment remains off by default and disabled in Proxy mode.
+
 - Add user-configured HTTP/HTTPS CONNECT and SOCKS5 TCP routing for every HTTP
   and WebSocket role (M93), remote destination DNS, endpoint-bound native proxy
   passwords, categorical failures and a pre-join TCP-only media explanation.

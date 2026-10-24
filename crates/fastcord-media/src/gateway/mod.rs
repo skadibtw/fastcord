@@ -69,6 +69,11 @@ pub enum VoiceStatus {
     Identifying,
     /// Asking the voice server for our external UDP address.
     Discovering,
+    /// Explicitly enabled laboratory discovery, variants 1/2/3. This is not
+    /// evidence that the experimental prelude can bypass a real filter.
+    DiscoveringExperimental {
+        variant: u8,
+    },
     /// Select Protocol sent, waiting for the transport key.
     Negotiating,
     /// Transport is established, but DAVE has not executed a key-ready
@@ -106,8 +111,8 @@ pub enum CloseReason {
     RateLimited,
     /// 4011.
     ServerNotFound,
-    /// The voice server did not answer UDP IP discovery: UDP is blocked on
-    /// this network (no relay fallback exists).
+    /// UDP IP discovery did not answer. This alone does not identify filtering
+    /// or distinguish it from routing, NAT or server failure.
     UdpUnreachable,
     /// READY offered no transport mode fastcord implements.
     NoSupportedMode,
@@ -132,7 +137,7 @@ impl fmt::Display for CloseReason {
             Self::DaveUnavailable => f.write_str("voice could not establish DAVE encryption"),
             Self::RateLimited => f.write_str("voice server rate limit reached"),
             Self::ServerNotFound => f.write_str("voice server not found"),
-            Self::UdpUnreachable => f.write_str("UDP to the voice server is blocked"),
+            Self::UdpUnreachable => f.write_str("UDP discovery did not answer"),
             Self::NoSupportedMode => f.write_str("no supported voice encryption mode"),
             Self::KeyExhausted => f.write_str("voice encryption key exhausted"),
             Self::InvalidEndpoint => f.write_str("invalid voice server endpoint"),

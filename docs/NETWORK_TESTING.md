@@ -101,3 +101,39 @@ through an IPv4 proxy remains an active passing fixture. Re-run the ignored test
 on an unrestricted IPv6 host. Authenticated Windows login/Gateway/CDN/upload
 through real configured proxies, and blocked-direct real-network A/B, remain
 manual acceptance gates. SOCKS5 UDP has not been implemented in M93.
+
+## M94: experimental direct UDP discovery preludes
+
+Windows offline evidence, 2026-10-24:
+
+- All 178 media tests passed, including unchanged AEAD, DAVE/MLS, RTP and H.264/
+  AV1 vectors. Independent datagram/signaling fixtures verify direct/3/6 ordering,
+  exactly fifteen one-second-spaced discovery requests over three retained local
+  ports, nine 1200-byte preludes, one signaling connection/Identify and no Select
+  Protocol for unanswered discovery. Old-flow replies, wrong source and wrong
+  SSRC cannot select; a valid reply selects once and stops all preludes/retries.
+- A port allocator deliberately reuses released ports; retained old flows force
+  distinct ports. They are released when the join ends. A new WS handshake does
+  not advance the variant or refill the opt-in campaign's socket/request/byte
+  budget. A drop after Select Protocol cannot restart experimental discovery.
+- Stalled bind and prelude futures end at the same sixteen-second join deadline.
+  Heartbeat requests and leave remain responsive during a stalled prelude. The
+  existing HELLO/READY/Session Description and normal established Resume tests
+  pass. With the experiment off, the previous direct-only signaling retry policy
+  is preserved; no laboratory datagram is sent.
+- Net tests verify separate opt-in, false defaults in Off/Auto, Proxy-disabled
+  behavior, shared budget preservation and coalesced variant notifications.
+  The app shows variants and unanswered UDP separately from TLS reachability.
+- Final M94 runs: 822 app tests, 178 media tests and 65 net tests passed; one
+  existing Windows IPv6 proxy fixture and existing app hardware/live gates remain
+  ignored. Workspace Clippy with warnings denied and the network audit passed.
+  The real Windows preview showed the separate checkbox off by default; explicit
+  opt-in changed only preview memory, with no account or network traffic.
+- The original fixture, regeneration and SHA-256 are in
+  `fixtures/voice/udp-prelude-v1.md`; no captured/third-party payload is used.
+
+Filtered-network A/B and real NAT behavior are unverified. Zeros are only a
+laboratory candidate, never a supported arbitrary-payload bypass claim. The
+experiment remains off by default and unavailable on proxy routes. The feature
+adds no OS interception, TTL adjustment, extra voice Identify for rotation,
+post-selection strategy change or real-time audio callback work.

@@ -146,6 +146,7 @@ pub enum ServiceStatus {
     ServiceReachable,
     SessionHealthy,
     Failed(NetworkError),
+    UdpDiscovering { variant: u8 },
     UdpUnreachable,
 }
 
@@ -446,6 +447,14 @@ impl Controller {
 
     pub fn note_udp_unreachable(&self, role: Role) {
         self.set_status(role, ServiceStatus::UdpUnreachable);
+    }
+
+    /// Progress in a separately opted-in discovery campaign. This is neither
+    /// evidence of TLS reachability nor a new TLS diagnostic campaign.
+    pub fn note_udp_discovery(&self, role: Role, variant: u8) {
+        if (1..=3).contains(&variant) {
+            self.set_status(role, ServiceStatus::UdpDiscovering { variant });
+        }
     }
 
     pub fn note_failure(&self, role: Role, failure: NetworkError) {
@@ -915,6 +924,47 @@ mod tests {
             controller.service_status(Role::Voice),
             ServiceStatus::SessionHealthy
         );
+    }
+
+    #[tokio::test]
+    async fn udp_progress_is_bounded_coalesced_and_does_not_change_tls_budgets() {
+        let controller = Controller::new();
+        let mut updates = controller.changes();
+        for invalid in [0, 4, u8::MAX] {
+            controller.note_udp_discovery(Role::Voice, invalid);
+        }
+        assert_eq!(
+            controller.service_status(Role::Voice),
+            ServiceStatus::Unknown
+        );
+        assert!(!updates.has_changed().unwrap());
+        let mut diagnosis = Box::pin(controller.diagnose(
+            target(),
+            NetworkError::TlsReset,
+            |_| async { std::future::pending::<ProbeOutcome>().await },
+        ));
+        assert!(futures_poll_once(diagnosis.as_mut()).await.is_none());
+        let before = controller.budget_snapshot();
+        updates.borrow_and_update();
+        for variant in 1..=3 {
+            controller.note_udp_discovery(Role::Voice, variant);
+            assert!(updates.has_changed().unwrap());
+            updates.borrow_and_update();
+            controller.note_udp_discovery(Role::Voice, variant);
+            assert!(!updates.has_changed().unwrap());
+            assert_eq!(
+                controller.service_status(Role::Voice),
+                ServiceStatus::UdpDiscovering { variant }
+            );
+            assert!(futures_poll_once(diagnosis.as_mut()).await.is_none());
+        }
+        let after = controller.budget_snapshot();
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.rolling_dials, before.rolling_dials);
+        assert_eq!(after.campaign_dials, before.campaign_dials);
+        assert_eq!(after.campaign_probes, before.campaign_probes);
+        assert_eq!(after.campaign_bytes, before.campaign_bytes);
+        assert!(after.campaign_active);
     }
 
     #[tokio::test]

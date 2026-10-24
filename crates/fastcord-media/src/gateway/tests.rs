@@ -21,6 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 
+mod discovery;
 mod video;
 
 use super::driver::Options;
@@ -150,10 +151,15 @@ impl UdpLink for FakeLink {
 struct FakeNetwork {
     peers: mpsc::UnboundedSender<Udp>,
     binds: Arc<Mutex<Vec<SocketAddr>>>,
+    experimental_udp: bool,
 }
 
 impl Network for FakeNetwork {
     type Udp = FakeLink;
+
+    fn experimental_udp(&self) -> bool {
+        self.experimental_udp
+    }
 
     async fn bind(&self, server: SocketAddr) -> io::Result<FakeLink> {
         self.binds.lock().push(server);
@@ -326,12 +332,25 @@ impl Harness {
     }
 
     fn start_with(credentials: VoiceCredentials, options: Options) -> (Self, FakeSignaling) {
+        Self::start_inner(credentials, options, false)
+    }
+
+    fn start_experimental(options: Options) -> (Self, FakeSignaling) {
+        Self::start_inner(credentials("fixture.discord.media:443"), options, true)
+    }
+
+    fn start_inner(
+        credentials: VoiceCredentials,
+        options: Options,
+        experimental_udp: bool,
+    ) -> (Self, FakeSignaling) {
         let signaling = FakeSignaling::default();
         let (peers_tx, peers) = mpsc::unbounded_channel();
         let binds = Arc::new(Mutex::new(Vec::new()));
         let network = FakeNetwork {
             peers: peers_tx,
             binds: Arc::clone(&binds),
+            experimental_udp,
         };
         let session = start(signaling.clone(), network, credentials, options);
         (

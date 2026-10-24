@@ -374,7 +374,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     // A camera that is off is declared like a viewer: no
                     // video SSRC until the first frame announces the layer.
                     let payload = wire::video_state(audio_ssrc, None);
-                    self.send_text(conn, socket, &payload).await?;
+                    Self::send_text(conn, socket, &payload).await?;
                 }
             }
             None => {
@@ -383,7 +383,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 // sending or receiving video data").
                 if let Some(audio_ssrc) = self.udp.as_ref().map(|udp| udp.ssrc) {
                     let payload = wire::video_state(audio_ssrc, None);
-                    self.send_text(conn, socket, &payload).await?;
+                    Self::send_text(conn, socket, &payload).await?;
                 }
             }
         }
@@ -457,7 +457,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         }
         let payload = wire::media_sink_wants(&wants);
         video.wants_sent = Some(wants);
-        self.send_text(conn, socket, &payload).await
+        Self::send_text(conn, socket, &payload).await
     }
 
     /// The application changed what it receives or whether it sends.
@@ -1007,7 +1007,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             return Ok(());
         };
         let payload = wire::video_state(audio_ssrc, Some((&layer, active)));
-        self.send_text(conn, socket, &payload).await?;
+        Self::send_text(conn, socket, &payload).await?;
         if let Some(video) = self.video.as_mut() {
             video.announced = active;
         }
