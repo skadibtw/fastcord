@@ -2,7 +2,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use fastcord_discord::gateway::{ClientProperties, HostOs};
-use fastcord_discord::{Priority, RestClient, RestError, UserToken};
+use fastcord_discord::{
+    NetworkFailure, Priority, RestClient, RestError, RetryableFailure, UserToken,
+};
 use fastcord_model::{Snowflake, User};
 use fastcord_platform::{NativeCredentialStore, StoreError};
 
@@ -69,14 +71,40 @@ pub enum LoginError {
     WorkerStopped,
 }
 
+impl LoginError {
+    /// Only typed categories enter the login notice; raw transport errors may
+    /// contain URLs, headers or credentials and are never formatted here.
+    pub fn notice(self, network: &fastcord_net::NetworkContext) -> String {
+        if matches!(
+            self,
+            Self::Rest(RestError::Retryable(RetryableFailure::Network(_)))
+        ) && let fastcord_net::selector::ServiceStatus::Failed(category) = network
+            .controller()
+            .service_status(fastcord_net::Role::Rest)
+        {
+            return format!("Could not reach Discord: {category} Login stopped; try again.");
+        }
+        self.to_string()
+    }
+}
+
 impl fmt::Display for LoginError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Rest(RestError::AuthenticationRequired | RestError::InvalidToken) => {
                 f.write_str("Discord rejected this token. Login stopped; paste a valid alt-account token.")
             }
-            Self::Rest(RestError::Retryable(_)) => {
-                f.write_str("Could not reach Discord or Discord is temporarily unavailable. Login stopped; try again.")
+            Self::Rest(RestError::Retryable(RetryableFailure::Server(status))) => {
+                write!(f, "Discord returned HTTP {}. Login stopped; try again later.", status.as_u16())
+            }
+            Self::Rest(RestError::Retryable(RetryableFailure::Network(failure))) => {
+                let reason = match failure {
+                    NetworkFailure::Timeout => "the request timed out",
+                    NetworkFailure::Connection => "the connection failed",
+                    NetworkFailure::Body => "the response could not be read",
+                    NetworkFailure::Other => "the request failed",
+                };
+                write!(f, "Could not reach Discord: {reason}. Login stopped; try again.")
             }
             Self::Rest(error) => write!(f, "Login stopped: {error}."),
             Self::Store(error) => write!(f, "{error} Unlock it to restore your saved login, or explicitly choose a memory-only session."),
@@ -323,5 +351,49 @@ mod tests {
                 .to_string()
                 .contains("memory-only")
         );
+    }
+
+    #[test]
+    fn login_notice_preserves_typed_transport_failures_and_server_statuses() {
+        let network = fastcord_net::NetworkContext::off();
+        network.controller().note_failure(
+            fastcord_net::Role::Rest,
+            fastcord_net::NetworkError::TlsReset,
+        );
+        let connection = LoginError::Rest(RestError::Retryable(RetryableFailure::Network(
+            NetworkFailure::Connection,
+        )));
+        assert!(
+            connection
+                .notice(&network)
+                .contains("TLS connection was reset")
+        );
+        let server = LoginError::Rest(RestError::Retryable(RetryableFailure::Server(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        )));
+        let text = server.notice(&network);
+        assert!(text.contains("HTTP 503"));
+        assert!(!text.contains("TLS"));
+        let authentication = LoginError::Rest(RestError::AuthenticationRequired);
+        assert!(
+            authentication
+                .notice(&network)
+                .contains("rejected this token")
+        );
+    }
+
+    #[test]
+    fn login_notice_uses_the_current_request_category_after_a_successful_connection() {
+        let network = fastcord_net::NetworkContext::off();
+        network
+            .controller()
+            .note_service_reachable(fastcord_net::Role::Rest);
+        for (failure, expected) in [
+            (NetworkFailure::Timeout, "timed out"),
+            (NetworkFailure::Body, "response could not be read"),
+        ] {
+            let error = LoginError::Rest(RestError::Retryable(RetryableFailure::Network(failure)));
+            assert!(error.notice(&network).contains(expected));
+        }
     }
 }

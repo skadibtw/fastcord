@@ -323,6 +323,70 @@ pub fn changes() -> impl iced::futures::Stream<Item = ()> {
     )
 }
 
+/// Credential-free reachability check under the actual fastcord executable's
+/// routing rules. It runs before settings, account restore and instance handoff.
+#[cfg(debug_assertions)]
+pub fn check() {
+    let worker = std::thread::Builder::new()
+        .name("fastcord-network-check".into())
+        .spawn(|| {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                eprintln!("Network check: runtime could not start.");
+                return;
+            };
+            runtime.block_on(async {
+                use fastcord_net::Role;
+                use std::time::Duration;
+                for mode in [Mode::Off, Mode::Auto] {
+                    let context = fastcord_net::NetworkContext::off().with_mode(mode);
+                    let client = context.http_builder(Role::Rest).and_then(|builder| {
+                        builder
+                            .connect_timeout(Duration::from_secs(8))
+                            .timeout(Duration::from_secs(12))
+                            .build()
+                    });
+                    let Ok(client) = client else {
+                        eprintln!("{mode:?}: HTTP client could not start.");
+                        continue;
+                    };
+                    match client
+                        .get("https://discord.com/api/v9/gateway")
+                        .send()
+                        .await
+                    {
+                        Ok(response) => println!(
+                            "{mode:?}: anonymous gateway HTTP {}",
+                            response.status().as_u16()
+                        ),
+                        Err(error) => println!(
+                            "{mode:?}: category={:?}; connect={}; timeout={}",
+                            error.category(),
+                            error.is_connect(),
+                            error.is_timeout()
+                        ),
+                    }
+                    println!(
+                        "{mode:?}: service={:?}",
+                        context.controller().service_status(Role::Rest)
+                    );
+                    if mode == Mode::Auto {
+                        context.wait_for_recovery().await;
+                        println!(
+                            "Auto after bounded TLS check: {:?}",
+                            context.controller().service_status(Role::Rest)
+                        );
+                    }
+                }
+            });
+        });
+    if !worker.is_ok_and(|worker| worker.join().is_ok()) {
+        eprintln!("Network check: worker stopped.");
+    }
+}
+
 /// Real binary/UI check without credential access, restoration or network I/O.
 #[cfg(debug_assertions)]
 pub fn preview() -> iced::Result {

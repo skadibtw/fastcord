@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve typed network failures and HTTP server status codes in login errors,
+  and add a debug-only `--network-check` using the actual fastcord executable
+  for process-specific routing diagnostics without account credentials.
+
 - Add separate SOCKS5 UDP ASSOCIATE media routing (M95) for voice/camera and
   Go Live, with retained control TCP, source/header/MTU validation, eight shared
   association slots and fail-closed control-loss handling. HTTP CONNECT remains

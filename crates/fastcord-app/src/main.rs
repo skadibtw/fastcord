@@ -180,6 +180,11 @@ fn window_title() -> &'static str {
 
 fn main() -> iced::Result {
     #[cfg(debug_assertions)]
+    if std::env::args_os().any(|arg| arg == "--network-check") {
+        network_ui::check();
+        return Ok(());
+    }
+    #[cfg(debug_assertions)]
     if std::env::args_os().any(|arg| arg == "--network-preview") {
         return network_ui::preview();
     }
@@ -1938,7 +1943,7 @@ impl App {
                     }
                     Err(error) => {
                         self.phase = Phase::Login;
-                        self.notice = Some(error.to_string());
+                        self.notice = Some(error.notice(&self.network));
                     }
                 }
             }

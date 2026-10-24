@@ -191,3 +191,39 @@ screen-share send/watch with direct routing unavailable, filtered-network A/B,
 and Linux/macOS native checks. UDP to the proxy must itself be reachable. These
 gates remain open; neither SOCKS5 UDP nor the experimental direct preludes are
 claimed to repair every blocked media path.
+
+## Live login follow-up, 2026-10-24
+
+The user reported a failed Auto login behind a process-specific VPN exclusion
+for fastcord. The new debug-only `fastcord.exe --network-check` runs before
+credential access/settings/account restore/instance handoff and sends one
+anonymous `GET /api/v9/gateway` per Off/Auto context. An eligible Auto failure
+uses the existing bounded TLS selector. All output is categorical, with no
+account token, proxy password, response body or endpoint address.
+
+With the exact workspace `target/debug/fastcord.exe`, both initial requests
+failed with `TcpTimeout`; the Auto TLS check ended with `TlsTimeout`, without a
+confirmed working strategy. No login or Gateway Identify was sent. A preliminary
+check from a differently named executable returned HTTP 200, but is not direct-
+route evidence when VPN policy applies to fastcord specifically. The successful
+offline tests above therefore do not establish that the implemented recovery
+works on this filtered route. The failure cause beyond timeout is unconfirmed.
+
+The implemented TLS catalog has record/write splitting only. Flowseal's
+[general](https://github.com/Flowseal/zapret-discord-youtube/blob/main/general.bat)
+and [FAKE TLS AUTO](https://github.com/Flowseal/zapret-discord-youtube/blob/main/general%20%28FAKE%20TLS%20AUTO%29.bat)
+include packet fake injection, TCP sequence overlap and/or disorder techniques
+absent here. The zero-filled UDP prelude is explicitly original laboratory data,
+not a port of those profiles. The Windows upstream packet backend uses WinDivert;
+see its [Windows documentation](https://github.com/bol-van/zapret/blob/master/docs/windows.md).
+
+Login notices now retain the available typed transport category or HTTP server
+status instead of using one message for both. Unknown/body failures retain safe
+fallback categories; account rejection is still distinct. No automatic login or
+authenticated-request replay was introduced.
+
+Follow-up validation: all 830 app tests passed (six existing ignored gates),
+including transport-vs-server login notices; app Clippy with warnings denied,
+formatting and the network boundary audit passed. The Windows binary was rebuilt
+and the isolated native preview launched. This validates the diagnostic change;
+direct login remains unresolved on the reported route.

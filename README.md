@@ -15,6 +15,9 @@ Auto uses bounded TLS-only checks of a failed required service and application-l
 TLS splitting. It preserves certificate verification and all account retry limits.
 It changes no system network settings. TCP write boundaries are best effort;
 fragmentation is not universal and blocked-network effectiveness is unverified.
+The current catalog splits TLS records/writes around SNI. It does not implement
+zapret-discord-youtube's packet fake injection, TCP sequence overlap or disorder
+strategies; successful offline transport tests do not establish equivalent bypass.
 HTTP/HTTPS CONNECT and SOCKS5 send destination names to the selected proxy.
 Origin TLS verification remains on; failures never fall back directly. Proxy
 passwords live in native credential storage, bound to the exact proxy settings.
@@ -25,6 +28,13 @@ Control loss stops media, with no direct fallback. SOCKS5 itself does not encryp
 the connection to the proxy. Real relay interoperability/NAT checks are pending.
 Network settings use `network-settings.json` beside the audio settings, with a
 separate fake-mode namespace. See SPEC §5.4 and TESTING for limits and evidence.
+
+Debug builds support `fastcord.exe --network-check` for process-specific routing
+diagnosis (for example, a VPN exclusion tied to this executable). It makes one
+anonymous gateway-discovery GET in Off and Auto, then runs the existing bounded
+TLS check only after an eligible Auto failure. It prints categorical results,
+loads no credentials or saved settings, starts no account/Gateway session and
+changes no system routing. Run the exact executable covered by the routing rule.
 
 **Experimental UDP discovery preludes** are a separate opt-in, off by default.
 They try at most three direct UDP flows before voice protocol selection, with
