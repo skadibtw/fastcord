@@ -1,6 +1,8 @@
 //! Audio a screen share carries (SPEC §8.4, §8.7; milestones 35 and 36):
-//! WASAPI loopback on Windows and a PipeWire capture stream on Linux, both
-//! delivered as 48 kHz interleaved stereo `f32`.
+//! WASAPI loopback on Windows, a PipeWire capture stream on Linux and an
+//! audio-only ScreenCaptureKit stream on macOS (milestone 37; a window's
+//! application, or everything but fastcord), all delivered as 48 kHz
+//! interleaved stereo `f32`.
 //!
 //! One [`Loopback`] owns one dedicated native thread. Everything that touches
 //! the operating system's audio objects, and the handler, runs there; the
@@ -25,8 +27,7 @@
 //! everything that output plays (the call too, if fastcord plays there), or an
 //! input such as a virtual source an application was routed to.
 //!
-//! Elsewhere every entry point reports [`LoopbackError::Unsupported`] (SPEC
-//! milestone 37).
+//! Elsewhere every entry point reports [`LoopbackError::Unsupported`].
 
 use std::fmt;
 
@@ -34,14 +35,18 @@ use crate::capture::{SourceId, SourceKind};
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod unsupported;
 #[cfg(windows)]
 mod windows;
 
 #[cfg(target_os = "linux")]
 use linux as native;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+use macos as native;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 use unsupported as native;
 #[cfg(windows)]
 use windows as native;

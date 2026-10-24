@@ -110,7 +110,7 @@ fn ns_error(error: *mut NSError, operation: &'static str) -> CaptureError {
 }
 
 /// The shareable displays and on-screen windows, from ScreenCaptureKit.
-fn shareable() -> Result<Retained<SCShareableContent>, CaptureError> {
+pub(crate) fn shareable() -> Result<Retained<SCShareableContent>, CaptureError> {
     let (sender, receiver) = mpsc::sync_channel(1);
     let block = RcBlock::new(
         move |content: *mut SCShareableContent, error: *mut NSError| {
@@ -327,10 +327,10 @@ fn copy_picture(sample: &CMSampleBuffer, latest: &Mutex<Latest>) -> bool {
 }
 
 /// Where a completion handler's outcome arrives.
-type Answer = Receiver<Result<(), CaptureError>>;
+pub(crate) type Answer = Receiver<Result<(), CaptureError>>;
 
 /// Waits for a ScreenCaptureKit completion handler.
-fn completion(operation: &'static str) -> (RcBlock<dyn Fn(*mut NSError)>, Answer) {
+pub(crate) fn completion(operation: &'static str) -> (RcBlock<dyn Fn(*mut NSError)>, Answer) {
     let (sender, receiver) = mpsc::sync_channel(1);
     let block = RcBlock::new(move |error: *mut NSError| {
         let _ = sender.send(if error.is_null() {
@@ -342,7 +342,7 @@ fn completion(operation: &'static str) -> (RcBlock<dyn Fn(*mut NSError)>, Answer
     (block, receiver)
 }
 
-fn answered(receiver: &Answer) -> Result<(), CaptureError> {
+pub(crate) fn answered(receiver: &Answer) -> Result<(), CaptureError> {
     receiver
         .recv_timeout(ANSWER)
         .unwrap_or(Err(CaptureError::Worker("ScreenCaptureKit did not answer")))

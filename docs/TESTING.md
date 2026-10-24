@@ -133,6 +133,14 @@ Automated: `cargo test -p fastcord-fake --locked` (unit tests plus `tests/drive_
 - [ ] Resize the shared window: the picture keeps the whole window (scaled, not cropped). Close it: the share ends as "closed". Stop sharing from the macOS menu-bar indicator: the share ends and nothing keeps capturing.
 - [ ] Revoke the permission in System Settings during a share: the share ends with the permission text. Repeated start/stop ten times: no growing memory in Activity Monitor and no capture indicator left in the menu bar.
 
+### macOS stream audio: ScreenCaptureKit (M37, implementation 2026-10-24)
+- **What ran (Windows host only):** `cargo clippy -p fastcord-platform --target aarch64-apple-darwin --all-targets --locked -- -D warnings` passed. Nothing ran on macOS here; the macOS CI job builds and tests the workspace.
+- **Maintainer checklist (macOS 13 or later; CI-built `.app`; alt account and the official client as the viewer):**
+- [ ] Share a window of an application playing sound (for example a browser video) with "Share audio": the viewer hears that application, in sync with the picture, and not the call or other applications.
+- [ ] Share a screen with "Share audio": the viewer hears system sound but not the people in the call (fastcord is excluded).
+- [ ] Quit the shared application during a window share: the picture ends as closed and the audio stops with it; the call continues.
+- [ ] On macOS 12.x (if available), "Share audio" is not offered and the picture still shares.
+
 ### Interop partner for voice and Go Live
 - **fastcord** runs as the **alt account** (already logged in on discord.com in the maintainer's browser; obtain login via QR/token from that session).
 - **Partner:** the maintainer's official Discord client on the same PC, in a private test server/DM with the alt.

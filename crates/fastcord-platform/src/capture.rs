@@ -19,7 +19,7 @@ pub mod convert;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod unsupported;
 #[cfg(windows)]

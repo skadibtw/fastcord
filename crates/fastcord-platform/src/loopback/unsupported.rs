@@ -1,4 +1,4 @@
-//! Platforms without stream-audio capture yet (SPEC milestone 37).
+//! Platforms without stream-audio capture.
 
 use super::{AudioSource, Handler, LoopbackError, LoopbackScope, LoopbackSupport};
 use crate::capture::SourceId;
@@ -27,6 +27,6 @@ pub(super) fn list_targets() -> Result<Vec<AudioSource>, LoopbackError> {
 
 pub(super) fn start(_: LoopbackScope, _: Handler) -> Result<Native, LoopbackError> {
     Err(LoopbackError::Unsupported(
-        "sharing audio is only implemented for Windows and Linux so far",
+        "sharing audio is not implemented on this system",
     ))
 }

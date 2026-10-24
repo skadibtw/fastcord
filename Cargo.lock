@@ -2194,6 +2194,7 @@ dependencies = [
  "fastcord-model",
  "keyring-core",
  "objc2 0.6.5",
+ "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-core-media",
