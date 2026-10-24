@@ -77,9 +77,11 @@ objc2-core-media.workspace = true
 objc2-core-video.workspace = true
 objc2-foundation.workspace = true
 objc2-screen-capture-kit.workspace = true
+objc2-user-notifications.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd.workspace = true
+futures-util.workspace = true
 pipewire.workspace = true
 tokio.workspace = true
 zbus-secret-service-keyring-store.workspace = true

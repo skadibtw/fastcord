@@ -53,6 +53,8 @@ pub struct Preferences {
     pub input_gain: fastcord_audio::InputGain,
     /// Desktop notifications are on unless this is set (so `Default` is on).
     pub notifications_off: bool,
+    /// Toasts name the author but never show message text.
+    pub notification_previews_off: bool,
     /// Experimental voice-message recording is offered (off until the user turns it on).
     pub voice_recording: bool,
     /// Input mode, sensitivity and communication shortcuts.
@@ -84,6 +86,7 @@ impl Default for Preferences {
             echo_cancellation: true,
             input_gain: fastcord_audio::InputGain::default(),
             notifications_off: false,
+            notification_previews_off: false,
             voice_recording: false,
             voice_input: crate::shortcuts::Settings::default(),
             camera: CameraSelection::default(),
@@ -295,6 +298,7 @@ pub fn view<'a>(
         checkbox(prefs.echo_cancellation).label("Echo cancellation").on_toggle(crate::Message::EchoCancellationChanged),
         text("Removes what your speakers play from your microphone, so others do not hear themselves. It needs a few seconds of speech to adapt, works best with the microphone and speakers in a fixed position, and is not needed with a headset."),
         checkbox(!prefs.notifications_off).label("Desktop notifications for DMs and mentions while the window is not active").on_toggle(crate::Message::NotificationsToggled),
+        checkbox(!prefs.notification_previews_off).label("Show message text in notifications").on_toggle(crate::Message::NotificationPreviewsToggled),
         checkbox(prefs.interface_sounds).label("Interface sounds (mute, deafen, joining and leaving a call, pings)").on_toggle(crate::Message::InterfaceSoundsToggled),
         row![text("Interface sound volume"), slider(0..=100u8, prefs.interface_volume, crate::Message::InterfaceVolumeChanged).width(Length::Fill), text(format!("{}%", prefs.interface_volume))].spacing(12),
         checkbox(prefs.voice_recording).label("Voice message recording (experimental)").on_toggle(crate::Message::VoiceRecordingToggled),
@@ -381,6 +385,10 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
         }
         .clamped(),
         notifications_off: value.get("notifications_off").and_then(Value::as_bool) == Some(true),
+        notification_previews_off: value
+            .get("notification_previews_off")
+            .and_then(Value::as_bool)
+            == Some(true),
         voice_recording: value.get("voice_recording").and_then(Value::as_bool) == Some(true),
         // Older settings predate voice input: voice activity, no shortcuts.
         voice_input: value
@@ -459,7 +467,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json(), "interface_sounds": prefs.interface_sounds, "interface_volume": prefs.interface_volume, "chat": prefs.chat.to_json(), "organize": prefs.organize.to_json(), "speech": prefs.speech.to_json(), "close_to_tray": prefs.close_to_tray}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "notification_previews_off": prefs.notification_previews_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json(), "interface_sounds": prefs.interface_sounds, "interface_volume": prefs.interface_volume, "chat": prefs.chat.to_json(), "organize": prefs.organize.to_json(), "speech": prefs.speech.to_json(), "close_to_tray": prefs.close_to_tray}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -571,6 +579,7 @@ mod tests {
                 automatic: true,
             },
             notifications_off: true,
+            notification_previews_off: true,
             voice_recording: true,
             voice_input: {
                 let mut input = crate::shortcuts::Settings::default();

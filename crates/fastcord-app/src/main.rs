@@ -197,6 +197,7 @@ fn main() -> iced::Result {
     // instance's links nor is found by one.
     let arg = std::env::args().nth(1).filter(|_| !fake_mode());
     let (forwarded, requests) = tokio::sync::mpsc::channel(8);
+    notify::set_clicks(forwarded.clone());
     let _instance = if fake_mode() {
         None
     } else {
@@ -459,6 +460,7 @@ enum Message {
     NoiseSuppressionChanged(fastcord_audio::NoiseSuppression),
     EchoCancellationChanged(bool),
     NotificationsToggled(bool),
+    NotificationPreviewsToggled(bool),
     AudioPreferencesSaved(Result<(), &'static str>),
     Timeline(timeline::Event),
     SelectPrivateChannel(Snowflake),
@@ -1208,6 +1210,7 @@ impl App {
         match message {
             Message::Initialized(preferences, store) => {
                 notify::set_enabled(!preferences.notifications_off);
+                notify::set_previews(!preferences.notification_previews_off);
                 self.soundboard.set_prefs(preferences.soundboard.clone());
                 self.audio_preferences = preferences;
                 chat_prefs::apply(self.audio_preferences.chat);
@@ -1479,6 +1482,13 @@ impl App {
             Message::NotificationsToggled(on) => {
                 self.audio_preferences.notifications_off = !on;
                 notify::set_enabled(on);
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::NotificationPreviewsToggled(on) => {
+                self.audio_preferences.notification_previews_off = !on;
+                notify::set_previews(on);
                 if self.audio_saving.is_none() {
                     return self.save_audio_preferences();
                 }

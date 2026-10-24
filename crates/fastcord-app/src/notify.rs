@@ -3,7 +3,8 @@
 //! "N new messages" summary on the next allowed toast, and a bounded replay
 //! filter so Resume never notifies twice. Pure and clock-injected; the toast
 //! itself is `fastcord_platform::notify`. No timer or polling: decisions are
-//! made only when a message event arrives.
+//! made only when a message event arrives. Clicking a toast opens its message
+//! through the second-launch hand-off queue, as a `discord://` link would.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -11,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use fastcord_model::{Message, Snowflake};
+use fastcord_platform::instance::Forwarded;
 
 /// Minimum time between toasts.
 pub const COOLDOWN: Duration = Duration::from_secs(5);
@@ -26,6 +28,8 @@ pub struct Candidate {
     pub own: bool,
     /// The channel or its guild is muted.
     pub muted: bool,
+    /// The account's own status is Do Not Disturb: nothing notifies.
+    pub dnd: bool,
     /// The author is ignored or blocked, or the conversation is a message
     /// request not yet accepted: nothing of it may surface, not even in a
     /// coalesced summary.
@@ -60,6 +64,7 @@ impl Policy {
         if !enabled
             || active
             || candidate.own
+            || candidate.dnd
             || candidate.suppressed
             || (candidate.muted && !candidate.mentions_me)
             || !(candidate.direct || candidate.mentions_me)
@@ -104,9 +109,34 @@ impl Policy {
 static POLICY: Mutex<Option<Policy>> = Mutex::new(None);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static ACTIVE: AtomicBool = AtomicBool::new(true);
+static PREVIEWS: AtomicBool = AtomicBool::new(true);
+/// The hand-off queue `main` also gives the single-instance guard.
+static CLICKS: Mutex<Option<tokio::sync::mpsc::Sender<Forwarded>>> = Mutex::new(None);
+
+pub fn set_clicks(sender: tokio::sync::mpsc::Sender<Forwarded>) {
+    if let Ok(mut slot) = CLICKS.lock() {
+        *slot = Some(sender);
+    }
+}
+
+/// The link a toast's click opens: the message in its conversation.
+fn link(message: &Message) -> String {
+    let guild = message
+        .guild_id
+        .map_or_else(|| "@me".to_owned(), |guild| guild.0.to_string());
+    format!(
+        "discord://-/channels/{guild}/{}/{}",
+        message.channel_id.0, message.id.0
+    )
+}
 
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether toasts may show message text (the author is always named).
+pub fn set_previews(previews: bool) {
+    PREVIEWS.store(previews, Ordering::Relaxed);
 }
 
 pub fn set_active(active: bool) {
@@ -121,25 +151,33 @@ pub fn on_message(
     muted: bool,
     suppressed: bool,
     mentions_me: bool,
+    dnd: bool,
 ) {
     let Some(me) = me else { return };
     if ACTIVE.load(Ordering::Relaxed) || !ENABLED.load(Ordering::Relaxed) {
         return;
     }
+    let previews = PREVIEWS.load(Ordering::Relaxed);
     let candidate = Candidate {
         id: message.id,
         direct: message.guild_id.is_none(),
         mentions_me,
         own: message.author.id == me,
         muted,
+        dnd,
         suppressed,
         author: message
             .author
             .global_name
             .clone()
             .unwrap_or_else(|| message.author.username.clone()),
-        text: message.content.clone(),
-        has_attachment: !message.attachments.is_empty(),
+        // Hidden previews: no text, not even whether a file came with it.
+        text: if previews {
+            message.content.clone()
+        } else {
+            String::new()
+        },
+        has_attachment: previews && !message.attachments.is_empty(),
     };
     let toast = POLICY.lock().ok().and_then(|mut policy| {
         policy
@@ -148,8 +186,15 @@ pub fn on_message(
     });
     if let Some(toast) = toast {
         crate::ui_sound::play(crate::ui_sound::Sound::Ping);
+        let link = link(message);
+        let clicks = CLICKS.lock().ok().and_then(|slot| slot.clone());
         std::thread::spawn(move || {
-            let _ = fastcord_platform::notify::show(&toast.title, &toast.body);
+            let _ = fastcord_platform::notify::show(&toast.title, &toast.body, move || {
+                if let Some(clicks) = clicks {
+                    // A full queue drops the click; the toast is gone either way.
+                    let _ = clicks.try_send(Forwarded::Open(link));
+                }
+            });
         });
     }
 }
@@ -165,6 +210,7 @@ mod tests {
             mentions_me: false,
             own: false,
             muted: false,
+            dnd: false,
             suppressed: false,
             author: "ann".to_owned(),
             text: "hi".to_owned(),
@@ -198,6 +244,10 @@ mod tests {
         let mut own = dm(4);
         own.own = true;
         assert!(decide(&mut Policy::default(), &own, t).is_none());
+        let mut dnd = dm(5);
+        dnd.dnd = true;
+        dnd.mentions_me = true;
+        assert!(decide(&mut Policy::default(), &dnd, t).is_none(), "DND");
     }
 
     #[test]
@@ -253,5 +303,27 @@ mod tests {
             decide(&mut p, &file, t + COOLDOWN).unwrap().body,
             "Sent an attachment"
         );
+    }
+
+    #[test]
+    fn a_click_opens_the_message_in_its_conversation() {
+        let message = |guild: Option<&str>| -> Message {
+            serde_json::from_value(serde_json::json!({
+                "id": "900", "channel_id": "500", "guild_id": guild, "content": "hi",
+                "timestamp": "2026-10-07T12:00:00.000000+00:00",
+                "author": {"id": "3", "username": "other"},
+            }))
+            .unwrap()
+        };
+        for (guild, expected) in [(Some("7"), Some(Snowflake(7))), (None, None)] {
+            assert_eq!(
+                crate::desktop::parse(&link(&message(guild))),
+                Some(crate::desktop::DeepLink::Channel {
+                    guild: expected,
+                    channel: Snowflake(500),
+                    message: Some(Snowflake(900)),
+                })
+            );
+        }
     }
 }

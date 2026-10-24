@@ -457,19 +457,22 @@ impl Tracker {
                             .store
                             .private_channel(message.channel_id)
                             .is_some_and(Channel::is_pending_request);
+                    let me = self.store.current_user().map(|u| u.id);
+                    let own_status =
+                        me.and_then(|me| self.store.presences().get(&me).map(|p| p.status));
                     crate::notify::on_message(
                         message,
-                        self.store.current_user().map(|u| u.id),
+                        me,
                         muted,
                         suppressed,
                         self.store.notifies_account(message),
+                        own_status == Some(fastcord_model::Status::Dnd),
                     );
-                    let me = self.store.current_user().map(|u| u.id);
                     crate::speech::on_message(
                         message,
                         me,
                         self.history.open_channel(),
-                        me.and_then(|me| self.store.presences().get(&me).map(|p| p.status)),
+                        own_status,
                         muted,
                         suppressed,
                     );

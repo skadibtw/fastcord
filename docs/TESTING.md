@@ -504,7 +504,11 @@ Each milestone in `docs/SPEC.md` §16 lists acceptance criteria. Before committi
 
 ### Desktop notifications (milestone 42)
 
-Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, window inactive, enabled, unmuted, not own), the 5 s cooldown with text-free coalescing, replay de-duplication and the 128-ID / 80-character bounds; `fastcord-platform` `notify::tests` cover clipping. Manual and not yet recorded: a real toast on Windows (an unpackaged build may need a Start-menu shortcut with AUMID `fastcord`), and Linux/macOS adapters (not implemented).
+Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, window inactive, enabled, unmuted, not own, not Do Not Disturb), the 5 s cooldown with text-free coalescing, replay de-duplication, the 128-ID / 80-character bounds and the click link (`discord://-/channels/{guild|@me}/{channel}/{message}`, parsed back by `desktop::parse`); `fastcord-platform` `notify::tests` cover clipping, markup escaping and the bounded click table (8 waiting clicks, each runs once).
+
+- **Linux, real D-Bus (2026-10-24, WSL Ubuntu 24.04, dbus-daemon 1.14):** `dbus-run-session -- cargo test -p fastcord-platform --locked notify -- --include-ignored` passed (4/4). `notify::linux::tests::a_toast_reaches_the_server_and_its_click_comes_back` runs a stand-in `org.freedesktop.Notifications` server on the real session bus: the toast arrives with its title, the body escaped for a `body-markup` server and the `default` action, and the server's `ActionInvoked` runs the click. A real desktop notification daemon (GNOME Shell, KDE Plasma, dunst/mako) is not covered.
+- **macOS:** type-checked and linted for `aarch64-apple-darwin` from Windows only. `UNUserNotificationCenter` needs the packaged `.app` (bundle identifier); a bare `cargo run` binary reports notifications unsupported.
+- **Pending manual checks:** a real toast on Windows (an unpackaged build may need a Start-menu shortcut with AUMID `fastcord`) and on a Linux desktop and the packaged macOS app; clicking each opens the message (or the conversation, if the message is gone) and brings the window forward, also when it was closed to the tray; Do Not Disturb set in the official client silences toasts; with "Show message text in notifications" off the toast names the author and says "New message". On Windows a click is received only while fastcord runs and the toast is still in the banner or Action Center of this session.
 
 ### Pinned-message browser (milestone 44)
 

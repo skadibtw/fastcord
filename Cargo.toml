@@ -40,8 +40,9 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGDirectDisplay", "CGDisplayStream", "CGWindow"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "CMBase", "CMBlockBuffer", "objc2-core-audio-types", "objc2-core-video"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSString", "NSObject"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSEnumerator", "NSError", "NSString", "NSObject"] }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "SCStream", "SCShareableContent", "SCError", "block2", "dispatch2", "libc", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "bitflags", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain"] }
 base64 = "0.22"
 bytes = "1"
