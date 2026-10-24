@@ -1,7 +1,7 @@
 //! Bounded, non-secret network settings. The app stores this document beside
 //! audio-devices.json and supplies the same isolated fake-mode directory.
 //!
-//! No endpoint, destination IP, account, packet, SSID/BSSID, signed URL, proxy
+//! No origin endpoint, destination IP, account, packet, SSID/BSSID, signed URL, proxy
 //! password or exact endpoint confirmation is represented by this schema.
 
 use std::fmt;
@@ -104,6 +104,8 @@ pub struct Settings {
     /// Laboratory UDP discovery preludes are independent of TLS recovery.
     /// Merely loading settings or selecting Auto never enables this flag.
     pub experimental_udp: bool,
+    #[serde(default)]
+    pub proxy: Option<crate::ProxyConfig>,
     #[serde(deserialize_with = "deserialize_profiles")]
     pub profiles: Vec<NetworkProfile>,
 }
@@ -116,6 +118,7 @@ impl Default for Settings {
             catalog_version: CATALOG_VERSION,
             mode: Mode::Off,
             experimental_udp: false,
+            proxy: None,
             profiles: Vec::new(),
         }
     }
@@ -164,6 +167,9 @@ impl Settings {
     }
 
     fn validate(&self) -> Result<(), SettingsError> {
+        if let Some(proxy) = &self.proxy {
+            proxy.validate().map_err(|_| SettingsError::Invalid)?;
+        }
         if self.version != SETTINGS_VERSION {
             return Err(SettingsError::UnsupportedVersion);
         }

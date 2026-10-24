@@ -1,7 +1,26 @@
 //! Network preferences share the per-user settings directory and fake namespace.
+use fastcord_discord::UserToken;
+use fastcord_net::proxy::{ProxyConfig, ProxyKind};
 use fastcord_net::settings::{Mode, Settings};
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Length};
+use std::sync::Arc;
+
+#[derive(Clone, Debug)]
+pub struct Loaded {
+    pub settings: Settings,
+    pub password: Arc<UserToken>,
+    pub warning: Option<&'static str>,
+}
+impl Default for Loaded {
+    fn default() -> Self {
+        Self {
+            settings: Settings::default(),
+            password: Arc::new(UserToken::new(String::new())),
+            warning: None,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct State {
@@ -9,6 +28,11 @@ pub struct State {
     pub settings: Settings,
     pub notice: Option<&'static str>,
     pub saving: bool,
+    pub proxy_kind: Option<ProxyKind>,
+    pub proxy_host: String,
+    pub proxy_port: String,
+    pub proxy_username: String,
+    pub proxy_password: Option<Arc<UserToken>>,
 }
 
 #[derive(Clone, Debug)]
@@ -19,6 +43,13 @@ pub enum Action {
     Retried,
     Mode(Mode),
     Saved(Result<(), &'static str>),
+    ProxyKind(ProxyKind),
+    ProxyHost(String),
+    ProxyPort(String),
+    ProxyUsername(String),
+    ProxyPassword(Arc<UserToken>),
+    ApplyProxy,
+    ProxyApplied(Result<Loaded, &'static str>),
 }
 
 fn now() -> u64 {
@@ -28,22 +59,119 @@ fn now() -> u64 {
         .as_secs()
 }
 
-pub async fn load() -> Settings {
+pub async fn load() -> Loaded {
     let Some(dir) = crate::audio_devices::data_dir() else {
-        return Settings::default();
+        return Loaded::default();
     };
     // Read through a bounded reader: metadata can change between stat and read.
     tokio::task::spawn_blocking(move || {
         use std::io::Read;
-        let file = std::fs::File::open(dir.join("network-settings.json")).ok()?;
+        let blocked = || Loaded { settings: Settings { mode: Mode::Proxy, ..Settings::default() }, warning: Some("Network settings could not be read. Routing is stopped until you choose a mode."), ..Loaded::default() };
+        let file = match std::fs::File::open(dir.join("network-settings.json")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Loaded::default(),
+            Err(_) => return blocked(),
+        };
         let mut bytes = Vec::new();
-        file.take(64 * 1024 + 1).read_to_end(&mut bytes).ok()?;
-        Settings::decode(&bytes, now()).ok()
+        if file.take(64 * 1024 + 1).read_to_end(&mut bytes).is_err() { return blocked(); }
+        let Ok(settings) = Settings::decode(&bytes, now()) else { return blocked(); };
+        let mut loaded = Loaded { settings, ..Loaded::default() };
+        if !crate::fake_mode() && let Some(config) = loaded.settings.proxy.as_ref().filter(|config| config.username.is_some()) {
+            let password = fastcord_platform::NativeCredentialStore::new().and_then(|store| store.load_proxy_password(&config.credential_key()));
+            match password {
+                Ok(Some(password)) => { let mut secret = password.into_secret(); loaded.password = Arc::new(UserToken::new(std::mem::take(&mut *secret))); }
+                _ => loaded.warning = Some("The proxy password could not be loaded. Open Network recovery to save it again."),
+            }
+        }
+        loaded
     })
     .await
-    .ok()
-    .flatten()
-    .unwrap_or_default()
+    .unwrap_or_else(|_| Loaded { settings: Settings { mode: Mode::Proxy, ..Settings::default() }, warning: Some("Network settings could not be read; routing is stopped."), ..Loaded::default() })
+}
+
+impl State {
+    pub fn apply(&mut self, loaded: &Loaded) {
+        self.settings = loaded.settings.clone();
+        self.notice = loaded.warning;
+        self.proxy_password = Some(loaded.password.clone());
+        if let Some(config) = &loaded.settings.proxy {
+            self.proxy_kind = Some(config.kind);
+            self.proxy_host = config.host.clone();
+            self.proxy_port = config.port.to_string();
+            self.proxy_username = config.username.clone().unwrap_or_default();
+        }
+    }
+    pub fn proxy_config(&self) -> Result<ProxyConfig, &'static str> {
+        let config = ProxyConfig {
+            kind: self.proxy_kind.unwrap_or(ProxyKind::Http),
+            host: self.proxy_host.trim().to_owned(),
+            port: self
+                .proxy_port
+                .parse()
+                .map_err(|_| "Enter a proxy port from 1 to 65535.")?,
+            username: (!self.proxy_username.is_empty()).then(|| self.proxy_username.clone()),
+        };
+        config
+            .validate()
+            .map_err(|_| "The proxy host, port or username is invalid.")?;
+        Ok(config)
+    }
+}
+
+pub fn configure(
+    context: &fastcord_net::NetworkContext,
+    loaded: &Loaded,
+) -> Result<fastcord_net::NetworkContext, fastcord_net::NetworkError> {
+    if loaded.settings.mode == Mode::Proxy {
+        let config = loaded
+            .settings
+            .proxy
+            .clone()
+            .ok_or(fastcord_net::NetworkError::ProxyRefused)?;
+        if loaded.warning.is_some() {
+            return Err(fastcord_net::NetworkError::ProxyRefused);
+        }
+        context.with_proxy(
+            config,
+            zeroize::Zeroizing::new(loaded.password.expose_secret().to_owned()),
+        )
+    } else {
+        Ok(context.with_mode(loaded.settings.mode))
+    }
+}
+
+pub async fn apply_proxy(
+    settings: Settings,
+    password: Arc<UserToken>,
+) -> Result<Loaded, &'static str> {
+    let config = settings
+        .proxy
+        .as_ref()
+        .ok_or("Enter a proxy first.")?
+        .clone();
+    let saving_password = password.clone();
+    tokio::task::spawn_blocking(move || {
+        if crate::fake_mode() && config.username.is_some() {
+            return Err("Proxy passwords are unavailable in fake mode.");
+        }
+        if config.username.is_some() {
+            let store = fastcord_platform::NativeCredentialStore::new().map_err(
+                |_| "Native credential storage is unavailable; the proxy was not applied.",
+            )?;
+            store
+                .save_proxy_password(&config.credential_key(), saving_password.expose_secret())
+                .map_err(|_| "The proxy password could not be saved.")?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "The proxy password could not be saved.")??;
+    save(settings.clone()).await?;
+    Ok(Loaded {
+        settings,
+        password,
+        warning: None,
+    })
 }
 
 pub async fn save(settings: Settings) -> Result<(), &'static str> {
@@ -82,6 +210,24 @@ pub fn view<'a>(
         button("Retry pending TLS check").on_press(crate::Message::Network(Action::Retry)),
         button("Close").on_press(crate::Message::Network(Action::Close)),
     ].spacing(12);
+    let password = state
+        .proxy_password
+        .as_ref()
+        .map_or("", |password| password.expose_secret());
+    let proxy_choice = |label, kind| {
+        button(label).on_press_maybe(
+            (editable && !state.saving).then_some(crate::Message::Network(Action::ProxyKind(kind))),
+        )
+    };
+    body = body.push(text("TCP proxy").size(22))
+        .push(row![proxy_choice("HTTP CONNECT", ProxyKind::Http), proxy_choice("HTTPS CONNECT", ProxyKind::Https), proxy_choice("SOCKS5", ProxyKind::Socks5)].spacing(8))
+        .push(text(format!("Type: {}", state.proxy_kind.unwrap_or(ProxyKind::Http))))
+        .push(text_input("Proxy host (no scheme or path)", &state.proxy_host).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyHost(value)))))
+        .push(text_input("Proxy port", &state.proxy_port).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyPort(value)))))
+        .push(text_input("Username (optional)", &state.proxy_username).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyUsername(value)))))
+        .push(text_input("Password", password).secure(true).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyPassword(Arc::new(UserToken::new(value)))))))
+        .push(button("Save and use proxy").on_press_maybe((editable && !state.saving).then_some(crate::Message::Network(Action::ApplyProxy))))
+        .push(text("Proxy mode never falls back to a direct connection. CONNECT proxies carry TCP only: voice, camera and screen sharing cannot join through them. SOCKS5 does not encrypt traffic to the proxy; UDP support is a separate capability. Passwords are saved in native credential storage."));
     for (label, role) in [
         ("API", fastcord_net::Role::Rest),
         ("Gateway", fastcord_net::Role::Gateway),

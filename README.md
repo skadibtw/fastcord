@@ -10,11 +10,16 @@ The approved delivery order and issue links are in [docs/ROADMAP.md](docs/ROADMA
 
 ## Network recovery
 
-**Network recovery** on the login screen selects Off or Auto before sign-in.
+**Network recovery** on the login screen selects Off, Auto or a user-configured TCP proxy before sign-in.
 Auto uses bounded TLS-only checks of a failed required service and application-local
 TLS splitting. It preserves certificate verification and all account retry limits.
 It changes no system network settings. TCP write boundaries are best effort;
 fragmentation is not universal and blocked-network effectiveness is unverified.
+HTTP/HTTPS CONNECT and SOCKS5 send destination names to the selected proxy.
+Origin TLS verification remains on; failures never fall back directly. Proxy
+passwords live in native credential storage, bound to the exact proxy settings.
+CONNECT is TCP-only; the UI explains media limitations before joining. SOCKS5
+itself does not encrypt the connection to the proxy.
 Network settings use `network-settings.json` beside the audio settings, with a
 separate fake-mode namespace. See SPEC §5.4 and TESTING for limits and evidence.
 

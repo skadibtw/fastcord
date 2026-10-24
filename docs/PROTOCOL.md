@@ -956,3 +956,19 @@ errors and demand-only TLS probe budgets are in SPEC §5.4. Probes send no HTTP,
 WebSocket Upgrade, discovery, Identify, headers or token. A TLS candidate is not
 DPI detection or service/session health. No captured hello or ambiguous request
 is replayed on another socket. Network-change hints do not disconnect sessions.
+
+## User-configured TCP proxies (M93)
+
+HTTP CONNECT sends an authority-form CONNECT with a bounded header and optional
+Proxy-Authorization: Basic to the configured proxy only. HTTPS CONNECT wraps that
+negotiation in independently verified proxy TLS. The resulting stream carries
+ordinary end-to-end origin TLS; the origin never receives proxy credentials.
+The authenticated private HTTP bridge routes reqwest tunnels through that same
+upstream path, while WebSockets use it directly before their origin TLS/Upgrade.
+
+SOCKS5 TCP offers only the configured authentication method (no downgrade), uses
+RFC 1929 username/password when configured, then CMD=1 CONNECT with domain ATYP=3
+for names, ATYP=1/4 for numeric IPv4/IPv6. Destination names are not resolved
+locally. The bounded reply validates version/reserved/type/status before exposing
+the stream. No direct socket is opened on proxy failure; no request body is
+replayed. M93 sends no UDP ASSOCIATE and refuses proxy media joins explicitly.

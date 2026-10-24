@@ -12,7 +12,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, oneshot, watch};
 use zeroize::Zeroizing;
 
-use crate::broker::{FailureReporter, authorize, dial_public};
+use crate::broker::{BoxedIo, FailureReporter, authorize, dial_public};
+use crate::proxy::ProxyCredentials;
 use crate::selector::{AddressFamily, Controller, DiagnosticTarget, TlsProfile};
 use crate::tls::{ShapedStream, Strategy};
 use crate::{NetworkContext, NetworkError, Role};
@@ -21,6 +22,15 @@ pub(crate) const HEADER_LIMIT: usize = 8 * 1024;
 pub(crate) const TUNNEL_LIMIT: usize = 32;
 pub(crate) const FORWARD_BUFFER: usize = 32 * 1024;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Clone)]
+struct Upstream {
+    controller: Controller,
+    transforms: Arc<Semaphore>,
+    slots: Arc<Semaphore>,
+    reporter: FailureReporter,
+    proxy: Option<Arc<ProxyCredentials>>,
+}
 
 pub(crate) struct Bridge {
     address: SocketAddr,
@@ -67,10 +77,17 @@ impl Bridge {
                 })
                 .collect(),
         );
-        let controller = context.controller().clone();
-        let transforms = context.transforms();
-        let slots = context.tunnel_slots();
-        let reporter = context.failure_reporter();
+        let upstream = Upstream {
+            controller: context.controller().clone(),
+            transforms: context.transforms(),
+            slots: context.tunnel_slots(),
+            reporter: context.failure_reporter(),
+            proxy: if context.mode() == crate::settings::Mode::Proxy {
+                context.proxy_credentials()
+            } else {
+                None
+            },
+        };
         let (stop, receiver) = oneshot::channel();
         // No reference to NetworkContext is retained by the bridge task: doing
         // so would form a cycle and keep the listener alive after app teardown.
@@ -87,16 +104,7 @@ impl Bridge {
                     let Ok(listener) = TcpListener::from_std(listener) else {
                         return;
                     };
-                    run(
-                        listener,
-                        credentials,
-                        controller,
-                        transforms,
-                        slots,
-                        reporter,
-                        receiver,
-                    )
-                    .await;
+                    run(listener, credentials, upstream, receiver).await;
                 });
             })
             .map_err(|_| NetworkError::BridgeUnavailable)?;
@@ -119,10 +127,7 @@ impl Bridge {
 async fn run(
     listener: TcpListener,
     credentials: Arc<Vec<(Role, Zeroizing<String>)>>,
-    controller: Controller,
-    transforms: Arc<Semaphore>,
-    slots: Arc<Semaphore>,
-    reporter: FailureReporter,
+    upstream: Upstream,
     mut stop: oneshot::Receiver<()>,
 ) {
     let (closed, _) = watch::channel(false);
@@ -137,19 +142,17 @@ async fn run(
         if !source.ip().is_loopback() {
             continue;
         }
-        let Ok(slot) = slots.clone().try_acquire_owned() else {
+        let Ok(slot) = upstream.slots.clone().try_acquire_owned() else {
             continue;
         };
         let credentials = credentials.clone();
-        let controller = controller.clone();
-        let transforms = transforms.clone();
-        let reporter = reporter.clone();
+        let upstream = upstream.clone();
         let mut closing = closed.subscribe();
         tokio::spawn(async move {
             let _slot = slot;
             tokio::select! {
                 _ = closing.changed() => {},
-                _ = tunnel(client, &credentials, &controller, transforms, reporter) => {},
+                _ = tunnel(client, &credentials, &upstream) => {},
             }
         });
     }
@@ -159,9 +162,7 @@ async fn run(
 async fn tunnel(
     mut client: TcpStream,
     credentials: &[(Role, Zeroizing<String>)],
-    controller: &Controller,
-    transforms: Arc<Semaphore>,
-    reporter: FailureReporter,
+    upstream: &Upstream,
 ) {
     let headers = tokio::time::timeout(HEADER_TIMEOUT, read_headers(&mut client)).await;
     let Ok(Ok(headers)) = headers else {
@@ -185,28 +186,44 @@ async fn tunnel(
         return;
     }
     let mut failed_address = None;
-    let (server, address) = match dial_public(&host, port, &mut failed_address).await {
+    let connected = if let Some(proxy) = &upstream.proxy {
+        crate::proxy::dial(proxy, &host, port)
+            .await
+            .map(|io| (io, None))
+    } else {
+        dial_public(&host, port, &mut failed_address)
+            .await
+            .map(|(io, address)| (Box::new(io) as BoxedIo, Some(address)))
+    };
+    let (server, address) = match connected {
         Ok(connected) => connected,
         Err(error) => {
-            reporter.record(&host, port, role, TlsProfile::Http, error, failed_address);
+            upstream
+                .reporter
+                .record(&host, port, role, TlsProfile::Http, error, failed_address);
             let _ = client
                 .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                 .await;
             return;
         }
     };
-    let family = if address.is_ipv4() {
-        AddressFamily::V4
+    let strategy = if let Some(address) = address {
+        let family = if address.is_ipv4() {
+            AddressFamily::V4
+        } else {
+            AddressFamily::V6
+        };
+        upstream.reporter.connected(&host, port, role, address);
+        if crate::broker::probe_authorized(role, &host) {
+            DiagnosticTarget::new(host, port, role, family, TlsProfile::Http)
+                .ok()
+                .and_then(|target| upstream.controller.strategy_for(&target))
+                .unwrap_or(Strategy::Direct)
+        } else {
+            Strategy::Direct
+        }
     } else {
-        AddressFamily::V6
-    };
-    reporter.connected(&host, port, role, address);
-    let strategy = if crate::broker::probe_authorized(role, &host) {
-        DiagnosticTarget::new(host, port, role, family, TlsProfile::Http)
-            .ok()
-            .and_then(|target| controller.strategy_for(&target))
-            .unwrap_or(Strategy::Direct)
-    } else {
+        upstream.reporter.tunneled(&host, port, role);
         Strategy::Direct
     };
     if client.set_nodelay(true).is_err()
@@ -219,17 +236,17 @@ async fn tunnel(
     }
     // One immutable plan on one upstream. Partial transformed output cannot be
     // rolled back or replayed on another socket.
-    let _ = forward(client, server, strategy, transforms).await;
+    let _ = forward(client, server, strategy, upstream.transforms.clone()).await;
 }
 
-async fn forward(
+async fn forward<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     client: TcpStream,
-    server: TcpStream,
+    server: S,
     strategy: Strategy,
     transforms: Arc<Semaphore>,
 ) -> std::io::Result<()> {
     let (mut client_read, mut client_write) = client.into_split();
-    let (mut server_read, server_write) = server.into_split();
+    let (mut server_read, server_write) = tokio::io::split(server);
     let mut server_write = ShapedStream::with_budget(server_write, strategy, transforms);
     let mut observer = server_write.server_hello_observer();
     let outgoing = async {

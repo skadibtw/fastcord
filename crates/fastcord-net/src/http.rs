@@ -41,7 +41,12 @@ impl HttpBuilder {
             match context.mode() {
                 Mode::Off => inner = inner.dns_resolver(Arc::new(PublicResolver { role })),
                 Mode::Auto => inner = inner.proxy(context.bridge_proxy(role)?),
-                Mode::Proxy => return Err(NetworkError::ProxyRefused),
+                Mode::Proxy => {
+                    if context.proxy_config().is_none() {
+                        return Err(NetworkError::ProxyConfiguration);
+                    }
+                    inner = inner.proxy(context.bridge_proxy(role)?);
+                }
             }
         }
         Ok(Self {
@@ -56,6 +61,12 @@ impl HttpBuilder {
     pub fn default_headers(mut self, headers: HeaderMap) -> Self {
         self.invalid_headers |= !allowed_headers(self.role, &headers);
         self.inner = self.inner.default_headers(headers);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_tls(mut self, config: tokio_rustls::rustls::ClientConfig) -> Self {
+        self.inner = self.inner.use_preconfigured_tls(config);
         self
     }
 
@@ -187,8 +198,10 @@ impl HttpClient {
         let result = self.inner.execute(request).await.map_err(|raw| {
             let mut error = HttpError::from(raw);
             if error.is_connect()
-                && self.context.mode() == Mode::Auto
-                && let Some(category) = self.context.pending_failure(&host, port, self.role)
+                && self.context.mode() != Mode::Off
+                && let Some(category) =
+                    self.context
+                        .recent_failure(&host, port, self.role, before_connection)
             {
                 error.category = category;
             } else if error.is_connect()
@@ -318,6 +331,16 @@ impl From<reqwest::Error> for HttpError {
                 break;
             }
             if let Some(io) = inner.downcast_ref::<std::io::Error>() {
+                // std::io::Error's source chain does not always expose its
+                // contained rustls error. Inspect the typed payload directly;
+                // never infer certificate failures from an error string.
+                if io
+                    .get_ref()
+                    .is_some_and(|error| error.is::<tokio_rustls::rustls::Error>())
+                {
+                    category = crate::broker::tls_error(io);
+                    break;
+                }
                 category = crate::broker::tcp_error(io);
             }
             if let Some(net) = inner.downcast_ref::<NetworkError>() {

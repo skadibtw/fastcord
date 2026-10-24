@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add user-configured HTTP/HTTPS CONNECT and SOCKS5 TCP routing for every HTTP
+  and WebSocket role (M93), remote destination DNS, endpoint-bound native proxy
+  passwords, categorical failures and a pre-join TCP-only media explanation.
+  Routing never silently falls back to direct; live proxy interoperability gates
+  remain pending.
+
 - Add an application-scoped socket/HTTP boundary, private authenticated CONNECT
   bridge and bounded TLS recovery catalog/selection (M92), network preferences
   and Windows network-change hints, preserving account and write retry limits.

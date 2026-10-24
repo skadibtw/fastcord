@@ -61,3 +61,43 @@ The app-managed buffer bound is an explicit code budget: shared 32 tunnel slots,
 stages, 16 remembered connection endpoints and bounded selector/settings state.
 Kernel socket buffers and existing HTTP/TLS allocations are outside that budget
 and must be reported separately in a resource measurement.
+
+## M93: user-configured TCP proxy
+
+Windows offline evidence, 2026-10-24:
+
+- HTTP CONNECT and SOCKS5 fixtures check authenticated/unauthenticated transport,
+  remote destination DNS (deliberately unresolvable origin names), fragmented
+  replies, IPv4/IPv6 origin address encodings, negotiation bounds, EOF, cancellation,
+  refusals and unavailable-proxy behavior. An origin listener sees no connection
+  when the selected proxy is unavailable.
+- A shared-factory fixture exercises all nine HTTP roles and four WS roles:
+  exactly 13 CONNECT requests reach the configured proxy, origin-token/private-
+  bridge credentials never enter upstream proxy headers, and probe dials stay zero.
+- Actual HTTPS-proxy TLS rejects an untrusted proxy certificate. Trusted local
+  fixture TLS carries separately verified origin TLS and h2 ALPN. Real reqwest
+  HTTP/2, uploaded PUT bytes and a non-followed 302 cross the private bridge and
+  selected upstream proxy. Negative HTTP/WS origin-certificate fixtures reject
+  a self-signed origin with CertificateRejected, without a shaping campaign.
+- Positive HTTP CONNECT, HTTPS CONNECT and SOCKS5 fixtures complete a real
+  RFC 6455 Upgrade and receive Gateway HELLO after verified origin TLS/ALPN;
+  proxy credentials do not reach the origin, and no Identify/token is sent.
+- Five native-store mock tests cover independent endpoint-bound slots, separate
+  account namespace, empty/oversized passwords, overwrite/delete, locked-store
+  failure and redaction. The credential key includes kind/host/port/username;
+  network-settings.json contains no password.
+- App tests verify the pre-join explanation precedes voice-state/ring intent and
+  that password UI messages redact a canary. The real Windows proxy settings
+  screen was built, launched and visually inspected in the offline preview.
+- Workspace Clippy passes with warnings denied. App/native-store suites passed
+  (822/62 tests respectively, existing hardware/live tests ignored). Final net
+  counts are recorded by the test command; the proxy subset passes with one
+  explicit Windows-only ignored IPv6 proxy-listener gate.
+
+This Windows host refuses outgoing ::1 sockets with error 10013 even outside the
+restricted process (also checked independently with native TCP). The actual IPv6
+proxy-listener fixture is explicitly ignored on Windows; IPv6 destination ATYP4
+through an IPv4 proxy remains an active passing fixture. Re-run the ignored test
+on an unrestricted IPv6 host. Authenticated Windows login/Gateway/CDN/upload
+through real configured proxies, and blocked-direct real-network A/B, remain
+manual acceptance gates. SOCKS5 UDP has not been implemented in M93.

@@ -23,6 +23,10 @@ use keyring_core::{CredentialStore, Entry};
 use zeroize::{Zeroize, Zeroizing};
 
 const SERVICE: &str = "fastcord";
+const PROXY_SERVICE: &str = "fastcord-proxy";
+/// Apply a portable one-byte length cap. An empty stored password is distinct
+/// from a missing credential and permits HTTP Basic's empty-password case.
+pub const MAX_PROXY_PASSWORD_BYTES: usize = 255;
 
 /// The user's primary locale as a BCP 47 tag (for example `en-US`), reported in
 /// the Gateway client profile. Falls back to `en-US` when the OS reports none
@@ -321,6 +325,64 @@ impl NativeCredentialStore {
         }
     }
 
+    /// Loads the proxy password bound to the selected configuration's 64-digit
+    /// lowercase SHA-256 key, in a native namespace separate from every
+    /// Discord account. Endpoint-bound entries prevent a failed settings save
+    /// from offering a new proxy's password to the previous proxy on restart.
+    /// Worker-thread only;
+    /// fake mode must not call this or any other native proxy-store method.
+    pub fn load_proxy_password(&self, key: &str) -> Result<Option<StoredCredential>, StoreError> {
+        let _guard = self.access.lock().map_err(|_| StoreError::Unavailable)?;
+        match self.proxy_entry(key)?.get_password() {
+            Ok(secret) => {
+                let secret = Zeroizing::new(secret);
+                if !valid_proxy_password(&secret) {
+                    return Err(StoreError::InvalidCredential);
+                }
+                Ok(Some(StoredCredential(secret)))
+            }
+            Err(keyring_core::Error::NoEntry) => Ok(None),
+            Err(error) => Err(store_error(error)),
+        }
+    }
+
+    /// Saves only to the selected native backend; a refused write never falls
+    /// back to network-settings.json or another plaintext location. The caller
+    /// owns and zeroizes the input; neither the password nor backend details
+    /// can be formatted through this API's return values.
+    pub fn save_proxy_password(&self, key: &str, password: &str) -> Result<(), StoreError> {
+        if !valid_proxy_password(password) {
+            return Err(StoreError::InvalidCredential);
+        }
+        let _guard = self.access.lock().map_err(|_| StoreError::Unavailable)?;
+        self.proxy_entry(key)?
+            .set_password(password)
+            .map_err(store_error)
+    }
+
+    /// Idempotent and unrelated to account logout. Removing the proxy password
+    /// never removes a Discord token or changes account discovery metadata.
+    pub fn delete_proxy_password(&self, key: &str) -> Result<(), StoreError> {
+        let _guard = self.access.lock().map_err(|_| StoreError::Unavailable)?;
+        match self.proxy_entry(key)?.delete_credential() {
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+            Err(error) => Err(store_error(error)),
+        }
+    }
+
+    fn proxy_entry(&self, key: &str) -> Result<Entry, StoreError> {
+        if key.len() != 64
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(StoreError::InvalidCredential);
+        }
+        self.inner
+            .build(PROXY_SERVICE, key, None)
+            .map_err(store_error)
+    }
+
     fn entry(&self, account: Snowflake) -> Result<Entry, StoreError> {
         if account.0 == 0 {
             return Err(StoreError::InvalidCredential);
@@ -331,9 +393,26 @@ impl NativeCredentialStore {
     }
 }
 
+fn valid_proxy_password(password: &str) -> bool {
+    password.len() <= MAX_PROXY_PASSWORD_BYTES
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_PROXY_KEY: &str = concat!(
+        "0123456789abcdef",
+        "0123456789abcdef",
+        "0123456789abcdef",
+        "0123456789abcdef"
+    );
+    const OTHER_PROXY_KEY: &str = concat!(
+        "abcdef0123456789",
+        "abcdef0123456789",
+        "abcdef0123456789",
+        "abcdef0123456789"
+    );
 
     #[test]
     fn only_passive_media_and_documents_are_opened_everything_else_is_refused() {
@@ -552,6 +631,247 @@ mod tests {
             assert!(!format!("{error:?} {error}").contains("secret-context"));
         }
         assert_eq!(format!("{:?}", mock_store()), "NativeCredentialStore");
+    }
+
+    #[test]
+    fn proxy_password_uses_its_own_namespace_without_appearing_as_an_account() {
+        let store = mock_store();
+        let account = Snowflake(123);
+        store.save(account, "dummy-account-token").unwrap();
+        assert!(store.load_proxy_password(TEST_PROXY_KEY).unwrap().is_none());
+        store
+            .save_proxy_password(TEST_PROXY_KEY, "dummy-proxy-password")
+            .unwrap();
+        let proxy_entry = store.proxy_entry(TEST_PROXY_KEY).unwrap();
+        assert_eq!(
+            proxy_entry.get_specifiers(),
+            Some((PROXY_SERVICE.to_owned(), TEST_PROXY_KEY.to_owned()))
+        );
+        assert_eq!(store.accounts().unwrap(), [account]);
+        let loaded = store
+            .clone()
+            .load_proxy_password(TEST_PROXY_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(format!("{loaded:?}"), "StoredCredential([REDACTED])");
+        assert!(loaded.into_secret().as_str() == "dummy-proxy-password");
+        assert!(
+            store.load(account).unwrap().unwrap().into_secret().as_str() == "dummy-account-token"
+        );
+        store
+            .save_proxy_password(TEST_PROXY_KEY, "replacement-proxy-password")
+            .unwrap();
+        assert!(
+            store
+                .load_proxy_password(TEST_PROXY_KEY)
+                .unwrap()
+                .unwrap()
+                .into_secret()
+                .as_str()
+                == "replacement-proxy-password"
+        );
+        store.delete_proxy_password(TEST_PROXY_KEY).unwrap();
+        store.delete_proxy_password(TEST_PROXY_KEY).unwrap();
+        assert!(store.load_proxy_password(TEST_PROXY_KEY).unwrap().is_none());
+        assert_eq!(store.accounts().unwrap(), [account]);
+        assert!(store.load(account).unwrap().is_some());
+    }
+
+    #[test]
+    fn account_logout_and_other_native_services_do_not_change_the_proxy_password() {
+        let store = mock_store();
+        store
+            .inner
+            .build("fastcord-other-proxy", TEST_PROXY_KEY, None)
+            .unwrap()
+            .set_password("other-service-password")
+            .unwrap();
+        store
+            .inner
+            .build(PROXY_SERVICE, "other-entry", None)
+            .unwrap()
+            .set_password("other-entry-password")
+            .unwrap();
+        store.save(Snowflake(1), "dummy-account-token").unwrap();
+        store
+            .save_proxy_password(TEST_PROXY_KEY, "dummy-proxy-password")
+            .unwrap();
+        store.delete(Snowflake(1)).unwrap();
+        assert!(store.load(Snowflake(1)).unwrap().is_none());
+        assert!(
+            store
+                .load_proxy_password(TEST_PROXY_KEY)
+                .unwrap()
+                .unwrap()
+                .into_secret()
+                .as_str()
+                == "dummy-proxy-password"
+        );
+        store.delete_proxy_password(TEST_PROXY_KEY).unwrap();
+        assert!(
+            store
+                .inner
+                .build("fastcord-other-proxy", TEST_PROXY_KEY, None)
+                .unwrap()
+                .get_password()
+                .unwrap()
+                == "other-service-password"
+        );
+        assert!(
+            store
+                .inner
+                .build(PROXY_SERVICE, "other-entry", None)
+                .unwrap()
+                .get_password()
+                .unwrap()
+                == "other-entry-password"
+        );
+    }
+
+    #[test]
+    fn proxy_password_byte_limit_is_checked_on_save_and_native_load() {
+        let store = mock_store();
+        store.save_proxy_password(TEST_PROXY_KEY, "").unwrap();
+        assert!(
+            store
+                .load_proxy_password(TEST_PROXY_KEY)
+                .unwrap()
+                .unwrap()
+                .into_secret()
+                .is_empty()
+        );
+        assert_eq!(
+            store.save_proxy_password(TEST_PROXY_KEY, &"x".repeat(256)),
+            Err(StoreError::InvalidCredential)
+        );
+        // Limits are bytes, rather than Unicode scalar/character counts.
+        assert_eq!(
+            store.save_proxy_password(TEST_PROXY_KEY, &"é".repeat(128)),
+            Err(StoreError::InvalidCredential)
+        );
+        let largest = format!("{}x", "é".repeat(127));
+        assert_eq!(largest.len(), 255);
+        store.save_proxy_password(TEST_PROXY_KEY, &largest).unwrap();
+        assert!(
+            store
+                .load_proxy_password(TEST_PROXY_KEY)
+                .unwrap()
+                .unwrap()
+                .into_secret()
+                .as_str()
+                == largest
+        );
+        for invalid in ["x".repeat(256), "é".repeat(128)] {
+            store
+                .proxy_entry(TEST_PROXY_KEY)
+                .unwrap()
+                .set_password(&invalid)
+                .unwrap();
+            assert!(matches!(
+                store.load_proxy_password(TEST_PROXY_KEY),
+                Err(StoreError::InvalidCredential)
+            ));
+        }
+    }
+
+    #[test]
+    fn proxy_password_slots_are_endpoint_bound_and_reject_unbound_keys() {
+        let store = mock_store();
+        store
+            .save_proxy_password(TEST_PROXY_KEY, "first-proxy-password")
+            .unwrap();
+        store
+            .save_proxy_password(OTHER_PROXY_KEY, "second-proxy-password")
+            .unwrap();
+        assert!(
+            store
+                .load_proxy_password(TEST_PROXY_KEY)
+                .unwrap()
+                .unwrap()
+                .into_secret()
+                .as_str()
+                == "first-proxy-password"
+        );
+        assert!(
+            store
+                .load_proxy_password(OTHER_PROXY_KEY)
+                .unwrap()
+                .unwrap()
+                .into_secret()
+                .as_str()
+                == "second-proxy-password"
+        );
+        store.delete_proxy_password(TEST_PROXY_KEY).unwrap();
+        assert!(store.load_proxy_password(TEST_PROXY_KEY).unwrap().is_none());
+        assert!(
+            store
+                .load_proxy_password(OTHER_PROXY_KEY)
+                .unwrap()
+                .is_some()
+        );
+        assert!(store.accounts().unwrap().is_empty());
+        for invalid in [
+            "",
+            "default",
+            "123",
+            "proxy.example:1080",
+            &"A".repeat(64),
+            &"a".repeat(63),
+            &"a".repeat(65),
+        ] {
+            assert_eq!(
+                store.save_proxy_password(invalid, "canary-proxy-password"),
+                Err(StoreError::InvalidCredential)
+            );
+            assert!(matches!(
+                store.load_proxy_password(invalid),
+                Err(StoreError::InvalidCredential)
+            ));
+            assert_eq!(
+                store.delete_proxy_password(invalid),
+                Err(StoreError::InvalidCredential)
+            );
+        }
+    }
+
+    #[test]
+    fn locked_proxy_store_refuses_save_load_and_delete_without_fallback() {
+        let store = mock_store();
+        let entry = store.proxy_entry(TEST_PROXY_KEY).unwrap();
+        let mock = entry
+            .as_any()
+            .downcast_ref::<keyring_core::mock::Cred>()
+            .unwrap();
+        let locked = || {
+            keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other(
+                "canary-proxy-secret-context",
+            )))
+        };
+        mock.set_error(locked());
+        assert_eq!(
+            store.save_proxy_password(TEST_PROXY_KEY, "dummy-proxy-password"),
+            Err(StoreError::Locked)
+        );
+        assert!(store.load_proxy_password(TEST_PROXY_KEY).unwrap().is_none());
+        store
+            .save_proxy_password(TEST_PROXY_KEY, "dummy-proxy-password")
+            .unwrap();
+        mock.set_error(locked());
+        let error = store.load_proxy_password(TEST_PROXY_KEY).unwrap_err();
+        assert_eq!(error, StoreError::Locked);
+        assert!(!format!("{error:?} {error}").contains("canary"));
+        mock.set_error(locked());
+        assert_eq!(
+            store.delete_proxy_password(TEST_PROXY_KEY),
+            Err(StoreError::Locked)
+        );
+        assert!(store.load_proxy_password(TEST_PROXY_KEY).unwrap().is_some());
+        mock.set_error(keyring_core::Error::BadEncoding(
+            b"canary-invalid-proxy-password".to_vec(),
+        ));
+        let error = store.load_proxy_password(TEST_PROXY_KEY).unwrap_err();
+        assert_eq!(error, StoreError::InvalidCredential);
+        assert!(!format!("{error:?} {error}").contains("canary"));
     }
 
     /// Manual only: operates on a separate test service, never a real account.

@@ -468,7 +468,7 @@ enum Message {
     AudioDevicesListed(audio_devices::Inventory),
     Initialized(
         audio_devices::Preferences,
-        fastcord_net::settings::Settings,
+        Box<network_ui::Loaded>,
         Result<StoreReady, StoreError>,
     ),
     Network(network_ui::Action),
@@ -682,7 +682,9 @@ impl App {
                         login::initialize_store().await,
                     )
                 },
-                |(preferences, network, store)| Message::Initialized(preferences, network, store),
+                |(preferences, network, store)| {
+                    Message::Initialized(preferences, Box::new(network), store)
+                },
             ),
         )
     }
@@ -1240,6 +1242,17 @@ impl App {
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
+        if matches!(
+            message,
+            Message::JoinVoice(..) | Message::StartCall(_) | Message::AcceptCall(_)
+        ) && self.network.mode() == fastcord_net::settings::Mode::Proxy
+        {
+            self.network_settings.open = true;
+            self.network_settings.notice = Some(
+                "This proxy configuration carries TCP only. Voice, camera and screen sharing require a UDP-capable relay; no direct media connection was opened.",
+            );
+            return Task::none();
+        }
         match message {
             Message::NetworkProgress => {}
             Message::NetworkChanged => {
@@ -1273,6 +1286,84 @@ impl App {
                         );
                     }
                 }
+                network_ui::Action::ProxyKind(kind) => {
+                    if matches!(self.phase, Phase::Login) {
+                        self.network_settings.proxy_kind = Some(kind);
+                    }
+                }
+                network_ui::Action::ProxyHost(value) => {
+                    if matches!(self.phase, Phase::Login) && value.len() <= 253 {
+                        self.network_settings.proxy_host = value;
+                    }
+                }
+                network_ui::Action::ProxyPort(value) => {
+                    if matches!(self.phase, Phase::Login) && value.len() <= 5 {
+                        self.network_settings.proxy_port = value;
+                    }
+                }
+                network_ui::Action::ProxyUsername(value) => {
+                    if matches!(self.phase, Phase::Login) && value.len() <= 255 {
+                        self.network_settings.proxy_username = value;
+                    }
+                }
+                network_ui::Action::ProxyPassword(value) => {
+                    if matches!(self.phase, Phase::Login) && value.expose_secret().len() <= 255 {
+                        self.network_settings.proxy_password = Some(value);
+                    }
+                }
+                network_ui::Action::ApplyProxy => {
+                    if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                        let config = match self.network_settings.proxy_config() {
+                            Ok(config) => config,
+                            Err(error) => {
+                                self.network_settings.notice = Some(error);
+                                return Task::none();
+                            }
+                        };
+                        let password = self
+                            .network_settings
+                            .proxy_password
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(UserToken::new(String::new())));
+                        if self
+                            .network
+                            .with_proxy(
+                                config.clone(),
+                                zeroize::Zeroizing::new(password.expose_secret().to_owned()),
+                            )
+                            .is_err()
+                        {
+                            self.network_settings.notice =
+                                Some("The proxy credentials are invalid.");
+                            return Task::none();
+                        }
+                        let mut settings = self.network_settings.settings.clone();
+                        settings.mode = fastcord_net::settings::Mode::Proxy;
+                        settings.proxy = Some(config);
+                        self.network_settings.saving = true;
+                        return Task::perform(
+                            network_ui::apply_proxy(settings, password),
+                            |result| Message::Network(network_ui::Action::ProxyApplied(result)),
+                        );
+                    }
+                }
+                network_ui::Action::ProxyApplied(result) => {
+                    self.network_settings.saving = false;
+                    match result {
+                        Ok(loaded) => {
+                            self.network.controller().network_changed();
+                            self.network = network_ui::configure(&self.network, &loaded)
+                                .unwrap_or_else(|_| {
+                                    self.network.with_mode(fastcord_net::settings::Mode::Proxy)
+                                });
+                            self.network_settings.apply(&loaded);
+                            self.network_settings.notice = Some(
+                                "Proxy applied. Routing failures will be shown; there is no direct fallback.",
+                            );
+                        }
+                        Err(error) => self.network_settings.notice = Some(error),
+                    }
+                }
                 network_ui::Action::Saved(result) => {
                     self.network_settings.saving = false;
                     self.network_settings.notice =
@@ -1280,8 +1371,14 @@ impl App {
                 }
             },
             Message::Initialized(preferences, network, store) => {
-                self.network = self.network.with_mode(network.mode);
-                self.network_settings.settings = network;
+                self.network =
+                    network_ui::configure(&self.network, &network).unwrap_or_else(|_| {
+                        self.network.with_mode(fastcord_net::settings::Mode::Proxy)
+                    });
+                self.network_settings.apply(&network);
+                if let Some(warning) = network.warning {
+                    self.notice = Some(warning.to_owned());
+                }
                 notify::set_enabled(!preferences.notifications_off);
                 notify::set_previews(!preferences.notification_previews_off);
                 self.soundboard.set_prefs(preferences.soundboard.clone());
@@ -3426,6 +3523,9 @@ impl App {
     }
 
     fn can_login(&self) -> bool {
+        if self.network_settings.saving {
+            return false;
+        }
         self.acknowledged && !self.token.expose_secret().trim().is_empty()
     }
 
@@ -3440,6 +3540,9 @@ impl App {
     }
 
     fn can_password_login(&self) -> bool {
+        if self.network_settings.saving {
+            return false;
+        }
         self.acknowledged
             && !self.password_login.trim().is_empty()
             && !self.password.expose_secret().is_empty()
@@ -3591,6 +3694,9 @@ impl App {
     }
 
     fn start_restore(&mut self, account: Snowflake) -> Task<Message> {
+        if self.network_settings.saving {
+            return Task::none();
+        }
         let Some(store) = self.store.clone() else {
             self.notice = Some(LoginError::Store(StoreError::Unavailable).to_string());
             return Task::none();
@@ -3615,6 +3721,9 @@ impl App {
         )
     }
     fn start_qr(&mut self) -> Task<Message> {
+        if self.network_settings.saving {
+            return Task::none();
+        }
         if fake_mode() {
             self.notice = Some("QR login is not available in fake mode.".to_owned());
             return Task::none();
@@ -6261,6 +6370,39 @@ mod tests {
             persistence,
         ))));
         session
+    }
+
+    #[test]
+    fn tcp_proxy_explains_media_before_any_join_or_ring_intent() {
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        app.network = app.network.with_mode(fastcord_net::settings::Mode::Proxy);
+        for message in [
+            Message::JoinVoice(Snowflake(1), Snowflake(2)),
+            Message::StartCall(Snowflake(3)),
+            Message::AcceptCall(Snowflake(3)),
+        ] {
+            drop(app.update(message));
+            assert!(app.network_settings.open);
+            assert!(app.network_settings.notice.unwrap().contains("TCP only"));
+            let Phase::Account { gateway, .. } = &app.phase else {
+                panic!("account expected")
+            };
+            assert_eq!(
+                gateway.controls.voice_audio_state(),
+                gateway::VoiceAudioState::Idle
+            );
+            assert!(gateway.voice_call.is_none());
+            assert!(gateway.voice_guild.is_none());
+        }
+    }
+
+    #[test]
+    fn proxy_password_ui_messages_are_redacted() {
+        let message = Message::Network(network_ui::Action::ProxyPassword(Arc::new(
+            UserToken::new("proxy-canary-secret".into()),
+        )));
+        assert!(!format!("{message:?}").contains("proxy-canary-secret"));
     }
 
     #[test]

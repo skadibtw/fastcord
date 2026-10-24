@@ -13,6 +13,7 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, crypto, pki_types::ServerName};
 
 use crate::bridge::Bridge;
+use crate::proxy::{ProxyConfig, ProxyCredentials};
 use crate::selector::{
     AddressFamily, Controller, DiagnosticTarget, ProbeOutcome, ProbeRequest, TlsProfile,
 };
@@ -27,6 +28,7 @@ pub type TlsStream = tokio_rustls::client::TlsStream<ShapedStream<BoxedIo>>;
 
 struct Shared {
     mode: Mode,
+    proxy: Option<Arc<ProxyCredentials>>,
     controller: Controller,
     bridge: Mutex<Option<Bridge>>,
     transforms: Arc<Semaphore>,
@@ -51,7 +53,8 @@ struct Connected {
     host: String,
     port: u16,
     role: Role,
-    address: SocketAddr,
+    address: Option<SocketAddr>,
+    failure: Option<NetworkError>,
     generation: u64,
     epoch: u64,
 }
@@ -68,6 +71,19 @@ pub(crate) struct FailureReporter {
 
 impl FailureReporter {
     pub(crate) fn connected(&self, host: &str, port: u16, role: Role, address: SocketAddr) {
+        self.endpoint(host, port, role, Some(address), None);
+    }
+    pub(crate) fn tunneled(&self, host: &str, port: u16, role: Role) {
+        self.endpoint(host, port, role, None, None);
+    }
+    fn endpoint(
+        &self,
+        host: &str,
+        port: u16,
+        role: Role,
+        address: Option<SocketAddr>,
+        failure: Option<NetworkError>,
+    ) {
         if host.len() > 253 {
             return;
         }
@@ -87,6 +103,7 @@ impl FailureReporter {
             port,
             role,
             address,
+            failure,
             generation: self.controller.generation(),
             epoch,
         });
@@ -101,6 +118,7 @@ impl FailureReporter {
         address: Option<SocketAddr>,
     ) {
         self.controller.note_failure(role, error);
+        self.endpoint(host, port, role, address, Some(error));
         if !self.enabled
             || !error.eligible_for_selection()
             || !probe_authorized(role, host)
@@ -151,6 +169,7 @@ impl NetworkContext {
     pub fn new(mode: Mode) -> Self {
         Self(Arc::new(Shared {
             mode,
+            proxy: None,
             controller: Controller::default(),
             bridge: Mutex::new(None),
             transforms: Arc::new(Semaphore::new(4)),
@@ -165,6 +184,7 @@ impl NetworkContext {
     pub fn with_mode(&self, mode: Mode) -> Self {
         Self(Arc::new(Shared {
             mode,
+            proxy: self.0.proxy.clone(),
             controller: self.0.controller.clone(),
             bridge: Mutex::new(None),
             transforms: self.0.transforms.clone(),
@@ -178,6 +198,31 @@ impl NetworkContext {
 
     pub fn mode(&self) -> Mode {
         self.0.mode
+    }
+    pub fn with_proxy(
+        &self,
+        config: ProxyConfig,
+        password: zeroize::Zeroizing<String>,
+    ) -> Result<Self, NetworkError> {
+        let proxy = Arc::new(ProxyCredentials::new(config, password)?);
+        Ok(Self(Arc::new(Shared {
+            mode: Mode::Proxy,
+            proxy: Some(proxy),
+            controller: self.0.controller.clone(),
+            bridge: Mutex::new(None),
+            transforms: self.0.transforms.clone(),
+            tunnels: self.0.tunnels.clone(),
+            pending: self.0.pending.clone(),
+            connected: self.0.connected.clone(),
+            connection_epoch: self.0.connection_epoch.clone(),
+            recovery_gate: self.0.recovery_gate.clone(),
+        })))
+    }
+    pub fn proxy_config(&self) -> Option<&ProxyConfig> {
+        self.0.proxy.as_ref().map(|proxy| &proxy.config)
+    }
+    pub(crate) fn proxy_credentials(&self) -> Option<Arc<ProxyCredentials>> {
+        self.0.proxy.clone()
     }
     pub fn controller(&self) -> &Controller {
         &self.0.controller
@@ -280,23 +325,27 @@ impl NetworkContext {
             .record(host, port, role, profile, error, address);
     }
 
-    pub(crate) fn pending_failure(
+    pub(crate) fn recent_failure(
         &self,
         host: &str,
         port: u16,
         role: Role,
+        after_epoch: u64,
     ) -> Option<NetworkError> {
         self.0
-            .pending
+            .connected
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .filter(|pending| {
-                pending.host.eq_ignore_ascii_case(host)
-                    && pending.port == port
-                    && pending.role == role
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.host.eq_ignore_ascii_case(host)
+                    && entry.port == port
+                    && entry.role == role
+                    && entry.epoch > after_epoch
+                    && entry.generation == self.controller().generation()
             })
-            .map(|pending| pending.failure)
+            .and_then(|entry| entry.failure)
     }
 
     pub(crate) fn connection_epoch(&self) -> u64 {
@@ -321,8 +370,9 @@ impl NetworkContext {
                     && entry.role == role
                     && entry.generation == self.controller().generation()
                     && entry.epoch > after_epoch
+                    && entry.failure.is_none()
             })
-            .map(|entry| entry.address)
+            .and_then(|entry| entry.address)
     }
 
     /// Drives a pending failure before the next production dial. The first
@@ -410,9 +460,6 @@ impl SocketBroker {
         role: Role,
     ) -> Result<TlsStream, NetworkError> {
         authorize(role, host, port)?;
-        if self.0.mode() == Mode::Proxy {
-            return Err(NetworkError::ProxyRefused);
-        }
         self.0.wait_for_recovery().await;
         let mut failed_address = None;
         let result = self
@@ -440,13 +487,24 @@ impl SocketBroker {
         role: Role,
         failed_address: &mut Option<SocketAddr>,
     ) -> Result<TlsStream, NetworkError> {
-        let (tcp, address) = dial_public(host, port, failed_address).await?;
-        *failed_address = Some(address);
-        let strategy = self
-            .0
-            .strategy(host, port, role, address, TlsProfile::WebSocket);
-        let stream =
-            ShapedStream::with_budget(Box::new(tcp) as BoxedIo, strategy, self.0.transforms());
+        let (io, strategy) = if self.0.mode() == Mode::Proxy {
+            let proxy = self
+                .0
+                .proxy_credentials()
+                .ok_or(NetworkError::ProxyConfiguration)?;
+            (
+                crate::proxy::dial(&proxy, host, port).await?,
+                Strategy::Direct,
+            )
+        } else {
+            let (tcp, address) = dial_public(host, port, failed_address).await?;
+            *failed_address = Some(address);
+            let strategy = self
+                .0
+                .strategy(host, port, role, address, TlsProfile::WebSocket);
+            (Box::new(tcp) as BoxedIo, strategy)
+        };
+        let stream = ShapedStream::with_budget(io, strategy, self.0.transforms());
         let config = tls_config(TlsProfile::WebSocket, false)?;
         let name =
             ServerName::try_from(host.to_owned()).map_err(|_| NetworkError::InvalidTarget)?;

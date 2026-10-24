@@ -4,12 +4,14 @@
 mod bridge;
 mod broker;
 mod http;
+pub mod proxy;
 pub mod selector;
 pub mod settings;
 pub mod tls;
 
 pub use broker::{BoxedIo, NetworkContext, SocketBroker, TlsStream};
 pub use http::{HttpBuilder, HttpClient, HttpError, HttpRequestBuilder};
+pub use proxy::{ProxyConfig, ProxyKind};
 use serde::{Deserialize, Serialize};
 
 /// Authorization and TLS profile are attached to a feature, never to a token,
@@ -69,6 +71,12 @@ pub enum NetworkError {
     TlsProtocolRejected,
     WebSocketUpgrade,
     ProxyRefused,
+    ProxyConfiguration,
+    ProxyDns,
+    ProxyTimeout,
+    ProxyCertificateRejected,
+    ProxyAuthentication,
+    ProxyProtocol,
     BudgetExhausted,
     Unsupported,
     BridgeUnavailable,
@@ -98,6 +106,12 @@ impl std::fmt::Display for NetworkError {
             Self::TlsProtocolRejected => "The TLS handshake was rejected.",
             Self::WebSocketUpgrade => "The WebSocket upgrade failed.",
             Self::ProxyRefused => "The configured proxy refused the connection.",
+            Self::ProxyConfiguration => "The proxy configuration is invalid or incomplete.",
+            Self::ProxyDns => "The proxy name could not be resolved.",
+            Self::ProxyTimeout => "The connection to the proxy timed out.",
+            Self::ProxyCertificateRejected => "The HTTPS proxy certificate was rejected.",
+            Self::ProxyAuthentication => "The proxy rejected its login details.",
+            Self::ProxyProtocol => "The proxy returned an invalid response.",
             Self::BudgetExhausted => "The network recovery budget is exhausted.",
             Self::Unsupported => "This network configuration is unsupported.",
             Self::BridgeUnavailable => "The private network bridge is unavailable.",
