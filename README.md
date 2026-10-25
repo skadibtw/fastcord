@@ -14,10 +14,22 @@ The approved delivery order and issue links are in [docs/ROADMAP.md](docs/ROADMA
 Auto uses bounded TLS-only checks of a failed required service and application-local
 TLS splitting. It preserves certificate verification and all account retry limits.
 It changes no system network settings. TCP write boundaries are best effort;
-fragmentation is not universal and blocked-network effectiveness is unverified.
-The current catalog splits TLS records/writes around SNI. It does not implement
-zapret-discord-youtube's packet fake injection, TCP sequence overlap or disorder
-strategies; successful offline transport tests do not establish equivalent bypass.
+fragmentation is not universal and the base splitting catalog has no confirmed
+blocked-network effectiveness.
+
+On Windows x64, **Start packet recovery (administrator prompt)** optionally
+starts a separate WinDivert helper for this session. Confirm UAC manually; the
+ordinary account client stays unprivileged. The helper sees only a bounded public
+TLS ClientHello for a particular fastcord flow. It supports packet fake/disorder
+and sequence overlap inspired by zapret-discord-youtube. The native screen can
+check the public Discord API before sign-in. PacketFake restored API access,
+alt-account validation and Gateway READY on the reported VPN-excluded Windows
+route; that is not a universal bypass or UDP/media claim. Keep the packaged
+`windivert/` folder beside release builds. Start is explicit after each restart;
+Off, Proxy and Stop release the helper. See [the evidence](docs/NETWORK_TESTING.md).
+The base catalog splits TLS records/writes around SNI; it does not implicitly
+enable the optional packet helper. Successful offline transport tests alone do
+not establish blocked-network effectiveness.
 HTTP/HTTPS CONNECT and SOCKS5 send destination names to the selected proxy.
 Origin TLS verification remains on; failures never fall back directly. Proxy
 passwords live in native credential storage, bound to the exact proxy settings.

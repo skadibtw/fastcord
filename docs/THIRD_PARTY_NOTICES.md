@@ -1,5 +1,17 @@
 # Third-party notices
 
+## Optional Windows packet recovery: WinDivert
+
+Windows archives contain the unmodified WinDivert 2.2.2-A x64 DLL and signed
+driver from https://github.com/basil00/WinDivert/releases/tag/v2.2.2, used only
+by the explicitly started administrator helper. This component is distributed
+under **GNU LGPL version 3**, selected from upstream's LGPLv3/GPLv2 dual license.
+The complete terms, including the incorporated GPLv3 text, are shipped in
+`windivert/LICENSE`. Matching upstream source and build scripts are included as
+`windivert/WinDivert-2.2.2-source.zip`; SHA-256 provenance and instructions for
+rebuilding fastcord with a modified ABI-compatible library are in that folder's
+`provenance.json` and `README.md`. fastcord's application source remains MIT.
+
 fastcord itself is GPL-3.0-only (see `LICENSE`). Release archives carry this file as
 `THIRD_PARTY_NOTICES.md`, the generated license texts of every Rust dependency as
 `THIRD_PARTY_CRATES.md`, and the emoji notices under `assets/emoji/`. This file covers the

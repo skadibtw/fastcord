@@ -209,7 +209,7 @@ route evidence when VPN policy applies to fastcord specifically. The successful
 offline tests above therefore do not establish that the implemented recovery
 works on this filtered route. The failure cause beyond timeout is unconfirmed.
 
-The implemented TLS catalog has record/write splitting only. Flowseal's
+At that point the implemented TLS catalog had record/write splitting only. Flowseal's
 [general](https://github.com/Flowseal/zapret-discord-youtube/blob/main/general.bat)
 and [FAKE TLS AUTO](https://github.com/Flowseal/zapret-discord-youtube/blob/main/general%20%28FAKE%20TLS%20AUTO%29.bat)
 include packet fake injection, TCP sequence overlap and/or disorder techniques
@@ -238,3 +238,70 @@ file. The attempt returned the typed API `TcpTimeout`, without an HTTP response.
 It therefore did not establish whether the credential was accepted or rejected.
 No account was persisted and no Gateway was opened. The temporary harness was
 removed and the normal binary rebuilt; the direct-login failure remains open.
+
+## M96: optional Windows packet recovery, 2026-10-25
+
+The user explicitly approved an optional WinDivert mode with administrator UAC.
+Default Auto remains unprivileged and does not start a driver. The same executable
+now has a separate restricted helper entry, authenticated local named-pipe IPC,
+public-hello-only messages, deadlines, cancellation and exact per-hello filters.
+HTTP CONNECT and direct WS use one strategy selection function; authenticated
+requests, protected TLS records and origin certificate verification remain in
+the ordinary process. No credential or response body is logged or saved by
+the diagnostic. No account is persisted by the live check.
+
+Strategy references, inspected on this date:
+
+- Flowseal [general.bat](https://github.com/Flowseal/zapret-discord-youtube/blob/main/general.bat)
+  contains multisplit/sequence-overlap profiles (including 681 for media/Google
+  and 568 in general-list profiles). fastcord's experimental overlap candidate
+  uses 681 at split 1 and midsld; it is not a verbatim copy of that batch file.
+- Flowseal [FAKE TLS AUTO](https://github.com/Flowseal/zapret-discord-youtube/blob/main/general%20%28FAKE%20TLS%20AUTO%29.bat)
+  provides the fake/multidisorder/badseq approach. fastcord generates its own
+  same-size public decoy from its ClientHello, uses six sequence-10000 fakes,
+  then reversed real segments at 1/midsld. No winws binary, batch file or
+  third-party fake TLS/UDP payload is shipped.
+- Native ABI, filtering, checksums and queue constraints follow the
+  [WinDivert 2.2.2 documentation](https://github.com/basil00/WinDivert/blob/v2.2.2/doc/windivert.html).
+  Official unmodified x64 binaries, LGPLv3 terms, corresponding source and
+  SHA-256 provenance are in `crates/fastcord-platform/native/windivert/`.
+
+Live evidence on the reported route:
+
+1. All direct-route tests used the exact workspace
+   `target/debug/fastcord.exe`, which the user excluded from VPN. A differently
+   named test executable was not used as direct-route evidence.
+2. Base Direct/write/record/native-socket experiments did not restore access.
+   The unreliable TransmitFile, urgent-data and TTL prototypes were removed.
+3. An initial UAC attempt from an external PowerShell launcher did not appear;
+   no driver result was claimed. The user then confirmed the real native
+   fastcord button's UAC manually. The first API check exposed an HTTP-bridge
+   selection bug (it still chose Direct); that result was a failure, not packet
+   effectiveness evidence. HTTP and WS now share selection, covered offline.
+4. After the correction, the helper confirmed that **PacketFake** was applied
+   on hardware egress. Anonymous `GET /api/v9/gateway` returned **HTTP 200** and
+   the native UI displayed `API: Service answered`.
+5. A bounded debug-only check received the explicitly supplied alt-account
+   token through a private stdin pipe from a masked prompt. Production
+   `login::validate` succeeded; the production Gateway then delivered **READY**
+   and its closer confirmed a clean shutdown. Only categorical results were
+   printed. This proves the previously failing login and initial Gateway on
+   this route with PacketFake, without a proxy or account persistence.
+
+Offline coverage includes real localhost TLS/ALPN/h2 and application bytes
+through both packet-capability selections (a fixture forwards the original
+hello, without loading a driver), IPv4/IPv6 packet reconstruction with TCP
+options and wrapping sequence numbers, malformed packet rejection, and bounded
+IPC framing/private-address/port checks. These fixtures prove byte preservation
+and routing integration; they do not model an ISP's DPI.
+
+Final Windows validation: `cargo test --workspace --all-targets --locked`
+passed **2,207 tests**, with 52 existing live/hardware/platform gates ignored;
+`cargo clippy --workspace --all-targets --locked -- -D warnings`, formatting,
+the network constructor/dependency audit and regenerated third-party license
+checks passed. A normal debug executable was rebuilt after the live check.
+
+Still open: blocked-route effectiveness of PacketOverlap, a physical independent
+capture, kernel-inclusive resource measurements, CDN/upload breadth and
+thirty-minute bidirectional voice/camera/screen-share tests. The packet helper
+handles TCP TLS only; existing UDP preludes remain unverified and opt-in.

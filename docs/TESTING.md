@@ -932,4 +932,4 @@ Only the groups listed under "On by default" in PROTOCOL.md "Write allowlist" se
 ## Network recovery extension
 
 Implementation, deterministic tests, the Windows UI launch and outstanding live
-gates for M92–M95 are recorded in [NETWORK_TESTING.md](NETWORK_TESTING.md).
+gates for M92–M96 are recorded in [NETWORK_TESTING.md](NETWORK_TESTING.md).

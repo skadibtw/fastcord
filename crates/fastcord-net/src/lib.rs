@@ -7,6 +7,7 @@ mod http;
 pub mod proxy;
 pub mod selector;
 pub mod settings;
+mod socket;
 pub mod tls;
 pub mod udp;
 
@@ -15,6 +16,11 @@ pub use http::{HttpBuilder, HttpClient, HttpError, HttpRequestBuilder};
 pub use proxy::{ProxyConfig, ProxyKind};
 use serde::{Deserialize, Serialize};
 pub use udp::DatagramSocket;
+
+/// Shared public-origin policy, also checked by the optional native helper.
+pub fn is_public_destination(address: std::net::IpAddr) -> bool {
+    broker::public_ip(address)
+}
 
 /// Explicit reservations for the new subsystem. Kernel socket buffers and
 /// existing HTTP/TLS/feature-media allocations require separate measurements.
@@ -25,6 +31,8 @@ pub const MANAGED_BUFFER_RESERVATION_BYTES: usize = bridge::TUNNEL_LIMIT * (2 * 
     // Bounded settings input/serialization and conservative room for control
     // tasks, endpoint/controller metadata and remaining small scratch buffers.
     + 2 * settings::MAX_SETTINGS_BYTES
+    // One helper capture, four bounded public-hello RPCs and pipe buffers.
+    + 192 * 1024
     + 256 * 1024;
 const _: () = assert!(MANAGED_BUFFER_RESERVATION_BYTES <= MANAGED_BUFFER_BUDGET_BYTES);
 

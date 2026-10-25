@@ -179,9 +179,24 @@ fn window_title() -> &'static str {
 }
 
 fn main() -> iced::Result {
+    if std::env::args_os().any(|arg| arg == "--packet-helper") {
+        let args: Vec<_> = std::env::args().collect();
+        if args.len() == 4
+            && args[1] == "--packet-helper"
+            && let Ok(parent) = args[3].parse()
+        {
+            let _ = fastcord_platform::network::packet_helper_entry(&args[2], parent);
+        }
+        return Ok(());
+    }
+    #[cfg(debug_assertions)]
+    if std::env::args_os().any(|arg| arg == "--network-check-login-packet") {
+        network_ui::check_login();
+        return Ok(());
+    }
     #[cfg(debug_assertions)]
     if std::env::args_os().any(|arg| arg == "--network-check") {
-        network_ui::check();
+        network_ui::check(None);
         return Ok(());
     }
     #[cfg(debug_assertions)]
@@ -600,7 +615,7 @@ impl App {
         (
             Self {
                 phase: Phase::Starting,
-                network: fastcord_net::NetworkContext::off(),
+                network: network_ui::new_context(),
                 network_settings: network_ui::State::default(),
                 token: Arc::new(UserToken::new(String::new())),
                 acknowledged: false,
@@ -1264,6 +1279,66 @@ impl App {
                 self.network.controller().network_changed();
             }
             Message::Network(action) => match action {
+                network_ui::Action::PacketStart => {
+                    if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                        self.network_settings.saving = true;
+                        self.network_settings.notice =
+                            Some("Waiting for Windows administrator approval…");
+                        return Task::perform(network_ui::start_packet(), |r| {
+                            Message::Network(network_ui::Action::PacketStarted(r))
+                        });
+                    }
+                }
+                network_ui::Action::PacketStarted(result) => {
+                    self.network_settings.saving = false;
+                    if !matches!(self.phase, Phase::Login) {
+                        self.network_settings.notice =
+                            Some("Sign out before starting packet recovery.");
+                        return Task::none();
+                    }
+                    match result {
+                        Ok(route) => {
+                            self.network_settings.packet_active = true;
+                            self.network_settings.settings.mode =
+                                fastcord_net::settings::Mode::Auto;
+                            self.network.controller().network_changed();
+                            self.network = self
+                                .network
+                                .with_mode(fastcord_net::settings::Mode::Auto)
+                                .with_prefix_factory(route.0);
+                            self.network_settings.saving = true;
+                            self.network_settings.notice =
+                                Some("Packet helper started. Checking the public Discord API…");
+                            return Task::perform(
+                                network_ui::packet_check(self.network.clone()),
+                                |r| Message::Network(network_ui::Action::PacketChecked(r)),
+                            );
+                        }
+                        Err(e) => self.network_settings.notice = Some(e),
+                    }
+                }
+                network_ui::Action::PacketStop => {
+                    if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                        self.network_settings.packet_active = false;
+                        self.network = self.network.without_prefix_factory();
+                        self.network.controller().network_changed();
+                        self.network_settings.notice = Some("Packet recovery stopped.");
+                    }
+                }
+                network_ui::Action::PacketCheck => {
+                    if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                        self.network_settings.saving = true;
+                        self.network_settings.notice = Some("Checking the public Discord API…");
+                        return Task::perform(
+                            network_ui::packet_check(self.network.clone()),
+                            |r| Message::Network(network_ui::Action::PacketChecked(r)),
+                        );
+                    }
+                }
+                network_ui::Action::PacketChecked(result) => {
+                    self.network_settings.saving = false;
+                    self.network_settings.notice = Some(result);
+                }
                 network_ui::Action::Open => self.network_settings.open = true,
                 network_ui::Action::Close => self.network_settings.open = false,
                 network_ui::Action::Retry => {
@@ -1285,6 +1360,10 @@ impl App {
                         self.network.controller().network_changed();
                         self.network_settings.settings.mode = mode;
                         self.network = self.network.with_mode(mode);
+                        if mode != fastcord_net::settings::Mode::Auto {
+                            self.network_settings.packet_active = false;
+                            self.network = self.network.without_prefix_factory();
+                        }
                         return Task::perform(
                             network_ui::save(self.network_settings.settings.clone()),
                             |result| Message::Network(network_ui::Action::Saved(result)),
@@ -1370,6 +1449,8 @@ impl App {
                     self.network_settings.saving = false;
                     match result {
                         Ok(loaded) => {
+                            self.network_settings.packet_active = false;
+                            self.network = self.network.without_prefix_factory();
                             self.network.controller().network_changed();
                             self.network = network_ui::configure(&self.network, &loaded)
                                 .unwrap_or_else(|_| {

@@ -56,6 +56,42 @@ fn parsed(bytes: &[u8]) -> ClientHello {
     hello
 }
 
+struct PlanControl;
+impl PrefixControl for PlanControl {
+    fn close(&self) {}
+}
+
+#[test]
+fn actual_rustls_http_client_hello_has_a_valid_fake_plan() {
+    use crate::selector::TlsProfile;
+    use tokio_rustls::rustls::{ClientConnection, pki_types::ServerName};
+    let mut connection = ClientConnection::new(
+        crate::broker::tls_config(TlsProfile::Http, true).unwrap(),
+        ServerName::try_from("discord.com").unwrap(),
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    connection.write_tls(&mut bytes).unwrap();
+    let info = parsed(&bytes);
+    assert_eq!(
+        &bytes[info.split_at - 1..info.split_at - 1 + 11],
+        b"discord.com"
+    );
+    let (io, _) = ShortIo::new(usize::MAX);
+    let mut stream =
+        ShapedStream::new(io, Strategy::PacketFake).with_control(Arc::new(PlanControl));
+    stream.bytes = bytes;
+    assert!(
+        stream.prepare().is_ok(),
+        "prefix {}, record {:?}, sni {}",
+        info.prefix_end,
+        u16_at(&stream.bytes, 3),
+        info.split_at
+    );
+    assert_eq!(stream.fake_data.len(), info.prefix_end);
+    assert!(stream.fake_data.windows(11).any(|w| w == b"example.com"));
+}
+
 #[test]
 fn exact_sni_position_ignores_opaque_extensions_and_preserves_alpn_and_binders() {
     let original = handshake(b"gateway.discord.gg");
@@ -276,7 +312,7 @@ impl AsyncRead for ShortIo {
 async fn every_write_boundary_short_writes_and_exact_accepted_byte_accounting() {
     let original = handshake(b"gateway.discord.gg");
     let bytes = record(&original);
-    for strategy in Strategy::ORDER {
+    for strategy in Strategy::LEGACY {
         for boundary in 1..bytes.len() {
             let (io, output) = ShortIo::new(3);
             let mut stream = ShapedStream::new(io, strategy);
@@ -340,7 +376,7 @@ async fn write_split_has_one_async_delay_at_the_structural_position() {
 #[tokio::test(start_paused = true)]
 async fn hello_retry_request_compatibility_ccs_then_protected_data() {
     let hello = handshake(b"example.test");
-    for strategy in Strategy::ORDER {
+    for strategy in Strategy::LEGACY {
         let (io, output) = ShortIo::new(7);
         let mut stream = ShapedStream::new(io, strategy);
         let first = record(&hello);
@@ -505,7 +541,7 @@ async fn real_rustls_tls12_tls13_alpn_hrr_and_application_data() {
             if version == &rustls::version::TLS12 && hrr {
                 continue;
             }
-            for strategy in Strategy::ORDER {
+            for strategy in Strategy::LEGACY {
                 let mut roots = RootCertStore::empty();
                 roots.add(certificate.clone()).unwrap();
                 let mut client =
@@ -606,7 +642,7 @@ async fn real_tls12_abbreviated_session_resumption_preserves_encrypted_finished(
     use tokio_rustls::rustls;
 
     let certificate = CertificateDer::from(include_bytes!("fixtures/test-cert.der").to_vec());
-    for strategy in Strategy::ORDER {
+    for strategy in Strategy::LEGACY {
         let mut roots = RootCertStore::empty();
         roots.add(certificate.clone()).unwrap();
         let client = Arc::new(

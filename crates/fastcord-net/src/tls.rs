@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Sleep;
 
-pub const CATALOG_VERSION: u32 = 1;
+pub const CATALOG_VERSION: u32 = 2;
 pub const MAX_CLIENT_HELLO: usize = 32 * 1024;
 /// Raw staging (<64 KiB) plus temporary handshake assembly (32 KiB).
 pub const MAX_STAGING_BYTES: usize = 96 * 1024;
@@ -37,10 +37,21 @@ pub enum Strategy {
     TlsRecordSplit,
     WriteSplit,
     Combined,
+    MultiSplit,
+    PacketFake,
+    PacketOverlap,
 }
 
 impl Strategy {
-    pub const ORDER: [Self; 4] = [
+    pub const ORDER: [Self; 5] = [
+        Self::Direct,
+        Self::TlsRecordSplit,
+        Self::WriteSplit,
+        Self::Combined,
+        Self::MultiSplit,
+    ];
+    #[cfg(test)]
+    pub const LEGACY: [Self; 4] = [
         Self::Direct,
         Self::TlsRecordSplit,
         Self::WriteSplit,
@@ -71,6 +82,7 @@ pub enum ParseError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClientHello {
     pub split_at: usize,
+    pub sni_mid: usize,
     pub record_start: usize,
     pub record_end: usize,
     pub prefix_end: usize,
@@ -138,11 +150,12 @@ pub fn inspect_client_hello(records: &[u8]) -> Result<Inspection, ParseError> {
                 expected = Some(total);
             }
             if expected == Some(hello.len()) {
-                let logical_split = sni_split(&hello)?;
+                let (logical_split, middle) = sni_split(&hello)?;
                 let (record_start, split_at, record_end) =
                     locate(records, logical_split).ok_or(ParseError::InvalidRecord)?;
                 return Ok(Inspection::ClientHello(ClientHello {
                     split_at,
+                    sni_mid: locate(records, middle).ok_or(ParseError::InvalidRecord)?.1,
                     record_start,
                     record_end,
                     prefix_end: end,
@@ -167,7 +180,7 @@ fn locate(records: &[u8], mut logical_offset: usize) -> Option<(usize, usize, us
     }
 }
 
-fn sni_split(hello: &[u8]) -> Result<usize, ParseError> {
+fn sni_split(hello: &[u8]) -> Result<(usize, usize), ParseError> {
     let invalid = ParseError::InvalidHandshake;
     // Handshake header, legacy_version and random.
     let mut offset = 4 + 2 + 32;
@@ -219,7 +232,18 @@ fn sni_split(hello: &[u8]) -> Result<usize, ParseError> {
                     if bytes.is_empty() || bytes.len() > 253 || host.is_some() {
                         return Err(ParseError::InvalidSni);
                     }
-                    host = Some(offset + name + 1);
+                    // Middle of the second-last DNS label (midsld), without
+                    // changing or retaining the hostname outside this parse.
+                    let end = bytes
+                        .iter()
+                        .rposition(|b| *b == b'.')
+                        .unwrap_or(bytes.len());
+                    let start = bytes[..end]
+                        .iter()
+                        .rposition(|b| *b == b'.')
+                        .map_or(0, |i| i + 1);
+                    let middle = (start + (end - start).div_ceil(2)).clamp(1, bytes.len());
+                    host = Some((offset + name + 1, offset + name + middle));
                 }
                 name += length;
             }
@@ -366,13 +390,55 @@ impl ServerHelloObserver {
     }
 }
 
-/// Bounded TLS-prefix writer. Set TCP_NODELAY on the underlying socket first.
-///
-/// A complete plaintext ClientHello is staged before emitting any modification.
-/// A caller forcing a read/flush in the middle of that prefix gets transparent
-/// delivery before shaping has started, or a terminal error after it has. It
-/// never waits forever for the caller to provide bytes while that caller is
-/// awaiting a flush/read, and never rolls back a transformed prefix.
+/// A capability for one already-connected, application-owned socket. Public
+/// sends account for their physical bytes in the same probe budget as writes.
+pub trait PrefixControl: Send + Sync {
+    fn close(&self);
+    fn start_fake(
+        &self,
+        _original: Vec<u8>,
+        _fake: Vec<u8>,
+        _strategy: Strategy,
+    ) -> io::Result<PrefixFuture> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+pub type PrefixFuture = Pin<Box<dyn Future<Output = io::Result<usize>> + Send>>;
+pub trait FakePrefixFactory: Send + Sync {
+    fn strategy(&self) -> Strategy {
+        Strategy::PacketFake
+    }
+    fn select_strategy(&self, _strategy: Strategy) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    fn start(
+        &self,
+        socket: std::net::TcpStream,
+        original: Vec<u8>,
+        fake: Vec<u8>,
+        strategy: Strategy,
+    ) -> io::Result<PrefixFuture>;
+}
+
+#[derive(Clone, Copy, Default)]
+enum SendMode {
+    #[default]
+    Ordinary,
+    Fake,
+}
+#[derive(Clone, Copy, Default)]
+struct Step {
+    end: usize,
+    mode: SendMode,
+    pause: bool,
+}
+impl Step {
+    fn new(end: usize, mode: SendMode, pause: bool) -> Self {
+        Self { end, mode, pause }
+    }
+}
+
 pub struct ShapedStream<S> {
     inner: S,
     strategy: Strategy,
@@ -380,9 +446,13 @@ pub struct ShapedStream<S> {
     bytes: Vec<u8>,
     end: usize,
     written: usize,
-    split: Option<usize>,
+    steps: [Step; 4],
+    step_count: usize,
+    step_index: usize,
+    control: Option<Arc<dyn PrefixControl>>,
+    fake: Option<PrefixFuture>,
+    fake_data: Vec<u8>,
     delay: Option<Pin<Box<Sleep>>>,
-    delayed: bool,
     hellos: u8,
     transformed: bool,
     budget: Option<Arc<Semaphore>>,
@@ -407,9 +477,13 @@ impl<S> ShapedStream<S> {
             bytes: Vec::new(),
             end: 0,
             written: 0,
-            split: None,
+            steps: [Step::default(); 4],
+            step_count: 0,
+            step_index: 0,
+            control: None,
+            fake: None,
+            fake_data: Vec::new(),
             delay: None,
-            delayed: false,
             hellos: 0,
             transformed: false,
             budget: None,
@@ -425,6 +499,11 @@ impl<S> ShapedStream<S> {
         let mut stream = Self::new(inner, strategy);
         stream.budget = Some(budget);
         stream
+    }
+
+    pub fn with_control(mut self, control: Arc<dyn PrefixControl>) -> Self {
+        self.control = Some(control);
+        self
     }
 
     pub fn get_ref(&self) -> &S {
@@ -451,7 +530,10 @@ impl<S> ShapedStream<S> {
         self.bytes = Vec::new();
         self.end = 0;
         self.written = 0;
-        self.split = None;
+        self.step_count = 0;
+        self.step_index = 0;
+        self.fake = None;
+        self.fake_data = Vec::new();
         self.delay = None;
         self.acquiring = None;
         self.permit = None;
@@ -526,9 +608,7 @@ impl<S> ShapedStream<S> {
                         return self.unsupported();
                     }
                     self.end = hello.prefix_end + self.bytes.len() - old_len;
-                    if self.strategy.write_split() {
-                        self.split = Some(hello.split_at);
-                    }
+                    self.plan(hello)?;
                     self.transformed = true;
                     self.hellos += 1;
                     if self.hellos == 2 {
@@ -538,6 +618,58 @@ impl<S> ShapedStream<S> {
                 Err(_) => return self.unsupported(),
             },
             _ => return self.unsupported(),
+        }
+        Ok(())
+    }
+
+    fn plan(&mut self, hello: ClientHello) -> io::Result<()> {
+        use SendMode::{Fake, Ordinary};
+        if matches!(
+            self.strategy,
+            Strategy::PacketFake | Strategy::PacketOverlap
+        ) && self.control.is_none()
+        {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        let first = hello.split_at;
+        if self.strategy.write_split() {
+            self.steps[..2].copy_from_slice(&[
+                Step::new(first, Ordinary, true),
+                Step::new(self.end, Ordinary, false),
+            ]);
+            self.step_count = 2;
+        }
+        match self.strategy {
+            Strategy::PacketFake | Strategy::PacketOverlap => {
+                if self.end > 1024 || u16_at(&self.bytes, 3).map(|n| n + 5) != Some(self.end) {
+                    return Err(io::ErrorKind::Unsupported.into());
+                }
+                self.fake_data = self.bytes[..self.end].to_vec();
+                let start = first - 1;
+                let length = u16_at(&self.bytes, start - 2).ok_or(io::ErrorKind::InvalidData)?;
+                if length == 0 || start + length > self.end {
+                    return Err(io::ErrorKind::Unsupported.into());
+                }
+                self.fake_data[start..start + length].fill(b'a');
+                if length >= 11 {
+                    self.fake_data[start + length - 11..start + length]
+                        .copy_from_slice(b"example.com");
+                }
+                if length > 11 {
+                    self.fake_data[start + length - 12] = b'.';
+                }
+                self.steps[0] = Step::new(self.end, Fake, false);
+                self.step_count = 1;
+            }
+            Strategy::MultiSplit => {
+                self.steps[..3].copy_from_slice(&[
+                    Step::new(1, Ordinary, true),
+                    Step::new(hello.sni_mid, Ordinary, true),
+                    Step::new(self.end, Ordinary, false),
+                ]);
+                self.step_count = 3;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -564,22 +696,55 @@ impl<S: AsyncWrite + Unpin> ShapedStream<S> {
                 return Poll::Ready(Ok(()));
             }
             while self.written < self.end {
-                let mut end = self.end;
-                if let Some(split) = self.split.filter(|_| !self.delayed) {
-                    if self.written < split {
-                        end = split;
+                let step = if self.step_index < self.step_count {
+                    self.steps[self.step_index]
+                } else {
+                    Step::new(self.end, SendMode::Ordinary, false)
+                };
+                let wrote = if self.written < step.end {
+                    let bytes = &self.bytes[self.written..step.end];
+                    if matches!(step.mode, SendMode::Fake) {
+                        if self.fake.is_none() {
+                            let control =
+                                self.control.as_ref().ok_or(io::ErrorKind::Unsupported)?;
+                            self.fake = Some(control.start_fake(
+                                bytes.to_vec(),
+                                std::mem::take(&mut self.fake_data),
+                                self.strategy,
+                            )?);
+                        }
+                        let result = std::task::ready!(
+                            self.fake
+                                .as_mut()
+                                .ok_or(io::ErrorKind::InvalidData)?
+                                .as_mut()
+                                .poll(cx)
+                        )?;
+                        self.fake = None;
+                        if result != bytes.len() {
+                            if let Some(control) = &self.control {
+                                control.close();
+                            }
+                            return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+                        }
+                        result
                     } else {
+                        std::task::ready!(Pin::new(&mut self.inner).poll_write(cx, bytes))?
+                    }
+                } else {
+                    0
+                };
+                if self.written == step.end {
+                    if step.pause {
                         let delay = self
                             .delay
                             .get_or_insert_with(|| Box::pin(tokio::time::sleep(WRITE_DELAY)));
                         std::task::ready!(delay.as_mut().poll(cx));
                         self.delay = None;
-                        self.delayed = true;
                     }
+                    self.step_index += 1;
+                    continue;
                 }
-                let wrote = std::task::ready!(
-                    Pin::new(&mut self.inner).poll_write(cx, &self.bytes[self.written..end])
-                )?;
                 if wrote == 0 {
                     return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
                 }
@@ -588,8 +753,8 @@ impl<S: AsyncWrite + Unpin> ShapedStream<S> {
             self.bytes.drain(..self.end);
             self.end = 0;
             self.written = 0;
-            self.split = None;
-            self.delayed = false;
+            self.step_count = 0;
+            self.step_index = 0;
             if self.bytes.is_empty() {
                 // A healthy idle connection retains no shaping allocation.
                 self.bytes = Vec::new();

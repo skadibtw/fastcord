@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 
 use crate::broker::{BoxedIo, FailureReporter, authorize, dial_public};
 use crate::proxy::ProxyCredentials;
-use crate::selector::{AddressFamily, Controller, DiagnosticTarget, TlsProfile};
+use crate::selector::{Controller, TlsProfile};
 use crate::tls::{ShapedStream, Strategy};
 use crate::{NetworkContext, NetworkError, Role};
 
@@ -25,6 +25,7 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone)]
 struct Upstream {
+    factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>,
     controller: Controller,
     transforms: Arc<Semaphore>,
     slots: Arc<Semaphore>,
@@ -82,6 +83,7 @@ impl Bridge {
                 .collect(),
         );
         let upstream = Upstream {
+            factory: context.prefix_factory(),
             controller: context.controller().clone(),
             transforms: context.transforms(),
             slots: context.tunnel_slots(),
@@ -193,13 +195,18 @@ async fn tunnel(
     let connected = if let Some(proxy) = &upstream.proxy {
         crate::proxy::dial(proxy, &host, port)
             .await
-            .map(|io| (io, None))
+            .map(|io| (io, None, None))
     } else {
         dial_public(&host, port, &mut failed_address)
             .await
-            .map(|(io, address)| (Box::new(io) as BoxedIo, Some(address)))
+            .map(|(io, address)| {
+                let native =
+                    crate::socket::NativeIo::new(io).with_factory(upstream.factory.clone());
+                let control = native.control();
+                (Box::new(native) as BoxedIo, Some(address), Some(control))
+            })
     };
-    let (server, address) = match connected {
+    let (server, address, control) = match connected {
         Ok(connected) => connected,
         Err(error) => {
             upstream
@@ -212,20 +219,16 @@ async fn tunnel(
         }
     };
     let strategy = if let Some(address) = address {
-        let family = if address.is_ipv4() {
-            AddressFamily::V4
-        } else {
-            AddressFamily::V6
-        };
         upstream.reporter.connected(&host, port, role, address);
-        if crate::broker::probe_authorized(role, &host) {
-            DiagnosticTarget::new(host, port, role, family, TlsProfile::Http)
-                .ok()
-                .and_then(|target| upstream.controller.strategy_for(&target))
-                .unwrap_or(Strategy::Direct)
-        } else {
-            Strategy::Direct
-        }
+        crate::broker::select_strategy(
+            &upstream.controller,
+            upstream.factory.as_deref(),
+            &host,
+            port,
+            role,
+            address,
+            TlsProfile::Http,
+        )
     } else {
         upstream.reporter.tunneled(&host, port, role);
         Strategy::Direct
@@ -240,18 +243,39 @@ async fn tunnel(
     }
     // One immutable plan on one upstream. Partial transformed output cannot be
     // rolled back or replayed on another socket.
-    let _ = forward(client, server, strategy, upstream.transforms.clone()).await;
+    let _ = forward_with_control(
+        client,
+        server,
+        strategy,
+        upstream.transforms.clone(),
+        control,
+    )
+    .await;
 }
 
+#[cfg(test)]
 async fn forward<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     client: TcpStream,
     server: S,
     strategy: Strategy,
     transforms: Arc<Semaphore>,
 ) -> std::io::Result<()> {
+    forward_with_control(client, server, strategy, transforms, None).await
+}
+
+async fn forward_with_control<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    client: TcpStream,
+    server: S,
+    strategy: Strategy,
+    transforms: Arc<Semaphore>,
+    control: Option<Arc<dyn crate::tls::PrefixControl>>,
+) -> std::io::Result<()> {
     let (mut client_read, mut client_write) = client.into_split();
     let (mut server_read, server_write) = tokio::io::split(server);
     let mut server_write = ShapedStream::with_budget(server_write, strategy, transforms);
+    if let Some(control) = control {
+        server_write = server_write.with_control(control);
+    }
     let mut observer = server_write.server_hello_observer();
     let outgoing = async {
         let mut buffer = vec![0u8; FORWARD_BUFFER];
@@ -408,6 +432,39 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct TestPrefix {
+        strategy: Strategy,
+        calls: Arc<AtomicUsize>,
+    }
+    impl crate::tls::FakePrefixFactory for TestPrefix {
+        fn strategy(&self) -> Strategy {
+            self.strategy
+        }
+        fn start(
+            &self,
+            mut socket: std::net::TcpStream,
+            original: Vec<u8>,
+            fake: Vec<u8>,
+            strategy: Strategy,
+        ) -> std::io::Result<crate::tls::PrefixFuture> {
+            assert_eq!(strategy, self.strategy);
+            assert_ne!(original, fake);
+            assert!(matches!(
+                crate::tls::inspect_client_hello(&fake),
+                Ok(crate::tls::Inspection::ClientHello(_))
+            ));
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    std::io::Write::write_all(&mut socket, &original)?;
+                    Ok(original.len())
+                })
+                .await
+                .map_err(std::io::Error::other)?
+            }))
+        }
+    }
     fn credentials() -> Vec<(Role, Zeroizing<String>)> {
         vec![(Role::Rest, Zeroizing::new("Basic canary-auth".into()))]
     }
@@ -500,7 +557,11 @@ mod tests {
         let certificate =
             CertificateDer::from(include_bytes!("tls/fixtures/test-cert.der").to_vec());
         let key = include_bytes!("tls/fixtures/test-key.der");
-        for strategy in Strategy::ORDER {
+        for strategy in Strategy::LEGACY.into_iter().chain([
+            Strategy::MultiSplit,
+            Strategy::PacketFake,
+            Strategy::PacketOverlap,
+        ]) {
             let mut roots = RootCertStore::empty();
             roots.add(certificate.clone()).unwrap();
             let mut config =
@@ -534,8 +595,32 @@ mod tests {
             client.set_nodelay(true).unwrap();
             let budget = Arc::new(Semaphore::new(4));
             let forwarded_budget = budget.clone();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let factory = Arc::new(TestPrefix {
+                strategy,
+                calls: calls.clone(),
+            });
+            let packet = matches!(strategy, Strategy::PacketFake | Strategy::PacketOverlap);
+            let strategy = if packet {
+                // Same selection entry point as the production CONNECT bridge
+                // and WS broker, before either path emits the ClientHello.
+                crate::broker::select_strategy(
+                    &Controller::default(),
+                    Some(&*factory),
+                    "discord.com",
+                    443,
+                    Role::Rest,
+                    bridge_out.peer_addr().unwrap(),
+                    TlsProfile::Http,
+                )
+            } else {
+                strategy
+            };
+            let native = crate::socket::NativeIo::new(bridge_out).with_factory(Some(factory));
+            let control = native.control();
             let forwarding = tokio::spawn(async move {
-                forward(bridge_in, bridge_out, strategy, forwarded_budget).await
+                forward_with_control(bridge_in, native, strategy, forwarded_budget, Some(control))
+                    .await
             });
             let origin = tokio::spawn(async move {
                 let mut stream = tokio_rustls::TlsAcceptor::from(Arc::new(server_config))
@@ -572,6 +657,7 @@ mod tests {
                 origin.await.unwrap();
                 forwarding.await.unwrap().unwrap();
                 assert_eq!(budget.available_permits(), 4);
+                assert_eq!(calls.load(Ordering::Relaxed), usize::from(packet));
             };
             tokio::time::timeout(Duration::from_secs(10), check)
                 .await

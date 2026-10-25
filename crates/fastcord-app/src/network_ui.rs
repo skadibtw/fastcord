@@ -6,6 +6,97 @@ use iced::widget::{button, checkbox, column, container, row, text, text_input};
 use iced::{Element, Length};
 use std::sync::Arc;
 
+pub fn new_context() -> fastcord_net::NetworkContext {
+    fastcord_net::NetworkContext::off()
+}
+
+/// Explicit manual alt-account diagnostic. A bounded private stdin pipe is the
+/// only token input; no native store, settings, UI restore or account output.
+#[cfg(debug_assertions)]
+pub fn check_login() {
+    use fastcord_discord::gateway::{ConnectionState, Dispatch, Gateway, GatewayEvent};
+    use std::io::Read;
+    use std::time::Duration;
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    if std::io::stdin().take(4097).read_to_end(&mut bytes).is_err() || bytes.len() > 4096 {
+        println!("Login check: invalid input.");
+        return;
+    }
+    let Ok(input) = std::str::from_utf8(&bytes) else {
+        println!("Login check: invalid input.");
+        return;
+    };
+    let token = Arc::new(UserToken::new(input.trim().to_owned()));
+    drop(bytes);
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        println!("Login check: runtime unavailable.");
+        return;
+    };
+    runtime.block_on(async {
+        let route = match start_packet().await {
+            Ok(route) => route,
+            Err(_) => {
+                println!("Login check: packet helper unavailable.");
+                return;
+            }
+        };
+        let context = new_context()
+            .with_mode(Mode::Auto)
+            .with_prefix_factory(route.0);
+        let validated = tokio::time::timeout(
+            Duration::from_secs(40),
+            crate::login::validate(context.clone(), token, None),
+        )
+        .await;
+        let session = match validated {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => {
+                println!("Login validation: {}", error.notice(&context));
+                return;
+            }
+            Err(_) => {
+                println!("Login validation: deadline exceeded.");
+                return;
+            }
+        };
+        println!("Authenticated login validation passed.");
+        let mut gateway = Gateway::start(
+            session.client.clone(),
+            session.token(),
+            session.properties.clone(),
+        );
+        let closer = gateway.closer();
+        let result = tokio::time::timeout(Duration::from_secs(25), async {
+            while let Some(event) = gateway.next_event().await {
+                match event {
+                    GatewayEvent::Dispatch {
+                        event: Dispatch::Ready(_),
+                        ..
+                    } => return true,
+                    GatewayEvent::State(
+                        ConnectionState::AuthenticationRequired
+                        | ConnectionState::Stopped(_)
+                        | ConnectionState::Reconnecting { .. },
+                    ) => return false,
+                    _ => {}
+                }
+            }
+            false
+        })
+        .await;
+        println!("Gateway READY received: {}", result == Ok(true));
+        println!(
+            "Gateway clean close: {}",
+            closer.close(Duration::from_secs(3)).await
+        );
+        drop(gateway);
+        drop(session);
+    });
+}
+
 #[derive(Clone, Debug)]
 pub struct Loaded {
     pub settings: Settings,
@@ -28,6 +119,7 @@ pub struct State {
     pub settings: Settings,
     pub notice: Option<&'static str>,
     pub saving: bool,
+    pub packet_active: bool,
     pub proxy_kind: Option<ProxyKind>,
     pub proxy_host: String,
     pub proxy_port: String,
@@ -51,6 +143,76 @@ pub enum Action {
     ProxyPassword(Arc<UserToken>),
     ApplyProxy,
     ProxyApplied(Result<Loaded, &'static str>),
+    PacketStart,
+    PacketStarted(Result<PacketRoute, &'static str>),
+    PacketStop,
+    PacketCheck,
+    PacketChecked(&'static str),
+}
+
+#[derive(Clone)]
+pub struct PacketRoute(pub Arc<dyn fastcord_net::tls::FakePrefixFactory>);
+impl std::fmt::Debug for PacketRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PacketRoute")
+    }
+}
+pub async fn start_packet() -> Result<PacketRoute, &'static str> {
+    tokio::task::spawn_blocking(|| {
+        #[cfg(target_os = "windows")]
+        { fastcord_platform::network::PacketHelper::launch().map(|helper| PacketRoute(Arc::new(fastcord_platform::network::PacketFactory(helper)))).map_err(|_| "Packet recovery could not start. UAC may have been cancelled, or the pinned WinDivert driver is unavailable.") }
+        #[cfg(not(target_os = "windows"))]
+        { Err("Packet recovery is currently available on Windows only.") }
+    }).await.unwrap_or(Err("Packet recovery worker stopped."))
+}
+pub async fn packet_check(context: fastcord_net::NetworkContext) -> &'static str {
+    use fastcord_net::tls::Strategy;
+    use std::time::Duration;
+    for strategy in [Strategy::PacketFake, Strategy::PacketOverlap] {
+        let packet =
+            context.mode() == Mode::Auto && context.select_packet_strategy(strategy).is_ok();
+        if !packet && strategy == Strategy::PacketOverlap {
+            break;
+        }
+        let Ok(client) = context
+            .http_builder(fastcord_net::Role::Rest)
+            .and_then(|b| {
+                b.connect_timeout(Duration::from_secs(8))
+                    .timeout(Duration::from_secs(12))
+                    .build()
+            })
+        else {
+            return "Anonymous check: HTTP client could not start.";
+        };
+        #[cfg(debug_assertions)]
+        eprintln!("Anonymous API check: packet={packet}; strategy={strategy:?}");
+        match client
+            .get("https://discord.com/api/v9/gateway")
+            .send()
+            .await
+        {
+            Ok(response) if response.status().as_u16() == 200 => {
+                return if packet && strategy == Strategy::PacketOverlap {
+                    "Discord API HTTP 200: packet overlap 681 restored access. You can try signing in."
+                } else if packet {
+                    "Discord API HTTP 200: packet fake + disorder restored access. You can try signing in."
+                } else {
+                    "Anonymous Discord API check passed (HTTP 200). You can try signing in."
+                };
+            }
+            Ok(_) => {
+                return "Discord returned an HTTP response; the anonymous API check did not return 200.";
+            }
+            Err(error) => {
+                #[cfg(debug_assertions)]
+                eprintln!("Anonymous API check failed: {:?}", error.category());
+                if !error.category().eligible_for_selection() {
+                    break;
+                }
+            }
+        }
+    }
+    "Anonymous Discord API check failed. Packet recovery has not restored access."
 }
 
 fn now() -> u64 {
@@ -204,8 +366,13 @@ pub fn view<'a>(
     };
     let mut body = column![
         text("Network recovery").size(26),
+        text(state.notice.unwrap_or("Choose routing before signing in.")),
         text(format!("Mode: {:?}", state.settings.mode)),
         row![choose("Off", Mode::Off), choose("Auto", Mode::Auto)].spacing(12),
+        text(if state.packet_active { "Windows packet recovery: active for this session" } else { "Windows packet recovery: off" }),
+        button(if state.packet_active { "Stop packet recovery" } else { "Start packet recovery (administrator prompt)" }).on_press_maybe((editable && !state.saving).then_some(crate::Message::Network(if state.packet_active { Action::PacketStop } else { Action::PacketStart }))),
+        button("Check Discord API without signing in").on_press_maybe((editable && !state.saving).then_some(crate::Message::Network(Action::PacketCheck))),
+        text("Optional Windows helper requires UAC once per session. It handles only the public TLS handshake for fastcord connections. The client and account stay unprivileged. Starting it selects Auto."),
         checkbox(state.settings.experimental_udp)
             .label("Experimental UDP discovery preludes (unverified)")
             .on_toggle_maybe((editable && !state.saving && state.settings.mode != Mode::Proxy).then_some(|value| crate::Message::Network(Action::ExperimentalUdp(value)))),
@@ -249,9 +416,6 @@ pub fn view<'a>(
             "{label}: {}",
             status_text(context.controller().service_status(role))
         )));
-    }
-    if let Some(notice) = state.notice {
-        body = body.push(text(notice));
     }
     container(body)
         .padding(24)
@@ -326,10 +490,10 @@ pub fn changes() -> impl iced::futures::Stream<Item = ()> {
 /// Credential-free reachability check under the actual fastcord executable's
 /// routing rules. It runs before settings, account restore and instance handoff.
 #[cfg(debug_assertions)]
-pub fn check() {
+pub fn check(strategy: Option<fastcord_net::tls::Strategy>) {
     let worker = std::thread::Builder::new()
         .name("fastcord-network-check".into())
-        .spawn(|| {
+        .spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -341,7 +505,11 @@ pub fn check() {
                 use fastcord_net::Role;
                 use std::time::Duration;
                 for mode in [Mode::Off, Mode::Auto] {
-                    let context = fastcord_net::NetworkContext::off().with_mode(mode);
+                    if strategy.is_some() && mode == Mode::Off {
+                        continue;
+                    }
+                    let context = new_context().with_mode(mode);
+                    context.debug_probe_output(true);
                     let client = context.http_builder(Role::Rest).and_then(|builder| {
                         builder
                             .connect_timeout(Duration::from_secs(8))
@@ -373,11 +541,32 @@ pub fn check() {
                         context.controller().service_status(Role::Rest)
                     );
                     if mode == Mode::Auto {
-                        context.wait_for_recovery().await;
+                        if let Some(strategy) = strategy {
+                            context.debug_recover_with(strategy).await;
+                        } else {
+                            context.wait_for_recovery().await;
+                        }
                         println!(
                             "Auto after bounded TLS check: {:?}",
                             context.controller().service_status(Role::Rest)
                         );
+                        if context.controller().service_status(Role::Rest)
+                            == fastcord_net::selector::ServiceStatus::TlsReachable
+                        {
+                            match client
+                                .get("https://discord.com/api/v9/gateway")
+                                .send()
+                                .await
+                            {
+                                Ok(response) => println!(
+                                    "Recovered public gateway HTTP {}",
+                                    response.status().as_u16()
+                                ),
+                                Err(error) => {
+                                    println!("Recovered request failed: {:?}", error.category())
+                                }
+                            }
+                        }
                     }
                 }
             });
@@ -387,7 +576,8 @@ pub fn check() {
     }
 }
 
-/// Real binary/UI check without credential access, restoration or network I/O.
+/// UI check without credential access or account restoration. Network and UAC
+/// actions require the same explicit buttons as the ordinary network screen.
 #[cfg(debug_assertions)]
 pub fn preview() -> iced::Result {
     struct Preview {
@@ -407,7 +597,7 @@ pub fn preview() -> iced::Result {
             state: State {
                 open: true,
                 notice: Some(
-                    "Offline preview: changes stay in memory; no account or network traffic.",
+                    "Diagnostic preview: no account or credential access. Use the buttons to start an anonymous API check or the optional packet helper.",
                 ),
                 ..State::default()
             },
@@ -416,9 +606,44 @@ pub fn preview() -> iced::Result {
         |state: &mut Preview, message: crate::Message| {
             if let crate::Message::Network(action) = message {
                 match action {
+                    Action::Close => return iced::exit(),
+                    Action::PacketStart if !state.state.saving => {
+                        state.state.saving = true;
+                        state.state.notice = Some("Waiting for Windows administrator approval…");
+                        return iced::Task::perform(start_packet(), |r| crate::Message::Network(Action::PacketStarted(r)));
+                    }
+                    Action::PacketStarted(result) => {
+                        state.state.saving = false;
+                        match result {
+                            Ok(route) => {
+                                state.state.packet_active = true;
+                                state.state.settings.mode = Mode::Auto;
+                                state.context = state.context.with_mode(Mode::Auto).with_prefix_factory(route.0);
+                                state.state.saving = true;
+                                state.state.notice = Some("Packet helper started. Checking the public Discord API…");
+                                return iced::Task::perform(packet_check(state.context.clone()), |r| crate::Message::Network(Action::PacketChecked(r)));
+                            }
+                            Err(e) => state.state.notice = Some(e),
+                        }
+                    }
+                    Action::PacketStop if !state.state.saving => {
+                        state.state.packet_active = false;
+                        state.context = state.context.without_prefix_factory();
+                        state.state.notice = Some("Packet recovery stopped.");
+                    }
+                    Action::PacketCheck if !state.state.saving => {
+                        state.state.saving = true;
+                        state.state.notice = Some("Checking the public Discord API…");
+                        return iced::Task::perform(packet_check(state.context.clone()), |r| crate::Message::Network(Action::PacketChecked(r)));
+                    }
+                    Action::PacketChecked(r) => { state.state.saving = false; state.state.notice = Some(r); }
                     Action::Mode(mode) => {
                         state.state.settings.mode = mode;
                         state.context = state.context.with_mode(mode);
+                        if mode != Mode::Auto {
+                            state.state.packet_active = false;
+                            state.context = state.context.without_prefix_factory();
+                        }
                     }
                     Action::ExperimentalUdp(enabled) => {
                         state.state.settings.experimental_udp = enabled;
@@ -432,10 +657,11 @@ pub fn preview() -> iced::Result {
                     _ => {}
                 }
             }
+            iced::Task::none()
         },
         view,
     )
-    .title("fastcord — offline Network preview")
+    .title("fastcord — Network diagnostic")
     .theme(|_: &Preview| crate::style::theme())
     .window(iced::window::Settings {
         size: iced::Size::new(820.0, 800.0),

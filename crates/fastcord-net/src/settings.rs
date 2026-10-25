@@ -59,6 +59,9 @@ enum SavedStrategy {
     TlsRecordSplit,
     WriteSplit,
     Combined,
+    MultiSplit,
+    PacketFake,
+    PacketOverlap,
 }
 
 impl From<Strategy> for SavedStrategy {
@@ -68,6 +71,9 @@ impl From<Strategy> for SavedStrategy {
             Strategy::TlsRecordSplit => Self::TlsRecordSplit,
             Strategy::WriteSplit => Self::WriteSplit,
             Strategy::Combined => Self::Combined,
+            Strategy::MultiSplit => Self::MultiSplit,
+            Strategy::PacketFake => Self::PacketFake,
+            Strategy::PacketOverlap => Self::PacketOverlap,
         }
     }
 }
@@ -79,6 +85,9 @@ impl From<SavedStrategy> for Strategy {
             SavedStrategy::TlsRecordSplit => Self::TlsRecordSplit,
             SavedStrategy::WriteSplit => Self::WriteSplit,
             SavedStrategy::Combined => Self::Combined,
+            SavedStrategy::MultiSplit => Self::MultiSplit,
+            SavedStrategy::PacketFake => Self::PacketFake,
+            SavedStrategy::PacketOverlap => Self::PacketOverlap,
         }
     }
 }

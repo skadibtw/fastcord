@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add optional Windows packet recovery (M96): a separate, manually elevated
+  WinDivert helper, PID-authenticated local IPC and exact ClientHello filters;
+  packet fake/disorder and sequence-overlap profiles inspired by zapret.
+  The ordinary client retains credentials and certificate verification.
+  Anonymous API access was restored on the reported direct Windows route;
+  authenticated login/Gateway and media evidence are recorded separately.
+
 - Preserve typed network failures and HTTP server status codes in login errors,
   and add a debug-only `--network-check` using the actual fastcord executable
   for process-specific routing diagnostics without account credentials.

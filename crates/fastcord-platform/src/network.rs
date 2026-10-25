@@ -7,6 +7,26 @@ use std::sync::Arc;
 use fastcord_net::NetworkError;
 use fastcord_net::selector::NetworkChangeSource;
 
+#[cfg(target_os = "windows")]
+mod helper;
+#[cfg(target_os = "windows")]
+mod packet;
+#[cfg(target_os = "windows")]
+pub use helper::{PacketFactory, PacketHelper};
+
+/// Special child entry; malformed helper invocations never start the client.
+pub fn packet_helper_entry(suffix: &str, parent: u32) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        helper::entry(suffix, parent)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (suffix, parent);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
 /// Dropping the guard unregisters the event handler. No packet interception,
 /// system proxy/DNS/firewall changes or administrator privileges are involved.
 pub struct NetworkChanges {

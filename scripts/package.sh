@@ -30,6 +30,8 @@ cp assets/emoji/NOTICE.txt assets/emoji/TWEMOJI-LICENSE-GRAPHICS.txt \
 case "$target" in
   *-windows-msvc)
     cp "${bin_dir}/fastcord.exe" "$stage/"
+    mkdir -p "$stage/windivert"
+    cp crates/fastcord-platform/native/windivert/{WinDivert.dll,WinDivert64.sys,LICENSE,provenance.json,WinDivert-2.2.2-source.zip,README.md} "$stage/windivert/"
     zip_out="$(cd "$out" && (pwd -W 2>/dev/null || pwd))/${name}.zip"
     (cd "$(dirname "$stage")" && 7z a -tzip -bso0 "$zip_out" "$name")
     ;;

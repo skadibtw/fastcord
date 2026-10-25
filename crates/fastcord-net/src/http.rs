@@ -36,7 +36,9 @@ impl HttpBuilder {
             .https_only(!local)
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
-            .use_preconfigured_tls((*tls_config(TlsProfile::Http, false)?).clone());
+            .use_preconfigured_tls(
+                (*tls_config(TlsProfile::Http, context.mode() == Mode::Auto)?).clone(),
+            );
         if !local {
             match context.mode() {
                 Mode::Off => inner = inner.dns_resolver(Arc::new(PublicResolver { role })),

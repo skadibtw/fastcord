@@ -18,6 +18,7 @@ use crate::selector::{
     AddressFamily, Controller, DiagnosticTarget, ProbeOutcome, ProbeRequest, TlsProfile,
 };
 use crate::settings::Mode;
+use crate::socket::NativeIo;
 use crate::tls::{ShapedStream, Strategy};
 use crate::{DatagramSocket, HttpBuilder, NetworkError, Role};
 
@@ -27,6 +28,7 @@ pub type BoxedIo = Box<dyn NetworkIo>;
 pub type TlsStream = tokio_rustls::client::TlsStream<ShapedStream<BoxedIo>>;
 
 struct Shared {
+    prefix_factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>,
     mode: Mode,
     experimental_udp: bool,
     proxy: Option<Arc<ProxyCredentials>>,
@@ -40,6 +42,8 @@ struct Shared {
     connection_epoch: Arc<AtomicU64>,
     recovery_gate: Arc<tokio::sync::Mutex<()>>,
     associations: Arc<Semaphore>,
+    #[cfg(debug_assertions)]
+    probe_output: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct Demand {
@@ -171,6 +175,7 @@ impl NetworkContext {
 
     pub fn new(mode: Mode) -> Self {
         Self(Arc::new(Shared {
+            prefix_factory: None,
             mode,
             experimental_udp: false,
             proxy: None,
@@ -184,11 +189,14 @@ impl NetworkContext {
             connection_epoch: Arc::new(AtomicU64::new(0)),
             recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
             associations: Arc::new(Semaphore::new(crate::udp::MAX_ASSOCIATIONS)),
+            #[cfg(debug_assertions)]
+            probe_output: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }))
     }
 
     pub fn with_mode(&self, mode: Mode) -> Self {
         Self(Arc::new(Shared {
+            prefix_factory: self.0.prefix_factory.clone(),
             mode,
             experimental_udp: self.0.experimental_udp,
             proxy: self.0.proxy.clone(),
@@ -202,6 +210,8 @@ impl NetworkContext {
             connection_epoch: self.0.connection_epoch.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
             associations: self.0.associations.clone(),
+            #[cfg(debug_assertions)]
+            probe_output: self.0.probe_output.clone(),
         }))
     }
 
@@ -216,6 +226,7 @@ impl NetworkContext {
 
     pub fn with_experimental_udp(&self, enabled: bool) -> Self {
         Self(Arc::new(Shared {
+            prefix_factory: self.0.prefix_factory.clone(),
             mode: self.0.mode,
             experimental_udp: enabled,
             proxy: self.0.proxy.clone(),
@@ -229,6 +240,8 @@ impl NetworkContext {
             connection_epoch: self.0.connection_epoch.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
             associations: self.0.associations.clone(),
+            #[cfg(debug_assertions)]
+            probe_output: self.0.probe_output.clone(),
         }))
     }
     pub fn with_proxy(
@@ -238,6 +251,7 @@ impl NetworkContext {
     ) -> Result<Self, NetworkError> {
         let proxy = Arc::new(ProxyCredentials::new(config, password)?);
         Ok(Self(Arc::new(Shared {
+            prefix_factory: self.0.prefix_factory.clone(),
             mode: Mode::Proxy,
             experimental_udp: self.0.experimental_udp,
             proxy: Some(proxy),
@@ -251,10 +265,50 @@ impl NetworkContext {
             connection_epoch: self.0.connection_epoch.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
             associations: self.0.associations.clone(),
+            #[cfg(debug_assertions)]
+            probe_output: self.0.probe_output.clone(),
         })))
     }
     pub fn proxy_config(&self) -> Option<&ProxyConfig> {
         self.0.proxy.as_ref().map(|proxy| &proxy.config)
+    }
+    pub fn with_prefix_factory(&self, factory: Arc<dyn crate::tls::FakePrefixFactory>) -> Self {
+        self.set_prefix_factory(Some(factory))
+    }
+    pub fn without_prefix_factory(&self) -> Self {
+        self.set_prefix_factory(None)
+    }
+    fn set_prefix_factory(&self, factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>) -> Self {
+        Self(Arc::new(Shared {
+            prefix_factory: factory,
+            mode: self.0.mode,
+            experimental_udp: self.0.experimental_udp,
+            proxy: self.0.proxy.clone(),
+            controller: self.0.controller.clone(),
+            bridge: Mutex::new(None),
+            bridge_secret: self.0.bridge_secret.clone(),
+            transforms: self.0.transforms.clone(),
+            tunnels: self.0.tunnels.clone(),
+            pending: self.0.pending.clone(),
+            connected: self.0.connected.clone(),
+            connection_epoch: self.0.connection_epoch.clone(),
+            recovery_gate: self.0.recovery_gate.clone(),
+            associations: self.0.associations.clone(),
+            #[cfg(debug_assertions)]
+            probe_output: self.0.probe_output.clone(),
+        }))
+    }
+    pub(crate) fn prefix_factory(&self) -> Option<Arc<dyn crate::tls::FakePrefixFactory>> {
+        self.0.prefix_factory.clone()
+    }
+    pub fn select_packet_strategy(&self, strategy: Strategy) -> io::Result<()> {
+        self.0
+            .prefix_factory
+            .as_ref()
+            .ok_or(io::ErrorKind::Unsupported)?
+            .select_strategy(strategy)?;
+        self.controller().network_changed();
+        Ok(())
     }
     pub fn media_supported(&self) -> bool {
         self.mode() != Mode::Proxy
@@ -373,6 +427,11 @@ impl NetworkContext {
             .record(host, port, role, profile, error, address);
     }
 
+    #[cfg(debug_assertions)]
+    pub fn debug_probe_output(&self, enabled: bool) {
+        self.0.probe_output.store(enabled, Ordering::Relaxed);
+    }
+
     pub(crate) fn recent_failure(
         &self,
         host: &str,
@@ -427,6 +486,15 @@ impl NetworkContext {
     /// failed attempt returns immediately so its owner records the failure and
     /// applies its normal backoff before entering this gate. No request replay.
     pub async fn wait_for_recovery(&self) {
+        self.recover(None).await;
+    }
+
+    #[cfg(debug_assertions)]
+    pub async fn debug_recover_with(&self, strategy: Strategy) {
+        self.recover(Some(strategy)).await;
+    }
+
+    async fn recover(&self, forced: Option<Strategy>) {
         if self.mode() != Mode::Auto {
             return;
         }
@@ -464,12 +532,40 @@ impl NetworkContext {
             return;
         };
         let transforms = self.0.transforms.clone();
+        let factory = self.0.prefix_factory.clone();
+        #[cfg(debug_assertions)]
+        let output = self.0.probe_output.clone();
+        let catalog = forced
+            .or_else(|| factory.as_ref().map(|f| f.strategy()))
+            .map(|strategy| [strategy]);
+        let plan = catalog
+            .as_ref()
+            .map_or(Strategy::ORDER.as_slice(), |one| one.as_slice());
         let _ = self
             .0
             .controller
-            .diagnose(target, pending.failure, move |request| {
+            .diagnose_plan(target, pending.failure, plan, move |request| {
                 let transforms = transforms.clone();
-                async move { run_probe(address, request, transforms).await }
+                let factory = factory.clone();
+                #[cfg(debug_assertions)]
+                let output = output.clone();
+                async move {
+                    #[cfg(debug_assertions)]
+                    let strategy = request.strategy;
+                    #[cfg(debug_assertions)]
+                    let verbose = output.load(Ordering::Relaxed);
+                    #[cfg(not(debug_assertions))]
+                    let verbose = false;
+                    let result = run_probe(address, request, transforms, factory, verbose).await;
+                    #[cfg(debug_assertions)]
+                    if output.load(Ordering::Relaxed) {
+                        println!(
+                            "TLS probe {strategy:?}: {:?}; sent={} received={}",
+                            result.result, result.sent_bytes, result.received_bytes
+                        );
+                    }
+                    result
+                }
             })
             .await;
     }
@@ -482,19 +578,46 @@ impl NetworkContext {
         address: SocketAddr,
         profile: TlsProfile,
     ) -> Strategy {
-        if self.mode() != Mode::Auto || !probe_authorized(role, host) {
+        if self.mode() != Mode::Auto {
             return Strategy::Direct;
         }
-        let family = if address.is_ipv4() {
-            AddressFamily::V4
-        } else {
-            AddressFamily::V6
-        };
-        DiagnosticTarget::new(host, port, role, family, profile)
-            .ok()
-            .and_then(|target| self.0.controller.strategy_for(&target))
-            .unwrap_or(Strategy::Direct)
+        select_strategy(
+            self.controller(),
+            self.0.prefix_factory.as_deref(),
+            host,
+            port,
+            role,
+            address,
+            profile,
+        )
     }
+}
+
+pub(crate) fn select_strategy(
+    controller: &Controller,
+    factory: Option<&dyn crate::tls::FakePrefixFactory>,
+    host: &str,
+    port: u16,
+    role: Role,
+    address: SocketAddr,
+    profile: TlsProfile,
+) -> Strategy {
+    if !probe_authorized(role, host) {
+        return Strategy::Direct;
+    }
+    if let Some(factory) = factory {
+        return factory.strategy();
+    }
+    let family = if address.is_ipv4() {
+        AddressFamily::V4
+    } else {
+        AddressFamily::V6
+    };
+    DiagnosticTarget::new(host, port, role, family, profile)
+        .ok()
+        .and_then(|target| controller.strategy_for(&target))
+        .filter(|strategy| !matches!(strategy, Strategy::PacketFake | Strategy::PacketOverlap))
+        .unwrap_or(Strategy::Direct)
 }
 
 #[derive(Clone)]
@@ -535,7 +658,7 @@ impl SocketBroker {
         role: Role,
         failed_address: &mut Option<SocketAddr>,
     ) -> Result<TlsStream, NetworkError> {
-        let (io, strategy) = if self.0.mode() == Mode::Proxy {
+        let (io, strategy, control) = if self.0.mode() == Mode::Proxy {
             let proxy = self
                 .0
                 .proxy_credentials()
@@ -543,6 +666,7 @@ impl SocketBroker {
             (
                 crate::proxy::dial(&proxy, host, port).await?,
                 Strategy::Direct,
+                None,
             )
         } else {
             let (tcp, address) = dial_public(host, port, failed_address).await?;
@@ -550,10 +674,17 @@ impl SocketBroker {
             let strategy = self
                 .0
                 .strategy(host, port, role, address, TlsProfile::WebSocket);
-            (Box::new(tcp) as BoxedIo, strategy)
+            let native = NativeIo::new(tcp).with_factory(self.0.prefix_factory());
+            let control = native.control();
+            (Box::new(native) as BoxedIo, strategy, Some(control))
         };
         let stream = ShapedStream::with_budget(io, strategy, self.0.transforms());
-        let config = tls_config(TlsProfile::WebSocket, false)?;
+        let stream = if let Some(control) = control {
+            stream.with_control(control)
+        } else {
+            stream
+        };
+        let config = tls_config(TlsProfile::WebSocket, self.0.mode() == Mode::Auto)?;
         let name =
             ServerName::try_from(host.to_owned()).map_err(|_| NetworkError::InvalidTarget)?;
         timeout(
@@ -786,6 +917,8 @@ async fn run_probe(
     address: SocketAddr,
     request: ProbeRequest,
     transforms: Arc<Semaphore>,
+    factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>,
+    verbose: bool,
 ) -> ProbeOutcome {
     // Count all TLS bytes, including retransmitted records, but never keep
     // their contents. The wrapper fails closed on either byte limit.
@@ -798,13 +931,16 @@ async fn run_probe(
         stream
             .set_nodelay(true)
             .map_err(|_| NetworkError::NoRoute)?;
-        let bounded = CountedIo {
+        let bounded = NativeIo::bounded(
             stream,
-            counters: counters.clone(),
-            inbound: request.limits.max_inbound_bytes,
-            total: request.limits.max_network_bytes,
-        };
-        let stream = ShapedStream::with_budget(bounded, request.strategy, transforms);
+            counters.clone(),
+            request.limits.max_inbound_bytes,
+            request.limits.max_network_bytes,
+        )
+        .with_factory(factory);
+        let control = bounded.control();
+        let stream =
+            ShapedStream::with_budget(bounded, request.strategy, transforms).with_control(control);
         let name = ServerName::try_from(request.target.host.clone())
             .map_err(|_| NetworkError::InvalidTarget)?;
         let config = tls_config(request.target.profile, true)?;
@@ -814,7 +950,16 @@ async fn run_probe(
         )
         .await
         .map_err(|_| NetworkError::TlsTimeout)?
-        .map_err(|error| tls_error(&error))?;
+        .map_err(|error| {
+            if verbose {
+                println!(
+                    "TLS transport error: kind={:?}; os={:?}",
+                    error.kind(),
+                    error.raw_os_error()
+                );
+            }
+            tls_error(&error)
+        })?;
         Ok(())
     };
     let result = timeout(request.limits.total_timeout, inner)
@@ -827,71 +972,6 @@ async fn run_probe(
         result,
         sent_bytes,
         received_bytes,
-    }
-}
-
-struct CountedIo {
-    stream: TcpStream,
-    counters: Arc<Mutex<(usize, usize)>>,
-    inbound: usize,
-    total: usize,
-}
-
-impl AsyncRead for CountedIo {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        let (sent, received) = *self.counters.lock().unwrap_or_else(|p| p.into_inner());
-        let remaining = self
-            .inbound
-            .saturating_sub(received)
-            .min(self.total.saturating_sub(sent + received));
-        if remaining == 0 {
-            return std::task::Poll::Ready(Err(io::Error::other(NetworkError::BudgetExhausted)));
-        }
-        let length = remaining.min(buf.remaining());
-        let mut limited = tokio::io::ReadBuf::new(buf.initialize_unfilled_to(length));
-        let result = std::pin::Pin::new(&mut self.stream).poll_read(cx, &mut limited);
-        let len = limited.filled().len();
-        if let std::task::Poll::Ready(Ok(())) = result {
-            buf.advance(len);
-            self.counters.lock().unwrap_or_else(|p| p.into_inner()).1 += len;
-        }
-        result
-    }
-}
-
-impl AsyncWrite for CountedIo {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<io::Result<usize>> {
-        let (sent, received) = *self.counters.lock().unwrap_or_else(|p| p.into_inner());
-        let remaining = self.total.saturating_sub(sent + received);
-        if remaining == 0 {
-            return std::task::Poll::Ready(Err(io::Error::other(NetworkError::BudgetExhausted)));
-        }
-        let result =
-            std::pin::Pin::new(&mut self.stream).poll_write(cx, &buf[..buf.len().min(remaining)]);
-        if let std::task::Poll::Ready(Ok(len)) = result {
-            self.counters.lock().unwrap_or_else(|p| p.into_inner()).0 += len;
-        }
-        result
-    }
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        std::pin::Pin::new(&mut self.stream).poll_flush(cx)
-    }
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 
@@ -1039,12 +1119,7 @@ mod tests {
             .unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let counters = Arc::new(Mutex::new((0, 0)));
-        let mut counted = CountedIo {
-            stream,
-            counters: counters.clone(),
-            inbound: 128,
-            total: 192,
-        };
+        let mut counted = NativeIo::bounded(stream, counters.clone(), 128, 192);
         remote.write_all(&[7; 256]).await.unwrap();
         let mut inbound = Vec::new();
         assert!(counted.read_to_end(&mut inbound).await.is_err());

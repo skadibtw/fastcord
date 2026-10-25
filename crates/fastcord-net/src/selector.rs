@@ -17,8 +17,8 @@ use tokio::sync::watch;
 use crate::tls::Strategy;
 use crate::{NetworkError, Role};
 
-pub const CATALOG_VERSION: u32 = 1;
-pub const TLS_PROFILE_VERSION: u32 = 1;
+pub const CATALOG_VERSION: u32 = crate::tls::CATALOG_VERSION;
+pub const TLS_PROFILE_VERSION: u32 = 2;
 pub const MAX_TLS_PROBES: u8 = 6;
 pub const MAX_CAMPAIGN_DIALS: u8 = 12;
 pub const MAX_ROLLING_DIALS: usize = 24;
@@ -469,12 +469,30 @@ impl Controller {
         &self,
         target: DiagnosticTarget,
         error: NetworkError,
+        probe: F,
+    ) -> Result<Option<Candidate>, NetworkError>
+    where
+        F: FnMut(ProbeRequest) -> Fut,
+        Fut: Future<Output = ProbeOutcome>,
+    {
+        self.diagnose_plan(target, error, &Strategy::ORDER, probe)
+            .await
+    }
+
+    pub(crate) async fn diagnose_plan<F, Fut>(
+        &self,
+        target: DiagnosticTarget,
+        error: NetworkError,
+        strategies: &[Strategy],
         mut probe: F,
     ) -> Result<Option<Candidate>, NetworkError>
     where
         F: FnMut(ProbeRequest) -> Fut,
         Fut: Future<Output = ProbeOutcome>,
     {
+        if strategies.is_empty() || strategies.len() > Strategy::ORDER.len() {
+            return Err(NetworkError::InvalidTarget);
+        }
         // Fields are visible to the transport executor, so revalidate at this
         // boundary as well: a caller cannot bypass target bounds by building
         // or modifying a struct directly.
@@ -502,12 +520,6 @@ impl Controller {
             role: target.role,
             completed: false,
         };
-        let strategies = [
-            Strategy::Direct,
-            Strategy::TlsRecordSplit,
-            Strategy::WriteSplit,
-            Strategy::Combined,
-        ];
         let mut strategy_index = 0;
         let mut successes = 0;
         loop {
