@@ -80,13 +80,22 @@ pub fn presets() -> &'static [Preset] {
 /// the connection or answers with a broken TLS handshake, byedpi resends the
 /// same request with the next one and remembers the one that worked for that
 /// address for the rest of the process.
+///
+/// byedpi compiles its timeout option (`-T`) only for Linux and Windows
+/// (`TIMEOUT_SUPPORT` in its `params.h`), so on macOS the chain has none:
+/// resets and broken handshakes still move to the next preset, while a host
+/// that stays silent waits for the OS connect timeout.
 pub fn auto_strategy() -> String {
-    let mut strategy = format!("-T {AUTO_TIMEOUT_SECS}");
+    let mut strategy = if cfg!(target_os = "macos") {
+        String::new()
+    } else {
+        format!("-T {AUTO_TIMEOUT_SECS}")
+    };
     for preset in presets() {
         strategy.push_str(" -A torst,ssl_err ");
         strategy.push_str(preset.args);
     }
-    strategy
+    strategy.trim_start().to_owned()
 }
 
 const READY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -375,6 +384,14 @@ mod tests {
             drop(Engine::start(preset.args).unwrap());
         }
         drop(Engine::start(&auto_strategy()).unwrap());
+        // byedpi has no `-T` on macOS; the chain must not offer one there.
+        assert_eq!(
+            auto_strategy().contains("-T "),
+            !cfg!(target_os = "macos"),
+            "{}",
+            auto_strategy()
+        );
+        assert!(auto_strategy().starts_with('-'));
         // Ids are saved in settings, so they must stay distinct.
         let ids: Vec<_> = PRESETS.iter().map(|preset| preset.id).collect();
         assert!(ids.iter().enumerate().all(|(i, id)| !ids[..i].contains(id)));
