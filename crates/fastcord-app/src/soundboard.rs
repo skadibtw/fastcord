@@ -730,7 +730,7 @@ mod tests {
 
     fn cache() -> AttachmentCache {
         let root = std::env::temp_dir().join(format!("fastcord-soundboard-{}", std::process::id()));
-        AttachmentCache::new(Snowflake(1), root).unwrap()
+        AttachmentCache::new(Snowflake(1), root, "Mozilla/5.0 test").unwrap()
     }
 
     fn sound(id: u64, name: &str, available: bool) -> SoundboardSound {

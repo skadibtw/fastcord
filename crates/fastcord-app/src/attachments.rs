@@ -6,6 +6,10 @@
 //! * One separate HTTP client with no credentials of any kind fetches the CDN.
 //!   Redirects are followed by hand, each hop re-validated, so nothing but the
 //!   plain `GET` (with the signed query kept as the server wrote it) is ever sent.
+//!   It carries only the public profile's `User-Agent` and the `Accept` of the
+//!   fetch purpose (Chromium's image list for image subresources, `*/*` for a
+//!   file download): no cookie, `Authorization`, fingerprint, installation id or
+//!   `x-super-properties` (IDENTITY_AUDIT C2).
 //! * A 403/404 asks the authenticated API for a fresh URL once and retries once.
 //! * Compressed bytes live in an account-scoped disk LRU (256 MiB across all
 //!   accounts, atomic writes); decoded thumbnails in a 12 MiB CPU LRU.
@@ -46,6 +50,14 @@ const FETCH_SLOTS: usize = 4;
 const DECODE_SLOTS: usize = 2;
 const MIN_CHARGE: u64 = 4096;
 const CACHE_FORMAT_VERSION: &str = "attachment-v2";
+/// Chromium's `Accept` for an image subresource (avatar, emoji, preview, embed).
+const IMAGE_ACCEPT: &str = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+/// Chromium's `Accept` for a plain `fetch()` of a file: no type preference.
+const FILE_ACCEPT: &str = "*/*";
+/// The bundled desktop browser user agent, as the app passes it in; tests only.
+#[cfg(test)]
+const TEST_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9265 Chrome/148.0.7778.280 Electron/42.11.15 Safari/537.36";
 
 /// Stable identity independent of expiring CDN signatures.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -185,25 +197,28 @@ impl std::fmt::Display for AttachmentError {
 
 impl std::error::Error for AttachmentError {}
 
-fn build_http(local: bool) -> Result<reqwest::Client, AttachmentError> {
-    let mut builder = fastcord_bypass::route_http(reqwest::Client::builder())
+fn build_http(local: bool, user_agent: &str) -> Result<reqwest::Client, AttachmentError> {
+    let builder = fastcord_bypass::route_http(reqwest::Client::builder())
         .use_rustls_tls()
-        // No default headers, cookies, or credentials of any kind. Redirects
-        // are followed below, one validated hop at a time.
+        // Only the public `User-Agent`: no cookies, credentials or identity
+        // headers. Redirects are followed below, one validated hop at a time.
+        .user_agent(user_agent)
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(30))
         .https_only(!local);
-    if local {
-        builder = builder.no_proxy();
-    }
+    let builder = if local { builder.no_proxy() } else { builder };
     builder.build().map_err(|_| AttachmentError::Network)
 }
 
 impl AttachmentCache {
-    pub fn new(account: Snowflake, root: PathBuf) -> Result<Self, AttachmentError> {
-        Self::with_http(account, root, build_http(false)?, false)
+    pub fn new(
+        account: Snowflake,
+        root: PathBuf,
+        user_agent: &str,
+    ) -> Result<Self, AttachmentError> {
+        Self::with_http(account, root, build_http(false, user_agent)?, false)
     }
 
     fn with_http(
@@ -231,15 +246,22 @@ impl AttachmentCache {
     /// A cache whose HTTP client may reach `http://127.0.0.1`; tests only.
     #[cfg(test)]
     fn for_local_tests(account: Snowflake, root: PathBuf) -> Self {
-        Self::with_http(account, root, build_http(true).unwrap(), true).unwrap()
+        Self::with_http(
+            account,
+            root,
+            build_http(true, TEST_USER_AGENT).unwrap(),
+            true,
+        )
+        .unwrap()
     }
 
-    pub fn default_root(account: Snowflake) -> Result<Self, AttachmentError> {
+    pub fn default_root(account: Snowflake, user_agent: &str) -> Result<Self, AttachmentError> {
         let base = cache_base().ok_or(AttachmentError::CacheUnavailable)?;
         Self::new(
             account,
             base.join(crate::audio_devices::app_dir_name())
                 .join("attachments"),
+            user_agent,
         )
     }
 
@@ -297,6 +319,21 @@ impl AttachmentCache {
         url: &str,
         limit: u64,
     ) -> Result<PathBuf, AttachmentError> {
+        self.fetch_file_accepting(refresh, key, filename, url, limit, FILE_ACCEPT)
+            .await
+    }
+
+    /// `fetch_file` with the `Accept` of the fetch purpose: Chromium's image list
+    /// for an image subresource, `*/*` for a file.
+    async fn fetch_file_accepting<R: UrlRefresh>(
+        &self,
+        refresh: &R,
+        key: AttachmentKey,
+        filename: &str,
+        url: &str,
+        limit: u64,
+        accept: &'static str,
+    ) -> Result<PathBuf, AttachmentError> {
         self.check(key)?;
         let _permit = self
             .fetch_slots
@@ -310,7 +347,7 @@ impl AttachmentCache {
         let temporary = self.temporary_path(&name);
         let cleanup = TemporaryFile(Some(temporary.clone()));
         let result = self
-            .download_and_store(refresh, url, limit, &name, &temporary)
+            .download_and_store(refresh, url, limit, &name, &temporary, accept)
             .await;
         cleanup.remove().await;
         result
@@ -334,7 +371,9 @@ impl AttachmentCache {
             .acquire()
             .await
             .map_err(|_| AttachmentError::WorkerStopped)?;
-        let response = self.fetch_response_refreshing(refresh, url).await?;
+        let response = self
+            .fetch_response_refreshing(refresh, url, FILE_ACCEPT)
+            .await?;
         let part = partial_path(destination)?;
         // The guard exists before the open is awaited: the file appears on
         // disk as soon as the blocking open runs, and a cancellation in that
@@ -401,8 +440,9 @@ impl AttachmentCache {
         limit: u64,
         name: &str,
         temporary: &Path,
+        accept: &'static str,
     ) -> Result<PathBuf, AttachmentError> {
-        let response = self.fetch_response_refreshing(refresh, url).await?;
+        let response = self.fetch_response_refreshing(refresh, url, accept).await?;
         let size = self.download(response, limit, temporary).await?;
         let root = self.root.clone();
         let active = self.active.clone();
@@ -464,9 +504,14 @@ impl AttachmentCache {
 
     /// Fetches `url` with the credential-free client, following redirects by
     /// hand. A 4xx or 5xx status is an error, and no body is read.
-    async fn fetch_response(&self, url: &str) -> Result<reqwest::Response, AttachmentError> {
+    async fn fetch_response(
+        &self,
+        url: &str,
+        accept: &'static str,
+    ) -> Result<reqwest::Response, AttachmentError> {
         self.ensure_active()?;
-        let response = send_following_redirects(&self.http, url, self.allow_local_http).await?;
+        let response =
+            send_following_redirects(&self.http, url, self.allow_local_http, accept).await?;
         let status = response.status();
         if status.is_client_error() || status.is_server_error() {
             return Err(AttachmentError::Http(status.as_u16()));
@@ -480,11 +525,12 @@ impl AttachmentCache {
         &self,
         refresh: &R,
         url: &str,
+        accept: &'static str,
     ) -> Result<reqwest::Response, AttachmentError> {
-        match self.fetch_response(url).await {
+        match self.fetch_response(url, accept).await {
             Err(AttachmentError::Http(403 | 404)) => {
                 let fresh = refresh.refresh(url.to_owned()).await?;
-                self.fetch_response(&fresh).await
+                self.fetch_response(&fresh, accept).await
             }
             other => other,
         }
@@ -619,12 +665,13 @@ impl AttachmentCache {
             return Err(AttachmentError::TooLarge);
         }
         let path = self
-            .fetch_file(
+            .fetch_file_accepting(
                 refresh,
                 key,
                 &attachment.filename,
                 &attachment.url,
                 MAX_IMAGE_FILE_BYTES,
+                IMAGE_ACCEPT,
             )
             .await?;
         let permit = self
@@ -671,7 +718,7 @@ impl AttachmentCache {
             attachment: id,
         };
         let path = self
-            .fetch_file(
+            .fetch_file_accepting(
                 &PublicEmoji,
                 key,
                 &format!("emoji.{extension}"),
@@ -679,6 +726,7 @@ impl AttachmentCache {
                     "https://cdn.discordapp.com/emojis/{id}.{extension}?size=32&quality=lossless"
                 ),
                 MAX_EMOJI_FILE_BYTES,
+                IMAGE_ACCEPT,
             )
             .await?;
         let bytes = tokio::fs::read(path)
@@ -787,7 +835,7 @@ impl AttachmentCache {
             }
         }
         let path = self
-            .fetch_file(&PublicEmoji, key, "avatar.png", url, limit)
+            .fetch_file_accepting(&PublicEmoji, key, "avatar.png", url, limit, IMAGE_ACCEPT)
             .await?;
         let permit = self
             .decode_slots
@@ -875,11 +923,13 @@ fn prepare_root(root: &Path, prepared: &AtomicBool) -> Result<(), AttachmentErro
 }
 
 /// Sends `GET`s from the credential-free client, following redirects by hand:
-/// each hop must again be an HTTPS URL without embedded credentials.
+/// each hop must again be an HTTPS URL without embedded credentials. Only the
+/// public `User-Agent` (a client default) and `accept` are sent.
 async fn send_following_redirects(
     http: &reqwest::Client,
     raw_url: &str,
     allow_local_http: bool,
+    accept: &'static str,
 ) -> Result<reqwest::Response, AttachmentError> {
     let mut url = reqwest::Url::parse(raw_url).map_err(|_| AttachmentError::InvalidUrl)?;
     if !valid_cdn_url(&url, allow_local_http) {
@@ -893,6 +943,7 @@ async fn send_following_redirects(
     for _ in 0..=MAX_REDIRECTS {
         let response = http
             .get(url.clone())
+            .header(reqwest::header::ACCEPT, accept)
             .send()
             .await
             .map_err(|_| AttachmentError::Network)?;
@@ -1611,7 +1662,7 @@ mod tests {
     #[tokio::test]
     async fn plain_http_outside_the_loopback_test_harness_is_rejected() {
         let root = scratch("https-only");
-        let cache = AttachmentCache::new(ACCOUNT, root.clone()).unwrap();
+        let cache = AttachmentCache::new(ACCOUNT, root.clone(), TEST_USER_AGENT).unwrap();
         for url in [
             "http://cdn.discordapp.com/a.png",
             "https://user:secret@cdn.discordapp.com/a.png",
@@ -1862,7 +1913,26 @@ mod tests {
         {
             let head = &seen.lock()[0];
             assert!(head.starts_with("get /avatars/9/h1.png?size=64 "));
-            assert!(!head.contains("authorization") && !head.contains("cookie"));
+            assert!(
+                !head.contains("authorization")
+                    && !head.contains("cookie")
+                    && !head.contains("x-super-properties")
+                    && !head.contains("x-installation-id")
+                    && !head.contains("x-fingerprint")
+                    && !head.contains("x-discord-locale")
+                    && !head.contains("sec-ch-ua"),
+                "a credential or identity header was sent to the CDN"
+            );
+            // An image subresource carries the public user agent and Chromium's
+            // image `Accept`, and nothing else that identifies the account.
+            assert!(
+                head.contains(&format!("user-agent: {}", TEST_USER_AGENT.to_lowercase())),
+                "the public user agent was not sent"
+            );
+            assert!(
+                head.contains(&format!("accept: {}", IMAGE_ACCEPT.to_lowercase())),
+                "an image fetch did not send the image Accept: {head}"
+            );
         }
         // A changed hash is a different cache entry; so is a different kind.
         cache.avatar(2, Snowflake(9), "h2", &url).await.unwrap();
@@ -2633,9 +2703,25 @@ mod tests {
             "the redirect target was not requested exactly as written"
         );
         for head in front_seen.iter().chain(&cdn_seen) {
-            for forbidden in ["authorization:", "cookie:", "proxy-authorization:"] {
+            for forbidden in [
+                "authorization:",
+                "cookie:",
+                "proxy-authorization:",
+                "x-super-properties:",
+                "x-installation-id:",
+                "x-fingerprint:",
+                "x-discord-locale:",
+                "sec-ch-ua",
+            ] {
                 assert!(!head.contains(forbidden), "a credential header was sent");
             }
+            // A file download is not an image subresource: `*/*`, Chromium's
+            // `fetch()` default, and only the public user agent besides it.
+            assert!(head.contains("accept: */*"), "wrong Accept for a file");
+            assert!(
+                head.contains(&format!("user-agent: {}", TEST_USER_AGENT.to_lowercase())),
+                "the public user agent was not sent"
+            );
         }
         assert!(!root.exists(), "a download must not create the cache");
         let _ = fs::remove_dir_all(dir);

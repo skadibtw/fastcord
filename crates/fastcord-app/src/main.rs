@@ -3623,8 +3623,11 @@ impl App {
         let stream =
             gateway::status_stream(session.client.clone(), session.token(), controls.clone());
         let (task, worker) = Task::run(stream, move |()| Message::Navigation(id)).abortable();
-        let attachment_cache =
-            crate::attachments::AttachmentCache::default_root(session.user.id).ok();
+        let attachment_cache = crate::attachments::AttachmentCache::default_root(
+            session.user.id,
+            &session.client.identity().properties().browser_user_agent,
+        )
+        .ok();
         self.search = search::State::default();
         self.pins = pins::State::default();
         self.inbox.clear();
