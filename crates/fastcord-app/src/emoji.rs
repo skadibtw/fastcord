@@ -373,6 +373,18 @@ impl State {
             && self.views.values().any(|view| view.frames.len() > 1)
     }
 
+    /// When the earliest visible animated frame is due, while animation runs.
+    pub fn next_due(&self) -> Option<Instant> {
+        if !self.animating() {
+            return None;
+        }
+        self.views
+            .values()
+            .filter(|view| view.frames.len() > 1)
+            .map(|view| view.due)
+            .min()
+    }
+
     pub fn tick(&mut self, now: Instant) {
         if !self.active {
             return;
@@ -661,8 +673,17 @@ mod tests {
         state.views.insert(asset, View::from_decoded(animation(2)));
         assert!(state.animating());
         let due = state.views[&asset].due;
+        assert_eq!(
+            state.next_due(),
+            Some(due),
+            "the wake-up is the frame's own due time"
+        );
         state.tick(due);
         assert_eq!(state.views[&asset].frame, 1);
+        assert!(
+            state.next_due().is_some_and(|next| next > due),
+            "a tick moves the wake-up to the next frame"
+        );
         state.tick(due + Duration::from_millis(80));
         assert_eq!(
             state.views[&asset].frame, 1,

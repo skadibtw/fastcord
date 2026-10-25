@@ -1311,13 +1311,25 @@ impl App {
         }
     }
 
-    /// The 20 ms animation timer exists only while a visible, active emoji animates.
+    /// The animation wake-up exists only while a visible, active emoji animates,
+    /// and fires once, when the earliest frame is due (at most 50 times a
+    /// second): every message redraws the whole window, so a fixed 50 Hz timer
+    /// redrew it even between frames.
     fn animation_subscription(&self) -> iced::Subscription<Message> {
-        if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.emoji.animating()) {
-            iced::time::every(std::time::Duration::from_millis(20)).map(Message::EmojiTick)
-        } else {
-            iced::Subscription::none()
-        }
+        let Phase::Account { gateway, .. } = &self.phase else {
+            return iced::Subscription::none();
+        };
+        let Some(due) = gateway.emoji.next_due() else {
+            return iced::Subscription::none();
+        };
+        iced::Subscription::run_with(due, |due| {
+            let due = *due;
+            iced::futures::stream::once(async move {
+                let floor = std::time::Instant::now() + std::time::Duration::from_millis(20);
+                tokio::time::sleep_until(due.max(floor).into()).await;
+                Message::EmojiTick(std::time::Instant::now())
+            })
+        })
     }
 
     // Keep specialized dispatch outside the large account-message frame.
