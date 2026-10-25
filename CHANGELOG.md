@@ -15,6 +15,7 @@
 - The voice transport cipher uses the same `aes-gcm` 0.10 / `chacha20poly1305` 0.10 generation as openmls, so the binary carries one AEAD stack instead of two (about a dozen duplicate crates fewer) (#203).
 - The Windows executable links the C runtime statically and no longer needs the Visual C++ Redistributable; a PC without it used to fail with "VCRUNTIME140.dll was not found" (#206).
 - iced's image support no longer pulls in every `image` codec: the app hands iced decoded pixels only, so the rav1e AV1 encoder, EXR, TIFF, QOI and their dependencies (over a hundred crates) are gone from the build (#200).
+- The macOS app declares `NSMicrophoneUsageDescription`, so the first microphone use shows the permission prompt instead of macOS terminating the app (#199).
 
 ### Removed
 - The retired "Blocking bypass" setting is gone. Since the transport moved to `fastcord-net`, turning it on started nothing, yet the value was still stored, still displayed as on, and still accepted byedpi options such as `-I <address>`. The app no longer reads, writes or links `fastcord-bypass` at all; an old settings file loads normally and the stale `bypass` key disappears the next time preferences are saved.

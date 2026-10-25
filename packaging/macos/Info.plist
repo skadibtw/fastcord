@@ -12,5 +12,6 @@
   <key>CFBundleVersion</key><string>@VERSION@</string>
   <key>LSMinimumSystemVersion</key><string>12.3</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>fastcord uses the microphone for voice calls, the microphone test and voice messages you record.</string>
 </dict>
 </plist>
