@@ -211,7 +211,7 @@ mod tests {
         {
             assert_eq!(
                 route.url.as_str(),
-                format!("https://discord.com/api/v10{path}")
+                format!("https://discord.com/api/v9{path}")
             );
             assert_eq!(route.key().method(), &Method::GET);
             // The request's Debug output names the normalized route, never the

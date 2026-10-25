@@ -8,14 +8,14 @@ use zeroize::Zeroizing;
 
 use crate::RestError;
 
-pub(crate) const API_BASE: &str = "https://discord.com/api/v10";
+pub(crate) const API_BASE: &str = "https://discord.com/api/v9";
 const MAX_ROUTE_BYTES: usize = 8 * 1024;
 
 /// The REST origin: Discord's, or the loopback fake's in the test-only mode.
 pub(crate) fn api_base() -> std::borrow::Cow<'static, str> {
     #[cfg(feature = "fake-discord")]
     if let Some(port) = crate::fake_origin::port() {
-        return format!("http://127.0.0.1:{port}/api/v10").into();
+        return format!("http://127.0.0.1:{port}/api/v9").into();
     }
     API_BASE.into()
 }
@@ -125,7 +125,7 @@ impl RouteKey {
     }
 }
 
-/// A resource path under the fixed `/api/v10` origin, never an arbitrary URL.
+/// A resource path under the fixed `/api/v9` origin, never an arbitrary URL.
 /// Queries affect the request, not its rate-limit key.
 #[derive(Clone)]
 pub struct Route {
@@ -154,10 +154,10 @@ impl Route {
         }
         let url =
             Url::parse(&format!("{}{path}", api_base())).map_err(|_| RestError::InvalidRoute)?;
-        if !trusted_origin(&url) || !url.path().starts_with("/api/v10/") {
+        if !trusted_origin(&url) || !url.path().starts_with("/api/v9/") {
             return Err(RestError::InvalidRoute);
         }
-        let segments = url.path()["/api/v10/".len()..].split('/');
+        let segments = url.path()["/api/v9/".len()..].split('/');
         let mut head = segments.clone();
         let family = head.next().unwrap_or_default();
         let major_id = head.next().and_then(|id| id.parse::<Snowflake>().ok());
@@ -245,7 +245,7 @@ mod tests {
         );
         assert_eq!(
             first.url.as_str(),
-            "https://discord.com/api/v10/channels/123/messages/456?limit=50"
+            "https://discord.com/api/v9/channels/123/messages/456?limit=50"
         );
     }
 

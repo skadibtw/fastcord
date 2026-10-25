@@ -244,7 +244,7 @@ mod tests {
     fn path(query: &SearchQuery) -> String {
         let route = query.route().unwrap();
         let url = route.url.as_str().to_owned();
-        url.strip_prefix("https://discord.com/api/v10")
+        url.strip_prefix("https://discord.com/api/v9")
             .unwrap()
             .to_owned()
     }

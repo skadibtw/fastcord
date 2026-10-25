@@ -85,16 +85,16 @@ mod tests {
     #[test]
     fn keys_keep_the_major_id_and_normalize_the_rest() {
         assert_eq!(
-            route_key("GET", "/api/v10/channels/12/messages/34"),
-            "GET/api/v10/channels/12/messages/{id}"
+            route_key("GET", "/api/v9/channels/12/messages/34"),
+            "GET/api/v9/channels/12/messages/{id}"
         );
         assert_eq!(
-            route_key("PUT", "/api/v10/guilds/5/roles/7"),
-            "PUT/api/v10/guilds/5/roles/{id}"
+            route_key("PUT", "/api/v9/guilds/5/roles/7"),
+            "PUT/api/v9/guilds/5/roles/{id}"
         );
         assert_ne!(
-            route_key("GET", "/api/v10/channels/1/messages"),
-            route_key("GET", "/api/v10/channels/2/messages")
+            route_key("GET", "/api/v9/channels/1/messages"),
+            route_key("GET", "/api/v9/channels/2/messages")
         );
     }
 }

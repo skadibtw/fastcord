@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(
             user.url.as_str(),
             format!(
-                "https://discord.com/api/v10/channels/500/messages/{MESSAGE}/reactions/%E2%9D%A4/77"
+                "https://discord.com/api/v9/channels/500/messages/{MESSAGE}/reactions/%E2%9D%A4/77"
             )
         );
         assert!(clear.url.as_str().ends_with("/reactions/%E2%9D%A4"));
@@ -442,7 +442,7 @@ mod tests {
             assert_eq!(route.key().method().as_str(), pin.method, "{what}");
             assert_eq!(
                 route.url.as_str(),
-                format!("https://discord.com/api/v10{}", pin.path),
+                format!("https://discord.com/api/v9{}", pin.path),
                 "{what}"
             );
         }

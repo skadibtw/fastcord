@@ -736,13 +736,13 @@ mod tests {
         let verify = route(Method::GET, guild, "member-verification?with_guild=false").unwrap();
         assert_eq!(
             path(&verify),
-            "/api/v10/guilds/100/member-verification?with_guild=false"
+            "/api/v9/guilds/100/member-verification?with_guild=false"
         );
         let accept = route(Method::PUT, guild, "requests/@me").unwrap();
-        assert_eq!(path(&accept), "/api/v10/guilds/100/requests/@me");
+        assert_eq!(path(&accept), "/api/v9/guilds/100/requests/@me");
         assert_eq!(accept.key().method(), &Method::PUT);
         let answer = route(Method::PUT, guild, "onboarding-responses").unwrap();
-        assert_eq!(path(&answer), "/api/v10/guilds/100/onboarding-responses");
+        assert_eq!(path(&answer), "/api/v9/guilds/100/onboarding-responses");
         assert_eq!(
             route(Method::GET, guild, "onboarding")
                 .unwrap()

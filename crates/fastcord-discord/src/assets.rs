@@ -574,7 +574,7 @@ mod tests {
         let route = |method, path: &str| Route::new(method, path).unwrap();
         assert_eq!(
             route(Method::POST, "/guilds/5/emojis").url.as_str(),
-            "https://discord.com/api/v10/guilds/5/emojis"
+            "https://discord.com/api/v9/guilds/5/emojis"
         );
         assert!(write(Method::PATCH, "/guilds/5/emojis/6").is_ok());
         assert!(write(Method::DELETE, "/guilds/5/soundboard-sounds/7").is_ok());

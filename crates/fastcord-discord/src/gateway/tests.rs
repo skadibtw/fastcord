@@ -34,9 +34,9 @@ use crate::ws::ConnectError;
 const READY: &str = include_str!("../../../../fixtures/gateway/ready.json");
 const SUPPLEMENTAL: &str = include_str!("../../../../fixtures/gateway/ready_supplemental.json");
 const MESSAGE: &str = include_str!("../../../../fixtures/model/message_create.json");
-const DISCOVERED: &str = "wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream";
+const DISCOVERED: &str = "wss://gateway.discord.gg/?v=9&encoding=json&compress=zlib-stream";
 const RESUME_URL: &str =
-    "wss://gateway-us-east1-b.discord.gg/?v=10&encoding=json&compress=zlib-stream";
+    "wss://gateway-us-east1-b.discord.gg/?v=9&encoding=json&compress=zlib-stream";
 const FETCHED_BUILD: u32 = 700_123;
 const HEARTBEAT_MS: u64 = 40_000;
 

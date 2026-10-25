@@ -277,7 +277,7 @@ mod tests {
         route
             .url
             .as_str()
-            .strip_prefix("https://discord.com/api/v10")
+            .strip_prefix("https://discord.com/api/v9")
             .unwrap()
             .to_owned()
     }

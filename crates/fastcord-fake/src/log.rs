@@ -113,7 +113,7 @@ mod tests {
         let entry = Entry {
             kind: "http",
             method: "POST",
-            path: "/api/v10/auth/login",
+            path: "/api/v9/auth/login",
             query: "a=b",
             status: Some(404),
             body_bytes: 40,

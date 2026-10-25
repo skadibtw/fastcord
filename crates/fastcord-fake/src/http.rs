@@ -239,11 +239,11 @@ mod tests {
     #[test]
     fn head_parses_target_query_and_lowercases_headers() {
         let request = parse_head(
-            "GET /api/v10/channels/5/messages?limit=50&before=9 HTTP/1.1\r\nHost: x\r\nAuthorization: abc\r\nContent-Length: 0",
+            "GET /api/v9/channels/5/messages?limit=50&before=9 HTTP/1.1\r\nHost: x\r\nAuthorization: abc\r\nContent-Length: 0",
         )
         .unwrap();
         assert_eq!(request.method, "GET");
-        assert_eq!(request.path, "/api/v10/channels/5/messages");
+        assert_eq!(request.path, "/api/v9/channels/5/messages");
         assert_eq!(request.header("authorization"), Some("abc"));
         assert_eq!(
             request.query_pairs(),

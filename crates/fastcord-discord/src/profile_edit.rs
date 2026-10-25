@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(route.key().method(), &Method::PATCH);
         assert_eq!(
             route.url.as_str(),
-            "https://discord.com/api/v10/users/@me/connections/github/123"
+            "https://discord.com/api/v9/users/@me/connections/github/123"
         );
         assert_eq!(
             connection_route(&list[2]).err(),
@@ -389,7 +389,7 @@ mod tests {
         let route = Route::new(Method::PATCH, "/guilds/9/members/@me").unwrap();
         assert_eq!(
             route.url.as_str(),
-            "https://discord.com/api/v10/guilds/9/members/@me"
+            "https://discord.com/api/v9/guilds/9/members/@me"
         );
         assert_eq!(route.key().method(), &Method::PATCH);
     }

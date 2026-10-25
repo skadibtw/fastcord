@@ -37,7 +37,7 @@ impl Transport for Unauthenticated {
     type Socket = TlsSocket;
 
     async fn discover(&self) -> Result<String, DiscoverError> {
-        let response = reqwest::get("https://discord.com/api/v10/gateway")
+        let response = reqwest::get("https://discord.com/api/v9/gateway")
             .await
             .map_err(|_| DiscoverError::Failed)?;
         let body = response.bytes().await.map_err(|_| DiscoverError::Failed)?;

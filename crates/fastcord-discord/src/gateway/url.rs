@@ -5,10 +5,10 @@ use reqwest::Url;
 use super::compression::Compression;
 
 /// Gateway protocol version. Separate from the voice Gateway version.
-pub(crate) const GATEWAY_VERSION: &str = "10";
+pub(crate) const GATEWAY_VERSION: &str = "9";
 
 /// A validated Gateway WebSocket URL with the connection parameters fixed:
-/// API v10, JSON encoding, zlib-stream transport compression.
+/// API v9 (the official client's), JSON encoding, zlib-stream transport compression.
 ///
 /// Both `GET /gateway` and READY's `resume_gateway_url` are server-provided;
 /// the identify/resume payloads carry the user token, so only `wss://` URLs on
@@ -63,17 +63,17 @@ mod tests {
         for base in [
             "wss://gateway.discord.gg",
             "wss://gateway.discord.gg/",
-            "wss://gateway-us-east1-b.discord.gg/?v=9&encoding=etf",
+            "wss://gateway-us-east1-b.discord.gg/?v=6&encoding=etf",
             "wss://gateway.discord.gg:443",
         ] {
             let url = GatewayUrl::parse(base).unwrap_or_else(|| panic!("{base}"));
             assert!(
                 url.as_str()
-                    .ends_with("/?v=10&encoding=json&compress=zlib-stream"),
+                    .ends_with("/?v=9&encoding=json&compress=zlib-stream"),
                 "{}",
                 url.as_str()
             );
-            assert!(!url.as_str().contains("etf") && !url.as_str().contains("v=9"));
+            assert!(!url.as_str().contains("etf") && !url.as_str().contains("v=6"));
         }
     }
 

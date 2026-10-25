@@ -85,6 +85,6 @@ mod tests {
     fn the_route_is_the_settings_patch() {
         let route = Route::new(Method::PATCH, "/users/@me/settings").unwrap();
         assert_eq!(route.key().method(), Method::PATCH);
-        assert_eq!(route.url.path(), "/api/v10/users/@me/settings");
+        assert_eq!(route.url.path(), "/api/v9/users/@me/settings");
     }
 }

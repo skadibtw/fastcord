@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(route.key().method(), Method::POST);
         assert_eq!(
             route.url.as_str(),
-            "https://discord.com/api/v10/channels/500/send-soundboard-sound"
+            "https://discord.com/api/v9/channels/500/send-soundboard-sound"
         );
         assert_eq!(
             serde_json::to_string(&PlayBody {

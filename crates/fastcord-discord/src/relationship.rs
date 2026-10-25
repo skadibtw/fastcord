@@ -222,28 +222,28 @@ mod tests {
         let id = Snowflake(42);
         let (route, body) = action_parts(RelationshipAction::Befriend, id).unwrap();
         assert_eq!(route.key().method(), Method::PUT);
-        assert_eq!(route.url.path(), "/api/v10/users/@me/relationships/42");
+        assert_eq!(route.url.path(), "/api/v9/users/@me/relationships/42");
         assert_eq!(body.unwrap(), serde_json::json!({}));
         let (route, body) = action_parts(RelationshipAction::Block, id).unwrap();
         assert_eq!(route.key().method(), Method::PUT);
         assert_eq!(body.unwrap(), serde_json::json!({"type": 2}));
         let (route, body) = action_parts(RelationshipAction::Remove, id).unwrap();
         assert_eq!(route.key().method(), Method::DELETE);
-        assert_eq!(route.url.path(), "/api/v10/users/@me/relationships/42");
+        assert_eq!(route.url.path(), "/api/v9/users/@me/relationships/42");
         assert!(body.is_none());
         // Ignore is its own route and never the block body.
         let (route, body) = action_parts(RelationshipAction::Ignore, id).unwrap();
         assert_eq!(route.key().method(), Method::PUT);
         assert_eq!(
             route.url.path(),
-            "/api/v10/users/@me/relationships/42/ignore"
+            "/api/v9/users/@me/relationships/42/ignore"
         );
         assert_eq!(body.unwrap(), serde_json::json!({}));
         let (route, body) = action_parts(RelationshipAction::Unignore, id).unwrap();
         assert_eq!(route.key().method(), Method::DELETE);
         assert_eq!(
             route.url.path(),
-            "/api/v10/users/@me/relationships/42/ignore"
+            "/api/v9/users/@me/relationships/42/ignore"
         );
         assert!(body.is_none());
         for action in [

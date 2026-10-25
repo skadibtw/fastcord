@@ -9,7 +9,7 @@ use crate::world::{
     MANAGE_CHANNELS, MANAGE_MESSAGES, MANAGE_ROLES, SEND_MESSAGES, VIEW_CHANNEL, World, iso, text,
 };
 
-pub const PREFIX: &str = "/api/v10";
+pub const PREFIX: &str = "/api/v9";
 
 /// A Gateway dispatch the answer caused.
 #[derive(Clone, Debug)]

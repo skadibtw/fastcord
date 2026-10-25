@@ -53,7 +53,7 @@ async fn two_gateway_discovery_403s_stop_with_the_manual_reconnect_state() {
     let log = std::fs::read_to_string(&log_path).unwrap();
     let discoveries = log
         .lines()
-        .filter(|line| line.contains("\"path\":\"/api/v10/gateway\""))
+        .filter(|line| line.contains("\"path\":\"/api/v9/gateway\""))
         .count();
     assert_eq!(discoveries, 2, "exactly two asks, then it stopped");
     assert!(!log.contains("\"kind\":\"ws\""), "no socket was opened");

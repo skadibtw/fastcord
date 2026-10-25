@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(vote.key().method().as_str(), "PUT");
         assert_eq!(
             vote.url.as_str(),
-            "https://discord.com/api/v10/channels/500/polls/1290000000000000010/answers/@me"
+            "https://discord.com/api/v9/channels/500/polls/1290000000000000010/answers/@me"
         );
         assert_eq!(
             serde_json::to_value(vote_body(&[1, 3])).unwrap(),

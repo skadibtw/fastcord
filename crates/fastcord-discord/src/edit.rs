@@ -365,7 +365,7 @@ mod tests {
         let delete = message_route(Method::DELETE, CHANNEL, ID).unwrap();
         assert_eq!(
             edit.url.as_str(),
-            "https://discord.com/api/v10/channels/500/messages/1290000000000000099"
+            "https://discord.com/api/v9/channels/500/messages/1290000000000000099"
         );
         assert_eq!(edit.url, delete.url);
         assert_eq!(edit.key().method(), &Method::PATCH);

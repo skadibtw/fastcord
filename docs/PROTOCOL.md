@@ -7,7 +7,7 @@ Wire-level behavior fastcord implements or depends on, with its evidence status.
 Implemented in `fastcord-discord::gateway`. One `Gateway` handle is one account's connection lifecycle; a Tokio task owns the socket and hands ordered `GatewayEvent`s to the single consumer (the reducer of milestone 7).
 
 ### Connection and compression
-- URL from `GET /gateway` (cached; asked again only after a failed connect), then `?v=10&encoding=json&compress=zlib-stream`. Only `wss://` hosts on `discord.gg` are ever connected to or sent the token; anything else (including a hostile `resume_gateway_url`) is refused, a hostile resume URL falling back to the discovered one.
+- URL from `GET /gateway` (cached; asked again only after a failed connect), then `?v=9&encoding=json&compress=zlib-stream` (v9, the official client's API version; ADR 0005). Only `wss://` hosts on `discord.gg` are ever connected to or sent the token; anything else (including a hostile `resume_gateway_url`) is refused, a hostile resume URL falling back to the discovered one.
 - One persistent zlib context per connection (`flate2`, pure Rust). WebSocket message payloads accumulate until the `00 00 ff ff` sync-flush suffix, which is looked for at the end of the accumulation, so a message boundary may fall anywhere (even inside the suffix). The dictionary is never reset on a live connection; a new connection starts a new one. Identify's `compress` stays `false`.
 - Safety ceiling: 16 MiB per decompressed event, and 16 MiB of compressed bytes accumulated toward one. Exceeding it ends in `Stopped(EventTooLarge)` (a diagnosable startup error, never silent truncation). Decompression is incremental, so a bomb is stopped before it is allocated. Scratch above 256 KiB is released as soon as the event has been handled.
 - zstd-stream is intentionally not implemented (SPEC §4.1).
@@ -142,8 +142,8 @@ Windows host equal to the pin.
 
 #### Other target changes
 
-- API base and Gateway `v=` become 9 (the documented client default); the
-  current build uses 10.
+- API base and Gateway `v=` are 9 (the documented client default) since
+  2026-10-25; a bogus-token Identify on `v=9` was answered with 4004.
 - `launch_signature` clears the 12 documented client-mod bits; the heartbeat
   and installation id are sent as above; `X-Fingerprint` comes from
   `GET /experiments` for the unauthenticated login flow.
@@ -185,7 +185,7 @@ VOICE_SERVER_UPDATE (`{token, guild_id, channel_id?, endpoint}`) is decoded for 
 
 ## REST client identity (ADR 0005)
 
-`RestClient` carries the same `ClientProperties` the Gateway Identifies with, so both halves present one consistent official-client identity (ADR 0005 revision 2026-10-25). The identity headers are encoded and validated once at REST client construction, then installed as default headers for every authenticated request. The current build uses `/api/v10` and only the headers below; the target uses `/api/v9` and the desktop (Electron) surface listed after the bullets.
+`RestClient` carries the same `Identity` the Gateway Identifies with, so both halves present one consistent official-client identity (ADR 0005 revision 2026-10-25). The fixed identity headers are validated once at REST client construction and installed as default headers; `x-super-properties` and `x-installation-id` are added per request from the shared `Identity`. Requests go to `https://discord.com/api/v9`.
 
 - `Authorization: <raw user token>` (no `Bot `/`Bearer ` prefix, marked sensitive).
 - `x-super-properties`: the `ClientProperties` JSON, standard-base64 encoded — the exact same object Identify sends under `properties`, with the current `client_heartbeat_session_id`.

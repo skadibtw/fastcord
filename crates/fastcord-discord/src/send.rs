@@ -1112,7 +1112,7 @@ line"
         assert_eq!(route.key().major().channel_id(), Some(Snowflake(500)));
         assert_eq!(
             route.url.as_str(),
-            "https://discord.com/api/v10/channels/500/messages"
+            "https://discord.com/api/v9/channels/500/messages"
         );
     }
 

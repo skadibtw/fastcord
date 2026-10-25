@@ -133,7 +133,7 @@ async fn the_real_client_talks_to_the_fake() {
 
     // The request log has the traffic, with the credential redacted.
     let log = std::fs::read_to_string(&log_path).unwrap();
-    assert!(log.contains("\"path\":\"/api/v10/users/@me\""));
+    assert!(log.contains("\"path\":\"/api/v9/users/@me\""));
     assert!(log.contains("\"kind\":\"ws\""));
     assert!(log.contains("\"RATE_LIMITED\""));
     assert!(!log.contains("fake-token"), "a token reached the log");

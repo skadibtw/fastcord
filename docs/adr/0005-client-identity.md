@@ -162,8 +162,8 @@ non-secret `installation-id` file of the data folder and sent as
 REST client and the Gateway). The pin check is
 `live_version_chain_matches_the_pin`, run daily by
 `.github/workflows/identity-pin.yml`. Password login sends the `X-Fingerprint`
-of `GET /experiments`. Still open: API and Gateway v9, the Electron header set and cookie jar, the nonce shape and
-`self_stream`. The exact payload, the gaps and the per-item corrections are in
+of `GET /experiments`. API and Gateway use v9. Still open: the Electron
+header set and cookie jar, the nonce shape and `self_stream`. The exact payload, the gaps and the per-item corrections are in
 `docs/PROTOCOL.md` and `docs/IDENTITY_AUDIT.md`.
 The accepted-shape evidence from 2026-10-07 (a bogus-token Identify over the
 real compressed Gateway answered with close 4004, not 4002; build number
