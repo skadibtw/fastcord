@@ -1,4 +1,5 @@
-//! The main user Gateway: API v10, JSON, `compress=zlib-stream` (SPEC §4).
+//! The main user Gateway: API v10 (target v9, ADR 0005 revision 2026-10-25),
+//! JSON, `compress=zlib-stream` (SPEC §4).
 //!
 //! One [`Gateway`] is one account's connection lifecycle. It owns a task that
 //! discovers the URL, connects, heartbeats, Identifies or Resumes, decodes

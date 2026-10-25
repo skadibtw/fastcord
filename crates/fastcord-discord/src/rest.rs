@@ -575,9 +575,10 @@ pub(crate) fn identity_headers(properties: &ClientProperties) -> Result<HeaderMa
         HeaderValue::from_str(&properties.browser_user_agent)
             .map_err(|_| RestError::ClientConfiguration)?,
     );
-    // A fingerprint is a server-issued installation/session identifier, not
-    // versioned client metadata. Do not reuse a captured value across accounts
-    // or invent one. Omit it until a supported per-installation flow exists.
+    // Current build: omitted. The target generates a fingerprint per
+    // installation through GET /experiments for the unauthenticated login flow
+    // and never reuses a captured value across accounts or installations
+    // (ADR 0005 revision 2026-10-25).
 
     Ok(headers)
 }

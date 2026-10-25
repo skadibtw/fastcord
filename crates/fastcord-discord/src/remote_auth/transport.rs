@@ -8,7 +8,7 @@ use super::RemoteAuthError;
 use crate::ws::{self, TlsSocket};
 
 const GATEWAY_URL: &str = "wss://remote-auth-gateway.discord.gg/?v=2";
-/// The gateway rejects other origins; this is the documented web-client origin.
+/// The gateway rejects other origins; this is the documented client origin.
 const ORIGIN: &str = "https://discord.com";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Every legitimate frame is a few hundred bytes.

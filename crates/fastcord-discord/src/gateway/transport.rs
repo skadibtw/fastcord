@@ -16,7 +16,7 @@ use super::url::GatewayUrl;
 use crate::ws::{self, ConnectError, TlsSocket};
 use crate::{Priority, RestClient, RestError};
 
-/// The documented web-client origin; Discord's gateways reject other origins.
+/// The documented client origin; Discord's gateways reject other origins.
 const ORIGIN: &str = "https://discord.com";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 

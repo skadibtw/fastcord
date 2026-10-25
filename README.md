@@ -99,13 +99,18 @@ Local logout does not revoke every Discord session.
 
 ## Connection
 
-After login the account screen connects to Discord's Gateway (v10, zlib-stream
+After login the account screen connects to Discord's Gateway (zlib-stream
 compression) and shows its state: connected (with server and direct-message
 counts), reconnecting, a rejected login (back to the login screen), or stopped
-with the reason. It presents the Discord web client's identity (Chrome profile,
-per-launch identity, current build number fetched from discord.com, bundled
-fallback), and the same profile is what its API requests carry; the exact
-payload is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md). Dropped connections resume
+with the reason. It presents the official Discord client's identity (the
+official desktop/Electron profile): the fields, version, headers and cookies
+the official client uses, with the identity work specified in
+[docs/adr/0005-client-identity.md](docs/adr/0005-client-identity.md) and the
+remaining gaps and known residuals listed in
+[docs/IDENTITY_AUDIT.md](docs/IDENTITY_AUDIT.md); the same profile is what its
+API requests carry, and the exact payload is documented in
+[docs/PROTOCOL.md](docs/PROTOCOL.md). Impersonation is best-effort and does not
+guarantee that an account survives. Dropped connections resume
 the session with bounded, jittered backoff. If Discord demands an action or a
 challenge on the account, fastcord stops and says so; it never completes or
 bypasses one. Logging out closes the Gateway session, so the account goes

@@ -111,7 +111,9 @@ pub async fn initialize_store() -> Result<StoreReady, StoreError> {
     .map_err(|_| StoreError::Unavailable)?
 }
 
-/// The web-client identity shared by password login and the validated session.
+/// The official-client identity shared by password login and the validated
+/// session. The desktop profile is the target; the current build sends the web
+/// placeholder (ADR 0005 revision 2026-10-25).
 pub async fn client_properties() -> ClientProperties {
     let build = fastcord_discord::gateway::resolve_build_number().await;
     ClientProperties::web(

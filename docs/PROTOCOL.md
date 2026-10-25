@@ -36,17 +36,93 @@ A 401 on `GET /gateway`, or on any other request of the account (`RestClient::au
 Dropping the `Gateway` handle closes the socket with code 1000, which ends the session on Discord's side.
 
 ### Capabilities
-Identify's `capabilities` is derived from named flags, never a magic number: `LAZY_USER_NOTES` (1<<0), `NO_AFFINE_USER_IDS` (1<<1), `DEDUPE_USER_OBJECTS` (1<<4), `PRIORITIZED_READY_PAYLOAD` (1<<5, requires dedupe), `PASSIVE_GUILD_UPDATE_V2` (1<<14) = **16435**. No intents. Not enabled because their payloads have no handler: protobuf user settings, reaction debouncing, client-state v2, versioned read states and guild settings, token refresh, auto call/lobby connect, channel obfuscation. The empty `client_state.guild_versions` is sent (cold login; no versions are persisted).
+Identify's `capabilities` is derived from named flags, never a magic number: `LAZY_USER_NOTES` (1<<0), `NO_AFFINE_USER_IDS` (1<<1), `DEDUPE_USER_OBJECTS` (1<<4), `PRIORITIZED_READY_PAYLOAD` (1<<5, requires dedupe), `PASSIVE_GUILD_UPDATE_V2` (1<<14) = **16435**. No intents. Not enabled because their payloads have no handler: protobuf user settings, reaction debouncing, client-state v2, versioned read states and guild settings, token refresh, auto call/lobby connect, channel obfuscation. The empty `client_state.guild_versions` is sent on a cold login; the 2026-10-25 target adds a bounded persisted map for warm logins (see below).
 
-### Identify profile (ADR 0005, risk U1)
-Built once per launch (at login) by `ClientProperties::web(HostOs::current(), system_locale, build_number).with_launch_identity()` and reused unchanged by every Identify and by every REST request of the account. The accepted-shape payload, with the token replaced, is recorded in `fixtures/gateway/identify.sanitized.json` and asserted byte-for-value by a test:
+### Identify profile (ADR 0005, target revision 2026-10-25)
 
-- `properties`: `os` / `os_version` / UA platform token from the host (`Windows`/`10`, `Mac OS X`/`10.15.7`, `Linux`/`""`, which is what Chrome reports on each), `browser: "Chrome"`, `browser_user_agent` and `browser_version` for Chrome 155 (reduced UA, minor parts `0`), `device: ""`, `system_locale` from the OS, empty referrer fields, `release_channel: "stable"`, `has_client_mods: false`, `client_event_source: null`, and `client_build_number`.
-- `client_launch_id` and `launch_signature` are two fresh UUIDv4s generated once per launch (at login) and fixed for the rest of the run, exactly as the web client does; `client_app_state` is `"focused"`. The desktop-only `native_build_number` is not sent.
-- `client_build_number` is read from the `"BUILD_NUMBER"` entry of `window.GLOBAL_ENV` in `https://discord.com/app` once per launch (unauthenticated, 1 MiB read cap, plausibility range 100 000–9 999 999), timestamped when resolved, and falls back to the value bundled at release time (`631730`, observed 2026-10-07). It is resolved once per process (the answer, fetched or fallback, is cached; validate, restore, account switch, password and MFA reuse it) and never changes between reconnects.
-- Also: `presence {status: "unknown", since: 0, activities: [], afk: false}`, `compress: false`.
+The code still sends the 2026-10-07 web profile; the target is the official
+desktop (Electron) profile. Both are built once at login and reused by every
+Identify and REST request, except the 30-minute heartbeat and the installation
+id learned after READY.
 
-Evidence (2026-10-07, Windows, unauthenticated): the real endpoints returned build number 631730; a real Identify with a deliberately bogus token reached the real Gateway over `compress=zlib-stream`, its compressed HELLO decoded, and Discord answered with close code **4004** (authentication failed), not 4002 (undecodable payload): the structure of the payload is accepted. **Not yet established:** acceptance of the profile together with a *valid* account token (READY/READY_SUPPLEMENTAL on the alt account, and no challenge). That check is `live_account_identifies_and_resumes_after_a_forced_reconnect` (see `docs/TESTING.md`); until it has run, U1 remains open and the profile above is "structurally accepted", not "accepted".
+#### Current web placeholder
+
+`ClientProperties::web` sends `browser: "Chrome"`, the Chrome 155 reduced UA,
+the web `client_build_number`, no `client_version`/`native_build_number`, and
+two fresh UUIDv4s for `client_launch_id`/`launch_signature`. The accepted-shape
+payload is in `fixtures/gateway/identify.sanitized.json`; its 2026-10-07
+evidence (close 4004 with a bogus token, build 631730) is history, not the
+target.
+
+#### Target desktop profile
+
+| Field | Sent as |
+|---|---|
+| `os`, `os_version` | the host's full values (`Windows`/`10.0.26100`, `Mac OS X`/`24.2.0`, `Linux`/kernel) |
+| `os_arch`, `app_arch` | `x64` or `arm64` |
+| `os_sdk_version` | Windows build / macOS SDK, when the official capture has it |
+| `window_manager`, `distro`, `runtime_environment` | Linux only, when the official capture has them |
+| `browser` | `Discord Client` |
+| `client_version` | the Discord host version (`1.0.xxxx`) |
+| `browser_user_agent` | Electron UA: `Mozilla/5.0 (<platform>) AppleWebKit/537.36 (KHTML, like Gecko) discord/<client_version> Chrome/<chromium> Electron/<electron> Safari/537.36` |
+| `browser_version` | the Electron version |
+| `client_build_number` | the web build from `https://discord.com/app` |
+| `native_build_number` | the manifest `metadata_version` |
+| `client_launch_id` | a fresh UUIDv4 per launch |
+| `launch_signature` | a UUIDv4 with the 12 client-mod detection bits cleared |
+| `client_heartbeat_session_id` | a fresh UUIDv4, rotated every 30 minutes |
+| `client_app_state` | only if the official capture shows it |
+| `device`, `referrer*` | omit unless the desktop capture shows them |
+| `system_locale` | the OS locale |
+| `release_channel` | `stable` |
+| `has_client_mods` | `false` |
+| `client_event_source` | `null` |
+| `installation_id` | the persisted installation id |
+
+Also: `presence {status: "unknown", since: 0, activities: [], afk: false}`,
+`compress: false`, and the capabilities/version-cache target below. The
+web-only `device` and `referrer*` fields are optional; the published desktop
+example omits them, so the capture decides. The target
+adds the desktop headers: `X-Installation-ID`, `x-discord-timezone`,
+`sec-ch-ua*` as Electron sends it, `sec-fetch-*`, `accept-language`,
+`accept-encoding`, `origin`/`referer`, a bounded cookie jar for `discord.com`,
+and the same on the Gateway, voice and remote-auth WebSocket handshakes.
+
+#### Version chain
+
+`client_version` and `native_build_number` come from the update manifest
+(`https://updates.discord.com/distributions/app/manifests/latest` with
+`channel=stable`, the host `platform`, `arch` and a client-generated
+`install_id`: `full.host_version`, `metadata_version`); `client_build_number`
+comes from `https://discord.com/app`; the Electron and Chromium versions are
+not in the manifest and are a pinned pair reviewed when the host version
+changes. A CI or scheduled check fetches the manifest and `/app`, asserts the
+user-agent/native/build consistency, and fails when the pin is stale; it does
+not download Discord.
+
+#### Other target changes
+
+- API base and Gateway `v=` become 9 (the documented client default); the
+  current build uses 10.
+- `launch_signature` clears the 12 documented client-mod bits; the heartbeat
+  and installation id are sent as above; `X-Fingerprint` comes from
+  `GET /experiments` for the unauthenticated login flow.
+- `client_app_state` is kept only if a sanitized official Identify shows it.
+- `capabilities` and `client_state.guild_versions` follow a sanitized official
+  Identify once their payloads are handled; a bounded persisted version map
+  replaces the always-empty one.
+
+Evidence (2026-10-07, Windows, unauthenticated, web placeholder): the real
+endpoints returned build number 631730; a real Identify with a deliberately
+bogus token reached the real Gateway over `compress=zlib-stream`, its
+compressed HELLO decoded, and Discord answered with close code **4004**
+(authentication failed), not 4002 (undecodable payload): the structure of the
+payload is accepted. **Not yet established:** acceptance of the desktop
+profile together with a *valid* account token (READY/READY_SUPPLEMENTAL on the
+alt account, and no challenge). That check is
+`live_account_identifies_and_resumes_after_a_forced_reconnect` (see
+`docs/TESTING.md`); until it has run, U1 remains open and the profile above is
+"structurally accepted", not "accepted".
 
 ### READY normalization
 Decoded straight from the borrowed event text into typed structs that name only the fields used, so unknown fields are skipped as they are read and no untyped JSON tree is built; READY's arrays stream element by element.
@@ -63,19 +139,20 @@ Decoded straight from the borrowed event text into typed structs that name only 
 Events pass through a byte-bounded queue (2 MiB budget, 256 events): each reserves about twice its frame size and returns it when taken. A slow consumer stops the task from reading the socket instead of growing memory; nothing is dropped, ordering is kept, and heartbeats continue. An event larger than the whole budget (a big READY) is queued alone. Events already decoded are always delivered before a reconnect, so the Resume sequence equals what was delivered.
 
 ### Voice state (milestone 17)
-Opcode 4 (Update Voice State) is sent through `Gateway::voice_state()` (`VoiceStateControl`): `{"op": 4, "d": {"guild_id": "<id>"|null, "channel_id": "<id>"|null, "self_mute": bool, "self_deaf": bool, "self_video": false}}`, where `channel_id: null` leaves voice and `guild_id: null` addresses a private call. The consumer sets one wanted state; the connection task sends it only while Ready (after READY or RESUMED, never while Identifying or Resuming) and only when it differs from what this session last sent. Rapid requests coalesce and the newest wins. What was sent survives reconnects: after RESUMED only a state changed while disconnected goes out; a fresh READY starts with nothing sent, so a wanted join is sent again and a wanted leave is not sent at all. Opcode 4 counts against the 120-per-60 s ceiling and may use the control reserve but never the slots kept for a full window of heartbeats; when only those are left it is deferred until the window frees a slot.
+Opcode 4 (Update Voice State) is sent through `Gateway::voice_state()` (`VoiceStateControl`): `{"op": 4, "d": {"guild_id": "<id>"|null, "channel_id": "<id>"|null, "self_mute": bool, "self_deaf": bool, "self_video": false}}`, where `channel_id: null` leaves voice and `guild_id: null` addresses a private call. The consumer sets one wanted state; the connection task sends it only while Ready (after READY or RESUMED, never while Identifying or Resuming) and only when it differs from what this session last sent. Rapid requests coalesce and the newest wins. What was sent survives reconnects: after RESUMED only a state changed while disconnected goes out; a fresh READY starts with nothing sent, so a wanted join is sent again and a wanted leave is not sent at all. Opcode 4 counts against the 120-per-60 s ceiling and may use the control reserve but never the slots kept for a full window of heartbeats; when only those are left it is deferred until the window frees a slot. The current shape has no `self_stream`; the 2026-10-25 target adds it and sets it while a Go Live stream is live (B2 in `docs/IDENTITY_AUDIT.md`).
 
 VOICE_SERVER_UPDATE (`{token, guild_id, channel_id?, endpoint}`) is decoded for the voice layer and ignored by the reducer. A null `endpoint` means the voice server is being reallocated: the voice connection disconnects and waits for the next update. The token is redacted from `Debug`, zeroed on drop, and never logged.
 
 ## REST client identity (ADR 0005)
 
-`RestClient` carries the same `ClientProperties` the Gateway Identifies with, so both halves of the client present one consistent web-client identity for the whole run. The identity headers are encoded and validated once at REST client construction, then installed as default headers for every authenticated `/api/v10` request:
+`RestClient` carries the same `ClientProperties` the Gateway Identifies with, so both halves present one consistent official-client identity (ADR 0005 revision 2026-10-25). The identity headers are encoded and validated once at REST client construction, then installed as default headers for every authenticated request. The current build uses `/api/v10` and the web placeholder headers; the target uses `/api/v9` and the desktop (Electron) surface listed after the bullets.
 
 - `Authorization: <raw user token>` (no `Bot `/`Bearer ` prefix, marked sensitive).
-- `x-super-properties`: the `ClientProperties` JSON, standard-base64 encoded — the exact same object Identify sends under `properties`.
-- `user-agent`: the `browser_user_agent` of the profile (Chrome 155 reduced UA for the host OS).
-- `x-discord-locale`: the profile's `system_locale`.
-- `x-fingerprint` is omitted. Profile version 2 removes the captured constant previously shared by every installation/account. No replacement is fabricated; fingerprint/session metadata must not be treated as versioned client metadata. Compatibility without this header still needs independent validation.
+- `x-super-properties`: the `ClientProperties` JSON, standard-base64 encoded — the exact same object Identify sends under `properties`, with the current `client_heartbeat_session_id`.
+- `user-agent`: the profile's `browser_user_agent` (the Electron UA on the target; the current build still sends the web Chrome UA).
+- `x-discord-locale`: the profile's `system_locale` until the account locale is known, then the account's client locale.
+- `x-fingerprint`: the current build omits it. The target generates one through `GET /experiments` for the unauthenticated login flow; a captured value is never reused across installations/accounts.
+- **Target additions:** `X-Installation-ID` (the persisted installation id), `x-discord-timezone`, `sec-ch-ua`/`sec-ch-ua-mobile`/`sec-ch-ua-platform` as Electron sends them, `sec-fetch-site`/`mode`/`dest`, `accept-language`, `accept-encoding`, `origin`/`referer` on writes, and a bounded cookie jar for `discord.com` sent on REST and WebSocket handshakes.
 
 Offline consistency tests use `fixtures/rest/client-identity-profiles.json` for Windows, macOS, Linux, and a non-en-US locale, comparing REST user-agent/locale and decoded `x-super-properties` against the actual Gateway Identify properties.
 

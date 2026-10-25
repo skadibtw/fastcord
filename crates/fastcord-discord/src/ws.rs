@@ -123,7 +123,7 @@ pub(crate) mod fake {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ConnectError;
 
-/// Connects to a `wss://` URL. The `Origin` header is the documented web-client
+/// Connects to a `wss://` URL. The `Origin` header is the documented client
 /// origin; Discord's gateways reject other origins.
 pub(crate) async fn connect(
     url: &str,

@@ -29,4 +29,15 @@ Both feed the same validation (`GET /users/@me`) and keyring storage path.
 - Still unverified without the alt account's phone: the `pending_ticket`/`pending_login` payloads of a real scan, the real ticket exchange response, and whether Discord answers that exchange with a CAPTCHA (risk U6).
 
 ## Amendment (2026-10-16): email/password
-Added at the maintainer's request. `POST /auth/login` (and `/auth/mfa/totp`) use the same web-client identity as every other request. A CAPTCHA response is shown to the person in a short-lived embedded web view (`wry`/WebView2, Windows only; macOS and GTK need the main thread that iced owns) with a throwaway profile directory; the key their own interaction produces is sent back once. Nothing solves or bypasses a challenge, and a second CAPTCHA in one login stops the flow. Only TOTP is supported for second factor (no SMS, WebAuthn or backup codes). The result is a token handed to the common validation/storage path. Still unverified against Discord: the widget host page (`discord.com/robots.txt` with the body replaced), hCaptcha acceptance in WebView2, and whether new-location email verification interrupts a login (reported as a refusal with the HTTP status). Higher ban risk than QR remains.
+Added at the maintainer's request. `POST /auth/login` (and `/auth/mfa/totp`) use the same official-client identity as every other request (the desktop profile per ADR 0005 revision 2026-10-25). A CAPTCHA response is shown to the person in a short-lived embedded web view (`wry`/WebView2, Windows only; macOS and GTK need the main thread that iced owns) with a throwaway profile directory; the key their own interaction produces is sent back once. Nothing solves or bypasses a challenge, and a second CAPTCHA in one login stops the flow. Only TOTP is supported for second factor (no SMS, WebAuthn or backup codes). The result is a token handed to the common validation/storage path. Still unverified against Discord: the widget host page (`discord.com/robots.txt` with the body replaced), hCaptcha acceptance in WebView2, and whether new-location email verification interrupts a login (reported as a refusal with the HTTP status). Higher ban risk than QR remains.
+
+## Revision 2026-10-25: identity during login
+
+ADR 0005 was revised on 2026-10-25 (official-client impersonation). The login
+flow is part of that identity: before authentication it must obtain a
+fingerprint through `GET /experiments` and send it in `X-Fingerprint`, keep the
+`discord.com` cookie jar created by the login page, and use the same API
+version (v9) and Electron/Chromium header set as the authenticated REST client. The
+CAPTCHA, MFA and no-bypass rules above are unchanged. The current build sends
+neither the fingerprint nor cookies; that gap is tracked in
+`docs/IDENTITY_AUDIT.md` (A5, A7-A9).

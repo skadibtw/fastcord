@@ -23,7 +23,7 @@ use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 
 use super::wire::VERSION;
 
-/// The web-client origin (ADR 0005).
+/// The client origin (ADR 0005).
 const ORIGIN: &str = "https://discord.com";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Voice signaling messages are small; DAVE/MLS binary messages (milestone

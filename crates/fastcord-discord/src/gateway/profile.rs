@@ -1,8 +1,10 @@
-//! The shared Gateway and REST web-client identity (ADR 0005).
+//! The shared Gateway and REST identity (ADR 0005).
 //!
-//! One versioned module owns the identity sent to the Gateway and REST API.
-//! The profile is built once at login and reused unchanged across requests and
-//! reconnects: nothing here is randomized per connection.
+//! The current build carries the 2026-10-07 web profile; the 2026-10-25
+//! revision targets the official desktop (Electron) profile. One versioned
+//! module owns the identity sent to the Gateway and REST API. The profile is
+//! built once at login and reused unchanged across requests and reconnects:
+//! nothing here is randomized per connection.
 
 use serde::Serialize;
 use std::time::{Duration, SystemTime};
