@@ -27,6 +27,89 @@ const HEALTHY_PICTURES: u32 = 30;
 /// Timestamps handed to the transport differ by at least this much.
 const MIN_TIMESTAMP_STEP: Duration = Duration::from_millis(1);
 
+/// Encoded rates as fractions of the capture rate: 30, 20 and 15 fps.
+const PACE_LEVELS: [(u32, u32); 3] = [(1, 1), (2, 3), (1, 2)];
+/// The rate steps down once encoding a picture takes this share of the capture
+/// rate's frame time on average, and back up below `PACE_RECOVER`.
+const PACE_BUSY: f64 = 0.6;
+const PACE_RECOVER: f64 = 0.3;
+/// The rate changes at most this often.
+const PACE_HOLD: Duration = Duration::from_secs(2);
+
+/// Trades frame rate for time when the machine is busy (a game holding the
+/// GPU): a share that encodes fewer pictures smoothly beats one whose encoder
+/// starves. Measures wall time per encode on the capture thread.
+// ponytail: wall-clock encode time is the only load signal; add GPU queue
+// depth or capture lateness if this misses contention.
+pub(super) struct Pace {
+    capture_fps: u32,
+    level: usize,
+    /// Smoothed seconds per encode.
+    average: f64,
+    last_admitted: Option<Instant>,
+    changed_at: Option<Instant>,
+}
+
+impl Pace {
+    pub(super) fn new(capture_fps: u32) -> Self {
+        Self {
+            capture_fps: capture_fps.max(1),
+            level: 0,
+            average: 0.0,
+            last_admitted: None,
+            changed_at: None,
+        }
+    }
+
+    /// The encoded rate, or `None` at the full capture rate.
+    pub(super) fn paced_fps(&self) -> Option<u32> {
+        let (num, den) = PACE_LEVELS[self.level];
+        (self.level > 0).then(|| (self.capture_fps * num / den).max(1))
+    }
+
+    /// Whether the picture at `now` is encoded. At the full rate every
+    /// picture is (the capture already paces them).
+    pub(super) fn admit(&mut self, now: Instant) -> bool {
+        if let Some(fps) = self.paced_fps() {
+            // Three quarters of the interval absorbs capture timing jitter.
+            let spacing = Duration::from_secs(1) * 3 / (4 * fps);
+            if self
+                .last_admitted
+                .is_some_and(|last| now.saturating_duration_since(last) < spacing)
+            {
+                return false;
+            }
+        }
+        self.last_admitted = Some(now);
+        true
+    }
+
+    /// Records one encode that took `took`; true when the rate changed.
+    pub(super) fn record(&mut self, took: Duration, now: Instant) -> bool {
+        self.average += (took.as_secs_f64() - self.average) / 8.0;
+        if self
+            .changed_at
+            .is_some_and(|at| now.saturating_duration_since(at) < PACE_HOLD)
+        {
+            return false;
+        }
+        let frame = 1.0 / self.capture_fps as f64;
+        let level = if self.average > frame * PACE_BUSY {
+            (self.level + 1).min(PACE_LEVELS.len() - 1)
+        } else if self.average < frame * PACE_RECOVER {
+            self.level.saturating_sub(1)
+        } else {
+            self.level
+        };
+        if level == self.level {
+            return false;
+        }
+        self.level = level;
+        self.changed_at = Some(now);
+        true
+    }
+}
+
 struct Running {
     encoder: Box<dyn VideoEncoder>,
     config: EncoderConfig,
@@ -67,6 +150,7 @@ pub(super) struct Pipeline {
     fell_back: bool,
     output: Vec<EncodedFrame>,
     ended: bool,
+    pace: Pace,
 }
 
 impl Pipeline {
@@ -107,6 +191,7 @@ impl Pipeline {
             fell_back: false,
             output: Vec::new(),
             ended: false,
+            pace: Pace::new(config.capture.frame_rate),
         }
     }
 
@@ -167,6 +252,10 @@ impl Pipeline {
             self.was_armed = true;
             self.shared.keyframe.store(true, Ordering::Release);
         }
+        if !self.pace.admit(now) {
+            Counters::add(&counters.paced, 1);
+            return Flow::Continue;
+        }
         match self.encode(sample, now) {
             Ok(()) => Flow::Continue,
             Err(end) => {
@@ -225,6 +314,7 @@ impl Pipeline {
         .map_err(|error| ShareEnd::Encoder(error.to_string()))?;
         let running = self.encoder.as_mut().expect("opened above");
         self.output.clear();
+        let started = Instant::now();
         if let Err(error) = running
             .encoder
             .encode(&image, timestamp, force, &mut self.output)
@@ -233,12 +323,21 @@ impl Pipeline {
             self.output.clear();
             return self.recover(&error);
         }
+        self.paced(started.elapsed(), now);
         self.healthy = self.healthy.saturating_add(1);
         if self.healthy >= HEALTHY_PICTURES {
             self.failures = 0;
         }
         self.last_encode = Some(now);
         self.forward(now)
+    }
+
+    /// Feeds one encode's duration to the pace and publishes a rate change.
+    fn paced(&mut self, took: Duration, now: Instant) {
+        if self.pace.record(took, now) {
+            let fps = self.pace.paced_fps().unwrap_or(0);
+            self.shared.counters.paced_fps.store(fps, Ordering::Relaxed);
+        }
     }
 
     /// Hands the encoder's output to the transport.
@@ -413,10 +512,18 @@ impl Pipeline {
             self.was_armed = true;
             self.shared.keyframe.store(true, Ordering::Release);
         }
+        if !self.pace.admit(now) {
+            let counters = &self.shared.counters;
+            Counters::add(&counters.pictures, 1);
+            Counters::add(&counters.gpu_pictures, 1);
+            Counters::add(&counters.paced, 1);
+            return GpuOutcome::Handled(Flow::Continue);
+        }
         let force = self.shared.keyframe.swap(false, Ordering::AcqRel);
         let timestamp = self.timestamp(frame.timestamp());
         let running = self.encoder.as_mut().expect("opened above");
         self.output.clear();
+        let started = Instant::now();
         if let Err(error) = running
             .encoder
             .encode_gpu(frame, timestamp, force, &mut self.output)
@@ -424,6 +531,7 @@ impl Pipeline {
             self.leave_zero_copy(format!("the GPU encoder failed: {error}"));
             return GpuOutcome::Declined;
         }
+        self.paced(started.elapsed(), now);
         let counters = &self.shared.counters;
         Counters::add(&counters.pictures, 1);
         Counters::add(&counters.gpu_pictures, 1);

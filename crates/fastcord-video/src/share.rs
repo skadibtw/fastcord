@@ -318,6 +318,11 @@ pub struct ShareStats {
     pub width: u32,
     pub height: u32,
     pub bitrate: u32,
+    /// The rate pictures are encoded at after the share stepped down because
+    /// encoding took too long (see `Pace`); 0 while at the capture rate.
+    pub paced_fps: u32,
+    /// Pictures skipped by that step-down.
+    pub paced: u64,
 }
 
 #[derive(Default)]
@@ -334,6 +339,8 @@ pub(crate) struct Counters {
     pub(crate) width: AtomicU32,
     pub(crate) height: AtomicU32,
     pub(crate) bitrate: AtomicU32,
+    pub(crate) paced_fps: AtomicU32,
+    pub(crate) paced: AtomicU64,
 }
 
 impl Counters {
@@ -478,6 +485,8 @@ impl ShareControl {
             width: counters.width.load(Ordering::Relaxed),
             height: counters.height.load(Ordering::Relaxed),
             bitrate: counters.bitrate.load(Ordering::Relaxed),
+            paced_fps: counters.paced_fps.load(Ordering::Relaxed),
+            paced: get(&counters.paced),
         }
     }
 }

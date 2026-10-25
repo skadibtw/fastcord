@@ -799,3 +799,41 @@ fn pictures_are_offered_as_gpu_textures_only_when_zero_copy_can_work() {
     ));
     assert!(!wants_gpu(base, true, true));
 }
+
+/// A busy encoder steps 30 → 20 → 15 fps no faster than the hold, skips
+/// pictures to match, and climbs back once encoding is cheap again.
+#[test]
+fn pace_trades_frame_rate_for_encode_time_and_recovers() {
+    use super::pipeline::Pace;
+    let start = Instant::now();
+    let mut pace = Pace::new(30);
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    // At the full rate every picture is admitted, however close.
+    assert!(pace.admit(at(0)) && pace.admit(at(1)));
+    // 30 ms per encode is 90% of a 33 ms frame: step down once, then hold.
+    let mut changed = Vec::new();
+    for tick in 0..200u64 {
+        if pace.record(Duration::from_millis(30), at(tick * 33)) {
+            changed.push((tick * 33, pace.paced_fps()));
+        }
+    }
+    assert_eq!(changed.len(), 2, "{changed:?}");
+    assert_eq!(changed[0].1, Some(20));
+    assert_eq!(changed[1].1, Some(15));
+    assert!(changed[1].0 - changed[0].0 >= 2_000, "{changed:?}");
+    // At 15 fps a picture 33 ms after the last admitted one is skipped.
+    let base = 10_000;
+    assert!(pace.admit(at(base)));
+    assert!(!pace.admit(at(base + 33)));
+    assert!(pace.admit(at(base + 66)));
+    // Cheap encodes bring the rate back up, one step per hold.
+    let mut recovered = None;
+    for tick in 0..400u64 {
+        let now = base + 100 + tick * 33;
+        if pace.record(Duration::from_millis(2), at(now)) && pace.paced_fps().is_none() {
+            recovered = Some(now);
+            break;
+        }
+    }
+    assert!(recovered.is_some(), "never returned to the capture rate");
+}

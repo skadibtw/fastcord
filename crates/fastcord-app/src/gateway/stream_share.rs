@@ -121,6 +121,9 @@ pub(super) struct SendHealth {
     frames_per_second: u16,
     refused: u64,
     audio_packets: u64,
+    /// The rate the share stepped down to because encoding was slow; 0 at
+    /// the capture rate.
+    paced_fps: u32,
 }
 
 impl ShareProgress {
@@ -209,6 +212,12 @@ pub(super) fn describe(title: &str, progress: &ShareProgress) -> String {
                     " · {} fps · audio {} packets",
                     &[&health.frames_per_second, &health.audio_packets],
                 ));
+                if health.paced_fps > 0 {
+                    text.push_str(&trf(
+                        " · lowered to {} fps, encoder busy",
+                        &[&health.paced_fps],
+                    ));
+                }
                 if health.refused > 0 {
                     text.push_str(&trn(
                         health.refused,
@@ -433,6 +442,7 @@ pub(super) async fn run(
                         frames_per_second: ((stats.video_frames_sent.saturating_sub(sent_frames)) as f64 / elapsed).round().min(u16::MAX as f64) as u16,
                         refused: stats.video_frames_refused,
                         audio_packets: stats.rtp_sent,
+                        paced_fps: control.stats().paced_fps,
                     };
                     progress.send_if_modified(|progress| {
                         if progress.health == Some(health) { return false; }
@@ -945,5 +955,12 @@ mod tests {
         assert!(describe("Editor", &progress).ends_with("system audio without fastcord"));
         progress.audio = Some(LoopbackScope::SystemIncludingFastcord);
         assert!(describe("Editor", &progress).contains("may hear your call"));
+        progress.health = Some(SendHealth {
+            frames_per_second: 15,
+            refused: 0,
+            audio_packets: 0,
+            paced_fps: 15,
+        });
+        assert!(describe("Editor", &progress).contains("lowered to 15 fps, encoder busy"));
     }
 }
