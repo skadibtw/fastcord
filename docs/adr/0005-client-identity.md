@@ -167,18 +167,27 @@ installation fields. Native metadata is nullable; macOS has its own fallback
 (96312) and reports Darwin major as its SDK.
 The pin check covers Windows x64/ARM64, macOS x64/ARM64 and Linux x64
 (`live_version_chain_matches_the_pin`), run daily by
-`.github/workflows/identity-pin.yml`. Password login sends the `X-Fingerprint`
+`.github/workflows/identity-pin.yml`; it proves manifest coverage only, and the
+Electron/Chromium runtime pair has evidence on Windows x64 alone, where the
+ignored `live_installed_client_reports_the_pinned_runtime_pair` reads those two
+versions out of the installed stable client's own binary. Password login sends
+the `X-Fingerprint`
 of `GET /experiments`. API and Gateway use v9. REST sends the Chromium
 same-origin header set with `x-discord-timezone` and a bounded `discord.com`
-cookie jar; the WebSocket handshakes carry the user agent, language and
+cookie jar that scopes cookies by `Domain`/`Path` and expires them on the
+request clock; `x-discord-locale` reports the account's chosen client locale
+from READY (the OS locale before that and in `system_locale`); the WebSocket
+handshakes carry the user agent, language and
 no-cache headers and zstd in HTTP Accept-Encoding. REST decodes zstd and tracks
-the current UI location in Referer. A7-A9 and C1 remain partial: GREASE and
+the current UI location in Referer. Public CDN fetches send only the profile
+user agent and a purpose-specific `Accept`, never an account credential. A7-A9
+and C1 remain partial: GREASE and
 handshake details need an official capture, permessage-deflate is not
 implemented, and the runtime pair outside Windows x64 is unverified. Message
 nonces have the official shape (zero low 22 bits, one process-wide sequence).
 Opcode 4 stays without `self_stream`, as the
 official client sends it. Open: the P2 items (capabilities, the persisted
-guild-version cache, the account locale) wait for a sanitized official
+guild-version cache) wait for a sanitized official
 capture, and the residual differences above stay. The exact payload, the gaps
 and the per-item corrections are in `docs/PROTOCOL.md` and
 `docs/IDENTITY_AUDIT.md`. Every live check so far is unauthenticated (a

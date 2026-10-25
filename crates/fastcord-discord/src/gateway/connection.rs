@@ -898,6 +898,10 @@ fn on_message(
     }
 }
 
+// The pieces are distinct mutable parts of one state machine, already borrowed
+// separately by the loop; wrapping them in a context struct would only move the
+// argument list to a constructor.
+#[allow(clippy::too_many_arguments)]
 fn on_dispatch(
     conn: &mut Conn,
     properties: &Identity,

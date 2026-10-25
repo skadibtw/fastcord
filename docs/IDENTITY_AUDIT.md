@@ -376,6 +376,54 @@ not another round of header work.
 
 Execution handoff: [Identity audit implementation plan](IDENTITY_IMPLEMENTATION_PLAN.md).
 
+### Status ledger (2026-10-25 implementation pass)
+
+Statuses follow the plan's vocabulary and are not interchangeable: *implemented /
+offline tested* means code and deterministic tests exist; *compared with capture*
+means a field matches a recorded official build and scenario; *live checked* means
+the named scenario ran with the designated alt. No row is live checked: there is
+no valid-alt run and no sanitized Identify capture, and a bogus-token 4004
+establishes neither. Evidence used here: the source tree and its offline tests,
+the public update manifests and `/app` fetched on 2026-10-25, and the installed
+official stable Windows client 1.0.9265 on the maintainer's host.
+
+| ID | Status | Code and evidence | Remaining work |
+| --- | --- | --- | --- |
+| A1 | Implemented/offline tested | `profile.rs`: the 12 documented bits clear, 256-signature test, still UUIDv4 | Per-launch vs per-installation lifetime needs a capture |
+| A2 | Implemented/offline tested | 30-minute rotation on the shared `Identity`; paused-clock header test | — |
+| A3, A4 | Implemented/offline tested | READY `apex_experiments.installation` → non-secret file → `X-Installation-ID` + Gateway-only `installation_id` | The pre-login `GET /apex/experiments` variant is unused; whether it is needed needs a capture |
+| A5 | Implemented/offline tested | `X-Fingerprint` from `GET /experiments` for the pre-token requests | Live behavior with a valid account unverified |
+| A6 | Implemented/offline tested | API and Gateway v9; route validation, fixtures and tests follow | Which version the current client really uses needs a capture (docs say v9) |
+| A7 | Partial | Chromium header subset, timezone, Referer, reqwest decoders, header tests | GREASE/brand order, exact `accept-language` and header order need a capture |
+| A8 | Implemented/offline tested | Bounded `discord.com` jar; now RFC 6265 `Domain`/`Path` scoping and `Max-Age`/`Expires` on the request clock, longest path first | Which cookies the official client sends on each host needs a capture |
+| A9 | Partial | Main/QR/voice handshakes carry UA, language, HTTP encodings and no-cache; no WS compression | permessage-deflate is packet I1; offer values and per-host headers need a capture |
+| A10 | Accepted residual | rustls/ring TLS and h2 | Not closed by this layer |
+| A11 | Accepted residual | UDP/RTP voice transport | Needs a separate WebRTC project |
+| B1 | Implemented/offline tested | Nonce shape with zero low 22 bits, monotonic, reused on retry | Official collision behavior needs a capture |
+| B2 | Withdrawn | opcode 4 has no `self_stream` | — |
+| B3 | Partial | Mask 16435 derived from named flags; no bit added in this pass | Target mask and every payload handler need a capture plus I5 work |
+| B4 | Partial | `guild_versions` stays empty on every Identify | I6 waits on READY omission semantics from evidence |
+| B5 | Implemented/offline tested | Account locale from READY and a live `USER_SETTINGS_UPDATE` for `x-discord-locale`; OS locale stays in `system_locale`/`accept-language`; per-session identity | Whether `accept-language` also follows the account locale needs a capture |
+| B6 | Partial | `client_app_state` omitted; initial presence still `unknown` | Both need a sanitized Identify |
+| B7 | Accepted residual | No `/science`, `/track` or fabricated analytics | — |
+| C1 | Partial | Version chain, daily five-target pin, Windows x64 runtime pair read from the installed client's own binary | Runtime pairs for Windows ARM64, macOS and Linux stay unverified |
+| C2 | Implemented/offline tested | CDN client sends only the profile user agent and a purpose `Accept`; tests read the request head | The exact `Accept` per asset class needs a capture |
+| D | Keep | fastcord naming, legal and ethical requirement | — |
+| U1 | Pending | — | Sanitized official Identify capture and a valid-alt acceptance run |
+| U1b | Residual | — | WebRTC |
+
+Not started in this pass, and why: I6 (warm guild state) depends on I0's READY
+omission semantics and I5's handler set, so persisting versions now would mean
+claiming versions whose baselines cannot be reconstructed; I5 stays closed until
+a captured Identify names the target bits and their payload handlers exist.
+
+### Review follow-up (2026-10-25), kept as history
+
+The text below records the state at that review and is kept for provenance; the
+ledger above is current. Its statements that the cookie jar has no scoping, that
+the locale is OS-derived, that CDN requests carry no headers, and that no
+runtime-pair check exists are superseded.
+
 ### Review follow-up (2026-10-25)
 
 The earlier "implemented" list below describes code, not official-client

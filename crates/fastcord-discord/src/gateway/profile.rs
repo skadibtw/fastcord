@@ -1013,7 +1013,8 @@ mod tests {
     }
 
     #[test]
-    fn bundled_values_are_plausible_and_match_the_pin() {        assert!(BUILD_RANGE.contains(&BUNDLED_BUILD_NUMBER));
+    fn bundled_values_are_plausible_and_match_the_pin() {
+        assert!(BUILD_RANGE.contains(&BUNDLED_BUILD_NUMBER));
         assert!(NATIVE_RANGE.contains(&BUNDLED_NATIVE_BUILD_NUMBER));
         // A release cannot bump the bundled host without reviewing the
         // Electron/Chromium pair that belongs to it.
@@ -1146,10 +1147,11 @@ mod tests {
     #[test]
     #[ignore = "reads the installed official client if present"]
     fn live_installed_client_reports_the_pinned_runtime_pair() {
-        let root = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"))
-            .join("Discord")
-            .join(format!("app-{PIN_HOST_VERSION}"))
-            .join("Discord.exe");
+        let root =
+            std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"))
+                .join("Discord")
+                .join(format!("app-{PIN_HOST_VERSION}"))
+                .join("Discord.exe");
         let Ok(bytes) = std::fs::read(&root) else {
             panic!(
                 "no installed official client at {}; the runtime pair stays unverified here",

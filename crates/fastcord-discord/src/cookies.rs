@@ -146,13 +146,9 @@ impl Jar {
                     path = value.to_owned();
                 }
             } else if key.eq_ignore_ascii_case("max-age") {
-                if let Some(seconds) = value.and_then(|v| v.parse::<i64>().ok()) {
-                    max_age = Some(seconds);
-                }
+                max_age = value.and_then(|v| v.parse::<i64>().ok());
             } else if key.eq_ignore_ascii_case("expires") {
-                if let Some(seconds) = value.and_then(parse_cookie_date) {
-                    expires = Some(seconds);
-                }
+                expires = value.and_then(parse_cookie_date);
             }
         }
         // `Max-Age` wins over `Expires` (RFC 6265 §5.3).
@@ -281,7 +277,7 @@ fn parse_cookie_date(text: &str) -> Option<u64> {
     let mut month = None;
     let mut year = None;
     let mut time = None;
-    for token in text.split(|c: char| c == ' ' || c == ',' || c == '\t' || c == '-') {
+    for token in text.split([' ', ',', '\t', '-']) {
         if token.is_empty() {
             continue;
         }
@@ -467,13 +463,19 @@ mod tests {
             cookie(&mut jar, "https://canary.discord.com/app").as_deref(),
             Some("b=2")
         );
-        assert_eq!(cookie(&mut jar, "https://cdn.discord.com/x").as_deref(), Some("b=2"));
+        assert_eq!(
+            cookie(&mut jar, "https://cdn.discord.com/x").as_deref(),
+            Some("b=2")
+        );
         // Path matching is on whole segments, and longer paths come first.
         assert_eq!(
             cookie(&mut jar, "https://discord.com/api/v9/users").as_deref(),
             Some("d=4; a=1; b=2")
         );
-        assert_eq!(cookie(&mut jar, "https://discord.com/api/v9x").as_deref(), Some("a=1; b=2"));
+        assert_eq!(
+            cookie(&mut jar, "https://discord.com/api/v9x").as_deref(),
+            Some("a=1; b=2")
+        );
         // A foreign Domain is refused outright, not stored for another host.
         jar.apply("e=5; Domain=evil.example", &app, NOW);
         assert!(jar.cookies.iter().all(|cookie| cookie.name != "e"));
@@ -541,16 +543,21 @@ mod tests {
         );
         assert_eq!(jar.cookies.len(), 2);
         assert_eq!(
-            jar.header(&url("https://discord.com/api/v9/users"), NOW).as_deref(),
+            jar.header(&url("https://discord.com/api/v9/users"), NOW)
+                .as_deref(),
             Some("k=api; k=root")
         );
         // The same name on one path is replaced; the other path keeps its value.
         jar.apply("k=replaced; Path=/", &app, NOW);
         assert_eq!(
-            jar.header(&url("https://discord.com/api/v9/users"), NOW).as_deref(),
+            jar.header(&url("https://discord.com/api/v9/users"), NOW)
+                .as_deref(),
             Some("k=api; k=replaced")
         );
-        assert_eq!(jar.header(&url("https://discord.com/app"), NOW).as_deref(), Some("k=replaced"));
+        assert_eq!(
+            jar.header(&url("https://discord.com/app"), NOW).as_deref(),
+            Some("k=replaced")
+        );
     }
 
     #[test]
@@ -564,7 +571,11 @@ mod tests {
         assert!(jar.bytes() <= MAX_TOTAL_BYTES);
         assert!(jar.cookies.len() < MAX_COOKIES);
         // The most recent cookies are the ones kept.
-        assert!(jar.cookies.last().is_some_and(|c| c.name == format!("c{}", MAX_COOKIES - 1)));
+        assert!(
+            jar.cookies
+                .last()
+                .is_some_and(|c| c.name == format!("c{}", MAX_COOKIES - 1))
+        );
         // One cookie larger than the whole budget is refused.
         jar.apply(&format!("huge={}", "v".repeat(MAX_TOTAL_BYTES)), &app, NOW);
         assert!(jar.cookies.iter().all(|c| c.name != "huge"));

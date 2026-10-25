@@ -56,8 +56,7 @@ const IMAGE_ACCEPT: &str = "image/avif,image/webp,image/apng,image/svg+xml,image
 const FILE_ACCEPT: &str = "*/*";
 /// The bundled desktop browser user agent, as the app passes it in; tests only.
 #[cfg(test)]
-const TEST_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9265 Chrome/148.0.7778.280 Electron/42.11.15 Safari/537.36";
+const TEST_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9265 Chrome/148.0.7778.280 Electron/42.11.15 Safari/537.36";
 
 /// Stable identity independent of expiring CDN signatures.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]

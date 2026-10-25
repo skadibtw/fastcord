@@ -13,14 +13,34 @@
   native metadata and Darwin SDK shape, platform fallbacks and Referer changes
   across guild/DM/home are checked offline. x64 identity fixtures are independent
   of the test runner's architecture.
+- Cookie jar (2026-10-25): `cookies::tests` cover host-only versus `Domain`
+  scoping, a foreign `Domain` refused, `Path` matching on whole segments and
+  longest-path-first order, `Max-Age` winning over `Expires`, both expiry forms
+  on an injected clock, deletion, replacement per name/domain/path, the 32-cookie
+  and 16 KiB bounds, and IMF-fixdate parsing (including a leap day and rejected
+  impossible dates). Account locale: a `ru-RU` OS with an `en-US` account sends
+  the account locale in `x-discord-locale` while `system_locale`, the super
+  properties and `accept-language` keep the OS values, the value is shape-checked
+  both from READY and a live `USER_SETTINGS_UPDATE`, and a new session's identity
+  starts from the OS locale again.
+- CDN fetches: the loopback tests read the actual request head and require the
+  public user agent and the purpose `Accept` (image list for an avatar, `*/*` for
+  a file download) with no cookie, `authorization`, `x-fingerprint`,
+  `x-installation-id`, `x-super-properties`, `x-discord-locale` or `sec-ch-ua`.
+- Platform versions: `live_installed_client_reports_the_pinned_runtime_pair`
+  (ignored, Windows) reads Electron 42.11.15 / Chromium 148.0.7778.280 out of the
+  installed stable client 1.0.9265's own binary and fails on drift. Manifest
+  coverage is separate evidence and does not confirm a runtime pair on another
+  target.
 - `cargo check -p fastcord-platform --all-targets --locked --target
   aarch64-apple-darwin` passes from Windows. This is not a run on macOS.
 - The public live version matrix passes through embedded byedpi (details in
   Milestone 5 below). No credentials or account traffic are needed for it.
 - Still pending: sanitized official desktop capture (GREASE, language and
   Referer policy, WebSocket fetch metadata), WS permessage-deflate support,
-  Electron/Chromium evidence outside Windows x64, P2 identity items, and valid
-  alt-account U1. Bogus-token 4004 is not an acceptance result.
+  Electron/Chromium evidence outside Windows x64, capabilities and the persisted
+  guild-version cache, and valid alt-account U1. Bogus-token 4004 is not an
+  acceptance result.
 
 ### Account restriction and Alerts regression (2026-10-22)
 
