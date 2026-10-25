@@ -5,10 +5,9 @@ use fastcord_discord::{EventPermissions, NetworkFailure, RetryableFailure};
 fn client() -> RestClient {
     RestClient::new(
         fastcord_discord::UserToken::new("offline-test-credential".to_owned()),
-        fastcord_discord::gateway::ClientProperties::web(
+        fastcord_discord::gateway::ClientProperties::bundled(
             fastcord_discord::gateway::HostOs::Linux,
             "en-US",
-            1,
         ),
     )
     .unwrap()

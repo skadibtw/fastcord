@@ -55,8 +55,8 @@ pub use event::{
 };
 pub use event::{MAX_PRESENCES, MAX_RELATIONSHIPS, PresenceUpdate};
 pub use profile::{
-    BUNDLED_BUILD_NUMBER, BuildNumber, BuildSource, ClientProperties, HostOs, PROFILE_VERSION,
-    resolve_build_number,
+    BUNDLED_BUILD_NUMBER, BUNDLED_NATIVE_BUILD_NUMBER, CHROMIUM_VERSION, ClientProperties,
+    ELECTRON_VERSION, Host, HostOs, PIN_HOST_VERSION, PROFILE_VERSION, Versions, resolve_versions,
 };
 pub use stream::{StreamControl, StreamSignalQueueError};
 pub use subscription::{
@@ -116,7 +116,7 @@ impl Gateway {
     /// only because of an explicit user action (login or restore). `rest` is the
     /// account's client, used for discovery and shared for authentication stop;
     /// `properties` is the profile Identify sends, already carrying the system
-    /// locale and the resolved `client_build_number`.
+    /// locale and the resolved version chain.
     pub fn start(rest: RestClient, token: Arc<UserToken>, properties: ClientProperties) -> Self {
         start_with(
             Arc::new(LiveTransport::new(rest)),

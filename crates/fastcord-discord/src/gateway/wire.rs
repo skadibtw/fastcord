@@ -261,7 +261,6 @@ mod tests {
         use reqwest::header::{AUTHORIZATION, USER_AGENT};
 
         use crate::UserToken;
-        use crate::gateway::BUNDLED_BUILD_NUMBER;
         use crate::rest::auth_headers;
 
         let fixtures: Vec<Value> = serde_json::from_str(REST_IDENTITY_FIXTURE).unwrap();
@@ -273,8 +272,7 @@ mod tests {
             (HostOs::Linux, "ru-RU"),
         ];
         for ((host, locale), fixture) in cases.into_iter().zip(fixtures) {
-            let properties =
-                ClientProperties::web(host, locale, BUNDLED_BUILD_NUMBER).with_launch_identity();
+            let properties = ClientProperties::bundled(host, locale).with_launch_identity();
             let token = UserToken::new("REDACTED-TOKEN".to_owned());
             let headers = auth_headers(&token, &properties).unwrap();
             let gateway: Value =
@@ -314,14 +312,31 @@ mod tests {
 
     #[test]
     fn identify_matches_the_recorded_sanitized_payload() {
-        let properties =
-            ClientProperties::web(HostOs::Windows, "en-US", 631_730).with_launch_identity();
+        use crate::gateway::profile::{Host, Versions};
+        let host = Host {
+            os_version: "10.0.26100".to_owned(),
+            os_sdk_version: Some("26100".to_owned()),
+            ..Host::bare(HostOs::Windows)
+        };
+        let versions = Versions {
+            client_version: "1.0.9265".to_owned(),
+            native_build_number: 96_160,
+            client_build_number: 649_389,
+        };
+        let mut properties =
+            ClientProperties::desktop(&host, "en-US", &versions).with_launch_identity();
+        // The recording is of an x64 build.
+        (properties.os_arch, properties.app_arch) = ("x64", "x64");
         let text = identify("REDACTED-TOKEN", &properties).unwrap();
         let mut sent: Value = serde_json::from_str(&text).unwrap();
         let recorded: Value = serde_json::from_str(IDENTIFY_FIXTURE).unwrap();
         // The launch identity is fresh per launch, so the recording has it
         // redacted: restore the placeholders before comparing.
-        for field in ["client_launch_id", "launch_signature"] {
+        for field in [
+            "client_launch_id",
+            "launch_signature",
+            "client_heartbeat_session_id",
+        ] {
             assert!(sent["d"]["properties"][field].is_string(), "{field}");
             sent["d"]["properties"][field] = recorded["d"]["properties"][field].clone();
         }
@@ -337,7 +352,7 @@ mod tests {
 
     #[test]
     fn token_is_raw_and_json_escaped() {
-        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let text = identify("a\"b\\c", &properties).unwrap();
         let sent: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(sent["d"]["token"], "a\"b\\c");
@@ -414,7 +429,7 @@ mod tests {
 
     #[test]
     fn oversized_outbound_payloads_are_refused_locally() {
-        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let huge = "x".repeat(MAX_OUTBOUND_BYTES);
         assert_eq!(identify(&huge, &properties), Err(OutboundError));
         assert_eq!(resume(&huge, "s", 1), Err(OutboundError));

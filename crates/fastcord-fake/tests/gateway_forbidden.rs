@@ -5,9 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fastcord_discord::gateway::{
-    BUNDLED_BUILD_NUMBER, ClientProperties, ConnectionState, HostOs, StopReason,
-};
+use fastcord_discord::gateway::{ClientProperties, ConnectionState, HostOs, StopReason};
 use fastcord_discord::{Gateway, GatewayEvent, RestClient, UserToken, fake_origin};
 use fastcord_fake::{Config, Switches, start};
 use tokio::time::timeout;
@@ -32,7 +30,7 @@ async fn two_gateway_discovery_403s_stop_with_the_manual_reconnect_state() {
     .await
     .unwrap();
     fake_origin::set_origin(&format!("127.0.0.1:{}", fake.port())).unwrap();
-    let properties = ClientProperties::web(HostOs::Linux, "en-US", BUNDLED_BUILD_NUMBER);
+    let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
     let client =
         RestClient::new(UserToken::new("fake-token".to_owned()), properties.clone()).unwrap();
     let mut gateway = Gateway::start(

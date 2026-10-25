@@ -5233,7 +5233,7 @@ mod tests {
     use fastcord_discord::gateway::{ClientProperties, HostOs};
     fn worker() -> Worker {
         let bridge = NavigationBridge::new();
-        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let rest = RestClient::new(
             UserToken::new("offline-fixture-credential".to_owned()),
             properties,

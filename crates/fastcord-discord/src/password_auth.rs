@@ -1,8 +1,8 @@
 //! Email/password login: `POST /auth/login`, optional `POST /auth/mfa/totp`.
 //!
 //! The requests carry no token (there is none yet) but the same official-client
-//! identity headers as every other request (the desktop profile is the target;
-//! the current build sends the web placeholder). A CAPTCHA is never solved here: it
+//! identity headers as every other request (the official desktop profile). A
+//! CAPTCHA is never solved here: it
 //! is returned as a challenge for the caller to show to the person, who then
 //! repeats the login with the key their own browser view produced. Response
 //! bodies are inspected but never copied into errors or logs: they can echo the

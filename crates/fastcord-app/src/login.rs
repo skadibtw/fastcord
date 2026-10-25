@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use fastcord_discord::gateway::{ClientProperties, HostOs};
+use fastcord_discord::gateway::{ClientProperties, Host, HostOs};
 use fastcord_discord::{Priority, RestClient, RestError, UserToken};
 use fastcord_model::{Snowflake, User};
 use fastcord_platform::{NativeCredentialStore, StoreError};
@@ -111,17 +111,22 @@ pub async fn initialize_store() -> Result<StoreReady, StoreError> {
     .map_err(|_| StoreError::Unavailable)?
 }
 
-/// The official-client identity shared by password login and the validated
-/// session. The desktop profile is the target; the current build sends the web
-/// placeholder (ADR 0005 revision 2026-10-25).
+/// The official desktop-client identity shared by password login and the
+/// validated session (ADR 0005 revision 2026-10-25).
 pub async fn client_properties() -> ClientProperties {
-    let build = fastcord_discord::gateway::resolve_build_number().await;
-    ClientProperties::web(
-        HostOs::current(),
-        &fastcord_platform::system_locale(),
-        build.value,
-    )
-    .with_launch_identity()
+    let versions = fastcord_discord::gateway::resolve_versions().await;
+    let release = tokio::task::spawn_blocking(fastcord_platform::os_release)
+        .await
+        .unwrap_or_default();
+    let host = Host {
+        os: HostOs::current(),
+        os_version: release.version,
+        os_sdk_version: release.sdk_version,
+        window_manager: release.window_manager,
+        distro: release.distro,
+    };
+    ClientProperties::desktop(&host, &fastcord_platform::system_locale(), &versions)
+        .with_launch_identity()
 }
 
 /// Exactly one validation request before an authenticated account is displayed.
@@ -229,7 +234,7 @@ pub async fn delete_saved(
 #[cfg(test)]
 pub(crate) fn fixture_session() -> Arc<Session> {
     let token = Arc::new(UserToken::new("dummy-offline-secret".to_owned()));
-    let properties = ClientProperties::web(HostOs::Linux, "en-US", 1).with_launch_identity();
+    let properties = ClientProperties::bundled(HostOs::Linux, "en-US").with_launch_identity();
     Arc::new(Session {
         user: serde_json::from_str(include_str!("../../../fixtures/rest/current-user.json"))
             .unwrap(),

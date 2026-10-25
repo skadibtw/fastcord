@@ -595,7 +595,7 @@ mod tests {
     async fn create_refuses_a_bad_name_before_any_request() {
         use crate::UserToken;
         use crate::gateway::{ClientProperties, HostOs};
-        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let client = RestClient::new(UserToken::new("dummy".into()), properties).unwrap();
         assert_eq!(
             client

@@ -375,6 +375,11 @@ not another round of header work.
 
 ## F. Specification status
 
+Implemented on 2026-10-25: the desktop profile itself, A1 (launch signature
+mask), the A2 field without its 30-minute rotation, and C1 (version chain and
+the daily `identity-pin` check); see ADR 0005 "Current implementation". The
+other items below are still open.
+
 This branch applies the policy: ADR 0005 carries the 2026-10-25 revision,
 SPEC §4.3 states the requirements and residuals, `docs/PROTOCOL.md` marks the
 target desktop profile, and `README.md` describes the impersonation. The remaining

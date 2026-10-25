@@ -5,11 +5,10 @@
 use std::ffi::c_void;
 use std::mem::{ManuallyDrop, size_of};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::{
     CloseHandle, E_ACCESSDENIED, E_INVALIDARG, HANDLE, HWND, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -33,7 +32,6 @@ use windows::Win32::System::Com::{
     BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     IAgileObject, IAgileObject_Impl,
 };
-use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::System::Threading::{
     CreateEventW, GetCurrentProcessId, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
 };
@@ -125,20 +123,7 @@ fn join_within(thread: JoinHandle<()>, timeout: Duration) {
 }
 
 pub(super) fn support() -> LoopbackSupport {
-    static BUILD: OnceLock<u32> = OnceLock::new();
-    let build = *BUILD.get_or_init(|| {
-        let mut info = OSVERSIONINFOW {
-            dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
-            ..Default::default()
-        };
-        // SAFETY: `info` is a correctly sized, writable OSVERSIONINFOW.
-        let status = unsafe { RtlGetVersion(&mut info) };
-        if status.is_ok() {
-            info.dwBuildNumber
-        } else {
-            0
-        }
-    });
+    let build = crate::host::windows_version().2;
     LoopbackSupport {
         process_loopback: build >= PROCESS_LOOPBACK_BUILD,
         system_loopback: true,

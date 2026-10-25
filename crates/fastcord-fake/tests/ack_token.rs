@@ -1,7 +1,7 @@
 //! The ack token Discord's answer carries is kept and sent with the next
 //! automatic ack. One test per file: the fake origin is process-wide.
 
-use fastcord_discord::gateway::{BUNDLED_BUILD_NUMBER, ClientProperties, HostOs};
+use fastcord_discord::gateway::{ClientProperties, HostOs};
 use fastcord_discord::{RestClient, UserToken, fake_origin};
 use fastcord_fake::{Config, start};
 use fastcord_model::Snowflake;
@@ -23,7 +23,7 @@ async fn the_next_ack_sends_back_the_token_of_the_last_answer() {
     fake_origin::set_origin(&format!("127.0.0.1:{}", fake.port())).unwrap();
     let client = RestClient::new(
         UserToken::new("fake-token".to_owned()),
-        ClientProperties::web(HostOs::Linux, "en-US", BUNDLED_BUILD_NUMBER),
+        ClientProperties::bundled(HostOs::Linux, "en-US"),
     )
     .unwrap();
 

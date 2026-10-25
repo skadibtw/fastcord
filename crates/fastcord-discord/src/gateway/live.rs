@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use crate::gateway::{BUNDLED_BUILD_NUMBER, ClientProperties, HostOs};
+use crate::gateway::{ClientProperties, HostOs};
 use futures_util::{Sink, Stream};
 use tokio::sync::watch;
 use tokio::time::timeout;
@@ -149,7 +149,7 @@ async fn live_real_gateway_negotiates_zlib_stream_and_rejects_a_bogus_token() {
     let mut gateway = start_with(
         Arc::new(Unauthenticated),
         token,
-        ClientProperties::web(HostOs::current(), "en-US", BUNDLED_BUILD_NUMBER),
+        ClientProperties::bundled(HostOs::current(), "en-US"),
         OsJitter,
     );
     let mut states = Vec::new();
@@ -180,7 +180,7 @@ async fn live_real_gateway_negotiates_zlib_stream_and_rejects_a_bogus_token() {
 #[ignore = "needs FASTCORD_LIVE_TOKEN (alt account) in the environment; contacts Discord"]
 async fn live_account_identifies_and_resumes_after_a_forced_reconnect() {
     let token = std::env::var("FASTCORD_LIVE_TOKEN").expect("set FASTCORD_LIVE_TOKEN for this run");
-    let properties = ClientProperties::web(HostOs::current(), "en-US", BUNDLED_BUILD_NUMBER);
+    let properties = ClientProperties::bundled(HostOs::current(), "en-US");
     let rest = RestClient::new(UserToken::new(token.clone()), properties.clone()).unwrap();
     let (cut, _) = watch::channel(0u64);
     let transport = Arc::new(Severable {

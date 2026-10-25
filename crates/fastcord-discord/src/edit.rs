@@ -439,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stopped_account_never_edits_or_deletes() {
-        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let client = RestClient::new(
             UserToken::new("offline-test-credential".to_owned()),
             properties,

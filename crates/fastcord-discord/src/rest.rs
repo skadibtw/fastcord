@@ -645,7 +645,7 @@ mod tests {
 
     #[test]
     fn authorization_is_raw_and_sensitive() {
-        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let token = UserToken::new("offline-test-credential".to_owned());
         let headers = auth_headers(&token, &properties).unwrap();
         assert_eq!(
@@ -669,7 +669,7 @@ mod tests {
         let token = UserToken::new("offline-test-credential".to_owned());
         for invalid in ["bad\r\nheader", "bad\0header"] {
             for field in ["browser_user_agent", "system_locale"] {
-                let mut properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+                let mut properties = ClientProperties::bundled(HostOs::Linux, "en-US");
                 match field {
                     "browser_user_agent" => properties.browser_user_agent = invalid.to_owned(),
                     "system_locale" => properties.system_locale = invalid.to_owned(),
@@ -690,7 +690,7 @@ mod tests {
     async fn an_account_challenge_stops_reads_writes_and_clones() {
         let client = RestClient::new(
             UserToken::new("offline-test-credential".to_owned()),
-            ClientProperties::web(HostOs::Linux, "en-US", 1),
+            ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
         .unwrap();
         let join = || {
@@ -734,7 +734,7 @@ mod tests {
         for code in [40002, 40012, 50178] {
             let client = RestClient::new(
                 UserToken::new("offline-test-credential".to_owned()),
-                ClientProperties::web(HostOs::Linux, "en-US", 1),
+                ClientProperties::bundled(HostOs::Linux, "en-US"),
             )
             .unwrap();
             let route = Route::new(Method::GET, "/users/@me").unwrap();
@@ -761,7 +761,7 @@ mod tests {
     fn resource_permissions_do_not_stop_the_account() {
         let client = RestClient::new(
             UserToken::new("offline-test-credential".to_owned()),
-            ClientProperties::web(HostOs::Linux, "en-US", 1),
+            ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
         .unwrap();
         for body in [
@@ -793,7 +793,7 @@ mod tests {
         let client = RestClient::with_clock(
             UserToken::new("offline-test-credential".to_owned()),
             clock.clone(),
-            ClientProperties::web(HostOs::Linux, "en-US", 1),
+            ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
         .unwrap();
         // A plain text message (on by default); opening DMs needs its group.
@@ -910,7 +910,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopped_client_and_clones_never_dispatch_even_a_post() {
-        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let client = RestClient::new(
             UserToken::new("offline-test-credential".to_owned()),
             properties,
@@ -933,7 +933,7 @@ mod tests {
     async fn observing_401_cancels_queued_requests_before_dispatch() {
         use std::task::{Context, Poll, Waker};
 
-        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let client = RestClient::new(
             UserToken::new("offline-test-credential".to_owned()),
             properties,

@@ -364,7 +364,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopped_client_uses_the_account_stop_without_touching_the_network() {
-        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let client = RestClient::new(
             UserToken::new("offline-search-credential".to_owned()),
             properties,

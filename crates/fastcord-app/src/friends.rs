@@ -731,7 +731,7 @@ mod tests {
     fn rest() -> RestClient {
         RestClient::new(
             fastcord_discord::UserToken::new("dummy".into()),
-            ClientProperties::web(HostOs::Linux, "en-US", 1),
+            ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
         .unwrap()
     }

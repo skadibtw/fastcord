@@ -148,10 +148,20 @@ milestones rather than accepted risk.
 
 ## Current implementation
 
-The code still carries the 2026-10-07 web profile
-(`fastcord-discord::gateway::ClientProperties::web`); this ADR is the target,
-not a description of the current build. The exact payload, the gaps and the
-per-item corrections are in `docs/PROTOCOL.md` and `docs/IDENTITY_AUDIT.md`.
+`fastcord-discord::gateway::ClientProperties::desktop` builds the desktop
+profile above (2026-10-25, `PROFILE_VERSION` 3): the desktop field set and
+order, the host's `os_version`/`os_sdk_version` and Linux
+`window_manager`/`distro` from `fastcord_platform::os_release`, the version
+chain (`resolve_versions`: manifest and `/app` once per process, bundled
+fallbacks), the Electron 42.11.15 / Chromium 148.0.7778.280 pair read from the
+installed stable Windows host 1.0.9265, a launch signature with the 12
+client-mod bits clear, and a `client_heartbeat_session_id` generated per
+launch. The pin check is `live_version_chain_matches_the_pin`, run daily by
+`.github/workflows/identity-pin.yml`. Still open from the P0 list: the
+30-minute heartbeat rotation, the installation id and `X-Fingerprint`, API and
+Gateway v9, the Electron header set and cookie jar, the nonce shape and
+`self_stream`. The exact payload, the gaps and the per-item corrections are in
+`docs/PROTOCOL.md` and `docs/IDENTITY_AUDIT.md`.
 The accepted-shape evidence from 2026-10-07 (a bogus-token Identify over the
 real compressed Gateway answered with close 4004, not 4002; build number
 631730; Chrome 155) belongs to the web placeholder and is kept only as

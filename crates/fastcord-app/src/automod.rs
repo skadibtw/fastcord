@@ -1126,7 +1126,7 @@ mod tests {
     fn client() -> RestClient {
         RestClient::new(
             UserToken::new("offline-test-credential".to_owned()),
-            ClientProperties::web(HostOs::Linux, "en-US", 1),
+            ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
         .unwrap()
     }

@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fastcord_discord::gateway::{BUNDLED_BUILD_NUMBER, ClientProperties, Dispatch, HostOs};
+use fastcord_discord::gateway::{ClientProperties, Dispatch, HostOs};
 use fastcord_discord::state::Store;
 use fastcord_discord::{
     Gateway, GatewayEvent, MentionPolicy, NonceGenerator, OutgoingMessage, Priority, RestClient,
@@ -19,7 +19,7 @@ use tokio::time::timeout;
 const GENERAL: Snowflake = Snowflake(6005);
 
 fn properties() -> ClientProperties {
-    ClientProperties::web(HostOs::Linux, "en-US", BUNDLED_BUILD_NUMBER)
+    ClientProperties::bundled(HostOs::Linux, "en-US")
 }
 
 async fn next(gateway: &mut Gateway) -> GatewayEvent {

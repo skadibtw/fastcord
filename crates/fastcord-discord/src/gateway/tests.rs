@@ -233,7 +233,10 @@ fn start(transport: &Arc<FakeTransport>, jitter: f64) -> Gateway {
     start_with(
         Arc::clone(transport),
         Arc::new(UserToken::new("test-token".to_owned())),
-        ClientProperties::web(HostOs::Linux, "en-US", FETCHED_BUILD),
+        ClientProperties {
+            client_build_number: FETCHED_BUILD,
+            ..ClientProperties::bundled(HostOs::Linux, "en-US")
+        },
         Fixed(jitter),
     )
 }
@@ -335,7 +338,7 @@ fn message_json(id: u64, content: &str) -> String {
 }
 
 #[tokio::test(start_paused = true)]
-async fn identify_flow_sends_the_web_profile_and_delivers_normalized_ready() {
+async fn identify_flow_sends_the_desktop_profile_and_delivers_normalized_ready() {
     let transport = FakeTransport::new();
     let mut server = transport.accept().await;
     let mut gateway = start(&transport, 0.5);
@@ -349,7 +352,7 @@ async fn identify_flow_sends_the_web_profile_and_delivers_normalized_ready() {
     assert!(data.get("intents").is_none());
     assert_eq!(data["client_state"]["guild_versions"], json!({}));
     let properties = &data["properties"];
-    assert_eq!(properties["browser"], "Chrome");
+    assert_eq!(properties["browser"], "Discord Client");
     assert_eq!(properties["release_channel"], "stable");
     assert_eq!(properties["client_build_number"], FETCHED_BUILD);
     assert_eq!(properties["system_locale"], "en-US");

@@ -74,7 +74,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_requires_a_bounded_unique_explicit_recipient_selection() {
-        let properties = ClientProperties::web(HostOs::Linux, "en-US", 1);
+        let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let client = RestClient::new(UserToken::new("dummy".into()), properties).unwrap();
         assert_eq!(
             client.open_private_channel(&[]).await,

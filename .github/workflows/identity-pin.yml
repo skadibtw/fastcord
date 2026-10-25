@@ -1,0 +1,27 @@
+name: Identity pin
+
+# ADR 0005: the Electron/Chromium pair is pinned to one stable Windows host
+# version. This fetches the public update manifest and discord.com/app (never
+# the Discord package), checks the profile built from them, and fails when the
+# host moved past the pin so the pair is reviewed.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pin:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: 1.99.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test -p fastcord-discord --lib --locked live_version_chain -- --ignored --nocapture

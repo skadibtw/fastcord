@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use fastcord_discord::gateway::{BUNDLED_BUILD_NUMBER, ClientProperties, HostOs};
+use fastcord_discord::gateway::{ClientProperties, HostOs};
 use fastcord_discord::{Priority, RestClient, RestError, UserToken, fake_origin};
 use fastcord_fake::{Config, Switches, start};
 
@@ -26,7 +26,7 @@ async fn five_zero_delay_429s_become_a_rate_limited_error_after_waiting_between_
     fake_origin::set_origin(&format!("127.0.0.1:{}", fake.port())).unwrap();
     let client = RestClient::new(
         UserToken::new("fake-token".to_owned()),
-        ClientProperties::web(HostOs::Linux, "en-US", BUNDLED_BUILD_NUMBER),
+        ClientProperties::bundled(HostOs::Linux, "en-US"),
     )
     .unwrap();
 

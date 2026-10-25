@@ -40,19 +40,31 @@ Identify's `capabilities` is derived from named flags, never a magic number: `LA
 
 ### Identify profile (ADR 0005, target revision 2026-10-25)
 
-The code still sends the 2026-10-07 web profile; the target is the official
-desktop (Electron) profile. Both are built once at login and reused by every
-Identify and REST request, except the 30-minute heartbeat and the installation
-id learned after READY.
+The code sends the official desktop (Electron) profile. It is built once at
+login and reused by every Identify and REST request, except the 30-minute
+heartbeat and the installation id learned after READY (both still open).
 
-#### Current web placeholder
+#### Current implementation (2026-10-25)
 
-`ClientProperties::web` sends `browser: "Chrome"`, the Chrome 155 reduced UA,
-the web `client_build_number`, no `client_version`/`native_build_number`, and
-two fresh UUIDv4s for `client_launch_id`/`launch_signature`. The accepted-shape
-payload is in `fixtures/gateway/identify.sanitized.json`; its 2026-10-07
-evidence (close 4004 with a bogus token, build 631730) is history, not the
-target.
+`ClientProperties::desktop` (`PROFILE_VERSION` 3) sends the field set and
+order of the table below, from the published desktop examples:
+`os, browser, release_channel, client_version, os_version, os_arch, app_arch,
+system_locale, has_client_mods, client_launch_id, launch_signature,
+browser_user_agent, browser_version, [os_sdk_version | window_manager, distro],
+client_build_number, native_build_number, client_event_source,
+client_heartbeat_session_id`. `os_version` is Node's `os.release()`
+(`RtlGetVersion` on Windows, the Darwin release from `uname -r` on macOS,
+`/proc/sys/kernel/osrelease` on Linux); `os_sdk_version` is the Windows build;
+`window_manager` is `XDG_CURRENT_DESKTOP,GDMSESSION` (`unknown` for a missing
+one) and `distro` the os-release `PRETTY_NAME` (`fastcord_platform::os_release`).
+`os_arch`/`app_arch` are the build's architecture (`x64`, `arm64`, `ia32`).
+`client_app_state`, `device`, `referrer*` and `installation_id` are not sent.
+The launch signature is a UUIDv4 with the 12 client-mod bits cleared; the
+heartbeat session is a fresh UUIDv4 per launch, not yet rotated. The payload
+is `fixtures/gateway/identify.sanitized.json`. Evidence (2026-10-25, Windows,
+unauthenticated): the desktop Identify with a deliberately bogus token reached
+the real Gateway and was answered with close 4004, not 4002, so its structure
+is accepted; the 2026-10-07 web-placeholder evidence below is history.
 
 #### Target desktop profile
 
@@ -100,6 +112,21 @@ changes. A CI or scheduled check fetches the manifest and `/app`, asserts the
 user-agent/native/build consistency, and fails when the pin is stale; it does
 not download Discord.
 
+Implemented by `gateway::resolve_versions`, once per process (fake mode: the
+bundled values): `GET` the manifest with `channel=stable`,
+`platform=win|osx|linux`, the build's `arch` and a fresh `install_id` per
+process, in parallel with `/app`; at most 256 KiB, no redirects, 10 s.
+`full.host_version` `[a, b, c]` becomes `a.b.c`; `metadata_version` must be in
+1000–9999999. The host version and native build come from the same manifest or
+are both bundled (Windows x64 1.0.9265, Windows arm64 1.0.57, macOS 0.0.419,
+Linux 1.0.166; native 96160; web build 649389, all observed 2026-10-25). The
+pinned pair is Electron 42.11.15 / Chromium 148.0.7778.280, read from the
+installed stable Windows host 1.0.9265 (`PIN_HOST_VERSION`). The check is
+`live_version_chain_matches_the_pin`, daily in
+`.github/workflows/identity-pin.yml`; it fails when the stable Windows x64
+host differs from `PIN_HOST_VERSION`, and an offline test keeps the bundled
+Windows host equal to the pin.
+
 #### Other target changes
 
 - API base and Gateway `v=` become 9 (the documented client default); the
@@ -145,11 +172,11 @@ VOICE_SERVER_UPDATE (`{token, guild_id, channel_id?, endpoint}`) is decoded for 
 
 ## REST client identity (ADR 0005)
 
-`RestClient` carries the same `ClientProperties` the Gateway Identifies with, so both halves present one consistent official-client identity (ADR 0005 revision 2026-10-25). The identity headers are encoded and validated once at REST client construction, then installed as default headers for every authenticated request. The current build uses `/api/v10` and the web placeholder headers; the target uses `/api/v9` and the desktop (Electron) surface listed after the bullets.
+`RestClient` carries the same `ClientProperties` the Gateway Identifies with, so both halves present one consistent official-client identity (ADR 0005 revision 2026-10-25). The identity headers are encoded and validated once at REST client construction, then installed as default headers for every authenticated request. The current build uses `/api/v10` and only the headers below; the target uses `/api/v9` and the desktop (Electron) surface listed after the bullets.
 
 - `Authorization: <raw user token>` (no `Bot `/`Bearer ` prefix, marked sensitive).
 - `x-super-properties`: the `ClientProperties` JSON, standard-base64 encoded — the exact same object Identify sends under `properties`, with the current `client_heartbeat_session_id`.
-- `user-agent`: the profile's `browser_user_agent` (the Electron UA on the target; the current build still sends the web Chrome UA).
+- `user-agent`: the profile's `browser_user_agent` (the Electron UA).
 - `x-discord-locale`: the profile's `system_locale` until the account locale is known, then the account's client locale.
 - `x-fingerprint`: the current build omits it. The target generates one through `GET /experiments` for the unauthenticated login flow; a captured value is never reused across installations/accounts.
 - **Target additions:** `X-Installation-ID` (the persisted installation id), `x-discord-timezone`, `sec-ch-ua`/`sec-ch-ua-mobile`/`sec-ch-ua-platform` as Electron sends them, `sec-fetch-site`/`mode`/`dest`, `accept-language`, `accept-encoding`, `origin`/`referer` on writes, and a bounded cookie jar for `discord.com` sent on REST and WebSocket handshakes.

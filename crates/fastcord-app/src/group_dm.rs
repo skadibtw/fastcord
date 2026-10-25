@@ -588,7 +588,7 @@ mod tests {
         use fastcord_discord::gateway::{ClientProperties, HostOs};
         RestClient::new(
             UserToken::new("offline-group-credential".into()),
-            ClientProperties::web(HostOs::Linux, "en-US", 1),
+            ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
         .unwrap()
     }
