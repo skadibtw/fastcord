@@ -165,7 +165,8 @@ REST client and the Gateway). The pin check is
 of `GET /experiments`. API and Gateway use v9. REST sends the Chromium
 same-origin header set with `x-discord-timezone` and a bounded `discord.com`
 cookie jar; the WebSocket handshakes carry the user agent, language and
-no-cache headers. Still open: the nonce shape and `self_stream`. The exact payload, the gaps and the per-item corrections are in
+no-cache headers. Message nonces have the official shape (zero low 22 bits,
+one process-wide sequence). Still open: `self_stream`. The exact payload, the gaps and the per-item corrections are in
 `docs/PROTOCOL.md` and `docs/IDENTITY_AUDIT.md`.
 The accepted-shape evidence from 2026-10-07 (a bogus-token Identify over the
 real compressed Gateway answered with close 4004, not 4002; build number

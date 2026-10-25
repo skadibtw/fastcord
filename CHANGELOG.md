@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- Message nonces now have the official client's shape: the send time in the snowflake position and the low 22 bits zero instead of random, from one process-wide sequence that moves to the next millisecond when one is already used (ADR 0005, IDENTITY_AUDIT B1).
 - Requests to Discord carry the desktop client's Chromium header set (`sec-ch-ua*` from the pinned Chromium, `sec-fetch-*`, `accept-language`, `accept-encoding: gzip, deflate, br` with decoding, `referer`, `origin` on writes, `x-discord-timezone` from the OS) and a bounded in-memory `discord.com` cookie jar; the QR login exchange now sends the identity headers too, and the Gateway, QR and voice WebSocket handshakes carry the user agent, language and no-cache headers (ADR 0005, IDENTITY_AUDIT A7-A9). New dependencies: reqwest's gzip/deflate/brotli decoders.
 - REST and the Gateway use API version 9, the official client's (`/api/v9`, `?v=9`), instead of 10; the fake server follows (ADR 0005, IDENTITY_AUDIT A6).
 - Password login sends `X-Fingerprint`, obtained once per process from Discord's unauthenticated `GET /experiments`, as the official client does before it has a token (ADR 0005, IDENTITY_AUDIT A5).

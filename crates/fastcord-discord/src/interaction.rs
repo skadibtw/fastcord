@@ -697,7 +697,7 @@ mod tests {
     const MODAL: &str = include_str!("../../../fixtures/gateway/interaction_modal_create.json");
 
     fn nonce() -> Nonce {
-        crate::NonceGenerator::default().next(1_800_000_000_000, 7)
+        crate::NonceGenerator.next(1_800_000_000_000)
     }
 
     fn context(nonce: Nonce) -> InteractionContext<'static> {

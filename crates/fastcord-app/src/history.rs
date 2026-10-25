@@ -4984,7 +4984,7 @@ mod tests {
     }
 
     fn other_nonce() -> Nonce {
-        fastcord_discord::NonceGenerator::default().next(1_700_000_000_000, 1)
+        fastcord_discord::NonceGenerator.next(1_700_000_000_000)
     }
 
     fn modal_for(nonce: Nonce) -> Dispatch {

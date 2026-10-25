@@ -249,8 +249,18 @@ pub fn argument(error: ArgError) -> &'static str {
 mod tests {
     use super::*;
 
+    /// One stable nonce per `n` for this test thread (nonces come from one
+    /// process-wide sequence, so they are drawn once and remembered).
     fn nonce(n: u64) -> Nonce {
-        fastcord_discord::NonceGenerator::default().next(1_800_000_000_000, n)
+        thread_local! {
+            static DRAWN: std::cell::RefCell<std::collections::HashMap<u64, Nonce>> =
+                Default::default();
+        }
+        DRAWN.with_borrow_mut(|drawn| {
+            *drawn
+                .entry(n)
+                .or_insert_with(|| fastcord_discord::NonceGenerator.next(1_800_000_000_000 + n))
+        })
     }
 
     fn button(message: u64, custom_id: &str, n: u64) -> Entry {

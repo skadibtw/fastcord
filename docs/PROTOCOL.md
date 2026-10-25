@@ -282,7 +282,7 @@ Implemented in `fastcord-discord::send` (the request and failure classification)
 ```
 
 - `content`: the draft with surrounding whitespace trimmed, interior text as written. Empty text or more than 4,000 characters is refused locally; whether 2,000 (no Nitro) applies is left to Discord, whose 400 is shown as a failed send.
-- `nonce`: a snowflake-shaped `u64` sent as a decimal string (at most 19 characters): milliseconds since the Discord epoch in the high 42 bits, 22 bits of operating-system entropy below, strictly increasing within the process. It is chosen once per operation and reused by every explicit retry.
+- `nonce`: a snowflake-shaped `u64` sent as a decimal string (at most 19 characters): milliseconds since the Discord epoch in the high 42 bits and the low 22 bits zero, the official client's shape (ADR 0005, IDENTITY_AUDIT B1). One sequence for the whole process: a send in a millisecond already used takes the next one, so no two operations share a nonce and the sequence never goes backwards. It is chosen once per operation and reused by every explicit retry.
 - `allowed_mentions` is always sent, never left to Discord's default: `users` and `roles` parse, `everyone` (which covers `@here`) only when the user ticked "Allow @everyone and @here to notify" for this message. The choice resets after every send and on every channel switch. Replies add `replied_user` in milestone 12.
 - No attachments, embeds, stickers, components, or TTS.
 

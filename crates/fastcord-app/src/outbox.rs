@@ -658,12 +658,12 @@ mod tests {
         fn new() -> Self {
             Self {
                 outbox: Outbox::default(),
-                nonces: NonceGenerator::default(),
+                nonces: NonceGenerator,
             }
         }
 
         fn send(&mut self, channel: Snowflake, text: &str) -> OpId {
-            let nonce = self.nonces.next(1_790_000_000_000, 0);
+            let nonce = self.nonces.next(1_790_000_000_000);
             self.outbox
                 .enqueue(channel, text, MentionPolicy::default(), None, nonce, true)
         }
@@ -687,7 +687,7 @@ mod tests {
     }
 
     fn send_files(f: &mut Fixture, channel: Snowflake, text: &str, name: &str) -> OpId {
-        let nonce = f.nonces.next(1_790_000_000_000, 0);
+        let nonce = f.nonces.next(1_790_000_000_000);
         let file = sample_file(name, b"data");
         f.outbox.enqueue_with_files(
             channel,
@@ -847,7 +847,7 @@ mod tests {
             content: Arc::from("original text"),
             mention_author: false,
         };
-        let nonce = f.nonces.next(1_790_000_000_000, 0);
+        let nonce = f.nonces.next(1_790_000_000_000);
         let id = f.outbox.enqueue(
             A,
             "answer",
@@ -884,7 +884,7 @@ mod tests {
     #[test]
     fn reply_preview_strings_are_bounded_at_the_outbox_boundary() {
         let mut outbox = Outbox::default();
-        let nonce = NonceGenerator::default().next(1_790_000_000_000, 0);
+        let nonce = NonceGenerator.next(1_790_000_000_000);
         outbox.enqueue(
             A,
             "answer",
@@ -975,7 +975,7 @@ mod tests {
     #[test]
     fn a_channel_that_cannot_be_sent_to_keeps_the_text_as_a_failed_operation() {
         let mut outbox = Outbox::default();
-        let nonce = NonceGenerator::default().next(1_790_000_000_000, 0);
+        let nonce = NonceGenerator.next(1_790_000_000_000);
         let id = outbox.enqueue(
             A,
             "typed text",
@@ -1051,11 +1051,11 @@ mod tests {
     fn slots_bound_the_outbox_and_every_departure_frees_one() {
         let slots = Slots::default();
         let mut outbox = Outbox::new(slots.clone());
-        let mut nonces = NonceGenerator::default();
+        let mut nonces = NonceGenerator;
         let mut ids = Vec::new();
         for n in 0..MAX_OUTBOX {
             assert!(slots.reserve(), "slot {n}");
-            let nonce = nonces.next(1_790_000_000_000, 0);
+            let nonce = nonces.next(1_790_000_000_000);
             ids.push(outbox.enqueue(A, "x", MentionPolicy::default(), None, nonce, true));
         }
         assert!(!slots.reserve(), "the outbox is full");

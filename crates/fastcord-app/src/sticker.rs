@@ -66,7 +66,7 @@ impl Default for State {
             status: Status::Loading,
             stickers: Vec::new(),
             thumbs: Vec::new(),
-            nonces: NonceGenerator::default(),
+            nonces: NonceGenerator,
             task: None,
         }
     }

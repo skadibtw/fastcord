@@ -93,7 +93,7 @@ async fn the_real_client_talks_to_the_fake() {
     );
 
     // A send is stored by the fake and comes back as MESSAGE_CREATE with its nonce.
-    let nonce = NonceGenerator::default().next_now();
+    let nonce = NonceGenerator.next_now();
     let outgoing =
         OutgoingMessage::new("hello from the test", nonce, MentionPolicy::default()).unwrap();
     let created = client.create_message(GENERAL, &outgoing).await.unwrap();

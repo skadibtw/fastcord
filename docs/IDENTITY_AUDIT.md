@@ -380,7 +380,7 @@ mask), A2 (heartbeat session with 30-minute rotation), A3/A4 (installation id
 from READY, persisted, sent in Identify and `X-Installation-ID`), A5
 (`X-Fingerprint` from `GET /experiments` on password login), A6 (API and
 Gateway v9), A7-A9 (Chromium header set, `x-discord-timezone`, cookie jar,
-WebSocket handshake headers), and C1
+WebSocket handshake headers), B1 (nonce shape), and C1
 (version chain and the daily `identity-pin` check); see ADR 0005 "Current implementation". The
 other items below are still open.
 

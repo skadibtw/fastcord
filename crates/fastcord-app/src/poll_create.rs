@@ -82,7 +82,7 @@ impl Default for State {
             answers: vec![String::new(), String::new()],
             hours: DEFAULT_DURATION,
             multiselect: false,
-            nonces: NonceGenerator::default(),
+            nonces: NonceGenerator,
             attempt: None,
             task: None,
         }

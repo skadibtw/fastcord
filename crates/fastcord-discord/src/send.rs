@@ -13,10 +13,10 @@
 //! over the Gateway is the nonce's other job: [`Nonce::matches`].
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fastcord_model::{DISCORD_EPOCH_MS, Message, Snowflake};
-use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 
 use crate::error::RetryableFailure;
@@ -34,12 +34,16 @@ use crate::{Clock, Method, NetworkFailure, Priority, RestClient, RestError, Rest
 /// authoritative about which applies. Anything longer cannot succeed.
 pub const MAX_CONTENT_CHARS: usize = 4_000;
 
-/// Low bits of the nonce that carry entropy rather than the timestamp.
-const NONCE_ENTROPY_BITS: u32 = 22;
-const NONCE_ENTROPY_MASK: u64 = (1 << NONCE_ENTROPY_BITS) - 1;
+/// Low bits of a snowflake below the timestamp; the official client's nonces
+/// leave them zero.
+const NONCE_LOW_BITS: u32 = 22;
+/// One millisecond in nonce units.
+const NONCE_MILLISECOND: u64 = 1 << NONCE_LOW_BITS;
 /// Timestamps beyond this many milliseconds since the Discord epoch would not
 /// fit the 64-bit nonce (about 139 years after 2015).
-const NONCE_TIME_MASK: u64 = (1 << (64 - NONCE_ENTROPY_BITS)) - 1;
+const NONCE_TIME_MASK: u64 = (1 << (64 - NONCE_LOW_BITS)) - 1;
+/// The last nonce handed out in this process, shared by every generator.
+static LAST_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// Identifies one send operation to Discord and, over the Gateway, back to
 /// us. Snowflake-shaped (time in the high bits, like the official client's),
@@ -66,32 +70,43 @@ impl Serialize for Nonce {
     }
 }
 
-/// Produces nonces that are unique within the process and, because enforcement
-/// is per author, very unlikely to equal one chosen by the user's other
-/// clients: the official client's nonces have no entropy in their low bits,
-/// these have 22 random ones.
+/// Produces nonces in the official client's shape: the send time in the
+/// snowflake position and the low 22 bits zero (ADR 0005, IDENTITY_AUDIT B1).
+/// Unique within the process across every generator: a send in a millisecond
+/// already used takes the next one. Enforcement is per author, so the only
+/// other clash is with the same account's other client in the same
+/// millisecond, as between two official clients.
 #[derive(Debug, Default)]
-pub struct NonceGenerator {
-    last: u64,
-}
+pub struct NonceGenerator;
 
 impl NonceGenerator {
-    /// A nonce for a send started at `unix_ms`, with `entropy` in its low bits.
-    /// Strictly greater than every nonce this generator produced before.
-    pub fn next(&mut self, unix_ms: u64, entropy: u64) -> Nonce {
-        let time = unix_ms.saturating_sub(DISCORD_EPOCH_MS) & NONCE_TIME_MASK;
-        let candidate = (time << NONCE_ENTROPY_BITS) | (entropy & NONCE_ENTROPY_MASK);
-        self.last = candidate.max(self.last.saturating_add(1));
-        Nonce(self.last)
+    /// A nonce for a send started at `unix_ms`. Strictly greater than every
+    /// nonce produced before in this process.
+    pub fn next(&mut self, unix_ms: u64) -> Nonce {
+        let mut next = 0;
+        let _ = LAST_NONCE.try_update(Ordering::AcqRel, Ordering::Acquire, |last| {
+            next = next_after(last, unix_ms);
+            Some(next)
+        });
+        Nonce(next)
     }
 
-    /// [`next`](Self::next) with the system clock and operating-system entropy.
+    /// [`next`](Self::next) with the system clock.
     pub fn next_now(&mut self) -> Nonce {
         let unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as u64);
-        self.next(unix_ms, OsRng.next_u64())
+        self.next(unix_ms)
     }
+}
+
+/// The nonce for `unix_ms` after `last`: the millisecond in the snowflake
+/// position, moved past `last` when that millisecond is used, saturating.
+fn next_after(last: u64, unix_ms: u64) -> u64 {
+    let time = unix_ms.saturating_sub(DISCORD_EPOCH_MS) & NONCE_TIME_MASK;
+    let candidate = time << NONCE_LOW_BITS;
+    let after_last = (last & !(NONCE_MILLISECOND - 1)).saturating_add(NONCE_MILLISECOND);
+    candidate.max(if last == 0 { 0 } else { after_last })
 }
 
 /// Which mentions in a message's text may notify anyone. Always sent in full
@@ -594,8 +609,7 @@ mod tests {
     const NOW_MS: u64 = 1_790_000_000_000;
 
     fn nonce(n: u64) -> Nonce {
-        let mut generator = NonceGenerator::default();
-        generator.next(NOW_MS, n)
+        Nonce(next_after(0, NOW_MS + n))
     }
 
     #[test]
@@ -976,39 +990,39 @@ line"
     }
 
     #[test]
-    fn nonces_are_unique_monotonic_snowflake_text_that_fit_discords_limit() {
-        let mut generator = NonceGenerator::default();
-        let first = generator.next(NOW_MS, 0x12_3456);
-        // The same millisecond with the same entropy cannot repeat a nonce.
-        let second = generator.next(NOW_MS, 0x12_3456);
-        assert!(second.0 > first.0);
+    fn nonces_have_the_official_shape_and_never_repeat() {
+        let low = NONCE_MILLISECOND - 1;
+        // The time in the snowflake position, the low 22 bits zero.
+        let first = next_after(0, NOW_MS);
+        assert_eq!(first >> NONCE_LOW_BITS, NOW_MS - DISCORD_EPOCH_MS);
+        assert_eq!(first & low, 0);
+        // The same millisecond again takes the next one.
+        let second = next_after(first, NOW_MS);
+        assert_eq!(second, first + NONCE_MILLISECOND);
         // A clock stepping backwards cannot repeat or reorder them either.
-        let third = generator.next(NOW_MS - 10_000, 0);
-        assert!(third.0 > second.0);
+        let third = next_after(second, NOW_MS - 10_000);
+        assert_eq!(third, second + NONCE_MILLISECOND);
+        // A later send keeps its own time.
         assert_eq!(
-            first.0 >> NONCE_ENTROPY_BITS,
-            NOW_MS - DISCORD_EPOCH_MS,
-            "the time is in the snowflake position"
+            next_after(third, NOW_MS + 60_000) >> NONCE_LOW_BITS,
+            NOW_MS + 60_000 - DISCORD_EPOCH_MS
         );
-        assert_eq!(first.0 & NONCE_ENTROPY_MASK, 0x12_3456);
-        for nonce in [first, second, third] {
+        for nonce in [first, second, third].map(Nonce) {
             let text = nonce.to_string();
-            assert!(text.len() <= 19 && text.len() <= 25, "{text}");
+            assert!(text.len() <= 19, "{text}");
             assert!(nonce.matches(&text));
         }
-        // Entropy outside its 22 bits cannot leak into the timestamp.
-        assert_eq!(
-            NonceGenerator::default().next(NOW_MS, u64::MAX).0 >> NONCE_ENTROPY_BITS,
-            NOW_MS - DISCORD_EPOCH_MS
-        );
-        // A saturated generator stays well-defined.
-        let mut saturated = NonceGenerator { last: u64::MAX };
-        assert_eq!(saturated.next(NOW_MS, 1).0, u64::MAX);
-        // The real clock and entropy produce distinct values.
-        let mut live = NonceGenerator::default();
-        let a = live.next_now();
-        let b = live.next_now();
-        assert_ne!(a, b);
+        // A saturated sequence stays well-defined.
+        assert_eq!(next_after(u64::MAX, NOW_MS), u64::MAX);
+        // Every generator in the process shares one sequence.
+        let (mut one, mut two) = (NonceGenerator, NonceGenerator);
+        let a = one.next(NOW_MS);
+        let b = two.next(NOW_MS);
+        assert!(b.0 > a.0);
+        assert_eq!(b.0 & low, 0);
+        let live = one.next_now();
+        assert!(live.0 > b.0);
+        assert_eq!(live.0 & low, 0);
     }
 
     #[test]
