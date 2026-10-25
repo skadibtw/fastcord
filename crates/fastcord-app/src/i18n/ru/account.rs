@@ -698,6 +698,10 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ),
     // login
     (
+        "This network may be blocking Discord. Open Network recovery and start the packet helper (Windows, administrator approval), or use a proxy or VPN.",
+        "Похоже, эта сеть блокирует Discord. Откройте «Сетевое подключение» и запустите пакетный помощник (Windows, нужно разрешение администратора) или используйте прокси или VPN.",
+    ),
+    (
         "Discord rejected this token. Login stopped; paste a valid alt-account token.",
         "Discord отклонил этот токен. Вход остановлен; вставьте действительный токен дополнительного аккаунта.",
     ),

@@ -364,6 +364,8 @@ pub fn view<'a>(
         text(crate::i18n::tr("Network recovery")).size(26),
         text(state.notice.unwrap_or("Choose routing before signing in.")),
         text(format!("Mode: {:?}", state.settings.mode)),
+        text(path_text(state.settings.mode, state.packet_active, state.proxy_kind)),
+        text(budget_text(context.controller().budget_snapshot())),
         row![choose("Off", Mode::Off), choose("Auto", Mode::Auto)].spacing(12),
         text(if state.packet_active { "Windows packet recovery: active for this session" } else { "Windows packet recovery: off" }),
         button(if state.packet_active { "Stop packet recovery" } else { "Start packet recovery (administrator prompt)" }).on_press_maybe((editable && !state.saving).then_some(crate::Message::Network(if state.packet_active { Action::PacketStop } else { Action::PacketStart }))),
@@ -417,6 +419,41 @@ pub fn view<'a>(
         .padding(24)
         .width(Length::Fixed(650.0))
         .into()
+}
+
+/// The route a new dial takes, so a user who lost the connection can see which
+/// one is in force. There is no byedpi path: that engine is not linked.
+fn path_text(mode: Mode, packet: bool, proxy: Option<ProxyKind>) -> String {
+    match mode {
+        Mode::Off => "Active path: direct, no recovery".into(),
+        Mode::Auto if packet => "Active path: direct, TLS recovery and the packet helper".into(),
+        Mode::Auto => "Active path: direct with TLS recovery; no packet helper".into(),
+        Mode::Proxy => format!(
+            "Active path: proxy ({}), never direct",
+            proxy.unwrap_or(ProxyKind::Http)
+        ),
+    }
+}
+
+fn budget_text(budget: fastcord_net::selector::BudgetSnapshot) -> String {
+    use fastcord_net::selector::{MAX_ROLLING_DIALS, MAX_TLS_PROBES};
+    let campaign = if budget.campaign_active {
+        format!(
+            "checking, {}/{MAX_TLS_PROBES} probes",
+            budget.campaign_probes
+        )
+    } else {
+        "idle".into()
+    };
+    let rest = if budget.rolling_dials + 2 > MAX_ROLLING_DIALS {
+        " Budget spent: new checks wait up to 10 minutes."
+    } else {
+        ""
+    };
+    format!(
+        "Recovery: {campaign}; {}/{MAX_ROLLING_DIALS} dials used in the last 10 minutes.{rest}",
+        budget.rolling_dials
+    )
 }
 
 pub(crate) fn status_text(status: fastcord_net::selector::ServiceStatus) -> String {
@@ -665,4 +702,33 @@ pub fn preview() -> iced::Result {
         ..Default::default()
     })
     .run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fastcord_net::selector::BudgetSnapshot;
+
+    #[test]
+    fn budget_line_says_when_checks_must_wait() {
+        let budget = BudgetSnapshot {
+            campaign_active: true,
+            generation: 0,
+            rolling_dials: 23,
+            campaign_probes: 4,
+            campaign_dials: 8,
+            campaign_bytes: 0,
+        };
+        let line = budget_text(budget);
+        assert!(line.contains("checking, 4/6 probes"), "{line}");
+        assert!(line.contains("23/24 dials"), "{line}");
+        assert!(line.contains("wait up to 10 minutes"), "{line}");
+        let idle = budget_text(BudgetSnapshot {
+            campaign_active: false,
+            rolling_dials: 2,
+            ..budget
+        });
+        assert!(idle.starts_with("Recovery: idle; 2/24"), "{idle}");
+        assert!(!idle.contains("wait"), "{idle}");
+    }
 }

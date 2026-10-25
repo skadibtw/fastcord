@@ -72,6 +72,8 @@ pub enum LoginError {
     WorkerStopped,
 }
 
+const BLOCKED_HINT: &str = "This network may be blocking Discord. Open Network recovery and start the packet helper (Windows, administrator approval), or use a proxy or VPN.";
+
 impl LoginError {
     /// Only typed categories enter the login notice; raw transport errors may
     /// contain URLs, headers or credentials and are never formatted here.
@@ -83,7 +85,14 @@ impl LoginError {
             .controller()
             .service_status(fastcord_net::Role::Rest)
         {
-            return format!("Could not reach Discord: {category} Login stopped; try again.");
+            let notice = format!("Could not reach Discord: {category} Login stopped; try again.");
+            // A timeout or reset before TLS completes is how a filtering
+            // network looks from here; say what can still get through.
+            return if category.eligible_for_selection() {
+                format!("{notice} {}", tr(BLOCKED_HINT))
+            } else {
+                notice
+            };
         }
         self.to_string()
     }
@@ -335,6 +344,23 @@ pub(crate) fn fixture_session() -> Arc<Session> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocked_network_failures_point_at_network_recovery() {
+        use fastcord_net::{NetworkError, Role};
+        let context = fastcord_net::NetworkContext::off();
+        let error = LoginError::Rest(RestError::Retryable(RetryableFailure::Network(
+            NetworkFailure::Connection,
+        )));
+        context
+            .controller()
+            .note_failure(Role::Rest, NetworkError::TlsReset);
+        assert!(error.notice(&context).contains("Open Network recovery"));
+        context
+            .controller()
+            .note_failure(Role::Rest, NetworkError::Dns);
+        assert!(!error.notice(&context).contains("Network recovery"));
+    }
 
     #[test]
     fn current_user_fixture_and_saved_account_identity_are_checked() {
