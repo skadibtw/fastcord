@@ -424,7 +424,10 @@ fn the_real_model_builds_off_thread_and_takes_over_at_its_published_latency() {
     });
     rig.denoiser.select(NoiseSuppression::HighQuality);
     let mut slowest = Duration::ZERO;
-    let deadline = Instant::now() + PATIENCE;
+    // Its own budget: a debug-build tract optimisation of the real graph takes
+    // over two minutes on hosted macOS runners. The test grades the hand-over
+    // and that the caller never blocks, not how fast debug code loads a model.
+    let deadline = Instant::now() + Duration::from_secs(300);
     while rig.denoiser.status().active != NoiseSuppression::HighQuality {
         assert!(Instant::now() < deadline, "{:?}", rig.denoiser.status());
         assert_eq!(rig.denoiser.status().error, None);
