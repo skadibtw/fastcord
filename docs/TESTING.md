@@ -22,7 +22,8 @@
   the account locale in `x-discord-locale` while `system_locale`, the super
   properties and `accept-language` keep the OS values, the value is shape-checked
   both from READY and a live `USER_SETTINGS_UPDATE`, and a new session's identity
-  starts from the OS locale again.
+  starts from the OS locale again. The Gateway driver test repeats this end to
+  end against the in-process server (`ready_and_a_live_setting_change_adopt_the_account_locale`).
 - CDN fetches: the loopback tests read the actual request head and require the
   public user agent and the purpose `Accept` (image list for an avatar, `*/*` for
   a file download) with no cookie, `authorization`, `x-fingerprint`,
@@ -36,6 +37,11 @@
   aarch64-apple-darwin` passes from Windows. This is not a run on macOS.
 - The public live version matrix passes through embedded byedpi (details in
   Milestone 5 below). No credentials or account traffic are needed for it.
+  Re-checked at the end of this pass on 2026-10-25, directly and with
+  `FASTCORD_IDENTITY_BYEDPI=-d1`: the five host/native pins and the web build are
+  unchanged (Windows x64 1.0.9265/96160, Windows ARM64 1.0.57/96160, macOS
+  0.0.419/96312, Linux x64 1.0.166/96160, web 649389), so the byedpi route on
+  the production version fetch still works.
 - Still pending: sanitized official desktop capture (GREASE, language and
   Referer policy, WebSocket fetch metadata), WS permessage-deflate support,
   Electron/Chromium evidence outside Windows x64, capabilities and the persisted

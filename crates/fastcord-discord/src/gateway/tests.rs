@@ -382,6 +382,63 @@ async fn identify_flow_sends_the_desktop_profile_and_delivers_normalized_ready()
 }
 
 #[tokio::test(start_paused = true)]
+async fn ready_and_a_live_setting_change_adopt_the_account_locale() {
+    let transport = FakeTransport::new();
+    let mut server = transport.accept().await;
+    let identity = Identity::new(ClientProperties::bundled(HostOs::Windows, "ru-RU"));
+    let mut gateway = start_with(
+        Arc::clone(&transport),
+        Arc::new(UserToken::new("test-token".to_owned())),
+        identity.clone(),
+        Fixed(0.5),
+    );
+    server.handshake().await;
+    // Before READY the header carries the OS locale.
+    assert_eq!(identity.locale(), "ru-RU");
+    let mut ready: Value = serde_json::from_str(READY).unwrap();
+    ready["user_settings"] = json!({"locale": "en-US"});
+    server.dispatch("READY", 1, &ready.to_string()).await;
+    skip_connection_states(&mut gateway).await;
+    assert!(matches!(
+        next_dispatch(&mut gateway).await.1,
+        Dispatch::Ready(_)
+    ));
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    // The account's chosen locale wins over the OS locale, and only that header.
+    assert_eq!(identity.locale(), "en-US");
+    assert_eq!(identity.properties().system_locale, "ru-RU");
+    // A partial settings update without a locale changes nothing.
+    server
+        .dispatch(
+            "USER_SETTINGS_UPDATE",
+            2,
+            r#"{"explicit_content_filter":2}"#,
+        )
+        .await;
+    assert!(matches!(
+        next_dispatch(&mut gateway).await.1,
+        Dispatch::UserSettingsUpdate(_)
+    ));
+    assert_eq!(identity.locale(), "en-US");
+    // One that carries a locale is adopted at once.
+    server
+        .dispatch(
+            "USER_SETTINGS_UPDATE",
+            3,
+            r#"{"locale":"es-419","theme":"dark"}"#,
+        )
+        .await;
+    let _ = next_dispatch(&mut gateway).await;
+    assert_eq!(identity.locale(), "es-419");
+    // A malformed locale never reaches the header.
+    server
+        .dispatch("USER_SETTINGS_UPDATE", 4, r#"{"locale":"EN-us"}"#)
+        .await;
+    let _ = next_dispatch(&mut gateway).await;
+    assert_eq!(identity.locale(), "es-419");
+}
+
+#[tokio::test(start_paused = true)]
 async fn fragmented_compressed_events_reassemble_and_share_one_dictionary() {
     let transport = FakeTransport::new();
     let mut server = transport.accept().await;
