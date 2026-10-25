@@ -122,33 +122,31 @@ impl Speaker {
                 .min(MAX_TARGET.as_millis() as f64);
             self.target = Duration::from_millis(target.ceil() as u64);
 
+            // A new target moves the playout point by the difference; the
+            // talkspurt's start is not an anchor (it was, and a speaker that
+            // talked longer than the target was then due on every pull).
             if let Some(due) = self.next_due {
-                self.next_due = Some(
-                    if let Some(start) = self.active_since
-                        && now < due
-                    {
-                        start + self.target
-                    } else if self.target >= previous {
-                        due + (self.target - previous)
-                    } else {
-                        due.checked_sub(previous - self.target)
-                            .unwrap_or(now)
-                            .max(now)
-                    },
-                );
+                self.next_due = Some(if self.target >= previous {
+                    due + (self.target - previous)
+                } else {
+                    due.checked_sub(previous - self.target)
+                        .unwrap_or(now)
+                        .max(now)
+                });
             }
             self.last_transit = Some(transit);
         }
         self.last_arrival = Some(now);
         self.last_timestamp = Some(frame.timestamp);
         self.last_packet = now;
+        // A talkspurt starts playing one target after its first packet, so
+        // the queue holds what jitter needs from the start.
         if self.active_since.is_none() {
             self.active_since = Some(now);
-            // Set next_due to now so first mix() call produces output
-            self.next_due = Some(now);
+            self.next_due = Some(now + self.target);
         } else if self.next_due.is_none() {
             // Restart after PLC capping
-            self.next_due = Some(now);
+            self.next_due = Some(now + self.target);
             self.consecutive_plc = 0;
         }
 
@@ -311,7 +309,10 @@ impl JitterMixer {
     }
 
     pub(crate) fn push(&mut self, frame: RemoteFrame) {
-        let now = Instant::now();
+        self.push_at(frame, Instant::now());
+    }
+
+    fn push_at(&mut self, frame: RemoteFrame, now: Instant) {
         let index = match self
             .speakers
             .iter()
@@ -594,6 +595,53 @@ mod tests {
         }
     }
 
+    /// With an advancing clock and arrivals jittered well inside the target,
+    /// every packet is played on time: nothing is concealed, and playout lags
+    /// the first arrival by the target, not by whatever the pull rate makes it.
+    #[test]
+    fn jittered_arrivals_within_the_target_are_never_concealed() {
+        let mut mixer = JitterMixer::new().unwrap();
+        let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
+        let start = Instant::now();
+        let mut out = [0.0; FRAME_SAMPLES * CHANNELS];
+        let mut jitter = 0x2545_f491u32;
+        let mut arrivals: Vec<(Instant, u64)> = (0..150u64)
+            .map(|sequence| {
+                jitter = jitter.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let late = u64::from(jitter >> 16) % 15; // 0..15 ms
+                (
+                    start + Duration::from_millis(sequence * 20 + late),
+                    sequence,
+                )
+            })
+            .collect();
+        arrivals.sort();
+        let mut next = 0;
+        let mut first_played = None;
+        // The engine pulls every 5 ms.
+        for tick in 0..((150 * 20 + 400) / 5) {
+            let now = start + Duration::from_millis(tick * 5);
+            while next < arrivals.len() && arrivals[next].0 <= now {
+                let (at, sequence) = arrivals[next];
+                mixer.push_at(frame(&mut encoder, 1, sequence), at);
+                next += 1;
+            }
+            if mixer.mix(&mut out, now) && first_played.is_none() {
+                first_played = Some(now);
+            }
+        }
+        assert_eq!(
+            mixer.concealed_frames(),
+            MAX_CONSECUTIVE_PLC as u64,
+            "only the tail"
+        );
+        let lag = first_played.unwrap() - start;
+        assert!(
+            lag >= MIN_TARGET && lag <= INITIAL_TARGET + Duration::from_millis(5),
+            "{lag:?}"
+        );
+    }
+
     /// Test: reordered arrival keeps jitter bounded
     #[test]
     fn remote_gain_is_isolated_to_its_ssrc() {
@@ -603,7 +651,10 @@ mod tests {
         mixer.push(frame(&mut encoder, 10, 0));
         mixer.push(frame(&mut encoder, 20, 0));
         let mut out = [0.0; FRAME_SAMPLES * CHANNELS];
-        assert!(mixer.mix(&mut out, Instant::now() + Duration::from_millis(50)));
+        assert!(mixer.mix(
+            &mut out,
+            Instant::now() + INITIAL_TARGET + Duration::from_millis(50)
+        ));
         assert!(out.iter().any(|sample| sample.abs() > 0.01));
         assert_eq!(
             mixer
@@ -719,7 +770,8 @@ mod tests {
         let frames: Vec<_> = (1..=4u32)
             .map(|ssrc| frame_amplitude(&mut encoder, ssrc, 0, 0.9))
             .collect();
-        let t0 = Instant::now();
+        // A talkspurt plays one target after its first packet.
+        let t0 = Instant::now() + INITIAL_TARGET;
         for frame in frames {
             mixer.push(frame);
         }
@@ -834,7 +886,7 @@ mod tests {
     fn plc_capping_fades_out_and_stops_output_after_the_run() {
         let mut mixer = JitterMixer::new().unwrap();
         let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
-        let start = Instant::now();
+        let start = Instant::now() + INITIAL_TARGET;
         let mut mixed = [0.0; FRAME_SAMPLES * CHANNELS];
 
         mixer.push(frame(&mut encoder, 1, 0));
