@@ -415,7 +415,8 @@ impl MediaSender {
 pub struct TransportStats {
     pub rtp_sent: u64,
     pub rtp_received: u64,
-    /// Failed transport authentication.
+    /// Failed transport authentication (RTP/RTCP AEAD), and video frames
+    /// DAVE refused.
     pub rejected_authentication: u64,
     /// Malformed or unexpected datagrams and RTP/RTCP headers.
     pub rejected_malformed: u64,
@@ -451,6 +452,9 @@ pub struct TransportStats {
     /// as opposed to [`Self::rejected_authentication`], where a session exists
     /// and the packet did not authenticate against it.
     pub audio_without_dave: u64,
+    /// Inbound audio that passed the transport cipher but that the installed
+    /// DAVE session refused: end-to-end keys out of step with the sender.
+    pub audio_rejected_by_dave: u64,
 }
 
 #[derive(Default)]
@@ -473,6 +477,7 @@ pub(crate) struct Counters {
     pub(crate) keyframe_requests_sent: AtomicU64,
     pub(crate) audio_waiting_for_keys: AtomicU64,
     pub(crate) audio_without_dave: AtomicU64,
+    pub(crate) audio_rejected_by_dave: AtomicU64,
 }
 
 impl Counters {
@@ -501,6 +506,7 @@ impl Counters {
             keyframe_requests_sent: get(&self.keyframe_requests_sent),
             audio_waiting_for_keys: get(&self.audio_waiting_for_keys),
             audio_without_dave: get(&self.audio_without_dave),
+            audio_rejected_by_dave: get(&self.audio_rejected_by_dave),
         }
     }
 }

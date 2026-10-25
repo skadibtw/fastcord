@@ -1301,9 +1301,14 @@ fn anomaly_lines(
         }
     };
     grew(
+        transport.audio_rejected_by_dave,
+        t.audio_rejected_by_dave,
+        "inbound: audio that failed end-to-end decryption (keys out of step) in the last second",
+    );
+    grew(
         transport.rejected_authentication,
         t.rejected_authentication,
-        "inbound: packets that failed decryption (end-to-end keys out of step) in the last second",
+        "inbound: packets that failed transport decryption or video end-to-end decryption in the last second",
     );
     grew(
         transport.audio_without_dave,
@@ -1360,7 +1365,14 @@ mod anomaly_tests {
         };
         let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &failing);
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("failed decryption") && lines[0].ends_with(": 40"));
+        assert!(lines[0].contains("transport decryption") && lines[0].ends_with(": 40"));
+        let refused = fastcord_media::gateway::TransportStats {
+            audio_rejected_by_dave: 9,
+            ..transport
+        };
+        let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &refused);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("keys out of step") && lines[0].ends_with(": 9"));
 
         // "No session at all" and "the session rejected the packet" are
         // different problems and must not look the same in the log.

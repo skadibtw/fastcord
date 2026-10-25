@@ -1157,7 +1157,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let payload = match dave.decrypt_opus(owner.user_id.0, &audio.payload) {
             Ok(payload) => payload,
             Err(_) => {
-                Counters::add(&self.ch.counters.rejected_authentication, 1);
+                Counters::add(&self.ch.counters.audio_rejected_by_dave, 1);
                 return;
             }
         };

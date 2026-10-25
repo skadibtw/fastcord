@@ -343,8 +343,12 @@ impl DaveSession {
         if !self.is_receive_ready() {
             return Err(DaveError::NotReady);
         }
+        // The protocol sends the Opus silence frame unencrypted
+        // (https://daveprotocol.com/#silence-packets) and davey passes it
+        // through. It carries no content, so it is accepted as silence;
+        // refusing it turned every talkspurt's end into dropped packets.
         if packet == OPUS_SILENCE {
-            return Err(DaveError::PlaintextBypass);
+            return Ok(OPUS_SILENCE.to_vec());
         }
         let frame = self
             .engine
@@ -613,6 +617,12 @@ mod tests {
                 .unwrap(),
             clear
         );
+        assert_eq!(
+            receiver.decrypt_opus(sender_id, OPUS_SILENCE).unwrap(),
+            OPUS_SILENCE,
+            "the unencrypted silence frame is protocol traffic, not a bypass"
+        );
+        assert!(receiver.decrypt_opus(sender_id, clear).is_err());
     }
 
     const H264_FIXTURE: &[u8] = include_bytes!("../../../fixtures/video/ipcm-128x96.h264");
