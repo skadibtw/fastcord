@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.5 — 2026-10-25
+
+### Fixed
+- Friends, blocks and pending friend requests that existed before sign-in are visible again. READY lists each user once and its relationship entries carry only a `user_id`, so the decoder dropped every one of them at login and only relationships changed during the session appeared — pre-existing requests looked lost. The entry's user is now resolved from READY's `users` table (the inline `user` object still wins when present), and the deduplicated `fixtures/gateway/ready.json` asserts it.
+
 ## 0.1.0-alpha.4 — 2026-10-25
 
 ### Added
