@@ -319,7 +319,7 @@ async fn forward_with_control<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + 
         loop {
             let len = client_read.read(&mut buffer).await?;
             if len == 0 {
-                return server_write.shutdown().await;
+                return teardown(server_write.shutdown().await);
             }
             server_write.write_all(&buffer[..len]).await?;
             // A network read can end anywhere in ClientHello. Unlike flush,
@@ -332,7 +332,7 @@ async fn forward_with_control<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + 
         loop {
             let len = server_read.read(&mut buffer).await?;
             if len == 0 {
-                return client_write.shutdown().await;
+                return teardown(client_write.shutdown().await);
             }
             observer.observe(&buffer[..len]);
             client_write.write_all(&buffer[..len]).await?;
@@ -340,6 +340,24 @@ async fn forward_with_control<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + 
     };
     tokio::try_join!(outgoing, incoming)?;
     Ok(())
+}
+
+/// A half-close that fails because the far side already reset or went away
+/// is the tunnel ending, not a bridge failure (Linux answers `ENOTCONN`).
+/// Read and write errors still propagate.
+fn teardown(result: std::io::Result<()>) -> std::io::Result<()> {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected};
+    match result {
+        Err(error)
+            if matches!(
+                error.kind(),
+                NotConnected | ConnectionReset | BrokenPipe | ConnectionAborted
+            ) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
 }
 
 async fn read_headers(client: &mut TcpStream) -> std::io::Result<Zeroizing<Vec<u8>>> {
@@ -500,6 +518,20 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_reset_peer_ends_the_tunnel_cleanly() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::NotConnected,
+            ErrorKind::ConnectionReset,
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionAborted,
+        ] {
+            assert!(teardown(Err(Error::from(kind))).is_ok(), "{kind:?}");
+        }
+        assert!(teardown(Err(Error::from(ErrorKind::PermissionDenied))).is_err());
+    }
     struct TestPrefix {
         strategy: Strategy,
         calls: Arc<AtomicUsize>,
