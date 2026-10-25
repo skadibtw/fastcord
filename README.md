@@ -10,7 +10,7 @@ The approved delivery order and issue links are in [docs/ROADMAP.md](docs/ROADMA
 
 ## Download
 
-Builds are on the [Releases](https://github.com/skadibtw/fastcord/releases) page. On Windows, download `fastcord-v…-x86_64-pc-windows-msvc.exe` and run it (the `.zip` holds the same executable with the licences). It needs the [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe), which most PCs already have from other programs and games; if Windows says `VCRUNTIME140.dll` was not found, install it. Builds are unsigned, so SmartScreen may warn. Linux and macOS archives are `.tar.gz`; on macOS right-click the app and choose Open the first time.
+Builds are on the [Releases](https://github.com/skadibtw/fastcord/releases) page. On Windows, download `fastcord-v…-x86_64-pc-windows-msvc.exe` and run it (the `.zip` holds the same executable with the licences). It links the C runtime statically, so no Visual C++ Redistributable is needed. Builds are unsigned, so SmartScreen may warn. Linux and macOS archives are `.tar.gz`; on macOS right-click the app and choose Open the first time.
 
 ## Network recovery
 

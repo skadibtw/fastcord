@@ -3,3 +3,11 @@
 # remains authoritative. This variable affects only Apple-target builds.
 [env]
 MACOSX_DEPLOYMENT_TARGET = "12.3"
+
+# Link the C runtime statically on Windows, so the executable starts without
+# the Visual C++ Redistributable. `cc` and `cmake` builds follow it with /MT.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
