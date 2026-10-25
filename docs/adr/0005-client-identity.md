@@ -72,7 +72,8 @@ truthfully must match, and no field may contradict another.
   `x-discord-timezone`); a cookie jar for `discord.com`; the same headers on
   the Gateway, voice and remote-auth WebSocket handshakes.
 - Behaviour: message nonces in the official shape (timestamp in the high bits,
-  zero low 22 bits); `self_stream` in the voice state; the persisted
+  zero low 22 bits); opcode 4 without `self_stream`, which the server
+  sets when opcode 18 creates a stream (corrected 2026-10-25); the persisted
   guild-version cache and `capabilities` follow the official capture once their
   payloads are handled.
 
@@ -166,7 +167,8 @@ of `GET /experiments`. API and Gateway use v9. REST sends the Chromium
 same-origin header set with `x-discord-timezone` and a bounded `discord.com`
 cookie jar; the WebSocket handshakes carry the user agent, language and
 no-cache headers. Message nonces have the official shape (zero low 22 bits,
-one process-wide sequence). Still open: `self_stream`. The exact payload, the gaps and the per-item corrections are in
+one process-wide sequence). Opcode 4 stays without `self_stream`, as the
+official client sends it. The exact payload, the gaps and the per-item corrections are in
 `docs/PROTOCOL.md` and `docs/IDENTITY_AUDIT.md`.
 The accepted-shape evidence from 2026-10-07 (a bogus-token Identify over the
 real compressed Gateway answered with close 4004, not 4002; build number

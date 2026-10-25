@@ -41,7 +41,7 @@ mismatch, moderate cost; **P2** = cosmetic or unverified; **—** = do not chang
 | A10 | rustls/ring TLS and h2 fingerprints differ from Chromium/Electron | code | P1 | large |
 | A11 | Voice says `protocol: "udp"` under a desktop identity | code + docs | P1 | very large |
 | B1 | Nonces carry 22 random low bits; official-client nonces do not | code | P1 | small |
-| B2 | Voice state never sends `self_stream` | code | P1 | small |
+| B2 | ~~Voice state never sends `self_stream`~~ withdrawn: opcode 4 has no such field | docs | — | none |
 | B3 | `capabilities` is a deliberate subset | code + docs | P2 | large |
 | B4 | `guild_versions` is always empty | code | P2 | medium |
 | B5 | `x-discord-locale` is the OS locale, not the account locale | code | P2 | medium |
@@ -246,20 +246,19 @@ official client's collision behaviour if a capture shows one). Keep reusing the
 same nonce on an explicit retry, which is required for `enforce_nonce`. Add a
 test for the zero low bits and for monotonicity.
 
-### B2. `self_stream` (P1)
+### B2. `self_stream` (withdrawn 2026-10-25)
 
-`VoiceStateRequest` has no `self_stream` field
-(`crates/fastcord-model/src/voice.rs:89`), and starting a share does not update
-the voice state (`crates/fastcord-app/src/gateway/stream_share.rs`). Official
-clients set it when Go Live starts and clears it when it ends. fastcord itself
-reads the field to build stream offers
-(`crates/fastcord-app/src/gateway.rs:3270`), so its own streams are offered from
-a field its own client never sets.
-
-**Correction.** Add `self_stream: bool` to `VoiceStateRequest`, send `true` when
-the stream is created and `false` on stream delete, stop or leave, and update
-the reducer/tests. This is both a protocol-parity fix and a user-visible bug
-fix.
+The original item asked to send `self_stream` in opcode 4. That premise is
+wrong: the user-client Update Voice State structure is `guild_id`,
+`channel_id`, `self_mute`, `self_deaf`, `self_video?`, `preferred_region?`,
+`preferred_regions?` and `flags?`
+(<https://docs.discord.food/topics/gateway-events>), with no `self_stream`.
+`self_stream` belongs to the voice state *object* the server sends, and the
+server sets it when the client creates a stream with opcode 18, which fastcord
+already sends for Go Live. Adding the field to opcode 4 would create a
+difference the official client does not have, so nothing is changed. The
+optional `flags` and `preferred_region(s)` fields are unverified and stay
+unsent until a capture shows them.
 
 ### B3. Capabilities (P2)
 
@@ -381,8 +380,9 @@ from READY, persisted, sent in Identify and `X-Installation-ID`), A5
 (`X-Fingerprint` from `GET /experiments` on password login), A6 (API and
 Gateway v9), A7-A9 (Chromium header set, `x-discord-timezone`, cookie jar,
 WebSocket handshake headers), B1 (nonce shape), and C1
-(version chain and the daily `identity-pin` check); see ADR 0005 "Current implementation". The
-other items below are still open.
+(version chain and the daily `identity-pin` check); see ADR 0005 "Current implementation". B2
+was withdrawn (opcode 4 has no `self_stream`). The other items below are still
+open.
 
 This branch applies the policy: ADR 0005 carries the 2026-10-25 revision,
 SPEC §4.3 states the requirements and residuals, `docs/PROTOCOL.md` marks the
