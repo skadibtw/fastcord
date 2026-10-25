@@ -518,6 +518,9 @@ impl State {
                 self.clear();
             }
             Event::Close => {}
+            // Results apply to the open tab's draft, so the tab cannot change
+            // while an upload or a file pick is in flight.
+            Event::Tab(_) if self.busy.is_some() => {}
             Event::Tab(tab) => {
                 self.tab = tab;
                 self.edit = None;
@@ -971,7 +974,7 @@ pub fn view<'a>(
     );
     let tab = |label: &'static str, which: Tab| {
         button(text(tr(label)).size(13))
-            .on_press(Event::Tab(which))
+            .on_press_maybe(idle.then_some(Event::Tab(which)))
             .style(if state.tab == which {
                 button::primary
             } else {
@@ -1507,6 +1510,10 @@ mod tests {
         send(&mut state, &client, &ok, Event::Upload);
         assert_eq!(state.busy, Some(Busy::Upload));
         assert!(state.notice.as_deref().unwrap().contains("Wait"));
+        // The answer clears the draft of the open tab, so the tab stays put.
+        let tab = state.tab;
+        send(&mut state, &client, &ok, Event::Tab(Tab::Sounds));
+        assert_eq!(state.tab, tab, "no tab switch while an upload is in flight");
     }
 
     #[test]

@@ -30,6 +30,7 @@
 - After a pause for new end-to-end keys or a reconnect, your voice resumes with live audio instead of first sending up to 100 ms recorded when the pause began (#182). Audio that waited for keys is dropped when media resumes, as stale video frames already were.
 - Inbox buttons act on the conversation they were drawn for (#180). Open, Mark as read and Mute used the row's position, and the unread list re-sorts on every new message, so a click could acknowledge or mute another conversation; "Mark these as read" now covers exactly the rows it was shown over.
 - Watching a stream copies each received video packet once less and grows the frame buffer once per frame instead of repeatedly (#179): the decrypted payload moves into the reassembly buffer (the retransmission header is stripped in place).
+- In the server Emoji, Stickers and Sounds panel the tabs are disabled while an upload or a file pick is in progress (#178). Switching tabs mid-request used to clear the wrong tab's draft (so the same emoji could be uploaded twice) or put a picked image into the Sounds draft.
 
 ### Removed
 - The retired "Blocking bypass" setting is gone. Since the transport moved to `fastcord-net`, turning it on started nothing, yet the value was still stored, still displayed as on, and still accepted byedpi options such as `-I <address>`. The app no longer reads, writes or links `fastcord-bypass` at all; an old settings file loads normally and the stale `bypass` key disappears the next time preferences are saved.
