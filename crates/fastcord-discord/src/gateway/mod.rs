@@ -57,7 +57,7 @@ pub use event::{MAX_PRESENCES, MAX_RELATIONSHIPS, PresenceUpdate};
 pub use profile::{
     BUNDLED_BUILD_NUMBER, BUNDLED_NATIVE_BUILD_NUMBER, CHROMIUM_VERSION, ClientProperties,
     ELECTRON_VERSION, Host, HostOs, Identity, PIN_HOST_VERSION, PROFILE_VERSION, Versions,
-    is_installation_id, resolve_versions,
+    is_installation_id, is_locale, resolve_versions,
 };
 pub use stream::{StreamControl, StreamSignalQueueError};
 pub use subscription::{

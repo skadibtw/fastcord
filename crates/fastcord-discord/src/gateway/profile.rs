@@ -532,6 +532,30 @@ fn is_time_zone(zone: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'))
 }
 
+/// Whether `locale` has the shape of a Discord locale (`en-US`, `es-419`, `ru`):
+/// a lower-case language subtag and an optional region subtag of two upper-case
+/// letters or three digits. The value comes from Discord's own setting, but it
+/// reaches a header, so it is checked before it is used.
+/// (`x-discord-locale` also reports `system_locale`, which comes from the OS and
+/// needs no check here: it is already a locale the platform produced.)
+pub fn is_locale(locale: &str) -> bool {
+    let mut parts = locale.split('-');
+    let Some(language) = parts.next() else {
+        return false;
+    };
+    if !(2..=3).contains(&language.len()) || !language.bytes().all(|b| b.is_ascii_lowercase()) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(region) => {
+            let good = (region.len() == 2 && region.bytes().all(|b| b.is_ascii_uppercase()))
+                || (region.len() == 3 && region.bytes().all(|b| b.is_ascii_digit()));
+            good && parts.next().is_none()
+        }
+    }
+}
+
 /// Whether `id` has the shape of an installation id: `<digits>.<base64url>`.
 pub fn is_installation_id(id: &str) -> bool {
     id.len() <= MAX_INSTALLATION_BYTES
@@ -556,6 +580,8 @@ pub struct Identity(Arc<Mutex<Current>>);
 struct Current {
     properties: ClientProperties,
     heartbeat_since: Instant,
+    /// READY's `user_settings.locale`: the account's client locale.
+    account_locale: Option<String>,
     /// `x-super-properties`, re-encoded only when the profile changes.
     encoded: String,
 }
@@ -566,6 +592,7 @@ impl Identity {
         Self(Arc::new(Mutex::new(Current {
             properties,
             heartbeat_since: Instant::now(),
+            account_locale: None,
             encoded,
         })))
     }
@@ -599,6 +626,33 @@ impl Identity {
                 current.properties.installation_id = Some(id.to_owned());
             }
         });
+    }
+
+    /// The account's chosen client locale (READY `user_settings.locale`), which
+    /// `x-discord-locale` reports; `None` before READY or when Discord sends no
+    /// usable value, in which case the OS locale stands in.
+    pub fn account_locale(&self) -> Option<String> {
+        self.with_current(|current| current.account_locale.clone())
+    }
+
+    /// Adopts the account locale. It is not a client property: `system_locale`
+    /// keeps the OS locale, and only `x-discord-locale` follows this value.
+    pub fn set_account_locale(&self, locale: &str) {
+        if !is_locale(locale) {
+            return;
+        }
+        self.with_current(|current| current.account_locale = Some(locale.to_owned()));
+    }
+
+    /// The locale `x-discord-locale` carries now: the account's choice once
+    /// READY has supplied it, the OS locale before that.
+    pub fn locale(&self) -> String {
+        self.with_current(|current| {
+            current
+                .account_locale
+                .clone()
+                .unwrap_or_else(|| current.properties.system_locale.clone())
+        })
     }
 
     fn with_current<R>(&self, f: impl FnOnce(&mut Current) -> R) -> R {
@@ -932,8 +986,34 @@ mod tests {
     }
 
     #[test]
-    fn bundled_values_are_plausible_and_match_the_pin() {
-        assert!(BUILD_RANGE.contains(&BUNDLED_BUILD_NUMBER));
+    fn the_account_locale_changes_only_the_locale_header() {
+        // A Russian Windows account whose Discord UI is English: the OS locale
+        // stays in the properties, the account locale is what x-discord-locale
+        // reports once READY has supplied it.
+        let identity = Identity::new(ClientProperties::bundled(HostOs::Windows, "ru-RU"));
+        let os_view = identity.headers().0;
+        assert_eq!(identity.account_locale(), None);
+        assert_eq!(identity.locale(), "ru-RU");
+        for bad in ["", "english", "EN-us", "en_US", "en-usa", "en-US-x", "e"] {
+            identity.set_account_locale(bad);
+            assert_eq!(identity.account_locale(), None, "{bad:?}");
+        }
+        identity.set_account_locale("en-US");
+        assert_eq!(identity.account_locale().as_deref(), Some("en-US"));
+        assert_eq!(identity.locale(), "en-US");
+        assert_eq!(identity.properties().system_locale, "ru-RU");
+        assert_eq!(identity.headers().0, os_view, "never changes the REST view");
+        // A later change (another account or a live setting) replaces it.
+        identity.set_account_locale("es-419");
+        assert_eq!(identity.locale(), "es-419");
+        // A locale shape Discord uses passes.
+        for good in ["ru", "en-US", "es-419", "pt-BR", "zh-CN"] {
+            assert!(is_locale(good), "{good}");
+        }
+    }
+
+    #[test]
+    fn bundled_values_are_plausible_and_match_the_pin() {        assert!(BUILD_RANGE.contains(&BUNDLED_BUILD_NUMBER));
         assert!(NATIVE_RANGE.contains(&BUNDLED_NATIVE_BUILD_NUMBER));
         // A release cannot bump the bundled host without reviewing the
         // Electron/Chromium pair that belongs to it.
@@ -984,8 +1064,10 @@ mod tests {
     /// The pin check (`.github/workflows/identity-pin.yml`; manual:
     /// `cargo test -p fastcord-discord live_version_chain --locked -- --ignored --nocapture`).
     /// Fetches all supported platform/architecture manifests and the web
-    /// client; fails on host/native drift. Runtime-pair evidence outside
-    /// Windows x64 is a separate capture gate. Never downloads Discord.
+    /// client; fails on host/native drift. This proves manifest coverage only:
+    /// the Electron/Chromium runtime pair has evidence from an installed client
+    /// on Windows x64 alone, and every other target still needs one. Never
+    /// downloads Discord.
     #[tokio::test]
     #[ignore = "contacts updates.discord.com and discord.com"]
     async fn live_version_chain_matches_the_pin() {
@@ -1048,5 +1130,54 @@ mod tests {
             assert_eq!(profile.client_build_number, build);
         }
         assert!(drift.is_empty(), "{}", drift.join("\n"));
+        // Manifest coverage is not runtime evidence: only Windows x64 has a
+        // client whose own binary reports the pinned runtime pair (see the
+        // ignored `live_installed_client_reports_the_pinned_runtime_pair`).
+        println!(
+            "manifest coverage only: Electron {ELECTRON_VERSION} / Chromium {CHROMIUM_VERSION} is runtime-verified on Windows x64 host {PIN_HOST_VERSION}; macOS and Linux runtime pairs stay unverified"
+        );
+    }
+
+    /// Reads the pinned Electron and Chromium versions out of the installed
+    /// official stable client's own binary, the runtime-pair evidence the
+    /// manifest cannot give. Local files only: never downloads or starts the
+    /// client, never touches an account. Windows-only and ignored by default.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "reads the installed official client if present"]
+    fn live_installed_client_reports_the_pinned_runtime_pair() {
+        let root = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"))
+            .join("Discord")
+            .join(format!("app-{PIN_HOST_VERSION}"))
+            .join("Discord.exe");
+        let Ok(bytes) = std::fs::read(&root) else {
+            panic!(
+                "no installed official client at {}; the runtime pair stays unverified here",
+                root.display()
+            );
+        };
+        // The binary embeds its own user agent, e.g. `... Chrome/148.0.7778.280
+        // Electron/42.11.15 ...`; only those two tokens are read.
+        let found = |prefix: &str| {
+            let needle = prefix.as_bytes();
+            bytes
+                .windows(needle.len())
+                .position(|window| window == needle)
+                .map(|start| {
+                    let end = bytes[start..]
+                        .iter()
+                        .position(|b| *b == b' ' || *b == b';' || *b == b'"' || *b == 0)
+                        .map_or(bytes.len(), |end| start + end);
+                    String::from_utf8_lossy(&bytes[start + needle.len()..end]).into_owned()
+                })
+        };
+        let chromium = found("Chrome/").expect("the binary names its Chromium version");
+        let electron = found("Electron/").expect("the binary names its Electron version");
+        println!(
+            "installed client {} reports Electron {electron} / Chromium {chromium}",
+            PIN_HOST_VERSION
+        );
+        assert_eq!(chromium, CHROMIUM_VERSION, "Chromium runtime pair drift");
+        assert_eq!(electron, ELECTRON_VERSION, "Electron runtime pair drift");
     }
 }

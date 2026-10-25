@@ -579,6 +579,11 @@ impl<C: Clock> RestClient<C> {
         if let Some(installation) = installation {
             builder = builder.header("x-installation-id", installation);
         }
+        // The account locale replaces the OS locale once READY has supplied it;
+        // the default header keeps the OS locale for the pre-READY requests.
+        let locale = HeaderValue::from_str(&self.identity.locale())
+            .map_err(|_| RestError::ClientConfiguration)?;
+        builder = builder.header("x-discord-locale", locale);
         builder.build().map_err(|_| RestError::ClientConfiguration)
     }
 }
@@ -651,6 +656,8 @@ fn base_headers(properties: &ClientProperties) -> Result<HeaderMap, RestError> {
     headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
     headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
     headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+    // Before READY the account locale is unknown: the OS locale stands in, and
+    // `build_request` replaces this default with the account's choice.
     headers.insert("x-discord-locale", value(&properties.system_locale)?);
     if let Some(zone) = &properties.timezone {
         headers.insert("x-discord-timezone", value(zone)?);
@@ -804,6 +811,45 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn the_locale_header_follows_the_account_setting_but_language_does_not() {
+        let client = RestClient::new(
+            UserToken::new("t".to_owned()),
+            ClientProperties::bundled(HostOs::Windows, "ru-RU"),
+        )
+        .unwrap();
+        let request = RestRequest::new(
+            Route::new(Method::GET, "/users/@me").unwrap(),
+            Priority::UserRead,
+        );
+        let before = client.build_request(&request).unwrap();
+        assert_eq!(before.headers()["x-discord-locale"], "ru-RU");
+        // READY carries the account's chosen client locale.
+        client.identity().set_account_locale("en-US");
+        let after = client.build_request(&request).unwrap();
+        assert_eq!(after.headers()["x-discord-locale"], "en-US");
+        // The rest of the header set is a reqwest default that never changes for
+        // the run: the OS language stays in Accept-Language and in the
+        // properties until a capture shows the official client following the
+        // account locale there.
+        assert_eq!(before.headers().get(ACCEPT_LANGUAGE), None);
+        assert_eq!(
+            after.headers()["x-super-properties"],
+            before.headers()["x-super-properties"]
+        );
+        // A new account never inherits the previous account's locale: the
+        // identity is created with the session's client.
+        let other = RestClient::new(
+            UserToken::new("t".to_owned()),
+            ClientProperties::bundled(HostOs::Windows, "ru-RU"),
+        )
+        .unwrap();
+        assert_eq!(
+            other.build_request(&request).unwrap().headers()["x-discord-locale"],
+            "ru-RU"
+        );
     }
 
     #[test]

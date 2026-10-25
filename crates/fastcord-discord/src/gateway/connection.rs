@@ -36,7 +36,7 @@ use zeroize::Zeroizing;
 use super::url::GatewayUrl;
 
 use super::compression::{InflateError, Inflater};
-use super::decode::{Decoded, decode_dispatch, is_ready_family};
+use super::decode::{Decoded, decode_dispatch, is_ready_family, settings_locale};
 use super::event::{ConnectionState, ReconnectReason, StopReason};
 use super::event::{Dispatch, GatewayEvent};
 use super::outbox::Outbox;
@@ -670,6 +670,7 @@ async fn connection<T: Transport, J: JitterSource>(
                 }
                 let action = on_message(
                     &mut conn,
+                    properties,
                     session,
                     outbox,
                     identify_rejections,
@@ -838,6 +839,7 @@ fn close_end<T: Transport>(code: Option<u16>, transport: &T) -> End {
 /// respect to I/O: anything that needs the socket is returned as an [`Action`].
 fn on_message(
     conn: &mut Conn,
+    properties: &Identity,
     session: &mut Option<Session>,
     outbox: &mut Outbox,
     identify_rejections: &mut u32,
@@ -850,6 +852,7 @@ fn on_message(
     match envelope.op {
         op::DISPATCH => on_dispatch(
             conn,
+            properties,
             session,
             outbox,
             identify_rejections,
@@ -897,6 +900,7 @@ fn on_message(
 
 fn on_dispatch(
     conn: &mut Conn,
+    properties: &Identity,
     session: &mut Option<Session>,
     outbox: &mut Outbox,
     identify_rejections: &mut u32,
@@ -920,9 +924,20 @@ fn on_dispatch(
         return Action::Nothing;
     }
 
+    // The account can change its client locale while the session runs; the REST
+    // headers follow it from here on.
+    if name == "USER_SETTINGS_UPDATE"
+        && let Some(locale) = settings_locale(data.get())
+    {
+        properties.set_account_locale(&locale);
+    }
+
     match decode_dispatch(name, data.get()) {
         Decoded::Ready(decoded) => {
             let decoded = *decoded;
+            if let Some(locale) = decoded.locale.as_deref() {
+                properties.set_account_locale(locale);
+            }
             *session = Some(Session {
                 id: decoded.ready.session_id.as_str().to_owned(),
                 // An unusable resume address falls back to discovery.

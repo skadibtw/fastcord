@@ -666,6 +666,9 @@ pub(crate) struct DecodedReady {
     pub(crate) required_action: Option<String>,
     /// A newly issued installation id (absent when ours was valid).
     pub(crate) installation: Option<String>,
+    /// The account's chosen client locale (`user_settings.locale`), which the
+    /// REST headers report; absent when Discord sends none we can use.
+    pub(crate) locale: Option<String>,
 }
 
 fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
@@ -755,6 +758,13 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
             .and_then(|apex| apex.installation)
             .and_then(|value| value.as_str().map(str::to_owned))
             .filter(|id| crate::gateway::is_installation_id(id)),
+        locale: wire
+            .user_settings
+            .as_ref()
+            .and_then(|settings| settings.get("locale"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .filter(|locale| crate::gateway::is_locale(locale)),
     })
 }
 
@@ -1644,6 +1654,17 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
 
 pub(crate) fn is_ready_family(name: &str) -> bool {
     matches!(name, "READY" | "READY_SUPPLEMENTAL")
+}
+
+/// The account locale in a `USER_SETTINGS_UPDATE` body, when it carries one.
+/// That event is a partial update: a body without `locale` changes nothing.
+pub(crate) fn settings_locale(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("locale")?
+        .as_str()
+        .map(str::to_owned)
+        .filter(|locale| crate::gateway::is_locale(locale))
 }
 
 #[cfg(test)]
@@ -3027,6 +3048,36 @@ mod tests {
             decode_dispatch("USER_SETTINGS_PROTO_UPDATE", &proto("cgA=")),
             Decoded::Event(Dispatch::UserFoldersUpdate(f)) if f.folders.is_empty()
         ));
+    }
+
+    #[test]
+    fn the_account_locale_comes_from_ready_and_from_a_live_setting_change() {
+        let ready = |extra: serde_json::Value| {
+            let mut value: serde_json::Value = serde_json::from_str(READY).unwrap();
+            value["user_settings"] = extra;
+            let Decoded::Ready(ready) = decode_dispatch("READY", &value.to_string()) else {
+                panic!("READY did not decode");
+            };
+            ready.locale
+        };
+        // The protobuf-only fixture carries no plain settings: nothing to adopt.
+        assert_eq!(ready(serde_json::json!({})), None);
+        assert_eq!(
+            ready(serde_json::json!({"locale": "en-US"})).as_deref(),
+            Some("en-US")
+        );
+        // A malformed locale is dropped, not passed to a header.
+        for bad in ["", "EN-us", "english", "en_US", "en-US-x"] {
+            assert_eq!(ready(serde_json::json!({"locale": bad})), None, "{bad:?}");
+            assert_eq!(settings_locale(&format!("{{\"locale\":\"{bad}\"}}")), None);
+        }
+        assert_eq!(
+            settings_locale(r#"{"locale":"pt-BR","theme":"dark"}"#).as_deref(),
+            Some("pt-BR")
+        );
+        // A partial update without a locale changes nothing.
+        assert_eq!(settings_locale(r#"{"explicit_content_filter":2}"#), None);
+        assert_eq!(settings_locale("[]"), None);
     }
 
     #[test]
