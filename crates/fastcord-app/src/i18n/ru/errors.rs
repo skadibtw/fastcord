@@ -767,8 +767,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "системная звуковая служба не запущена. Перезапустите её или компьютер.",
     ),
     (
-        "the device changed its format while in use. Select it again to retry.",
-        "устройство изменило формат во время работы. Выберите его снова, чтобы повторить.",
+        "the device changed its format while in use. fastcord reopens it on its own; if it stays silent, select it again.",
+        "устройство изменило формат во время работы. fastcord переоткроет его сам; если звука нет, выберите его снова.",
     ),
     (
         "the device offers no format fastcord can use. Choose another device, or another sample rate in the system sound settings.",
@@ -867,8 +867,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Микрофон: системная звуковая служба не запущена. Перезапустите её или компьютер.",
     ),
     (
-        "Microphone: the device changed its format while in use. Select it again to retry.",
-        "Микрофон: устройство изменило формат во время работы. Выберите его снова, чтобы повторить.",
+        "Microphone: the device changed its format while in use. fastcord reopens it on its own; if it stays silent, select it again.",
+        "Микрофон: устройство изменило формат во время работы. fastcord переоткроет его сам; если звука нет, выберите его снова.",
     ),
     (
         "Microphone: the device offers no format fastcord can use. Choose another device, or another sample rate in the system sound settings.",
@@ -895,8 +895,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Воспроизведение: системная звуковая служба не запущена. Перезапустите её или компьютер.",
     ),
     (
-        "Playback: the device changed its format while in use. Select it again to retry.",
-        "Воспроизведение: устройство изменило формат во время работы. Выберите его снова, чтобы повторить.",
+        "Playback: the device changed its format while in use. fastcord reopens it on its own; if it stays silent, select it again.",
+        "Воспроизведение: устройство изменило формат во время работы. fastcord переоткроет его сам; если звука нет, выберите его снова.",
     ),
     (
         "Playback: the device offers no format fastcord can use. Choose another device, or another sample rate in the system sound settings.",

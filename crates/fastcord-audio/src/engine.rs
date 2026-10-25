@@ -582,6 +582,7 @@ fn run_owner<B: Backend>(
     let mut echo_diag_at = std::time::Instant::now();
     let mut gains = std::collections::HashMap::<u32, f32>::new();
     let mut probe_at = std::time::Instant::now() + Duration::from_secs(1);
+    let mut reopen = [Reopen::default(), Reopen::default()];
     // Coalesced input/output/suppression notifications bound control backpressure.
     let mut pending: [Option<EngineEvent>; 3] = [None, None, None];
     let mut ticker = Ticker::new(TICK);
@@ -655,6 +656,7 @@ fn run_owner<B: Backend>(
                             ));
                         }
                     }
+                    reopen[usize::from(direction == Direction::Output)].reset();
                     replace_device(
                         &mut backend,
                         direction,
@@ -691,6 +693,7 @@ fn run_owner<B: Backend>(
                 let current = backend.default_key(direction);
                 if current != defaults[index] {
                     defaults[index] = current;
+                    reopen[index].reset();
                     if direction == Direction::Input
                         && let Some(denoiser) = &mut denoiser
                     {
@@ -723,6 +726,7 @@ fn run_owner<B: Backend>(
                 direction: Direction::Input,
                 kind,
             });
+            reopen[0].failed(kind, std::time::Instant::now());
         }
         if playback.is_some()
             && let Some(kind) = shared.output.fault()
@@ -736,6 +740,44 @@ fn run_owner<B: Backend>(
                 direction: Direction::Output,
                 kind,
             });
+            reopen[1].failed(kind, std::time::Instant::now());
+        }
+        let now = std::time::Instant::now();
+        for (index, direction) in [(0, Direction::Input), (1, Direction::Output)] {
+            let closed = match direction {
+                Direction::Input => capture.is_none(),
+                Direction::Output => playback.is_none(),
+            };
+            let choice = match direction {
+                Direction::Input => config.input.clone(),
+                Direction::Output => config.output.clone(),
+            };
+            let Some(choice) = choice.filter(|_| closed && reopen[index].take_due(now)) else {
+                continue;
+            };
+            if direction == Direction::Input
+                && let Some(denoiser) = &mut denoiser
+            {
+                denoiser.reset();
+            }
+            replace_device(
+                &mut backend,
+                direction,
+                &choice,
+                config.bitrate,
+                shared,
+                &mut capture,
+                &mut playback,
+                &mut io,
+                output_enabled,
+                &gains,
+                &mut pending,
+            );
+            echo = None;
+            match &pending[index] {
+                Some(EngineEvent::StreamFailed { kind, .. }) => reopen[index].failed(*kind, now),
+                _ => reopen[index].reopened(now),
+            }
         }
         if let Some(denoiser) = &mut denoiser {
             denoiser.poll();
@@ -852,6 +894,76 @@ fn run_owner<B: Backend>(
 
 type CaptureStream<S> = Option<(S, CapturePipeline)>;
 type PlaybackStream<S> = Option<(S, PlaybackPipeline)>;
+
+/// Delays before reopening a stream that failed for a reason the same device
+/// can recover from; after the last one the failure stands.
+const REOPEN_DELAYS: [Duration; 3] = if cfg!(test) {
+    [Duration::from_millis(10); 3]
+} else {
+    [
+        Duration::from_millis(500),
+        Duration::from_secs(2),
+        Duration::from_secs(5),
+    ]
+};
+/// A reopened stream that runs this long earns a fresh set of attempts.
+const REOPEN_HEALTHY: Duration = Duration::from_secs(10);
+
+/// Automatic reopening of one direction's chosen device after a fault that
+/// does not mean the device is gone: a format change, a spatial-sound toggle,
+/// exclusive mode released, the audio service restarting. Reopening the same
+/// choice never moves audio to other hardware (SPEC 7.3).
+#[derive(Default)]
+struct Reopen {
+    attempts: usize,
+    due: Option<std::time::Instant>,
+    reopened_at: Option<std::time::Instant>,
+}
+
+impl Reopen {
+    fn retryable(kind: DeviceErrorKind) -> bool {
+        matches!(
+            kind,
+            DeviceErrorKind::Invalidated
+                | DeviceErrorKind::Other
+                | DeviceErrorKind::HostUnavailable
+        )
+    }
+
+    /// The stream failed with `kind`; schedules the next attempt if any is left.
+    fn failed(&mut self, kind: DeviceErrorKind, now: std::time::Instant) {
+        if self
+            .reopened_at
+            .is_some_and(|at| now.saturating_duration_since(at) >= REOPEN_HEALTHY)
+        {
+            self.attempts = 0;
+        }
+        self.reopened_at = None;
+        self.due = (Self::retryable(kind) && self.attempts < REOPEN_DELAYS.len()).then(|| {
+            let delay = REOPEN_DELAYS[self.attempts];
+            self.attempts += 1;
+            now + delay
+        });
+    }
+
+    /// Whether an attempt is due now; taking it clears the schedule.
+    fn take_due(&mut self, now: std::time::Instant) -> bool {
+        if self.due.is_some_and(|due| now >= due) {
+            self.due = None;
+            return true;
+        }
+        false
+    }
+
+    fn reopened(&mut self, now: std::time::Instant) {
+        self.reopened_at = Some(now);
+    }
+
+    /// The user or the default probe chose a device: start over.
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn replace_device<B: Backend>(
@@ -2003,6 +2115,71 @@ mod tests {
         let probes = engine.callback_probes();
         drop(engine);
         assert_torn_down(&fake, probes);
+    }
+
+    /// A stream invalidated under an unchanged device is reopened on its own,
+    /// a bounded number of times; a device that keeps failing stays failed.
+    #[test]
+    fn an_invalidated_stream_is_reopened_a_bounded_number_of_times() {
+        let mut fake = host(48_000, 48_000);
+        fake.fail_input = Some(DeviceErrorKind::Invalidated);
+        let backend = fake.clone();
+        let (engine, mut channels) =
+            AudioEngine::start_with(EngineConfig::default(), move || backend).unwrap();
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            match channels.events.try_recv() {
+                Ok(EngineEvent::StreamFailed {
+                    direction: Direction::Input,
+                    kind,
+                }) => seen.push(Some(kind)),
+                Ok(EngineEvent::StreamReady {
+                    direction: Direction::Input,
+                    ..
+                }) => seen.push(None),
+                _ => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        // The fake reports its fault through the generic path (`Other`, also
+        // retryable); what matters is the order and the bound.
+        assert!(
+            seen.iter().flatten().all(|kind| Reopen::retryable(*kind)),
+            "{seen:?}"
+        );
+        let failed: Vec<bool> = seen.iter().map(Option::is_some).collect();
+        assert_eq!(
+            failed,
+            [true, false, true, false, true, false, true],
+            "three reopens, then the failure stands"
+        );
+        let probes = engine.callback_probes();
+        drop(engine);
+        assert_torn_down(&fake, probes);
+    }
+
+    #[test]
+    fn reopen_schedule_skips_lost_devices_and_refreshes_after_a_healthy_run() {
+        let start = Instant::now();
+        let mut reopen = Reopen::default();
+        reopen.failed(DeviceErrorKind::Disconnected, start);
+        assert!(!reopen.take_due(start + Duration::from_secs(60)));
+        for _ in 0..REOPEN_DELAYS.len() {
+            reopen.failed(DeviceErrorKind::Invalidated, start);
+            assert!(reopen.take_due(start + Duration::from_secs(60)));
+            reopen.reopened(start);
+        }
+        reopen.failed(DeviceErrorKind::Invalidated, start);
+        assert!(
+            !reopen.take_due(start + Duration::from_secs(60)),
+            "budget spent"
+        );
+        reopen.reopened(start);
+        reopen.failed(DeviceErrorKind::Invalidated, start + REOPEN_HEALTHY);
+        assert!(
+            reopen.take_due(start + REOPEN_HEALTHY + Duration::from_secs(60)),
+            "a healthy run restores the attempts"
+        );
     }
 
     #[test]

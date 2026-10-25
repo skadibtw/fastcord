@@ -144,7 +144,7 @@ impl DeviceErrorKind {
                 "the system audio service is not running. Restart it or restart the computer."
             }
             Self::Invalidated => {
-                "the device changed its format while in use. Select it again to retry."
+                "the device changed its format while in use. fastcord reopens it on its own; if it stays silent, select it again."
             }
             Self::Unsupported => {
                 "the device offers no format fastcord can use. Choose another device, or another sample rate in the system sound settings."
