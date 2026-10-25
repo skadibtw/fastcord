@@ -217,6 +217,8 @@ pub struct EngineStats {
     pub decode_errors: u64,
     /// Remote 20 ms frames recovered from FEC or concealed because a packet was lost or late.
     pub plc_frames: u64,
+    /// Current playout target of the jitter buffer in ms (largest active speaker), 0 when idle.
+    pub jitter_target_ms: u64,
     /// 20 ms frames withheld by the input-sensitivity gate.
     pub frames_gated: u64,
     /// Engine threads (owner, High quality denoise worker) with real-time scheduling;
@@ -434,6 +436,7 @@ impl AudioEngine {
             packets_decoded: load(&pipeline.packets_decoded),
             decode_errors: load(&pipeline.decode_errors),
             plc_frames: load(&pipeline.plc_frames),
+            jitter_target_ms: load(&pipeline.jitter_target_ms),
             frames_gated: load(&pipeline.frames_gated),
             realtime_threads: elevated_threads(),
             callback_realtime_denied: load(&input.realtime_denied) + load(&output.realtime_denied),

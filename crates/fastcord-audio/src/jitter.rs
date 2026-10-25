@@ -9,7 +9,9 @@ const INITIAL_TARGET: Duration = Duration::from_millis(60);
 const MIN_TARGET: Duration = Duration::from_millis(40);
 const MAX_TARGET: Duration = Duration::from_millis(160);
 const INACTIVE: Duration = Duration::from_secs(2);
-const MAX_CONSECUTIVE_PLC: usize = 3;
+/// Concealment without a later packet lasts up to 160 ms (the largest target) and fades
+/// out over that run, so a late or lost burst is a soft dip instead of a hard gap.
+const MAX_CONSECUTIVE_PLC: usize = 8;
 const FAR_SEQUENCE_THRESHOLD: u64 = 12;
 
 struct Queued {
@@ -388,6 +390,16 @@ impl JitterMixer {
         self.concealed
     }
 
+    /// The largest playout target among speakers currently being played, 0 when none is.
+    pub(crate) fn target_ms(&self) -> u64 {
+        self.speakers
+            .iter()
+            .filter(|speaker| speaker.next_due.is_some())
+            .map(|speaker| speaker.target.as_millis() as u64)
+            .max()
+            .unwrap_or(0)
+    }
+
     pub(crate) fn mix(&mut self, out: &mut [f32; FRAME_SAMPLES * CHANNELS], now: Instant) -> bool {
         out.fill(0.0);
         self.speakers
@@ -414,6 +426,8 @@ impl JitterMixer {
             }
 
             let packet = speaker.pop_expected();
+            // Linear fade over this frame for open-ended concealment: 1.0 → 0.0 across the run.
+            let mut fade = None;
             let decoded = if let Some(packet) = packet {
                 speaker
                     .decoder
@@ -454,6 +468,9 @@ impl JitterMixer {
                     None
                 } else {
                     concealed += 1;
+                    let run = MAX_CONSECUTIVE_PLC as f32;
+                    let k = speaker.consecutive_plc as f32;
+                    fade = Some((1.0 - (k - 1.0) / run, 1.0 - k / run));
                     speaker
                         .decoder
                         .conceal(FRAME_SAMPLES, &mut speaker.pcm)
@@ -463,6 +480,8 @@ impl JitterMixer {
 
             if let Some(frames) = decoded {
                 let count = frames.min(FRAME_SAMPLES) * CHANNELS;
+                let step = fade.map_or(0.0, |(from, to)| (to - from) / (count / CHANNELS) as f32);
+                let mut level = fade.map_or(1.0, |(from, _)| from);
                 for (mix_frame, sample_frame) in out[..count]
                     .as_chunks_mut::<CHANNELS>()
                     .0
@@ -475,8 +494,9 @@ impl JitterMixer {
                         speaker.gain_ramp_samples -= 1;
                     }
                     for (mix, sample) in mix_frame.iter_mut().zip(sample_frame) {
-                        *mix += *sample * speaker.gain;
+                        *mix += *sample * speaker.gain * level;
                     }
+                    level += step;
                 }
                 active = true;
             }
@@ -552,8 +572,8 @@ mod tests {
             mixer.push(frame(&mut encoder, 1, 1));
             assert!(mixer.mix(&mut out, start + Duration::from_millis(50)));
             assert!(mixer.mix(&mut out, start + Duration::from_millis(70)));
-            // Silence: three concealed frames, then the speaker is parked.
-            for tick in 0..4u64 {
+            // Silence: the concealment run, then the speaker is parked.
+            for tick in 0..=MAX_CONSECUTIVE_PLC as u64 {
                 mixer.mix(&mut out, start + Duration::from_millis(90 + 20 * tick));
             }
             assert!(
@@ -564,7 +584,7 @@ mod tests {
             mixer.push(frame(&mut encoder, 1, resume_sequence));
             out.fill(0.0);
             assert!(
-                mixer.mix(&mut out, start + Duration::from_millis(190)),
+                mixer.mix(&mut out, start + Duration::from_millis(290)),
                 "resume at sequence {resume_sequence} was dropped"
             );
             assert!(
@@ -807,10 +827,11 @@ mod tests {
         // The key property is that both are bounded. Codec might produce artifacts.
     }
 
-    /// Concealment is capped: after three concealed frames with no packet the speaker is
-    /// parked and produces nothing until a real packet arrives.
+    /// Concealment is capped: after 160 ms of concealed frames with no packet the speaker is
+    /// parked and produces nothing until a real packet arrives. The run fades to zero, so
+    /// parking never cuts a waveform.
     #[test]
-    fn plc_capping_stops_output_after_three_frames() {
+    fn plc_capping_fades_out_and_stops_output_after_the_run() {
         let mut mixer = JitterMixer::new().unwrap();
         let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
         let start = Instant::now();
@@ -818,15 +839,27 @@ mod tests {
 
         mixer.push(frame(&mut encoder, 1, 0));
         assert!(mixer.mix(&mut mixed, start + Duration::from_millis(50)));
-        for tick in 1..=3u64 {
+        let run = MAX_CONSECUTIVE_PLC as u64;
+        for tick in 1..=run {
             assert!(
                 mixer.mix(&mut mixed, start + Duration::from_millis(50 + 20 * tick)),
                 "concealed frame {tick} should still be produced"
             );
         }
+        let tail = mixed[mixed.len() - CHANNELS..]
+            .iter()
+            .map(|s| s.abs())
+            .fold(0.0, f32::max);
         assert!(
-            !mixer.mix(&mut mixed, start + Duration::from_millis(130)),
-            "the fourth empty frame must not be concealed"
+            tail < 1e-3,
+            "the last concealed frame must end silent, got {tail}"
+        );
+        assert!(
+            !mixer.mix(
+                &mut mixed,
+                start + Duration::from_millis(50 + 20 * (run + 1))
+            ),
+            "an empty frame after the run must not be concealed"
         );
         assert!(
             mixer.speakers[0].next_due.is_none(),

@@ -1310,11 +1310,11 @@ fn anomaly_lines(
         t.audio_without_dave,
         "inbound: audio dropped because no end-to-end session was installed, in the last second",
     );
-    grew(
-        engine.plc_frames,
-        e.plc_frames,
-        "playback: audio concealed after loss or a late packet (PLC frames) in the last second",
+    let plc = format!(
+        "playback: audio concealed after loss or a late packet (PLC frames, jitter target {} ms) in the last second",
+        engine.jitter_target_ms
     );
+    grew(engine.plc_frames, e.plc_frames, &plc);
     grew(
         transport.dropped_unknown_ssrc,
         t.dropped_unknown_ssrc,
@@ -1374,10 +1374,12 @@ mod anomaly_tests {
 
         let concealed = fastcord_audio::EngineStats {
             plc_frames: 12,
+            jitter_target_ms: 80,
             ..engine
         };
         let lines = anomaly_lines(Some(&engine), &concealed, Some(&transport), &transport);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("PLC frames") && lines[0].ends_with(": 12"));
+        assert!(lines[0].contains("jitter target 80 ms"));
     }
 }

@@ -126,6 +126,8 @@ pub(crate) struct PipelineCounters {
     pub(crate) decode_errors: AtomicU64,
     /// 20 ms remote frames recovered from FEC or concealed (lost or late packets).
     pub(crate) plc_frames: AtomicU64,
+    /// Current jitter-buffer playout target in ms (largest active speaker), 0 when idle.
+    pub(crate) jitter_target_ms: AtomicU64,
     /// Input sensitivity: 0 transmits everything, otherwise frames quieter than
     /// `-n` dBFS are not sent (see [`VoiceGate`]).
     pub(crate) gate_below_full_scale: AtomicU8,
@@ -529,6 +531,9 @@ impl PlaybackPipeline {
                 counters
                     .plc_frames
                     .store(self.mixer.concealed_frames(), Ordering::Relaxed);
+                counters
+                    .jitter_target_ms
+                    .store(self.mixer.target_ms(), Ordering::Relaxed);
                 if active {
                     self.pending_start = 0;
                     self.pending.clear();
