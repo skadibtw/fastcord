@@ -52,7 +52,8 @@ pub struct Target {
 #[derive(Debug, Default)]
 pub struct State {
     pub target: Option<Target>,
-    pub pending: Option<u64>,
+    /// The running request and the member it is for.
+    pub pending: Option<(u64, Snowflake)>,
     pub serial: u64,
     pub notice: Option<String>,
 }
@@ -66,6 +67,29 @@ impl State {
         self.close();
         self.pending = None;
         self.serial = self.serial.wrapping_add(1);
+    }
+
+    /// Starts a request for `user`; its result arrives as `Done(serial, ..)`.
+    pub fn begin(&mut self, user: Snowflake) -> u64 {
+        self.serial = self.serial.wrapping_add(1);
+        self.pending = Some((self.serial, user));
+        self.notice = None;
+        self.serial
+    }
+
+    /// A request finished. Its text goes only to the menu of the member it was
+    /// for: another member's open menu keeps its input and shows nothing.
+    pub fn done(&mut self, serial: u64, text: String) {
+        let Some((_, user)) = self.pending.filter(|(pending, _)| *pending == serial) else {
+            return;
+        };
+        self.pending = None;
+        if let Some(target) = self.target.as_mut().filter(|t| t.user.id == user) {
+            target.confirm = None;
+            target.sub = None;
+            target.reason.clear();
+            self.notice = Some(text);
+        }
     }
 }
 
@@ -551,5 +575,51 @@ impl core::Widget<Message, iced::Theme, iced::Renderer> for Area<'_> {
             viewport,
             translation,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(id: u64) -> Target {
+        Target {
+            user: User {
+                id: Snowflake(id),
+                username: format!("user{id}"),
+                global_name: None,
+                avatar: None,
+                bot: false,
+            },
+            point: Point::ORIGIN,
+            guild: None,
+            confirm: None,
+            sub: None,
+            reason: format!("reason for {id}"),
+            nick: String::new(),
+            ban_window: 0,
+        }
+    }
+
+    #[test]
+    fn a_result_reaches_only_the_member_it_was_for() {
+        let mut state = State {
+            target: Some(target(1)),
+            ..State::default()
+        };
+        let serial = state.begin(Snowflake(1));
+        // Another member's menu opens while the request runs.
+        state.target = Some(target(2));
+        state.done(serial, "Done.".into());
+        assert_eq!(state.pending, None);
+        assert_eq!(state.notice, None, "B's menu must not say A's result");
+        assert_eq!(state.target.as_ref().unwrap().reason, "reason for 2");
+
+        let serial = state.begin(Snowflake(2));
+        state.done(serial.wrapping_add(1), "stale".into());
+        assert!(state.pending.is_some(), "a stale serial changes nothing");
+        state.done(serial, "Done.".into());
+        assert_eq!(state.notice.as_deref(), Some("Done."));
+        assert!(state.target.as_ref().unwrap().reason.is_empty());
     }
 }

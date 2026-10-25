@@ -5461,16 +5461,10 @@ impl App {
                 }
             }
             Event::Done(serial, result) => {
-                if self.member_menu.pending == Some(serial) {
-                    self.member_menu.pending = None;
-                    self.member_menu.notice =
-                        Some(result.map_or_else(moderation::failure, |()| "Done.".into()));
-                    if let Some(target) = &mut self.member_menu.target {
-                        target.confirm = None;
-                        target.sub = None;
-                        target.reason.clear();
-                    }
-                }
+                self.member_menu.done(
+                    serial,
+                    result.map_or_else(moderation::failure, |()| "Done.".into()),
+                );
             }
             Event::Sub(sub) => {
                 if let Some(target) = &mut self.member_menu.target {
@@ -5578,10 +5572,7 @@ impl App {
         }
         let reason = Some(target.reason.trim().to_owned()).filter(|r| !r.is_empty());
         let (bridge, user) = (gateway.controls.clone(), target.user.id);
-        self.member_menu.serial = self.member_menu.serial.wrapping_add(1);
-        let serial = self.member_menu.serial;
-        self.member_menu.pending = Some(serial);
-        self.member_menu.notice = None;
+        let serial = self.member_menu.begin(user);
         Task::perform(
             async move { bridge.moderate(guild, user, action, reason).await },
             move |result| Message::MemberMenu(member_menu::Event::Done(serial, result)),
