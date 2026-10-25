@@ -28,6 +28,7 @@
 - Closing the poll panel or switching channel while a poll is being sent no longer abandons the request (#184). The close button is disabled while sending and the send is awaited, so a poll Discord already created is not created again under a fresh nonce.
 - Removing a friend and blocking someone now ask first (#183). Remove and Block in the friends list and on the profile card show Confirm and Cancel in place of the row's buttons; Decline and Cancel request stay one click.
 - After a pause for new end-to-end keys or a reconnect, your voice resumes with live audio instead of first sending up to 100 ms recorded when the pause began (#182). Audio that waited for keys is dropped when media resumes, as stale video frames already were.
+- Inbox buttons act on the conversation they were drawn for (#180). Open, Mark as read and Mute used the row's position, and the unread list re-sorts on every new message, so a click could acknowledge or mute another conversation; "Mark these as read" now covers exactly the rows it was shown over.
 
 ### Removed
 - The retired "Blocking bypass" setting is gone. Since the transport moved to `fastcord-net`, turning it on started nothing, yet the value was still stored, still displayed as on, and still accepted byedpi options such as `-I <address>`. The app no longer reads, writes or links `fastcord-bypass` at all; an old settings file loads normally and the stale `bypass` key disappears the next time preferences are saved.

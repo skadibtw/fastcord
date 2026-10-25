@@ -43,13 +43,15 @@ pub enum Tab {
 pub enum Event {
     Toggle,
     Tab(Tab),
-    /// Open the unread conversation at this row of the snapshot.
-    OpenRow(usize),
+    /// Open this unread conversation. Rows carry their channel, not their
+    /// position: the list re-sorts on every new message.
+    OpenRow(Snowflake),
     /// Jump to the mention at this index.
     JumpMention(usize),
-    MarkRead(usize),
-    MarkAllRead,
-    ToggleMute(usize),
+    MarkRead(Snowflake),
+    /// Exactly the conversations the button was drawn over.
+    MarkAllRead(Vec<(Option<Snowflake>, Snowflake)>),
+    ToggleMute(Snowflake),
     Refresh,
     More,
     ToggleRoles,
@@ -288,8 +290,8 @@ impl State {
                 self.reset_mentions();
                 task = self.load(client);
             }
-            Event::OpenRow(index) => {
-                if let Some(row) = rows.rows.get(index) {
+            Event::OpenRow(channel) => {
+                if let Some(row) = rows.rows.iter().find(|row| row.channel == channel) {
                     self.open = false;
                     self.reset_mentions();
                     action = Action::Open(row.channel, Target::Unread(row.acked));
@@ -306,8 +308,8 @@ impl State {
                     self.reset_mentions();
                 }
             }
-            Event::ToggleMute(index) => {
-                if let Some(row) = rows.rows.get(index)
+            Event::ToggleMute(channel) => {
+                if let Some(row) = rows.rows.iter().find(|row| row.channel == channel)
                     && !self.muting.contains(&row.channel)
                     && self.muting.len() < fastcord_discord::state::navigation::MAX_INBOX_ROWS
                 {
@@ -366,7 +368,7 @@ impl State {
     }
 }
 
-fn unread_row<'a>(index: usize, item: &'a InboxRow) -> Element<'a, Event> {
+fn unread_row<'a>(item: &'a InboxRow) -> Element<'a, Event> {
     let place = if item.guild.is_some() {
         format!("#{}", item.name)
     } else {
@@ -423,11 +425,11 @@ fn unread_row<'a>(index: usize, item: &'a InboxRow) -> Element<'a, Event> {
             .width(Length::Fill)
             .padding([6, 10])
             .style(crate::style::row_button(false, true))
-            .on_press(Event::OpenRow(index)),
+            .on_press(Event::OpenRow(item.channel)),
         tool(
             crate::icons::Icon::MarkRead,
             tr("Mark as read"),
-            Event::MarkRead(index)
+            Event::MarkRead(item.channel)
         ),
         tool(
             if item.channel_muted {
@@ -440,7 +442,7 @@ fn unread_row<'a>(index: usize, item: &'a InboxRow) -> Element<'a, Event> {
             } else {
                 tr("Mute")
             },
-            Event::ToggleMute(index),
+            Event::ToggleMute(item.channel),
         ),
     ]
     .spacing(2)
@@ -474,8 +476,8 @@ pub fn view<'a>(state: &'a State, inbox: &'a Inbox) -> Element<'a, Event> {
     match state.tab {
         Tab::Unread => {
             let mut list = column![].spacing(2);
-            for (index, item) in inbox.rows.iter().enumerate() {
-                list = list.push(unread_row(index, item));
+            for item in &inbox.rows {
+                list = list.push(unread_row(item));
             }
             if inbox.total == 0 {
                 body = body.push(
@@ -505,7 +507,16 @@ pub fn view<'a>(state: &'a State, inbox: &'a Inbox) -> Element<'a, Event> {
                     .push(
                         row![
                             text(summary).size(12).color(MUTED).width(Length::Fill),
-                            crate::icons::secondary(label, Event::MarkAllRead),
+                            crate::icons::secondary(
+                                label,
+                                Event::MarkAllRead(
+                                    inbox
+                                        .rows
+                                        .iter()
+                                        .map(|row| (row.guild, row.channel))
+                                        .collect()
+                                ),
+                            ),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -834,11 +845,15 @@ mod tests {
         let inbox = rows(3);
         step(&mut state, Event::Toggle, &inbox);
         assert_eq!(
-            step(&mut state, Event::OpenRow(2), &inbox),
+            step(&mut state, Event::OpenRow(Snowflake(102)), &inbox),
             Action::Open(Snowflake(102), Target::Unread(Some(Snowflake(40))))
         );
         assert!(!state.open);
-        assert_eq!(step(&mut state, Event::OpenRow(9), &inbox), Action::None);
+        assert_eq!(
+            step(&mut state, Event::OpenRow(Snowflake(999)), &inbox),
+            Action::None,
+            "a row that left the list does nothing"
+        );
         step(&mut state, Event::Toggle, &inbox);
         step(&mut state, Event::Tab(Tab::Mentions), &inbox);
         let serial = state.serial;
@@ -858,9 +873,9 @@ mod tests {
         let mut state = State::default();
         let inbox = rows(2);
         state.open = true;
-        step(&mut state, Event::ToggleMute(0), &inbox);
-        step(&mut state, Event::ToggleMute(0), &inbox);
-        step(&mut state, Event::ToggleMute(1), &inbox);
+        step(&mut state, Event::ToggleMute(Snowflake(100)), &inbox);
+        step(&mut state, Event::ToggleMute(Snowflake(100)), &inbox);
+        step(&mut state, Event::ToggleMute(Snowflake(101)), &inbox);
         assert_eq!(state.muting, [Snowflake(100), Snowflake(101)]);
         step(
             &mut state,

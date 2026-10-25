@@ -5842,15 +5842,14 @@ impl App {
         };
         let rows = &gateway.navigation.inbox.rows;
         match event {
-            inbox::Event::MarkRead(index) => {
-                if let Some(row) = rows.get(index) {
+            inbox::Event::MarkRead(channel) => {
+                if let Some(row) = rows.iter().find(|row| row.channel == channel) {
                     gateway.controls.mark_read(row.guild, row.channel);
                 }
                 return Task::none();
             }
-            inbox::Event::MarkAllRead => {
-                let all = rows.iter().map(|row| (row.guild, row.channel)).collect();
-                gateway.controls.mark_read_many(all);
+            inbox::Event::MarkAllRead(shown) => {
+                gateway.controls.mark_read_many(shown);
                 return Task::none();
             }
             _ => {}
