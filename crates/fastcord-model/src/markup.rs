@@ -622,11 +622,25 @@ fn masked(line: &str, at: usize) -> Option<(usize, std::ops::Range<usize>, usize
         }
         (gt, gt + 1)
     } else {
+        // Balanced parentheses belong to the target (`…/Rust_(language))`);
+        // the `)` that would close more than was opened ends it.
+        let mut depth = 0usize;
         let end = url_start
             + line[url_start..]
                 .bytes()
                 .take(MAX_URL)
-                .position(|b| b == b')')?;
+                .position(|b| match b {
+                    b'(' => {
+                        depth += 1;
+                        false
+                    }
+                    b')' if depth == 0 => true,
+                    b')' => {
+                        depth -= 1;
+                        false
+                    }
+                    _ => false,
+                })?;
         (end, end)
     };
     let url = &line[url_start..url_end];
@@ -887,6 +901,27 @@ mod tests {
         for bad in ["[x](<javascript:alert(1)>)", "[x](<ftp://a>)"] {
             assert!(spans(bad).iter().all(|s| s.kind == Kind::Text), "{bad}");
         }
+        // Balanced parentheses stay in the target; an unbalanced `(` does not link.
+        assert_eq!(
+            pairs("[Rust](https://en.wikipedia.org/wiki/Rust_(language)) after"),
+            [
+                (
+                    "Rust",
+                    Some("https://en.wikipedia.org/wiki/Rust_(language)"),
+                    false
+                ),
+                (" after", None, false),
+            ]
+        );
+        assert!(
+            pairs("[x](https://a.test/(b c)")
+                .iter()
+                .all(|(text, url, _)| url.is_none() || *text != "x")
+        );
+        assert_eq!(
+            pairs("[x](<https://a.test/(b)>)"),
+            [("x", Some("https://a.test/(b)"), false)]
+        );
         // Unterminated: the label is not a link (a bare URL may still be).
         let open = spans("[x](<https://a");
         assert_eq!((open[0].text, open[0].kind), ("[x](<", Kind::Text));
