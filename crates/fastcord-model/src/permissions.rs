@@ -53,6 +53,7 @@ impl Permissions {
     pub const MANAGE_THREADS: Self = Self(1 << 34);
     pub const MANAGE_EVENTS: Self = Self(1 << 33);
     pub const CREATE_EVENTS: Self = Self(1 << 44);
+    pub const USE_EXTERNAL_SOUNDS: Self = Self(1 << 45);
     pub const CREATE_PUBLIC_THREADS: Self = Self(1 << 35);
     pub const SEND_MESSAGES_IN_THREADS: Self = Self(1 << 38);
 
@@ -186,7 +187,7 @@ pub const PERMISSION_GROUPS: [(&str, &[PermissionInfo]); 5] = [
             info(21, "Speak", scope::VOICE),
             info(9, "Video", scope::VOICE),
             info(42, "Use soundboard", scope::VOICE),
-            info(43, "Use external sounds", scope::VOICE),
+            info(45, "Use external sounds", scope::VOICE),
             info(25, "Use voice activity", scope::VOICE),
             info(8, "Priority speaker", scope::VOICE),
             info(22, "Mute members", scope::VOICE),
@@ -312,4 +313,46 @@ pub fn channel_permissions(
                 | Permissions::EMBED_LINKS);
     }
     perms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named(name: &str) -> Permissions {
+        PERMISSION_GROUPS
+            .iter()
+            .flat_map(|(_, infos)| infos.iter())
+            .find(|info| info.name == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .flag()
+    }
+
+    #[test]
+    fn every_catalog_permission_has_its_own_bit() {
+        let bits: Vec<u8> = PERMISSION_GROUPS
+            .iter()
+            .flat_map(|(_, infos)| infos.iter().map(|info| info.bit))
+            .collect();
+        for (index, bit) in bits.iter().enumerate() {
+            assert!(!bits[..index].contains(bit), "bit {bit} appears twice");
+        }
+        // The catalog and the named constants must not drift apart.
+        for (name, flag) in [
+            ("Create expressions", Permissions::CREATE_GUILD_EXPRESSIONS),
+            ("Create events", Permissions::CREATE_EVENTS),
+            ("Use external sounds", Permissions::USE_EXTERNAL_SOUNDS),
+            ("Use soundboard", Permissions::USE_SOUNDBOARD),
+            ("Manage expressions", Permissions::MANAGE_GUILD_EXPRESSIONS),
+            ("Timeout members", Permissions::MODERATE_MEMBERS),
+            ("Request to speak", Permissions::REQUEST_TO_SPEAK),
+            (
+                "Send messages in threads",
+                Permissions::SEND_MESSAGES_IN_THREADS,
+            ),
+            ("Administrator", Permissions::ADMINISTRATOR),
+        ] {
+            assert_eq!(named(name), flag, "{name}");
+        }
+    }
 }
