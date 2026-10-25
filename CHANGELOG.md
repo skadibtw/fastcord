@@ -17,6 +17,7 @@
 - iced's image support no longer pulls in every `image` codec: the app hands iced decoded pixels only, so the rav1e AV1 encoder, EXR, TIFF, QOI and their dependencies (over a hundred crates) are gone from the build (#200).
 - The macOS app declares `NSMicrophoneUsageDescription`, so the first microphone use shows the permission prompt instead of macOS terminating the app (#199).
 - "Use external sounds" in the role and channel permission editors now sets its own permission (bit 45). It was mapped to bit 43, so ticking it granted Create Expressions instead and the two checkboxes moved together (#198).
+- A message with a timestamp near year 9999, such as `<t:253402300799:F>`, no longer crashes the client for readers east of UTC (or west of it near year -9999); it shows as plain text (#196). Message, event and voice-log times all use the checked offset conversion.
 
 ### Removed
 - The retired "Blocking bypass" setting is gone. Since the transport moved to `fastcord-net`, turning it on started nothing, yet the value was still stored, still displayed as on, and still accepted byedpi options such as `-I <address>`. The app no longer reads, writes or links `fastcord-bypass` at all; an old settings file loads normally and the stale `bypass` key disappears the next time preferences are saved.

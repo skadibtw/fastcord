@@ -173,7 +173,9 @@ fn format_local(ms: u64, offset: UtcOffset) -> String {
     let Ok(at) = time::OffsetDateTime::from_unix_timestamp((ms / 1_000) as i64) else {
         return String::new();
     };
-    let at = at.to_offset(offset);
+    let Some(at) = at.checked_to_offset(offset) else {
+        return String::new();
+    };
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}",
         at.year(),

@@ -48,8 +48,10 @@ pub fn file() -> Option<PathBuf> {
 }
 
 fn stamp() -> String {
-    let now = time::OffsetDateTime::now_utc()
-        .to_offset(crate::localtime::offset().unwrap_or(time::UtcOffset::UTC));
+    let utc = time::OffsetDateTime::now_utc();
+    let now = utc
+        .checked_to_offset(crate::localtime::offset().unwrap_or(time::UtcOffset::UTC))
+        .unwrap_or(utc);
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         now.year(),

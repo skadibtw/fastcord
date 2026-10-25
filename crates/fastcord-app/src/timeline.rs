@@ -2351,8 +2351,11 @@ fn format_timestamp(raw: &str, local: Option<time::UtcOffset>) -> String {
 
 fn format_timestamp_in(raw: &str, local: Option<time::UtcOffset>, hour12: bool) -> String {
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-    if let (Some(local), Ok(at)) = (local, OffsetDateTime::parse(raw, &Rfc3339)) {
-        let at = at.to_offset(local);
+    if let Some(at) = local.and_then(|local| {
+        OffsetDateTime::parse(raw, &Rfc3339)
+            .ok()?
+            .checked_to_offset(local)
+    }) {
         return format!(
             "{:04}-{:02}-{:02} {}",
             at.year(),

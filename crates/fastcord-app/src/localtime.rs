@@ -66,9 +66,11 @@ pub fn markup(unix: i64, style: TimeStyle, offset: Option<UtcOffset>, now: i64) 
     if style == TimeStyle::Relative {
         return relative(unix, now);
     }
+    // `to_offset` panics when the offset carries the date past year 9999;
+    // anyone can post `<t:253402300799>`, so the checked form is required.
     let at = OffsetDateTime::from_unix_timestamp(unix)
         .ok()?
-        .to_offset(offset.unwrap_or(UtcOffset::UTC));
+        .checked_to_offset(offset.unwrap_or(UtcOffset::UTC))?;
     let (y, m, d) = (at.year(), at.month() as usize, at.day());
     let (h, min, s) = (at.hour(), at.minute(), at.second());
     let long_date = trf("{} {} {}", &[&d, &tr(MONTHS[m - 1]), &y]);
@@ -161,6 +163,18 @@ mod tests {
         let late = Some(UtcOffset::from_hms(9, 0, 0).unwrap());
         assert_eq!(f(TimeStyle::ShortDate, late), "21/04/2021");
         assert_eq!(markup(i64::MAX, TimeStyle::ShortTime, None, 0), None);
+        // The last representable second, moved past year 9999 by the offset.
+        let east = UtcOffset::from_hms(3, 0, 0).ok();
+        let west = UtcOffset::from_hms(-3, 0, 0).ok();
+        assert_eq!(
+            markup(253_402_300_799, TimeStyle::ShortDateTime, east, 0),
+            None
+        );
+        assert!(markup(253_402_300_799, TimeStyle::ShortDateTime, west, 0).is_some());
+        assert_eq!(
+            markup(-377_705_116_800, TimeStyle::ShortDateTime, west, 0),
+            None
+        );
     }
 
     #[test]
