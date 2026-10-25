@@ -404,3 +404,11 @@ fn an_ordinary_voice_channel_has_no_headings_or_seats() {
             .all(|line| matches!(line, Occupant::Member { seat: None, .. }))
     );
 }
+
+#[test]
+fn iso8601_formats_utc_with_milliseconds_and_leap_days() {
+    assert_eq!(iso8601(0), "1970-01-01T00:00:00.000Z");
+    assert_eq!(iso8601(1_709_164_800), "2024-02-29T00:00:00.000Z");
+    assert_eq!(iso8601(1_792_584_000), "2026-10-21T12:00:00.000Z");
+    assert_eq!(iso8601(u64::MAX), "");
+}

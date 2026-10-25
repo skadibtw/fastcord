@@ -276,61 +276,11 @@ impl Poll {
 }
 
 /// Unix milliseconds of an RFC 3339 timestamp (`2026-10-21T12:00:00.000000+00:00`
-/// or `...Z`), or `None` if it is not one.
+/// or `...Z`), or `None` if it is not one or names no real date (`02-31`).
 pub fn parse_unix_ms(raw: &str) -> Option<u64> {
-    let b = raw.as_bytes();
-    let num = |from: usize, len: usize| -> Option<i64> {
-        let digits = b.get(from..from + len)?;
-        digits.iter().all(u8::is_ascii_digit).then(|| {
-            digits
-                .iter()
-                .fold(0i64, |n, d| n * 10 + i64::from(d - b'0'))
-        })
-    };
-    if b.get(4) != Some(&b'-')
-        || b.get(7) != Some(&b'-')
-        || !matches!(b.get(10), Some(b'T' | b't' | b' '))
-    {
-        return None;
-    }
-    let (year, month, day) = (num(0, 4)?, num(5, 2)?, num(8, 2)?);
-    let (hour, minute, second) = (num(11, 2)?, num(14, 2)?, num(17, 2)?);
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 60
-    {
-        return None;
-    }
-    let mut at = 19;
-    let mut millis = 0;
-    if b.get(at) == Some(&b'.') {
-        at += 1;
-        let mut scale = 100;
-        while let Some(d) = b.get(at).filter(|d| d.is_ascii_digit()) {
-            millis += scale * i64::from(d - b'0');
-            scale /= 10;
-            at += 1;
-        }
-    }
-    let offset_minutes = match b.get(at)? {
-        b'Z' | b'z' if at + 1 == b.len() => 0,
-        sign @ (b'+' | b'-') if b.get(at + 3) == Some(&b':') && at + 6 == b.len() => {
-            let minutes = num(at + 1, 2)? * 60 + num(at + 4, 2)?;
-            if *sign == b'+' { minutes } else { -minutes }
-        }
-        _ => return None,
-    };
-    // Days from civil (Howard Hinnant).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second - offset_minutes * 60;
-    u64::try_from(seconds * 1_000 + millis).ok()
+    let at =
+        time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339).ok()?;
+    u64::try_from(at.unix_timestamp_nanos() / 1_000_000).ok()
 }
 
 #[cfg(test)]
@@ -447,6 +397,9 @@ mod tests {
             "tomorrow",
             "2026-13-01T00:00:00Z",
             "2026-10-21T12:00:00",
+            "2026-02-31T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-10-21T24:00:00Z",
         ] {
             assert_eq!(parse_unix_ms(bad), None, "{bad}");
         }

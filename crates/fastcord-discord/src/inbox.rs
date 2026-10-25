@@ -124,18 +124,7 @@ pub enum NotifySetting {
 
 /// `2026-01-02T03:04:05.000Z`, which is what `end_time` carries.
 fn rfc3339(unix: i64) -> String {
-    let Ok(t) = time::OffsetDateTime::from_unix_timestamp(unix) else {
-        return String::new();
-    };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
-        t.year(),
-        u8::from(t.month()),
-        t.day(),
-        t.hour(),
-        t.minute(),
-        t.second()
-    )
+    u64::try_from(unix).map(crate::iso8601).unwrap_or_default()
 }
 
 fn setting_fields(setting: NotifySetting, now: i64) -> serde_json::Value {

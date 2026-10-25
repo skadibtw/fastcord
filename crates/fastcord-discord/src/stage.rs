@@ -201,24 +201,23 @@ fn request(
     }
 }
 
-/// `YYYY-MM-DDTHH:MM:SS.000Z` for a Unix time in seconds (proleptic Gregorian).
+/// `YYYY-MM-DDTHH:MM:SS.000Z` for a Unix time in seconds; empty past the
+/// year 9999, which no Discord field accepts.
 pub fn iso8601(unix: u64) -> String {
-    let (days, rest) = (unix / 86_400, unix % 86_400);
-    // Howard Hinnant's civil-from-days.
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
+    let Some(t) = i64::try_from(unix)
+        .ok()
+        .and_then(|unix| time::OffsetDateTime::from_unix_timestamp(unix).ok())
+    else {
+        return String::new();
+    };
     format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.000Z",
-        rest / 3_600,
-        rest % 3_600 / 60,
-        rest % 60
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second()
     )
 }
 
