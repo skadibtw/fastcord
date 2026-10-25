@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.3 — 2026-10-25
+
 ### Fixed
 - Auto recovery now waits only for the failed endpoint/role/TLS profile; an unrelated CDN campaign cannot stall healthy API requests. Stale demands are discarded on network changes without resetting diagnostic budgets.
 - Concurrent HTTP connections use bounded, per-CONNECT attempt IDs and receipts instead of a last-result-per-host ledger. Proxy/TLS errors and destination addresses cannot cross between requests; cancellation revokes the ID, and connector timeouts retain their typed diagnostics without replaying requests.
