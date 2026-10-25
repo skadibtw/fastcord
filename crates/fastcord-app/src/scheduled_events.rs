@@ -350,11 +350,14 @@ impl State {
                 if self.guild == Some(guild) && !matches!(self.load, Load::Failed(_)) {
                     return Task::none();
                 }
+                // A write in flight survives a reopen: dropping it would let a
+                // second Create through and lose the first one's answer.
                 *self = Self {
                     guild: Some(guild),
                     hidden: std::mem::take(&mut self.hidden),
                     serial: self.serial,
                     generation: self.generation,
+                    pending: self.pending,
                     ..Self::default()
                 };
                 self.fetch(guild, client)
@@ -613,7 +616,7 @@ pub fn view<'a>(
     let busy = state.pending.is_some();
     let head = row![
         text(tr("Events")).size(13).width(Length::Fill),
-        crate::icons::close(Some(Event::Close)),
+        crate::icons::close((!busy).then_some(Event::Close)),
     ]
     .spacing(6);
     let body = match &state.screen {

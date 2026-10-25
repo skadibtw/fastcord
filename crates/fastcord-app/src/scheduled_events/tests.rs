@@ -197,6 +197,15 @@ fn one_write_at_a_time_and_destructive_ones_ask_first() {
         &bridge,
     );
     assert_eq!(state.pending, Some(serial), "still the one request");
+    // Closing and reopening the panel does not forget the request.
+    let _ = state.update(Event::Close, &nav, &client(), &bridge);
+    let _ = state.update(Event::Open(guild()), &nav, &client(), &bridge);
+    assert_eq!(
+        state.pending,
+        Some(serial),
+        "a reopen keeps the write in flight"
+    );
+    open(&mut state, &nav, &bridge);
     let _ = state.update(
         Event::Ask(Confirm::Cancel, Snowflake(1)),
         &nav,

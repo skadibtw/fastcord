@@ -24,6 +24,7 @@
 - A paused or finished voice message or inline audio/video attachment no longer keeps an audio stream and its engine thread running (#191). The output closes on pause or at the end and reopens on Play, so an idle client holds no audio callback stream after playing a clip.
 - A call with more than four people talking no longer turns everyone's audio to buzzing (#189). The mixer holds 16 speakers instead of 4, and a full mixer only makes room by evicting someone who has been quiet for 100 ms; before, a fifth talker evicted a live speaker on every packet, so every voice was decoded from a fresh decoder each time.
 - The result of a moderation action (kick, ban, timeout, nickname, move) is shown only in the menu of the member it was for (#188). Opening another member's menu while it ran used to show "Done." or the error there and wipe that menu's typed reason.
+- The Events panel can no longer create the same scheduled event twice (#186). Close is disabled while a change is being saved, and reopening the panel keeps the request in flight, so a second Create waits and the first one's result is still shown.
 
 ### Removed
 - The retired "Blocking bypass" setting is gone. Since the transport moved to `fastcord-net`, turning it on started nothing, yet the value was still stored, still displayed as on, and still accepted byedpi options such as `-I <address>`. The app no longer reads, writes or links `fastcord-bypass` at all; an old settings file loads normally and the stale `bypass` key disappears the next time preferences are saved.
