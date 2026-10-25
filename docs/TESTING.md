@@ -13,6 +13,19 @@
   native metadata and Darwin SDK shape, platform fallbacks and Referer changes
   across guild/DM/home are checked offline. x64 identity fixtures are independent
   of the test runner's architecture.
+- WebSocket permessage-deflate (2026-10-25): `cargo test -p fastcord-ws` covers
+  RFC 7692 parameter parsing (each accepted parameter, absent window bits,
+  unknown/duplicate/malformed values, an unoffered `server_max_window_bits`, a
+  second extension), a handshake peer that accepts and one that declines, the
+  real handshake headers and `Sec-WebSocket-Accept`, plain and compressed text
+  and binary messages, fragmented compressed messages with interleaved
+  ping/pong/close, context takeover on and off, invalid RSV bits, wrong
+  extension bytes, compressed-input and inflated-output bombs, frame-size limits,
+  and fresh state per connection. The main Gateway, remote-auth and voice suites
+  each run a compressed HELLO/Identify/READY (voice also Select State) through
+  the real driver, and the fake Discord declines the extension so fake mode
+  exercises the pass-through path. Not captured: the parameters Discord actually
+  selects.
 - Cookie jar (2026-10-25): `cookies::tests` cover host-only versus `Domain`
   scoping, a foreign `Domain` refused, `Path` matching on whole segments and
   longest-path-first order, `Max-Age` winning over `Expires`, both expiry forms
@@ -43,10 +56,10 @@
   0.0.419/96312, Linux x64 1.0.166/96160, web 649389), so the byedpi route on
   the production version fetch still works.
 - Still pending: sanitized official desktop capture (GREASE, language and
-  Referer policy, WebSocket fetch metadata), WS permessage-deflate support,
-  Electron/Chromium evidence outside Windows x64, capabilities and the persisted
-  guild-version cache, and valid alt-account U1. Bogus-token 4004 is not an
-  acceptance result.
+  Referer policy, WebSocket fetch metadata, the negotiated permessage-deflate
+  parameters), Electron/Chromium evidence outside Windows x64, capabilities and
+  the persisted guild-version cache, and valid alt-account U1. Bogus-token 4004
+  is not an acceptance result.
 
 ### Account restriction and Alerts regression (2026-10-22)
 

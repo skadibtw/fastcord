@@ -70,9 +70,10 @@ truthfully must match, and no field may contradict another.
 - Transport: API and Gateway version 9 (the documented client default); the
   Electron/Chromium header set (`sec-ch-ua*` as Electron sends it,
   `sec-fetch-*`, `accept-language`, `accept-encoding`, `origin`/`referer`,
-  `x-discord-timezone`); a cookie jar for `discord.com`; capture-confirmed headers
-  on the Gateway, voice and remote-auth WebSocket handshakes (these use a different
-  Chromium network path; REST fetch headers must not be copied by assumption).
+  `x-discord-timezone`); a cookie jar for `discord.com`; the WebSocket
+  handshakes' own headers plus Chromium's `permessage-deflate; client_max_window_bits`
+  offer, decoded by the client (these use a different Chromium network path;
+  REST fetch headers must not be copied by assumption).
 - Behaviour: message nonces in the official shape (timestamp in the high bits,
   zero low 22 bits); opcode 4 without `self_stream`, which the server
   sets when opcode 18 creates a stream (corrected 2026-10-25); the persisted
@@ -178,12 +179,15 @@ cookie jar that scopes cookies by `Domain`/`Path` and expires them on the
 request clock; `x-discord-locale` reports the account's chosen client locale
 from READY (the OS locale before that and in `system_locale`); the WebSocket
 handshakes carry the user agent, language and
-no-cache headers and zstd in HTTP Accept-Encoding. REST decodes zstd and tracks
-the current UI location in Referer. Public CDN fetches send only the profile
+no-cache headers, zstd in HTTP Accept-Encoding and Chromium's
+`permessage-deflate; client_max_window_bits` offer (negotiated and decoded by
+`fastcord-ws`, with byte-bounded compressed and inflated buffers; a declined
+extension is a pass-through socket). REST decodes zstd and tracks the current UI
+location in Referer. Public CDN fetches send only the profile
 user agent and a purpose-specific `Accept`, never an account credential. A7-A9
-and C1 remain partial: GREASE and
-handshake details need an official capture, permessage-deflate is not
-implemented, and the runtime pair outside Windows x64 is unverified. Message
+and C1 remain partial: GREASE, the negotiated extension values and other
+handshake details need an official capture, and the runtime pair outside Windows
+x64 is unverified. Message
 nonces have the official shape (zero low 22 bits, one process-wide sequence).
 Opcode 4 stays without `self_stream`, as the
 official client sends it. Open: the P2 items (capabilities, the persisted

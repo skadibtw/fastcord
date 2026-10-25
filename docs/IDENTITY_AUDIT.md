@@ -396,7 +396,7 @@ official stable Windows client 1.0.9265 on the maintainer's host.
 | A6 | Implemented/offline tested | API and Gateway v9; route validation, fixtures and tests follow | Which version the current client really uses needs a capture (docs say v9) |
 | A7 | Partial | Chromium header subset, timezone, Referer, reqwest decoders, header tests | GREASE/brand order, exact `accept-language` and header order need a capture |
 | A8 | Implemented/offline tested | Bounded `discord.com` jar; now RFC 6265 `Domain`/`Path` scoping and `Max-Age`/`Expires` on the request clock, longest path first | Which cookies the official client sends on each host needs a capture |
-| A9 | Partial | Main/QR/voice handshakes carry UA, language, HTTP encodings and no-cache; no WS compression | permessage-deflate is packet I1; offer values and per-host headers need a capture |
+| A9 | Implemented/offline tested | Main/QR/voice handshakes carry UA, language, HTTP encodings, no-cache, and Chromium's `permessage-deflate; client_max_window_bits` offer; `fastcord-ws` validates the upgrade/accept key and negotiates or declines the extension with byte-bounded RFC 7692 framing | The offer values, per-host headers and the parameters Discord actually selects need a capture |
 | A10 | Accepted residual | rustls/ring TLS and h2 | Not closed by this layer |
 | A11 | Accepted residual | UDP/RTP voice transport | Needs a separate WebRTC project |
 | B1 | Implemented/offline tested | Nonce shape with zero low 22 bits, monotonic, reused on retry | Official collision behavior needs a capture |
