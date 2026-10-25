@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.7 — 2026-10-25
+
+### Fixed
+- Voice rooms no longer look empty right after signing in. Guild payloads list their current occupants in `voice_states`, but the decoder never read that field and the reducer started every guild with an empty table, so people appeared only after their next move or rejoin. The field is decoded (bounded at 1000 per guild) and installed by READY and GUILD_CREATE; a payload that omits it leaves what the client already knows alone, so a partial GUILD_CREATE cannot wipe the room.
+
 ## 0.1.0-alpha.6 — 2026-10-25
 
 ### Fixed
