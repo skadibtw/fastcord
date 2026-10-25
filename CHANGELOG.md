@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.6 — 2026-10-25
+
+### Fixed
+- Password login's CAPTCHA no longer hangs as an empty window when it cannot load. The window connects directly and cannot use the app's network recovery, so on a filtered route the widget never appeared and nothing explained why; the page now reports a failed provider script or a widget that is not ready after 20 seconds, the window closes, and the login screen names `discord.com` and `js.hcaptcha.com` and points at QR or token login.
+- The login challenge's `captcha_session_id` is returned as `x-captcha-session-id` next to `x-captcha-key` and `x-captcha-rqtoken`, as the official client sends it; a solution without it can be refused as a repeat challenge.
+
 ## 0.1.0-alpha.5 — 2026-10-25
 
 ### Fixed

@@ -2125,7 +2125,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-app"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-audio"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "cpal",
  "deep_filter",
@@ -2182,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-bypass"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "cc",
  "flate2",
@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-discord"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2219,7 +2219,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-fake"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "fastcord-discord",
  "fastcord-model",
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-media"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "aes-gcm 0.11.1",
  "chacha20poly1305 0.11.0",
@@ -2258,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-model"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2268,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-net"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "base64 0.22.1",
  "http",
@@ -2287,7 +2287,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-platform"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "apple-native-keyring-store",
  "ashpd",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-video"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "cc",
  "fastcord-platform",
@@ -2342,7 +2342,7 @@ dependencies = [
 
 [[package]]
 name = "fastcord-ws"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "flate2",
  "futures-util",
