@@ -91,7 +91,7 @@ async fn resolve_once(
 }
 
 async fn fetch_build_number() -> Option<u32> {
-    let client = reqwest::Client::builder()
+    let client = fastcord_bypass::route_http(reqwest::Client::builder())
         .use_rustls_tls()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())

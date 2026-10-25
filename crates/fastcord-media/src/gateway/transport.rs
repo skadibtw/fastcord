@@ -115,7 +115,7 @@ async fn connect_tls(url: &str) -> Result<TlsSocket, ConnectError> {
     request
         .headers_mut()
         .insert("Origin", HeaderValue::from_static(ORIGIN));
-    let tcp = TcpStream::connect((host.as_str(), port))
+    let tcp = fastcord_bypass::connect(&host, port)
         .await
         .map_err(|_| ConnectError)?;
     tcp.set_nodelay(true).map_err(|_| ConnectError)?;

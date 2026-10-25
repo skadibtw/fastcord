@@ -1,16 +1,20 @@
 //! Desktop integration (issue #105): deep links, the tray icon and second-launch
-//! hand-off streams, the close-to-tray decision, the settings section, and the
+//! hand-off streams, the close-to-tray decision, the settings section with the
+//! blocking bypass (`fastcord_bypass`, started once at launch), and the
 //! compact call window. The native parts are `fastcord_platform::{tray,
 //! instance, autostart}`; nothing here polls: every stream blocks on a bounded
 //! queue fed by an OS thread.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use fastcord_model::Snowflake;
 use fastcord_platform::instance::Forwarded;
 use fastcord_platform::tray::Command;
-use iced::widget::{checkbox, column, container, row, scrollable, space, text};
+use iced::widget::{
+    checkbox, column, container, pick_list, row, scrollable, space, text, text_input,
+};
 use iced::{Element, Length};
+use serde_json::{Value, json};
 
 use crate::gateway::{VoiceControls, VoiceParticipant};
 use crate::icons::{self, Action, Icon};
@@ -176,11 +180,139 @@ pub fn tray_stream() -> impl iced::futures::Stream<Item = TrayEvent> {
     })
 }
 
+/// Which strategy the bypass runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// Direct, then each built-in preset until a host answers.
+    Auto,
+    Preset(&'static fastcord_bypass::Preset),
+    /// Only the advanced options.
+    Custom,
+}
+
+impl Choice {
+    fn all() -> Vec<Self> {
+        std::iter::once(Self::Auto)
+            .chain(fastcord_bypass::presets().iter().map(Self::Preset))
+            .chain([Self::Custom])
+            .collect()
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Preset(preset) => preset.id,
+            Self::Custom => "custom",
+        }
+    }
+
+    /// An unknown id (a preset this OS lacks, an older file) means Automatic.
+    fn from_id(id: &str) -> Self {
+        Self::all()
+            .into_iter()
+            .find(|choice| choice.id() == id)
+            .unwrap_or(Self::Auto)
+    }
+}
+
+impl std::fmt::Display for Choice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Auto => "Automatic: try each strategy until Discord answers",
+            Self::Preset(preset) => preset.name,
+            Self::Custom => "Only my options (Advanced)",
+        })
+    }
+}
+
+/// The blocking bypass setting: Discord through the embedded byedpi.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bypass {
+    pub on: bool,
+    pub choice: Choice,
+    /// byedpi options put before the strategy (for Custom, the whole strategy).
+    pub options: String,
+}
+
+pub const OPTIONS_LIMIT: usize = 512;
+
+impl Default for Bypass {
+    fn default() -> Self {
+        Self {
+            on: false,
+            choice: Choice::Auto,
+            options: String::new(),
+        }
+    }
+}
+
+impl Bypass {
+    pub fn from_json(value: &Value) -> Self {
+        Self {
+            on: value.get("on").and_then(Value::as_bool) == Some(true),
+            choice: Choice::from_id(value.get("choice").and_then(Value::as_str).unwrap_or("")),
+            options: value
+                .get("options")
+                .and_then(Value::as_str)
+                .filter(|options| options.len() <= OPTIONS_LIMIT)
+                .unwrap_or_default()
+                .to_owned(),
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({"on": self.on, "choice": self.choice.id(), "options": self.options})
+    }
+
+    /// The byedpi arguments this setting runs.
+    fn strategy(&self) -> String {
+        let strategy = match self.choice {
+            Choice::Auto => fastcord_bypass::auto_strategy(),
+            Choice::Preset(preset) => preset.args.to_owned(),
+            Choice::Custom => String::new(),
+        };
+        format!("{} {strategy}", self.options).trim().to_owned()
+    }
+}
+
+/// What this process started with: the setting and, when on, the engine's result.
+struct Launch {
+    bypass: Bypass,
+    started: Option<Result<(), String>>,
+}
+
+static LAUNCH: OnceLock<Launch> = OnceLock::new();
+
+/// Once, before any network request: routes never switch while running.
+pub fn start_bypass(bypass: Bypass) {
+    let started = bypass.on.then(|| {
+        fastcord_bypass::enable(&bypass.strategy())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    let _ = LAUNCH.set(Launch { bypass, started });
+}
+
+fn bypass_status(bypass: &Bypass) -> String {
+    let Some(launch) = LAUNCH.get() else {
+        return "Restart fastcord to apply.".to_owned();
+    };
+    let unchanged = launch.bypass == *bypass || !(launch.bypass.on || bypass.on);
+    match &launch.started {
+        _ if !unchanged => "Restart fastcord to apply.".to_owned(),
+        None => "Off: Discord is reached directly.".to_owned(),
+        Some(Ok(())) => "On: Discord connections go through byedpi.".to_owned(),
+        Some(Err(error)) => format!("Not running: {error} Discord is reached directly."),
+    }
+}
+
 /// The desktop section of the audio and general settings.
 pub fn view<'a>(
     close_to_tray: bool,
     tray: &Result<(), String>,
     autostart: Option<bool>,
+    bypass: &'a Bypass,
+    advanced: bool,
 ) -> Element<'a, Message> {
     let mut content = column![text("Desktop").size(18)].spacing(8);
     content = content.push(
@@ -201,6 +333,54 @@ pub fn view<'a>(
                 .label("Start fastcord when I sign in")
                 .on_toggle(Message::AutostartToggled),
         );
+    }
+    content = content
+        .push(text("Blocking bypass").size(18))
+        .push(
+            checkbox(bypass.on)
+                .label("Reach Discord through the built-in byedpi, for networks that block it")
+                .on_toggle(Message::BypassToggled),
+        )
+        .push(
+            pick_list(
+                Choice::all(),
+                Some(bypass.choice),
+                Message::BypassChoiceSelected,
+            )
+            .width(Length::Fill),
+        )
+        .push(
+            text(
+                "Messages, the Gateway and media files use it; voice and video still connect \
+                 directly. Automatic waits up to 2 seconds per strategy the first time it \
+                 reaches each Discord server.",
+            )
+            .size(12),
+        )
+        .push(text(bypass_status(bypass)).size(12))
+        .push(
+            checkbox(advanced)
+                .label("Advanced options")
+                .on_toggle(Message::BypassAdvancedToggled),
+        );
+    if advanced {
+        content = content
+            .push(
+                text_input(
+                    "byedpi options, for example -I 192.168.1.10",
+                    &bypass.options,
+                )
+                .on_input(Message::BypassOptionsEdited)
+                .padding(8),
+            )
+            .push(
+                text(
+                    "Put before the chosen strategy; with \"Only my options\" they are the \
+                     whole strategy. Behind a VPN that captures traffic with a TUN adapter, \
+                     -I <this computer's network address> sends byedpi past it.",
+                )
+                .size(12),
+            );
     }
     content.into()
 }
@@ -321,6 +501,29 @@ pub fn compact_view(voice: &VoiceControls) -> Element<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bypass_strategy_puts_options_first_and_reads_unknown_choices_as_automatic() {
+        let preset = &fastcord_bypass::presets()[0];
+        let bypass = Bypass {
+            on: true,
+            choice: Choice::Preset(preset),
+            options: "-I 192.0.2.1".to_owned(),
+        };
+        assert_eq!(bypass.strategy(), format!("-I 192.0.2.1 {}", preset.args));
+        assert_eq!(Bypass::from_json(&bypass.to_json()), bypass);
+        let custom = Bypass {
+            choice: Choice::Custom,
+            ..bypass
+        };
+        assert_eq!(custom.strategy(), "-I 192.0.2.1");
+        let auto = Bypass::default();
+        assert_eq!(auto.strategy(), fastcord_bypass::auto_strategy());
+        let unknown =
+            Bypass::from_json(&json!({"on": true, "choice": "gone", "options": "x".repeat(600)}));
+        assert_eq!(unknown.choice, Choice::Auto);
+        assert!(unknown.options.is_empty(), "oversized options are dropped");
+    }
 
     fn channel(guild: Option<u64>, channel: u64, message: Option<u64>) -> Option<DeepLink> {
         Some(DeepLink::Channel {

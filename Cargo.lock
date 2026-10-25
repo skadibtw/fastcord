@@ -2062,6 +2062,7 @@ dependencies = [
  "bytemuck",
  "bytes",
  "fastcord-audio",
+ "fastcord-bypass",
  "fastcord-discord",
  "fastcord-media",
  "fastcord-model",
@@ -2110,11 +2111,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastcord-bypass"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "cc",
+ "flate2",
+ "reqwest",
+ "sha2 0.10.9",
+ "tar",
+ "tokio",
+]
+
+[[package]]
 name = "fastcord-discord"
 version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "fastcord-bypass",
  "fastcord-model",
  "flate2",
  "futures-util",
@@ -2154,6 +2168,7 @@ dependencies = [
  "aes-gcm 0.11.1",
  "chacha20poly1305 0.11.0",
  "davey",
+ "fastcord-bypass",
  "fastcord-model",
  "futures-util",
  "openmls",

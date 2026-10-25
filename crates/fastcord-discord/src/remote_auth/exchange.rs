@@ -31,7 +31,7 @@ impl HttpTicketExchange {
         if crate::fake_origin::active() {
             return Err(RemoteAuthError::Connect);
         }
-        let http = reqwest::Client::builder()
+        let http = fastcord_bypass::route_http(reqwest::Client::builder())
             .use_rustls_tls()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())

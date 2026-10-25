@@ -212,6 +212,12 @@ fn main() -> iced::Result {
     };
     desktop::set_forwarded(requests);
     desktop::set_startup(arg);
+    // After the instance guard (a second launch exits) and before the first request.
+    desktop::start_bypass(if fake_mode() {
+        desktop::Bypass::default()
+    } else {
+        audio_devices::launch_bypass()
+    });
     render::application(App::boot, App::update, App::view)
         .title(window_title())
         .theme(App::theme)
@@ -268,6 +274,8 @@ struct App {
     /// The Windows start-at-sign-in setting as read from the registry; `None`
     /// where it does not exist.
     autostart: Option<bool>,
+    /// The bypass's advanced options are shown (not saved).
+    bypass_advanced: bool,
     /// A link from the command line or a second launch, opened once signed in.
     pending_link: Option<desktop::DeepLink>,
     /// The window was put in full screen by the call view's button.
@@ -557,6 +565,10 @@ enum Message {
     /// Gateway: a fresh connection with fresh counters.
     ReconnectGateway,
     CloseToTrayToggled(bool),
+    BypassToggled(bool),
+    BypassChoiceSelected(desktop::Choice),
+    BypassOptionsEdited(String),
+    BypassAdvancedToggled(bool),
     AutostartToggled(bool),
     /// Enter or leave compact call mode (small, always on top).
     ToggleCompact,
@@ -616,6 +628,7 @@ impl App {
                 autostart: (cfg!(any(windows, target_os = "linux", target_os = "macos"))
                     && !fake_mode())
                 .then(fastcord_platform::autostart::is_enabled),
+                bypass_advanced: false,
                 pending_link: desktop::take_startup(),
                 window_fullscreen: false,
                 voice_details: false,
@@ -1358,6 +1371,27 @@ impl App {
                     return self.save_audio_preferences();
                 }
             }
+            Message::BypassToggled(on) => {
+                self.audio_preferences.bypass.on = on;
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::BypassChoiceSelected(choice) => {
+                self.audio_preferences.bypass.choice = choice;
+                if self.audio_saving.is_none() {
+                    return self.save_audio_preferences();
+                }
+            }
+            Message::BypassOptionsEdited(options) => {
+                if options.len() <= desktop::OPTIONS_LIMIT {
+                    self.audio_preferences.bypass.options = options;
+                    if self.audio_saving.is_none() {
+                        return self.save_audio_preferences();
+                    }
+                }
+            }
+            Message::BypassAdvancedToggled(on) => self.bypass_advanced = on,
             Message::AutostartToggled(on) => match fastcord_platform::autostart::set(on) {
                 Ok(()) => self.autostart = Some(on),
                 Err(error) => self.notice = Some(error.to_string()),
@@ -5096,6 +5130,8 @@ impl App {
                                 self.audio_preferences.close_to_tray,
                                 &self.tray,
                                 self.autostart,
+                                &self.audio_preferences.bypass,
+                                self.bypass_advanced,
                             ),
                             mic_panel::view(
                                 &self.mic_panel,
@@ -5839,7 +5875,7 @@ impl App {
                 .on_submit_maybe(self.can_login().then_some(Message::Login))
                 .padding(12),
             button("Log in with token").on_press_maybe(self.can_login().then_some(Message::Login)),
-            button("Audio devices").on_press(Message::OpenAudioSettings),
+            button("Settings (audio, desktop, blocking bypass)").on_press(Message::OpenAudioSettings),
         ].spacing(16).width(Length::Fill);
         if let Some(notice) = &self.notice {
             content = content.push(text(notice));

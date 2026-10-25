@@ -18,6 +18,7 @@ fake-discord = ["fastcord-discord/fake-discord"]
 
 [dependencies]
 fastcord-model.workspace = true
+fastcord-bypass.workspace = true
 fastcord-discord.workspace = true
 fastcord-platform.workspace = true
 fastcord-media.workspace = true

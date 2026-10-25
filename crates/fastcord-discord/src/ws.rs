@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(not(feature = "fake-discord"))]
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
@@ -155,7 +156,7 @@ async fn connect_inner(
     request
         .headers_mut()
         .insert("Origin", HeaderValue::from_static(origin));
-    let tcp = TcpStream::connect((host.as_str(), port))
+    let tcp = fastcord_bypass::connect(&host, port)
         .await
         .map_err(|_| ConnectError)?;
     tcp.set_nodelay(true).map_err(|_| ConnectError)?;

@@ -1,0 +1,16 @@
+{
+  "name": "byedpi",
+  "version": "0.17.3",
+  "license": "MIT",
+  "upstream": "https://github.com/hufrea/byedpi",
+  "archive": "byedpi-0.17.3.tar.gz",
+  "archive_url": "https://github.com/hufrea/byedpi/archive/refs/tags/v0.17.3.tar.gz",
+  "archive_sha256": "0a9cb8585554c68c3e2be88c33c9bf6f99f8e8c7f54b362285adab99e262566c",
+  "archive_root": "byedpi-0.17.3",
+  "recipe": "../build.rs",
+  "recipe_basis": "Upstream Makefile SRC (packets, main, conev, proxy, desync, mpool, extend). win_service.c is not compiled; src/byedpi.c stubs register_winsvc. main is renamed byedpi_main and signal byedpi_signal (a no-op), so the engine never installs process signal handlers.",
+  "patches": "Applied to the extracted copy in OUT_DIR, never to the archive; each site must match exactly once. All targets: on_accept checks fastcord_stop_requested (the waking connect stops the engine; upstream's SIGINT shutdown does not wake WSAPoll on Windows). MSVC only: four C99 variable-length arrays become _alloca or a fixed 33-byte buffer.",
+  "msvc_compat": "native/compat: msvc.h (force-included: ssize_t, strcasecmp, __attribute__), strings.h, and getopt.h/getopt.c, a small getopt_long that supports the optind rewinding byedpi's option groups use.",
+  "linkage": "Static. Windows additionally links mswsock (TransmitFile).",
+  "license_file": "LICENSE inside the archive; reproduced in docs/THIRD_PARTY_NOTICES.md"
+}

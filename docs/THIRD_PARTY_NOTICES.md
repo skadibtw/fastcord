@@ -364,6 +364,39 @@ encoder and its libraries are fixture-generation tools only and are not linked
 or redistributed in fastcord packages; `fixtures/video/gen_av1_fixture.py` and
 `av1-fixture.json` record their pinned provenance and regeneration command.
 
+## byedpi (blocking bypass)
+
+byedpi 0.17.3, https://github.com/hufrea/byedpi, is statically compiled from the
+release archive `crates/fastcord-bypass/native/byedpi-0.17.3.tar.gz`; the build
+verifies its SHA-256
+`0a9cb8585554c68c3e2be88c33c9bf6f99f8e8c7f54b362285adab99e262566c` and applies the
+small patches recorded in `native/byedpi-source.json` to its extracted copy. Its
+`LICENSE` is MIT:
+
+```text
+MIT License
+
+Copyright (c) 2024 hufrea
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Symphonia AAC decoder (MPL-2.0)
 
 Inline playback of AAC-LC audio in MP4 and WebM attachments (ADR 0008) uses `symphonia-codec-aac`
