@@ -11,7 +11,7 @@ block = { path = "vendor/block" }
 coreaudio-rs = { path = "vendor/coreaudio-rs" }
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2024"
 rust-version = "1.99"
 license = "GPL-3.0-only"
@@ -24,6 +24,7 @@ fastcord-platform = { path = "crates/fastcord-platform" }
 fastcord-media = { path = "crates/fastcord-media" }
 fastcord-audio = { path = "crates/fastcord-audio" }
 fastcord-video = { path = "crates/fastcord-video" }
+fastcord-bypass = { path = "crates/fastcord-bypass" }
 cc = "1"
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }
 # Linux screen capture (milestone 33): the ScreenCast portal (already in the

@@ -36,7 +36,7 @@ impl HttpTicketExchange {
         }
         let headers =
             crate::rest::identity_headers(properties).map_err(|_| RemoteAuthError::Connect)?;
-        let http = reqwest::Client::builder()
+        let http = fastcord_bypass::route_http(reqwest::Client::builder())
             .default_headers(headers)
             .use_rustls_tls()
             .https_only(true)

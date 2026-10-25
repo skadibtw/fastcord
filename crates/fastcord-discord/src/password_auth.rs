@@ -257,7 +257,7 @@ impl PasswordAuth {
             return Err(PasswordAuthError::Configuration);
         }
         let headers = identity_headers(properties).map_err(|_| PasswordAuthError::Configuration)?;
-        let http = reqwest::Client::builder()
+        let http = fastcord_bypass::route_http(reqwest::Client::builder())
             .use_rustls_tls()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())

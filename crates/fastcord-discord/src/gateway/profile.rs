@@ -132,7 +132,7 @@ async fn resolve_once<T: Clone>(
 }
 
 fn fetch_client() -> Option<reqwest::Client> {
-    reqwest::Client::builder()
+    fastcord_bypass::route_http(reqwest::Client::builder())
         .use_rustls_tls()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())

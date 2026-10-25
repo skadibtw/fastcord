@@ -75,6 +75,8 @@ pub struct Preferences {
     pub speech: crate::speech::Prefs,
     /// Closing the window hides it to the tray icon instead of quitting (off by default).
     pub close_to_tray: bool,
+    /// Discord through the embedded byedpi, applied at the next launch.
+    pub bypass: crate::desktop::Bypass,
 }
 
 impl Default for Preferences {
@@ -97,6 +99,7 @@ impl Default for Preferences {
             organize: crate::organize::Local::default(),
             speech: crate::speech::Prefs::default(),
             close_to_tray: false,
+            bypass: crate::desktop::Bypass::default(),
         }
     }
 }
@@ -428,6 +431,11 @@ fn decode(bytes: &[u8]) -> Option<Preferences> {
             .unwrap_or_default(),
         // Older settings predate the tray: closing quits.
         close_to_tray: value.get("close_to_tray").and_then(Value::as_bool) == Some(true),
+        // Older settings predate the bypass: off.
+        bypass: value
+            .get("bypass")
+            .map(crate::desktop::Bypass::from_json)
+            .unwrap_or_default(),
     })
 }
 
@@ -467,7 +475,7 @@ fn encode(prefs: &Preferences) -> io::Result<Vec<u8>> {
         Ok(json!({"id": id, "label": saved.label}))
     }
     let bytes = serde_json::to_vec(
-        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "notification_previews_off": prefs.notification_previews_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json(), "interface_sounds": prefs.interface_sounds, "interface_volume": prefs.interface_volume, "chat": prefs.chat.to_json(), "organize": prefs.organize.to_json(), "speech": prefs.speech.to_json(), "close_to_tray": prefs.close_to_tray}),
+        &json!({"input": selection(&prefs.input)?, "output": selection(&prefs.output)?, "noise_suppression": prefs.noise_suppression.persisted(), "echo_cancellation": prefs.echo_cancellation, "input_gain_db": prefs.input_gain.manual_db, "automatic_gain": prefs.input_gain.automatic, "notifications_off": prefs.notifications_off, "notification_previews_off": prefs.notification_previews_off, "voice_recording": prefs.voice_recording, "voice_input": prefs.voice_input.to_json(), "camera": {"id": prefs.camera.id, "label": prefs.camera.label, "effect": prefs.camera.effect.persisted(), "mirror": prefs.camera.mirror}, "soundboard": prefs.soundboard.to_json(), "interface_sounds": prefs.interface_sounds, "interface_volume": prefs.interface_volume, "chat": prefs.chat.to_json(), "organize": prefs.organize.to_json(), "speech": prefs.speech.to_json(), "close_to_tray": prefs.close_to_tray, "bypass": prefs.bypass.to_json()}),
     )?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(io::Error::other("audio settings exceed limit"));
@@ -497,6 +505,13 @@ fn save_to(path: &Path, prefs: &Preferences) -> io::Result<()> {
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, bytes)?;
     fs::rename(temporary, path)
+}
+
+/// The bypass setting, read before the interface starts.
+pub fn launch_bypass() -> crate::desktop::Bypass {
+    path()
+        .map(|path| load_from(&path).bypass)
+        .unwrap_or_default()
 }
 
 pub async fn load() -> Preferences {
@@ -617,6 +632,11 @@ mod tests {
                 rate: 160,
             },
             close_to_tray: true,
+            bypass: crate::desktop::Bypass {
+                on: true,
+                choice: crate::desktop::Choice::Custom,
+                options: "-d1 -f-1 -t5".to_owned(),
+            },
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);

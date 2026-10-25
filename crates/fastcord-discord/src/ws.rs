@@ -186,7 +186,7 @@ async fn connect_inner(
         .headers_mut()
         .insert("Origin", HeaderValue::from_static(origin));
     browser_headers(&mut request, browser);
-    let tcp = TcpStream::connect((host.as_str(), port))
+    let tcp = fastcord_bypass::connect(&host, port)
         .await
         .map_err(|_| ConnectError)?;
     tcp.set_nodelay(true).map_err(|_| ConnectError)?;

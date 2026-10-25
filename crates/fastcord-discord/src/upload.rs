@@ -404,7 +404,7 @@ impl Uploader {
     }
 
     fn build(local: bool) -> Result<Self, UploadError> {
-        let mut builder = reqwest::Client::builder()
+        let mut builder = fastcord_bypass::route_http(reqwest::Client::builder())
             .use_rustls_tls()
             // No default headers, cookies or credentials of any kind, and a
             // redirect would carry the body somewhere nobody validated.

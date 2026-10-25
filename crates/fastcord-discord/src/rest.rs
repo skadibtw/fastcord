@@ -282,7 +282,7 @@ impl<C: Clock> RestClient<C> {
         headers.insert(AUTHORIZATION, authorization(&token)?);
         // The token wrapper is zeroized here; HTTP internals necessarily own
         // their header copy. No default Debug path exposes that sensitive header.
-        let http = reqwest::Client::builder()
+        let http = fastcord_bypass::route_http(reqwest::Client::builder())
             .default_headers(headers)
             .use_rustls_tls()
             .https_only(true)

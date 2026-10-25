@@ -186,7 +186,7 @@ impl std::fmt::Display for AttachmentError {
 impl std::error::Error for AttachmentError {}
 
 fn build_http(local: bool) -> Result<reqwest::Client, AttachmentError> {
-    let mut builder = reqwest::Client::builder()
+    let mut builder = fastcord_bypass::route_http(reqwest::Client::builder())
         .use_rustls_tls()
         // No default headers, cookies, or credentials of any kind. Redirects
         // are followed below, one validated hop at a time.

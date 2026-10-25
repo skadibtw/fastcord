@@ -54,6 +54,8 @@ crates/
   fastcord-video/src/       # capture orchestration, codecs, packetization, frame pools
   fastcord-video/native/    # pinned dav1d source archive + provenance; built by build.rs
   fastcord-platform/src/    # credential store, OS capture/audio, native handles
+  fastcord-bypass/src/      # embedded byedpi engine and the process-wide route through it
+  fastcord-bypass/native/   # pinned byedpi source archive, provenance, MSVC compatibility shims
   fastcord-app/src/         # binary, iced UI, orchestration, settings, image cache
 assets/emoji/              # versioned index and attributed assets
 packaging/                 # platform launchers, icons, Info.plist, bundle layouts
@@ -74,12 +76,13 @@ docs/
 Dependency direction:
 
 - `model` has no application-crate dependencies and no GUI/runtime dependency.
-- `discord -> model`.
-- `media -> model`; contains no cpal, iced, capture, or video decoder dependency.
+- `bypass` has no workspace-crate dependency.
+- `discord -> model, bypass`.
+- `media -> model, bypass`; contains no cpal, iced, capture, or video decoder dependency.
 - `platform -> model` where common IDs/settings are needed; never depends on iced.
 - `audio -> model, media, platform`.
 - `video -> model, media, platform`; it does not depend on `audio`.
-- `app -> discord, audio, video, platform, model` and coordinates stream-audio routing through bounded channels.
+- `app -> discord, audio, video, platform, model, bypass` and coordinates stream-audio routing through bounded channels.
 
 Keep OS-specific modules inside `platform`, rather than creating a crate per operating system. `media` exposes session handles and owned encoded-frame buffers, not UI widgets. `video` exposes decoded-frame leases and capture status, not a renderer instance. iced/wgpu interop belongs to `app` so codec workers never acquire the UI's device directly.
 
@@ -219,6 +222,18 @@ Use a separate unauthenticated HTTP client for CDN resources. Do not forward `Au
 - Avatars and server icons (`cdn.discordapp.com/avatars|icons/{id}/{hash}.png?size=64`, default avatars `embed/avatars/{(id>>22)%6}.png`; `a_` hashes use the static PNG) share the fetcher, disk LRU and decode slots; decoded results up to 128 KiB are also kept as raw sized RGBA in a separate persistent per-account store (`images/<account>` beside the attachment cache; name = kind, id, CDN hash, box; 64 MiB, LRU by last use, trimmed every 32 writes; purged with the account), so a later launch or server switch is one small file read with no network, decode or resize; the UI keeps at most 256 decoded handles (24 MiB of pixels in all, which also holds embed pictures), requested only for the rows on screen, with the letter circle as fallback.
 - In-app attachment view supports images and common media formats included in the media build; other files expose type, name, size, and user-driven open/download. Inline playback (#74, #116) covers Ogg Opus audio (mono/stereo, 20 ms packets) through `fastcord-audio`'s `ogg` demuxer and `file_player`, and MP4/WebM files with H.264 or AV1 video and Opus audio through the bounded demuxers in `fastcord-video::container` (ADR 0007), the existing video decoders and the latest-frame playback path, with the audio clock as master. AAC-LC audio (mono/stereo) is decoded by the pure-Rust `symphonia-codec-aac` and re-encoded to 20 ms Opus packets for the same engine path (ADR 0008); HE-AAC and multichannel AAC play the video silently with a note, and VP8/VP9/HEVC video, MP3, FLAC and every other format remain Download/Open-only. Voice messages (#75): the player draws the attachment's `waveform`/`duration_secs` and recognizes the `1 << 13` message flag; recording (`fastcord-audio::recorder`, an input-only engine plus the Ogg Opus writer, preview through the file player, upload through the ordinary cloud-upload path with the voice flag) is an off-by-default compatibility-gated extension because official recording is mobile-only; see PROTOCOL.md "Voice messages (#75)".
 - Animated assets run only while visible and the window is active. Their timers stop when not needed.
+
+### 5.4 Blocking bypass (approved 2026-10-25)
+
+For networks whose DPI blocks Discord by its TLS server name, `fastcord-bypass` statically embeds [byedpi](https://github.com/hufrea/byedpi) 0.17.3 (MIT) from a pinned source archive, built by its `build.rs` like dav1d. byedpi is a local proxy that splits, reorders or adds decoy packets to the client's own connections; it needs no driver, administrator rights or system setting and is the same code on every OS (fake packets work on Windows and Linux only, upstream). Origin TLS stays end to end with normal certificate verification. zapret/zapret2 were rejected: no licence file, and they intercept packets per OS (WinDivert, nfqueue, pf) with administrator rights. The earlier WinDivert helper proposal (PR #119) was not merged.
+
+- **Setting.** Settings, Desktop, "Blocking bypass": off by default, plus a strategy list: Automatic (default), the built-in presets and "Only my options". "Advanced options" (shown only while ticked, never saved) reveals one field of byedpi options, at most 512 bytes, put before the chosen strategy (for "Only my options", the whole strategy). Saved as `bypass` (`on`, `choice` id, `options`) in the audio settings file; an unknown id reads as Automatic. It is reachable from the login screen, because a blocked network cannot sign in. It applies at the next launch: `main` starts the engine once, after the single-instance guard and before the first request, and the route never changes while running. The panel shows Off, On, "Not running: <reason>" (then everything is direct) or "Restart fastcord to apply".
+- **Presets** (`fastcord_bypass::presets`, ids never renamed): Split + TLS records `-s1 -r1+s`, Disorder `-d1`, Out-of-band byte `-o1 -r1+s`, Split at the server name `-s1 -d3+s -s6+s -r1+s`, and Fake packet `-d1 -f-1 -t5 -r1+s` (not on macOS, where byedpi has no fake packets): the desync families of zapret-discord-youtube's profiles expressed as byedpi options. Sequence-overlap and bad-checksum fakes need raw packets and are not offered.
+- **Automatic** is byedpi's own auto mode, not a client-side probe loop: `-T 2` then one `-A torst,ssl_err` group per preset after an empty first group, so each new destination address is first tried directly; when it does not answer within 2 seconds, resets or answers with a broken TLS handshake, byedpi resends the same buffered request with the next preset and remembers the one that worked for that address for the process lifetime. Direct plus five presets fits the 15 s WebSocket connect limit; there is no background probing and nothing runs while idle.
+- **Engine.** One engine per process on its own thread, listening on an ephemeral `127.0.0.1` port for SOCKS5 and HTTP CONNECT (`-G`); the listener options are appended after the strategy so a strategy cannot move it off loopback. byedpi resolves names itself, so local DNS answers are not used for routed hosts. Rejected options end the engine before it listens (`InvalidStrategy`). Stopping sets a flag and wakes the event loop with one connection.
+- **Routed.** Every production `reqwest` client (`route_http`: REST, login, remote-auth exchange, build-number fetch, CDN/attachments, uploads; HTTPS goes through CONNECT) and both WebSocket connects (`connect`: main/remote-auth Gateway and the voice Gateway). Fake mode never enables it and its clients keep `no_proxy`.
+- **Not routed.** Voice and video UDP still go directly; byedpi accepts SOCKS5 UDP ASSOCIATE, which is the way to add it if media turns out to be blocked too.
+- **VPN TUN caveat.** A VPN that captures traffic with a TUN adapter and dials "direct" itself (sing-box/Throne process rules) re-segments the stream, so desync has no effect; adding `-I <physical address>` to the strategy binds byedpi's sockets to the real interface.
 
 ## 6. Voice transport and DAVE
 

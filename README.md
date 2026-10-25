@@ -8,6 +8,12 @@ Status: early development. See [docs/SPEC.md](docs/SPEC.md) for the design and m
 
 The approved delivery order and issue links are in [docs/ROADMAP.md](docs/ROADMAP.md): finish and verify the three-platform MVP, then add everyday messaging and community features. Implemented features and passed live/native acceptance are tracked separately.
 
+## Download
+
+Builds are on the [Releases](https://github.com/skadibtw/fastcord/releases) page. On Windows, download `fastcord-v…-x86_64-pc-windows-msvc.exe` and run it (the `.zip` holds the same executable with the licences). It needs the [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe), which most PCs already have from other programs and games; if Windows says `VCRUNTIME140.dll` was not found, install it. Builds are unsigned, so SmartScreen may warn. Linux and macOS archives are `.tar.gz`; on macOS right-click the app and choose Open the first time.
+
+If your network blocks Discord, open **Settings (audio, desktop, blocking bypass)** on the login screen, tick **Blocking bypass** and restart fastcord; **Automatic** tries the built-in strategies until Discord answers.
+
 ## Build
 
 Requires Rust (pinned by `rust-toolchain.toml`), CMake (the audio engine builds the bundled libopus), on Windows Visual Studio Build Tools with the C++ workload, and on Linux the ALSA, VA-API and PipeWire development headers plus clang (`libasound2-dev libva-dev libpipewire-0.3-dev clang`).
@@ -19,7 +25,7 @@ cargo build --release -p fastcord-app
 
 ## Audio devices
 
-Open **Audio devices** from the login or account screen to choose microphone
+Open **Settings** on the login screen (or the **Audio settings** icon once signed in) to choose microphone
 input and playback output independently. **System default** follows the OS
 default during a call; an explicit device never falls back to another output
 (particularly speakers) when it disappears. A stopped direction is reported

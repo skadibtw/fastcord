@@ -1,0 +1,21 @@
+[package]
+name = "fastcord-bypass"
+description = "Embedded byedpi DPI-circumvention proxy and the process-wide route through it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[build-dependencies]
+cc.workspace = true
+flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
+
+[lints]
+workspace = true
