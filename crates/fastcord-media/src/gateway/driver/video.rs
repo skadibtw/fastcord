@@ -527,7 +527,10 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             .filter(|stream| stream.active && stream.ssrc != 0)
             .max_by_key(|stream| stream.quality)
             .map(|stream| stream.ssrc);
-        if streams.is_empty() {
+        // Only users with an active stream hold a slot: a camera turned off is
+        // announced with inactive streams, and keeping those filled the table
+        // so later cameras were never asked for.
+        if best.is_none() {
             video.remote.remove(&announced.user_id);
         } else if video.remote.len() < MAX_REMOTE_VIDEO_USERS
             || video.remote.contains_key(&announced.user_id)

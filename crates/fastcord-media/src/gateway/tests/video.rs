@@ -558,6 +558,36 @@ async fn receiver_reports_carry_loss_and_the_sender_report_echo() {
     );
 }
 
+/// Cameras that were turned off do not hold the remote-user table: after 16
+/// users announced inactive streams, a 17th active camera is still asked for.
+#[tokio::test(start_paused = true)]
+async fn inactive_cameras_do_not_crowd_out_a_new_one() {
+    let mut rig = start_viewer().await;
+    for user in 0..16u64 {
+        let ssrc = 7_000 + 2 * user;
+        rig.ws
+            .send(json!({"op": 12, "d": {
+                "user_id": (900 + user).to_string(), "audio_ssrc": 0,
+                "streams": [{"ssrc": ssrc, "rtx_ssrc": ssrc + 1, "quality": 100, "active": false}]
+            }}))
+            .await;
+    }
+    rig.ws
+        .send(json!({"op": 12, "d": {
+            "user_id": ALICE.0.to_string(), "audio_ssrc": 0,
+            "streams": [{"ssrc": 8_000, "rtx_ssrc": 8_001, "quality": 100, "active": true}]
+        }}))
+        .await;
+    let asked = tokio::time::timeout(Duration::from_secs(5), async {
+        while rig.ws.recv_op(15).await["d"]["8000"] != 100 {}
+    })
+    .await;
+    assert!(
+        asked.is_ok(),
+        "the active camera must be in Media Sink Wants"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn wants_follow_the_viewer_the_best_layer_and_a_leaving_streamer() {
     let mut rig = start_viewer().await;

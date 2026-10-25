@@ -32,6 +32,7 @@
 - Watching a stream copies each received video packet once less and grows the frame buffer once per frame instead of repeatedly (#179): the decrypted payload moves into the reassembly buffer (the retransmission header is stripped in place).
 - In the server Emoji, Stickers and Sounds panel the tabs are disabled while an upload or a file pick is in progress (#178). Switching tabs mid-request used to clear the wrong tab's draft (so the same emoji could be uploaded twice) or put a picked image into the Sounds draft.
 - A video sender that jumps its sequence numbers can no longer grow a stream's missing-packet table to about a million entries and make every received packet walk it (#177). The receive window from the oldest unplayed packet is now bounded at 2048 packets, like what it stores.
+- In a call where many people have turned their camera on and off, a newly turned-on camera is still requested (#175). Cameras announced as off no longer keep one of the 16 remote-video slots, so the 17th camera used to be drawn as a tile that never received video.
 
 ### Removed
 - The retired "Blocking bypass" setting is gone. Since the transport moved to `fastcord-net`, turning it on started nothing, yet the value was still stored, still displayed as on, and still accepted byedpi options such as `-I <address>`. The app no longer reads, writes or links `fastcord-bypass` at all; an old settings file loads normally and the stale `bypass` key disappears the next time preferences are saved.
