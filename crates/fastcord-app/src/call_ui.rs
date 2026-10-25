@@ -521,16 +521,22 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
         buttons,
     ]
     .spacing(6);
-    // Sharing is always visible while it lasts.
+    // Sharing is always visible while it lasts. The status carries the health
+    // line (fps, audio packets, copy-path reason), so it wraps inside the
+    // footer instead of being clipped by it.
     if !bar.share_text.is_empty() {
         content = content.push(
             row![
                 container(text(tr("LIVE")).size(9).font(BOLD))
                     .padding([1, 4])
                     .style(style::live_badge),
-                text(tr(&bar.share_text).to_owned()).size(11).wrapping(NAME),
+                text(tr(&bar.share_text).to_owned())
+                    .size(11)
+                    .wrapping(text::Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
             ]
             .spacing(6)
+            .width(Length::Fill)
             .align_y(iced::alignment::Vertical::Center),
         );
     }
