@@ -311,7 +311,7 @@ async fn every_frame_reassembles_through_the_receive_buffer() {
                 buffer.pop_frame(now).is_none(),
                 "{name}: early frame at {index}"
             );
-            buffer.push(now, header, payload).unwrap();
+            buffer.push(now, header, payload.as_slice()).unwrap();
         }
         let assembled = buffer
             .pop_frame(now)
@@ -354,7 +354,7 @@ async fn delivery_cases_emit_only_complete_frames_exactly_once() {
         for &index in &order {
             now += Duration::from_millis(1);
             let (header, payload) = &packets[index];
-            buffer.push(now, header, payload).unwrap();
+            buffer.push(now, header, payload.as_slice()).unwrap();
             drain(&mut buffer, now, &mut emitted);
         }
 
@@ -426,7 +426,7 @@ async fn malformed_vectors_never_produce_a_frame() {
             // Only an empty payload is refused outright; everything else is
             // the depacketizer's to judge.
             assert_eq!(
-                buffer.push(now, &header, &payload).is_err(),
+                buffer.push(now, &header, payload.as_slice()).is_err(),
                 payload.is_empty(),
                 "{name}: push"
             );
@@ -637,7 +637,7 @@ fn sealed_av1_datagrams_open_parse_and_reassemble_in_both_transport_modes() {
         for (index, packet) in opened.iter().enumerate() {
             match packet.repair {
                 None => buffer
-                    .push(now, &packet.stream_header, &packet.payload)
+                    .push(now, &packet.stream_header, packet.payload.as_slice())
                     .unwrap(),
                 // A repair repeats an original packet byte for byte.
                 Some(original) => assert!(
@@ -723,7 +723,7 @@ async fn transport_deliveries_are_requested_repaired_or_given_up_like_the_driver
             for &index in &order[..split] {
                 let packet = &opened[index];
                 buffer
-                    .push(start, &packet.stream_header, &packet.payload)
+                    .push(start, &packet.stream_header, packet.payload.as_slice())
                     .unwrap();
                 drain(&mut buffer, start, &mut emitted);
             }
@@ -771,7 +771,7 @@ async fn transport_deliveries_are_requested_repaired_or_given_up_like_the_driver
             for &index in &order[split..] {
                 let packet = &opened[index];
                 buffer
-                    .push(now, &packet.stream_header, &packet.payload)
+                    .push(now, &packet.stream_header, packet.payload.as_slice())
                     .unwrap();
                 drain(&mut buffer, now, &mut emitted);
             }

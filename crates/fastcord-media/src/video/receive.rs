@@ -94,7 +94,7 @@ impl ReceiveBuffer {
     }
 
     /// Everything buffered is dropped and the stream restarts at `header`.
-    fn restart(&mut self, now: Instant, header: &RtpHeader, payload: &[u8]) {
+    fn restart(&mut self, now: Instant, header: &RtpHeader, payload: Vec<u8>) {
         self.packets.clear();
         self.bytes = 0;
         self.gaps.clear();
@@ -107,27 +107,29 @@ impl ReceiveBuffer {
         self.store(now, sequence, header, payload);
     }
 
-    fn store(&mut self, now: Instant, sequence: u64, header: &RtpHeader, payload: &[u8]) {
+    fn store(&mut self, now: Instant, sequence: u64, header: &RtpHeader, payload: Vec<u8>) {
         self.bytes += payload.len();
         self.packets.insert(
             sequence,
             Stored {
                 timestamp: header.timestamp,
                 marker: header.marker,
-                payload: payload.to_vec(),
+                payload,
             },
         );
         self.waiting_since.get_or_insert(now);
     }
 
     /// Adds one packet of the stream. Duplicates and packets from before the
-    /// frontier are dropped silently.
+    /// frontier are dropped silently. An owned payload is stored without a
+    /// copy (the receive path hands over the buffer it decrypted into).
     pub(crate) fn push(
         &mut self,
         now: Instant,
         header: &RtpHeader,
-        payload: &[u8],
+        payload: impl Into<Vec<u8>>,
     ) -> Result<(), VideoError> {
+        let payload = payload.into();
         if payload.is_empty() || payload.len() > MAX_PAYLOAD {
             return Err(VideoError::Malformed);
         }
@@ -386,7 +388,7 @@ mod tests {
             .push(
                 now,
                 &header(sequence, timestamp, marker),
-                &[sequence as u8, 1, 2],
+                [sequence as u8, 1, 2],
             )
             .unwrap();
     }
@@ -583,7 +585,7 @@ mod tests {
         // Packets of one endless frame, never closed by a marker.
         let mut refused = 0;
         for sequence in 0..(MAX_PACKETS as u32 + 10) {
-            let result = buffer.push(now, &header(sequence as u16, 100, false), &[0x41; 1500]);
+            let result = buffer.push(now, &header(sequence as u16, 100, false), [0x41; 1500]);
             if result.is_err() {
                 refused += 1;
             }
@@ -594,11 +596,11 @@ mod tests {
         // Invalid payloads are refused before any state changes.
         let mut fresh = ReceiveBuffer::new();
         assert_eq!(
-            fresh.push(now, &header(1, 1, true), &[]),
+            fresh.push(now, &header(1, 1, true), []),
             Err(VideoError::Malformed)
         );
         assert_eq!(
-            fresh.push(now, &header(1, 1, true), &[0; MAX_PAYLOAD + 1]),
+            fresh.push(now, &header(1, 1, true), vec![0; MAX_PAYLOAD + 1]),
             Err(VideoError::Malformed)
         );
         assert_eq!(fresh.buffered_bytes(), 0);

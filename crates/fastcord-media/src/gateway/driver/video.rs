@@ -664,8 +664,9 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             Counters::add(&counters.rejected_malformed, 1);
             return;
         };
-        let (primary, media_payload, sequence) = match (owner.kind, rtx) {
-            (StreamKind::Video, false) => (header.ssrc, &packet.payload[..], header.sequence),
+        // The RTX header (the original sequence) is stripped in place below.
+        let (primary, skip, sequence) = match (owner.kind, rtx) {
+            (StreamKind::Video, false) => (header.ssrc, 0, header.sequence),
             (StreamKind::Retransmission, true) => {
                 let Some(primary) = self.ssrcs.primary_of(header.ssrc) else {
                     Counters::add(&counters.rejected_malformed, 1);
@@ -680,7 +681,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     Counters::add(&counters.rejected_malformed, 1);
                     return;
                 }
-                (primary, payload, u16::from_be_bytes(*original))
+                (primary, 2, u16::from_be_bytes(*original))
             }
             // Audio SSRC, or media on the wrong stream.
             _ => {
@@ -718,6 +719,8 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         } else {
             receiver.stats.note_packet(now, sequence, header.timestamp);
         }
+        let mut media_payload = packet.payload;
+        media_payload.drain(..skip);
         if receiver
             .buffer
             .push(now, &stream_header, media_payload)
@@ -758,7 +761,8 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             return;
         };
         let payloads: Vec<&[u8]> = assembled.payloads.iter().map(Vec::as_slice).collect();
-        let mut sealed = Vec::new();
+        // Depacketizing adds at most a start code per packet: grow once.
+        let mut sealed = Vec::with_capacity(payloads.iter().map(|payload| payload.len() + 4).sum());
         let depacketized = match receiver.codec {
             VideoCodec::H264 => {
                 h264::depacketize(&payloads, &mut sealed).map(|()| h264::is_keyframe(&sealed))

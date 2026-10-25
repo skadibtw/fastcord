@@ -211,7 +211,7 @@ async fn a_lost_fragment_is_requested_and_repaired_by_rtx_into_the_exact_frame()
     let mut buffer = ReceiveBuffer::new();
     for (index, (header, payload)) in media.iter().enumerate() {
         if index != 1 {
-            buffer.push(now, header, payload).unwrap();
+            buffer.push(now, header, payload.as_slice()).unwrap();
         }
     }
     assert!(buffer.pop_frame(now).is_none());
@@ -230,7 +230,7 @@ async fn a_lost_fragment_is_requested_and_repaired_by_rtx_into_the_exact_frame()
         .push(
             now + Duration::from_millis(30),
             &repaired_header,
-            &repaired_payload,
+            repaired_payload.as_slice(),
         )
         .unwrap();
     let assembled = buffer.pop_frame(now + Duration::from_millis(30)).unwrap();
@@ -259,7 +259,7 @@ async fn reordering_across_the_sequence_wrap_and_duplicates_change_nothing() {
     let mut buffer = ReceiveBuffer::new();
     for index in [0, 3, 1, 4, 2, 2, 0, 4] {
         let (header, payload) = packet(index);
-        buffer.push(now, &header, &payload).unwrap();
+        buffer.push(now, &header, payload.as_slice()).unwrap();
     }
     assert_eq!(
         join(&buffer.pop_frame(now).unwrap().payloads).unwrap(),
@@ -276,7 +276,7 @@ async fn an_unrepaired_loss_never_yields_a_partial_frame() {
     let mut buffer = ReceiveBuffer::new();
     for (index, (header, payload)) in media.iter().enumerate() {
         if index != 2 {
-            buffer.push(now, header, payload).unwrap();
+            buffer.push(now, header, payload.as_slice()).unwrap();
         }
     }
     assert!(buffer.pop_frame(now + FRAME_DEADLINE).is_none());
