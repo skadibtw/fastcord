@@ -1306,6 +1306,16 @@ fn anomaly_lines(
         "inbound: packets that failed decryption (end-to-end keys out of step) in the last second",
     );
     grew(
+        transport.audio_without_dave,
+        t.audio_without_dave,
+        "inbound: audio dropped because no end-to-end session was installed, in the last second",
+    );
+    grew(
+        engine.plc_frames,
+        e.plc_frames,
+        "playback: audio concealed after loss or a late packet (PLC frames) in the last second",
+    );
+    grew(
         transport.dropped_unknown_ssrc,
         t.dropped_unknown_ssrc,
         "inbound: packets from an unannounced speaker dropped",
@@ -1351,5 +1361,23 @@ mod anomaly_tests {
         let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &failing);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("failed decryption") && lines[0].ends_with(": 40"));
+
+        // "No session at all" and "the session rejected the packet" are
+        // different problems and must not look the same in the log.
+        let without = fastcord_media::gateway::TransportStats {
+            audio_without_dave: 7,
+            ..transport
+        };
+        let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &without);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("no end-to-end session") && lines[0].ends_with(": 7"));
+
+        let concealed = fastcord_audio::EngineStats {
+            plc_frames: 12,
+            ..engine
+        };
+        let lines = anomaly_lines(Some(&engine), &concealed, Some(&transport), &transport);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("PLC frames") && lines[0].ends_with(": 12"));
     }
 }

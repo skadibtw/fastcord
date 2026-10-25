@@ -1151,7 +1151,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             return;
         }
         let Some(dave) = self.dave.as_mut() else {
-            Counters::add(&self.ch.counters.rejected_authentication, 1);
+            Counters::add(&self.ch.counters.audio_without_dave, 1);
             return;
         };
         let payload = match dave.decrypt_opus(owner.user_id.0, &audio.payload) {

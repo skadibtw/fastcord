@@ -1152,6 +1152,8 @@ async fn received_media_requires_dave_decryption_after_ssrc_attribution() {
     );
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(harness.session.next_audio().now_or_never().is_none());
+    // This packet fails the transport cipher before it can reach the DAVE gate,
+    // which is the counter this test exists for.
     assert_eq!(harness.session.stats().rejected_authentication, 1);
 
     udp.send(server_rtp(&mut sender, 556, 2, b"unannounced"));

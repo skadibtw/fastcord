@@ -447,6 +447,10 @@ pub struct TransportStats {
     pub keyframe_requests_sent: u64,
     /// Opus frames not sent because DAVE had no send key yet.
     pub audio_waiting_for_keys: u64,
+    /// Inbound audio dropped because no DAVE session was installed at all,
+    /// as opposed to [`Self::rejected_authentication`], where a session exists
+    /// and the packet did not authenticate against it.
+    pub audio_without_dave: u64,
 }
 
 #[derive(Default)]
@@ -468,6 +472,7 @@ pub(crate) struct Counters {
     pub(crate) nack_sequences_sent: AtomicU64,
     pub(crate) keyframe_requests_sent: AtomicU64,
     pub(crate) audio_waiting_for_keys: AtomicU64,
+    pub(crate) audio_without_dave: AtomicU64,
 }
 
 impl Counters {
@@ -495,6 +500,7 @@ impl Counters {
             nack_sequences_sent: get(&self.nack_sequences_sent),
             keyframe_requests_sent: get(&self.keyframe_requests_sent),
             audio_waiting_for_keys: get(&self.audio_waiting_for_keys),
+            audio_without_dave: get(&self.audio_without_dave),
         }
     }
 }
