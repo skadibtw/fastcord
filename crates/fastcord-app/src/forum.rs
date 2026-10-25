@@ -414,7 +414,7 @@ impl State {
                 let uploaded = if files.is_empty() {
                     Vec::new()
                 } else {
-                    let uploader = Uploader::new().map_err(Failure::Upload)?;
+                    let uploader = Uploader::new(client.network()).map_err(Failure::Upload)?;
                     client
                         .upload_files(&uploader, forum, &files, progress)
                         .await
@@ -847,6 +847,7 @@ mod tests {
 
     fn client() -> RestClient {
         RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-forum-credential".into()),
             ClientProperties::bundled(HostOs::Linux, "en-US"),
         )

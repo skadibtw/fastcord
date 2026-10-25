@@ -24,7 +24,7 @@ use super::stream_video::{Sink, StatusSink, StreamDecoder, StreamStatus};
 /// released while hidden. The gate owner updates the atomic before publishing
 /// actual changes to the watch; coalesced hide/show pulses also reset decoding.
 pub(super) async fn run(
-    credentials: StreamCredentials,
+    connection: (fastcord_net::NetworkContext, StreamCredentials),
     visible: Arc<AtomicBool>,
     visibility: watch::Receiver<bool>,
     sink: Sink,
@@ -32,16 +32,18 @@ pub(super) async fn run(
     controls: watch::Receiver<VoiceControls>,
     presentation: Arc<crate::playback::Session>,
 ) {
+    let (network, credentials) = connection;
     (status)(StreamStatus::Connecting);
-    let session = match connect_with_video(credentials.voice_credentials(), watch_options()) {
-        Ok(session) => session,
-        Err(error) => {
-            (status)(StreamStatus::Failed(format!(
-                "Could not start stream session: {error}"
-            )));
-            return;
-        }
-    };
+    let session =
+        match connect_with_video(network, credentials.voice_credentials(), watch_options()) {
+            Ok(session) => session,
+            Err(error) => {
+                (status)(StreamStatus::Failed(format!(
+                    "Could not start stream session: {error}"
+                )));
+                return;
+            }
+        };
     pump(
         session,
         visible,

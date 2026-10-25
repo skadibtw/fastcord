@@ -99,7 +99,7 @@ pub struct AttachmentCache {
     root: Arc<PathBuf>,
     /// Sized public images (`thumbs`): a sibling tree with its own byte bound.
     thumbs: Arc<PathBuf>,
-    http: reqwest::Client,
+    http: fastcord_net::HttpClient,
     decoded: Arc<Mutex<DecodedLru>>,
     fetch_slots: Arc<tokio::sync::Semaphore>,
     decode_slots: Arc<tokio::sync::Semaphore>,
@@ -196,8 +196,20 @@ impl std::fmt::Display for AttachmentError {
 
 impl std::error::Error for AttachmentError {}
 
-fn build_http(local: bool, user_agent: &str) -> Result<reqwest::Client, AttachmentError> {
-    let builder = fastcord_bypass::route_http(reqwest::Client::builder())
+fn build_http(
+    network: &fastcord_net::NetworkContext,
+    local: bool,
+    user_agent: &str,
+) -> Result<fastcord_net::HttpClient, AttachmentError> {
+    let builder = network.http_builder(fastcord_net::Role::Cdn);
+    #[cfg(test)]
+    let builder = if local {
+        network.debug_loopback_http_builder(fastcord_net::Role::Cdn)
+    } else {
+        builder
+    };
+    let builder = builder
+        .map_err(|_| AttachmentError::Network)?
         .use_rustls_tls()
         // Only the public `User-Agent`: no cookies, credentials or identity
         // headers. Redirects are followed below, one validated hop at a time.
@@ -213,17 +225,23 @@ fn build_http(local: bool, user_agent: &str) -> Result<reqwest::Client, Attachme
 
 impl AttachmentCache {
     pub fn new(
+        network: &fastcord_net::NetworkContext,
         account: Snowflake,
         root: PathBuf,
         user_agent: &str,
     ) -> Result<Self, AttachmentError> {
-        Self::with_http(account, root, build_http(false, user_agent)?, false)
+        Self::with_http(
+            account,
+            root,
+            build_http(network, false, user_agent)?,
+            false,
+        )
     }
 
     fn with_http(
         account: Snowflake,
         root: PathBuf,
-        http: reqwest::Client,
+        http: fastcord_net::HttpClient,
         allow_local_http: bool,
     ) -> Result<Self, AttachmentError> {
         Ok(Self {
@@ -248,15 +266,20 @@ impl AttachmentCache {
         Self::with_http(
             account,
             root,
-            build_http(true, TEST_USER_AGENT).unwrap(),
+            build_http(&fastcord_net::NetworkContext::off(), true, TEST_USER_AGENT).unwrap(),
             true,
         )
         .unwrap()
     }
 
-    pub fn default_root(account: Snowflake, user_agent: &str) -> Result<Self, AttachmentError> {
+    pub fn default_root(
+        network: &fastcord_net::NetworkContext,
+        account: Snowflake,
+        user_agent: &str,
+    ) -> Result<Self, AttachmentError> {
         let base = cache_base().ok_or(AttachmentError::CacheUnavailable)?;
         Self::new(
+            network,
             account,
             base.join(crate::audio_devices::app_dir_name())
                 .join("attachments"),
@@ -925,7 +948,7 @@ fn prepare_root(root: &Path, prepared: &AtomicBool) -> Result<(), AttachmentErro
 /// each hop must again be an HTTPS URL without embedded credentials. Only the
 /// public `User-Agent` (a client default) and `accept` are sent.
 async fn send_following_redirects(
-    http: &reqwest::Client,
+    http: &fastcord_net::HttpClient,
     raw_url: &str,
     allow_local_http: bool,
     accept: &'static str,
@@ -1661,7 +1684,13 @@ mod tests {
     #[tokio::test]
     async fn plain_http_outside_the_loopback_test_harness_is_rejected() {
         let root = scratch("https-only");
-        let cache = AttachmentCache::new(ACCOUNT, root.clone(), TEST_USER_AGENT).unwrap();
+        let cache = AttachmentCache::new(
+            &fastcord_net::NetworkContext::off(),
+            ACCOUNT,
+            root.clone(),
+            TEST_USER_AGENT,
+        )
+        .unwrap();
         for url in [
             "http://cdn.discordapp.com/a.png",
             "https://user:secret@cdn.discordapp.com/a.png",

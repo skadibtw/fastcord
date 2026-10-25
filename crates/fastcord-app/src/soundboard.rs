@@ -722,6 +722,7 @@ mod tests {
         use fastcord_discord::UserToken;
         use fastcord_discord::gateway::{ClientProperties, HostOs};
         RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-soundboard-credential".into()),
             ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
@@ -730,7 +731,13 @@ mod tests {
 
     fn cache() -> AttachmentCache {
         let root = std::env::temp_dir().join(format!("fastcord-soundboard-{}", std::process::id()));
-        AttachmentCache::new(Snowflake(1), root, "Mozilla/5.0 test").unwrap()
+        AttachmentCache::new(
+            &fastcord_net::NetworkContext::off(),
+            Snowflake(1),
+            root,
+            "Mozilla/5.0 test",
+        )
+        .unwrap()
     }
 
     fn sound(id: u64, name: &str, available: bool) -> SoundboardSound {

@@ -806,6 +806,7 @@ mod tests {
         use fastcord_discord::UserToken;
         use fastcord_discord::gateway::{ClientProperties, HostOs};
         RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-apps-credential".into()),
             ClientProperties::bundled(HostOs::Linux, "en-US"),
         )

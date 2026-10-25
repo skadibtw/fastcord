@@ -3,6 +3,7 @@
 //! The production implementation uses the account's REST client and a rustls
 //! WebSocket; tests substitute an in-process server.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{Sink, Stream};
@@ -37,6 +38,16 @@ pub(crate) trait Transport: Send + Sync + 'static {
         + Send
         + 'static;
 
+    /// Production returns the REST client's ledger, which survives replacement
+    /// Gateway tasks. Isolated fake transports may use a fresh test ledger.
+    fn retry_ledger(&self) -> Arc<super::RetryLedger> {
+        Arc::default()
+    }
+
+    fn note_service_reachable(&self) {}
+
+    fn note_session_healthy(&self) {}
+
     /// `GET /gateway`: the base WebSocket URL.
     fn discover(&self) -> impl Future<Output = Result<String, DiscoverError>> + Send;
 
@@ -60,10 +71,13 @@ pub(crate) fn websocket_config() -> WebSocketConfig {
 }
 
 pub(crate) async fn connect_tls(
+    network: &fastcord_net::NetworkContext,
     url: &GatewayUrl,
     browser: &ClientProperties,
 ) -> Result<TlsSocket, ConnectError> {
     ws::connect(
+        network,
+        fastcord_net::Role::Gateway,
         url.as_str(),
         ORIGIN,
         browser,
@@ -91,6 +105,24 @@ impl LiveTransport {
 impl Transport for LiveTransport {
     type Socket = TlsSocket;
 
+    fn retry_ledger(&self) -> Arc<super::RetryLedger> {
+        self.rest.gateway_retries()
+    }
+
+    fn note_service_reachable(&self) {
+        self.rest
+            .network()
+            .controller()
+            .note_service_reachable(fastcord_net::Role::Gateway);
+    }
+
+    fn note_session_healthy(&self) {
+        self.rest
+            .network()
+            .controller()
+            .note_session_healthy(fastcord_net::Role::Gateway);
+    }
+
     async fn discover(&self) -> Result<String, DiscoverError> {
         match self
             .rest
@@ -107,7 +139,7 @@ impl Transport for LiveTransport {
     }
 
     async fn connect(&self, url: &GatewayUrl) -> Result<TlsSocket, ConnectError> {
-        connect_tls(url, &self.rest.identity().properties()).await
+        connect_tls(self.rest.network(), url, &self.rest.identity().properties()).await
     }
 
     async fn authentication_required(&self) {

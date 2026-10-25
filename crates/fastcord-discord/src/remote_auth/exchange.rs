@@ -23,20 +23,25 @@ pub(crate) trait TicketExchange: Send + Sync {
 }
 
 pub(crate) struct HttpTicketExchange {
-    http: reqwest::Client,
+    http: fastcord_net::HttpClient,
 }
 
 impl HttpTicketExchange {
     /// The exchange carries the same identity headers as every other request,
     /// like the password login.
-    pub(crate) fn new(properties: &ClientProperties) -> Result<Self, RemoteAuthError> {
+    pub(crate) fn new(
+        network: &fastcord_net::NetworkContext,
+        properties: &ClientProperties,
+    ) -> Result<Self, RemoteAuthError> {
         #[cfg(feature = "fake-discord")]
         if crate::fake_origin::active() {
             return Err(RemoteAuthError::Connect);
         }
         let headers =
             crate::rest::identity_headers(properties).map_err(|_| RemoteAuthError::Connect)?;
-        let http = fastcord_bypass::route_http(reqwest::Client::builder())
+        let http = network
+            .http_builder(fastcord_net::Role::Login)
+            .map_err(|_| RemoteAuthError::Connect)?
             .default_headers(headers)
             .use_rustls_tls()
             .https_only(true)

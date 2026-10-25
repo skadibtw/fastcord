@@ -14,7 +14,7 @@ const BODY_BYTE_BUDGET: usize = 256 * 1024;
 /// at the next login attempt rather than never.
 // ponytail: one per process, not persisted; persist it beside the installation
 // id if a capture shows the official client keeps it across launches.
-pub(crate) async fn fingerprint(http: &reqwest::Client) -> Option<String> {
+pub(crate) async fn fingerprint(http: &fastcord_net::HttpClient) -> Option<String> {
     static FINGERPRINT: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
     FINGERPRINT
         .get_or_try_init(|| async { fetch(http).await.ok_or(()) })
@@ -23,7 +23,7 @@ pub(crate) async fn fingerprint(http: &reqwest::Client) -> Option<String> {
         .cloned()
 }
 
-async fn fetch(http: &reqwest::Client) -> Option<String> {
+async fn fetch(http: &fastcord_net::HttpClient) -> Option<String> {
     let mut request = http
         .get(format!("{}/experiments", crate::route::api_base()))
         .build()

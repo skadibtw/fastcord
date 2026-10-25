@@ -369,6 +369,7 @@ fn session_end_text(status: VoiceStatus) -> Option<String> {
 /// the share worker's pictures flow out through the connection's frame queue,
 /// and its feedback (keyframe requests, bitrate, pause) flows back in.
 pub(super) async fn run(
+    network: fastcord_net::NetworkContext,
     credentials: StreamCredentials,
     control: ShareControl,
     progress: Arc<watch::Sender<ShareProgress>>,
@@ -376,16 +377,19 @@ pub(super) async fn run(
 ) {
     control.set_negotiated(false);
     progress.send_modify(|progress| progress.connection = Connection::Connecting);
-    let mut session =
-        match connect_with_video(credentials.voice_credentials(), VideoOptions::share(SEND)) {
-            Ok(session) => session,
-            Err(error) => {
-                progress.send_modify(|progress| {
-                    progress.fail(format!("Could not start the stream session: {error}."));
-                });
-                return;
-            }
-        };
+    let mut session = match connect_with_video(
+        network,
+        credentials.voice_credentials(),
+        VideoOptions::share(SEND),
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            progress.send_modify(|progress| {
+                progress.fail(format!("Could not start the stream session: {error}."));
+            });
+            return;
+        }
+    };
     // Until H.264 is negotiated the share only captures; attaching resets the
     // stream to a keyframe.
     control.attach(sink(session.media()));

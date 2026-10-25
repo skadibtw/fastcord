@@ -242,11 +242,13 @@ impl fmt::Debug for RestResponse {
 /// A 401, account verification/challenge, or explicit stop permanently cancels
 /// queued and in-flight work, including reads and Gateway reconnection.
 pub struct RestClient<C = MonotonicClock> {
-    http: reqwest::Client,
     /// The profile this client and the account's Gateway share.
     identity: Identity,
     /// Current UI location, shared by all requests/clones, bounded to two IDs.
     location: Arc<Mutex<Option<ChannelLocation>>>,
+    network: fastcord_net::NetworkContext,
+    http: fastcord_net::HttpClient,
+    gateway_retries: Arc<crate::gateway::RetryLedger>,
     limiter: RateLimiter<C>,
     writes_restricted: Arc<AtomicBool>,
     /// Bitmask of enabled `WriteGroup`s, shared by clones.
@@ -257,9 +259,11 @@ pub struct RestClient<C = MonotonicClock> {
 impl<C> Clone for RestClient<C> {
     fn clone(&self) -> Self {
         Self {
+            network: self.network.clone(),
             http: self.http.clone(),
             identity: self.identity.clone(),
             location: self.location.clone(),
+            gateway_retries: self.gateway_retries.clone(),
             limiter: self.limiter.clone(),
             writes_restricted: self.writes_restricted.clone(),
             enabled_writes: self.enabled_writes.clone(),
@@ -269,13 +273,18 @@ impl<C> Clone for RestClient<C> {
 }
 
 impl RestClient {
-    pub fn new(token: UserToken, properties: ClientProperties) -> Result<Self, RestError> {
-        Self::with_clock(token, MonotonicClock::default(), properties)
+    pub fn new(
+        network: fastcord_net::NetworkContext,
+        token: UserToken,
+        properties: ClientProperties,
+    ) -> Result<Self, RestError> {
+        Self::with_clock(network, token, MonotonicClock::default(), properties)
     }
 }
 
 impl<C: Clock> RestClient<C> {
     pub fn with_clock(
+        network: fastcord_net::NetworkContext,
         token: UserToken,
         clock: C,
         properties: ClientProperties,
@@ -287,7 +296,15 @@ impl<C: Clock> RestClient<C> {
         headers.insert(AUTHORIZATION, authorization(&token)?);
         // The token wrapper is zeroized here; HTTP internals necessarily own
         // their header copy. No default Debug path exposes that sensitive header.
-        let http = fastcord_bypass::route_http(reqwest::Client::builder())
+        let http = network.http_builder(fastcord_net::Role::Rest);
+        #[cfg(feature = "fake-discord")]
+        let http = if crate::fake_origin::active() {
+            network.debug_loopback_http_builder(fastcord_net::Role::Rest)
+        } else {
+            http
+        };
+        let http = http
+            .map_err(|_| RestError::ClientConfiguration)?
             .default_headers(headers)
             .use_rustls_tls()
             .https_only(true)
@@ -303,9 +320,11 @@ impl<C: Clock> RestClient<C> {
         };
         let http = http.build().map_err(|_| RestError::ClientConfiguration)?;
         Ok(Self {
+            network,
             http,
             identity: Identity::new(properties),
             location: Arc::default(),
+            gateway_retries: Arc::default(),
             limiter: RateLimiter::new(clock),
             writes_restricted: Arc::new(AtomicBool::new(false)),
             enabled_writes: Arc::new(AtomicU64::new(WriteGroup::default_mask())),
@@ -330,6 +349,15 @@ impl<C: Clock> RestClient<C> {
         location: Option<(Option<fastcord_model::Snowflake>, fastcord_model::Snowflake)>,
     ) {
         *self.location.lock().unwrap_or_else(|e| e.into_inner()) = location;
+    }
+
+    /// Process-scoped transport policy, shared with every account worker.
+    pub fn network(&self) -> &fastcord_net::NetworkContext {
+        &self.network
+    }
+
+    pub(crate) fn gateway_retries(&self) -> Arc<crate::gateway::RetryLedger> {
+        self.gateway_retries.clone()
     }
 
     pub fn stop_authenticated_work(&self) {
@@ -668,9 +696,9 @@ fn base_headers(properties: &ClientProperties) -> Result<HeaderMap, RestError> {
     Ok(headers)
 }
 
-fn network_error(error: reqwest::Error) -> RestError {
-    RestError::Retryable(RetryableFailure::Network(NetworkFailure::from_reqwest(
-        &error,
+fn network_error(error: impl Into<fastcord_net::HttpError>) -> RestError {
+    RestError::Retryable(RetryableFailure::Network(NetworkFailure::from_http(
+        &error.into(),
     )))
 }
 
@@ -752,6 +780,7 @@ mod tests {
     #[test]
     fn every_request_carries_the_identity_as_it_is_now() {
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-test-credential".to_owned()),
             ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
@@ -785,6 +814,7 @@ mod tests {
     fn referer_tracks_the_visible_location_across_clones_and_requests() {
         use fastcord_model::Snowflake;
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("t".to_owned()),
             ClientProperties::bundled(HostOs::Windows, "en-US"),
         )
@@ -816,6 +846,7 @@ mod tests {
     #[test]
     fn the_locale_header_follows_the_account_setting_but_language_does_not() {
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("t".to_owned()),
             ClientProperties::bundled(HostOs::Windows, "ru-RU"),
         )
@@ -842,6 +873,7 @@ mod tests {
         // A new account never inherits the previous account's locale: the
         // identity is created with the session's client.
         let other = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("t".to_owned()),
             ClientProperties::bundled(HostOs::Windows, "ru-RU"),
         )
@@ -875,7 +907,12 @@ mod tests {
                 .is_some()
         );
 
-        let client = RestClient::new(UserToken::new("t".to_owned()), properties).unwrap();
+        let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
+            UserToken::new("t".to_owned()),
+            properties,
+        )
+        .unwrap();
         let get = RestRequest::new(
             Route::new(Method::GET, "/users/@me").unwrap(),
             Priority::UserRead,
@@ -912,7 +949,11 @@ mod tests {
                 assert_eq!(error, RestError::ClientConfiguration);
                 assert!(!format!("{error:?}: {error}").contains(token.expose_secret()));
                 assert!(matches!(
-                    RestClient::new(UserToken::new(token.expose_secret().to_owned()), properties,),
+                    RestClient::new(
+                        fastcord_net::NetworkContext::off(),
+                        UserToken::new(token.expose_secret().to_owned()),
+                        properties,
+                    ),
                     Err(RestError::ClientConfiguration)
                 ));
             }
@@ -922,6 +963,7 @@ mod tests {
     #[tokio::test]
     async fn an_account_challenge_stops_reads_writes_and_clones() {
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-test-credential".to_owned()),
             ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
@@ -966,6 +1008,7 @@ mod tests {
 
         for code in [40002, 40012, 50178] {
             let client = RestClient::new(
+                fastcord_net::NetworkContext::off(),
                 UserToken::new("offline-test-credential".to_owned()),
                 ClientProperties::bundled(HostOs::Linux, "en-US"),
             )
@@ -993,6 +1036,7 @@ mod tests {
     #[test]
     fn resource_permissions_do_not_stop_the_account() {
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-test-credential".to_owned()),
             ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
@@ -1024,6 +1068,7 @@ mod tests {
     fn slow_down_codes_pause_writes_not_reads_and_40003_also_blocks_dm_opens() {
         let clock = ManualClock::default();
         let client = RestClient::with_clock(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-test-credential".to_owned()),
             clock.clone(),
             ClientProperties::bundled(HostOs::Linux, "en-US"),
@@ -1145,6 +1190,7 @@ mod tests {
     async fn stopped_client_and_clones_never_dispatch_even_a_post() {
         let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-test-credential".to_owned()),
             properties,
         )
@@ -1168,6 +1214,7 @@ mod tests {
 
         let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-test-credential".to_owned()),
             properties,
         )

@@ -999,3 +999,7 @@ Only the groups listed under "On by default" in PROTOCOL.md "Write allowlist" se
   - [ ] Whether voice/video UDP is blocked on such a network; if so, route it through byedpi's SOCKS5 UDP ASSOCIATE.
   - [ ] Linux and macOS builds and a run on each (CI builds them; macOS has no fake packets upstream).
   - [ ] A filtered network without a VPN TUN, with the default strategy and no `-I`.
+## Network recovery extension
+
+Implementation, deterministic tests, the Windows UI launch and outstanding live
+gates for M92–M96 are recorded in [NETWORK_TESTING.md](NETWORK_TESTING.md).

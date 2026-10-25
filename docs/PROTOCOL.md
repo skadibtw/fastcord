@@ -1059,3 +1059,91 @@ Every non-GET request passes `RestClient::check_write` (`fastcord-discord/src/wr
 **Off by default (turn on one at a time under Settings, Advanced, Test unverified actions; session only, fake mode turns all on):** Message extras; File uploads (`POST /channels/{c}/attachments`); Pins; Poll votes; Application interactions (`POST /interactions`); Ring a call; Soundboard play; Open a DM by typed ID (`POST /users/@me/channels`); Group DM management; Relationships, ignore and message requests; Friend request by username (`POST /users/@me/relationships`); Join or leave a server (`POST /invites/{code}`, `DELETE /users/@me/guilds/{g}`); Create and revoke invites; Profile and connections; Status and privacy settings (`PATCH /users/@me/settings`, `/users/@me/guilds/{g}/settings`); Log out sessions; Deauthorize an app; Reports; Server administration; Channels; Roles and permission overwrites; Moderation (members, bans, bulk delete, others' reactions); AutoMod; Community and onboarding setup; Accept rules and onboarding answers; Scheduled events; Announcements; Emoji, stickers and sounds; Webhooks and integrations; Stage voice states and instances; Threads and forum posts; Other, unclassified writes. The exact routes of each group are listed in the switch and in `WriteGroup::routes`.
 
 The refusal text is "Not yet verified on a live account. Enable it under Settings → Advanced → Test unverified actions (alt account only)." (`WRITE_NOT_VERIFIED`).
+
+## Application-local TLS recovery (M92)
+
+All production HTTP/socket creation enters fastcord-net through the app-owned
+NetworkContext: REST; password/QR ticket exchange; profile fetch; Gateway and
+remote-auth WS; voice/stream WS; upload storage; CDN and manually checked
+redirects; media UDP. The clients retain separate credentials and feature URL
+allowlists. Auto HTTP enters an authenticated ephemeral loopback CONNECT bridge;
+origin TLS, ALPN and HTTP/2 cross it unchanged. The bridge is neither a MITM nor a
+system proxy. There is no direct fallback if it fails. Off skips the bridge.
+
+Catalog v1 rewrites only plaintext ClientHello record/write boundaries at the
+structurally parsed SNI position after the first hostname byte. Handshake bytes
+(including ALPN/PSK binders) are identical; at most two hellos including HRR.
+WriteSplit/Combined set NODELAY and wait 10 ms once per split; these are writes,
+not a claim about TCP segments. Protected TLS ends shaping. Limits, categorical
+errors and demand-only TLS probe budgets are in SPEC §5.4. Probes send no HTTP,
+WebSocket Upgrade, discovery, Identify, headers or token. A TLS candidate is not
+DPI detection or service/session health. No captured hello or ambiguous request
+is replayed on another socket. Network-change hints do not disconnect sessions.
+
+## User-configured TCP proxies (M93)
+
+HTTP CONNECT sends an authority-form CONNECT with a bounded header and optional
+Proxy-Authorization: Basic to the configured proxy only. HTTPS CONNECT wraps that
+negotiation in independently verified proxy TLS. The resulting stream carries
+ordinary end-to-end origin TLS; the origin never receives proxy credentials.
+The authenticated private HTTP bridge routes reqwest tunnels through that same
+upstream path, while WebSockets use it directly before their origin TLS/Upgrade.
+
+SOCKS5 TCP offers only the configured authentication method (no downgrade), uses
+RFC 1929 username/password when configured, then CMD=1 CONNECT with domain ATYP=3
+for names, ATYP=1/4 for numeric IPv4/IPv6. Destination names are not resolved
+locally. The bounded reply validates version/reserved/type/status before exposing
+the stream. No direct socket is opened on proxy failure; no request body is
+replayed. M93 sends no UDP ASSOCIATE and refuses proxy media joins explicitly.
+
+## Experimental UDP discovery preludes (M94)
+
+Only an explicit experimental opt-in changes discovery. The first flow sends
+ordinary 74-byte Discord discovery requests. If it does not answer, the next
+fresh bound flow sends three 1200-byte zero datagrams once, then ordinary
+discovery; the final fresh flow sends six once, then discovery. Preludes are
+never per-retry and never sent after Select Protocol. They contain no token,
+DAVE key, account data or copied packet. No TTL/Hop Limit/raw-packet technique is
+used. Zeros are an invalid-discovery/STUN/RTP laboratory candidate, not a known
+working arbitrary payload. The fixture is original work; no zapret payload or
+third-party license is involved.
+
+Each round has at most five discovery requests at existing one-second spacing;
+the user join has three sockets, fifteen requests, 10,800 prelude payload bytes
+and a sixteen-second discovery deadline across signaling retries. Old sockets
+stay bound and their late replies are ignored. Response source and SSRC must
+match before the single Select Protocol uses its external address/port. Ordinary
+Session Description, AEAD/DAVE/nonces and post-establishment Resume stay intact.
+A TLS-reachable service with unanswered UDP is reported separately. Proxy routes
+do not enable direct experimental traffic. See NETWORK_TESTING for actual
+fixture coverage and outstanding filtered-network evidence.
+
+## SOCKS5 UDP media relay (M95)
+
+SOCKS5 TCP and UDP are distinct. After authentication, CMD=3 UDP ASSOCIATE uses
+a family-matched wildcard address and zero port because the proxy-visible UDP
+source behind NAT is unknown. The
+actual local UDP socket is bound to a nonzero port and stays alive with its TCP
+control socket. This follows [RFC 1928 §6](https://www.rfc-editor.org/rfc/rfc1928.html#section-6);
+the local socket is not evidence of the external NAT mapping.
+The bounded BND address determines the relay (same-family wildcard uses the
+control peer). Relay domain DNS has a three-second deadline/sixteen-answer cap;
+total setup is ten seconds. Control EOF, unexpected data or I/O failure closes
+the association. There is no direct fallback or media-over-TCP implementation.
+
+Datagrams to the relay contain RSV=0, FRAG=0, ATYP=1/4, numeric media destination,
+port, then the unchanged discovery/AEAD-protected media datagram. Reception
+requires the exact relay source and enclosed expected media endpoint; domains,
+fragments, nonzero reserved bytes, malformed/oversized packets and spoofed
+sources are discarded. IP discovery returns through that path; its validated
+external address/port is used in Select Protocol, without rewriting AEAD/DAVE,
+SSRC, nonce or established Resume rules. A dead relay closes media instead of
+repeatedly resuming an unusable UDP path.
+
+Outer UDP payload caps (1472 IPv4, 1452 IPv6) assume a 1500-byte IP MTU; SOCKS5
+header overhead is subtracted from the media payload allowance. Existing
+1200-byte video datagrams fit. A path's actual MTU and proxy NAT behavior still
+require live validation. Eight shared associations each use one reused bounded
+64 KiB receive buffer to discard oversized datagrams portably. HTTP/HTTPS
+CONNECT has no UDP capability; SOCKS5 UDP cannot work if UDP to the proxy is
+blocked. Experimental direct preludes are disabled on all proxy routes.

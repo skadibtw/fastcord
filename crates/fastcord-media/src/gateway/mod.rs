@@ -70,6 +70,11 @@ pub enum VoiceStatus {
     Identifying,
     /// Asking the voice server for our external UDP address.
     Discovering,
+    /// Explicitly enabled laboratory discovery, variants 1/2/3. This is not
+    /// evidence that the experimental prelude can bypass a real filter.
+    DiscoveringExperimental {
+        variant: u8,
+    },
     /// Select Protocol sent, waiting for the transport key.
     Negotiating,
     /// Transport is established, but DAVE has not executed a key-ready
@@ -107,9 +112,13 @@ pub enum CloseReason {
     RateLimited,
     /// 4011.
     ServerNotFound,
-    /// The voice server did not answer UDP IP discovery: UDP is blocked on
-    /// this network (no relay fallback exists).
+    /// UDP IP discovery did not answer. This alone does not identify filtering
+    /// or distinguish it from routing, NAT or server failure.
     UdpUnreachable,
+    /// The configured SOCKS5 UDP association failed or lost its TCP control
+    /// connection. No direct media fallback is permitted.
+    UdpRelayUnavailable,
+    UdpRelayClosed,
     /// READY offered no transport mode fastcord implements.
     NoSupportedMode,
     /// Every transport nonce of this key was used; a new session is needed.
@@ -133,7 +142,13 @@ impl fmt::Display for CloseReason {
             Self::DaveUnavailable => f.write_str("voice could not establish DAVE encryption"),
             Self::RateLimited => f.write_str("voice server rate limit reached"),
             Self::ServerNotFound => f.write_str("voice server not found"),
-            Self::UdpUnreachable => f.write_str("UDP to the voice server is blocked"),
+            Self::UdpUnreachable => f.write_str("UDP discovery did not answer"),
+            Self::UdpRelayUnavailable => {
+                f.write_str("SOCKS5 UDP relay is unavailable; media stopped")
+            }
+            Self::UdpRelayClosed => {
+                f.write_str("SOCKS5 UDP control connection closed; media stopped")
+            }
             Self::NoSupportedMode => f.write_str("no supported voice encryption mode"),
             Self::KeyExhausted => f.write_str("voice encryption key exhausted"),
             Self::InvalidEndpoint => f.write_str("invalid voice server endpoint"),
@@ -508,11 +523,14 @@ impl fmt::Debug for VoiceSession {
 }
 
 /// Starts an audio-only voice connection on the current Tokio runtime.
-pub fn connect(credentials: VoiceCredentials) -> VoiceSession {
+pub fn connect(
+    network: fastcord_net::NetworkContext,
+    credentials: VoiceCredentials,
+) -> VoiceSession {
     let options = driver::Options::live(aes_accelerated());
     start(
-        transport::LiveSignaling,
-        transport::LiveNetwork,
+        transport::LiveSignaling(network.clone(), fastcord_net::Role::Voice),
+        transport::LiveNetwork(network),
         credentials,
         options,
     )
@@ -522,14 +540,20 @@ pub fn connect(credentials: VoiceCredentials) -> VoiceSession {
 /// ([`VideoOptions::watch`]) or owner ([`VideoOptions::share`]). Fails before
 /// anything is sent if the offer is inconsistent.
 pub fn connect_with_video(
+    network: fastcord_net::NetworkContext,
     credentials: VoiceCredentials,
     video: VideoOptions,
 ) -> Result<VoiceSession, VideoError> {
     video.validate()?;
+    let role = if video.camera {
+        fastcord_net::Role::Voice
+    } else {
+        fastcord_net::Role::Stream
+    };
     let options = driver::Options::live(aes_accelerated()).with_video(video);
     Ok(start(
-        transport::LiveSignaling,
-        transport::LiveNetwork,
+        transport::LiveSignaling(network.clone(), role),
+        transport::LiveNetwork(network),
         credentials,
         options,
     ))

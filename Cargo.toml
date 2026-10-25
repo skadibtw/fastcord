@@ -18,6 +18,8 @@ license = "GPL-3.0-only"
 repository = "https://github.com/skadibtw/fastcord"
 
 [workspace.dependencies]
+http = "1"
+fastcord-net = { path = "crates/fastcord-net" }
 fastcord-model = { path = "crates/fastcord-model" }
 fastcord-discord = { path = "crates/fastcord-discord" }
 fastcord-platform = { path = "crates/fastcord-platform" }
@@ -85,6 +87,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_repr = "0.1"
 sha2 = "0.10"
+socket2 = "0.6.5"
 symphonia-bundle-mp3 = { version = "0.6.1", default-features = false, features = ["mp3"] }
 symphonia-codec-aac = "0.6.1"
 symphonia-core = { version = "0.6.1", default-features = false }

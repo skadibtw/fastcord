@@ -31,9 +31,11 @@ async fn closes_every_second_are_resumed_with_one_identify_and_a_wait_each_time(
     .await
     .unwrap();
     fake_origin::set_origin(&format!("127.0.0.1:{}", fake.port())).unwrap();
+    let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
     let client = RestClient::new(
+        fastcord_net::NetworkContext::off(),
         UserToken::new("fake-token".to_owned()),
-        ClientProperties::bundled(HostOs::Linux, "en-US"),
+        properties.clone(),
     )
     .unwrap();
     let mut gateway = Gateway::start(client, Arc::new(UserToken::new("fake-token".to_owned())));

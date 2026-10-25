@@ -23,8 +23,13 @@ pub(crate) fn websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_MESSAGE_BYTES))
 }
 
-pub(crate) async fn connect(browser: &ClientProperties) -> Result<GatewaySocket, RemoteAuthError> {
+pub(crate) async fn connect(
+    network: &fastcord_net::NetworkContext,
+    browser: &ClientProperties,
+) -> Result<GatewaySocket, RemoteAuthError> {
     ws::connect(
+        network,
+        fastcord_net::Role::RemoteAuth,
         GATEWAY_URL,
         ORIGIN,
         browser,

@@ -166,10 +166,10 @@ impl RemoteAuth {
     /// Tokio runtime. Nothing is sent until the gateway connection opens, which
     /// happens only because the caller (an explicit user action) asked for it.
     /// `properties` is the identity the handshake and the exchange present.
-    pub fn start(properties: ClientProperties) -> Self {
+    pub fn start(network: fastcord_net::NetworkContext, properties: ClientProperties) -> Self {
         let (events_tx, events) = mpsc::channel(EVENT_QUEUE);
         let task = tokio::spawn(async move {
-            let event = match run(&events_tx, &properties).await {
+            let event = match run(&network, &events_tx, &properties).await {
                 Ok(token) => RemoteAuthEvent::Authorized(Arc::new(token)),
                 Err(RemoteAuthError::Cancelled) => return,
                 Err(error) => RemoteAuthEvent::Failed(error),
@@ -192,15 +192,16 @@ impl Drop for RemoteAuth {
 }
 
 async fn run(
+    network: &fastcord_net::NetworkContext,
     events: &mpsc::Sender<RemoteAuthEvent>,
     properties: &ClientProperties,
 ) -> Result<UserToken, RemoteAuthError> {
-    let exchange = HttpTicketExchange::new(properties)?;
+    let exchange = HttpTicketExchange::new(network, properties)?;
     // Key generation overlaps the network handshake so `init` can be sent as
     // soon as the gateway's hello arrives.
     let (key, socket) = tokio::join!(
         tokio::task::spawn_blocking(AttemptKey::generate),
-        transport::connect(properties)
+        transport::connect(network, properties)
     );
     let key = key.map_err(|_| RemoteAuthError::KeyGeneration)??;
     session::drive(socket?, &key, &exchange, events).await
@@ -220,10 +221,10 @@ mod live {
     #[tokio::test]
     #[ignore = "contacts Discord"]
     async fn live_gateway_issues_a_qr_code_and_keeps_the_session_alive() {
-        let mut auth = RemoteAuth::start(ClientProperties::bundled(
-            crate::gateway::HostOs::current(),
-            "en-US",
-        ));
+        let mut auth = RemoteAuth::start(
+            fastcord_net::NetworkContext::off(),
+            ClientProperties::bundled(crate::gateway::HostOs::current(), "en-US"),
+        );
         let event = tokio::time::timeout(Duration::from_secs(30), auth.next_event())
             .await
             .expect("no event within 30 s")
@@ -245,10 +246,10 @@ mod live {
     #[tokio::test]
     #[ignore = "contacts Discord"]
     async fn live_exchange_rejects_a_bogus_ticket_without_a_challenge() {
-        let exchange = HttpTicketExchange::new(&ClientProperties::bundled(
-            crate::gateway::HostOs::current(),
-            "en-US",
-        ))
+        let exchange = HttpTicketExchange::new(
+            &fastcord_net::NetworkContext::off(),
+            &ClientProperties::bundled(crate::gateway::HostOs::current(), "en-US"),
+        )
         .unwrap();
         let error = exchange.exchange("bogus.ticket.value").await.unwrap_err();
         println!("exchange outcome for a bogus ticket: {error:?}");

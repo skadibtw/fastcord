@@ -107,7 +107,7 @@ impl Versions {
 /// bundled. The requests are unauthenticated and carry no account data. They
 /// run at most once per process: the answer, fetched or fallback, is kept for
 /// every later validate, restore, account switch and login step.
-pub async fn resolve_versions() -> Versions {
+pub async fn resolve_versions(network: &fastcord_net::NetworkContext) -> Versions {
     static RESOLVED: tokio::sync::OnceCell<Versions> = tokio::sync::OnceCell::const_new();
     let os = HostOs::current();
     #[cfg(feature = "fake-discord")]
@@ -115,7 +115,10 @@ pub async fn resolve_versions() -> Versions {
         return Versions::bundled(os);
     }
     resolve_once(&RESOLVED, async move {
-        let (manifest, build) = tokio::join!(fetch_manifest(os, APP_ARCH), fetch_build_number());
+        let (manifest, build) = tokio::join!(
+            fetch_manifest(network, os, APP_ARCH),
+            fetch_build_number(network)
+        );
         let mut versions = Versions::bundled(os);
         if let Some(release) = manifest {
             versions.client_version = release.host_version;
@@ -137,8 +140,10 @@ async fn resolve_once<T: Clone>(
     cell.get_or_init(|| fetch).await.clone()
 }
 
-fn fetch_client() -> Option<reqwest::Client> {
-    fastcord_bypass::route_http(reqwest::Client::builder())
+fn fetch_client(network: &fastcord_net::NetworkContext) -> Option<fastcord_net::HttpClient> {
+    network
+        .http_builder(fastcord_net::Role::Profile)
+        .ok()?
         .use_rustls_tls()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -148,8 +153,8 @@ fn fetch_client() -> Option<reqwest::Client> {
         .ok()
 }
 
-async fn fetch_build_number() -> Option<u32> {
-    let mut response = fetch_client()?
+async fn fetch_build_number(network: &fastcord_net::NetworkContext) -> Option<u32> {
+    let mut response = fetch_client(network)?
         .get(APP_URL)
         .header(
             reqwest::header::USER_AGENT,
@@ -203,11 +208,15 @@ struct HostRelease {
 
 /// Asks the updater endpoint the desktop client polls; never downloads the
 /// package it points to.
-async fn fetch_manifest(os: HostOs, arch: &str) -> Option<HostRelease> {
+async fn fetch_manifest(
+    network: &fastcord_net::NetworkContext,
+    os: HostOs,
+    arch: &str,
+) -> Option<HostRelease> {
     // ponytail: a fresh install_id per process; persist it with the
     // installation id once that exists.
     let install_id = Uuid::new_v4().to_string();
-    let mut response = fetch_client()?
+    let mut response = fetch_client(network)?
         .get(MANIFEST_URL)
         .query(&[
             ("channel", "stable"),
@@ -1072,12 +1081,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "contacts updates.discord.com and discord.com"]
     async fn live_version_chain_matches_the_pin() {
-        // Explicit opt-in for the maintainer's filtered route. The same
-        // fetch_client used in production must retain route_http after merges.
-        if let Ok(strategy) = std::env::var("FASTCORD_IDENTITY_BYEDPI") {
-            fastcord_bypass::enable(&strategy).expect("the local byedpi engine starts");
-        }
-        let build = fetch_build_number()
+        let network = fastcord_net::NetworkContext::off();
+        let build = fetch_build_number(&network)
             .await
             .expect("discord.com/app carried a build number");
         let cases = [
@@ -1089,7 +1094,8 @@ mod tests {
         ];
         let mut tasks = tokio::task::JoinSet::new();
         for (os, arch) in cases {
-            tasks.spawn(async move { (os, arch, fetch_manifest(os, arch).await) });
+            let network = network.clone();
+            tasks.spawn(async move { (os, arch, fetch_manifest(&network, os, arch).await) });
         }
         // Check every target even when one drifts, so CI shows the full matrix.
         let mut drift = Vec::new();

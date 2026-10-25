@@ -13,6 +13,7 @@ repository.workspace = true
 fake-discord = []
 
 [dependencies]
+fastcord-net.workspace = true
 fastcord-model.workspace = true
 fastcord-bypass.workspace = true
 fastcord-ws.workspace = true
@@ -28,9 +29,7 @@ serde_json.workspace = true
 sha2.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
-tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
-webpki-roots.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 

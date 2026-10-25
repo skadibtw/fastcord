@@ -52,6 +52,7 @@ type ServerSocket = WebSocketStream<DuplexStream>;
 type ClientSocket = WebSocketStream<fastcord_ws::CompressingStream<DuplexStream>>;
 
 struct FakeTransport {
+    retries: Arc<super::RetryLedger>,
     sockets: Mutex<VecDeque<Option<ClientSocket>>>,
     discoveries: Mutex<VecDeque<Result<String, DiscoverError>>>,
     connected: Mutex<Vec<String>>,
@@ -62,6 +63,7 @@ struct FakeTransport {
 impl FakeTransport {
     fn new() -> Arc<Self> {
         Arc::new(Self {
+            retries: Arc::default(),
             sockets: Mutex::default(),
             discoveries: Mutex::default(),
             connected: Mutex::default(),
@@ -128,6 +130,10 @@ impl FakeTransport {
 
 impl Transport for FakeTransport {
     type Socket = ClientSocket;
+
+    fn retry_ledger(&self) -> Arc<super::RetryLedger> {
+        self.retries.clone()
+    }
 
     async fn discover(&self) -> Result<String, DiscoverError> {
         self.discovered.fetch_add(1, Ordering::SeqCst);
@@ -911,6 +917,103 @@ async fn ten_failed_attempts_in_a_row_stop_reconnecting_with_a_manual_reconnect_
     assert_eq!(transport.connected().len(), 10);
     assert!(StopReason::ReconnectFailures.allows_manual_reconnect());
     assert!(!StopReason::Rejected(4014).allows_manual_reconnect());
+}
+
+#[tokio::test(start_paused = true)]
+async fn replacing_a_gateway_driver_does_not_refill_failed_attempts() {
+    let transport = FakeTransport::new();
+    for _ in 0..12 {
+        transport.refuse();
+    }
+    let mut first = start(&transport, 0.5);
+    assert_eq!(
+        drain(&mut first).await,
+        Some(GatewayEvent::State(ConnectionState::Stopped(
+            StopReason::ReconnectFailures
+        )))
+    );
+    assert_eq!(transport.connected().len(), 10);
+    drop(first);
+    let mut replacement = start(&transport, 0.5);
+    assert_eq!(
+        drain(&mut replacement).await,
+        Some(GatewayEvent::State(ConnectionState::Stopped(
+            StopReason::ReconnectFailures
+        )))
+    );
+    assert_eq!(
+        transport.connected().len(),
+        10,
+        "manual driver replacement must not dial again"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn replacing_a_gateway_driver_keeps_the_first_failed_production_attempt_and_backoff() {
+    let transport = FakeTransport::new();
+    transport.refuse();
+    transport.refuse();
+    let mut first = start(&transport, 0.5);
+    expect_state(&mut first, ConnectionState::Connecting { attempt: 0 }).await;
+    let (attempt, delay, _) = expect_reconnecting(&mut first).await;
+    assert_eq!(attempt, 1);
+    let deadline = transport.retries.retry_not_before().unwrap();
+    assert!(deadline >= Instant::now());
+    assert!(!delay.is_zero());
+    drop(first);
+    let mut replacement = start(&transport, 0.5);
+    expect_state(&mut replacement, ConnectionState::Connecting { attempt: 1 }).await;
+    assert!(
+        Instant::now() >= deadline,
+        "replacement must wait for the retained backoff"
+    );
+    let (attempt, _, _) = expect_reconnecting(&mut replacement).await;
+    assert_eq!(attempt, 2);
+    assert_eq!(transport.retries.failures(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn replacing_a_gateway_driver_does_not_refill_identifies() {
+    let transport = FakeTransport::new();
+    for _ in 0..19 {
+        assert!(transport.retries.reserve_identify(Instant::now()));
+    }
+    let mut server = transport.accept().await;
+    let first = start(&transport, 0.5);
+    server.handshake().await;
+    assert!(!transport.retries.allows_identify(Instant::now()));
+    drop(first);
+    let mut replacement = start(&transport, 0.5);
+    assert_eq!(
+        drain(&mut replacement).await,
+        Some(GatewayEvent::State(ConnectionState::Stopped(
+            StopReason::IdentifyBudget
+        )))
+    );
+    assert_eq!(transport.connected().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn replacing_a_gateway_driver_does_not_erase_discovery_forbidden() {
+    let transport = FakeTransport::new();
+    transport
+        .discoveries
+        .lock()
+        .extend([Err(DiscoverError::Forbidden), Err(DiscoverError::Forbidden)]);
+    let mut first = start(&transport, 0.5);
+    expect_state(&mut first, ConnectionState::Connecting { attempt: 0 }).await;
+    expect_reconnecting(&mut first).await;
+    assert_eq!(transport.retries.forbidden(), 1);
+    drop(first);
+    let mut replacement = start(&transport, 0.5);
+    assert_eq!(
+        drain(&mut replacement).await,
+        Some(GatewayEvent::State(ConnectionState::Stopped(
+            StopReason::DiscoveryForbidden
+        )))
+    );
+    assert_eq!(transport.discovered.load(Ordering::SeqCst), 2);
+    assert!(transport.connected().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

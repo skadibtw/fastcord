@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- Add optional Windows packet recovery (M96): a separate, manually elevated
+  WinDivert helper, PID-authenticated local IPC and exact ClientHello filters;
+  packet fake/disorder and sequence-overlap profiles inspired by zapret.
+  The ordinary client retains credentials and certificate verification.
+  Anonymous API access was restored on the reported direct Windows route;
+  authenticated login/Gateway and media evidence are recorded separately.
+
+- Preserve typed network failures and HTTP server status codes in login errors,
+  and add a debug-only `--network-check` using the actual fastcord executable
+  for process-specific routing diagnostics without account credentials.
+
+- Add separate SOCKS5 UDP ASSOCIATE media routing (M95) for voice/camera and
+  Go Live, with retained control TCP, source/header/MTU validation, eight shared
+  association slots and fail-closed control-loss handling. HTTP CONNECT remains
+  TCP-only; proxy mode never leaks media direct. Real proxy NAT and 30-minute
+  Windows voice/share interoperability gates remain pending.
+
+- Add separately opt-in experimental UDP discovery preludes (M94): three bounded
+  direct flows inside one signaling connection, per-join byte/request/deadline
+  limits, retained old ports and visible variant progress. The original zero
+  fixture is a laboratory candidate with unverified filtered-network effectiveness;
+  the experiment remains off by default and disabled in Proxy mode.
+
+- Add user-configured HTTP/HTTPS CONNECT and SOCKS5 TCP routing for every HTTP
+  and WebSocket role (M93), remote destination DNS, endpoint-bound native proxy
+  passwords, categorical failures and a pre-join TCP-only media explanation.
+  Routing never silently falls back to direct; live proxy interoperability gates
+  remain pending.
+
+- Add an application-scoped socket/HTTP boundary, private authenticated CONNECT
+  bridge and bounded TLS recovery catalog/selection (M92), network preferences
+  and Windows network-change hints, preserving account and write retry limits.
+  Blocked-network effectiveness and remaining manual gates are unverified.
+
 ### Added
 - WebSocket permessage-deflate: the main Gateway, remote-auth and voice WebSockets now offer Chromium's `permessage-deflate; client_max_window_bits`, negotiate the server's parameters, compress and decompress RFC 7692 messages with byte-bounded buffers, and fall back to the uncompressed transport when the server declines. The opening handshake, the accept-key/extension validation and the RFC 7692 adapter live in a new shared crate, `fastcord-ws` (no new external dependency); unsolicited or malformed extensions, a bad accept key and compression bombs are typed failures, and the offered/negotiated values still await a sanitized official capture (ADR 0005, IDENTITY_AUDIT A9).
 

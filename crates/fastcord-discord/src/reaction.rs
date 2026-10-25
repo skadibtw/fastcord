@@ -842,6 +842,7 @@ mod tests {
     async fn a_stopped_account_never_adds_removes_or_lists_reactions() {
         let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-test-credential".to_owned()),
             properties,
         )
@@ -870,8 +871,12 @@ mod tests {
     async fn live_reaction_add_list_remove() {
         let var = |k: &str| std::env::var(k).unwrap();
         let properties = ClientProperties::bundled(HostOs::current(), "en-US");
-        let client =
-            RestClient::new(UserToken::new(var("FASTCORD_LIVE_TOKEN")), properties).unwrap();
+        let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
+            UserToken::new(var("FASTCORD_LIVE_TOKEN")),
+            properties,
+        )
+        .unwrap();
         let channel = Snowflake(var("FASTCORD_LIVE_CHANNEL").parse().unwrap());
         let message = Snowflake(var("FASTCORD_LIVE_MESSAGE").parse().unwrap());
         let up = emoji(&unicode("\u{1F44D}"));

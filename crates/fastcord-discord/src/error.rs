@@ -13,7 +13,7 @@ pub enum NetworkFailure {
 }
 
 impl NetworkFailure {
-    pub(crate) fn from_reqwest(error: &reqwest::Error) -> Self {
+    pub(crate) fn from_http(error: &fastcord_net::HttpError) -> Self {
         if error.is_timeout() {
             Self::Timeout
         } else if error.is_connect() {

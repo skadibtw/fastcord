@@ -50,10 +50,20 @@ async fn the_real_client_talks_to_the_fake() {
 
     // REST.
     let token = Arc::new(UserToken::new("fake-token".to_owned()));
-    let client = RestClient::new(UserToken::new("fake-token".to_owned()), properties()).unwrap();
+    let client = RestClient::new(
+        fastcord_net::NetworkContext::off(),
+        UserToken::new("fake-token".to_owned()),
+        properties(),
+    )
+    .unwrap();
     let me: User = client.get("/users/@me", Priority::UserRead).await.unwrap();
     assert_eq!(me.id, Snowflake(1001));
-    let bad = RestClient::new(UserToken::new("wrong".to_owned()), properties()).unwrap();
+    let bad = RestClient::new(
+        fastcord_net::NetworkContext::off(),
+        UserToken::new("wrong".to_owned()),
+        properties(),
+    )
+    .unwrap();
     assert!(
         bad.get::<User>("/users/@me", Priority::UserRead)
             .await

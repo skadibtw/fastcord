@@ -68,6 +68,7 @@ pub use voice::VoiceStateControl;
 
 use crate::{RestClient, UserToken};
 use outbox::EventReceiver;
+pub(crate) use pacing::RetryLedger;
 use pacing::{JitterSource, OsJitter};
 use transport::{LiveTransport, Transport};
 

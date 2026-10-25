@@ -551,6 +551,7 @@ mod tests {
         use fastcord_discord::UserToken;
         use fastcord_discord::gateway::{ClientProperties, HostOs};
         RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-announce-credential".into()),
             ClientProperties::bundled(HostOs::Linux, "en-US"),
         )

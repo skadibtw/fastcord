@@ -30,9 +30,11 @@ async fn two_gateway_discovery_403s_stop_with_the_manual_reconnect_state() {
     .await
     .unwrap();
     fake_origin::set_origin(&format!("127.0.0.1:{}", fake.port())).unwrap();
+    let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
     let client = RestClient::new(
+        fastcord_net::NetworkContext::off(),
         UserToken::new("fake-token".to_owned()),
-        ClientProperties::bundled(HostOs::Linux, "en-US"),
+        properties.clone(),
     )
     .unwrap();
     let mut gateway = Gateway::start(client, Arc::new(UserToken::new("fake-token".to_owned())));

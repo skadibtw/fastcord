@@ -366,6 +366,7 @@ mod tests {
     async fn stopped_client_uses_the_account_stop_without_touching_the_network() {
         let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-search-credential".to_owned()),
             properties,
         )

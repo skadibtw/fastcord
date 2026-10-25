@@ -15,12 +15,16 @@ test-support = []
 [dependencies]
 audio_thread_priority.workspace = true
 fastcord-model.workspace = true
+fastcord-net.workspace = true
+sha2.workspace = true
 keyring-core.workspace = true
 parking_lot.workspace = true
 sys-locale.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+rand_core.workspace = true
+tokio.workspace = true
 windows-native-keyring-store.workspace = true
 windows-core.workspace = true
 windows = { workspace = true, features = [
@@ -29,6 +33,7 @@ windows = { workspace = true, features = [
     "Foundation",
     "Foundation_Collections",
     "Globalization",
+    "Networking_Connectivity",
     "Media_Core",
     "Media_Playback",
     "Media_SpeechSynthesis",
@@ -38,6 +43,12 @@ windows = { workspace = true, features = [
     "Graphics_DirectX",
     "Graphics_DirectX_Direct3D11",
     "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dwm",

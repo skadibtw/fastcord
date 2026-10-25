@@ -10,13 +10,15 @@
 //! - Heartbeats follow v8: a nonce `t` plus `seq_ack`, the last sequence seen
 //!   on any numbered JSON message or binary message.
 
+mod discovery;
 mod video;
 
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::pin::Pin;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
@@ -117,7 +119,7 @@ pub(crate) struct Channels {
 }
 
 struct Udp<L> {
-    link: L,
+    link: Arc<L>,
     server: SocketAddr,
     ssrc: u32,
     mode: TransportMode,
@@ -198,14 +200,40 @@ impl Conn {
     }
 }
 
+enum UdpResult<L> {
+    Bound {
+        link: Arc<L>,
+        server: SocketAddr,
+        ssrc: u32,
+        mode: TransportMode,
+        preludes: u8,
+    },
+    Sent,
+    Failed {
+        relay: bool,
+    },
+}
+type UdpWork<L> = Pin<Box<dyn Future<Output = UdpResult<L>> + Send>>;
+async fn udp_work<L>(work: &mut Option<UdpWork<L>>) -> UdpResult<L> {
+    match work {
+        Some(work) => work.await,
+        None => std::future::pending().await,
+    }
+}
+
 struct Driver<S, N: Network> {
     signaling: S,
-    network: N,
+    network: Arc<N>,
     credentials: VoiceCredentials,
     options: Options,
     ch: Channels,
     seq_ack: Option<u64>,
     udp: Option<Udp<N::Udp>>,
+    udp_work: Option<UdpWork<N::Udp>>,
+    // At most three sockets. Keep even a completed-but-unconsumed bind alive
+    // across WS cancellation so an ephemeral port cannot immediately recur.
+    held_udp: Arc<Mutex<Vec<Arc<N::Udp>>>>,
+    discovery: discovery::Campaign,
     media: Option<Media>,
     dave: Option<DaveSession>,
     expected_users: Vec<u64>,
@@ -240,14 +268,18 @@ pub(crate) async fn run<S: Signaling, N: Network>(
         .clone()
         .map(|video| VideoState::new(video, wanted));
     let local_user_id = credentials.user_id.0;
+    let experimental_udp = network.experimental_udp();
     let mut driver = Driver {
         signaling,
-        network,
+        network: Arc::new(network),
         credentials,
         options,
         ch: channels,
         seq_ack: None,
         udp: None,
+        udp_work: None,
+        held_udp: Arc::new(Mutex::new(Vec::with_capacity(3))),
+        discovery: discovery::Campaign::new(experimental_udp),
         media: None,
         dave: None,
         expected_users: vec![local_user_id],
@@ -267,7 +299,19 @@ pub(crate) async fn run<S: Signaling, N: Network>(
     let reason = driver.drive().await;
     // Sockets and keys go before anyone hears that the connection is closed.
     driver.reset_session();
-    driver.ch.status.send_replace(VoiceStatus::Closed(reason));
+    driver
+        .held_udp
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
+    driver.set_status(VoiceStatus::Closed(reason));
+}
+
+async fn discovery_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 fn backoff(failures: u32) -> Duration {
@@ -320,12 +364,121 @@ fn ntp_now() -> u64 {
 }
 
 impl<S: Signaling, N: Network> Driver<S, N> {
+    fn start_discovery(
+        &mut self,
+        conn: &mut Conn,
+        server: SocketAddr,
+        ssrc: u32,
+        mode: TransportMode,
+    ) -> Result<(), End> {
+        let preludes = self
+            .discovery
+            .reserve_flow(Instant::now())
+            .ok_or(End::Close(CloseReason::UdpUnreachable))?;
+        self.udp = None;
+        let network = self.network.clone();
+        let held = self.held_udp.clone();
+        let relay = self.network.relay_configured();
+        self.udp_work = Some(Box::pin(async move {
+            let Ok(link) = network.bind(server).await else {
+                return UdpResult::Failed { relay };
+            };
+            let link = Arc::new(link);
+            let mut held = held.lock().unwrap_or_else(|p| p.into_inner());
+            if held.len() >= 3
+                || link
+                    .local_port()
+                    .is_some_and(|port| held.iter().any(|old| old.local_port() == Some(port)))
+            {
+                return UdpResult::Failed { relay };
+            }
+            held.push(link.clone());
+            UdpResult::Bound {
+                link,
+                server,
+                ssrc,
+                mode,
+                preludes,
+            }
+        }));
+        conn.phase = Phase::Discovering { attempts: 0 };
+        conn.deadline = None;
+        conn.ping_at = None;
+        Ok(())
+    }
+
+    fn on_udp_work(&mut self, conn: &mut Conn, result: UdpResult<N::Udp>) -> Result<(), End> {
+        self.udp_work = None;
+        match result {
+            UdpResult::Bound {
+                link,
+                server,
+                ssrc,
+                mode,
+                preludes,
+            } => {
+                self.udp = Some(Udp {
+                    link,
+                    server,
+                    ssrc,
+                    mode,
+                });
+                self.set_status(if self.discovery.experimental {
+                    VoiceStatus::DiscoveringExperimental {
+                        variant: self.discovery.variant,
+                    }
+                } else {
+                    VoiceStatus::Discovering
+                });
+                self.queue_discovery(conn, preludes)?;
+            }
+            UdpResult::Sent => conn.deadline = Some(Instant::now() + DISCOVERY_RETRY),
+            UdpResult::Failed { relay } => {
+                return Err(End::Close(if relay {
+                    CloseReason::UdpRelayUnavailable
+                } else {
+                    CloseReason::Network
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    fn queue_discovery(&mut self, conn: &mut Conn, preludes: u8) -> Result<(), End> {
+        if !self.discovery.reserve_request(Instant::now()) {
+            return Err(End::Close(CloseReason::UdpUnreachable));
+        }
+        let udp = self.udp.as_ref().ok_or(End::Close(CloseReason::Network))?;
+        let link = udp.link.clone();
+        let server = udp.server;
+        let request = udp::discovery_request(udp.ssrc);
+        self.udp_work = Some(Box::pin(async move {
+            for _ in 0..preludes {
+                let _ = link.send_to(discovery::PRELUDE, server).await;
+            }
+            let _ = link.send_to(&request, server).await;
+            UdpResult::Sent
+        }));
+        let attempts = match conn.phase {
+            Phase::Discovering { attempts } => attempts,
+            _ => 0,
+        };
+        conn.phase = Phase::Discovering {
+            attempts: attempts + 1,
+        };
+        conn.deadline = None;
+        Ok(())
+    }
+
     async fn drive(&mut self) -> CloseReason {
         let Some(url) = voice_url(&self.credentials.endpoint) else {
             return CloseReason::InvalidEndpoint;
         };
         let mut failures: u32 = 0;
         loop {
+            if self.discovery.expired(Instant::now()) {
+                return CloseReason::UdpUnreachable;
+            }
             let resume = self.media.is_some();
             if failures > MAX_RECONNECTS {
                 return CloseReason::Network;
@@ -339,7 +492,8 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 tokio::select! {
                     biased;
                     _ = &mut self.ch.leave => return CloseReason::Left,
-                    () = sleep(backoff(failures)) => {}
+                    () = sleep(backoff(failures)) => {},
+                    () = discovery_deadline(self.discovery.deadline()) => return CloseReason::UdpUnreachable,
                 }
             } else {
                 self.set_status(VoiceStatus::Connecting);
@@ -351,12 +505,24 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 biased;
                 _ = &mut self.ch.leave => return CloseReason::Left,
                 connected = self.signaling.connect(&url) => connected,
+                () = discovery_deadline(self.discovery.deadline()) => return CloseReason::UdpUnreachable,
             };
             let Ok(socket) = connected else {
                 failures += 1;
                 continue;
             };
-            match self.connection(socket, resume).await {
+            let end = self.connection(socket, resume).await;
+            // Select Protocol is a one-way boundary for this user join. Before
+            // Session Description there is no valid media Resume state; do
+            // not Identify again to obtain a new experimental flow.
+            if matches!(end, End::Retry { .. })
+                && self.discovery.experimental
+                && self.discovery.selected
+                && self.media.is_none()
+            {
+                return CloseReason::Network;
+            }
+            match end {
                 End::Close(reason) => return reason,
                 End::Retry { progressed: true } => failures = 1,
                 End::Retry { progressed: false } => failures += 1,
@@ -366,6 +532,16 @@ impl<S: Signaling, N: Network> Driver<S, N> {
 
     /// Forgets everything tied to one voice session, including DAVE/MLS keys.
     fn reset_session(&mut self) {
+        // With the experiment off retain the original direct-only signaling
+        // retry policy. An opt-in campaign never gets a new budget here.
+        if !self.discovery.experimental {
+            self.discovery = discovery::Campaign::new(false);
+            self.held_udp
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clear();
+        }
+        self.udp_work = None;
         self.udp = None;
         self.media = None;
         self.dave = None;
@@ -384,6 +560,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
     }
 
     fn set_status(&self, status: VoiceStatus) {
+        self.signaling.note_status(status);
         self.ch.status.send_replace(status);
     }
 
@@ -432,6 +609,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             self.video_gate(media_open);
             let wake = [
                 conn.next_wake(self.pending.next_expiry()),
+                self.discovery.deadline(),
                 if transport_up {
                     self.video_wake()
                 } else {
@@ -452,6 +630,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     let _ = timeout(SEND_TIMEOUT, socket.send(close)).await;
                     Err(End::Close(CloseReason::Left))
                 }
+                work = udp_work(&mut self.udp_work) => self.on_udp_work(&mut conn, work),
                 message = socket.next() => self.on_message(&mut conn, &mut socket, message).await,
                 received = recv_udp(self.udp.as_ref(), &mut buffer) => match received {
                     Ok((len, from)) => {
@@ -459,6 +638,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     }
                     // ICMP errors surface as receive errors on some systems;
                     // a dead route shows up as missing discovery or pings.
+                    Err(error) if error.kind() == io::ErrorKind::ConnectionAborted && self.udp.as_ref().is_some_and(|udp| udp.link.is_relay()) => Err(End::Close(CloseReason::UdpRelayClosed)),
                     Err(_) => Ok(()),
                 },
                 command = self.ch.media.recv(), if media_open => match command {
@@ -493,18 +673,13 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         }
     }
 
-    async fn send_text(&self, conn: &Conn, socket: &mut S::Socket, text: &str) -> Result<(), End> {
+    async fn send_text(conn: &Conn, socket: &mut S::Socket, text: &str) -> Result<(), End> {
         match timeout(SEND_TIMEOUT, socket.send(Message::text(text))).await {
             Ok(Ok(())) => Ok(()),
             _ => Err(conn.retry()),
         }
     }
-    async fn send_binary(
-        &self,
-        conn: &Conn,
-        socket: &mut S::Socket,
-        frame: Vec<u8>,
-    ) -> Result<(), End> {
+    async fn send_binary(conn: &Conn, socket: &mut S::Socket, frame: Vec<u8>) -> Result<(), End> {
         match timeout(SEND_TIMEOUT, socket.send(Message::Binary(frame.into()))).await {
             Ok(Ok(())) => Ok(()),
             _ => Err(conn.retry()),
@@ -567,11 +742,11 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 conn.deadline = Some(now + HANDSHAKE_TIMEOUT);
                 if conn.resume {
                     let payload = wire::resume(&self.credentials, self.seq_ack);
-                    self.send_text(conn, socket, &payload).await?;
+                    Self::send_text(conn, socket, &payload).await?;
                     conn.phase = Phase::Resuming;
                 } else {
                     let payload = wire::identify(&self.credentials, self.options.video.as_ref());
-                    self.send_text(conn, socket, &payload).await?;
+                    Self::send_text(conn, socket, &payload).await?;
                     conn.phase = Phase::Identifying;
                     self.set_status(VoiceStatus::Identifying);
                 }
@@ -588,28 +763,10 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     return Err(protocol());
                 }
                 let server = SocketAddr::new(ip, ready.port);
-                let link = self
-                    .network
-                    .bind(server)
-                    .await
-                    .map_err(|_| End::Close(CloseReason::Network))?;
-                let _ = link
-                    .send_to(&udp::discovery_request(ready.ssrc), server)
-                    .await;
-                self.udp = Some(Udp {
-                    link,
-                    server,
-                    ssrc: ready.ssrc,
-                    mode,
-                });
+                self.start_discovery(conn, server, ready.ssrc, mode)?;
                 if let Some(video) = self.video.as_mut() {
                     video.set_layer(ready.layer());
                 }
-
-                conn.phase = Phase::Discovering { attempts: 1 };
-                conn.deadline = Some(now + DISCOVERY_RETRY);
-                conn.ping_at = Some(now + PING_INTERVAL);
-                self.set_status(VoiceStatus::Discovering);
             }
             op::SESSION_DESCRIPTION if conn.phase == Phase::Negotiating => {
                 let description: wire::SessionDescription =
@@ -663,8 +820,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     reported_packets: 0,
                 });
                 self.dave = Some(dave);
-                self.send_binary(conn, socket, wire::dave_key_package(&key_package))
-                    .await?;
+                Self::send_binary(conn, socket, wire::dave_key_package(&key_package)).await?;
                 conn.progressed = true;
                 conn.phase = Phase::Connected;
                 conn.deadline = None;
@@ -683,8 +839,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     let key_package = dave
                         .create_key_package()
                         .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
-                    self.send_binary(conn, socket, wire::dave_key_package(&key_package))
-                        .await?;
+                    Self::send_binary(conn, socket, wire::dave_key_package(&key_package)).await?;
                 }
                 conn.progressed = true;
                 conn.phase = Phase::Connected;
@@ -791,7 +946,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     }
                 };
                 if ready {
-                    self.send_text(
+                    Self::send_text(
                         conn,
                         socket,
                         &wire::dave_transition_ready(prepare.transition_id),
@@ -826,8 +981,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     .prepare_epoch(prepare.epoch)
                     .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
                 if let Some(key_package) = key_package {
-                    self.send_binary(conn, socket, wire::dave_key_package(&key_package))
-                        .await?;
+                    Self::send_binary(conn, socket, wire::dave_key_package(&key_package)).await?;
                 }
                 self.set_status(self.connected_status());
             }
@@ -871,7 +1025,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                         &commit_welcome.commit,
                         commit_welcome.welcome.as_deref(),
                     );
-                    self.send_binary(conn, socket, frame).await?;
+                    Self::send_binary(conn, socket, frame).await?;
                 }
             }
             wire::ServerBinary::Commit {
@@ -928,8 +1082,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             self.set_status(self.connected_status());
             return Ok(());
         }
-        self.send_text(conn, socket, &wire::dave_transition_ready(transition_id))
-            .await?;
+        Self::send_text(conn, socket, &wire::dave_transition_ready(transition_id)).await?;
         self.set_status(VoiceStatus::Rekeying {
             transition_id: Some(transition_id),
         });
@@ -948,14 +1101,13 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             .ok_or(End::Close(CloseReason::DaveUnavailable))?
             .recover(transition_id)
             .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
-        self.send_text(
+        Self::send_text(
             conn,
             socket,
             &wire::dave_invalid_commit_welcome(transition_id),
         )
         .await?;
-        self.send_binary(conn, socket, wire::dave_key_package(&key_package))
-            .await?;
+        Self::send_binary(conn, socket, wire::dave_key_package(&key_package)).await?;
         self.set_status(VoiceStatus::Rekeying {
             transition_id: Some(transition_id),
         });
@@ -965,8 +1117,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
     async fn heartbeat(&mut self, conn: &mut Conn, socket: &mut S::Socket) -> Result<(), End> {
         let nonce = self.heartbeat_nonce;
         self.heartbeat_nonce = self.heartbeat_nonce.wrapping_add(1);
-        self.send_text(conn, socket, &wire::heartbeat(nonce, self.seq_ack))
-            .await?;
+        Self::send_text(conn, socket, &wire::heartbeat(nonce, self.seq_ack)).await?;
         conn.awaiting_ack = Some(nonce);
         Ok(())
     }
@@ -1060,9 +1211,14 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     Counters::add(&counters.rejected_malformed, 1);
                     return Ok(());
                 };
+                // Cancel any outstanding send before the one-way protocol
+                // boundary; no laboratory datagram may leave after selection.
+                self.udp_work = None;
+                self.discovery.selected = true;
                 let select = wire::select_protocol(external, udp.mode, self.options.video.as_ref());
-                self.send_text(conn, socket, &select).await?;
+                Self::send_text(conn, socket, &select).await?;
                 conn.phase = Phase::Negotiating;
+                conn.ping_at = Some(Instant::now() + PING_INTERVAL);
                 conn.deadline = Some(Instant::now() + HANDSHAKE_TIMEOUT);
                 self.set_status(VoiceStatus::Negotiating);
             }
@@ -1239,8 +1395,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     // Announce before the first audible packet.
                     media.speaking = true;
                     let ssrc = media.rtp.ssrc();
-                    self.send_text(conn, socket, &wire::speaking(flags, ssrc))
-                        .await?;
+                    Self::send_text(conn, socket, &wire::speaking(flags, ssrc)).await?;
                 }
                 self.send_rtp(&frame).await
             }
@@ -1336,22 +1491,27 @@ impl<S: Signaling, N: Network> Driver<S, N> {
 
     async fn on_timers(&mut self, conn: &mut Conn, socket: &mut S::Socket) -> Result<(), End> {
         let now = Instant::now();
+        if self.discovery.expired(now) {
+            return Err(End::Close(CloseReason::UdpUnreachable));
+        }
         if conn.deadline.is_some_and(|at| at <= now) {
             match conn.phase {
                 Phase::Discovering { attempts } => {
-                    if attempts >= DISCOVERY_ATTEMPTS {
-                        return Err(End::Close(CloseReason::UdpUnreachable));
+                    if self.udp_work.is_some() {
+                        conn.deadline = None;
+                    } else if attempts >= DISCOVERY_ATTEMPTS {
+                        if !self.discovery.advance() {
+                            return Err(End::Close(CloseReason::UdpUnreachable));
+                        }
+                        let udp = self
+                            .udp
+                            .as_ref()
+                            .ok_or(End::Close(CloseReason::UdpUnreachable))?;
+                        let target = (udp.server, udp.ssrc, udp.mode);
+                        self.start_discovery(conn, target.0, target.1, target.2)?;
+                    } else {
+                        self.queue_discovery(conn, 0)?;
                     }
-                    if let Some(udp) = &self.udp {
-                        let _ = udp
-                            .link
-                            .send_to(&udp::discovery_request(udp.ssrc), udp.server)
-                            .await;
-                    }
-                    conn.phase = Phase::Discovering {
-                        attempts: attempts + 1,
-                    };
-                    conn.deadline = Some(now + DISCOVERY_RETRY);
                 }
                 Phase::Connected => conn.deadline = None,
                 // No HELLO, READY, RESUMED, or Session Description in time.
@@ -1397,8 +1557,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 if let Some(media) = &mut self.media {
                     media.speaking = false;
                     let ssrc = media.rtp.ssrc();
-                    self.send_text(conn, socket, &wire::speaking(0, ssrc))
-                        .await?;
+                    Self::send_text(conn, socket, &wire::speaking(0, ssrc)).await?;
                 }
             } else {
                 conn.silence_at = conn.silence_at.map(|at| at + FRAME);

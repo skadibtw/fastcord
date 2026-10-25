@@ -2,7 +2,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use fastcord_discord::gateway::{ClientProperties, Host, HostOs};
-use fastcord_discord::{Priority, RestClient, RestError, UserToken};
+use fastcord_discord::{
+    NetworkFailure, Priority, RestClient, RestError, RetryableFailure, UserToken,
+};
 use fastcord_model::{Snowflake, User};
 use fastcord_platform::{NativeCredentialStore, StoreError};
 
@@ -68,14 +70,40 @@ pub enum LoginError {
     WorkerStopped,
 }
 
+impl LoginError {
+    /// Only typed categories enter the login notice; raw transport errors may
+    /// contain URLs, headers or credentials and are never formatted here.
+    pub fn notice(self, network: &fastcord_net::NetworkContext) -> String {
+        if matches!(
+            self,
+            Self::Rest(RestError::Retryable(RetryableFailure::Network(_)))
+        ) && let fastcord_net::selector::ServiceStatus::Failed(category) = network
+            .controller()
+            .service_status(fastcord_net::Role::Rest)
+        {
+            return format!("Could not reach Discord: {category} Login stopped; try again.");
+        }
+        self.to_string()
+    }
+}
+
 impl fmt::Display for LoginError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Rest(RestError::AuthenticationRequired | RestError::InvalidToken) => {
                 f.write_str("Discord rejected this token. Login stopped; paste a valid alt-account token.")
             }
-            Self::Rest(RestError::Retryable(_)) => {
-                f.write_str("Could not reach Discord or Discord is temporarily unavailable. Login stopped; try again.")
+            Self::Rest(RestError::Retryable(RetryableFailure::Server(status))) => {
+                write!(f, "Discord returned HTTP {}. Login stopped; try again later.", status.as_u16())
+            }
+            Self::Rest(RestError::Retryable(RetryableFailure::Network(failure))) => {
+                let reason = match failure {
+                    NetworkFailure::Timeout => "the request timed out",
+                    NetworkFailure::Connection => "the connection failed",
+                    NetworkFailure::Body => "the response could not be read",
+                    NetworkFailure::Other => "the request failed",
+                };
+                write!(f, "Could not reach Discord: {reason}. Login stopped; try again.")
             }
             Self::Rest(error) => write!(f, "Login stopped: {error}."),
             Self::Store(error) => write!(f, "{error} Unlock it to restore your saved login, or explicitly choose a memory-only session."),
@@ -112,8 +140,8 @@ pub async fn initialize_store() -> Result<StoreReady, StoreError> {
 
 /// The official desktop-client identity shared by password login and the
 /// validated session (ADR 0005 revision 2026-10-25).
-pub async fn client_properties() -> ClientProperties {
-    let versions = fastcord_discord::gateway::resolve_versions().await;
+pub async fn client_properties(network: &fastcord_net::NetworkContext) -> ClientProperties {
+    let versions = fastcord_discord::gateway::resolve_versions(network).await;
     let (release, installation_id) =
         tokio::task::spawn_blocking(|| (fastcord_platform::os_release(), load_installation()))
             .await
@@ -184,6 +212,7 @@ pub fn remember_installation(client: &RestClient) {
 /// Exactly one validation request before an authenticated account is displayed.
 /// Tokens and raw error bodies never enter a displayable diagnostic.
 pub async fn validate(
+    network: fastcord_net::NetworkContext,
     token: Arc<UserToken>,
     expected_account: Option<Snowflake>,
 ) -> Result<Arc<Session>, LoginError> {
@@ -191,8 +220,9 @@ pub async fn validate(
         return Err(LoginError::InvalidInput);
     }
     let client = RestClient::new(
+        network.clone(),
         UserToken::new(token.expose_secret().to_owned()),
-        client_properties().await,
+        client_properties(&network).await,
     )
     .map_err(LoginError::Rest)?;
     let user: User = client
@@ -239,15 +269,17 @@ pub async fn persist(
 }
 
 pub async fn token_login(
+    network: fastcord_net::NetworkContext,
     token: Arc<UserToken>,
     store: Option<NativeCredentialStore>,
     remember: bool,
 ) -> Result<LoginOutcome, LoginError> {
-    let session = validate(token, None).await?;
+    let session = validate(network, token, None).await?;
     Ok(persist(session, store, remember).await)
 }
 
 pub async fn restore(
+    network: fastcord_net::NetworkContext,
     store: NativeCredentialStore,
     account: Snowflake,
 ) -> Result<LoginOutcome, LoginError> {
@@ -258,7 +290,7 @@ pub async fn restore(
         .ok_or(LoginError::CredentialMissing)?;
     let mut secret = credential.into_secret();
     let token = Arc::new(UserToken::new(std::mem::take(&mut *secret)));
-    let session = validate(token, Some(account)).await?;
+    let session = validate(network, token, Some(account)).await?;
     Ok(LoginOutcome::Authenticated(session, Persistence::Saved))
 }
 
@@ -289,6 +321,7 @@ pub(crate) fn fixture_session() -> Arc<Session> {
         user: serde_json::from_str(include_str!("../../../fixtures/rest/current-user.json"))
             .unwrap(),
         client: RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("dummy-offline-secret".to_owned()),
             properties,
         )
@@ -339,7 +372,12 @@ mod tests {
             "x".repeat(MAX_TOKEN_BYTES + 1),
             "bad\r\nheader".to_owned(),
         ] {
-            let outcome = validate(Arc::new(UserToken::new(value)), None).await;
+            let outcome = validate(
+                fastcord_net::NetworkContext::off(),
+                Arc::new(UserToken::new(value)),
+                None,
+            )
+            .await;
             assert!(matches!(
                 outcome,
                 Err(LoginError::InvalidInput | LoginError::Rest(RestError::InvalidToken))
@@ -369,5 +407,49 @@ mod tests {
                 .to_string()
                 .contains("memory-only")
         );
+    }
+
+    #[test]
+    fn login_notice_preserves_typed_transport_failures_and_server_statuses() {
+        let network = fastcord_net::NetworkContext::off();
+        network.controller().note_failure(
+            fastcord_net::Role::Rest,
+            fastcord_net::NetworkError::TlsReset,
+        );
+        let connection = LoginError::Rest(RestError::Retryable(RetryableFailure::Network(
+            NetworkFailure::Connection,
+        )));
+        assert!(
+            connection
+                .notice(&network)
+                .contains("TLS connection was reset")
+        );
+        let server = LoginError::Rest(RestError::Retryable(RetryableFailure::Server(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        )));
+        let text = server.notice(&network);
+        assert!(text.contains("HTTP 503"));
+        assert!(!text.contains("TLS"));
+        let authentication = LoginError::Rest(RestError::AuthenticationRequired);
+        assert!(
+            authentication
+                .notice(&network)
+                .contains("rejected this token")
+        );
+    }
+
+    #[test]
+    fn login_notice_uses_the_current_request_category_after_a_successful_connection() {
+        let network = fastcord_net::NetworkContext::off();
+        network
+            .controller()
+            .note_service_reachable(fastcord_net::Role::Rest);
+        for (failure, expected) in [
+            (NetworkFailure::Timeout, "timed out"),
+            (NetworkFailure::Body, "response could not be read"),
+        ] {
+            let error = LoginError::Rest(RestError::Retryable(RetryableFailure::Network(failure)));
+            assert!(error.notice(&network).contains(expected));
+        }
     }
 }

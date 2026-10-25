@@ -2987,6 +2987,7 @@ impl Worker {
                 {
                     // The account's own stream: it sends video and never decodes.
                     let task = tokio::spawn(stream_share::run(
+                        self.rest.network().clone(),
                         credentials,
                         worker.control(),
                         Arc::clone(&share.sender),
@@ -3021,7 +3022,7 @@ impl Worker {
                 self.stream_tasks.insert(
                     key,
                     tokio::spawn(stream_audio::run(
-                        credentials,
+                        (self.rest.network().clone(), credentials),
                         presentation.visible.clone(),
                         presentation.visibility(),
                         Box::new(presentation.sink()),
@@ -3119,6 +3120,7 @@ impl Worker {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 self.voice_cancel_tx = Some(tx);
                 self.voice_task = Some(tokio::spawn(voice_audio::run(
+                    self.rest.network().clone(),
                     credentials,
                     rx,
                     self.bridge.voice_audio.clone(),
@@ -5241,6 +5243,7 @@ mod tests {
         let bridge = NavigationBridge::new();
         let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
         let rest = RestClient::new(
+            fastcord_net::NetworkContext::off(),
             UserToken::new("offline-fixture-credential".to_owned()),
             properties,
         )

@@ -27,7 +27,7 @@ use std::time::Duration;
 use fastcord_model::VoiceStateRequest;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::time::{Instant, sleep, sleep_until, timeout};
+use tokio::time::{Instant, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
@@ -41,7 +41,7 @@ use super::event::{ConnectionState, ReconnectReason, StopReason};
 use super::event::{Dispatch, GatewayEvent};
 use super::outbox::Outbox;
 use super::pacing::{
-    IdentifyBudget, JitterSource, MAX_DISCOVERY_FORBIDDEN, MAX_FAILED_ATTEMPTS, SEND_WINDOW,
+    JitterSource, MAX_DISCOVERY_FORBIDDEN, MAX_FAILED_ATTEMPTS, RetryLedger, SEND_WINDOW,
     SendBudget, backoff_delay, invalid_session_delay,
 };
 use super::profile::Identity;
@@ -139,8 +139,8 @@ struct Driver<T: Transport, J: JitterSource> {
     subscriber: Subscriber,
     session: Option<Session>,
     identify_rejections: u32,
-    /// Identifies of the last 24 hours (not Resumes).
-    identifies: IdentifyBudget,
+    /// Shared account retry and Identify accounting, including old drivers.
+    retries: Arc<RetryLedger>,
     stream: mpsc::Receiver<StreamCommand>,
     stream_pending: Option<StreamCommand>,
     /// The last opcode 4 this session accepted from us, across reconnects.
@@ -173,6 +173,7 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
         close,
     } = wanted;
     let interrupt = make_interrupt(Arc::clone(&transport), shutdown, close);
+    let retries = transport.retry_ledger();
     let mut driver = Driver {
         transport,
         token,
@@ -184,7 +185,7 @@ pub(crate) async fn run<T: Transport, J: JitterSource>(
         subscriber: Subscriber::new(),
         session: None,
         identify_rejections: 0,
-        identifies: IdentifyBudget::default(),
+        retries,
         stream,
         stream_pending: None,
         voice,
@@ -212,13 +213,21 @@ async fn drive<T: Transport, J: JitterSource>(
     driver: &mut Driver<T, J>,
 ) -> Result<Infallible, Terminal> {
     // The profile is fixed at Gateway start and passed in; reused by every Identify.
-    let mut failures = 0u32;
-    let mut forbidden = 0u32;
+    let mut failures = driver.retries.failures();
     let mut base_url: Option<GatewayUrl> = None;
     loop {
+        give_up_after_failures(failures)?;
+        if driver.retries.forbidden() >= MAX_DISCOVERY_FORBIDDEN {
+            return Err(Terminal::Stop(StopReason::DiscoveryForbidden));
+        }
         // A fresh Identify past the daily allowance waits for the user.
-        if driver.session.is_none() && !driver.identifies.allows_another(Instant::now()) {
+        if driver.session.is_none() && !driver.retries.allows_identify(Instant::now()) {
             return Err(Terminal::Stop(StopReason::IdentifyBudget));
+        }
+        // Dropping/recreating the task during a wait cannot bypass its
+        // nonzero backoff. Selection on the next demand is an additional gate.
+        if let Some(deadline) = driver.retries.retry_not_before() {
+            interruptible(&mut driver.interrupt, sleep_until(deadline)).await?;
         }
         driver.outbox.push(
             GatewayEvent::State(ConnectionState::Connecting { attempt: failures }),
@@ -237,20 +246,20 @@ async fn drive<T: Transport, J: JitterSource>(
                             return Err(Terminal::Stop(StopReason::InvalidGatewayUrl));
                         };
                         base_url = Some(url.clone());
-                        forbidden = 0;
+                        driver.retries.discovery_succeeded();
                         url
                     }
                     Err(DiscoverError::AuthenticationRequired) => {
                         return Err(Terminal::AuthenticationRequired);
                     }
                     Err(error) => {
+                        failures = driver.retries.failed_attempt();
                         if error == DiscoverError::Forbidden {
-                            forbidden += 1;
+                            let forbidden = driver.retries.discovery_forbidden();
                             if forbidden >= MAX_DISCOVERY_FORBIDDEN {
                                 return Err(Terminal::Stop(StopReason::DiscoveryForbidden));
                             }
                         }
-                        failures = failures.saturating_add(1);
                         give_up_after_failures(failures)?;
                         wait(driver, failures, ReconnectReason::DiscoveryFailed).await?;
                         continue;
@@ -262,7 +271,7 @@ async fn drive<T: Transport, J: JitterSource>(
             match interruptible(&mut driver.interrupt, driver.transport.connect(&url)).await? {
                 Ok(socket) => socket,
                 Err(_) => {
-                    failures = failures.saturating_add(1);
+                    failures = driver.retries.failed_attempt();
                     give_up_after_failures(failures)?;
                     if driver.session.is_none() {
                         // Ask Discord for a fresh address after a failed connect.
@@ -276,11 +285,7 @@ async fn drive<T: Transport, J: JitterSource>(
         if !ended.resume {
             driver.session = None;
         }
-        failures = if ended.healthy {
-            0
-        } else {
-            failures.saturating_add(1)
-        };
+        failures = driver.retries.connection_ended(ended.healthy);
         give_up_after_failures(failures)?;
         wait(driver, failures, ended.reason).await?;
     }
@@ -317,6 +322,7 @@ async fn wait<T: Transport, J: JitterSource>(
     reason: ReconnectReason,
 ) -> Result<(), Terminal> {
     let delay = reconnect_delay(reason, failures, &mut driver.jitter);
+    let deadline = driver.retries.schedule_retry(Instant::now() + delay);
     driver.outbox.push(
         GatewayEvent::State(ConnectionState::Reconnecting {
             attempt: failures,
@@ -328,7 +334,7 @@ async fn wait<T: Transport, J: JitterSource>(
     interruptible(&mut driver.interrupt, driver.outbox.flush())
         .await?
         .map_err(|_| Terminal::Shutdown)?;
-    interruptible(&mut driver.interrupt, sleep(delay)).await?;
+    interruptible(&mut driver.interrupt, sleep_until(deadline)).await?;
     Ok(())
 }
 
@@ -357,6 +363,7 @@ struct Conn {
     ready_since: Option<Instant>,
     /// The installation id the last READY issued, for the shared identity.
     installation: Option<String>,
+    health_reported: bool,
 }
 
 enum Action {
@@ -518,7 +525,7 @@ async fn connection<T: Transport, J: JitterSource>(
         subscriber,
         session,
         identify_rejections,
-        identifies,
+        retries,
         stream,
         stream_pending,
         voice,
@@ -531,6 +538,7 @@ async fn connection<T: Transport, J: JitterSource>(
         sent: Sent::Nothing,
         ready_since: None,
         installation: None,
+        health_reported: false,
     };
     let mut inflater = Inflater::new();
     subscriber.pause();
@@ -550,6 +558,17 @@ async fn connection<T: Transport, J: JitterSource>(
     outbox.push(GatewayEvent::State(ConnectionState::AwaitHello), STATE_COST);
 
     let end: End = loop {
+        // Piggyback on normal Gateway activity/heartbeats; no UI timer or
+        // diagnostic polling is introduced. This is a session-health report,
+        // independent of TLS reachability and of the shared safety ledger.
+        if !conn.health_reported
+            && conn
+                .ready_since
+                .is_some_and(|since| since.elapsed() >= STABLE_AFTER)
+        {
+            transport.note_session_healthy();
+            conn.health_reported = true;
+        }
         tokio::select! {
             biased;
             reason = interrupt.as_mut() => break Err(reason.into()),
@@ -703,6 +722,9 @@ async fn connection<T: Transport, J: JitterSource>(
                         stream_due = stream_pending.as_ref().map(|_| now);
                     }
                     Action::Hello(interval) => {
+                        // The WebSocket upgrade plus a valid HELLO establish
+                        // service reachability; TLS success alone does not.
+                        transport.note_service_reachable();
                         conn.interval = interval;
                         timer = Instant::now() + interval.mul_f64(jitter.unit());
                         let resuming = session.as_ref().and_then(|s| s.seq.map(|seq| (s, seq)));
@@ -725,8 +747,8 @@ async fn connection<T: Transport, J: JitterSource>(
                         let payload = Zeroizing::new(payload);
                         outbox.push(GatewayEvent::State(state), STATE_COST);
                         conn.sent = sent;
-                        if sent == Sent::Identify {
-                            identifies.record(Instant::now());
+                        if sent == Sent::Identify && !retries.reserve_identify(Instant::now()) {
+                            break Err(Terminal::Stop(StopReason::IdentifyBudget));
                         }
                         budget.record(Instant::now());
                         if !send(&mut socket, &payload).await {

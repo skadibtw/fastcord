@@ -37,6 +37,7 @@ type EngineStart = Result<(AudioEngine, EngineChannels), AudioError>;
 /// Cancellation (and every other exit) leaves gracefully: speech is ended and the voice
 /// session is closed with a normal close instead of being aborted.
 pub(super) async fn run(
+    network: fastcord_net::NetworkContext,
     credentials: VoiceCredentials,
     cancel_rx: oneshot::Receiver<()>,
     state: watch::Sender<VoiceAudioState>,
@@ -48,7 +49,7 @@ pub(super) async fn run(
     let capture_enabled = initial.capture_enabled();
     let bitrate = initial.send_bitrate();
     run_with(
-        credentials,
+        (network, credentials),
         cancel_rx,
         state,
         controls,
@@ -397,7 +398,7 @@ impl Drop for NoiseStatus<'_> {
     }
 }
 async fn run_with(
-    credentials: VoiceCredentials,
+    connection: (fastcord_net::NetworkContext, VoiceCredentials),
     mut cancel_rx: oneshot::Receiver<()>,
     state: watch::Sender<VoiceAudioState>,
     mut controls: watch::Receiver<VoiceControls>,
@@ -405,10 +406,12 @@ async fn run_with(
     tiles: Arc<CameraTiles>,
     start_engine: impl FnOnce() -> EngineStart + Send + 'static,
 ) {
+    let (network, credentials) = connection;
     // A call connection offers video (cameras) next to audio; if the offer is
     // ever inconsistent the call is still an audio call.
-    let mut session = connect_with_video(credentials.clone(), camera::call_options())
-        .unwrap_or_else(|_| connect(credentials));
+    let mut session =
+        connect_with_video(network.clone(), credentials.clone(), camera::call_options())
+            .unwrap_or_else(|_| connect(network, credentials));
     let media = session.media();
     let started = tokio::task::spawn_blocking(start_engine).await;
     let (engine, channels) = match started {
@@ -810,7 +813,7 @@ mod tests {
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
             run_with(
-                credentials(),
+                (fastcord_net::NetworkContext::off(), credentials()),
                 cancel_rx,
                 state,
                 controls,
@@ -1237,6 +1240,9 @@ fn describe_status(status: &VoiceStatus) -> String {
         VoiceStatus::Connecting => "connecting".into(),
         VoiceStatus::Identifying => "identifying".into(),
         VoiceStatus::Discovering => "discovering address".into(),
+        VoiceStatus::DiscoveringExperimental { variant } => {
+            format!("experimental UDP discovery, variant {variant}/3")
+        }
         VoiceStatus::Negotiating => "negotiating transport".into(),
         VoiceStatus::Rekeying { transition_id } => match transition_id {
             Some(id) => format!(

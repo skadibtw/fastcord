@@ -388,23 +388,31 @@ fn match_slots(files: &[UploadFile], answer: SlotResponse) -> Result<Vec<Slot>, 
 /// The credential-free client that sends file bytes to storage.
 #[derive(Clone)]
 pub struct Uploader {
-    http: reqwest::Client,
+    http: fastcord_net::HttpClient,
     allow_loopback_http: bool,
 }
 
 impl Uploader {
-    pub fn new() -> Result<Self, UploadError> {
-        Self::build(false)
+    pub fn new(network: &fastcord_net::NetworkContext) -> Result<Self, UploadError> {
+        Self::build(network, false)
     }
 
     /// Plain HTTP to loopback only, for tests against a local server.
     #[cfg(test)]
     fn for_tests() -> Result<Self, UploadError> {
-        Self::build(true)
+        Self::build(&fastcord_net::NetworkContext::off(), true)
     }
 
-    fn build(local: bool) -> Result<Self, UploadError> {
-        let mut builder = fastcord_bypass::route_http(reqwest::Client::builder())
+    fn build(network: &fastcord_net::NetworkContext, local: bool) -> Result<Self, UploadError> {
+        let builder = network.http_builder(fastcord_net::Role::Upload);
+        #[cfg(test)]
+        let builder = if local {
+            network.debug_loopback_http_builder(fastcord_net::Role::Upload)
+        } else {
+            builder
+        };
+        let mut builder = builder
+            .map_err(|_| UploadError::Network(NetworkFailure::Other))?
             .use_rustls_tls()
             // No default headers, cookies or credentials of any kind, and a
             // redirect would carry the body somewhere nobody validated.
@@ -492,7 +500,7 @@ impl Uploader {
                     // The body stream failed: the file changed or vanished.
                     UploadError::Changed
                 } else {
-                    UploadError::Network(NetworkFailure::from_reqwest(&error))
+                    UploadError::Network(NetworkFailure::from_http(&error))
                 }
             })?;
         if response.status().is_success() {
@@ -714,7 +722,7 @@ mod tests {
 
     #[test]
     fn only_discord_storage_over_https_without_credentials_may_receive_bytes() {
-        let uploader = Uploader::new().unwrap();
+        let uploader = Uploader::new(&fastcord_net::NetworkContext::off()).unwrap();
         assert!(
             uploader
                 .validate("https://discord-attachments-uploads-prd.storage.googleapis.com/x?sig=1")

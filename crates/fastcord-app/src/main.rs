@@ -49,6 +49,7 @@ mod message_link;
 mod mic_panel;
 mod moderation;
 mod navigation;
+mod network_ui;
 mod notify;
 mod notify_settings;
 mod onboarding;
@@ -178,6 +179,30 @@ fn window_title() -> &'static str {
 }
 
 fn main() -> iced::Result {
+    if std::env::args_os().any(|arg| arg == "--packet-helper") {
+        let args: Vec<_> = std::env::args().collect();
+        if args.len() == 4
+            && args[1] == "--packet-helper"
+            && let Ok(parent) = args[3].parse()
+        {
+            let _ = fastcord_platform::network::packet_helper_entry(&args[2], parent);
+        }
+        return Ok(());
+    }
+    #[cfg(debug_assertions)]
+    if std::env::args_os().any(|arg| arg == "--network-check-login-packet") {
+        network_ui::check_login();
+        return Ok(());
+    }
+    #[cfg(debug_assertions)]
+    if std::env::args_os().any(|arg| arg == "--network-check") {
+        network_ui::check(None);
+        return Ok(());
+    }
+    #[cfg(debug_assertions)]
+    if std::env::args_os().any(|arg| arg == "--network-preview") {
+        return network_ui::preview();
+    }
     // An offline UI check: runs before account restoration and single-instance
     // hand-off, with no session, credential access or Discord workers.
     if std::env::args_os().any(|arg| arg == "--alerts-preview") {
@@ -235,6 +260,8 @@ fn main() -> iced::Result {
 }
 
 struct App {
+    network: fastcord_net::NetworkContext,
+    network_settings: network_ui::State,
     phase: Phase,
     token: Arc<UserToken>,
     acknowledged: bool,
@@ -467,7 +494,14 @@ enum Message {
     StopSpeech,
     RefreshAudioDevices,
     AudioDevicesListed(audio_devices::Inventory),
-    Initialized(audio_devices::Preferences, Result<StoreReady, StoreError>),
+    Initialized(
+        audio_devices::Preferences,
+        Box<network_ui::Loaded>,
+        Result<StoreReady, StoreError>,
+    ),
+    Network(network_ui::Action),
+    NetworkChanged,
+    NetworkProgress,
     SelectAudioDevice(fastcord_audio::Direction, audio_devices::DeviceOption),
     NoiseSuppressionChanged(fastcord_audio::NoiseSuppression),
     EchoCancellationChanged(bool),
@@ -593,6 +627,8 @@ impl App {
         (
             Self {
                 phase: Phase::Starting,
+                network: network_ui::new_context(),
+                network_settings: network_ui::State::default(),
                 token: Arc::new(UserToken::new(String::new())),
                 acknowledged: false,
                 memory_only: false,
@@ -673,9 +709,15 @@ impl App {
                     paste::purge_stale();
                     voice_record::purge_stale();
                     let preferences = audio_devices::load().await;
-                    (preferences, login::initialize_store().await)
+                    (
+                        preferences,
+                        network_ui::load().await,
+                        login::initialize_store().await,
+                    )
                 },
-                |(preferences, store)| Message::Initialized(preferences, store),
+                |(preferences, network, store)| {
+                    Message::Initialized(preferences, Box::new(network), store)
+                },
             ),
         )
     }
@@ -875,6 +917,12 @@ impl App {
         });
         iced::Subscription::batch([
             activity,
+            iced::Subscription::run(network_ui::changes).map(|()| Message::NetworkChanged),
+            iced::Subscription::run_with(
+                network_ui::Updates(self.network.controller().clone()),
+                network_ui::updates,
+            )
+            .map(|()| Message::NetworkProgress),
             self.animation_subscription(),
             self.video_subscription(),
             self.media_subscription(),
@@ -1227,8 +1275,223 @@ impl App {
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
+        if matches!(
+            message,
+            Message::JoinVoice(..) | Message::StartCall(_) | Message::AcceptCall(_)
+        ) && !self.network.media_supported()
+        {
+            self.network_settings.open = true;
+            self.network_settings.notice = Some(
+                "This proxy configuration carries TCP only. Voice, camera and screen sharing require a UDP-capable relay; no direct media connection was opened.",
+            );
+            return Task::none();
+        }
         match message {
-            Message::Initialized(preferences, store) => {
+            Message::NetworkProgress => {}
+            Message::NetworkChanged => {
+                self.network.controller().network_changed();
+            }
+            Message::Network(action) => match action {
+                network_ui::Action::PacketStart => {
+                    if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                        self.network_settings.saving = true;
+                        self.network_settings.notice =
+                            Some("Waiting for Windows administrator approval…");
+                        return Task::perform(network_ui::start_packet(), |r| {
+                            Message::Network(network_ui::Action::PacketStarted(r))
+                        });
+                    }
+                }
+                network_ui::Action::PacketStarted(result) => {
+                    self.network_settings.saving = false;
+                    if !matches!(self.phase, Phase::Login) {
+                        self.network_settings.notice =
+                            Some("Sign out before starting packet recovery.");
+                        return Task::none();
+                    }
+                    match result {
+                        Ok(route) => {
+                            self.network_settings.packet_active = true;
+                            self.network_settings.settings.mode =
+                                fastcord_net::settings::Mode::Auto;
+                            self.network.controller().network_changed();
+                            self.network = self
+                                .network
+                                .with_mode(fastcord_net::settings::Mode::Auto)
+                                .with_prefix_factory(route.0);
+                            self.network_settings.saving = true;
+                            self.network_settings.notice =
+                                Some("Packet helper started. Checking the public Discord API…");
+                            return Task::perform(
+                                network_ui::packet_check(self.network.clone()),
+                                |r| Message::Network(network_ui::Action::PacketChecked(r)),
+                            );
+                        }
+                        Err(e) => self.network_settings.notice = Some(e),
+                    }
+                }
+                network_ui::Action::PacketStop => {
+                    if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                        self.network_settings.packet_active = false;
+                        self.network = self.network.without_prefix_factory();
+                        self.network.controller().network_changed();
+                        self.network_settings.notice = Some("Packet recovery stopped.");
+                    }
+                }
+                network_ui::Action::PacketCheck => {
+                    if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                        self.network_settings.saving = true;
+                        self.network_settings.notice = Some("Checking the public Discord API…");
+                        return Task::perform(
+                            network_ui::packet_check(self.network.clone()),
+                            |r| Message::Network(network_ui::Action::PacketChecked(r)),
+                        );
+                    }
+                }
+                network_ui::Action::PacketChecked(result) => {
+                    self.network_settings.saving = false;
+                    self.network_settings.notice = Some(result);
+                }
+                network_ui::Action::Open => self.network_settings.open = true,
+                network_ui::Action::Close => self.network_settings.open = false,
+                network_ui::Action::Retry => {
+                    let context = self.network.clone();
+                    return Task::perform(
+                        async move {
+                            context.wait_for_recovery().await;
+                        },
+                        |()| Message::Network(network_ui::Action::Retried),
+                    );
+                }
+                network_ui::Action::Retried => {
+                    self.network_settings.notice =
+                        Some("Pending check finished. Ordinary reconnect limits still apply.")
+                }
+                network_ui::Action::Mode(mode) => {
+                    if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                        self.network_settings.saving = true;
+                        self.network.controller().network_changed();
+                        self.network_settings.settings.mode = mode;
+                        self.network = self.network.with_mode(mode);
+                        if mode != fastcord_net::settings::Mode::Auto {
+                            self.network_settings.packet_active = false;
+                            self.network = self.network.without_prefix_factory();
+                        }
+                        return Task::perform(
+                            network_ui::save(self.network_settings.settings.clone()),
+                            |result| Message::Network(network_ui::Action::Saved(result)),
+                        );
+                    }
+                }
+                network_ui::Action::ExperimentalUdp(enabled) => {
+                    if matches!(self.phase, Phase::Login)
+                        && !self.network_settings.saving
+                        && self.network.mode() != fastcord_net::settings::Mode::Proxy
+                    {
+                        self.network_settings.saving = true;
+                        self.network_settings.settings.experimental_udp = enabled;
+                        self.network = self.network.with_experimental_udp(enabled);
+                        return Task::perform(
+                            network_ui::save(self.network_settings.settings.clone()),
+                            |result| Message::Network(network_ui::Action::Saved(result)),
+                        );
+                    }
+                }
+                network_ui::Action::ProxyKind(kind) => {
+                    if matches!(self.phase, Phase::Login) {
+                        self.network_settings.proxy_kind = Some(kind);
+                    }
+                }
+                network_ui::Action::ProxyHost(value) => {
+                    if matches!(self.phase, Phase::Login) && value.len() <= 253 {
+                        self.network_settings.proxy_host = value;
+                    }
+                }
+                network_ui::Action::ProxyPort(value) => {
+                    if matches!(self.phase, Phase::Login) && value.len() <= 5 {
+                        self.network_settings.proxy_port = value;
+                    }
+                }
+                network_ui::Action::ProxyUsername(value) => {
+                    if matches!(self.phase, Phase::Login) && value.len() <= 255 {
+                        self.network_settings.proxy_username = value;
+                    }
+                }
+                network_ui::Action::ProxyPassword(value) => {
+                    if matches!(self.phase, Phase::Login) && value.expose_secret().len() <= 255 {
+                        self.network_settings.proxy_password = Some(value);
+                    }
+                }
+                network_ui::Action::ApplyProxy => {
+                    if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                        let config = match self.network_settings.proxy_config() {
+                            Ok(config) => config,
+                            Err(error) => {
+                                self.network_settings.notice = Some(error);
+                                return Task::none();
+                            }
+                        };
+                        let password = self
+                            .network_settings
+                            .proxy_password
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(UserToken::new(String::new())));
+                        if self
+                            .network
+                            .with_proxy(
+                                config.clone(),
+                                zeroize::Zeroizing::new(password.expose_secret().to_owned()),
+                            )
+                            .is_err()
+                        {
+                            self.network_settings.notice =
+                                Some("The proxy credentials are invalid.");
+                            return Task::none();
+                        }
+                        let mut settings = self.network_settings.settings.clone();
+                        settings.mode = fastcord_net::settings::Mode::Proxy;
+                        settings.proxy = Some(config);
+                        self.network_settings.saving = true;
+                        return Task::perform(
+                            network_ui::apply_proxy(settings, password),
+                            |result| Message::Network(network_ui::Action::ProxyApplied(result)),
+                        );
+                    }
+                }
+                network_ui::Action::ProxyApplied(result) => {
+                    self.network_settings.saving = false;
+                    match result {
+                        Ok(loaded) => {
+                            self.network_settings.packet_active = false;
+                            self.network = self.network.without_prefix_factory();
+                            self.network.controller().network_changed();
+                            self.network = network_ui::configure(&self.network, &loaded)
+                                .unwrap_or_else(|_| {
+                                    self.network.with_mode(fastcord_net::settings::Mode::Proxy)
+                                });
+                            self.network_settings.apply(&loaded);
+                            self.network_settings.notice = Some(
+                                "Proxy applied. Routing failures will be shown; there is no direct fallback.",
+                            );
+                        }
+                        Err(error) => self.network_settings.notice = Some(error),
+                    }
+                }
+                network_ui::Action::Saved(result) => {
+                    self.network_settings.saving = false;
+                    self.network_settings.notice =
+                        Some(result.err().unwrap_or("Network settings saved."))
+                }
+            },
+            Message::Initialized(preferences, network, store) => {
+                self.network =
+                    network_ui::configure(&self.network, &network).unwrap_or_else(|_| {
+                        self.network.with_mode(fastcord_net::settings::Mode::Proxy)
+                    });
+                self.network_settings.apply(&network);
+                if let Some(warning) = network.warning {
+                    self.notice = Some(warning.to_owned());
+                }
                 notify::set_enabled(!preferences.notifications_off);
                 notify::set_previews(!preferences.notification_previews_off);
                 self.soundboard.set_prefs(preferences.soundboard.clone());
@@ -1246,6 +1509,7 @@ impl App {
                     };
                     return Task::perform(
                         login::token_login(
+                            self.network.clone(),
                             Arc::new(UserToken::new(fake::TOKEN.to_owned())),
                             None,
                             false,
@@ -1598,7 +1862,12 @@ impl App {
                     };
                     self.notice = None;
                     return Task::perform(
-                        login::token_login(token, self.store.clone(), !self.memory_only),
+                        login::token_login(
+                            self.network.clone(),
+                            token,
+                            self.store.clone(),
+                            !self.memory_only,
+                        ),
                         Message::LoginFinished,
                     );
                 }
@@ -1624,7 +1893,12 @@ impl App {
                     Ok(password::Step::Token(token)) => {
                         self.clear_password();
                         return Task::perform(
-                            login::token_login(token, self.store.clone(), !self.memory_only),
+                            login::token_login(
+                                self.network.clone(),
+                                token,
+                                self.store.clone(),
+                                !self.memory_only,
+                            ),
                             Message::LoginFinished,
                         );
                     }
@@ -1678,7 +1952,10 @@ impl App {
                     return Task::none();
                 };
                 let code = self.take_input_token();
-                return Task::perform(password::second_factor(challenge, code), Message::MfaResult);
+                return Task::perform(
+                    password::second_factor(self.network.clone(), challenge, code),
+                    Message::MfaResult,
+                );
             }
             Message::CancelMfa if matches!(self.phase, Phase::Mfa(_)) => {
                 self.clear_token();
@@ -1688,7 +1965,12 @@ impl App {
                 match result {
                     Ok(token) => {
                         return Task::perform(
-                            login::token_login(token, self.store.clone(), !self.memory_only),
+                            login::token_login(
+                                self.network.clone(),
+                                token,
+                                self.store.clone(),
+                                !self.memory_only,
+                            ),
                             Message::LoginFinished,
                         );
                     }
@@ -1718,7 +2000,12 @@ impl App {
                     saved_account: None,
                 };
                 return Task::perform(
-                    login::token_login(token, self.store.clone(), !self.memory_only),
+                    login::token_login(
+                        self.network.clone(),
+                        token,
+                        self.store.clone(),
+                        !self.memory_only,
+                    ),
                     Message::LoginFinished,
                 );
             }
@@ -1771,7 +2058,7 @@ impl App {
                     }
                     Err(error) => {
                         self.phase = Phase::Login;
-                        self.notice = Some(error.to_string());
+                        self.notice = Some(error.notice(&self.network));
                     }
                 }
             }
@@ -3370,6 +3657,9 @@ impl App {
     }
 
     fn can_login(&self) -> bool {
+        if self.network_settings.saving {
+            return false;
+        }
         self.acknowledged && !self.token.expose_secret().trim().is_empty()
     }
 
@@ -3384,6 +3674,9 @@ impl App {
     }
 
     fn can_password_login(&self) -> bool {
+        if self.network_settings.saving {
+            return false;
+        }
         self.acknowledged
             && !self.password_login.trim().is_empty()
             && !self.password.expose_secret().is_empty()
@@ -3401,6 +3694,7 @@ impl App {
     ) -> Task<Message> {
         Task::perform(
             password::attempt(
+                self.network.clone(),
                 self.password_login.clone(),
                 Arc::clone(&self.password),
                 captcha,
@@ -3534,6 +3828,9 @@ impl App {
     }
 
     fn start_restore(&mut self, account: Snowflake) -> Task<Message> {
+        if self.network_settings.saving {
+            return Task::none();
+        }
         let Some(store) = self.store.clone() else {
             self.notice = Some(LoginError::Store(StoreError::Unavailable).to_string());
             return Task::none();
@@ -3543,7 +3840,10 @@ impl App {
         self.phase = Phase::Authenticating {
             saved_account: Some(account),
         };
-        Task::perform(login::restore(store, account), Message::LoginFinished)
+        Task::perform(
+            login::restore(self.network.clone(), store, account),
+            Message::LoginFinished,
+        )
     }
 
     fn start_delete(&mut self, account: Snowflake) -> Task<Message> {
@@ -3555,6 +3855,9 @@ impl App {
         )
     }
     fn start_qr(&mut self) -> Task<Message> {
+        if self.network_settings.saving {
+            return Task::none();
+        }
         if fake_mode() {
             self.notice = Some("QR login is not available in fake mode.".to_owned());
             return Task::none();
@@ -3562,8 +3865,10 @@ impl App {
         self.clear_token();
         self.qr_attempts += 1;
         let id = self.qr_attempts;
-        let (task, worker) =
-            Task::run(qr::events(), move |event| Message::Qr(id, event)).abortable();
+        let (task, worker) = Task::run(qr::events(self.network.clone()), move |event| {
+            Message::Qr(id, event)
+        })
+        .abortable();
         self.phase = Phase::Qr(QrAttempt::new(id, worker));
         task
     }
@@ -3624,6 +3929,7 @@ impl App {
             gateway::status_stream(session.client.clone(), session.token(), controls.clone());
         let (task, worker) = Task::run(stream, move |()| Message::Navigation(id)).abortable();
         let attachment_cache = crate::attachments::AttachmentCache::default_root(
+            &self.network,
             session.user.id,
             &session.client.identity().properties().browser_user_agent,
         )
@@ -5060,6 +5366,14 @@ impl App {
     }
 
     fn view_body(&self) -> Element<'_, Message> {
+        if self.network_settings.open {
+            return center(scrollable(network_ui::view(
+                &self.network_settings,
+                &self.network,
+                matches!(self.phase, Phase::Login),
+            )))
+            .into();
+        }
         if self.compact_call
             && let Phase::Account { gateway, .. } = &self.phase
         {
@@ -5067,22 +5381,25 @@ impl App {
         }
         if self.chat_settings_open {
             return center(scrollable(
-                column![chat_prefs::view(
-                    self.audio_preferences.chat,
-                    &chat_prefs::SpeechView {
-                        prefs: &self.audio_preferences.speech,
-                        voices: &self.speech_voices,
-                        error: speech::error(),
-                        speaking: speech::speaking(),
-                    },
-                    unverified::view(
-                        match &self.phase {
-                            Phase::Account { session, .. } => Some(&session.client),
-                            _ => None,
+                column![
+                    button("Network recovery").on_press(Message::Network(network_ui::Action::Open)),
+                    chat_prefs::view(
+                        self.audio_preferences.chat,
+                        &chat_prefs::SpeechView {
+                            prefs: &self.audio_preferences.speech,
+                            voices: &self.speech_voices,
+                            error: speech::error(),
+                            speaking: speech::speaking(),
                         },
-                        self.unverified_open,
-                    ),
-                )]
+                        unverified::view(
+                            match &self.phase {
+                                Phase::Account { session, .. } => Some(&session.client),
+                                _ => None,
+                            },
+                            self.unverified_open,
+                        ),
+                    )
+                ]
                 .padding(12),
             ))
             .into();
@@ -5319,6 +5636,30 @@ impl App {
             // Closed, search is a tool in the conversation header.
             let has_search = self.search.open && !search_bar_is_empty(gateway);
             let mut banner_column = column![].spacing(2);
+            for (label, role) in [
+                ("Voice", fastcord_net::Role::Voice),
+                ("Stream", fastcord_net::Role::Stream),
+            ] {
+                let status = self.network.controller().service_status(role);
+                if matches!(
+                    status,
+                    fastcord_net::selector::ServiceStatus::UdpDiscovering { .. }
+                        | fastcord_net::selector::ServiceStatus::UdpUnreachable
+                        | fastcord_net::selector::ServiceStatus::Failed(
+                            fastcord_net::NetworkError::ProxyUdpClosed
+                                | fastcord_net::NetworkError::ProxyUdpUnavailable
+                        )
+                ) {
+                    banner_column = banner_column.push(
+                        row![
+                            text(format!("{label}: {}", network_ui::status_text(status))).size(13),
+                            button("Network recovery")
+                                .on_press(Message::Network(network_ui::Action::Open)),
+                        ]
+                        .spacing(8),
+                    );
+                }
+            }
             if has_search {
                 banner_column = banner_column.push(search_bar);
             }
@@ -5874,7 +6215,8 @@ impl App {
                 .on_submit_maybe(self.can_login().then_some(Message::Login))
                 .padding(12),
             button("Log in with token").on_press_maybe(self.can_login().then_some(Message::Login)),
-            button("Settings (audio, desktop, blocking bypass)").on_press(Message::OpenAudioSettings),
+            button("Audio devices").on_press(Message::OpenAudioSettings),
+            button("Network recovery").on_press(Message::Network(network_ui::Action::Open)),
         ].spacing(16).width(Length::Fill);
         if let Some(notice) = &self.notice {
             content = content.push(text(notice));
@@ -6188,6 +6530,67 @@ mod tests {
             persistence,
         ))));
         session
+    }
+
+    #[test]
+    fn tcp_proxy_explains_media_before_any_join_or_ring_intent() {
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        app.network = app.network.with_mode(fastcord_net::settings::Mode::Proxy);
+        for message in [
+            Message::JoinVoice(Snowflake(1), Snowflake(2)),
+            Message::StartCall(Snowflake(3)),
+            Message::AcceptCall(Snowflake(3)),
+        ] {
+            drop(app.update(message));
+            assert!(app.network_settings.open);
+            assert!(app.network_settings.notice.unwrap().contains("TCP only"));
+            let Phase::Account { gateway, .. } = &app.phase else {
+                panic!("account expected")
+            };
+            assert_eq!(
+                gateway.controls.voice_audio_state(),
+                gateway::VoiceAudioState::Idle
+            );
+            assert!(gateway.voice_call.is_none());
+            assert!(gateway.voice_guild.is_none());
+        }
+    }
+
+    #[test]
+    fn proxy_password_ui_messages_are_redacted() {
+        let message = Message::Network(network_ui::Action::ProxyPassword(Arc::new(
+            UserToken::new("proxy-canary-secret".into()),
+        )));
+        assert!(!format!("{message:?}").contains("proxy-canary-secret"));
+    }
+
+    #[test]
+    fn a_configured_socks5_proxy_allows_an_explicit_call_intent() {
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        app.network = app
+            .network
+            .with_proxy(
+                fastcord_net::ProxyConfig {
+                    kind: fastcord_net::ProxyKind::Socks5,
+                    host: "127.0.0.1".into(),
+                    port: 1080,
+                    username: None,
+                },
+                zeroize::Zeroizing::new(String::new()),
+            )
+            .unwrap();
+        drop(app.update(Message::StartCall(Snowflake(3))));
+        assert!(!app.network_settings.open);
+        let Phase::Account { gateway, .. } = &app.phase else {
+            panic!("account expected")
+        };
+        assert_eq!(gateway.voice_call, Some(Snowflake(3)));
+        assert_eq!(
+            gateway.controls.voice_audio_state(),
+            gateway::VoiceAudioState::Connecting
+        );
     }
 
     #[test]
