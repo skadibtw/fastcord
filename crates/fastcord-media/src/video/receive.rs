@@ -89,6 +89,11 @@ impl ReceiveBuffer {
     }
 
     #[cfg(test)]
+    pub(crate) fn gap_count(&self) -> usize {
+        self.gaps.len()
+    }
+
+    #[cfg(test)]
     pub(crate) fn buffered_bytes(&self) -> usize {
         self.bytes
     }
@@ -153,7 +158,15 @@ impl ReceiveBuffer {
         if self.packets.contains_key(&sequence) {
             return Ok(());
         }
-        if self.bytes + payload.len() > RECEIVE_BYTES || self.packets.len() >= MAX_PACKETS {
+        // The window from the frontier is bounded as well as what it stores:
+        // jumps just under MAX_GAP were each accepted and each added a gap per
+        // missing number (about a million for 2048 stored packets), which
+        // `next_wake` walked on every datagram. No frame spans more than
+        // MAX_PACKETS, so neither may the window.
+        if self.bytes + payload.len() > RECEIVE_BYTES
+            || self.packets.len() >= MAX_PACKETS
+            || sequence - next >= MAX_PACKETS as u64
+        {
             self.restart(now, header, payload);
             return Err(VideoError::TooLarge);
         }
@@ -576,6 +589,20 @@ mod tests {
         push(&mut buffer, now, 100, 300, true);
         assert!(buffer.take_broken());
         assert_eq!(payload_sequences(&buffer.pop_frame(now).unwrap()), [100]);
+    }
+
+    /// Jumps just under the per-jump bound cannot pile up gaps: the window
+    /// from the frontier is bounded, so the gap table is too.
+    #[tokio::test(start_paused = true)]
+    async fn repeated_large_jumps_keep_the_gap_table_bounded() {
+        let now = Instant::now();
+        let mut buffer = ReceiveBuffer::new();
+        let mut sequence = 0u32;
+        for _ in 0..200 {
+            let _ = buffer.push(now, &header(sequence as u16, 100, false), [1u8]);
+            sequence += 511;
+            assert!(buffer.gap_count() < MAX_PACKETS, "{}", buffer.gap_count());
+        }
     }
 
     #[tokio::test(start_paused = true)]
