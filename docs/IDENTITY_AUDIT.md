@@ -374,6 +374,8 @@ not another round of header work.
 
 ## F. Specification status
 
+Execution handoff: [Identity audit implementation plan](IDENTITY_IMPLEMENTATION_PLAN.md).
+
 ### Review follow-up (2026-10-25)
 
 The earlier "implemented" list below describes code, not official-client
