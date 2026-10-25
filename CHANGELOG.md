@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Removed
+- The retired "Blocking bypass" setting is gone. Since the transport moved to `fastcord-net`, turning it on started nothing, yet the value was still stored, still displayed as on, and still accepted byedpi options such as `-I <address>`. The app no longer reads, writes or links `fastcord-bypass` at all; an old settings file loads normally and the stale `bypass` key disappears the next time preferences are saved.
+
 ## 0.1.0-alpha.7 — 2026-10-25
 
 ### Fixed

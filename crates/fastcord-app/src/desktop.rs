@@ -12,7 +12,6 @@ use fastcord_platform::instance::Forwarded;
 use fastcord_platform::tray::Command;
 use iced::widget::{checkbox, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
-use serde_json::{Value, json};
 
 use crate::gateway::{VoiceControls, VoiceParticipant};
 use crate::i18n::{tr, trf};
@@ -179,102 +178,6 @@ pub fn tray_stream() -> impl iced::futures::Stream<Item = TrayEvent> {
     })
 }
 
-/// Which strategy the bypass runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Choice {
-    /// Direct, then each built-in preset until a host answers.
-    Auto,
-    Preset(&'static fastcord_bypass::Preset),
-    /// Only the advanced options.
-    Custom,
-}
-
-impl Choice {
-    fn all() -> Vec<Self> {
-        std::iter::once(Self::Auto)
-            .chain(fastcord_bypass::presets().iter().map(Self::Preset))
-            .chain([Self::Custom])
-            .collect()
-    }
-
-    fn id(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Preset(preset) => preset.id,
-            Self::Custom => "custom",
-        }
-    }
-
-    /// An unknown id (a preset this OS lacks, an older file) means Automatic.
-    fn from_id(id: &str) -> Self {
-        Self::all()
-            .into_iter()
-            .find(|choice| choice.id() == id)
-            .unwrap_or(Self::Auto)
-    }
-}
-
-impl std::fmt::Display for Choice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Auto => tr("Automatic: try each strategy until Discord answers"),
-            Self::Preset(preset) => tr(preset.name),
-            Self::Custom => tr("Only my options (Advanced)"),
-        })
-    }
-}
-
-/// The blocking bypass setting: Discord through the embedded byedpi.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Bypass {
-    pub on: bool,
-    pub choice: Choice,
-    /// byedpi options put before the strategy (for Custom, the whole strategy).
-    pub options: String,
-}
-
-pub const OPTIONS_LIMIT: usize = 512;
-
-impl Default for Bypass {
-    fn default() -> Self {
-        Self {
-            on: false,
-            choice: Choice::Auto,
-            options: String::new(),
-        }
-    }
-}
-
-impl Bypass {
-    pub fn from_json(value: &Value) -> Self {
-        Self {
-            on: value.get("on").and_then(Value::as_bool) == Some(true),
-            choice: Choice::from_id(value.get("choice").and_then(Value::as_str).unwrap_or("")),
-            options: value
-                .get("options")
-                .and_then(Value::as_str)
-                .filter(|options| options.len() <= OPTIONS_LIMIT)
-                .unwrap_or_default()
-                .to_owned(),
-        }
-    }
-
-    pub fn to_json(&self) -> Value {
-        json!({"on": self.on, "choice": self.choice.id(), "options": self.options})
-    }
-
-    /// Legacy settings kept readable for compatibility with older releases.
-    #[cfg(test)]
-    fn strategy(&self) -> String {
-        let strategy = match self.choice {
-            Choice::Auto => fastcord_bypass::auto_strategy(),
-            Choice::Preset(preset) => preset.args.to_owned(),
-            Choice::Custom => String::new(),
-        };
-        format!("{} {strategy}", self.options).trim().to_owned()
-    }
-}
-
 /// The desktop section of the audio and general settings.
 pub fn view<'a>(
     close_to_tray: bool,
@@ -433,29 +336,6 @@ pub fn compact_view(voice: &VoiceControls) -> Element<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bypass_strategy_puts_options_first_and_reads_unknown_choices_as_automatic() {
-        let preset = &fastcord_bypass::presets()[0];
-        let bypass = Bypass {
-            on: true,
-            choice: Choice::Preset(preset),
-            options: "-I 192.0.2.1".to_owned(),
-        };
-        assert_eq!(bypass.strategy(), format!("-I 192.0.2.1 {}", preset.args));
-        assert_eq!(Bypass::from_json(&bypass.to_json()), bypass);
-        let custom = Bypass {
-            choice: Choice::Custom,
-            ..bypass
-        };
-        assert_eq!(custom.strategy(), "-I 192.0.2.1");
-        let auto = Bypass::default();
-        assert_eq!(auto.strategy(), fastcord_bypass::auto_strategy());
-        let unknown =
-            Bypass::from_json(&json!({"on": true, "choice": "gone", "options": "x".repeat(600)}));
-        assert_eq!(unknown.choice, Choice::Auto);
-        assert!(unknown.options.is_empty(), "oversized options are dropped");
-    }
 
     fn channel(guild: Option<u64>, channel: u64, message: Option<u64>) -> Option<DeepLink> {
         Some(DeepLink::Channel {

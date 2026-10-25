@@ -2130,7 +2130,6 @@ dependencies = [
  "bytemuck",
  "bytes",
  "fastcord-audio",
- "fastcord-bypass",
  "fastcord-discord",
  "fastcord-media",
  "fastcord-model",
