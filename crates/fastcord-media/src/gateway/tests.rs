@@ -865,6 +865,41 @@ async fn audio_queued_while_keys_were_missing_is_dropped_not_sent_late() {
     assert_eq!(harness.session.stats().rtp_sent, 1);
 }
 
+/// A media path that answered and then went silent (roaming, a dropped NAT
+/// mapping) is not left "connected": after three silent ping intervals the
+/// client identifies again on a fresh socket.
+#[tokio::test(start_paused = true)]
+async fn a_media_path_that_goes_silent_is_rebuilt() {
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    let _second = signaling.accept().await;
+    let (mut udp, _) = negotiate(&mut harness, &mut ws, &BOTH_MODES).await;
+    ws.send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let _fixture = install_test_dave_group(&harness, &mut ws).await;
+    // One answered ping: the path worked.
+    let ping = loop {
+        let datagram = udp.recv_any().await;
+        if is_ping(&datagram) {
+            break datagram;
+        }
+    };
+    let mut answer = ping.clone();
+    answer[..4].copy_from_slice(&crate::udp::PING_RESPONSE.to_be_bytes());
+    udp.send(answer);
+    // Then nothing comes back.
+    let rebuilt = timeout(Duration::from_secs(60), async {
+        harness
+            .wait_status(|s| matches!(s, VoiceStatus::Connecting))
+            .await;
+    })
+    .await;
+    assert!(
+        rebuilt.is_ok(),
+        "a silent media path must not stay connected"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_media_queue_is_bounded_and_rejects_invalid_frames() {
     let (harness, _signaling) = Harness::start(options());

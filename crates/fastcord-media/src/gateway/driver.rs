@@ -54,6 +54,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const DISCOVERY_RETRY: Duration = Duration::from_secs(1);
 const DISCOVERY_ATTEMPTS: u32 = 5;
 const PING_INTERVAL: Duration = Duration::from_secs(5);
+/// Ping intervals in a row with no ping answer and no authenticated RTP after
+/// which the media path is dead (about 15 s): the WebSocket can stay up and
+/// Resume keeps the same UDP socket, so nothing else would notice.
+const DEAD_MEDIA_PINGS: u8 = 3;
 const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const MIN_HEARTBEAT: Duration = Duration::from_secs(1);
@@ -174,6 +178,10 @@ struct Conn {
     awaiting_ack: Option<u64>,
     ping_at: Option<Instant>,
     ping: Option<(u32, Instant)>,
+    /// Consecutive ping intervals in which nothing came back over UDP, and the
+    /// authenticated RTP count at the last interval.
+    silent_pings: u8,
+    rtp_mark: u64,
     report_at: Option<Instant>,
     silence_at: Option<Instant>,
 }
@@ -252,6 +260,10 @@ struct Driver<S, N: Network> {
     video: Option<VideoState>,
     /// The wanted-video channel's sender is gone (never while the session lives).
     wants_closed: bool,
+    /// Something authenticated came back over UDP in this media session (a
+    /// ping answer or RTP). Only a path that once worked can be declared dead:
+    /// a server that never answers pings is not a dead path.
+    udp_heard: bool,
 }
 
 pub(crate) async fn run<S: Signaling, N: Network>(
@@ -295,6 +307,7 @@ pub(crate) async fn run<S: Signaling, N: Network>(
         rtcp: Vec::with_capacity(256),
         video,
         wants_closed: false,
+        udp_heard: false,
     };
     let reason = driver.drive().await;
     // Sockets and keys go before anyone hears that the connection is closed.
@@ -543,6 +556,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         }
         self.udp_work = None;
         self.udp = None;
+        self.udp_heard = false;
         self.media = None;
         self.dave = None;
         self.expected_users.clear();
@@ -596,6 +610,8 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             awaiting_ack: None,
             ping_at: self.udp.is_some().then(|| Instant::now() + PING_INTERVAL),
             ping: None,
+            silent_pings: 0,
+            rtp_mark: 0,
             report_at: None,
             silence_at: None,
         };
@@ -1250,6 +1266,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     && expected == sequence
                 {
                     conn.ping = None;
+                    self.udp_heard = true;
                     let latency = Instant::now() - sent;
                     if let Some(video) = self.video.as_mut() {
                         video.note_rtt(latency);
@@ -1551,6 +1568,31 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         }
         if conn.ping_at.is_some_and(|at| at <= now) {
             conn.ping_at = Some(now + PING_INTERVAL);
+            // The previous ping was not answered and no authenticated RTP came
+            // in since: one more silent interval.
+            let received = self.ch.counters.rtp_received.load(Ordering::Relaxed);
+            if received != conn.rtp_mark {
+                self.udp_heard = true;
+            }
+            if conn.ping.is_some() && received == conn.rtp_mark {
+                conn.silent_pings = conn.silent_pings.saturating_add(1);
+            } else {
+                conn.silent_pings = 0;
+            }
+            conn.rtp_mark = received;
+            if conn.silent_pings >= DEAD_MEDIA_PINGS
+                && self.udp_heard
+                && conn.phase == Phase::Connected
+                && self.media.is_some()
+            {
+                if self.udp.as_ref().is_some_and(|udp| udp.link.is_relay()) {
+                    return Err(End::Close(CloseReason::UdpRelayClosed));
+                }
+                // A dead path (roaming, a dropped NAT mapping) does not come
+                // back on the same socket: Identify again with a fresh one.
+                self.media = None;
+                return Err(End::Retry { progressed: true });
+            }
             if let Some(udp) = &self.udp {
                 self.ping_sequence = self.ping_sequence.wrapping_add(1);
                 let sequence = self.ping_sequence;
