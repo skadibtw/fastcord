@@ -1,12 +1,12 @@
 # Releasing
 
 1. Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and move `CHANGELOG.md` entries under the new version.
-2. Commit, then tag and push:
+2. Commit and push to `main`, wait for CI to pass on that commit, then tag and push:
    ```sh
    git tag v0.2.0 && git push origin v0.2.0
    ```
    Tags containing `-` (e.g. `v0.2.0-alpha.1`) publish as prereleases.
-3. `.github/workflows/release.yml` checks that the tag matches the Cargo version, builds four targets, packages them with `scripts/package.sh`, and publishes one GitHub Release with `SHA256SUMS` only after every build succeeds.
+3. `.github/workflows/release.yml` refuses a tag whose commit has no successful `CI` run, checks that the tag matches the Cargo version, builds four targets, packages them with `scripts/package.sh`, and publishes one GitHub Release with `SHA256SUMS` only after every build succeeds.
 
 Assets: `fastcord-vX-x86_64-pc-windows-msvc.exe` (the standalone Windows executable), a `.zip` of it with the licences and notices, `.tar.gz` archives for Linux and both macOS architectures, the source archive and `SHA256SUMS`. The Windows executable links libopus, OpenH264 and dav1d statically; besides system DLLs it needs only the Microsoft Visual C++ Redistributable 2015-2022 (x64), the ordinary end-user runtime package (https://aka.ms/vs/17/release/vc_redist.x64.exe), not the developer tools. Its third-party notices are in the zip and in `docs/`.
 

@@ -14,9 +14,25 @@ env:
 jobs:
   version:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
+      # A tag publishes only a commit whose CI (fmt, clippy, tests on three
+      # OSes) already passed; the release jobs below only build and package.
+      - name: Require a green CI run for the tagged commit
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --status success --limit 1 --json databaseId --jq length)
+          if [[ "$passed" != 1 ]]; then
+            echo "::error::no successful CI run for $GITHUB_SHA; push it to main and let CI pass before tagging"
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: v
         shell: bash
