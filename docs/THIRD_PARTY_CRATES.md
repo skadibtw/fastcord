@@ -10,7 +10,7 @@ dav1d, RNNoise, the DeepFilterNet model, davey and OpenMLS) are also covered in
 offered licenses applies. A crate that publishes no license file is covered by the
 standard text of its declared license, credited to the authors in its manifest.
 
-## Crates (769)
+## Crates (772)
 
 | Crate | Version | License | Source |
 | --- | --- | --- | --- |
@@ -777,6 +777,9 @@ standard text of its declared license, credited to the authors in its manifest.
 | zerovec-derive | 0.11.6 | Unicode-3.0 | crates.io |
 | zlib-rs | 0.6.8 | Zlib | crates.io |
 | zmij | 1.0.23 | MIT | crates.io |
+| zstd | 0.14.3 | BSD-3-Clause | crates.io |
+| zstd-safe | 8.2.0 | BSD-3-Clause | crates.io |
+| zstd-sys | 2.1.2+zstd.1.5.7 | BSD-3-Clause | crates.io |
 | zune-core | 0.5.3 | MIT OR Apache-2.0 OR Zlib | crates.io |
 | zune-inflate | 0.2.54 | MIT OR Apache-2.0 OR Zlib | crates.io |
 | zune-jpeg | 0.5.15 | MIT OR Apache-2.0 OR Zlib | crates.io |
@@ -784,7 +787,7 @@ standard text of its declared license, credited to the authors in its manifest.
 | zvariant_derive | 5.15.0 | MIT | crates.io |
 | zvariant_utils | 4.2.0 | MIT | crates.io |
 
-## License texts (466)
+## License texts (468)
 
 ### 1. Used by: ab_glyph 0.2.32, ab_glyph_rasterizer 0.1.10, alsa 0.11.0, fdeflate 0.3.7, half 2.7.1, image 0.25.10, image-webp 0.2.4, linebender_resource_handle 0.1.1, miniz_oxide 0.8.9, miniz_oxide 0.9.1, naga 27.0.3, num-conv 0.2.2, owned_ttf_parser 0.25.1, pin-project-lite 0.2.17, range-alloc 0.1.5, raw-window-handle 0.6.2, sync_wrapper 1.0.2, time 0.3.55, time-core 0.1.9, time-macros 0.2.32, tiny-xlib 0.2.5, wgpu 27.0.1, wgpu-core 27.0.3, wgpu-core-deps-apple 27.0.0, wgpu-core-deps-windows-linux-android 27.0.0, wgpu-hal 27.0.4, wgpu-types 27.0.1
 
@@ -24749,7 +24752,77 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 ```
 
-### 464. Used by: zune-core 0.5.3, zune-jpeg 0.5.15
+### 464. Used by: zstd 0.14.3, zstd-safe 8.2.0, zstd-sys 2.1.2+zstd.1.5.7
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2026, Alexandre Bury
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### 465. Used by: zstd-sys 2.1.2+zstd.1.5.7
+
+```text
+The auto-generated bindings are under the 3-clause BSD license:
+
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### 466. Used by: zune-core 0.5.3, zune-jpeg 0.5.15
 
 ```text
 MIT License
@@ -24775,7 +24848,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### 465. Used by: zune-core 0.5.3, zune-jpeg 0.5.15
+### 467. Used by: zune-core 0.5.3, zune-jpeg 0.5.15
 
 ```text
 zlib License
@@ -24799,7 +24872,7 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 ```
 
-### 466. Used by: zune-inflate 0.2.54
+### 468. Used by: zune-inflate 0.2.54
 
 ```text
 MIT License

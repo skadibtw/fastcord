@@ -52,7 +52,7 @@ fn browser_headers(headers: &mut tokio_tungstenite::tungstenite::http::HeaderMap
     }
     headers.insert(
         "Accept-Encoding",
-        HeaderValue::from_static("gzip, deflate, br"),
+        HeaderValue::from_static("gzip, deflate, br, zstd"),
     );
     headers.insert("Cache-Control", HeaderValue::from_static("no-cache"));
     headers.insert("Pragma", HeaderValue::from_static("no-cache"));
@@ -216,6 +216,7 @@ mod tests {
         assert_eq!(headers["Accept-Language"], "en-US,en;q=0.9");
         assert_eq!(headers["Cache-Control"], "no-cache");
         assert_eq!(headers["Pragma"], "no-cache");
+        assert_eq!(headers["Accept-Encoding"], "gzip, deflate, br, zstd");
         assert!(!headers.contains_key("Sec-WebSocket-Extensions"));
     }
 

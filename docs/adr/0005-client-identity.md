@@ -46,10 +46,11 @@ truthfully must match, and no field may contradict another.
   the Chromium version).
 - `client_build_number` is the web build from `https://discord.com/app`; the
   desktop client loads the same web app.
-- `native_build_number` is the native metadata version from the update
+- `native_build_number` is a nullable native metadata version from the update
   manifest (see "Version chain").
 - `os`, `os_version` (full, for example `10.0.26100`), `os_arch` and
-  `app_arch` are the host's real values; Windows also sends `os_sdk_version`;
+  `app_arch` are the host's real values; Windows and macOS also send
+  `os_sdk_version`;
   Linux sends `window_manager`, `distro` and, when the official capture has
   it, `runtime_environment`.
 - `system_locale`, `has_client_mods: false`, `release_channel: "stable"`,
@@ -63,14 +64,15 @@ truthfully must match, and no field may contradict another.
   value); `client_app_state` only if a sanitized official capture shows it.
 - Installation and experiments: the installation id from READY
   `apex_experiments` (or `GET /apex/experiments?surface=2`) is persisted and
-  sent as `X-Installation-ID` and `installation_id`; `X-Fingerprint` is
-  generated through `GET /experiments` for the unauthenticated login flow, and
+  sent as REST `X-Installation-ID` and Gateway-only `installation_id`;
+  `X-Fingerprint` is generated through `GET /experiments` for the login flow, and
   a captured value is never reused across installations or accounts.
 - Transport: API and Gateway version 9 (the documented client default); the
   Electron/Chromium header set (`sec-ch-ua*` as Electron sends it,
   `sec-fetch-*`, `accept-language`, `accept-encoding`, `origin`/`referer`,
-  `x-discord-timezone`); a cookie jar for `discord.com`; the same headers on
-  the Gateway, voice and remote-auth WebSocket handshakes.
+  `x-discord-timezone`); a cookie jar for `discord.com`; capture-confirmed headers
+  on the Gateway, voice and remote-auth WebSocket handshakes (these use a different
+  Chromium network path; REST fetch headers must not be copied by assumption).
 - Behaviour: message nonces in the official shape (timestamp in the high bits,
   zero low 22 bits); opcode 4 without `self_stream`, which the server
   sets when opcode 18 creates a stream (corrected 2026-10-25); the persisted
@@ -150,7 +152,7 @@ milestones rather than accepted risk.
 ## Current implementation
 
 `fastcord-discord::gateway::ClientProperties::desktop` builds the desktop
-profile above (2026-10-25, `PROFILE_VERSION` 3): the desktop field set and
+profile above (2026-10-25, `PROFILE_VERSION` 4): the desktop field set and
 order, the host's `os_version`/`os_sdk_version` and Linux
 `window_manager`/`distro` from `fastcord_platform::os_release`, the version
 chain (`resolve_versions`: manifest and `/app` once per process, bundled
@@ -159,15 +161,22 @@ installed stable Windows host 1.0.9265, a launch signature with the 12
 client-mod bits clear, a `client_heartbeat_session_id` regenerated every 30
 minutes, and the installation id READY `apex_experiments` issues, kept in the
 non-secret `installation-id` file of the data folder and sent as
-`installation_id` and `X-Installation-ID` (`gateway::Identity`, shared by the
-REST client and the Gateway). The pin check is
-`live_version_chain_matches_the_pin`, run daily by
+Gateway-only `installation_id` and REST `X-Installation-ID` (`gateway::Identity`,
+shared by the REST client and the Gateway). The REST view excludes Gateway-only
+installation fields. Native metadata is nullable; macOS has its own fallback
+(96312) and reports Darwin major as its SDK.
+The pin check covers Windows x64/ARM64, macOS x64/ARM64 and Linux x64
+(`live_version_chain_matches_the_pin`), run daily by
 `.github/workflows/identity-pin.yml`. Password login sends the `X-Fingerprint`
 of `GET /experiments`. API and Gateway use v9. REST sends the Chromium
 same-origin header set with `x-discord-timezone` and a bounded `discord.com`
 cookie jar; the WebSocket handshakes carry the user agent, language and
-no-cache headers. Message nonces have the official shape (zero low 22 bits,
-one process-wide sequence). Opcode 4 stays without `self_stream`, as the
+no-cache headers and zstd in HTTP Accept-Encoding. REST decodes zstd and tracks
+the current UI location in Referer. A7-A9 and C1 remain partial: GREASE and
+handshake details need an official capture, permessage-deflate is not
+implemented, and the runtime pair outside Windows x64 is unverified. Message
+nonces have the official shape (zero low 22 bits, one process-wide sequence).
+Opcode 4 stays without `self_stream`, as the
 official client sends it. Open: the P2 items (capabilities, the persisted
 guild-version cache, the account locale) wait for a sanitized official
 capture, and the residual differences above stay. The exact payload, the gaps

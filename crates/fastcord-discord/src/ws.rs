@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(not(feature = "fake-discord"))]
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
@@ -159,7 +160,7 @@ fn browser_headers(
     }
     headers.insert(
         "Accept-Encoding",
-        HeaderValue::from_static("gzip, deflate, br"),
+        HeaderValue::from_static("gzip, deflate, br, zstd"),
     );
     headers.insert("Cache-Control", HeaderValue::from_static("no-cache"));
     headers.insert("Pragma", HeaderValue::from_static("no-cache"));
@@ -257,6 +258,7 @@ mod tests {
         assert_eq!(headers["Accept-Language"], "en-US,en;q=0.9");
         assert_eq!(headers["Cache-Control"], "no-cache");
         assert_eq!(headers["Pragma"], "no-cache");
+        assert_eq!(headers["Accept-Encoding"], "gzip, deflate, br, zstd");
         assert!(!headers.contains_key("Cookie"));
         assert!(!headers.contains_key("Sec-WebSocket-Extensions"));
     }

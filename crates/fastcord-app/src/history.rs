@@ -1321,6 +1321,11 @@ impl History {
     ) {
         let guild_selection = navigation.selection.as_ref();
         let private_selection = navigation.private_selection.as_ref();
+        rest.set_location(
+            guild_selection
+                .map(|selection| (Some(selection.guild_id), selection.channel_id))
+                .or_else(|| private_selection.map(|selection| (None, selection.channel_id))),
+        );
         let selected = guild_selection
             .filter(|selection| {
                 matches!(

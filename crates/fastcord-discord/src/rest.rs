@@ -39,6 +39,8 @@ const DEFAULT_DM_PAUSE: Duration = Duration::from_secs(600);
 /// A stated delay is honoured up to this long.
 const MAX_PAUSE: Duration = Duration::from_secs(3600);
 
+type ChannelLocation = (Option<fastcord_model::Snowflake>, fastcord_model::Snowflake);
+
 /// Write pauses as monotonic deadlines on the limiter's clock.
 #[derive(Default)]
 struct WritePause {
@@ -243,6 +245,8 @@ pub struct RestClient<C = MonotonicClock> {
     http: reqwest::Client,
     /// The profile this client and the account's Gateway share.
     identity: Identity,
+    /// Current UI location, shared by all requests/clones, bounded to two IDs.
+    location: Arc<Mutex<Option<ChannelLocation>>>,
     limiter: RateLimiter<C>,
     writes_restricted: Arc<AtomicBool>,
     /// Bitmask of enabled `WriteGroup`s, shared by clones.
@@ -255,6 +259,7 @@ impl<C> Clone for RestClient<C> {
         Self {
             http: self.http.clone(),
             identity: self.identity.clone(),
+            location: self.location.clone(),
             limiter: self.limiter.clone(),
             writes_restricted: self.writes_restricted.clone(),
             enabled_writes: self.enabled_writes.clone(),
@@ -300,6 +305,7 @@ impl<C: Clock> RestClient<C> {
         Ok(Self {
             http,
             identity: Identity::new(properties),
+            location: Arc::default(),
             limiter: RateLimiter::new(clock),
             writes_restricted: Arc::new(AtomicBool::new(false)),
             enabled_writes: Arc::new(AtomicU64::new(WriteGroup::default_mask())),
@@ -315,6 +321,15 @@ impl<C: Clock> RestClient<C> {
     /// The profile shared with the account's Gateway.
     pub fn identity(&self) -> &Identity {
         &self.identity
+    }
+
+    /// Records the visible channel for Chromium's same-origin Referer.
+    /// None selects the home page; a channel with no guild is a DM.
+    pub fn set_location(
+        &self,
+        location: Option<(Option<fastcord_model::Snowflake>, fastcord_model::Snowflake)>,
+    ) {
+        *self.location.lock().unwrap_or_else(|e| e.into_inner()) = location;
     }
 
     pub fn stop_authenticated_work(&self) {
@@ -553,6 +568,13 @@ impl<C: Clock> RestClient<C> {
             builder = builder.header("x-audit-log-reason", reason.clone());
         }
         let (super_properties, installation) = self.identity.headers();
+        let location = *self.location.lock().unwrap_or_else(|e| e.into_inner());
+        let referer = match location {
+            Some((Some(guild), channel)) => format!("{DISCORD_ORIGIN}/channels/{guild}/{channel}"),
+            Some((None, channel)) => format!("{DISCORD_ORIGIN}/channels/@me/{channel}"),
+            None => format!("{DISCORD_ORIGIN}/channels/@me"),
+        };
+        builder = builder.header(REFERER, referer);
         builder = builder.header("x-super-properties", super_properties);
         if let Some(installation) = installation {
             builder = builder.header("x-installation-id", installation);
@@ -586,7 +608,7 @@ fn authorization(token: &UserToken) -> Result<HeaderValue, RestError> {
 /// Everything but `Authorization`: also used by the pre-token password login.
 pub(crate) fn identity_headers(properties: &ClientProperties) -> Result<HeaderMap, RestError> {
     let mut headers = base_headers(properties)?;
-    // This is the exact properties object used by Gateway Identify.
+    // REST excludes Gateway-only fields; installation has a separate header.
     headers.insert(
         "x-super-properties",
         HeaderValue::from_str(&crate::gateway::profile::encode(properties))
@@ -605,8 +627,7 @@ pub(crate) const DISCORD_ORIGIN: &str = "https://discord.com";
 
 /// The headers that never change during a run: what the desktop client's
 /// Chromium sends on a same-origin `fetch` from the Discord app, plus Discord's
-/// own. The decoders behind `accept-encoding` are reqwest's; Chromium's `zstd`
-/// is not offered because it is not decoded.
+/// own. Every advertised content encoding has a reqwest decoder enabled.
 fn base_headers(properties: &ClientProperties) -> Result<HeaderMap, RestError> {
     let value =
         |text: &str| HeaderValue::from_str(text).map_err(|_| RestError::ClientConfiguration);
@@ -614,7 +635,7 @@ fn base_headers(properties: &ClientProperties) -> Result<HeaderMap, RestError> {
     headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
     headers.insert(
         ACCEPT_ENCODING,
-        HeaderValue::from_static("gzip, deflate, br"),
+        HeaderValue::from_static("gzip, deflate, br, zstd"),
     );
     headers.insert(ACCEPT_LANGUAGE, value(&properties.accept_language())?);
     headers.insert(
@@ -747,10 +768,42 @@ mod tests {
             after.headers()["x-super-properties"],
             crate::gateway::profile::encode(&client.identity().properties())
         );
-        assert_ne!(
+        assert_eq!(
             after.headers()["x-super-properties"],
             before.headers()["x-super-properties"]
         );
+    }
+
+    #[test]
+    fn referer_tracks_the_visible_location_across_clones_and_requests() {
+        use fastcord_model::Snowflake;
+        let client = RestClient::new(
+            UserToken::new("t".to_owned()),
+            ClientProperties::bundled(HostOs::Windows, "en-US"),
+        )
+        .unwrap();
+        // The Referer is the visible location, not the resource being requested.
+        let request = RestRequest::new(
+            Route::new(Method::GET, "/channels/999/messages").unwrap(),
+            Priority::UserRead,
+        );
+        for (location, expected) in [
+            (
+                Some((Some(Snowflake(1)), Snowflake(2))),
+                "https://discord.com/channels/1/2",
+            ),
+            (
+                Some((None, Snowflake(3))),
+                "https://discord.com/channels/@me/3",
+            ),
+            (None, "https://discord.com/channels/@me"),
+        ] {
+            client.clone().set_location(location);
+            assert_eq!(
+                client.build_request(&request).unwrap().headers()[REFERER],
+                expected
+            );
+        }
     }
 
     #[test]
@@ -761,7 +814,7 @@ mod tests {
         };
         let headers = auth_headers(&UserToken::new("t".to_owned()), &properties).unwrap();
         assert_eq!(headers[ACCEPT], "*/*");
-        assert_eq!(headers[ACCEPT_ENCODING], "gzip, deflate, br");
+        assert_eq!(headers[ACCEPT_ENCODING], "gzip, deflate, br, zstd");
         assert_eq!(headers[ACCEPT_LANGUAGE], "ru-RU,ru;q=0.9");
         assert_eq!(headers["sec-ch-ua"], properties.sec_ch_ua().as_str());
         assert_eq!(headers["sec-ch-ua-mobile"], "?0");

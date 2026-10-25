@@ -7,7 +7,7 @@ pub struct OsRelease {
     /// `10.0.26100` on Windows, the Darwin release on macOS, the kernel release
     /// on Linux; empty when the OS does not say.
     pub version: String,
-    /// Windows: the build number.
+    /// Windows: build number; macOS: Darwin major version.
     pub sdk_version: Option<String>,
     /// Linux: `XDG_CURRENT_DESKTOP,GDMSESSION`, `unknown` for a missing one.
     pub window_manager: Option<String>,
@@ -85,9 +85,17 @@ pub fn os_release() -> OsRelease {
         .unwrap_or_default();
     OsRelease {
         version: version.trim().to_owned(),
+        sdk_version: darwin_sdk(&version),
         timezone: unix_time_zone(),
         ..OsRelease::default()
     }
+}
+
+/// The documented macOS desktop profile sends the Darwin major as its SDK.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn darwin_sdk(release: &str) -> Option<String> {
+    let major = release.trim().split('.').next()?;
+    (!major.is_empty() && major.bytes().all(|b| b.is_ascii_digit())).then(|| major.to_owned())
 }
 
 /// `TZ` when it names a zone, else the zone `/etc/localtime` links to.
@@ -150,6 +158,14 @@ fn pretty_name(os_release: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_sdk_is_the_darwin_major() {
+        assert_eq!(darwin_sdk("24.2.0\n").as_deref(), Some("24"));
+        for invalid in ["", "\n", "Darwin", ".2.0"] {
+            assert_eq!(darwin_sdk(invalid), None);
+        }
+    }
 
     #[test]
     fn linux_extras_are_read_like_the_desktop_client() {

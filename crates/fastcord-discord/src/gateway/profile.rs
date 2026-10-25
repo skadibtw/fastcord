@@ -12,7 +12,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 /// Bump whenever the properties below change shape or meaning.
-pub const PROFILE_VERSION: u32 = 3;
+pub const PROFILE_VERSION: u32 = 4;
 
 /// Electron and Chromium of the official desktop client. Not in the update
 /// manifest: read from the `Discord.exe` of the stable Windows x64 host
@@ -26,9 +26,8 @@ pub const PIN_HOST_VERSION: &str = "1.0.9265";
 /// `client_build_number` of discord.com's web client observed on 2026-10-25.
 /// Used only when the live value cannot be fetched.
 pub const BUNDLED_BUILD_NUMBER: u32 = 649_389;
-/// The update manifest's `metadata_version` observed on 2026-10-25 (Windows
-/// and Linux; macOS answered 96312). Used only when the manifest cannot be
-/// fetched.
+/// Windows/Linux metadata fallback observed on 2026-10-25. macOS has its
+/// own fallback; the wire field is nullable for hosts without native metadata.
 pub const BUNDLED_NATIVE_BUILD_NUMBER: u32 = 96_160;
 
 const APP_URL: &str = "https://discord.com/app";
@@ -72,7 +71,7 @@ pub struct Versions {
     /// The desktop host version, `full.host_version` of the update manifest.
     pub client_version: String,
     /// The manifest's `metadata_version`.
-    pub native_build_number: u32,
+    pub native_build_number: Option<u32>,
     /// The web build the desktop client loads, from `https://discord.com/app`.
     pub client_build_number: u32,
 }
@@ -80,7 +79,11 @@ pub struct Versions {
 impl Versions {
     /// The values bundled at release time, per platform and architecture.
     pub fn bundled(os: HostOs) -> Self {
-        let client_version = match (os, APP_ARCH) {
+        Self::bundled_for(os, APP_ARCH)
+    }
+
+    pub(super) fn bundled_for(os: HostOs, arch: &str) -> Self {
+        let client_version = match (os, arch) {
             (HostOs::Windows, "arm64") => "1.0.57",
             (HostOs::Windows, _) => PIN_HOST_VERSION,
             (HostOs::MacOs, _) => "0.0.419",
@@ -88,7 +91,10 @@ impl Versions {
         };
         Self {
             client_version: client_version.to_owned(),
-            native_build_number: BUNDLED_NATIVE_BUILD_NUMBER,
+            native_build_number: Some(match os {
+                HostOs::MacOs => 96_312,
+                _ => BUNDLED_NATIVE_BUILD_NUMBER,
+            }),
             client_build_number: BUNDLED_BUILD_NUMBER,
         }
     }
@@ -113,7 +119,7 @@ pub async fn resolve_versions() -> Versions {
         let mut versions = Versions::bundled(os);
         if let Some(release) = manifest {
             versions.client_version = release.host_version;
-            versions.native_build_number = release.metadata_version;
+            versions.native_build_number = Some(release.metadata_version);
         }
         if let Some(build) = build {
             versions.client_build_number = build;
@@ -302,7 +308,7 @@ pub struct Host {
     pub os: HostOs,
     /// Node's `os.release()`: `10.0.26100`, the Darwin release, the kernel.
     pub os_version: String,
-    /// Windows only: the build number.
+    /// Windows: build number; macOS: Darwin major version.
     pub os_sdk_version: Option<String>,
     /// Linux only: `XDG_CURRENT_DESKTOP,GDMSESSION`.
     pub window_manager: Option<String>,
@@ -352,7 +358,7 @@ pub struct ClientProperties {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distro: Option<String>,
     pub client_build_number: u32,
-    pub native_build_number: u32,
+    pub native_build_number: Option<u32>,
     pub client_event_source: Option<&'static str>,
     pub client_heartbeat_session_id: String,
     /// The installation id Discord issued (READY `apex_experiments`),
@@ -362,6 +368,62 @@ pub struct ClientProperties {
     /// Not a property: the IANA zone the REST headers report.
     #[serde(skip)]
     pub timezone: Option<String>,
+}
+
+/// Explicit REST allowlist. Gateway-only fields must never enter this view
+/// (Client Properties footnote 3); installation uses its own REST header.
+#[derive(Serialize)]
+struct RestProperties<'a> {
+    os: &'a str,
+    browser: &'a str,
+    release_channel: &'a str,
+    client_version: &'a str,
+    os_version: &'a str,
+    os_arch: &'a str,
+    app_arch: &'a str,
+    system_locale: &'a str,
+    has_client_mods: bool,
+    client_launch_id: &'a str,
+    launch_signature: &'a str,
+    browser_user_agent: &'a str,
+    browser_version: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    os_sdk_version: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window_manager: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distro: Option<&'a str>,
+    client_build_number: u32,
+    native_build_number: Option<u32>,
+    client_event_source: Option<&'a str>,
+    client_heartbeat_session_id: &'a str,
+}
+
+impl<'a> From<&'a ClientProperties> for RestProperties<'a> {
+    fn from(p: &'a ClientProperties) -> Self {
+        Self {
+            os: p.os,
+            browser: p.browser,
+            release_channel: p.release_channel,
+            client_version: &p.client_version,
+            os_version: &p.os_version,
+            os_arch: p.os_arch,
+            app_arch: p.app_arch,
+            system_locale: &p.system_locale,
+            has_client_mods: p.has_client_mods,
+            client_launch_id: &p.client_launch_id,
+            launch_signature: &p.launch_signature,
+            browser_user_agent: &p.browser_user_agent,
+            browser_version: p.browser_version,
+            os_sdk_version: p.os_sdk_version.as_deref(),
+            window_manager: p.window_manager.as_deref(),
+            distro: p.distro.as_deref(),
+            client_build_number: p.client_build_number,
+            native_build_number: p.native_build_number,
+            client_event_source: p.client_event_source,
+            client_heartbeat_session_id: &p.client_heartbeat_session_id,
+        }
+    }
 }
 
 impl ClientProperties {
@@ -535,7 +597,6 @@ impl Identity {
         self.with_current(|current| {
             if current.properties.installation_id.as_deref() != Some(id) {
                 current.properties.installation_id = Some(id.to_owned());
-                current.encoded = encode(&current.properties);
             }
         });
     }
@@ -560,11 +621,12 @@ impl From<ClientProperties> for Identity {
     }
 }
 
-/// The properties JSON, standard-base64 encoded: the exact object Identify
-/// sends under `properties`.
+/// The REST properties view, standard-base64 encoded. Identify serializes
+/// `ClientProperties` directly and includes its Gateway-only fields.
 pub(crate) fn encode(properties: &ClientProperties) -> String {
     use base64::Engine;
-    let json = serde_json::to_string(properties).expect("plain strings and numbers serialize");
+    let json = serde_json::to_string(&RestProperties::from(properties))
+        .expect("plain strings and numbers serialize");
     base64::engine::general_purpose::STANDARD.encode(json)
 }
 
@@ -658,7 +720,7 @@ mod tests {
         };
         let versions = Versions {
             client_version: "1.0.9999".to_owned(),
-            native_build_number: 100_001,
+            native_build_number: Some(100_001),
             client_build_number: 700_001,
         };
         let windows = ClientProperties::desktop(&host, "ru-RU", &versions);
@@ -672,7 +734,7 @@ mod tests {
         assert!(!windows.has_client_mods);
         // Every version value in one place, and the UA agrees with all of them.
         assert_eq!(windows.client_version, "1.0.9999");
-        assert_eq!(windows.native_build_number, 100_001);
+        assert_eq!(windows.native_build_number, Some(100_001));
         assert_eq!(windows.client_build_number, 700_001);
         assert_eq!(windows.browser_version, ELECTRON_VERSION);
         assert_eq!(
@@ -824,8 +886,10 @@ mod tests {
     }
 
     #[test]
-    fn the_installation_id_is_validated_then_sent_everywhere() {
+    fn installation_is_gateway_only_with_a_separate_rest_header() {
+        use base64::Engine;
         let identity = Identity::new(ClientProperties::bundled(HostOs::Linux, "en-US"));
+        let before = identity.headers().0;
         let long = format!("1.{}", "a".repeat(200));
         for bad in [
             "",
@@ -847,6 +911,22 @@ mod tests {
         let (header, installation) = identity.headers();
         assert_eq!(installation.as_deref(), Some(id));
         assert_eq!(header, encode(&identity.properties()));
+        assert_eq!(header, before, "installation never changes the REST view");
+        let rest: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(header)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut gateway = serde_json::to_value(identity.properties()).unwrap();
+        assert_eq!(
+            gateway.as_object_mut().unwrap().remove("installation_id"),
+            Some(id.into())
+        );
+        assert_eq!(rest, gateway, "all common fields agree");
+        for gateway_only in ["installation_id", "is_fast_connect", "version"] {
+            assert!(rest.get(gateway_only).is_none());
+        }
         let json = serde_json::to_string(&identity.properties()).unwrap();
         assert!(json.ends_with(&format!("\"installation_id\":\"{id}\"}}")));
     }
@@ -868,41 +948,105 @@ mod tests {
         assert_eq!(ELECTRON_VERSION.split('.').count(), 3);
     }
 
+    #[test]
+    fn native_metadata_is_nullable_in_both_wire_views_and_platform_specific() {
+        use base64::Engine;
+        assert_eq!(
+            Versions::bundled(HostOs::MacOs).native_build_number,
+            Some(96_312)
+        );
+        assert_eq!(
+            Versions::bundled(HostOs::Windows).native_build_number,
+            Some(96_160)
+        );
+        let versions = Versions {
+            native_build_number: None,
+            ..Versions::bundled(HostOs::MacOs)
+        };
+        let host = Host {
+            os_version: "24.2.0".into(),
+            os_sdk_version: Some("24".into()),
+            ..Host::bare(HostOs::MacOs)
+        };
+        let profile = ClientProperties::desktop(&host, "en-US", &versions);
+        let gateway = serde_json::to_value(&profile).unwrap();
+        let rest: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(encode(&profile))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rest, gateway);
+        assert!(rest.get("native_build_number").unwrap().is_null());
+        assert_eq!(rest["os_sdk_version"], "24");
+    }
+
     /// The pin check (`.github/workflows/identity-pin.yml`; manual:
     /// `cargo test -p fastcord-discord live_version_chain --locked -- --ignored --nocapture`).
-    /// Fetches the stable Windows x64 manifest and the web client, builds the
-    /// profile from them, and fails when the host moved past the pinned
-    /// Electron/Chromium pair. Never downloads Discord.
+    /// Fetches all supported platform/architecture manifests and the web
+    /// client; fails on host/native drift. Runtime-pair evidence outside
+    /// Windows x64 is a separate capture gate. Never downloads Discord.
     #[tokio::test]
     #[ignore = "contacts updates.discord.com and discord.com"]
     async fn live_version_chain_matches_the_pin() {
-        let release = fetch_manifest(HostOs::Windows, "x64")
-            .await
-            .expect("the update manifest answered");
+        // Explicit opt-in for the maintainer's filtered route. The same
+        // fetch_client used in production must retain route_http after merges.
+        if let Ok(strategy) = std::env::var("FASTCORD_IDENTITY_BYEDPI") {
+            fastcord_bypass::enable(&strategy).expect("the local byedpi engine starts");
+        }
         let build = fetch_build_number()
             .await
             .expect("discord.com/app carried a build number");
-        println!(
-            "host {} native {} web build {build}",
-            release.host_version, release.metadata_version
-        );
-        let versions = Versions {
-            client_version: release.host_version.clone(),
-            native_build_number: release.metadata_version,
-            client_build_number: build,
-        };
-        let profile = ClientProperties::desktop(&Host::bare(HostOs::Windows), "en-US", &versions);
-        let ua = &profile.browser_user_agent;
-        assert!(ua.contains(&format!("discord/{} ", profile.client_version)));
-        assert!(ua.contains(&format!("Electron/{} ", profile.browser_version)));
-        assert_eq!(profile.native_build_number, release.metadata_version);
-        assert_eq!(profile.client_build_number, build);
-        assert_eq!(
-            release.host_version, PIN_HOST_VERSION,
-            "the stable Windows host moved: read Electron/Chromium from the new host \
-             (Discord.exe strings or package.json), update ELECTRON_VERSION and \
-             CHROMIUM_VERSION if they changed, then bump PIN_HOST_VERSION and the \
-             bundled values"
-        );
+        let cases = [
+            (HostOs::Windows, "x64"),
+            (HostOs::Windows, "arm64"),
+            (HostOs::MacOs, "x64"),
+            (HostOs::MacOs, "arm64"),
+            (HostOs::Linux, "x64"),
+        ];
+        let mut tasks = tokio::task::JoinSet::new();
+        for (os, arch) in cases {
+            tasks.spawn(async move { (os, arch, fetch_manifest(os, arch).await) });
+        }
+        // Check every target even when one drifts, so CI shows the full matrix.
+        let mut drift = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            let (os, arch, release) = result.unwrap();
+            let Some(release) = release else {
+                drift.push(format!("{os:?}/{arch}: manifest unavailable"));
+                continue;
+            };
+            println!(
+                "{os:?}/{arch}: host {} native {} web {build}",
+                release.host_version, release.metadata_version
+            );
+            let bundled = Versions::bundled_for(os, arch);
+            if release.host_version != bundled.client_version
+                || Some(release.metadata_version) != bundled.native_build_number
+            {
+                drift.push(format!(
+                    "{os:?}/{arch}: host/native pin changed; review runtime versions"
+                ));
+            }
+            let versions = Versions {
+                client_version: release.host_version,
+                native_build_number: Some(release.metadata_version),
+                client_build_number: build,
+            };
+            let profile = ClientProperties::desktop(&Host::bare(os), "en-US", &versions);
+            assert!(
+                profile
+                    .browser_user_agent
+                    .contains(&format!("discord/{} ", profile.client_version))
+            );
+            assert!(
+                profile
+                    .browser_user_agent
+                    .contains(&format!("Electron/{} ", profile.browser_version))
+            );
+            assert_eq!(profile.native_build_number, versions.native_build_number);
+            assert_eq!(profile.client_build_number, build);
+        }
+        assert!(drift.is_empty(), "{}", drift.join("\n"));
     }
 }

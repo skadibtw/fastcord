@@ -272,18 +272,34 @@ mod tests {
             (HostOs::Linux, "ru-RU"),
         ];
         for ((host, locale), fixture) in cases.into_iter().zip(fixtures) {
-            let properties = ClientProperties::bundled(host, locale).with_launch_identity();
+            // These fixtures describe x64 hosts, including on an ARM64 runner.
+            let mut properties = ClientProperties::desktop(
+                &crate::gateway::Host::bare(host),
+                locale,
+                &crate::gateway::Versions::bundled_for(host, "x64"),
+            )
+            .with_launch_identity();
+            properties.installation_id = Some("123.synthetic".into());
             let token = UserToken::new("REDACTED-TOKEN".to_owned());
             let headers = auth_headers(&token, &properties).unwrap();
-            let gateway: Value =
+            let mut gateway: Value =
                 serde_json::from_str(&identify(token.expose_secret(), &properties).unwrap())
                     .unwrap();
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(headers["x-super-properties"].as_bytes())
                 .unwrap();
             let rest: Value = serde_json::from_slice(&decoded).unwrap();
+            assert_eq!(
+                gateway["d"]["properties"]["installation_id"],
+                "123.synthetic"
+            );
+            assert_eq!(headers["x-installation-id"], "123.synthetic");
+            assert!(rest.get("installation_id").is_none());
+            gateway["d"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("installation_id");
             assert_eq!(rest, gateway["d"]["properties"]);
-            assert_eq!(rest, serde_json::to_value(&properties).unwrap());
             for field in ["os", "system_locale", "browser_user_agent"] {
                 assert_eq!(rest[field], fixture[field], "{host:?} {locale}: {field}");
             }
@@ -300,13 +316,15 @@ mod tests {
             assert!(headers[AUTHORIZATION].is_sensitive());
             // An identical profile stays identical across requests/reconnects.
             assert_eq!(headers, auth_headers(&token, &properties).unwrap());
-            assert_eq!(
-                gateway,
-                serde_json::from_str::<Value>(
-                    &identify(token.expose_secret(), &properties).unwrap()
-                )
+            let mut again = serde_json::from_str::<Value>(
+                &identify(token.expose_secret(), &properties).unwrap(),
+            )
+            .unwrap();
+            again["d"]["properties"]
+                .as_object_mut()
                 .unwrap()
-            );
+                .remove("installation_id");
+            assert_eq!(gateway, again);
         }
     }
 
@@ -320,7 +338,7 @@ mod tests {
         };
         let versions = Versions {
             client_version: "1.0.9265".to_owned(),
-            native_build_number: 96_160,
+            native_build_number: Some(96_160),
             client_build_number: 649_389,
         };
         let mut properties =

@@ -42,11 +42,12 @@ Identify's `capabilities` is derived from named flags, never a magic number: `LA
 
 The code sends the official desktop (Electron) profile. It is built once at
 login and reused by every Identify and REST request, except the 30-minute
-heartbeat and the installation id learned after READY (both still open).
+heartbeat and the installation id learned after READY. The REST view omits
+Gateway-only fields.
 
 #### Current implementation (2026-10-25)
 
-`ClientProperties::desktop` (`PROFILE_VERSION` 3) sends the field set and
+`ClientProperties::desktop` (`PROFILE_VERSION` 4) sends the field set and
 order of the table below, from the published desktop examples:
 `os, browser, release_channel, client_version, os_version, os_arch, app_arch,
 system_locale, has_client_mods, client_launch_id, launch_signature,
@@ -54,7 +55,7 @@ browser_user_agent, browser_version, [os_sdk_version | window_manager, distro],
 client_build_number, native_build_number, client_event_source,
 client_heartbeat_session_id`. `os_version` is Node's `os.release()`
 (`RtlGetVersion` on Windows, the Darwin release from `uname -r` on macOS,
-`/proc/sys/kernel/osrelease` on Linux); `os_sdk_version` is the Windows build;
+`/proc/sys/kernel/osrelease` on Linux); `os_sdk_version` is the Windows build or macOS Darwin major;
 `window_manager` is `XDG_CURRENT_DESKTOP,GDMSESSION` (`unknown` for a missing
 one) and `distro` the os-release `PRETTY_NAME` (`fastcord_platform::os_release`).
 `os_arch`/`app_arch` are the build's architecture (`x64`, `arm64`, `ia32`).
@@ -188,16 +189,16 @@ VOICE_SERVER_UPDATE (`{token, guild_id, channel_id?, endpoint}`) is decoded for 
 `RestClient` carries the same `Identity` the Gateway Identifies with, so both halves present one consistent official-client identity (ADR 0005 revision 2026-10-25). The fixed identity headers are validated once at REST client construction and installed as default headers; `x-super-properties` and `x-installation-id` are added per request from the shared `Identity`. Requests go to `https://discord.com/api/v9`.
 
 - `Authorization: <raw user token>` (no `Bot `/`Bearer ` prefix, marked sensitive).
-- `x-super-properties`: the `ClientProperties` JSON, standard-base64 encoded — the exact same object Identify sends under `properties`, with the current `client_heartbeat_session_id`.
+- `x-super-properties`: standard-base64 JSON from the explicit REST view of `ClientProperties`, with the current `client_heartbeat_session_id`. Gateway-only `installation_id`, `is_fast_connect` and `version` are excluded (Client Properties footnote 3). Common fields agree with Identify; installation uses the separate `X-Installation-ID` header.
 - `user-agent`: the profile's `browser_user_agent` (the Electron UA).
 - `x-discord-locale`: the profile's `system_locale` (the account's own client locale is IDENTITY_AUDIT B5, not implemented).
 - `x-installation-id`: the shared `Identity`'s installation id, once one is known.
-- Chromium's same-origin `fetch` set, from the same profile: `accept: */*`, `accept-encoding: gzip, deflate, br` (reqwest decodes all three; Chromium's `zstd` is not offered because it is not decoded), `accept-language` (`<locale>,<language>;q=0.9`), `referer: https://discord.com/channels/@me`, `sec-ch-ua` (Chromium's brand list for an embedder without a brand: the GREASE brand and `Chromium` with the pinned major, spelled and ordered by `GenerateBrandVersionList`; 148 gives `"Not/A)Brand";v="99", "Chromium";v="148"`), `sec-ch-ua-mobile: ?0`, `sec-ch-ua-platform` (`"Windows"`, `"macOS"`, `"Linux"`), `sec-fetch-dest: empty`, `sec-fetch-mode: cors`, `sec-fetch-site: same-origin`, and `x-discord-timezone` (the OS's IANA zone: WinRT `Calendar` on Windows, `TZ` or the `/etc/localtime` link elsewhere; omitted when unknown). `origin: https://discord.com` is added to every request that is not GET/HEAD. Unverified against a capture: the exact `accept-language` list, the referer path and header order (HTTP/2 order is a residual, A10).
+- Chromium's same-origin `fetch` set, from the same profile: `accept: */*`, `accept-encoding: gzip, deflate, br, zstd` (all four reqwest decoders enabled), `accept-language` (`<locale>,<language>;q=0.9`), `referer` from the current UI location (`https://discord.com/channels/<guild>/<channel>` for a server, `/channels/@me/<channel>` for a DM, `/channels/@me` at home; shared by all REST clones), `sec-ch-ua` (Chromium's brand list for an embedder without a brand: the GREASE brand and `Chromium` with the pinned major, spelled and ordered by `GenerateBrandVersionList`; 148 gives `"Not/A)Brand";v="99", "Chromium";v="148"`), `sec-ch-ua-mobile: ?0`, `sec-ch-ua-platform` (`"Windows"`, `"macOS"`, `"Linux"`), `sec-fetch-dest: empty`, `sec-fetch-mode: cors`, `sec-fetch-site: same-origin`, and `x-discord-timezone` (the OS's IANA zone: WinRT `Calendar` on Windows, `TZ` or the `/etc/localtime` link elsewhere; omitted when unknown). `origin: https://discord.com` is added to every request that is not GET/HEAD. Unverified against a capture: the exact `accept-language` list, the exact navigation/referrer policy, GREASE brand and header order (HTTP/2 order is a residual, A10).
 - `cookie`: the process-wide `discord.com` jar (`fastcord-discord::cookies`): `name=value` from every `Set-Cookie` of a `discord.com` response (the `/app` fetch, REST, password login, fingerprint and QR exchange), replaced by name, deleted by `Max-Age<=0`, at most 32 cookies of 4 KiB, memory only, never logged, marked sensitive; expiry dates are not modelled. Never sent to the CDN or the `discord.gg` WebSocket hosts.
 - `x-fingerprint`: only on the requests that have no token yet (`POST /auth/login`, `POST /auth/mfa/totp`): the `fingerprint` of the unauthenticated `GET /experiments` (same identity headers; at most 256 KiB read, assignments skipped; `<digits>.<base64url>` up to 128 bytes, verified live 2026-10-25), fetched on first use and kept for the process; a failed fetch is retried at the next attempt and the request goes without it. Never a captured value.
 - The QR login's ticket exchange (`POST /users/@me/remote-auth/login`) carries the same identity headers, `origin`, `x-fingerprint` and cookies; `RemoteAuth::start` takes the profile.
 
-WebSocket handshakes (main Gateway, remote-auth gateway, voice): `Origin: https://discord.com`, the profile's `User-Agent` and `Accept-Language`, `Accept-Encoding: gzip, deflate, br`, `Cache-Control: no-cache`, `Pragma: no-cache`. No cookie (the `discord.gg` hosts never set one) and no `permessage-deflate` offer (not implemented). The voice crate has no profile; the app hands it the user agent and language when it builds the login profile (`fastcord_media::set_handshake_identity`).
+WebSocket handshakes (main Gateway, remote-auth gateway, voice): `Origin: https://discord.com`, the profile's `User-Agent` and `Accept-Language`, `Accept-Encoding: gzip, deflate, br, zstd`, `Cache-Control: no-cache`, `Pragma: no-cache`. No cookie (the `discord.gg` hosts never set one) and no `permessage-deflate` offer (not implemented; compressed RSV1 frames must be supported first). WebSocket `Sec-Fetch-*` remains capture-gated: Chromium has a tracked omission on this path (see IDENTITY_AUDIT F), so REST fetch headers are not copied to WS by assumption. The voice crate has no profile; the app hands it the user agent and language when it builds the login profile (`fastcord_media::set_handshake_identity`).
 
 Offline consistency tests use `fixtures/rest/client-identity-profiles.json` for Windows, macOS, Linux, and a non-en-US locale, comparing REST user-agent/locale and decoded `x-super-properties` against the actual Gateway Identify properties.
 

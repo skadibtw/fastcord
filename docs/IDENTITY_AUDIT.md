@@ -374,13 +374,57 @@ not another round of header work.
 
 ## F. Specification status
 
+### Review follow-up (2026-10-25)
+
+The earlier "implemented" list below describes code, not official-client
+equivalence. The review found and corrected a P1 serialization error:
+`installation_id` is Gateway-only ([Client Properties, footnote 3](https://docs.discord.food/reference#client-properties)).
+Profile version 4 uses an explicit REST allowlist; `X-Installation-ID` stays,
+and a regression decodes the real REST header and compares every common field
+with Identify before and after READY supplies an installation.
+
+Current main is merged into this branch with byedpi preserved in the version
+fetch client, QR exchange, main/remote-auth WebSocket and media WebSocket.
+`feat/byedpi` is independently published; identity remains local.
+
+REST now advertises and decodes zstd; both WebSocket handshakes advertise the
+same HTTP encoding list. Referer follows the current UI location rather than
+always claiming DM home. The field `native_build_number` supports JSON null;
+macOS has its own 96312 metadata fallback and Darwin-major `os_sdk_version`.
+The published macOS/Linux null examples are older PTB/canary hosts, not proof
+that the current stable update metadata must be discarded. A current capture
+still decides which hosts actually send null.
+
+The unauthenticated live pin matrix passed through embedded byedpi: Windows
+x64 1.0.9265/96160, Windows ARM64 1.0.57/96160, macOS x64 and ARM64
+0.0.419/96312, Linux x64 1.0.166/96160, web 649389. Windows ARM64 1.0.57 is
+indeed the manifest's host version. This does **not** verify the runtime pair
+outside Windows x64. The daily test now checks every listed target's host and
+metadata pins, so these targets cannot drift silently.
+
+A7-A9 and C1 remain **partial**. There is no sanitized official capture to
+confirm GREASE, exact language/referrer policy, the runtime pair on other
+targets, or every handshake header. `permessage-deflate` is unimplemented;
+offering it before decoding compressed RSV1 frames would break signaling.
+Do not add guessed `Sec-Fetch-*` to WebSockets: Chromium has a
+[tracked absence of fetch metadata on that path](https://issues.chromium.org/issues/40922285),
+and its [WebSocket network path](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/services/network/websocket.cc)
+does not establish that the REST header set is sent there. Capture the pinned
+Electron build before treating their absence as a confirmed discrepancy.
+
+P2 remains open: capabilities 16435, the empty guild-version cache, OS-derived
+account/language headers, initial presence `unknown`, and credential-free CDN
+headers. TLS/HTTP2, UDP/RTP versus WebRTC, `/science` and the missing Electron
+runtime remain residuals. No valid-alt login was attempted during this review;
+4004 from a bogus token does not close U1 or prove the profile accepted.
+
 Implemented on 2026-10-25: the desktop profile itself, A1 (launch signature
 mask), A2 (heartbeat session with 30-minute rotation), A3/A4 (installation id
 from READY, persisted, sent in Identify and `X-Installation-ID`), A5
 (`X-Fingerprint` from `GET /experiments` on password login), A6 (API and
-Gateway v9), A7-A9 (Chromium header set, `x-discord-timezone`, cookie jar,
-WebSocket handshake headers), B1 (nonce shape), and C1
-(version chain and the daily `identity-pin` check); see ADR 0005 "Current implementation". B2
+Gateway v9), part of A7-A9 (the header subset, `x-discord-timezone`, cookie jar,
+WebSocket handshake headers), B1 (nonce shape), and part of C1
+(version chain and the daily `identity-pin` manifest check); see ADR 0005 "Current implementation". B2
 was withdrawn (opcode 4 has no `self_stream`). The other items below are still
 open.
 

@@ -1,9 +1,9 @@
 name: Identity pin
 
-# ADR 0005: the Electron/Chromium pair is pinned to one stable Windows host
-# version. This fetches the public update manifest and discord.com/app (never
-# the Discord package), checks the profile built from them, and fails when the
-# host moved past the pin so the pair is reviewed.
+# ADR 0005: check host/native pins for Windows x64/ARM64, macOS x64/ARM64,
+# and Linux x64 against public manifests, plus the web build. Runtime pair
+# evidence is still Windows x64 only; manifest checks cannot confirm it on
+# another target. Never downloads the Discord package.
 on:
   schedule:
     - cron: "17 6 * * *"
