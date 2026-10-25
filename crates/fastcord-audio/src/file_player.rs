@@ -37,6 +37,8 @@ const LATENCY_MS: u64 = 120;
 const SEQUENCE_JUMP: u64 = 64;
 /// A paused or finished player still looks for a lost device this often.
 const IDLE_POLL: Duration = Duration::from_millis(500);
+/// How long a paused or ended player sleeps between commands.
+const PARKED: Duration = Duration::from_secs(3600);
 const SSRC: u32 = 0x4650_4c59;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,6 +212,12 @@ trait Sink {
     fn failed(&mut self) -> bool;
     /// Estimated time between handing a packet over and hearing it.
     fn latency_ms(&self) -> u64;
+    /// Paused or ended: release the output (no stream, no engine thread).
+    fn suspend(&mut self) {}
+    /// About to play again: reopen the output; false if it cannot be opened.
+    fn resume(&mut self) -> bool {
+        true
+    }
 }
 
 /// No output at all: packets are paced and dropped.
@@ -239,7 +247,14 @@ enum Offer {
     Closed,
 }
 
+/// An output-only engine that exists only while the player plays: a paused or
+/// finished attachment holds no audio stream and no engine thread (SPEC 2.3).
 struct EngineSink {
+    output: DeviceChoice,
+    open: Option<OpenEngine>,
+}
+
+struct OpenEngine {
     // Held so the streams live exactly as long as the sink.
     _engine: AudioEngine,
     remote: tokio::sync::mpsc::Sender<RemoteFrame>,
@@ -247,10 +262,34 @@ struct EngineSink {
     events: tokio::sync::mpsc::Receiver<EngineEvent>,
 }
 
+impl OpenEngine {
+    /// Blocks while the device opens.
+    fn start(output: &DeviceChoice) -> Result<Self, PlayerError> {
+        let (engine, channels) = AudioEngine::start(EngineConfig {
+            input: None,
+            output: Some(output.clone()),
+            noise_suppression: NoiseSuppression::Off,
+            echo_cancellation: false,
+            capture_enabled: false,
+            ..EngineConfig::default()
+        })
+        .map_err(|_| PlayerError::Device)?;
+        Ok(Self {
+            _engine: engine,
+            remote: channels.remote_audio.ok_or(PlayerError::Device)?,
+            controls: channels.controls,
+            events: channels.events,
+        })
+    }
+}
+
 impl Sink for EngineSink {
     fn offer(&mut self, frame: &RemoteFrame) -> Offer {
+        let Some(open) = &self.open else {
+            return Offer::Closed;
+        };
         // The copy is one 20 ms packet; keeping the original lets a full queue be retried.
-        match self.remote.try_send(frame.clone()) {
+        match open.remote.try_send(frame.clone()) {
             Ok(()) => Offer::Sent,
             Err(TrySendError::Full(_)) => Offer::Full,
             Err(TrySendError::Closed(_)) => Offer::Closed,
@@ -258,17 +297,34 @@ impl Sink for EngineSink {
     }
 
     fn gain(&mut self, gain: f32) -> bool {
-        self.controls
-            .try_send(EngineControl::RemoteGain { ssrc: SSRC, gain })
-            .is_ok()
+        // Suspended: the next engine gets the gain when it opens.
+        self.open.as_ref().is_none_or(|open| {
+            open.controls
+                .try_send(EngineControl::RemoteGain { ssrc: SSRC, gain })
+                .is_ok()
+        })
     }
 
     fn latency_ms(&self) -> u64 {
         LATENCY_MS
     }
 
+    fn suspend(&mut self) {
+        self.open = None;
+    }
+
+    fn resume(&mut self) -> bool {
+        if self.open.is_none() {
+            self.open = OpenEngine::start(&self.output).ok();
+        }
+        self.open.is_some()
+    }
+
     fn failed(&mut self) -> bool {
-        while let Ok(event) = self.events.try_recv() {
+        let Some(open) = &mut self.open else {
+            return false;
+        };
+        while let Ok(event) = open.events.try_recv() {
             if matches!(
                 event,
                 EngineEvent::StreamFailed {
@@ -333,23 +389,12 @@ impl FilePlayer {
         let Some(output) = output else {
             return Ok(Self::spawn(source, NullSink));
         };
-        let (engine, channels) = AudioEngine::start(EngineConfig {
-            input: None,
-            output: Some(output),
-            noise_suppression: NoiseSuppression::Off,
-            echo_cancellation: false,
-            capture_enabled: false,
-            ..EngineConfig::default()
-        })
-        .map_err(|_| PlayerError::Device)?;
-        let remote = channels.remote_audio.ok_or(PlayerError::Device)?;
+        let open = OpenEngine::start(&output)?;
         Ok(Self::spawn(
             source,
             EngineSink {
-                _engine: engine,
-                remote,
-                controls: channels.controls,
-                events: channels.events,
+                output,
+                open: Some(open),
             },
         ))
     }
@@ -445,6 +490,7 @@ fn run(
                 Command::Pause if playing => {
                     resume_ms = audible(base_ms, sent);
                     playing = false;
+                    sink.suspend();
                     shared.position_ms.store(resume_ms, Ordering::Release);
                     shared.set_state(PlayerState::Paused);
                 }
@@ -468,6 +514,16 @@ fn run(
             if let Err(failure) = reader.seek_ms(at) {
                 return shared.set_state(PlayerState::Failed(failure));
             }
+            if play && !playing {
+                if !sink.resume() {
+                    return shared.set_state(PlayerState::Failed(PlayerFailure::Device));
+                }
+                // A reopened engine starts at unity gain.
+                applied = None;
+                if sink.gain(wanted) {
+                    applied = Some(wanted);
+                }
+            }
             pending = None;
             drain_until = None;
             ended = false;
@@ -486,7 +542,8 @@ fn run(
             shared.epoch.fetch_add(1, Ordering::AcqRel);
         }
         let now = Instant::now();
-        wait = IDLE_POLL;
+        // Paused or ended, the output is closed: wait for a command.
+        wait = if playing { IDLE_POLL } else { PARKED };
         if now > next_due + LEAD {
             // The thread was starved (suspend, debugger): resume in real time, not in a burst.
             next_due = now;
@@ -499,6 +556,7 @@ fn run(
                 playing = false;
                 ended = true;
                 drain_until = None;
+                sink.suspend();
                 resume_ms = duration.unwrap_or(base_ms + sent * FRAME_MS);
                 shared.position_ms.store(resume_ms, Ordering::Release);
                 shared.set_state(PlayerState::Ended);
@@ -563,6 +621,11 @@ mod tests {
         gains: Vec<f32>,
         /// Offers refused because the sink was full.
         refused: usize,
+        /// Whether the output is open (between `resume` and `suspend`), and
+        /// offers made while it was closed.
+        suspended: bool,
+        offered_while_suspended: usize,
+        resumes: usize,
     }
 
     struct Recorder {
@@ -576,6 +639,9 @@ mod tests {
             if self.full.load(Ordering::Acquire) {
                 self.log.lock().unwrap().refused += 1;
                 return Offer::Full;
+            }
+            if self.log.lock().unwrap().suspended {
+                self.log.lock().unwrap().offered_while_suspended += 1;
             }
             let id = packet_id(frame.packet.as_bytes());
             self.log
@@ -597,6 +663,17 @@ mod tests {
 
         fn latency_ms(&self) -> u64 {
             LATENCY_MS
+        }
+
+        fn suspend(&mut self) {
+            self.log.lock().unwrap().suspended = true;
+        }
+
+        fn resume(&mut self) -> bool {
+            let mut log = self.log.lock().unwrap();
+            log.suspended = false;
+            log.resumes += 1;
+            true
         }
     }
 
@@ -747,6 +824,23 @@ mod tests {
         let gains = rig.log.lock().unwrap().gains.clone();
         assert_eq!(gains.first(), Some(&1.0));
         assert!(gains.windows(2).all(|pair| pair[0] != pair[1]), "{gains:?}");
+    }
+
+    /// A paused or finished player releases its output (no engine, no device
+    /// stream) and reopens it only to play again.
+    #[test]
+    fn paused_and_ended_players_release_the_output() {
+        let rig = rig(sample(10, 9));
+        wait_for(|| rig.ids().len() >= 2);
+        rig.player.pause();
+        wait_for(|| rig.state() == PlayerState::Paused);
+        assert!(rig.log.lock().unwrap().suspended, "paused holds no output");
+        rig.player.play();
+        wait_for(|| rig.state() == PlayerState::Ended);
+        let log = rig.log.lock().unwrap();
+        assert_eq!(log.resumes, 1, "play reopened the output once");
+        assert!(log.suspended, "the end releases the output");
+        assert_eq!(log.offered_while_suspended, 0);
     }
 
     #[test]
