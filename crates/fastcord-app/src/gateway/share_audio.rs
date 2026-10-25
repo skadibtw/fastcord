@@ -9,6 +9,7 @@
 //! encoder thread, so nothing outlives a share; the worker drops it off the
 //! async task because the joins block.
 
+use crate::i18n::{tr, trf};
 use std::sync::Arc;
 
 use fastcord_audio::soundshare::{self, ShareFrame, SoundShare};
@@ -64,16 +65,16 @@ impl AudioOffer {
     /// The picker's description of what "Share audio" does.
     pub fn note(self) -> &'static str {
         match self {
-            Self::Unavailable => "Sharing audio is not available on this system yet.",
-            Self::PerApplication => {
-                "A window shares that application's sound; a screen shares all system sound except fastcord, so your call is not sent. Your microphone stays separate."
-            }
-            Self::Broad => {
-                "Broad capture: this Windows version can only capture everything your speakers play, including your call, so viewers may hear the people in your call. Turn this off to share the picture only."
-            }
-            Self::Choose => {
-                "Choose what viewers hear. An output shares everything it plays, including your call if fastcord plays there; to share one application only, route it to a separate output (for example with pavucontrol) and choose that one. Your microphone stays separate."
-            }
+            Self::Unavailable => tr("Sharing audio is not available on this system yet."),
+            Self::PerApplication => tr(
+                "A window shares that application's sound; a screen shares all system sound except fastcord, so your call is not sent. Your microphone stays separate.",
+            ),
+            Self::Broad => tr(
+                "Broad capture: this Windows version can only capture everything your speakers play, including your call, so viewers may hear the people in your call. Turn this off to share the picture only.",
+            ),
+            Self::Choose => tr(
+                "Choose what viewers hear. An output shares everything it plays, including your call if fastcord plays there; to share one application only, route it to a separate output (for example with pavucontrol) and choose that one. Your microphone stays separate.",
+            ),
         }
     }
 
@@ -91,18 +92,23 @@ impl AudioOffer {
 /// What a running share's audio captures, for the share's status text.
 pub(super) fn scope_text(scope: LoopbackScope) -> &'static str {
     match scope {
-        LoopbackScope::Application { .. } => "app audio",
-        LoopbackScope::SystemExcludingFastcord => "system audio without fastcord",
-        LoopbackScope::SystemIncludingFastcord => "all system audio (viewers may hear your call)",
+        LoopbackScope::Application { .. } => tr("app audio"),
+        LoopbackScope::SystemExcludingFastcord => tr("system audio without fastcord"),
+        LoopbackScope::SystemIncludingFastcord => {
+            tr("all system audio (viewers may hear your call)")
+        }
         LoopbackScope::Target(AudioTarget {
             whole_output: true, ..
-        }) => "the chosen output's audio (viewers may hear your call)",
-        LoopbackScope::Target(_) => "the chosen input's audio",
+        }) => tr("the chosen output's audio (viewers may hear your call)"),
+        LoopbackScope::Target(_) => tr("the chosen input's audio"),
     }
 }
 
 pub(super) fn error_text(error: &LoopbackError) -> String {
-    format!("Could not capture audio: {error}. Turn off “Share audio” to share only the picture.")
+    trf(
+        "Could not capture audio: {}. Turn off “Share audio” to share only the picture.",
+        &[&tr(&error.to_string())],
+    )
 }
 
 /// A started audio share.
@@ -129,7 +135,12 @@ pub(super) fn start(scope: LoopbackScope) -> Result<AudioShare, String> {
             };
         }
     })
-    .map_err(|error| format!("Could not start the audio encoder: {error}."))?;
+    .map_err(|error| {
+        trf(
+            "Could not start the audio encoder: {}.",
+            &[&tr(&error.to_string())],
+        )
+    })?;
     let capture = loopback::start(scope, Box::new(move |block| input.push(block)))
         .map_err(|error| error_text(&error))?;
     Ok(AudioShare {

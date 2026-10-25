@@ -14,6 +14,8 @@ use fastcord_discord::{
     ForwardSource, MentionPolicy, NonceGenerator, OutgoingMessage, RestClient, RestError, SendError,
 };
 use fastcord_model::{REPLY_PREVIEW_CHARS, Snowflake};
+
+use crate::i18n::{tr, trf};
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 
@@ -96,20 +98,20 @@ fn describe(error: SendError) -> Outcome {
         return Outcome::Ambiguous;
     }
     Outcome::Refused(match error.cause() {
-        RestError::PermissionDenied => {
-            "Discord did not allow this: you may lack permission there, or the message cannot be forwarded."
-        }
+        RestError::PermissionDenied => tr(
+            "Discord did not allow this: you may lack permission there, or the message cannot be forwarded.",
+        ),
         RestError::ResourceGone => {
-            "The destination or the original message is no longer available."
+            tr("The destination or the original message is no longer available.")
         }
-        RestError::AuthenticationRequired => "Sign-in is required again.",
+        RestError::AuthenticationRequired => tr("Sign-in is required again."),
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this. Try again shortly."
+            tr("Discord is rate limiting this. Try again shortly.")
         }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "Discord did not forward the message.",
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED),
+        _ => tr("Discord did not forward the message."),
     })
 }
 
@@ -214,11 +216,11 @@ impl State {
                 if let Some(at) = self.picked.iter().position(|id| *id == destination) {
                     self.picked.remove(at);
                 } else if self.outcome(destination).is_some_and(Outcome::settled) {
-                    self.notice = Some("Already forwarded there; it will not be sent twice.");
+                    self.notice = Some(tr("Already forwarded there; it will not be sent twice."));
                 } else if !candidates.iter().any(|c| c.id == destination) {
-                    self.notice = Some("You cannot post there.");
+                    self.notice = Some(tr("You cannot post there."));
                 } else if self.picked.len() >= MAX_DESTINATIONS {
-                    self.notice = Some("Forward to at most five places at once.");
+                    self.notice = Some(tr("Forward to at most five places at once."));
                 } else {
                     self.picked.push(destination);
                 }
@@ -232,13 +234,15 @@ impl State {
                     && OutgoingMessage::new(&note, self.nonces.next_now(), MentionPolicy::default())
                         .is_err()
                 {
-                    self.notice = Some("The note is too long.");
+                    self.notice = Some(tr("The note is too long."));
                     return Task::none();
                 }
                 self.notice = None;
                 let plans = self.plan(candidates, (!note.is_empty()).then_some(note.as_str()));
                 if plans.is_empty() {
-                    self.notice = Some("Nothing to send: pick a place that has not received it.");
+                    self.notice = Some(tr(
+                        "Nothing to send: pick a place that has not received it.",
+                    ));
                     return Task::none();
                 }
                 let serial = self.serial;
@@ -255,12 +259,12 @@ impl State {
                                 Some(note) => match client.create_message(destination, &note).await
                                 {
                                     Ok(_) => Outcome::Sent,
-                                    Err(error) if error.is_ambiguous() => Outcome::NoteFailed(
+                                    Err(error) if error.is_ambiguous() => Outcome::NoteFailed(tr(
                                         "Forwarded, but the note may not have been sent.",
-                                    ),
-                                    Err(_) => {
-                                        Outcome::NoteFailed("Forwarded, but the note was not sent.")
-                                    }
+                                    )),
+                                    Err(_) => Outcome::NoteFailed(tr(
+                                        "Forwarded, but the note was not sent.",
+                                    )),
                                 },
                                 None => Outcome::Sent,
                             }
@@ -290,32 +294,32 @@ pub fn view<'a>(state: &'a State, candidates: &[Candidate]) -> Option<Element<'a
     let open = state.open.as_ref()?;
     let busy = state.busy();
     let controls = row![
-        text("Forward message").size(13),
+        text(tr("Forward message")).size(13),
         iced::widget::space::horizontal(),
         crate::icons::close((!busy).then_some(Event::Close)),
     ]
     .align_y(iced::Alignment::Center);
     let preview = text(if open.preview.is_empty() {
-        "(no text)"
+        tr("(no text)")
     } else {
         open.preview.as_str()
     })
     .size(12)
     .style(text::secondary);
-    let note = text_input("Add a message (optional)", &state.note)
+    let note = text_input(tr("Add a message (optional)"), &state.note)
         .on_input_maybe((!busy).then_some(Event::Input))
         .on_submit(Event::Send);
     let list = candidates.iter().map(|candidate| {
         let ticked = state.picked.contains(&candidate.id);
         let status = if state.in_flight.contains(&candidate.id) {
-            " - sending".to_owned()
+            tr(" - sending").to_owned()
         } else {
             match state.outcome(candidate.id) {
-                Some(Outcome::Sent) => " - forwarded".to_owned(),
+                Some(Outcome::Sent) => tr(" - forwarded").to_owned(),
                 Some(Outcome::NoteFailed(reason)) => format!(" - {reason}"),
-                Some(Outcome::Refused(reason)) => format!(" - not sent: {reason}"),
+                Some(Outcome::Refused(reason)) => trf(" - not sent: {}", &[&reason]),
                 Some(Outcome::Ambiguous) => {
-                    " - may have been delivered; check before sending again".to_owned()
+                    tr(" - may have been delivered; check before sending again").to_owned()
                 }
                 None => String::new(),
             }
@@ -339,11 +343,11 @@ pub fn view<'a>(state: &'a State, candidates: &[Candidate]) -> Option<Element<'a
         note,
         scrollable(column(list).spacing(2)).height(Length::Fixed(180.0)),
         row![
-            button(text("Forward").size(13))
+            button(text(tr("Forward")).size(13))
                 .on_press_maybe((!busy && !state.picked.is_empty()).then_some(Event::Send)),
-            text(format!(
-                "{} of {MAX_DESTINATIONS} places",
-                state.picked.len()
+            text(trf(
+                "{} of {} places",
+                &[&state.picked.len(), &MAX_DESTINATIONS],
             ))
             .size(12)
             .style(text::secondary),

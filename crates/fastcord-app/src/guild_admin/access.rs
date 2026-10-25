@@ -178,12 +178,12 @@ fn overwrite_name(admin: &GuildAdmin, id: Snowflake, kind: OverwriteKind) -> Str
     match kind {
         OverwriteKind::Role => admin
             .role(id)
-            .map_or_else(|| format!("Role {id}"), |r| r.name.clone()),
+            .map_or_else(|| trf("Role {}", &[&id]), |r| r.name.clone()),
         OverwriteKind::Member => admin
             .people
             .iter()
             .find(|(p, _)| *p == id)
-            .map_or_else(|| format!("Member {id}"), |(_, n)| n.clone()),
+            .map_or_else(|| trf("Member {}", &[&id]), |(_, n)| n.clone()),
     }
 }
 
@@ -568,14 +568,14 @@ pub(super) fn roles_view<'a>(
         .spacing(6)
         .into();
     };
-    let mut panel = column![header(format!("Roles: {}", admin.name), idle)].spacing(6);
+    let mut panel = column![header(trf("Roles: {}", &[&admin.name]), idle)].spacing(6);
     if !admin.can_manage_roles {
         panel = panel.push(small(
             fastcord_discord::state::navigation::NEEDS_MANAGE_ROLES,
         ));
     }
     panel = panel.push(
-        button(text("New role").size(12))
+        button(text(tr("New role")).size(12))
             .on_press_maybe((idle && admin.can_manage_roles).then_some(Event::NewRole)),
     );
     let list = column(admin.roles.iter().map(|role| {
@@ -587,11 +587,11 @@ pub(super) fn roles_view<'a>(
                 .size(13)
                 .width(Length::Fill)
                 .wrapping(text::Wrapping::None),
-            button(text("Up").size(11))
+            button(text(tr("Up")).size(11))
                 .on_press_maybe(up.then_some(Event::MoveRole(role.id, false))),
-            button(text("Down").size(11))
+            button(text(tr("Down")).size(11))
                 .on_press_maybe(down.then_some(Event::MoveRole(role.id, true))),
-            button(text("Edit").size(11)).on_press(Event::PickRole(role.id)),
+            button(text(tr("Edit")).size(11)).on_press(Event::PickRole(role.id)),
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center)
@@ -615,7 +615,7 @@ fn role_editor<'a>(
     let enabled = idle && role.edit_lock.is_none();
     let plain = enabled && !role.everyone;
     let mut panel = column![
-        text(format!("Edit {}", role.name)).size(13),
+        text(trf("Edit {}", &[&role.name])).size(13),
         lock_note(role.edit_lock)
     ]
     .spacing(6);
@@ -624,13 +624,13 @@ fn role_editor<'a>(
     } else {
         panel = panel.push(labelled(
             "Name",
-            text_input("Role name", &form.name)
+            text_input(tr("Role name"), &form.name)
                 .on_input_maybe(plain.then_some(|v| Event::Input(Field::RoleName, v)))
                 .size(13)
                 .into(),
         ));
         let presets = PRESET_COLORS.iter().map(|(label, color)| {
-            button(text(*label).size(11))
+            button(text(tr(label)).size(11))
                 .on_press_maybe(plain.then_some(Event::Color(*color)))
                 .into()
         });
@@ -638,7 +638,7 @@ fn role_editor<'a>(
             "Colour",
             column![
                 row(presets).spacing(3).wrap(),
-                text_input("Hex, such as 3498DB", &form.color)
+                text_input(tr("Hex, such as 3498DB"), &form.color)
                     .on_input_maybe(plain.then_some(|v| Event::Input(Field::RoleColor, v)))
                     .size(13),
             ]
@@ -648,23 +648,23 @@ fn role_editor<'a>(
         panel = panel
             .push(
                 checkbox(form.hoist)
-                    .label("Show members of this role separately")
+                    .label(tr("Show members of this role separately"))
                     .on_toggle_maybe(plain.then_some(Event::Hoist)),
             )
             .push(
                 checkbox(form.mentionable)
-                    .label("Allow anyone to mention this role")
+                    .label(tr("Allow anyone to mention this role"))
                     .on_toggle_maybe(plain.then_some(Event::Mentionable)),
             );
     }
     let mut perms = column![].spacing(2);
     for (group, list) in PERMISSION_GROUPS {
-        perms = perms.push(text(group).size(12).style(text::secondary));
+        perms = perms.push(text(tr(group)).size(12).style(text::secondary));
         for info in list {
             let may = enabled && admin.can_grant(admin.mine, info.flag());
             perms = perms.push(
                 checkbox(form.perms.contains(info.flag()))
-                    .label(info.name)
+                    .label(tr(info.name))
                     .size(14)
                     .text_size(12)
                     .on_toggle_maybe(may.then_some(move |_| Event::Bit(info.bit))),
@@ -678,24 +678,26 @@ fn role_editor<'a>(
             "Permissions (you can only change ones you have yourself)"
         }))
         .push(scrollable(perms.padding([0, 8])).height(Length::Fixed(200.0)))
-        .push(button(text("Save role").size(13)).on_press_maybe(enabled.then_some(Event::Save)));
+        .push(
+            button(text(tr("Save role")).size(13)).on_press_maybe(enabled.then_some(Event::Save)),
+        );
     if let Some(reason) = role.move_lock {
         panel = panel.push(small(reason));
     } else if form.confirm_delete {
         panel = panel.push(
             row![
-                text(format!("Delete the role {}? Members lose it.", role.name)).size(12),
-                button(text("Delete").size(12))
+                text(trf("Delete the role {}? Members lose it.", &[&role.name])).size(12),
+                button(text(tr("Delete")).size(12))
                     .on_press_maybe(idle.then_some(Event::Confirm))
                     .style(button::danger),
-                button(text("Cancel").size(12)).on_press_maybe(idle.then_some(Event::Cancel)),
+                button(text(tr("Cancel")).size(12)).on_press_maybe(idle.then_some(Event::Cancel)),
             ]
             .spacing(6)
             .align_y(iced::Alignment::Center),
         );
     } else {
         panel = panel.push(
-            button(text("Delete role").size(12))
+            button(text(tr("Delete role")).size(12))
                 .on_press_maybe(idle.then_some(Event::Ask(Ask::DeleteRole)))
                 .style(button::danger),
         );
@@ -720,7 +722,7 @@ pub(super) fn member_roles_view<'a>(
         .spacing(6)
         .into();
     };
-    let mut panel = column![header(format!("Roles of {}", member.name), idle)].spacing(6);
+    let mut panel = column![header(trf("Roles of {}", &[&member.name]), idle)].spacing(6);
     if !admin.can_manage_roles {
         panel = panel.push(small(
             fastcord_discord::state::navigation::NEEDS_MANAGE_ROLES,
@@ -763,7 +765,7 @@ fn tri_row<'a>(
     enabled: bool,
 ) -> Element<'a, Event> {
     let pick = |label: &'static str, on: bool, event: Option<Event>| {
-        button(text(label).size(11))
+        button(text(tr(label)).size(11))
             .on_press_maybe(event.filter(|_| enabled))
             .style(if on {
                 button::primary
@@ -772,7 +774,7 @@ fn tri_row<'a>(
             })
     };
     row![
-        text(info.name).size(12).width(Length::Fill),
+        text(tr(info.name)).size(12).width(Length::Fill),
         pick(
             "Allow",
             allow,
@@ -800,7 +802,7 @@ pub(super) fn access_view<'a>(
 ) -> Element<'a, Event> {
     let access = &form.access;
     let enabled = idle && current.can_manage_permissions;
-    let mut panel = column![text("Permissions").size(13)].spacing(6);
+    let mut panel = column![text(tr("Permissions")).size(13)].spacing(6);
     if !current.can_manage_permissions {
         panel = panel.push(small(
             "You need Manage Roles in this channel to change these.",
@@ -813,11 +815,11 @@ pub(super) fn access_view<'a>(
     panel = panel.push(match (current.synced, parent) {
         (Some(synced), Some(parent)) => row![
             small(&if synced {
-                format!("Synced with the category {}.", parent.name)
+                trf("Synced with the category {}.", &[&parent.name])
             } else {
-                format!("Not synced with the category {}.", parent.name)
+                trf("Not synced with the category {}.", &[&parent.name])
             }),
-            button(text("Sync with category").size(12))
+            button(text(tr("Sync with category")).size(12))
                 .on_press_maybe((enabled && !synced).then_some(Event::Sync)),
         ]
         .spacing(8)
@@ -830,14 +832,13 @@ pub(super) fn access_view<'a>(
     });
     // The overwrites that exist.
     let existing = current.overwrites.iter().map(|o| {
-        let label = format!(
-            "{} {}",
+        let label = trf(
             if o.kind == OverwriteKind::Role {
-                "Role"
+                "Role {}"
             } else {
-                "Member"
+                "Member {}"
             },
-            overwrite_name(admin, o.id, o.kind)
+            &[&overwrite_name(admin, o.id, o.kind)],
         );
         button(text(label).size(11))
             .on_press(Event::PickTarget(Some((o.id, o.kind))))
@@ -851,7 +852,7 @@ pub(super) fn access_view<'a>(
     panel = panel.push(row(existing).spacing(4).wrap());
     // Add one.
     let free_roles: Vec<Item<Option<Snowflake>>> =
-        std::iter::once(Item(None, "Add a role".to_owned()))
+        std::iter::once(Item(None, tr("Add a role").to_owned()))
             .chain(
                 admin
                     .roles
@@ -882,7 +883,7 @@ pub(super) fn access_view<'a>(
         });
     panel = panel
         .push(
-            text_input("Add a member by name", &access.filter)
+            text_input(tr("Add a member by name"), &access.filter)
                 .on_input_maybe(enabled.then_some(|v| Event::Input(Field::TargetFilter, v)))
                 .size(13),
         )
@@ -890,14 +891,13 @@ pub(super) fn access_view<'a>(
     // The tri-state editor.
     if let Some((target, kind)) = access.target {
         panel = panel.push(
-            text(format!(
-                "{} {}",
+            text(trf(
                 if kind == OverwriteKind::Role {
-                    "Role"
+                    "Role {}"
                 } else {
-                    "Member"
+                    "Member {}"
                 },
-                overwrite_name(admin, target, kind)
+                &[&overwrite_name(admin, target, kind)],
             ))
             .size(12),
         );
@@ -905,7 +905,7 @@ pub(super) fn access_view<'a>(
         let mut last = "";
         for (group, info) in relevant(current.kind) {
             if group != last {
-                rows = rows.push(text(group).size(12).style(text::secondary));
+                rows = rows.push(text(tr(group)).size(12).style(text::secondary));
                 last = group;
             }
             rows = rows.push(tri_row(
@@ -919,23 +919,24 @@ pub(super) fn access_view<'a>(
         panel = panel.push(scrollable(rows.padding([0, 8])).height(Length::Fixed(220.0)));
         let exists = current.overwrites.iter().any(|o| o.id == target);
         panel = panel.push(
-            button(text("Save overwrite").size(13))
+            button(text(tr("Save overwrite")).size(13))
                 .on_press_maybe(enabled.then_some(Event::SaveOverwrite)),
         );
         if exists {
             panel = panel.push(if access.confirm_remove {
                 row![
-                    text("Remove this overwrite?").size(12),
-                    button(text("Remove").size(12))
+                    text(tr("Remove this overwrite?")).size(12),
+                    button(text(tr("Remove")).size(12))
                         .on_press_maybe(enabled.then_some(Event::Confirm))
                         .style(button::danger),
-                    button(text("Cancel").size(12)).on_press_maybe(idle.then_some(Event::Cancel)),
+                    button(text(tr("Cancel")).size(12))
+                        .on_press_maybe(idle.then_some(Event::Cancel)),
                 ]
                 .spacing(6)
                 .align_y(iced::Alignment::Center)
             } else {
                 row![
-                    button(text("Remove overwrite").size(12))
+                    button(text(tr("Remove overwrite")).size(12))
                         .on_press_maybe(enabled.then_some(Event::Ask(Ask::RemoveOverwrite)))
                         .style(button::danger)
                 ]
@@ -955,7 +956,7 @@ fn inspect_view<'a>(
     member: Option<&'a AdminMember>,
 ) -> Element<'a, Event> {
     let access = &form.access;
-    let mut panel = column![text("What can a member do here?").size(13)].spacing(4);
+    let mut panel = column![text(tr("What can a member do here?")).size(13)].spacing(4);
     let Some(user) = access.inspect else {
         let needle = access.inspect_filter.trim().to_lowercase();
         let people = admin
@@ -970,7 +971,7 @@ fn inspect_view<'a>(
             });
         return panel
             .push(
-                text_input("Find a member by name", &access.inspect_filter)
+                text_input(tr("Find a member by name"), &access.inspect_filter)
                     .on_input(|v| Event::Input(Field::InspectFilter, v))
                     .size(13),
             )
@@ -980,8 +981,8 @@ fn inspect_view<'a>(
     let member = member.filter(|m| m.user == user);
     panel = panel.push(
         row![
-            small(&member.map_or_else(|| "Loading\u{2026}".to_owned(), |m| m.name.clone())),
-            button(text("Close").size(11)).on_press(Event::Inspect(None)),
+            small(&member.map_or_else(|| tr("Loading\u{2026}").to_owned(), |m| m.name.clone())),
+            button(text(tr("Close")).size(11)).on_press(Event::Inspect(None)),
         ]
         .spacing(8),
     );
@@ -999,7 +1000,7 @@ fn inspect_view<'a>(
             text(format!(
                 "{} {}",
                 if yes { "\u{2713}" } else { "\u{2717}" },
-                info.name
+                tr(info.name)
             ))
             .size(12),
         );

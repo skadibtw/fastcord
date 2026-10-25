@@ -31,6 +31,7 @@ use iced::widget::{
 use iced::{Color, Element, Length, Task};
 
 use crate::composer::Act;
+use crate::i18n::{tr, trf, trn};
 use crate::threads::ForumArchive;
 use crate::{Message, localtime, style, threads};
 
@@ -131,49 +132,53 @@ pub struct State {
 
 fn describe(error: PostError) -> String {
     let cause = match error {
-        PostError::Invalid(invalid) => return invalid.reason().to_owned(),
+        PostError::Invalid(invalid) => return tr(invalid.reason()).to_owned(),
         PostError::Send(send) => send.cause(),
     };
     let ambiguous = matches!(error, PostError::Send(SendError::Ambiguous(_)));
     if ambiguous {
-        return "Discord did not confirm the post. It may exist: check the list before posting again."
-            .to_owned();
+        return tr(
+            "Discord did not confirm the post. It may exist: check the list before posting again.",
+        )
+        .to_owned();
     }
     match cause {
         RestError::PermissionDenied => {
-            "You cannot post in this forum: a permission is missing.".to_owned()
+            tr("You cannot post in this forum: a permission is missing.").to_owned()
         }
-        RestError::ResourceGone => "This forum no longer exists.".to_owned(),
-        RestError::AuthenticationRequired => "Discord no longer accepts this login.".to_owned(),
+        RestError::ResourceGone => tr("This forum no longer exists.").to_owned(),
+        RestError::AuthenticationRequired => tr("Discord no longer accepts this login.").to_owned(),
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this. Try again shortly.".to_owned()
+            tr("Discord is rate limiting this. Try again shortly.").to_owned()
         }
-        RestError::RequestBodyTooLarge => "The post is too large.".to_owned(),
+        RestError::RequestBodyTooLarge => tr("The post is too large.").to_owned(),
         RestError::Refused(refusal) => match refusal.code {
             Some(50001 | 50013) => {
-                "You cannot post in this forum: a permission is missing.".to_owned()
+                tr("You cannot post in this forum: a permission is missing.").to_owned()
             }
             Some(50035) => {
-                "Discord rejected the title, the tags or the message. Check them and try again."
+                tr("Discord rejected the title, the tags or the message. Check them and try again.")
                     .to_owned()
             }
-            Some(code) => format!("Discord refused the post: {} ({code})", refusal.message()),
-            None => format!(
+            Some(code) => trf(
+                "Discord refused the post: {} ({})",
+                &[&refusal.message(), &code],
+            ),
+            None => trf(
                 "Discord refused the post ({}): {}",
-                refusal.status.as_u16(),
-                refusal.message()
+                &[&refusal.status.as_u16(), &refusal.message()],
             ),
         },
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED.to_owned(),
-        _ => "Discord did not accept the post. Try again.".to_owned(),
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED).to_owned(),
+        _ => tr("Discord did not accept the post. Try again.").to_owned(),
     }
 }
 
 fn failure_text(failure: Failure) -> (String, bool) {
     match failure {
-        Failure::Upload(error) => (error.reason().to_owned(), false),
+        Failure::Upload(error) => (tr(error.reason()).to_owned(), false),
         Failure::Post(error) => (
             describe(error),
             matches!(error, PostError::Send(SendError::Ambiguous(_))),
@@ -281,7 +286,7 @@ impl State {
                         draft.tags.push(tag);
                         draft.notice = None;
                     } else {
-                        draft.notice = Some(PostInvalid::TooManyTags.reason().to_owned());
+                        draft.notice = Some(tr(PostInvalid::TooManyTags.reason()).to_owned());
                     }
                 }
             }
@@ -293,7 +298,7 @@ impl State {
                         Task::perform(
                             async {
                                 rfd::AsyncFileDialog::new()
-                                    .set_title("Attach files to the post")
+                                    .set_title(tr("Attach files to the post"))
                                     .pick_files()
                                     .await
                                     .map(|files| {
@@ -314,12 +319,12 @@ impl State {
                 {
                     for path in paths {
                         if draft.files.len() >= MAX_UPLOAD_FILES {
-                            draft.notice = Some(UploadError::TooMany.reason().to_owned());
+                            draft.notice = Some(tr(UploadError::TooMany.reason()).to_owned());
                             break;
                         }
                         match UploadFile::inspect(&path) {
                             Ok(file) => draft.files.push(file),
-                            Err(error) => draft.notice = Some(error.reason().to_owned()),
+                            Err(error) => draft.notice = Some(tr(error.reason()).to_owned()),
                         }
                     }
                 }
@@ -392,13 +397,14 @@ impl State {
         };
         let body = draft.body.text();
         if !view.can_post {
-            draft.notice = Some("You cannot post in this forum: a permission is missing.".into());
+            draft.notice =
+                Some(tr("You cannot post in this forum: a permission is missing.").into());
             return Task::none();
         }
         if let Err(invalid) =
             ForumPost::check(&draft.title, &body, &draft.tags, draft.files.len(), rules)
         {
-            draft.notice = Some(invalid.reason().to_owned());
+            draft.notice = Some(tr(invalid.reason()).to_owned());
             return Task::none();
         }
         draft.stage = Stage::Posting;
@@ -500,19 +506,16 @@ fn ago(id: Snowflake, now: i64) -> String {
 }
 
 fn replies(count: u32) -> String {
-    match count {
-        1 => "1 reply".to_owned(),
-        n => format!("{n} replies"),
-    }
+    trn(count as u64, "{} reply", "{} replies")
 }
 
 fn post_card<'a>(view: &ForumView, post: &PostRow, now: i64) -> Element<'a, Message> {
     let mut badges = String::new();
     if post.pinned {
-        badges.push_str("pinned ");
+        badges.push_str(tr("pinned "));
     }
     if post.locked {
-        badges.push_str("locked ");
+        badges.push_str(tr("locked "));
     }
     let by = if post.author.is_empty() {
         String::new()
@@ -523,10 +526,9 @@ fn post_card<'a>(view: &ForumView, post: &PostRow, now: i64) -> Element<'a, Mess
         post.title.clone(),
         badges.trim_end(),
         tag_names(view, &post.tags),
-        format!(
-            "{} \u{b7} active {}{by}",
-            replies(post.replies),
-            ago(post.last_activity, now)
+        trf(
+            "{} \u{b7} active {}{}",
+            &[&replies(post.replies), &ago(post.last_activity, now), &by],
         ),
         post.unread,
         Message::SelectChannel(view.guild, post.id),
@@ -550,24 +552,24 @@ pub fn view<'a>(
     let filter = state.filter.filter(|_| state.scope == Some(forum.channel));
     let event = |e: Event| Some(Message::Forum(e));
 
-    let mut controls = row![text("Sort").size(12).color(MUTED)]
+    let mut controls = row![text(tr("Sort")).size(12).color(MUTED)]
         .spacing(6)
         .align_y(iced::alignment::Vertical::Center);
     controls = controls
         .push(chip(
-            "Latest activity".into(),
+            tr("Latest activity").into(),
             !creation,
             event(Event::Sort(false)),
         ))
         .push(chip(
-            "Date posted".into(),
+            tr("Date posted").into(),
             creation,
             event(Event::Sort(true)),
         ));
     let mut tags: Vec<Element<'a, Message>> = Vec::new();
     if !forum.tags.is_empty() {
         tags.push(chip(
-            "All".into(),
+            tr("All").into(),
             filter.is_none(),
             event(Event::Filter(None)),
         ));
@@ -607,9 +609,9 @@ pub fn view<'a>(
     if shown == 0 {
         list = list.push(
             text(if forum.posts.is_empty() {
-                "No active posts."
+                tr("No active posts.")
             } else {
-                "No active post has this tag."
+                tr("No active post has this tag.")
             })
             .size(13)
             .color(MUTED),
@@ -617,10 +619,9 @@ pub fn view<'a>(
     }
     if forum.total > forum.posts.len() {
         list = list.push(
-            text(format!(
+            text(trf(
                 "Showing the {} most recent of {} active posts.",
-                forum.posts.len(),
-                forum.total
+                &[&forum.posts.len(), &forum.total],
             ))
             .size(12)
             .color(MUTED),
@@ -629,13 +630,13 @@ pub fn view<'a>(
 
     list = list.push(
         row![
-            text("Archived posts").size(13).color(MUTED),
+            text(tr("Archived posts")).size(13).color(MUTED),
             space::horizontal(),
             button(
                 text(if archive.is_some() {
-                    "Hide"
+                    tr("Hide")
                 } else {
-                    "Load archived"
+                    tr("Load archived")
                 })
                 .size(12)
             )
@@ -654,32 +655,40 @@ pub fn view<'a>(
             }
             let locked = post.thread_metadata.as_ref().is_some_and(|m| m.locked);
             list = list.push(card(
-                post.name.clone().unwrap_or_else(|| "Untitled post".into()),
+                post.name
+                    .clone()
+                    .unwrap_or_else(|| tr("Untitled post").into()),
                 if locked {
-                    "archived locked"
+                    tr("archived locked")
                 } else {
-                    "archived"
+                    tr("archived")
                 },
                 tag_names(forum, &post.applied_tags),
-                format!(
+                trf(
                     "{} \u{b7} active {}",
-                    replies(post.message_count.unwrap_or(0)),
-                    ago(post.last_message_id.unwrap_or(post.id), now)
+                    &[
+                        &replies(post.message_count.unwrap_or(0)),
+                        &ago(post.last_message_id.unwrap_or(post.id), now),
+                    ],
                 ),
                 false,
                 Message::Threads(threads::Event::OpenArchived(index)),
             ));
         }
         if let Some(reason) = archive.failure {
-            list = list.push(text(reason).size(12).color(WARN));
+            list = list.push(text(tr(reason)).size(12).color(WARN));
         } else if archive.loading {
-            list = list.push(text("Loading archived posts\u{2026}").size(12).color(MUTED));
+            list = list.push(
+                text(tr("Loading archived posts\u{2026}"))
+                    .size(12)
+                    .color(MUTED),
+            );
         } else if archive.posts.is_empty() {
-            list = list.push(text("No archived posts.").size(12).color(MUTED));
+            list = list.push(text(tr("No archived posts.")).size(12).color(MUTED));
         }
         if archive.has_more {
             list = list.push(
-                button(text("Load more").size(12))
+                button(text(tr("Load more")).size(12))
                     .on_press(Message::Threads(threads::Event::MoreArchived))
                     .style(style::tool_button(true, false)),
             );
@@ -696,15 +705,17 @@ fn form<'a>(
     me: Snowflake,
 ) -> Element<'a, Message> {
     let editing = draft.stage == Stage::Editing;
-    let mut title = text_input("Post title", &draft.title).size(14).padding(6);
+    let mut title = text_input(tr("Post title"), &draft.title)
+        .size(14)
+        .padding(6);
     if editing {
         title = title.on_input(|t| Message::Forum(Event::Title(t)));
     }
     let mut editor = text_editor(&draft.body)
         .placeholder(if forum.media {
-            "Describe the post (a file is required)"
+            tr("Describe the post (a file is required)")
         } else {
-            "First message of the post"
+            tr("First message of the post")
         })
         .size(14)
         .padding(8)
@@ -715,9 +726,9 @@ fn form<'a>(
     }
     let mut col = column![
         row![
-            text("New post").size(14).font(BOLD),
+            text(tr("New post")).size(14).font(BOLD),
             space::horizontal(),
-            button(text("Hide").size(12))
+            button(text(tr("Hide")).size(12))
                 .on_press(Message::Forum(Event::Close))
                 .style(style::tool_button(true, false)),
         ],
@@ -729,9 +740,9 @@ fn form<'a>(
     if !forum.tags.is_empty() {
         let mut tags: Vec<Element<'a, Message>> = vec![
             text(if forum.require_tag {
-                "Tags (required)"
+                tr("Tags (required)")
             } else {
-                "Tags"
+                tr("Tags")
             })
             .size(12)
             .color(MUTED)
@@ -758,7 +769,7 @@ fn form<'a>(
     let mut files: Vec<Element<'a, Message>> = Vec::new();
     if forum.can_attach {
         files.push(
-            button(text("Attach files").size(12))
+            button(text(tr("Attach files")).size(12))
                 .on_press_maybe(editing.then_some(Message::Forum(Event::Attach)))
                 .style(style::tool_button(true, false))
                 .into(),
@@ -777,31 +788,31 @@ fn form<'a>(
         let total = draft.progress.total();
         col = col.push(
             text(match (draft.progress.sent() * 100).checked_div(total) {
-                Some(percent) => format!("Posting\u{2026} uploaded {percent}%"),
-                None => "Posting\u{2026}".to_owned(),
+                Some(percent) => trf("Posting\u{2026} uploaded {}%", &[&percent]),
+                None => tr("Posting\u{2026}").to_owned(),
             })
             .size(12)
             .color(MUTED),
         );
     }
     if let Some(notice) = &draft.notice {
-        col = col.push(text(notice.as_str()).size(12).color(WARN));
+        col = col.push(text(tr(notice.as_str())).size(12).color(WARN));
     }
     let mut actions = row![].spacing(8);
     if let Some(found) = state.arrived(forum, me) {
         col = col.push(
-            text("A post with this title from you is in the list.")
+            text(tr("A post with this title from you is in the list."))
                 .size(12)
                 .color(MUTED),
         );
         actions = actions
             .push(
-                button(text("Open it").size(13))
+                button(text(tr("Open it")).size(13))
                     .on_press(Message::SelectChannel(forum.guild, found))
                     .style(style::action_button(false)),
             )
             .push(
-                button(text("Discard draft").size(13))
+                button(text(tr("Discard draft")).size(13))
                     .on_press(Message::Forum(Event::Discard))
                     .style(style::action_button(true)),
             );
@@ -810,8 +821,8 @@ fn form<'a>(
             .push(
                 button(
                     text(match draft.stage {
-                        Stage::Unconfirmed => "Post again",
-                        _ => "Post",
+                        Stage::Unconfirmed => tr("Post again"),
+                        _ => tr("Post"),
                     })
                     .size(13),
                 )
@@ -821,7 +832,7 @@ fn form<'a>(
                 .style(style::action_button(false)),
             )
             .push(
-                button(text("Discard draft").size(13))
+                button(text(tr("Discard draft")).size(13))
                     .on_press_maybe(
                         (draft.stage != Stage::Posting).then_some(Message::Forum(Event::Discard)),
                     )

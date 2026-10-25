@@ -1,22 +1,21 @@
 //! Desktop integration (issue #105): deep links, the tray icon and second-launch
 //! hand-off streams, the close-to-tray decision, the settings section with the
-//! blocking bypass (`fastcord_bypass`, started once at launch), and the
+//! application preferences, and the
 //! compact call window. The native parts are `fastcord_platform::{tray,
 //! instance, autostart}`; nothing here polls: every stream blocks on a bounded
 //! queue fed by an OS thread.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use fastcord_model::Snowflake;
 use fastcord_platform::instance::Forwarded;
 use fastcord_platform::tray::Command;
-use iced::widget::{
-    checkbox, column, container, pick_list, row, scrollable, space, text, text_input,
-};
+use iced::widget::{checkbox, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
 use serde_json::{Value, json};
 
 use crate::gateway::{VoiceControls, VoiceParticipant};
+use crate::i18n::{tr, trf};
 use crate::icons::{self, Action, Icon};
 use crate::{Message, message_link, style};
 
@@ -218,9 +217,9 @@ impl Choice {
 impl std::fmt::Display for Choice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Auto => "Automatic: try each strategy until Discord answers",
-            Self::Preset(preset) => preset.name,
-            Self::Custom => "Only my options (Advanced)",
+            Self::Auto => tr("Automatic: try each strategy until Discord answers"),
+            Self::Preset(preset) => tr(preset.name),
+            Self::Custom => tr("Only my options (Advanced)"),
         })
     }
 }
@@ -264,7 +263,8 @@ impl Bypass {
         json!({"on": self.on, "choice": self.choice.id(), "options": self.options})
     }
 
-    /// The byedpi arguments this setting runs.
+    /// Legacy settings kept readable for compatibility with older releases.
+    #[cfg(test)]
     fn strategy(&self) -> String {
         let strategy = match self.choice {
             Choice::Auto => fastcord_bypass::auto_strategy(),
@@ -275,112 +275,38 @@ impl Bypass {
     }
 }
 
-/// What this process started with: the setting and, when on, the engine's result.
-struct Launch {
-    bypass: Bypass,
-    started: Option<Result<(), String>>,
-}
-
-static LAUNCH: OnceLock<Launch> = OnceLock::new();
-
-/// Once, before any network request: routes never switch while running.
-pub fn start_bypass(bypass: Bypass) {
-    let started = bypass.on.then(|| {
-        fastcord_bypass::enable(&bypass.strategy())
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    });
-    let _ = LAUNCH.set(Launch { bypass, started });
-}
-
-fn bypass_status(bypass: &Bypass) -> String {
-    let Some(launch) = LAUNCH.get() else {
-        return "Restart fastcord to apply.".to_owned();
-    };
-    let unchanged = launch.bypass == *bypass || !(launch.bypass.on || bypass.on);
-    match &launch.started {
-        _ if !unchanged => "Restart fastcord to apply.".to_owned(),
-        None => "Off: Discord is reached directly.".to_owned(),
-        Some(Ok(())) => "On: Discord connections go through byedpi.".to_owned(),
-        Some(Err(error)) => format!("Not running: {error} Discord is reached directly."),
-    }
-}
-
 /// The desktop section of the audio and general settings.
 pub fn view<'a>(
     close_to_tray: bool,
     tray: &Result<(), String>,
     autostart: Option<bool>,
-    bypass: &'a Bypass,
-    advanced: bool,
 ) -> Element<'a, Message> {
-    let mut content = column![text("Desktop").size(18)].spacing(8);
+    let mut content = column![text(tr("Desktop")).size(18)].spacing(8);
     content = content.push(
         checkbox(close_to_tray)
-            .label("Closing the window minimizes fastcord to the tray instead of quitting")
+            .label(tr(
+                "Closing the window minimizes fastcord to the tray instead of quitting",
+            ))
             .on_toggle_maybe(tray.is_ok().then_some(Message::CloseToTrayToggled)),
     );
     content = content.push(
         text(match tray {
-            Ok(()) => "Quit in the tray menu always exits fastcord and leaves any call.".to_owned(),
-            Err(reason) => format!("Tray icon unavailable: {reason} Closing the window quits."),
+            Ok(()) => {
+                tr("Quit in the tray menu always exits fastcord and leaves any call.").to_owned()
+            }
+            Err(reason) => trf(
+                "Tray icon unavailable: {} Closing the window quits.",
+                &[&tr(reason)],
+            ),
         })
         .size(12),
     );
     if let Some(on) = autostart {
         content = content.push(
             checkbox(on)
-                .label("Start fastcord when I sign in")
+                .label(tr("Start fastcord when I sign in"))
                 .on_toggle(Message::AutostartToggled),
         );
-    }
-    content = content
-        .push(text("Blocking bypass").size(18))
-        .push(
-            checkbox(bypass.on)
-                .label("Reach Discord through the built-in byedpi, for networks that block it")
-                .on_toggle(Message::BypassToggled),
-        )
-        .push(
-            pick_list(
-                Choice::all(),
-                Some(bypass.choice),
-                Message::BypassChoiceSelected,
-            )
-            .width(Length::Fill),
-        )
-        .push(
-            text(
-                "Messages, the Gateway and media files use it; voice and video still connect \
-                 directly. Automatic waits up to 2 seconds per strategy the first time it \
-                 reaches each Discord server.",
-            )
-            .size(12),
-        )
-        .push(text(bypass_status(bypass)).size(12))
-        .push(
-            checkbox(advanced)
-                .label("Advanced options")
-                .on_toggle(Message::BypassAdvancedToggled),
-        );
-    if advanced {
-        content = content
-            .push(
-                text_input(
-                    "byedpi options, for example -I 192.168.1.10",
-                    &bypass.options,
-                )
-                .on_input(Message::BypassOptionsEdited)
-                .padding(8),
-            )
-            .push(
-                text(
-                    "Put before the chosen strategy; with \"Only my options\" they are the \
-                     whole strategy. Behind a VPN that captures traffic with a TUN adapter, \
-                     -I <this computer's network address> sends byedpi past it.",
-                )
-                .size(12),
-            );
     }
     content.into()
 }
@@ -395,9 +321,9 @@ static WAYLAND: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
 /// staying on top, because the compositor decides that.
 pub fn compact_tip() -> &'static str {
     if *WAYLAND {
-        "Compact call window (small; Wayland does not let it stay on top)"
+        tr("Compact call window (small; Wayland does not let it stay on top)")
     } else {
-        "Compact call window (small, always on top)"
+        tr("Compact call window (small, always on top)")
     }
 }
 
@@ -454,9 +380,9 @@ pub fn compact_view(voice: &VoiceControls) -> Element<'static, Message> {
             !voice.self_muted,
             voice.self_muted,
             if voice.self_muted {
-                "Microphone muted. Click to unmute"
+                tr("Microphone muted. Click to unmute")
             } else {
-                "Microphone on. Click to mute"
+                tr("Microphone on. Click to mute")
             },
         ),
         tool(
@@ -467,26 +393,32 @@ pub fn compact_view(voice: &VoiceControls) -> Element<'static, Message> {
             !voice.deafened,
             voice.deafened,
             if voice.deafened {
-                "Deafened. Click to hear again"
+                tr("Deafened. Click to hear again")
             } else {
-                "Hearing. Click to deafen"
+                tr("Hearing. Click to deafen")
             },
         ),
-        tool(Icon::HangUp, Message::LeaveVoice, true, true, "Disconnect"),
+        tool(
+            Icon::HangUp,
+            Message::LeaveVoice,
+            true,
+            true,
+            tr("Disconnect")
+        ),
         space::horizontal(),
         tool(
             Icon::Pin,
             Message::ToggleCompact,
             true,
             false,
-            "Back to the full window",
+            tr("Back to the full window"),
         ),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center);
     container(
         column![
-            text("In call").size(12).style(text::secondary),
+            text(tr("In call")).size(12).style(text::secondary),
             scrollable(people).height(Length::Fill),
             controls,
         ]

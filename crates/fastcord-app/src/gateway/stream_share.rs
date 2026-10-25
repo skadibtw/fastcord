@@ -11,6 +11,7 @@
 //! share has its own worker thread, WebSocket, UDP socket, SSRCs and DAVE
 //! group.
 
+use crate::i18n::{tr, trf, trn};
 use std::sync::Arc;
 
 use fastcord_media::video::{SendOptions, VideoCodec, VideoFrame, VideoOptions};
@@ -141,42 +142,42 @@ impl ShareProgress {
 
 fn end_text(end: &ShareEnd) -> String {
     match end {
-        ShareEnd::Stopped => "Sharing stopped.".to_owned(),
+        ShareEnd::Stopped => tr("Sharing stopped.").to_owned(),
         ShareEnd::Capture(CaptureError::SourceClosed) => {
-            "The shared window or screen was closed, so sharing stopped.".to_owned()
+            tr("The shared window or screen was closed, so sharing stopped.").to_owned()
         }
         ShareEnd::Capture(CaptureError::PermissionDenied) if cfg!(windows) => {
-            "Windows refused to capture this source (a privacy setting, a policy, or a protected window). Choose another window or screen.".to_owned()
+            tr("Windows refused to capture this source (a privacy setting, a policy, or a protected window). Choose another window or screen.").to_owned()
         }
-        ShareEnd::Capture(CaptureError::Unsupported(detail)) => (*detail).to_owned(),
+        ShareEnd::Capture(CaptureError::Unsupported(detail)) => tr(detail).to_owned(),
         ShareEnd::Capture(CaptureError::Cancelled) => {
-            "No screen or window was chosen, so nothing was shared.".to_owned()
+            tr("No screen or window was chosen, so nothing was shared.").to_owned()
         }
-        ShareEnd::Capture(error) => format!("Screen capture stopped: {error}."),
-        ShareEnd::Encoder(detail) => format!("Video encoding failed: {detail}."),
-        ShareEnd::SinkClosed => "The stream connection closed.".to_owned(),
+        ShareEnd::Capture(error) => trf("Screen capture stopped: {}.", &[&tr(&error.to_string())]),
+        ShareEnd::Encoder(detail) => trf("Video encoding failed: {}.", &[&detail]),
+        ShareEnd::SinkClosed => tr("The stream connection closed.").to_owned(),
         // Only a camera has an effect stage.
-        ShareEnd::Effect(detail) => format!("The picture effect failed: {detail}."),
+        ShareEnd::Effect(detail) => trf("The picture effect failed: {}.", &[&detail]),
     }
 }
 
 /// Why Discord ended the stream, for the screen.
 pub(super) fn delete_text(reason: StreamDeleteReason, unavailable: bool) -> String {
     if unavailable {
-        return "Discord's stream server is unavailable; sharing stopped.".to_owned();
+        return tr("Discord's stream server is unavailable; sharing stopped.").to_owned();
     }
     match reason {
-        StreamDeleteReason::UserRequested => "Sharing stopped.".to_owned(),
-        StreamDeleteReason::StreamEnded => "Discord ended the stream.".to_owned(),
-        StreamDeleteReason::StreamFull => "Discord says the stream is full.".to_owned(),
+        StreamDeleteReason::UserRequested => tr("Sharing stopped.").to_owned(),
+        StreamDeleteReason::StreamEnded => tr("Discord ended the stream.").to_owned(),
+        StreamDeleteReason::StreamFull => tr("Discord says the stream is full.").to_owned(),
         StreamDeleteReason::Unauthorized => {
-            "Discord refused the stream: you may not stream in this channel.".to_owned()
+            tr("Discord refused the stream: you may not stream in this channel.").to_owned()
         }
         StreamDeleteReason::SafetyGuildRateLimited => {
-            "Discord rate limited streaming in this server. Try again later.".to_owned()
+            tr("Discord rate limited streaming in this server. Try again later.").to_owned()
         }
         StreamDeleteReason::ParseFailed | StreamDeleteReason::InvalidChannel => {
-            "Discord rejected the stream request.".to_owned()
+            tr("Discord rejected the stream request.").to_owned()
         }
     }
 }
@@ -186,11 +187,11 @@ pub(super) fn describe(title: &str, progress: &ShareProgress) -> String {
         return text.clone();
     }
     if !progress.capturing {
-        return format!("Starting capture of “{title}”…");
+        return trf("Starting capture of “{}”…", &[&title]);
     }
     match progress.connection {
         Connection::Live => {
-            let mut text = format!("Sharing “{title}”");
+            let mut text = trf("Sharing “{}”", &[&title]);
             if let Some(encoder) = &progress.encoder {
                 text.push_str(&format!(
                     " · {}x{} · {}",
@@ -201,21 +202,25 @@ pub(super) fn describe(title: &str, progress: &ShareProgress) -> String {
                 text.push_str(&format!(" · {}", share_audio::scope_text(audio)));
             }
             if let Some(ZeroCopy::Copy(reason)) = &progress.zero_copy {
-                text.push_str(&format!(" · copy path: {reason}"));
+                text.push_str(&trf(" · copy path: {}", &[&reason]));
             }
             if let Some(health) = progress.health {
-                text.push_str(&format!(
+                text.push_str(&trf(
                     " · {} fps · audio {} packets",
-                    health.frames_per_second, health.audio_packets
+                    &[&health.frames_per_second, &health.audio_packets],
                 ));
                 if health.refused > 0 {
-                    text.push_str(&format!(" · {} frames refused", health.refused));
+                    text.push_str(&trn(
+                        health.refused,
+                        " · {} frame refused",
+                        " · {} frames refused",
+                    ));
                 }
             }
             text
         }
         Connection::Idle | Connection::Connecting => {
-            format!("Starting your stream of “{title}”…")
+            trf("Starting your stream of “{}”…", &[&title])
         }
     }
 }
@@ -312,7 +317,7 @@ pub(super) fn start_worker(source: &CaptureSource) -> Result<Started, String> {
             fastcord_video::share::ShareError::Capture(error) => {
                 end_text(&ShareEnd::Capture(error))
             }
-            other => format!("Could not start sharing: {other}."),
+            other => trf("Could not start sharing: {}.", &[&tr(&other.to_string())]),
         })
 }
 
@@ -358,8 +363,11 @@ pub(super) fn sink(media: MediaSender) -> FrameSink {
 
 fn session_end_text(status: VoiceStatus) -> Option<String> {
     match status {
-        VoiceStatus::Closed(CloseReason::Left) => Some("The stream session ended.".to_owned()),
-        VoiceStatus::Closed(reason) => Some(format!("The stream connection failed: {reason}.")),
+        VoiceStatus::Closed(CloseReason::Left) => Some(tr("The stream session ended.").to_owned()),
+        VoiceStatus::Closed(reason) => Some(trf(
+            "The stream connection failed: {}.",
+            &[&tr(&reason.to_string())],
+        )),
         _ => None,
     }
 }
@@ -385,7 +393,10 @@ pub(super) async fn run(
         Ok(session) => session,
         Err(error) => {
             progress.send_modify(|progress| {
-                progress.fail(format!("Could not start the stream session: {error}."));
+                progress.fail(trf(
+                    "Could not start the stream session: {}.",
+                    &[&tr(&error.to_string())],
+                ));
             });
             return;
         }
@@ -441,7 +452,7 @@ pub(super) async fn run(
                     Some(Route::Negotiated(false)) => {
                         progress.send_modify(|progress| {
                             progress.fail(
-                                "Discord did not accept H.264 video from fastcord for this stream."
+                                tr("Discord did not accept H.264 video from fastcord for this stream.")
                                     .to_owned(),
                             );
                         });
@@ -468,7 +479,7 @@ pub(super) async fn run(
         progress.send_modify(|progress| progress.fail(text));
     } else {
         progress.send_modify(|progress| {
-            progress.fail("The stream session stopped unexpectedly.".to_owned());
+            progress.fail(tr("The stream session stopped unexpectedly.").to_owned());
         });
     }
     session.leave().await;
@@ -490,13 +501,13 @@ impl super::Worker {
         }
         let Some(user) = self.stream_intents.user_id else {
             self.publish_share(ShareView::failed(
-                "Still connecting to Discord; try again in a moment.".to_owned(),
+                tr("Still connecting to Discord; try again in a moment.").to_owned(),
             ));
             return;
         };
         let Some(key) = owner_key(&request, user) else {
             self.publish_share(ShareView::failed(
-                "This voice channel cannot be shared to.".to_owned(),
+                tr("This voice channel cannot be shared to.").to_owned(),
             ));
             return;
         };
@@ -525,9 +536,9 @@ impl super::Worker {
                     phase: Phase::StartingCapture,
                     audio,
                 });
-                self.publish_share(ShareView::active(format!(
+                self.publish_share(ShareView::active(trf(
                     "Starting capture of “{}”…",
-                    source.title
+                    &[&source.title],
                 )));
             }
             Err(text) => self.publish_share(ShareView::failed(text)),

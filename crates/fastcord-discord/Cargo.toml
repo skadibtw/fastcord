@@ -15,7 +15,6 @@ fake-discord = []
 [dependencies]
 fastcord-net.workspace = true
 fastcord-model.workspace = true
-fastcord-bypass.workspace = true
 fastcord-ws.workspace = true
 base64.workspace = true
 bytes.workspace = true

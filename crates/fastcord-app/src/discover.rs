@@ -13,6 +13,7 @@ use iced::widget::{button, column, container, image, row, scrollable, text};
 use iced::{Element, Length, Task};
 
 use crate::avatars::{self, AvatarKey};
+use crate::i18n::{tr, trf};
 
 /// Pages kept, so at most `MAX_PAGES * DISCOVERY_PAGE` servers.
 pub const MAX_PAGES: usize = 4;
@@ -120,10 +121,10 @@ impl State {
 fn counts_line(guild: &DiscoveredGuild) -> String {
     let mut parts = Vec::new();
     if let Some(online) = guild.online {
-        parts.push(format!("{} online", crate::invite::count(online)));
+        parts.push(trf("{} online", &[&crate::invite::count(online)]));
     }
     if let Some(members) = guild.members {
-        parts.push(format!("{} members", crate::invite::count(members)));
+        parts.push(crate::invite::members_line(members));
     }
     parts.join(" \u{b7} ")
 }
@@ -168,24 +169,24 @@ pub fn view<'a>(
             .spacing(10)
             .align_y(iced::Alignment::Center);
         if joined {
-            line = line.push(text("Joined").size(12).style(text::secondary));
+            line = line.push(text(tr("Joined")).size(12).style(text::secondary));
         }
         list = list.push(line);
     }
     if state.loading {
-        list = list.push(text("Loading\u{2026}").size(12));
+        list = list.push(text(tr("Loading\u{2026}")).size(12));
     }
     if let Some(error) = &state.error {
         list = list.push(text(error.clone()).size(12).style(text::danger));
     }
     if state.guilds.is_empty() && !state.loading && state.error.is_none() {
-        list = list.push(text("No public servers were listed.").size(12));
+        list = list.push(text(tr("No public servers were listed.")).size(12));
     }
     if state.more && !state.loading && state.next_offset().is_some() {
-        list = list.push(button(text("Show more").size(13)).on_press(Event::More));
+        list = list.push(button(text(tr("Show more")).size(13)).on_press(Event::More));
     } else if state.guilds.len() >= MAX_PAGES * DISCOVERY_PAGE {
         list = list.push(
-            text(format!("Showing the first {} servers.", state.guilds.len()))
+            text(trf("Showing the first {} servers.", &[&state.guilds.len()]))
                 .size(12)
                 .style(text::secondary),
         );
@@ -193,12 +194,14 @@ pub fn view<'a>(
     Some(
         column![
             row![
-                text("Explore public servers").size(13).width(Length::Fill),
+                text(tr("Explore public servers"))
+                    .size(13)
+                    .width(Length::Fill),
                 crate::icons::close(Some(Event::Toggle)),
             ],
-            text(
+            text(tr(
                 "To join a server, open an invite link to it. Searching the list is not available."
-            )
+            ))
             .size(12)
             .style(text::secondary),
             scrollable(list).height(Length::Fixed(280.0)),

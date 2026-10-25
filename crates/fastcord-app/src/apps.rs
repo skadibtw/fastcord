@@ -23,6 +23,7 @@ use iced::widget::{button, column, container, row, scrollable, space, text, text
 use iced::{Element, Length, Task};
 
 use crate::announce::{can_manage_webhooks, describe};
+use crate::i18n::{tr, trf};
 
 /// What one confirmed removal deletes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,12 +170,12 @@ impl State {
     fn blocked(&self, navigation: &NavigationSnapshot) -> Option<&'static str> {
         match &self.panel {
             Some(Panel::Guild(guild, _)) if Self::guild_blocked(navigation, *guild) => {
-                Some("You need Manage Server for this.")
+                Some(tr("You need Manage Server for this."))
             }
             Some(Panel::Webhooks { guild, channel, .. })
                 if !can_manage_webhooks(navigation, *guild, *channel) =>
             {
-                Some("You need Manage Webhooks in this channel.")
+                Some(tr("You need Manage Webhooks in this channel."))
             }
             _ => None,
         }
@@ -265,9 +266,9 @@ impl State {
                         }
                         self.notice = Some(
                             if gone {
-                                "It was already removed."
+                                tr("It was already removed.")
                             } else {
-                                "Removed."
+                                tr("Removed.")
                             }
                             .to_owned(),
                         );
@@ -288,7 +289,7 @@ impl State {
                         if let Some(list) = self.webhooks_mut(channel) {
                             list.push(webhook);
                             self.name_input.clear();
-                            self.notice = Some("Webhook created.".to_owned());
+                            self.notice = Some(tr("Webhook created.").to_owned());
                         }
                     }
                     Err(error) => {
@@ -321,7 +322,7 @@ impl State {
                                 *editing = None;
                             }
                             self.notice =
-                                Some(if moved { "Moved." } else { "Renamed." }.to_owned());
+                                Some(if moved { tr("Moved.") } else { tr("Renamed.") }.to_owned());
                         }
                     }
                     Err(error) => {
@@ -353,12 +354,13 @@ impl State {
             Event::AddInBrowser => match parse_client_id(&self.client_input) {
                 Some(id) => {
                     self.notice = Some(
-                        "Opened Discord's page in your browser. Consent happens there.".to_owned(),
+                        tr("Opened Discord's page in your browser. Consent happens there.")
+                            .to_owned(),
                     );
                     return (Task::none(), Some(Action::Open(authorize_url(id))));
                 }
                 None => {
-                    self.notice = Some("Enter the app's client id: digits only.".to_owned());
+                    self.notice = Some(tr("Enter the app's client id: digits only.").to_owned());
                 }
             },
             Event::CopyUrl(id) => {
@@ -374,16 +376,17 @@ impl State {
                 match url {
                     Some(url) => {
                         self.notice =
-                            Some("Webhook URL copied. Treat it as a password.".to_owned());
+                            Some(tr("Webhook URL copied. Treat it as a password.").to_owned());
                         return (Task::none(), Some(Action::Copy(url)));
                     }
                     None => {
-                        self.notice = Some("Discord sent no token for this webhook.".to_owned());
+                        self.notice =
+                            Some(tr("Discord sent no token for this webhook.").to_owned());
                     }
                 }
             }
             _ if self.busy => {
-                self.notice = Some("Wait for the previous request to finish.".to_owned());
+                self.notice = Some(tr("Wait for the previous request to finish.").to_owned());
             }
             Event::OpenAuthorized => {
                 self.open(Panel::Authorized(None));
@@ -396,7 +399,7 @@ impl State {
             }
             Event::OpenGuild(guild) => {
                 if Self::guild_blocked(navigation, guild) {
-                    self.notice = Some("You need Manage Server for this.".to_owned());
+                    self.notice = Some(tr("You need Manage Server for this.").to_owned());
                     return (Task::none(), None);
                 }
                 self.open(Panel::Guild(guild, None));
@@ -410,7 +413,7 @@ impl State {
             Event::OpenWebhooks(guild, channel) => {
                 if !can_manage_webhooks(navigation, guild, channel) {
                     self.notice =
-                        Some("You need Manage Webhooks in a text channel for this.".to_owned());
+                        Some(tr("You need Manage Webhooks in a text channel for this.").to_owned());
                     return (Task::none(), None);
                 }
                 self.open(Panel::Webhooks {
@@ -474,13 +477,14 @@ impl State {
                 let (guild, channel) = (*guild, *channel);
                 let name = self.name_input.trim().to_owned();
                 if name.is_empty() || name.chars().count() > MAX_WEBHOOK_NAME {
-                    self.notice = Some(format!(
-                        "Name the webhook (1 to {MAX_WEBHOOK_NAME} characters)."
+                    self.notice = Some(trf(
+                        "Name the webhook (1 to {} characters).",
+                        &[&MAX_WEBHOOK_NAME],
                     ));
                     return (Task::none(), None);
                 }
                 if !can_manage_webhooks(navigation, guild, channel) {
-                    self.notice = Some("You need Manage Webhooks in this channel.".to_owned());
+                    self.notice = Some(tr("You need Manage Webhooks in this channel.").to_owned());
                     return (Task::none(), None);
                 }
                 return (
@@ -518,13 +522,14 @@ impl State {
                     return (Task::none(), None);
                 };
                 if !can_manage_webhooks(navigation, guild, channel) {
-                    self.notice = Some("You need Manage Webhooks in this channel.".to_owned());
+                    self.notice = Some(tr("You need Manage Webhooks in this channel.").to_owned());
                     return (Task::none(), None);
                 }
                 let (name, to) = match event {
                     Event::MoveTo(target) => {
                         if target == channel || !can_manage_webhooks(navigation, guild, target) {
-                            self.notice = Some("You cannot move it to that channel.".to_owned());
+                            self.notice =
+                                Some(tr("You cannot move it to that channel.").to_owned());
                             return (Task::none(), None);
                         }
                         (None, Some(target))
@@ -535,7 +540,7 @@ impl State {
                             || name.chars().count() > MAX_WEBHOOK_NAME
                             || name == current.name
                         {
-                            self.notice = Some("Enter a new name first.".to_owned());
+                            self.notice = Some(tr("Enter a new name first.").to_owned());
                             return (Task::none(), None);
                         }
                         (Some(name), None)
@@ -559,7 +564,7 @@ impl State {
 
 fn scope_line(scopes: &[String]) -> String {
     if scopes.is_empty() {
-        "no scopes listed".to_owned()
+        tr("no scopes listed").to_owned()
     } else {
         scopes.join(", ")
     }
@@ -567,24 +572,26 @@ fn scope_line(scopes: &[String]) -> String {
 
 fn when(text: &Option<String>) -> String {
     text.as_deref().map_or_else(String::new, |t| {
-        format!(" \u{b7} since {}", t.get(..10).unwrap_or(t))
+        trf(" \u{b7} since {}", &[&t.get(..10).unwrap_or(t)])
     })
 }
 
 fn removal<'a>(state: &State, target: Target, idle: bool, what: &str) -> Element<'a, Event> {
     if state.confirm == Some(target) {
         row![
-            text(format!("Remove {what}?")).size(12).style(text::danger),
-            button(text("Remove").size(12))
+            text(trf("Remove {}?", &[&tr(what)]))
+                .size(12)
+                .style(text::danger),
+            button(text(tr("Remove")).size(12))
                 .style(button::danger)
                 .on_press_maybe(idle.then_some(Event::Confirm)),
-            button(text("Cancel").size(12)).on_press(Event::Cancel),
+            button(text(tr("Cancel")).size(12)).on_press(Event::Cancel),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center)
         .into()
     } else {
-        button(text("Remove").size(12))
+        button(text(tr("Remove")).size(12))
             .on_press_maybe(idle.then_some(Event::Ask(target)))
             .into()
     }
@@ -592,18 +599,20 @@ fn removal<'a>(state: &State, target: Target, idle: bool, what: &str) -> Element
 
 fn add_app<'a>(state: &'a State, idle: bool) -> Element<'a, Event> {
     column![
-        text("Add an app").size(13),
+        text(tr("Add an app")).size(13),
         row![
-            text_input("App client id", &state.client_input)
+            text_input(tr("App client id"), &state.client_input)
                 .on_input(Event::ClientInput)
                 .size(13),
-            button(text("Add app via the browser").size(12))
+            button(text(tr("Add app via the browser")).size(12))
                 .on_press_maybe(idle.then_some(Event::AddInBrowser)),
         ]
         .spacing(6),
-        text("Consent happens on Discord's own page; fastcord never authorizes an app itself.")
-            .size(12)
-            .style(text::secondary),
+        text(tr(
+            "Consent happens on Discord's own page; fastcord never authorizes an app itself."
+        ))
+        .size(12)
+        .style(text::secondary),
     ]
     .spacing(4)
     .into()
@@ -616,9 +625,9 @@ pub fn view<'a>(
     let panel = state.panel.as_ref()?;
     let idle = !state.busy;
     let title = match panel {
-        Panel::Authorized(_) => "Authorized apps",
-        Panel::Guild(..) => "Apps and integrations",
-        Panel::Webhooks { .. } => "Webhooks",
+        Panel::Authorized(_) => tr("Authorized apps"),
+        Panel::Guild(..) => tr("Apps and integrations"),
+        Panel::Webhooks { .. } => tr("Webhooks"),
     };
     let mut body = column![
         row![
@@ -630,11 +639,11 @@ pub fn view<'a>(
     ]
     .spacing(6);
     let loading =
-        |loaded: bool| (!loaded).then(|| text("Loading...").size(12).style(text::secondary));
+        |loaded: bool| (!loaded).then(|| text(tr("Loading...")).size(12).style(text::secondary));
     match panel {
         Panel::Authorized(list) => {
             body = body.push(
-                text("Apps you authorized with your account. This list uses an unverified Discord route.")
+                text(tr("Apps you authorized with your account. This list uses an unverified Discord route."))
                     .size(12)
                     .style(text::secondary),
             );
@@ -642,7 +651,7 @@ pub fn view<'a>(
             let rows = list.iter().flatten().map(|app| {
                 column![
                     text(if app.name.is_empty() {
-                        "Unnamed app"
+                        tr("Unnamed app")
                     } else {
                         &app.name
                     })
@@ -667,7 +676,7 @@ pub fn view<'a>(
             body = body.extend(loading(list.is_some()).map(iced::Element::from));
             if list.as_ref().is_some_and(Vec::is_empty) {
                 body = body.push(
-                    text("No integrations or bots.")
+                    text(tr("No integrations or bots."))
                         .size(12)
                         .style(text::secondary),
                 );
@@ -678,7 +687,7 @@ pub fn view<'a>(
                     line.push_str(&format!(" \u{b7} {}", i.account));
                 }
                 if let Some(bot) = &i.bot {
-                    line.push_str(&format!(" \u{b7} bot {bot}"));
+                    line.push_str(&trf(" \u{b7} bot {}", &[bot]));
                 }
                 row![
                     text(line).size(13).width(Length::Fill),
@@ -691,9 +700,11 @@ pub fn view<'a>(
             body = body
                 .push(scrollable(column(rows).spacing(4)).height(Length::Fixed(200.0)))
                 .push(
-                    text("Command permissions of each app are managed in the official client.")
-                        .size(12)
-                        .style(text::secondary),
+                    text(tr(
+                        "Command permissions of each app are managed in the official client.",
+                    ))
+                    .size(12)
+                    .style(text::secondary),
                 )
                 .push(add_app(state, idle));
         }
@@ -704,14 +715,14 @@ pub fn view<'a>(
             editing,
         } => {
             body = body.push(
-                text("Incoming webhooks of this channel. The URL is a secret: copying it is your click only, and fastcord never posts through a webhook.")
+                text(tr("Incoming webhooks of this channel. The URL is a secret: copying it is your click only, and fastcord never posts through a webhook."))
                     .size(12)
                     .style(text::secondary),
             );
             body = body.extend(loading(list.is_some()).map(iced::Element::from));
             if list.as_ref().is_some_and(Vec::is_empty) {
                 body = body.push(
-                    text("No incoming webhooks.")
+                    text(tr("No incoming webhooks."))
                         .size(12)
                         .style(text::secondary),
                 );
@@ -731,10 +742,11 @@ pub fn view<'a>(
             for w in list.iter().flatten() {
                 let mut line = row![
                     text(&w.name).size(13).width(Length::Fill),
-                    button(text("Copy webhook URL").size(12)).on_press_maybe(
+                    button(text(tr("Copy webhook URL")).size(12)).on_press_maybe(
                         (idle && w.token.is_some()).then_some(Event::CopyUrl(w.id))
                     ),
-                    button(text("Edit").size(12)).on_press_maybe(idle.then_some(Event::Edit(w.id))),
+                    button(text(tr("Edit")).size(12))
+                        .on_press_maybe(idle.then_some(Event::Edit(w.id))),
                     removal(state, Target::Webhook(w.id), idle, "this webhook"),
                 ]
                 .spacing(6)
@@ -746,19 +758,19 @@ pub fn view<'a>(
                 if *editing == Some(w.id) {
                     let mut edit = column![
                         row![
-                            text_input("Webhook name", &state.name_input)
+                            text_input(tr("Webhook name"), &state.name_input)
                                 .on_input(Event::NameInput)
                                 .size(13),
-                            button(text("Rename").size(12))
+                            button(text(tr("Rename")).size(12))
                                 .on_press_maybe(idle.then_some(Event::SaveName)),
                         ]
                         .spacing(6),
-                        text("Move to:").size(12).style(text::secondary),
+                        text(tr("Move to:")).size(12).style(text::secondary),
                     ]
                     .spacing(4);
                     if targets.is_empty() {
                         edit = edit.push(
-                            text("No other text channel where you have Manage Webhooks.")
+                            text(tr("No other text channel where you have Manage Webhooks."))
                                 .size(12)
                                 .style(text::secondary),
                         );
@@ -777,10 +789,10 @@ pub fn view<'a>(
                 .push(scrollable(rows).height(Length::Fixed(200.0)))
                 .push(
                     row![
-                        text_input("New webhook name", &state.name_input)
+                        text_input(tr("New webhook name"), &state.name_input)
                             .on_input(Event::NameInput)
                             .size(13),
-                        button(text("Create").size(12))
+                        button(text(tr("Create")).size(12))
                             .on_press_maybe(idle.then_some(Event::Create)),
                     ]
                     .spacing(6),

@@ -19,21 +19,36 @@ struct Glyph {
     size: f32,
 }
 
+/// A glyph's drawing, kept until the glyph at that place changes.
+///
+/// Always cached: iced_wgpu 0.14 turns uncached ("live") canvas geometry into
+/// an extra, empty text group, and a frame holding one after a new layer (a
+/// text input, a popover) lost the text of the whole window.
+#[derive(Default)]
+struct Drawn {
+    cache: canvas::Cache,
+    key: std::cell::Cell<Option<(Icon, [u8; 4], u32)>>,
+}
+
 impl<M> canvas::Program<M> for Glyph {
-    type State = ();
+    type State = Drawn;
 
     fn draw(
         &self,
-        _: &(),
+        state: &Drawn,
         renderer: &Renderer,
         _: &Theme,
         bounds: iced::Rectangle,
         _: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        frame.scale(self.size / SIZE);
-        catalog::draw(self.icon, &mut frame, self.color);
-        vec![frame.into_geometry()]
+        let key = Some((self.icon, self.color.into_rgba8(), self.size.to_bits()));
+        if state.key.replace(key) != key {
+            state.cache.clear();
+        }
+        vec![state.cache.draw(renderer, bounds.size(), |frame| {
+            frame.scale(self.size / SIZE);
+            catalog::draw(self.icon, frame, self.color);
+        })]
     }
 }
 
@@ -225,6 +240,7 @@ pub fn action<'a, M: Clone + 'a>(a: Action<M>) -> Element<'a, M> {
 }
 
 /// Identity on top (clipped to the sidebar), the six actions in a row below.
+#[cfg(test)]
 pub fn footer<'a, M: Clone + 'a>(
     identity: Element<'a, M>,
     actions: impl IntoIterator<Item = Action<M>>,

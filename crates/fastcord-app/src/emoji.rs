@@ -1,5 +1,6 @@
 //! Source-preserving inline emoji, using the versioned Unicode index and
 //! attributed Twemoji PNGs. Only visible assets are decoded; handles share pixels.
+
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -48,17 +49,21 @@ impl Asset {
             Self::Unicode(id) => {
                 let entry = index::ENTRIES
                     .get(usize::from(id))
-                    .ok_or("Emoji is unavailable.")?;
+                    .ok_or_else(|| crate::i18n::tr("Emoji is unavailable."))?;
                 bytes::Bytes::from_static(&index::PNGS[entry.offset..entry.offset + entry.len])
             }
-            Self::Custom { id, animated } => cache.custom_emoji(id, animated).await.map_err(
-                |_| "Custom emoji could not be loaded; its original token is preserved.",
-            )?,
+            Self::Custom { id, animated } => {
+                cache.custom_emoji(id, animated).await.map_err(|_| {
+                    crate::i18n::tr(
+                        "Custom emoji could not be loaded; its original token is preserved.",
+                    )
+                })?
+            }
         };
         cache
             .decode_emoji(bytes)
             .await
-            .map_err(|_| "Emoji could not be decoded; original text is preserved.")
+            .map_err(|_| crate::i18n::tr("Emoji could not be decoded; original text is preserved."))
     }
 }
 

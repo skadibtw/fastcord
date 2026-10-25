@@ -10,6 +10,7 @@
 //! same nonce, which makes Discord return the poll it already made instead of
 //! a second one, while a changed poll is a new, deliberate send.
 
+use crate::i18n::{tr, trf};
 use fastcord_discord::{
     Nonce, NonceGenerator, OutgoingMessage, PollDraft, PollError, RestClient, SendError,
 };
@@ -94,11 +95,15 @@ fn describe_send(error: SendError) -> &'static str {
         error.cause(),
         fastcord_discord::RestError::WriteNotVerified(_)
     ) {
-        fastcord_discord::WRITE_NOT_VERIFIED
+        crate::i18n::tr(fastcord_discord::WRITE_NOT_VERIFIED)
     } else if error.is_ambiguous() {
-        "The poll may have been created. Check the conversation; pressing Create again will not make a second copy of the same poll."
+        crate::i18n::tr(
+            "The poll may have been created. Check the conversation; pressing Create again will not make a second copy of the same poll.",
+        )
     } else {
-        "Discord did not create the poll. You may lack the permission to create polls here."
+        crate::i18n::tr(
+            "Discord did not create the poll. You may lack the permission to create polls here.",
+        )
     }
 }
 
@@ -231,24 +236,24 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
     state.open?;
     let sending = state.status == Status::Sending;
     let controls = row![
-        text("Create a poll").size(13),
+        text(tr("Create a poll")).size(13),
         iced::widget::space::horizontal(),
         crate::icons::close(Some(Event::Toggle)),
     ]
     .align_y(iced::Alignment::Center);
-    let question = text_input("Question", &state.question)
+    let question = text_input(tr("Question"), &state.question)
         .on_input_maybe((!sending).then_some(Event::Question))
         .size(13);
     let mut answers = column![].spacing(4);
     for (at, answer) in state.answers.iter().enumerate() {
-        let field = text_input(&format!("Answer {}", at + 1), answer)
+        let field = text_input(&trf("Answer {}", &[&(at + 1)]), answer)
             .on_input_maybe((!sending).then_some(move |text| Event::Answer(at, text)))
             .size(13)
             .width(Length::Fill);
         answers = answers.push(
             row![
                 field,
-                button(text("Remove").size(12))
+                button(text(tr("Remove")).size(12))
                     .on_press_maybe(
                         (!sending && state.answers.len() > 2).then_some(Event::RemoveAnswer(at))
                     )
@@ -258,12 +263,12 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
         );
     }
     let durations = DURATIONS.iter().fold(
-        row![text("Open for").size(12)]
+        row![text(tr("Open for")).size(12)]
             .spacing(4)
             .align_y(iced::Alignment::Center),
         |line, &(hours, label)| {
             line.push(
-                button(text(label).size(12))
+                button(text(tr(label)).size(12))
                     .on_press_maybe((!sending).then_some(Event::Duration(hours)))
                     .style(if hours == state.hours {
                         button::primary
@@ -278,14 +283,14 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
         question,
         answers,
         row![
-            button(text("Add answer").size(12))
+            button(text(tr("Add answer")).size(12))
                 .on_press_maybe(
                     (!sending && state.answers.len() < MAX_POLL_ANSWERS)
                         .then_some(Event::AddAnswer)
                 )
                 .style(button::secondary),
             checkbox(state.multiselect)
-                .label("Allow several answers")
+                .label(tr("Allow several answers"))
                 .size(14)
                 .text_size(12)
                 .on_toggle_maybe((!sending).then_some(Event::Multiselect)),
@@ -295,14 +300,18 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
         scrollable(durations).direction(scrollable::Direction::Horizontal(
             scrollable::Scrollbar::default()
         )),
-        button(text("Create").size(13)).on_press_maybe((!sending).then_some(Event::Create)),
+        button(text(tr("Create")).size(13)).on_press_maybe((!sending).then_some(Event::Create)),
     ]
     .spacing(6);
     match state.status {
         Status::Editing => {}
-        Status::Sending => panel = panel.push(text("Sending…").size(12).style(text::secondary)),
+        Status::Sending => panel = panel.push(text(tr("Sending…")).size(12).style(text::secondary)),
         Status::Invalid(error) => {
-            panel = panel.push(text(error.to_string()).size(12).style(text::danger));
+            panel = panel.push(
+                text(tr(&error.to_string()).to_string())
+                    .size(12)
+                    .style(text::danger),
+            );
         }
         Status::Failed(reason) => panel = panel.push(text(reason).size(12).style(text::danger)),
     }

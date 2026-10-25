@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use fastcord_model::{Message, Snowflake};
 use fastcord_platform::instance::Forwarded;
 
+use crate::i18n::tr;
+
 /// Minimum time between toasts.
 pub const COOLDOWN: Duration = Duration::from_secs(5);
 /// Message IDs remembered to drop replays.
@@ -89,15 +91,15 @@ impl Policy {
         if std::mem::take(&mut self.coalesced) > 0 {
             return Some(Toast {
                 title: "fastcord".to_owned(),
-                body: "New messages".to_owned(),
+                body: tr("New messages").to_owned(),
             });
         }
         let body = if !candidate.text.trim().is_empty() {
             fastcord_platform::notify::clip(candidate.text.trim(), PREVIEW_CHARS)
         } else if candidate.has_attachment {
-            "Sent an attachment".to_owned()
+            tr("Sent an attachment").to_owned()
         } else {
-            "New message".to_owned()
+            tr("New message").to_owned()
         };
         Some(Toast {
             title: candidate.author.clone(),

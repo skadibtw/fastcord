@@ -21,6 +21,7 @@ use fastcord_discord::{
 use fastcord_model::{Message, Snowflake};
 
 use super::{History, NOT_LOADED, NOT_OPEN, NOT_OWN};
+use crate::i18n::tr;
 use crate::timeline::{ReactionTarget, SelectView, UsersState};
 
 pub const NO_MODERATION: &str = "You need Manage Messages in this channel.";
@@ -59,39 +60,39 @@ fn system_ms() -> u64 {
 /// A fixed, secret-free sentence for a refused or failed moderation request.
 pub fn failure(error: BulkRequestError) -> &'static str {
     let error = match error {
-        BulkRequestError::Invalid(BulkError::TooFew) => return TOO_FEW,
-        BulkRequestError::Invalid(BulkError::TooMany) => return TOO_MANY,
-        BulkRequestError::Invalid(BulkError::TooOld) => return TOO_OLD,
+        BulkRequestError::Invalid(BulkError::TooFew) => return tr(TOO_FEW),
+        BulkRequestError::Invalid(BulkError::TooMany) => return tr(TOO_MANY),
+        BulkRequestError::Invalid(BulkError::TooOld) => return tr(TOO_OLD),
         BulkRequestError::Rest(error) => error,
     };
     match error {
-        RestError::PermissionDenied => "Discord refused: you need Manage Messages here.",
-        RestError::ResourceGone => "That message is already gone.",
-        RestError::Retryable(_) => {
-            "Discord did not confirm. It may have been applied; check the messages before trying again."
-        }
-        RestError::Refused(refusal) if refusal.code == Some(60003) => {
-            "Discord asks for two-factor verification. Complete it in the official client; nothing was changed here."
-        }
+        RestError::PermissionDenied => tr("Discord refused: you need Manage Messages here."),
+        RestError::ResourceGone => tr("That message is already gone."),
+        RestError::Retryable(_) => tr(
+            "Discord did not confirm. It may have been applied; check the messages before trying again.",
+        ),
+        RestError::Refused(refusal) if refusal.code == Some(60003) => tr(
+            "Discord asks for two-factor verification. Complete it in the official client; nothing was changed here.",
+        ),
         RestError::Refused(refusal) if refusal.status.as_u16() == 403 => {
-            "Discord refused: you need Manage Messages here."
+            tr("Discord refused: you need Manage Messages here.")
         }
         RestError::Refused(refusal) if refusal.status.as_u16() == 404 => {
-            "That message is already gone."
+            tr("That message is already gone.")
         }
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this. Try again shortly."
+            tr("Discord is rate limiting this. Try again shortly.")
         }
         RestError::Http(status) if status.as_u16() == 429 => {
-            "Discord is rate limiting this. Try again shortly."
+            tr("Discord is rate limiting this. Try again shortly.")
         }
         RestError::AccountVerificationRequired => {
-            "Discord requires an account check. Requests are paused."
+            tr("Discord requires an account check. Requests are paused.")
         }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "Discord did not accept the request.",
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED),
+        _ => tr("Discord did not accept the request."),
     }
 }
 
@@ -126,10 +127,10 @@ impl History {
         self.dirty = true;
         self.notice = None;
         if self.channel != Some(channel) {
-            self.notice = Some(NOT_OPEN);
+            self.notice = Some(tr(NOT_OPEN));
             false
         } else if self.moderable != Some(channel) {
-            self.notice = Some(NO_MODERATION);
+            self.notice = Some(tr(NO_MODERATION));
             false
         } else {
             true
@@ -140,7 +141,7 @@ impl History {
     pub fn select_messages(&mut self, channel: Snowflake, on: bool) {
         self.dirty = true;
         if self.selection.as_ref().is_some_and(|s| s.busy) {
-            self.notice = Some(BUSY);
+            self.notice = Some(tr(BUSY));
             return;
         }
         if !on {
@@ -179,11 +180,11 @@ impl History {
             return;
         }
         self.notice = if !held {
-            Some(NOT_LOADED)
+            Some(tr(NOT_LOADED))
         } else if !bulk_deletable(message, now) {
-            Some(TOO_OLD)
+            Some(tr(TOO_OLD))
         } else if selection.ids.len() >= BULK_MAX {
-            Some(TOO_MANY)
+            Some(tr(TOO_MANY))
         } else {
             selection.ids.insert(message);
             None
@@ -203,7 +204,7 @@ impl History {
             return;
         };
         if selection.ids.len() < BULK_MIN {
-            self.notice = Some(TOO_FEW);
+            self.notice = Some(tr(TOO_FEW));
         } else {
             selection.confirming = true;
         }
@@ -233,7 +234,7 @@ impl History {
         let ids: Vec<Snowflake> = selection.ids.iter().copied().collect();
         selection.confirming = false;
         if ids.iter().any(|id| !bulk_deletable(*id, now)) {
-            self.notice = Some(TOO_OLD);
+            self.notice = Some(tr(TOO_OLD));
             return;
         }
         selection.busy = true;
@@ -333,7 +334,7 @@ impl History {
         };
         let (message, serial) = (inspection.message, inspection.serial);
         if self.store.get(channel, message).is_none() {
-            self.notice = Some(NOT_LOADED);
+            self.notice = Some(tr(NOT_LOADED));
             return;
         }
         let Ok(emoji) = ReactionEmoji::new(&inspection.emoji) else {
@@ -376,9 +377,9 @@ impl History {
                 match result {
                     Ok(()) => {
                         self.selection = None;
-                        self.notice = Some("Messages deleted.");
+                        self.notice = Some(tr("Messages deleted."));
                     }
-                    Err(error) => self.notice = Some(failure(error)),
+                    Err(error) => self.notice = Some(tr(failure(error))),
                 }
             }
             ModKind::Reaction(serial, target) => {
@@ -401,9 +402,9 @@ impl History {
                                 }
                             }
                         }
-                        self.notice = Some("Reaction removed.");
+                        self.notice = Some(tr("Reaction removed."));
                     }
-                    Err(error) => self.notice = Some(failure(error)),
+                    Err(error) => self.notice = Some(tr(failure(error))),
                 }
             }
         }

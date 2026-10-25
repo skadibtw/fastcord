@@ -21,6 +21,7 @@ use iced::widget::{button, column, row, scrollable, text};
 use iced::{Element, Length, Task};
 
 use crate::accounts::Index;
+use crate::i18n::{tr, trf};
 
 /// Where password, MFA, passkeys and recovery are changed.
 pub const SETTINGS_URL: &str = "https://discord.com/settings/account";
@@ -76,20 +77,20 @@ fn describe(error: RestError) -> String {
         let RestError::Refused(refusal) = error else {
             unreachable!("is_mfa_required matches only a refusal");
         };
-        return format!(
-            "Discord wants multi-factor or password re-authentication for this (code {MFA_REQUIRED}: {}). fastcord does not answer it. Confirm in the official client.",
-            refusal.message()
+        return trf(
+            "Discord wants multi-factor or password re-authentication for this (code {}: {}). fastcord does not answer it. Confirm in the official client.",
+            &[&MFA_REQUIRED, &refusal.message()],
         );
     }
     match error {
         RestError::Retryable(RetryableFailure::Network(_) | RetryableFailure::Server(_)) => {
-            "Discord did not confirm. The session may have been logged out; reload the list before trying again.".to_owned()
+            tr("Discord did not confirm. The session may have been logged out; reload the list before trying again.").to_owned()
         }
         RestError::PermissionDenied => {
-            "Discord refused this. Confirm in the official client.".to_owned()
+            tr("Discord refused this. Confirm in the official client.").to_owned()
         }
         RestError::ResourceGone => {
-            "Discord did not find that session list or session. Reload the list.".to_owned()
+            tr("Discord did not find that session list or session. Reload the list.").to_owned()
         }
         other => crate::invite::describe(other),
     }
@@ -142,7 +143,7 @@ impl State {
                 if let Some(list) = &mut self.sessions {
                     list.retain(|session| session.id_hash != hash);
                 }
-                self.notice = Some("That session was logged out.".to_owned());
+                self.notice = Some(tr("That session was logged out.").to_owned());
             }
             Err(error) => self.notice = Some(describe(error)),
         }
@@ -224,9 +225,9 @@ impl State {
 
 fn flag(value: Option<bool>, yes: &str, no: &str) -> String {
     match value {
-        Some(true) => yes.to_owned(),
-        Some(false) => no.to_owned(),
-        None => "unknown".to_owned(),
+        Some(true) => tr(yes).to_owned(),
+        Some(false) => tr(no).to_owned(),
+        None => tr("unknown").to_owned(),
     }
 }
 
@@ -237,14 +238,17 @@ fn session_line(session: &AuthSession) -> String {
         .filter(|part| !part.is_empty())
         .collect();
     if parts.is_empty() {
-        parts.push("Unknown client");
+        parts.push(tr("Unknown client"));
     }
     let mut line = parts.join(" \u{b7} ");
     if let Some(when) = &session.last_used {
         // Date and minutes of Discord's ISO 8601 text.
         line.push_str(&format!(
-            " \u{b7} last used {}",
-            when.get(..16).unwrap_or(when).replace('T', " ")
+            " \u{b7} {}",
+            trf(
+                "last used {}",
+                &[&when.get(..16).unwrap_or(when).replace('T', " ")]
+            )
         ));
     }
     line
@@ -261,69 +265,70 @@ pub fn view<'a>(
     if !state.open {
         return None;
     }
-    let mut body = column![text("Saved accounts").size(14)].spacing(6);
+    let mut body = column![text(tr("Saved accounts")).size(14)].spacing(6);
     for entry in index.entries() {
         let mut line = row![text(entry.label()).size(13).width(Length::Fill)].spacing(8);
         if entry.id == active {
             line = line
-                .push(text("Active").size(12).style(text::secondary))
-                .push(button(text("Log out of fastcord").size(12)).on_press(Event::Logout));
+                .push(text(tr("Active")).size(12).style(text::secondary))
+                .push(button(text(tr("Log out of fastcord")).size(12)).on_press(Event::Logout));
         } else {
             line =
-                line.push(button(text("Switch").size(12)).on_press_maybe(
+                line.push(button(text(tr("Switch")).size(12)).on_press_maybe(
                     (can_switch && !state.busy).then_some(Event::Switch(entry.id)),
                 ))
                 .push(
-                    button(text("Remove").size(12)).on_press(Event::Ask(Pending::Remove(entry.id))),
+                    button(text(tr("Remove")).size(12))
+                        .on_press(Event::Ask(Pending::Remove(entry.id))),
                 );
         }
         body = body.push(line);
     }
     body = body.push(
         text(if can_switch {
-            "Switching logs this account out of fastcord first; only one account is ever connected."
+            tr("Switching logs this account out of fastcord first; only one account is ever connected.")
         } else {
-            "This session is memory-only; switching would lose it, so Switch is off."
+            tr("This session is memory-only; switching would lose it, so Switch is off.")
         })
         .size(12)
         .style(text::secondary),
     );
     let overview = state.overview.unwrap_or_default();
     body = body
-        .push(text("Security").size(14))
-        .push(text(format!(
+        .push(text(tr("Security")).size(14))
+        .push(text(trf(
             "Two-factor authentication: {}",
-            flag(overview.mfa_enabled, "on", "off")
+            &[&flag(overview.mfa_enabled, "on", "off")]
         )).size(13))
-        .push(text(format!(
+        .push(text(trf(
             "Email: {}",
-            flag(overview.email_verified, "verified", "not verified")
+            &[&flag(overview.email_verified, "verified", "not verified")]
         )).size(13))
-        .push(text(format!(
+        .push(text(trf(
             "Phone number: {}",
-            flag(overview.phone_present, "added", "none")
+            &[&flag(overview.phone_present, "added", "none")]
         )).size(13))
         .push(
-            text("Changing the password, two-factor authentication, passkeys and account recovery is done in the official client or Discord's website, not here.")
+            text(tr("Changing the password, two-factor authentication, passkeys and account recovery is done in the official client or Discord's website, not here."))
                 .size(12)
                 .style(text::secondary),
         )
-        .push(button(text("Open account settings in the browser").size(12)).on_press(Event::OpenWeb))
-        .push(button(text("Authorized apps").size(12)).on_press(Event::OpenApps))
+        .push(button(text(tr("Open account settings in the browser")).size(12)).on_press(Event::OpenWeb))
+        .push(button(text(tr("Authorized apps")).size(12)).on_press(Event::OpenApps))
         .push(
             row![
-                text("Sessions").size(14).width(Length::Fill),
-                button(text("Reload").size(12)).on_press_maybe((!state.loading).then_some(Event::Reload)),
+                text(tr("Sessions")).size(14).width(Length::Fill),
+                button(text(tr("Reload")).size(12)).on_press_maybe((!state.loading).then_some(Event::Reload)),
             ],
         );
     if state.loading && state.sessions.is_none() {
-        body = body.push(text("Loading\u{2026}").size(12));
+        body = body.push(text(tr("Loading\u{2026}")).size(12));
     }
     for session in state.sessions.iter().flatten() {
         body = body.push(
             row![
                 text(session_line(session)).size(12).width(Length::Fill),
-                button(text("Log out").size(12)).on_press_maybe(
+                button(text(tr("Log out")).size(12)).on_press_maybe(
                     (!state.busy).then(|| Event::Ask(Pending::Logout(session.id_hash.clone()))),
                 ),
             ]
@@ -333,9 +338,9 @@ pub fn view<'a>(
     if let Some(list) = &state.sessions {
         body = body.push(
             text(if list.is_empty() {
-                "Discord listed no sessions."
+                tr("Discord listed no sessions.")
             } else {
-                "One of these is probably fastcord; logging it out ends this login."
+                tr("One of these is probably fastcord; logging it out ends this login.")
             })
             .size(12)
             .style(text::secondary),
@@ -343,18 +348,18 @@ pub fn view<'a>(
     }
     if let Some(pending) = &state.pending {
         let question = match pending {
-            Pending::Logout(_) => "Log that session out?".to_owned(),
-            Pending::Remove(id) => format!(
+            Pending::Logout(_) => tr("Log that session out?").to_owned(),
+            Pending::Remove(id) => trf(
                 "Forget the saved login for {}? Its token is deleted from this computer; the account stays logged in elsewhere.",
-                index.get(*id).map_or_else(|| id.to_string(), |e| e.label())
+                &[&index.get(*id).map_or_else(|| id.to_string(), |e| e.label())],
             ),
         };
         body = body.push(
             row![
                 text(question).size(13).width(Length::Fill),
-                button(text("Confirm").size(12))
+                button(text(tr("Confirm")).size(12))
                     .on_press_maybe((!state.busy).then_some(Event::Confirm)),
-                button(text("Cancel").size(12)).on_press(Event::Cancel),
+                button(text(tr("Cancel")).size(12)).on_press(Event::Cancel),
             ]
             .spacing(8),
         );
@@ -365,7 +370,9 @@ pub fn view<'a>(
     Some(
         column![
             row![
-                text("Accounts and security").size(13).width(Length::Fill),
+                text(tr("Accounts and security"))
+                    .size(13)
+                    .width(Length::Fill),
                 crate::icons::close(Some(Event::Toggle)),
             ],
             scrollable(body).height(Length::Fixed(320.0)),

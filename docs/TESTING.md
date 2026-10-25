@@ -1003,3 +1003,42 @@ Only the groups listed under "On by default" in PROTOCOL.md "Write allowlist" se
 
 Implementation, deterministic tests, the Windows UI launch and outstanding live
 gates for M92–M96 are recorded in [NETWORK_TESTING.md](NETWORK_TESTING.md).
+
+
+## Network/UI worktree integration (Windows, 2026-10-25)
+
+Merged `codex/dpi-recovery` with the existing desktop identity and permessage-deflate
+transport, then the UI worktree snapshot `92a1a05`. The original UI worktree's
+100 changed/new files were hash-checked against that snapshot and left untouched.
+The public CDN client retains the shared desktop User-Agent and credential-free
+headers while using the new broker; profile manifest/app fetches, fingerprint,
+QR exchange and all WebSockets use the shared network context.
+
+Network recovery is available directly on the sign-in screen and under
+Application settings. The old byedpi settings fields remain readable for
+compatibility, but the old switch and startup engine are superseded. The network
+boundary audit explicitly refuses legacy engine transport calls in consumers.
+
+A real debug GUI launch caught main-thread stack overflow that unit-test worker
+threads did not reproduce. Network/script dispatch and the network/settings view
+entry paths were separated; the Windows executable now reserves 4 MiB of virtual
+main-thread stack with the existing 4 KiB initial commitment (further pages are
+committed on demand). No worker-stack setting or idle timer was added.
+
+Offline GUI checks used `fastcord-fake --port 18765` and the actual
+`fastcord --fake-discord 18765 --script ...` executable, with `--login-screen`
+for the signed-out run. At 1080x672, inspected the Russian saved-account and token
+screens, signed-out and signed-in Application settings, the network panel in both
+states, and guild 5001/channel 6005 (`general`) with history and composer. Both
+processes exited with code 0. The fake recorded the expected message-history GET
+and coalesced acknowledgement. Snapshots/scripts/logs are under the ignored
+`target/merge-qa/`; a second snapshot after 400 ms avoids capturing a prior GPU
+frame. Script panels `app` and `network` were added for this integration check.
+No packet helper/UAC, real credential, live Discord request or system route
+change was used. Live network/media gates in NETWORK_TESTING.md remain separate.
+
+Validation: workspace Clippy and fake-feature Clippy with warnings denied;
+workspace tests (2288 passed, 54 ignored); fake-feature app tests (839 passed,
+6 ignored); fmt, network boundary audit and third-party-license freshness.
+The native linker still emits the existing byedpi `LNK4217 byedpi_signal`
+warning when building the executable; Clippy reports no Rust warnings.

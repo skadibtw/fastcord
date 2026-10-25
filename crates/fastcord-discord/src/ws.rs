@@ -123,11 +123,10 @@ async fn connect_inner(
         .map_err(|_| ConnectError)?;
     handshake(Box::new(tls) as fastcord_net::BoxedIo, request, config)
         .await
-        .map_err(|error| {
+        .inspect_err(|_| {
             network
                 .controller()
                 .note_failure(role, fastcord_net::NetworkError::WebSocketUpgrade);
-            error
         })
 }
 

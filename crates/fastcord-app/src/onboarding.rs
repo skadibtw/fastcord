@@ -24,6 +24,7 @@ use iced::{Element, Length, Task};
 
 use crate::avatars::AvatarKey;
 use crate::emoji::{Asset, View};
+use crate::i18n::{tr, trf};
 use crate::{rich, timeline};
 
 /// Guilds whose accepted rules are remembered (until the Gateway answers).
@@ -129,18 +130,19 @@ pub struct State {
 /// may have made.
 pub(crate) fn failure(error: RestError, what: &str) -> String {
     match error {
-        RestError::Retryable(_) => format!(
-            "Discord did not confirm. {what} may have been applied; it was not retried. Check in the official client before trying again."
+        RestError::Retryable(_) => trf(
+            "Discord did not confirm. {} may have been applied; it was not retried. Check in the official client before trying again.",
+            &[&tr(what)],
         ),
-        RestError::ResourceGone => "Discord could not find that for this server.".to_owned(),
+        RestError::ResourceGone => tr("Discord could not find that for this server.").to_owned(),
         RestError::PermissionDenied => {
-            "Discord refused (403): you may not do this in this server.".to_owned()
+            tr("Discord refused (403): you may not do this in this server.").to_owned()
         }
         RestError::Refused(refusal) if refusal.status.as_u16() == 404 => {
-            "Discord could not find that for this server.".to_owned()
+            tr("Discord could not find that for this server.").to_owned()
         }
         RestError::Refused(refusal) if refusal.status.as_u16() == 403 => {
-            format!("Discord refused (403): {}", refusal.message())
+            trf("Discord refused (403): {}", &[&refusal.message()])
         }
         other => crate::invite::describe(other),
     }
@@ -459,7 +461,7 @@ impl State {
                     view.load = match result {
                         Ok(guide) => Load::Ready(guide),
                         Err(error) if is_absent(&error) => {
-                            Load::Failed("This server has no guide.".to_owned())
+                            Load::Failed(tr("This server has no guide.").to_owned())
                         }
                         Err(error) => Load::Failed(failure(error, "Nothing")),
                     };
@@ -487,11 +489,11 @@ pub fn visible_channel(navigation: &NavigationSnapshot, channel: Snowflake) -> b
 }
 
 fn banner_line<'a>(message: &'a str, action: Option<(&'a str, Event)>) -> Element<'a, Event> {
-    let mut line = row![text(message).size(13).width(Length::Fill)]
+    let mut line = row![text(tr(message)).size(13).width(Length::Fill)]
         .spacing(8)
         .align_y(iced::Alignment::Center);
     if let Some((label, event)) = action {
-        line = line.push(button(text(label).size(13)).on_press(event));
+        line = line.push(button(text(tr(label)).size(13)).on_press(event));
     }
     container(line)
         .padding([4, 8])
@@ -510,7 +512,7 @@ pub fn view<'a>(
     };
     let title = |label: &'static str, busy: bool| {
         row![
-            text(label).size(13).width(Length::Fill),
+            text(tr(label)).size(13).width(Length::Fill),
             crate::icons::close((!busy).then_some(Event::Close)),
         ]
     };
@@ -568,7 +570,7 @@ fn banner<'a>(state: &'a State, navigation: &NavigationSnapshot) -> Option<Eleme
 
 fn loading<'a, T>(load: &'a Load<T>) -> Option<Element<'a, Event>> {
     match load {
-        Load::Loading => Some(text("Loading\u{2026}").size(12).into()),
+        Load::Loading => Some(text(tr("Loading\u{2026}")).size(12).into()),
         Load::Failed(error) => Some(text(error.as_str()).size(12).style(text::danger).into()),
         Load::Ready(_) => None,
     }
@@ -595,13 +597,13 @@ fn rules_body<'a>(state: &'a State, rules: &'a Rules) -> Element<'a, Event> {
             }
         } else {
             list = list.push(
-                text(format!(
+                text(trf(
                     "{}: answer this in the official client.",
-                    if field.label.is_empty() {
-                        "A question"
+                    &[&if field.label.is_empty() {
+                        tr("A question")
                     } else {
                         &field.label
-                    }
+                    }],
                 ))
                 .size(12)
                 .style(text::secondary),
@@ -614,14 +616,14 @@ fn rules_body<'a>(state: &'a State, rules: &'a Rules) -> Element<'a, Event> {
     }
     footer = footer.push(match state.outcome(rules.guild) {
         Some(Outcome::Waiting) => {
-            text("Waiting for the server's moderators.").size(12).into()
+            text(tr("Waiting for the server's moderators.")).size(12).into()
         }
-        Some(Outcome::Approved | Outcome::Sent) => text(
+        Some(Outcome::Approved | Outcome::Sent) => text(tr(
             "Sent. Writing opens when Discord updates your membership.",
-        )
+        ))
         .size(12)
         .into(),
-        Some(Outcome::Rejected) => text("The moderators declined your application.")
+        Some(Outcome::Rejected) => text(tr("The moderators declined your application."))
             .size(12)
             .style(text::danger)
             .into(),
@@ -629,12 +631,17 @@ fn rules_body<'a>(state: &'a State, rules: &'a Rules) -> Element<'a, Event> {
             let busy = state.accepting.is_some();
             Element::from(
                 button(
-                    text(if busy { "Sending\u{2026}" } else { "I have read and agree" }).size(13),
+                    text(if busy {
+                        tr("Sending\u{2026}")
+                    } else {
+                        tr("I have read and agree")
+                    })
+                    .size(13),
                 )
                 .on_press_maybe((!busy).then_some(Event::AcceptRules)),
             )
         }
-        None => text("This server asks for more than this client can answer. Finish joining in the official client.")
+        None => text(tr("This server asks for more than this client can answer. Finish joining in the official client."))
             .size(12)
             .style(text::secondary)
             .into(),
@@ -652,7 +659,7 @@ fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> 
         return column![].into();
     };
     if onboarding.prompts.is_empty() {
-        return text("This server has no onboarding questions.")
+        return text(tr("This server has no onboarding questions."))
             .size(12)
             .into();
     }
@@ -662,16 +669,20 @@ fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> 
             text(format!(
                 "{}{}",
                 prompt.title,
-                if prompt.required { " (required)" } else { "" }
+                if prompt.required {
+                    tr(" (required)")
+                } else {
+                    ""
+                }
             ))
             .size(13)
         ]
         .spacing(4);
         block = block.push(
             text(if prompt.single_select {
-                "Choose one"
+                tr("Choose one")
             } else {
-                "Choose any"
+                tr("Choose any")
             })
             .size(11)
             .style(text::secondary),
@@ -706,26 +717,28 @@ fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> 
     }
     let missing = missing_required(&onboarding.prompts, &q.chosen);
     let mut footer = column![
-        text("Roles and channels change only when Discord sends them after you save.")
-            .size(11)
-            .style(text::secondary)
+        text(tr(
+            "Roles and channels change only when Discord sends them after you save."
+        ))
+        .size(11)
+        .style(text::secondary)
     ]
     .spacing(4);
     if let Some(error) = &q.error {
         footer = footer.push(text(error.as_str()).size(12).style(text::danger));
     }
     if q.saved {
-        footer = footer.push(text("Saved.").size(12));
+        footer = footer.push(text(tr("Saved.")).size(12));
     }
     if let Some(title) = missing {
-        footer = footer.push(text(format!("Answer \"{title}\" to continue.")).size(12));
+        footer = footer.push(text(trf("Answer \"{}\" to continue.", &[&title])).size(12));
     }
     footer = footer.push(
         button(
             text(if state.submitting {
-                "Saving\u{2026}"
+                tr("Saving\u{2026}")
             } else {
-                "Save choices"
+                tr("Save choices")
             })
             .size(13),
         )
@@ -749,7 +762,7 @@ fn guide_body<'a>(
         return column![].into();
     };
     if guide.is_empty() {
-        return text("This server has no guide.").size(12).into();
+        return text(tr("This server has no guide.")).size(12).into();
     }
     let mut list = column![].spacing(8);
     if !guide.welcome.is_empty() {
@@ -773,7 +786,7 @@ fn guide_body<'a>(
         if items.is_empty() {
             continue;
         }
-        list = list.push(text(heading).size(13));
+        list = list.push(text(tr(heading)).size(13));
         for item in items {
             let open = visible_channel(navigation, item.channel);
             let mut line = column![
@@ -789,7 +802,7 @@ fn guide_body<'a>(
             }
             if !open {
                 line = line.push(
-                    text("You cannot open this channel.")
+                    text(tr("You cannot open this channel."))
                         .size(11)
                         .style(text::secondary),
                 );

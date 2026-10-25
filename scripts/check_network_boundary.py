@@ -12,6 +12,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW = re.compile(r"\b(?:TcpStream|TcpSocket|UdpSocket|TcpListener|Client|ClientBuilder|TlsConnector)\s*::\s*(?:connect|bind|new|builder|default|from)\s*\(|\breqwest\s*::\s*(?:get|ClientBuilder)\s*\(|\b(?:connect_async|connect_async_tls_with_config|lookup_host)\s*\(")
+# fastcord-bypass is a retained legacy engine; production consumers are forbidden below.
 # These complete source modules are cfg(test) in their parents. The fake
 # service is publish=false, debug/test only and binds only 127.0.0.1.
 TEST_MODULES = {"crates/fastcord-discord/src/gateway/live.rs"}
@@ -40,11 +41,14 @@ def main():
     failures = []
     for path in (ROOT / "crates").rglob("*.rs"):
         rel = path.relative_to(ROOT).as_posix()
-        if rel.startswith(("crates/fastcord-net/", "crates/fastcord-fake/")): continue
+        if rel.startswith(("crates/fastcord-net/", "crates/fastcord-fake/", "crates/fastcord-bypass/")): continue
         if "/tests/" in rel or path.stem == "tests" or rel in TEST_MODULES: continue
         source = path.read_text(encoding="utf-8-sig")
         code = masked(source)
         ranges = test_ranges(code)
+        for match in re.finditer(r"fastcord_bypass\s*::\s*(?:connect|route_http|enable)\s*\(", code):
+            if not any(start <= match.start() < end for start, end in ranges):
+                failures.append(f"{rel}: legacy bypass transport outside fastcord-net")
         for match in RAW.finditer(code):
             if not any(start <= match.start() < end for start, end in ranges):
                 line = code.count("\n", 0, match.start()) + 1

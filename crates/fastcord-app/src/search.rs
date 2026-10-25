@@ -4,6 +4,7 @@
 //! bodies, and nothing is stored on disk. Opening a hit is a normal
 //! `history::Intent::JumpTo`, which loads the exact message context.
 
+use crate::i18n::{tr, trf, trn};
 use std::time::{Duration, Instant};
 
 use fastcord_discord::{
@@ -144,28 +145,28 @@ const HAS_CYCLE: [Option<SearchHas>; 4] = [
 
 fn has_label(has: Option<SearchHas>) -> &'static str {
     match has {
-        None => "Any content",
-        Some(SearchHas::Image) => "Has image",
-        Some(SearchHas::File) => "Has file",
-        Some(SearchHas::Link) => "Has link",
-        Some(_) => "Has other",
+        None => tr("Any content"),
+        Some(SearchHas::Image) => tr("Has image"),
+        Some(SearchHas::File) => tr("Has file"),
+        Some(SearchHas::Link) => tr("Has link"),
+        Some(_) => tr("Has other"),
     }
 }
 
 fn describe(error: RestError) -> &'static str {
     match error {
-        RestError::PermissionDenied => "You cannot search here.",
-        RestError::ResourceGone => "This conversation is no longer available.",
-        RestError::AuthenticationRequired => "Discord no longer accepts this login.",
+        RestError::PermissionDenied => tr("You cannot search here."),
+        RestError::ResourceGone => tr("This conversation is no longer available."),
+        RestError::AuthenticationRequired => tr("Discord no longer accepts this login."),
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting searches. Try again shortly."
+            tr("Discord is rate limiting searches. Try again shortly.")
         }
         RestError::Retryable(_) | RestError::Http(_) => {
-            "Search failed on Discord's side. Try again."
+            tr("Search failed on Discord's side. Try again.")
         }
-        _ => "Search results could not be read.",
+        _ => tr("Search results could not be read."),
     }
 }
 
@@ -361,22 +362,22 @@ fn panel(content: impl Into<Element<'static, Event>>) -> Element<'static, Event>
 /// The header search control; `guild` is whether the conversation is a server.
 pub fn view(state: &State, in_guild: bool) -> Element<'_, Event> {
     if !state.open {
-        return button(text("Search").size(13))
+        return button(text(tr("Search")).size(13))
             .on_press(Event::Toggle)
             .into();
     }
     let mut controls = row![
-        text_input("Search messages", &state.input)
+        text_input(tr("Search messages"), &state.input)
             .on_input(Event::Input)
             .on_submit(Event::Submit)
             .width(Length::Fill),
-        button(text("Search").size(13)).on_press(Event::Submit),
+        button(text(tr("Search")).size(13)).on_press(Event::Submit),
         button(text(has_label(state.has)).size(13))
             .on_press(Event::CycleHas)
             .padding([4, 10])
             .style(crate::style::secondary_button(false)),
         checkbox(state.from_me)
-            .label("From me")
+            .label(tr("From me"))
             .on_toggle(Event::FromMe),
     ]
     .spacing(8)
@@ -384,31 +385,32 @@ pub fn view(state: &State, in_guild: bool) -> Element<'_, Event> {
     if in_guild {
         controls = controls.push(
             checkbox(state.whole_server)
-                .label("Whole server")
+                .label(tr("Whole server"))
                 .on_toggle(Event::WholeServer),
         );
     }
     controls = controls
-        .push(crate::icons::secondary("Clear", Event::Clear))
+        .push(crate::icons::secondary(tr("Clear"), Event::Clear))
         .push(crate::icons::tool(
             crate::icons::Icon::Close,
-            "Close search",
+            tr("Close search"),
             Event::Toggle,
         ));
     let status: Element<'_, Event> = match &state.status {
         Status::Idle => text("").size(12).into(),
-        Status::Loading => text("Searching…").size(12).color(MUTED).into(),
-        Status::Indexing(n) => text(format!(
-            "Discord is indexing this conversation; retrying ({n}/{MAX_INDEX_WAITS})…"
+        Status::Loading => text(tr("Searching…")).size(12).color(MUTED).into(),
+        Status::Indexing(n) => text(trf(
+            "Discord is indexing this conversation; retrying ({}/{})…",
+            &[&n, &MAX_INDEX_WAITS],
         ))
         .size(12)
         .color(MUTED)
         .into(),
-        Status::Failed(reason) => text(*reason).size(12).color(WARN).into(),
+        Status::Failed(reason) => text(tr(reason)).size(12).color(WARN).into(),
         Status::Done if state.hits.is_empty() => {
-            text("No messages found.").size(12).color(MUTED).into()
+            text(tr("No messages found.")).size(12).color(MUTED).into()
         }
-        Status::Done => text(format!("{} of {} results", state.hits.len(), state.total))
+        Status::Done => text(trf("{} of {} results", &[&state.hits.len(), &state.total]))
             .size(12)
             .color(MUTED)
             .into(),
@@ -416,7 +418,11 @@ pub fn view(state: &State, in_guild: bool) -> Element<'_, Event> {
     let mut list = column![].spacing(4);
     for (index, hit) in state.hits.iter().enumerate() {
         let attachments = if hit.attachments > 0 {
-            format!(" [{} attachment(s)]", hit.attachments)
+            trn(
+                hit.attachments as u64,
+                " [{} attachment]",
+                " [{} attachments]",
+            )
         } else {
             String::new()
         };
@@ -447,7 +453,7 @@ pub fn view(state: &State, in_guild: bool) -> Element<'_, Event> {
             && state.bytes < MAX_RESULT_BYTES
             && (state.hits.len() as u32) < state.total
         {
-            body = body.push(button(text("Load more").size(13)).on_press(Event::More));
+            body = body.push(button(text(tr("Load more")).size(13)).on_press(Event::More));
         }
     }
     panel(body)

@@ -31,7 +31,7 @@ pub struct Entry {
 impl Entry {
     pub fn label(&self) -> String {
         if self.name.is_empty() {
-            format!("Account {}", self.id)
+            crate::i18n::trf("Account {}", &[&self.id])
         } else {
             self.name.clone()
         }

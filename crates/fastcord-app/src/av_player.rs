@@ -698,8 +698,9 @@ fn decode_step(
             if fatal || at.failures >= MAX_DECODE_FAILURES {
                 at.failed = true;
                 at.pending.clear();
-                w.session
-                    .status(Status::Failed("this video could not be decoded".into()));
+                w.session.status(Status::Failed(
+                    crate::i18n::tr("this video could not be decoded").into(),
+                ));
             }
         }
     }

@@ -31,6 +31,7 @@ use iced::widget::{
 use iced::{Element, Length, Task};
 
 use crate::attachments::{AttachmentCache, DecodedImage};
+use crate::i18n::{tr, trf};
 
 const EMOJI_FILE_LIMIT: u64 = 256 * 1024;
 
@@ -615,14 +616,14 @@ impl State {
                         let dialog = rfd::AsyncFileDialog::new();
                         let dialog = match tab {
                             Tab::Emoji => dialog
-                                .set_title("Emoji image")
-                                .add_filter("Image", &["png", "jpg", "jpeg", "gif", "webp"]),
+                                .set_title(tr("Emoji image"))
+                                .add_filter(tr("Image"), &["png", "jpg", "jpeg", "gif", "webp"]),
                             Tab::Stickers => dialog
-                                .set_title("Sticker")
-                                .add_filter("Sticker", &["png", "apng", "gif", "json"]),
+                                .set_title(tr("Sticker"))
+                                .add_filter(tr("Sticker"), &["png", "apng", "gif", "json"]),
                             Tab::Sounds => dialog
-                                .set_title("Sound")
-                                .add_filter("Sound", &["mp3", "ogg", "opus"]),
+                                .set_title(tr("Sound"))
+                                .add_filter(tr("Sound"), &["mp3", "ogg", "opus"]),
                         };
                         let Some(file) = dialog.pick_file().await else {
                             return Ok(None);
@@ -944,14 +945,16 @@ impl State {
     }
 }
 
-fn small<'a>(line: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
-    text(line).size(12).style(text::secondary)
+fn small<'a>(line: impl AsRef<str>) -> iced::widget::Text<'a> {
+    text(tr(line.as_ref()).to_owned())
+        .size(12)
+        .style(text::secondary)
 }
 
 fn slots(used: usize, limit: usize) -> String {
-    format!(
-        "{used} of {limit} used, {} free",
-        limit.saturating_sub(used)
+    trf(
+        "{} of {} used, {} free",
+        &[&used, &limit, &limit.saturating_sub(used)],
     )
 }
 
@@ -963,11 +966,11 @@ pub fn view<'a>(
     let idle = state.busy.is_none();
     let assets = navigation.assets.as_ref().filter(|a| a.id == guild);
     let title = assets.map_or_else(
-        || "Emoji, stickers and sounds".to_owned(),
-        |a| format!("Emoji, stickers and sounds: {}", a.name),
+        || tr("Emoji, stickers and sounds").to_owned(),
+        |a| trf("Emoji, stickers and sounds: {}", &[&a.name]),
     );
     let tab = |label: &'static str, which: Tab| {
-        button(text(label).size(13))
+        button(text(tr(label)).size(13))
             .on_press(Event::Tab(which))
             .style(if state.tab == which {
                 button::primary
@@ -1005,7 +1008,7 @@ pub fn view<'a>(
         ));
     }
     if let Some(notice) = &state.notice {
-        panel = panel.push(text(notice).size(12).style(text::danger));
+        panel = panel.push(text(tr(notice)).size(12).style(text::danger));
     }
     panel = match state.tab {
         Tab::Emoji => panel.push(emoji_view(state, assets, idle)),
@@ -1021,10 +1024,11 @@ fn file_row<'a>(
     idle: bool,
     ready: bool,
 ) -> Element<'a, Event> {
-    let mut line =
-        row![button(text("Choose file").size(12)).on_press_maybe(idle.then_some(Event::PickFile)),]
-            .spacing(8)
-            .align_y(iced::Alignment::Center);
+    let mut line = row![
+        button(text(tr("Choose file")).size(12)).on_press_maybe(idle.then_some(Event::PickFile)),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
     if let Some(handle) = &draft.preview {
         line = line.push(image(handle.clone()).width(32).height(32));
     }
@@ -1034,13 +1038,14 @@ fn file_row<'a>(
         label
     }));
     line = line.push(
-        button(text("Upload").size(12)).on_press_maybe((idle && ready).then_some(Event::Upload)),
+        button(text(tr("Upload")).size(12))
+            .on_press_maybe((idle && ready).then_some(Event::Upload)),
     );
     line.into()
 }
 
 fn name_input<'a>(draft: &'a Draft, hint: &'static str) -> Element<'a, Event> {
-    text_input(hint, &draft.name)
+    text_input(tr(hint), &draft.name)
         .on_input(|v| Event::Input(Field::Name, v))
         .size(13)
         .into()
@@ -1048,8 +1053,8 @@ fn name_input<'a>(draft: &'a Draft, hint: &'static str) -> Element<'a, Event> {
 
 fn edit_buttons<'a>(idle: bool) -> Element<'a, Event> {
     row![
-        button(text("Save").size(12)).on_press_maybe(idle.then_some(Event::Save)),
-        button(text("Cancel").size(12)).on_press(Event::CancelEdit),
+        button(text(tr("Save")).size(12)).on_press_maybe(idle.then_some(Event::Save)),
+        button(text(tr("Cancel")).size(12)).on_press(Event::CancelEdit),
     ]
     .spacing(6)
     .into()
@@ -1065,11 +1070,11 @@ fn actions<'a>(
 ) -> Element<'a, Event> {
     if state.confirm == Some(target) {
         return row![
-            text("Delete it?").size(12).style(text::danger),
-            button(text("Delete").size(12))
+            text(tr("Delete it?")).size(12).style(text::danger),
+            button(text(tr("Delete")).size(12))
                 .on_press_maybe(idle.then_some(Event::ConfirmDelete))
                 .style(button::danger),
-            button(text("Cancel").size(12)).on_press(Event::CancelDelete),
+            button(text(tr("Cancel")).size(12)).on_press(Event::CancelDelete),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center)
@@ -1077,10 +1082,10 @@ fn actions<'a>(
     }
     let allowed = assets.may_change(creator);
     row![
-        button(text("Edit").size(12))
+        button(text(tr("Edit")).size(12))
             .on_press_maybe((idle && allowed).then_some(Event::StartEdit(target)))
             .style(button::secondary),
-        button(text("Delete").size(12))
+        button(text(tr("Delete")).size(12))
             .on_press_maybe((idle && allowed).then_some(Event::AskDelete(target)))
             .style(button::secondary),
     ]
@@ -1090,8 +1095,8 @@ fn actions<'a>(
 
 fn creator_label(name: Option<&str>, creator: Option<Snowflake>) -> String {
     match (name, creator) {
-        (Some(name), _) => format!("by {name}"),
-        (None, Some(_)) => "by a member".to_owned(),
+        (Some(name), _) => trf("by {}", &[&name]),
+        (None, Some(_)) => tr("by a member").to_owned(),
         (None, None) => String::new(),
     }
 }
@@ -1105,21 +1110,20 @@ fn emoji_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
             .count()
     };
     let summary = match assets.limits() {
-        Some(l) => format!(
+        Some(l) => trf(
             "Static {}. Animated {}.",
-            slots(count(false), l.emoji),
-            slots(count(true), l.emoji)
+            &[&slots(count(false), l.emoji), &slots(count(true), l.emoji)],
         ),
-        None => {
-            "Free slots are unknown: Discord did not report this server's boost level.".to_owned()
-        }
+        None => tr("Free slots are unknown: Discord did not report this server's boost level.")
+            .to_owned(),
     };
     let mut panel = column![small(summary)].spacing(6);
     if assets.can_create {
         let ready = state.emoji.picked.is_some() && !state.emoji.name.trim().is_empty();
         panel = panel
-            .push(small(format!(
-                "PNG, JPEG, GIF or WebP up to 256 KiB; a name of 2 to {MAX_EMOJI_NAME_CHARS} letters, digits or underscores."
+            .push(small(trf(
+                "PNG, JPEG, GIF or WebP up to 256 KiB; a name of 2 to {} letters, digits or underscores.",
+                &[&MAX_EMOJI_NAME_CHARS],
             )))
             .push(name_input(&state.emoji, "Emoji name"))
             .push(file_row(&state.emoji, "no file chosen", idle, ready));
@@ -1131,7 +1135,7 @@ fn emoji_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
             Some(edit) if edit.target == target => {
                 line = line
                     .push(
-                        text_input("Name", &edit.name)
+                        text_input(tr("Name"), &edit.name)
                             .on_input(|v| Event::Input(Field::EditName, v))
                             .size(13),
                     )
@@ -1143,7 +1147,11 @@ fn emoji_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
                         text(format!(
                             ":{}:{}  {}",
                             e.name,
-                            if e.animated { " (animated)" } else { "" },
+                            if e.animated {
+                                format!(" ({})", tr("animated"))
+                            } else {
+                                String::new()
+                            },
                             creator_label(e.creator_name.as_deref(), e.creator)
                         ))
                         .size(13)
@@ -1165,15 +1173,16 @@ fn sticker_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> El
     let list = &state.stickers;
     let used = list.items.as_ref().map(Vec::len);
     let summary = match (assets.limits(), used) {
-        (Some(l), Some(used)) => format!("Stickers {}.", slots(used, l.stickers)),
+        (Some(l), Some(used)) => trf("Stickers {}.", &[&slots(used, l.stickers)]),
         (None, _) => {
-            "Free slots are unknown: Discord did not report this server's boost level.".to_owned()
+            tr("Free slots are unknown: Discord did not report this server's boost level.")
+                .to_owned()
         }
-        _ => "Loading...".to_owned(),
+        _ => tr("Loading...").to_owned(),
     };
     let mut panel = column![small(summary)].spacing(6);
     if let Some(reason) = &list.failed {
-        panel = panel.push(text(reason).size(12).style(text::danger));
+        panel = panel.push(text(tr(reason)).size(12).style(text::danger));
     }
     if assets.can_create {
         let d = &state.sticker;
@@ -1184,12 +1193,12 @@ fn sticker_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> El
             ))
             .push(name_input(d, "Sticker name"))
             .push(
-                text_input("Description (optional)", &d.description)
+                text_input(tr("Description (optional)"), &d.description)
                     .on_input(|v| Event::Input(Field::Description, v))
                     .size(13),
             )
             .push(
-                text_input("Tags, for example the related emoji name", &d.tags)
+                text_input(tr("Tags, for example the related emoji name"), &d.tags)
                     .on_input(|v| Event::Input(Field::Tags, v))
                     .size(13),
             )
@@ -1199,13 +1208,13 @@ fn sticker_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> El
         let target = Target::Sticker(s.id);
         match &state.edit {
             Some(edit) if edit.target == target => column![
-                text_input("Name", &edit.name)
+                text_input(tr("Name"), &edit.name)
                     .on_input(|v| Event::Input(Field::EditName, v))
                     .size(13),
-                text_input("Description", &edit.description)
+                text_input(tr("Description"), &edit.description)
                     .on_input(|v| Event::Input(Field::EditDescription, v))
                     .size(13),
-                text_input("Tags", &edit.tags)
+                text_input(tr("Tags"), &edit.tags)
                     .on_input(|v| Event::Input(Field::EditTags, v))
                     .size(13),
                 edit_buttons(idle),
@@ -1216,7 +1225,11 @@ fn sticker_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> El
                 text(format!(
                     "{}{}  {}",
                     s.name,
-                    if s.available { "" } else { " (unavailable)" },
+                    if s.available {
+                        String::new()
+                    } else {
+                        format!(" ({})", tr("unavailable"))
+                    },
                     creator_label(None, s.creator)
                 ))
                 .size(13)
@@ -1240,15 +1253,16 @@ fn sound_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
     let list = &state.sounds;
     let used = list.items.as_ref().map(Vec::len);
     let summary = match (assets.limits(), used) {
-        (Some(l), Some(used)) => format!("Sounds {}.", slots(used, l.sounds)),
+        (Some(l), Some(used)) => trf("Sounds {}.", &[&slots(used, l.sounds)]),
         (None, _) => {
-            "Free slots are unknown: Discord did not report this server's boost level.".to_owned()
+            tr("Free slots are unknown: Discord did not report this server's boost level.")
+                .to_owned()
         }
-        _ => "Loading...".to_owned(),
+        _ => tr("Loading...").to_owned(),
     };
     let mut panel = column![small(summary)].spacing(6);
     if let Some(reason) = &list.failed {
-        panel = panel.push(text(reason).size(12).style(text::danger));
+        panel = panel.push(text(tr(reason)).size(12).style(text::danger));
     }
     let playing = |sound: Option<Snowflake>| {
         state
@@ -1260,7 +1274,9 @@ fn sound_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
         let d = &state.sound;
         let ready = d.picked.is_some() && !d.name.trim().is_empty();
         let length = match &d.picked {
-            Some(Picked::Sound { ms, .. }) => format!("{:.1} s", *ms as f64 / 1000.0),
+            Some(Picked::Sound { ms, .. }) => {
+                trf("{} s", &[&format!("{:.1}", *ms as f64 / 1000.0)])
+            }
             _ => String::new(),
         };
         panel = panel
@@ -1270,10 +1286,10 @@ fn sound_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
             .push(name_input(d, "Sound name"))
             .push(
                 row![
-                    text_input("Emoji (optional)", &d.emoji)
+                    text_input(tr("Emoji (optional)"), &d.emoji)
                         .on_input(|v| Event::Input(Field::Emoji, v))
                         .size(13),
-                    small(format!("Volume {}%", d.volume)),
+                    small(trf("Volume {}%", &[&d.volume])),
                     slider(0..=100u8, d.volume, Event::NewVolume).width(Length::Fixed(120.0)),
                 ]
                 .spacing(8)
@@ -1284,9 +1300,9 @@ fn sound_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
                 row![
                     button(
                         text(if playing(None) {
-                            "Stop"
+                            tr("Stop")
                         } else {
-                            "Preview file"
+                            tr("Preview file")
                         })
                         .size(12)
                     )
@@ -1302,14 +1318,14 @@ fn sound_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
         let target = Target::Sound(s.id);
         match &state.edit {
             Some(edit) if edit.target == target => column![
-                text_input("Name", &edit.name)
+                text_input(tr("Name"), &edit.name)
                     .on_input(|v| Event::Input(Field::EditName, v))
                     .size(13),
                 row![
-                    text_input("Emoji (optional)", &edit.emoji)
+                    text_input(tr("Emoji (optional)"), &edit.emoji)
                         .on_input(|v| Event::Input(Field::EditEmoji, v))
                         .size(13),
-                    small(format!("Volume {}%", edit.volume)),
+                    small(trf("Volume {}%", &[&edit.volume])),
                     slider(0..=100u8, edit.volume, Event::EditVolume).width(Length::Fixed(120.0)),
                 ]
                 .spacing(8),
@@ -1324,15 +1340,19 @@ fn sound_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
                         .as_deref()
                         .map_or_else(String::new, |e| format!("{e} ")),
                     s.name,
-                    if s.available { "" } else { " (unavailable)" }
+                    if s.available {
+                        String::new()
+                    } else {
+                        format!(" ({})", tr("unavailable"))
+                    }
                 ))
                 .size(13)
                 .width(Length::Fill),
                 button(
                     text(if playing(Some(s.id)) {
-                        "Stop"
+                        tr("Stop")
                     } else {
-                        "Preview"
+                        tr("Preview")
                     })
                     .size(12)
                 )

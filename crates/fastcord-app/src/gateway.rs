@@ -34,6 +34,8 @@ use std::time::Duration;
 
 use fastcord_video::effect::Effect;
 
+use crate::i18n::{tr, trf, trn};
+
 use fastcord_discord::gateway::{
     ConnectionState, Dispatch, Gateway, GatewayEvent, ReconnectReason, StopReason,
 };
@@ -187,7 +189,7 @@ impl VoiceControls {
         self.names
             .iter()
             .find(|(id, _)| *id == user)
-            .map_or_else(|| format!("User {}", user.0 % 10_000), |(_, n)| n.clone())
+            .map_or_else(|| trf("User {}", &[&(user.0 % 10_000)]), |(_, n)| n.clone())
     }
 
     pub fn avatar_key(&self, user: Snowflake) -> crate::avatars::AvatarKey {
@@ -309,19 +311,20 @@ pub enum AttachmentAction {
 impl GatewayStatus {
     pub fn describe(&self) -> String {
         match self {
-            Self::Connecting { attempt: 0 } => "Connecting to Discord…".to_owned(),
+            Self::Connecting { attempt: 0 } => tr("Connecting to Discord…").to_owned(),
             Self::Connecting { attempt } => {
-                format!("Connecting to Discord… (attempt {})", attempt + 1)
+                trf("Connecting to Discord… (attempt {})", &[&(attempt + 1)])
             }
-            Self::SigningIn => "Connected; signing in…".to_owned(),
-            Self::Resuming => "Connected; resuming your session…".to_owned(),
+            Self::SigningIn => tr("Connected; signing in…").to_owned(),
+            Self::Resuming => tr("Connected; resuming your session…").to_owned(),
             Self::Ready(counts) => {
-                let mut text = format!(
+                let mut text = trf(
                     "Connected to Discord: {} servers, {} direct messages.",
-                    counts.guilds, counts.direct_messages
+                    &[&counts.guilds, &counts.direct_messages],
                 );
                 if counts.unavailable > 0 {
-                    text.push_str(&format!(" {} servers are unavailable.", counts.unavailable));
+                    text.push(' ');
+                    text.push_str(&trf("{} servers are unavailable.", &[&counts.unavailable]));
                 }
                 text
             }
@@ -329,15 +332,18 @@ impl GatewayStatus {
                 attempt,
                 delay,
                 reason,
-            } => format!(
-                "Connection lost ({}). Reconnecting in {} (attempt {attempt}).",
-                describe_reason(*reason),
-                describe_delay(*delay)
+            } => trf(
+                "Connection lost ({}). Reconnecting in {} (attempt {}).",
+                &[
+                    &tr(describe_reason(*reason)),
+                    &describe_delay(*delay),
+                    attempt,
+                ],
             ),
             Self::AuthenticationRequired => {
-                "Discord no longer accepts this login. Log in again.".to_owned()
+                tr("Discord no longer accepts this login. Log in again.").to_owned()
             }
-            Self::Stopped(reason) => format!("Disconnected: {reason}"),
+            Self::Stopped(reason) => trf("Disconnected: {}", &[&tr(&reason.to_string())]),
         }
     }
 }
@@ -359,9 +365,9 @@ fn describe_reason(reason: ReconnectReason) -> &'static str {
 /// "now" / "2 seconds": static text, so no per-second redraw timer is needed.
 fn describe_delay(delay: Duration) -> String {
     match delay.as_secs_f64() {
-        seconds if seconds < 0.5 => "a moment".to_owned(),
-        seconds if seconds < 1.5 => "1 second".to_owned(),
-        seconds => format!("{} seconds", seconds.round() as u64),
+        seconds if seconds < 0.5 => tr("a moment").to_owned(),
+        seconds if seconds < 1.5 => tr("1 second").to_owned(),
+        seconds => trn(seconds.round() as u64, "{} second", "{} seconds"),
     }
 }
 
@@ -546,7 +552,7 @@ impl Tracker {
             .map(|id| {
                 self.store
                     .user(id)
-                    .map_or_else(|| "Someone".to_owned(), |u| u.display_name().to_owned())
+                    .map_or_else(|| tr("Someone").to_owned(), |u| u.display_name().to_owned())
             })
             .collect()
     }
@@ -1350,16 +1356,16 @@ impl NavigationBridge {
     pub fn watch_stream(&self, stream_key: impl Into<String>) -> Result<(), &'static str> {
         let stream_key = stream_key.into();
         if StreamKey::from_wire(&stream_key).is_none() {
-            return Err("That is not a stream this client can watch.");
+            return Err(tr("That is not a stream this client can watch."));
         }
         let mut watched = self.watched.lock();
         if watched.iter().any(|session| session.key == stream_key) {
-            return Err("You are already watching this stream.");
+            return Err(tr("You are already watching this stream."));
         }
         if watched.len() >= crate::call_layout::MAX_WATCHED_STREAMS {
-            return Err(
+            return Err(tr(
                 "You are watching as many streams as fastcord allows at once. Stop watching one first.",
-            );
+            ));
         }
         let session = crate::playback::Session::new(stream_key.clone());
         watched.push(session.clone());
@@ -1368,7 +1374,7 @@ impl NavigationBridge {
         } else {
             session.close();
             watched.pop();
-            Err("Could not queue Watch; retry.")
+            Err(tr("Could not queue Watch; retry."))
         }
     }
 
@@ -1445,7 +1451,7 @@ impl NavigationBridge {
         request: StreamCreateRequest,
         audio: Option<fastcord_platform::loopback::LoopbackScope>,
     ) -> bool {
-        let text = format!("Starting capture of “{}”…", source.title);
+        let text = trf("Starting capture of “{}”…", &[&source.title]);
         let queued = self
             .commands
             .try_send(Command::StartShare {
@@ -1457,7 +1463,7 @@ impl NavigationBridge {
         self.share_view.send_replace(if queued {
             ShareView::active(text)
         } else {
-            ShareView::failed("Could not start sharing; try again.".to_owned())
+            ShareView::failed(tr("Could not start sharing; try again.").to_owned())
         });
         queued
     }
@@ -2194,8 +2200,10 @@ impl Worker {
                     .then_some(GatewayStatus::Stopped(StopReason::StateTooLarge))
             }
             Err(error) => {
-                self.bridge
-                    .set_private_notice(format!("Could not refresh direct conversations: {error}"));
+                self.bridge.set_private_notice(trf(
+                    "Could not refresh direct conversations: {}",
+                    &[&tr(&error.to_string())],
+                ));
                 self.tracker.navigation_dirty = true;
                 None
             }
@@ -2295,8 +2303,14 @@ impl Worker {
                     PrivateChannelError::Rest(
                         error @ (fastcord_discord::RestError::WriteNotVerified(_)
                         | fastcord_discord::RestError::WritesPaused(_)),
-                    ) => format!("Could not open direct conversation: {error}"),
-                    other => format!("Could not open direct conversation: {other:?}"),
+                    ) => trf(
+                        "Could not open direct conversation: {}",
+                        &[&tr(&error.to_string())],
+                    ),
+                    other => trf(
+                        "Could not open direct conversation: {}",
+                        &[&format!("{other:?}")],
+                    ),
                 };
                 self.bridge.set_private_notice(notice);
                 self.tracker.navigation_dirty = true;
@@ -3048,7 +3062,7 @@ impl Worker {
                 self.stop_stream_key(&key.to_wire());
                 if let Some(session) = self.bridge.watched_stream(&key.to_wire()) {
                     session.status(crate::playback::Status::Failed(
-                        "The stream's RTC identity or endpoint is invalid.".into(),
+                        tr("The stream's RTC identity or endpoint is invalid.").into(),
                     ));
                 }
             }

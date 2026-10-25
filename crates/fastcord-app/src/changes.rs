@@ -20,6 +20,8 @@ use std::sync::Arc;
 use fastcord_discord::{EditedMessage, NetworkFailure, RestError, RetryableFailure};
 use fastcord_model::Snowflake;
 
+use crate::i18n::tr;
+
 /// Unfinished changes across all channels.
 pub const MAX_CHANGES: usize = 16;
 
@@ -109,35 +111,35 @@ impl Change {
 /// A fixed, secret-free sentence for a failed edit.
 pub fn edit_failure(error: RestError) -> &'static str {
     match error {
-        RestError::PermissionDenied => "Discord did not allow this edit.",
+        RestError::PermissionDenied => tr("Discord did not allow this edit."),
         RestError::Http(status) if status.as_u16() == 400 => {
-            "Discord rejected the edit; it may be too long."
+            tr("Discord rejected the edit; it may be too long.")
         }
-        RestError::Http(_) => "Discord rejected the edit.",
+        RestError::Http(_) => tr("Discord rejected the edit."),
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-            "Could not reach Discord; the edit was not saved."
+            tr("Could not reach Discord; the edit was not saved.")
         }
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
-            "Discord did not confirm the edit; it may have been saved. Retrying is safe."
+            tr("Discord did not confirm the edit; it may have been saved. Retrying is safe.")
         }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "The edit could not be saved.",
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED),
+        _ => tr("The edit could not be saved."),
     }
 }
 
 /// A fixed, secret-free sentence for a failed deletion.
 pub fn delete_failure(error: RestError) -> &'static str {
     match error {
-        RestError::PermissionDenied => "Discord did not allow deleting this message.",
-        RestError::Http(_) => "Discord refused to delete the message.",
+        RestError::PermissionDenied => tr("Discord did not allow deleting this message."),
+        RestError::Http(_) => tr("Discord refused to delete the message."),
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-            "Could not reach Discord; the message was not deleted."
+            tr("Could not reach Discord; the message was not deleted.")
         }
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge => {
-            "Discord did not confirm the deletion; it may already be gone. Retrying is safe."
+            tr("Discord did not confirm the deletion; it may already be gone. Retrying is safe.")
         }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "The message could not be deleted.",
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED),
+        _ => tr("The message could not be deleted."),
     }
 }
 

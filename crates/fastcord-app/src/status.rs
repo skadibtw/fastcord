@@ -15,6 +15,7 @@ use iced::font::Weight;
 use iced::widget::{button, column, container, row, space, text, text_input};
 use iced::{Color, Element, Font, Length, Task, alignment};
 
+use crate::i18n::tr;
 use crate::style;
 
 /// What an account can choose (offline is never a choice).
@@ -36,11 +37,11 @@ pub fn color(status: Status) -> Color {
 
 pub fn label(status: Status) -> &'static str {
     match status {
-        Status::Online => "Online",
-        Status::Idle => "Idle",
-        Status::Dnd => "Do Not Disturb",
-        Status::Invisible => "Invisible",
-        Status::Offline => "Offline",
+        Status::Online => tr("Online"),
+        Status::Idle => tr("Idle"),
+        Status::Dnd => tr("Do Not Disturb"),
+        Status::Invisible => tr("Invisible"),
+        Status::Offline => tr("Offline"),
     }
 }
 
@@ -220,15 +221,15 @@ impl State {
             );
         }
         let custom = row![
-            text_input("Custom status", &self.input)
+            text_input(tr("Custom status"), &self.input)
                 .on_input(Event::Input)
                 .on_submit(Event::SaveCustom)
                 .size(13)
                 .padding(6),
-            button(text("Set").size(12))
+            button(text(tr("Set")).size(12))
                 .on_press_maybe((!self.pending).then_some(Event::SaveCustom))
                 .style(style::action_button(false)),
-            button(text("Clear").size(12))
+            button(text(tr("Clear")).size(12))
                 .on_press_maybe((!self.pending).then_some(Event::ClearCustom))
                 .style(style::tool_button(true, false)),
         ]
@@ -236,7 +237,10 @@ impl State {
         .align_y(alignment::Vertical::Center);
         container(
             column![
-                text("Status").size(12).font(BOLD).style(text::secondary),
+                text(tr("Status"))
+                    .size(12)
+                    .font(BOLD)
+                    .style(text::secondary),
                 choices,
                 custom,
                 text(self.notice.as_deref().unwrap_or(persistence))

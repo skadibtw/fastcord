@@ -16,6 +16,8 @@ use fastcord_model::Snowflake;
 use iced::widget::{button, checkbox, column, container, pick_list, row, space, text};
 use iced::{Color, Element, Length, Task};
 
+use crate::i18n::{tr, trf};
+
 const WARN: Color = crate::style::RED;
 const PAUSED: &str = "Notification changes are paused pending validation. Use the official Discord client to change them. Opening Alerts sends no request.";
 
@@ -43,13 +45,32 @@ struct Choice(Option<NotifyLevel>);
 impl std::fmt::Display for Choice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self.0 {
-            None => "Default",
-            Some(NotifyLevel::All) => "All messages",
-            Some(NotifyLevel::Mentions) => "Only @mentions",
-            Some(NotifyLevel::Nothing) => "Nothing",
+            None => tr("Default"),
+            Some(NotifyLevel::All) => tr("All messages"),
+            Some(NotifyLevel::Mentions) => tr("Only @mentions"),
+            Some(NotifyLevel::Nothing) => tr("Nothing"),
         })
     }
 }
+
+/// A mute length as the pick list shows it, in the interface language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MuteChoice(MuteFor);
+
+impl std::fmt::Display for MuteChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(tr(&self.0.to_string()))
+    }
+}
+
+const MUTE_CHOICES: [MuteChoice; 6] = [
+    MuteChoice(MuteFor::ALL[0]),
+    MuteChoice(MuteFor::ALL[1]),
+    MuteChoice(MuteFor::ALL[2]),
+    MuteChoice(MuteFor::ALL[3]),
+    MuteChoice(MuteFor::ALL[4]),
+    MuteChoice(MuteFor::ALL[5]),
+];
 
 const CHOICES: [Choice; 4] = [
     Choice(None),
@@ -174,25 +195,25 @@ pub fn view<'a>(
 ) -> Element<'a, Event> {
     let busy = state.busy || !NOTIFICATION_WRITES_ENABLED;
     let mut body = column![row![
-        text("Notifications").size(16),
+        text(tr("Notifications")).size(16),
         space::horizontal(),
         crate::icons::close(Some(Event::Toggle)),
     ]]
     .spacing(10);
     if !NOTIFICATION_WRITES_ENABLED {
-        body = body.push(text(PAUSED).size(12).color(WARN));
+        body = body.push(text(tr(PAUSED)).size(12).color(WARN));
     }
     if let Some(notice) = state.notice {
-        body = body.push(text(notice).size(12).color(WARN));
+        body = body.push(text(tr(notice)).size(12).color(WARN));
     }
     let n = notifications;
     // One block per target: level, then mute.
     let block = |title: &'static str, target: Target, level: Option<NotifyLevel>, muted: bool| {
         if !NOTIFICATION_WRITES_ENABLED {
             return column![
-                text(title).size(14),
-                text(format!("Notify for: {}", Choice(level))).size(13),
-                text(if muted { "Muted" } else { "Not muted" }).size(13),
+                text(tr(title)).size(14),
+                text(trf("Notify for: {}", &[&Choice(level)])).size(13),
+                text(if muted { tr("Muted") } else { tr("Not muted") }).size(13),
             ]
             .spacing(6);
         }
@@ -200,16 +221,22 @@ pub fn view<'a>(
             Event::Set(target, NotifySetting::Level(c.0))
         })
         .text_size(13);
-        let mute = pick_list(MuteFor::ALL, None::<MuteFor>, move |length| {
-            Event::Set(target, NotifySetting::Mute(length))
+        let mute = pick_list(
+            MUTE_CHOICES,
+            None::<MuteChoice>,
+            move |length: MuteChoice| Event::Set(target, NotifySetting::Mute(length.0)),
+        )
+        .placeholder(if muted {
+            tr("Muted: change…")
+        } else {
+            tr("Mute…")
         })
-        .placeholder(if muted { "Muted: change…" } else { "Mute…" })
         .text_size(13);
-        let unmute = button(text("Unmute").size(13))
+        let unmute = button(text(tr("Unmute")).size(13))
             .on_press_maybe((muted && !busy).then_some(Event::Set(target, NotifySetting::Unmute)));
         column![
-            text(title).size(14),
-            row![text("Notify for").size(13), pick].spacing(8),
+            text(tr(title)).size(14),
+            row![text(tr("Notify for")).size(13), pick].spacing(8),
             row![mute, unmute].spacing(8),
         ]
         .spacing(6)
@@ -221,14 +248,14 @@ pub fn view<'a>(
         section =
             section.push(
                 checkbox(n.suppress_everyone)
-                    .label("Suppress @everyone and @here")
+                    .label(tr("Suppress @everyone and @here"))
                     .on_toggle_maybe((!busy).then_some(move |on| {
                         Event::Set(server, NotifySetting::SuppressEveryone(on))
                     })),
             );
         section = section.push(
             checkbox(n.suppress_roles)
-                .label("Suppress all role @mentions")
+                .label(tr("Suppress all role @mentions"))
                 .on_toggle_maybe(
                     (!busy)
                         .then_some(move |on| Event::Set(server, NotifySetting::SuppressRoles(on))),
@@ -236,7 +263,7 @@ pub fn view<'a>(
         );
         section = section.push(
             checkbox(n.hide_muted)
-                .label("Hide muted channels in this server (this device only)")
+                .label(tr("Hide muted channels in this server (this device only)"))
                 .on_toggle(move |_| Event::HideMuted(guild)),
         );
         body = body.push(section);
@@ -256,10 +283,10 @@ pub fn view<'a>(
             n.private_muted,
         ));
     } else {
-        body = body.push(text("Open a server or conversation first.").size(13));
+        body = body.push(text(tr("Open a server or conversation first.")).size(13));
     }
     body = body.push(
-        text("\"Default\" follows the server's setting. Muting stops badges and notifications; mentions still show in muted places.")
+        text(tr("\"Default\" follows the server's setting. Muting stops badges and notifications; mentions still show in muted places."))
             .size(11),
     );
     container(body)

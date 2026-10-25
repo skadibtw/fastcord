@@ -440,19 +440,23 @@ impl<'a> Renderer<'a> {
                 .mentions
                 .iter()
                 .find(|user| user.id == id)
-                .map_or("@unknown-user".into(), |user| {
+                .map_or(crate::i18n::tr("@unknown-user").into(), |user| {
                     format!("@{}", user.display_name()).into()
                 }),
             Kind::Role(id) => self
                 .cx
                 .names
                 .role(id)
-                .map_or("@unknown-role".into(), |name| format!("@{name}").into()),
+                .map_or(crate::i18n::tr("@unknown-role").into(), |name| {
+                    format!("@{name}").into()
+                }),
             Kind::Channel(id) => self
                 .cx
                 .names
                 .channel(id)
-                .map_or("#unknown-channel".into(), |name| format!("#{name}").into()),
+                .map_or(crate::i18n::tr("#unknown-channel").into(), |name| {
+                    format!("#{name}").into()
+                }),
             Kind::Timestamp { unix, style } => {
                 crate::localtime::markup(unix, style, crate::localtime::offset(), self.cx.now)
                     .map_or(shown.into(), Into::into)
@@ -610,11 +614,14 @@ impl<'a> Renderer<'a> {
             }
             if let Some(media) = media.as_ref().filter(|m| safe_url(&m.url)) {
                 body = body.push(
-                    rich_text([span(format!("{label}: {}", host(&media.url)))
-                        .size(12)
-                        .color(LINK)
-                        .underline(true)
-                        .link(Link::Url(media.url.clone()))])
+                    rich_text([span(crate::i18n::trf(
+                        "{}: {}",
+                        &[&crate::i18n::tr(label), &host(&media.url)],
+                    ))
+                    .size(12)
+                    .color(LINK)
+                    .underline(true)
+                    .link(Link::Url(media.url.clone()))])
                     .on_link_click(to_event),
                 );
             }

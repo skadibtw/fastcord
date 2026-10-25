@@ -23,6 +23,7 @@ use iced::{Element, Length, Task};
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
 use crate::gateway::NavigationBridge;
+use crate::i18n::{tr, trf};
 use crate::localtime;
 
 /// An event this close to starting (or running) shows the banner.
@@ -229,7 +230,10 @@ fn channel_name(navigation: &NavigationSnapshot, id: Snowflake) -> String {
         .rows
         .iter()
         .find(|row| row.id == id && row.occupant.is_none())
-        .map_or_else(|| "a channel you cannot see".to_owned(), |r| r.name.clone())
+        .map_or_else(
+            || tr("a channel you cannot see").to_owned(),
+            |r| r.name.clone(),
+        )
 }
 
 /// Whether joining `channel` for an event of the selected server is offered:
@@ -256,11 +260,12 @@ fn failure(error: RestError, what: &str) -> String {
 }
 
 fn draft_of(form: &Form) -> Result<EventDraft, String> {
-    let start = parse_local(&form.start, offset())
-        .ok_or("Write the start as YYYY-MM-DD HH:MM in your local time.")?;
+    let start = parse_local(&form.start, offset()).ok_or(tr(
+        "Write the start as YYYY-MM-DD HH:MM in your local time.",
+    ))?;
     let end = match form.end.trim() {
         "" => None,
-        raw => Some(parse_local(raw, offset()).ok_or("Write the end as YYYY-MM-DD HH:MM.")?),
+        raw => Some(parse_local(raw, offset()).ok_or(tr("Write the end as YYYY-MM-DD HH:MM."))?),
     };
     let draft = EventDraft {
         name: form.name.clone(),
@@ -278,7 +283,7 @@ fn draft_of(form: &Form) -> Result<EventDraft, String> {
         .is_none_or(|(_, before)| before / 60_000 != start / 60_000);
     draft
         .check(now_ms(), future)
-        .map_err(|e: DraftError| e.message().to_owned())?;
+        .map_err(|e: DraftError| tr(e.message()).to_owned())?;
     Ok(draft)
 }
 
@@ -516,7 +521,7 @@ impl State {
                             self.screen = Screen::List;
                         }
                         self.notice =
-                            Some("Sent. It changes here when Discord confirms it.".to_owned());
+                            Some(tr("Sent. It changes here when Discord confirms it.").to_owned());
                     }
                     Err(error) => {
                         let message = failure(error, "The change");
@@ -543,18 +548,18 @@ impl State {
 
 fn status_label(event: &ScheduledEvent) -> &'static str {
     match event.status {
-        EventStatus::Scheduled => "Scheduled",
-        EventStatus::Active => "Live now",
-        EventStatus::Completed => "Ended",
-        EventStatus::Canceled => "Canceled",
+        EventStatus::Scheduled => tr("Scheduled"),
+        EventStatus::Active => tr("Live now"),
+        EventStatus::Completed => tr("Ended"),
+        EventStatus::Canceled => tr("Canceled"),
     }
 }
 
 fn kind_label(kind: EventKind) -> &'static str {
     match kind {
-        EventKind::Stage => "Stage",
-        EventKind::Voice => "Voice",
-        EventKind::External => "Elsewhere",
+        EventKind::Stage => tr("Stage"),
+        EventKind::Voice => tr("Voice"),
+        EventKind::External => tr("Elsewhere"),
     }
 }
 
@@ -568,7 +573,7 @@ fn when(ms: u64, now: i64) -> String {
 
 fn count(event: &ScheduledEvent) -> String {
     event.user_count.map_or_else(String::new, |n| {
-        format!(" \u{b7} {} interested", crate::invite::count(n))
+        trf(" \u{b7} {} interested", &[&crate::invite::count(n)])
     })
 }
 
@@ -605,7 +610,7 @@ pub fn view<'a>(
     }
     let busy = state.pending.is_some();
     let head = row![
-        text("Events").size(13).width(Length::Fill),
+        text(tr("Events")).size(13).width(Length::Fill),
         crate::icons::close(Some(Event::Close)),
     ]
     .spacing(6);
@@ -625,40 +630,30 @@ fn banner<'a>(state: &'a State, navigation: &'a NavigationSnapshot) -> Option<El
     let guild = navigation.selected_guild?;
     let now = localtime::now();
     let event = soon(state, navigation, now_ms())?;
-    let line = format!(
-        "{} \"{}\"{}",
-        if event.status == EventStatus::Active {
-            "Live now:"
-        } else {
-            "Starting soon:"
-        },
-        event.name,
-        if event.status == EventStatus::Active {
-            String::new()
-        } else {
-            format!(
-                " {}",
-                localtime::markup(
-                    (event.start_ms / 1_000) as i64,
-                    TimeStyle::Relative,
-                    None,
-                    now
-                )
-                .unwrap_or_default()
-            )
-        }
-    );
+    let line = if event.status == EventStatus::Active {
+        trf("Live now: \"{}\"", &[&event.name])
+    } else {
+        let relative = localtime::markup(
+            (event.start_ms / 1_000) as i64,
+            TimeStyle::Relative,
+            None,
+            now,
+        )
+        .unwrap_or_default();
+        trf("Starting soon: \"{}\" {}", &[&event.name, &relative])
+    };
     let mut actions = row![text(line).size(13).width(Length::Fill)]
         .spacing(8)
         .align_y(iced::Alignment::Center);
     if let Some(channel) = event.joinable_channel()
         && joinable(navigation, guild, channel)
     {
-        actions = actions.push(button(text("Join").size(13)).on_press(Event::Join(guild, channel)));
+        actions =
+            actions.push(button(text(tr("Join")).size(13)).on_press(Event::Join(guild, channel)));
     }
     actions = actions
-        .push(button(text("Details").size(13)).on_press(Event::Open(guild)))
-        .push(button(text("Hide").size(13)).on_press(Event::Hide(event.id)));
+        .push(button(text(tr("Details")).size(13)).on_press(Event::Open(guild)))
+        .push(button(text(tr("Hide")).size(13)).on_press(Event::Hide(event.id)));
     Some(
         container(actions)
             .padding([4, 8])
@@ -675,11 +670,12 @@ fn list_body<'a>(
     let permissions = navigation.event_permissions;
     let mut tools = row![].spacing(6);
     if permissions.manage || permissions.create {
-        tools = tools
-            .push(button(text("New event").size(13)).on_press_maybe((!busy).then_some(Event::New)));
+        tools = tools.push(
+            button(text(tr("New event")).size(13)).on_press_maybe((!busy).then_some(Event::New)),
+        );
     }
     tools = tools.push(
-        button(text("Refresh").size(13))
+        button(text(tr("Refresh")).size(13))
             .on_press_maybe((!matches!(state.load, Load::Loading)).then_some(Event::Reload)),
     );
     let mut list = column![].spacing(4);
@@ -706,7 +702,7 @@ fn list_body<'a>(
     }
     let mut out = column![tools].spacing(6);
     match &state.load {
-        Load::Loading => out = out.push(text("Loading\u{2026}").size(12)),
+        Load::Loading => out = out.push(text(tr("Loading\u{2026}")).size(12)),
         Load::Failed(error) => out = out.push(text(error.as_str()).size(12).style(text::danger)),
         Load::Idle => {}
     }
@@ -714,7 +710,7 @@ fn list_body<'a>(
         out = out.push(text(notice.as_str()).size(12));
     }
     if navigation.events.is_empty() && matches!(state.load, Load::Idle) {
-        out = out.push(text("No upcoming events.").size(12));
+        out = out.push(text(tr("No upcoming events.")).size(12));
     }
     out.push(scrollable(list).height(Length::Fixed(260.0)))
         .into()
@@ -726,44 +722,43 @@ fn detail_body<'a>(
     id: Snowflake,
     busy: bool,
 ) -> Element<'a, Event> {
-    let back = button(text("All events").size(13)).on_press(Event::List);
+    let back = button(text(tr("All events")).size(13)).on_press(Event::List);
     let Some(event) = find(navigation, id) else {
-        return column![text("This event no longer exists.").size(12), back,]
+        return column![text(tr("This event no longer exists.")).size(12), back,]
             .spacing(6)
             .into();
     };
     let now = localtime::now();
     let place = match (event.kind, event.channel_id) {
-        (EventKind::External, _) => format!("At {}", event.location),
-        (kind, Some(channel)) => format!(
-            "{} channel {}",
-            kind_label(kind),
-            channel_name(navigation, channel)
-        ),
+        (EventKind::External, _) => trf("At {}", &[&event.location]),
+        (EventKind::Stage, Some(channel)) => {
+            trf("Stage channel {}", &[&channel_name(navigation, channel)])
+        }
+        (_, Some(channel)) => trf("Voice channel {}", &[&channel_name(navigation, channel)]),
         (kind, None) => kind_label(kind).to_owned(),
     };
     let mut info = column![
         text(event.name.as_str()).size(15),
         text(format!("{}{}", status_label(event), count(event))).size(12),
-        text(format!("Starts {}", when(event.start_ms, now))).size(12),
+        text(trf("Starts {}", &[&when(event.start_ms, now)])).size(12),
     ]
     .spacing(3);
     if let Some(end) = event.end_ms {
-        info = info.push(text(format!("Ends {}", when(end, now))).size(12));
+        info = info.push(text(trf("Ends {}", &[&when(end, now)])).size(12));
     }
     info = info.push(text(place).size(12));
     if let Some(repeat) = &event.recurrence {
-        info = info.push(text(format!("Repeats: {repeat}")).size(12));
+        info = info.push(text(trf("Repeats: {}", &[repeat])).size(12));
     }
     if !event.creator.is_empty() {
-        info = info.push(text(format!("By {}", event.creator)).size(12));
+        info = info.push(text(trf("By {}", &[&event.creator])).size(12));
     }
     if !event.description.is_empty() {
         info = info.push(text(event.description.as_str()).size(13));
     }
 
     let act = |label: &'static str, event: Event| {
-        button(text(label).size(13)).on_press_maybe((!busy).then_some(event))
+        button(text(tr(label)).size(13)).on_press_maybe((!busy).then_some(event))
     };
     let mut actions = row![].spacing(6);
     if !event.status.is_over() && event.interested != Some(true) {
@@ -775,11 +770,12 @@ fn detail_body<'a>(
             Event::Do(EventAction::NotInterested(id)),
         ));
     }
-    actions = actions.push(button(text("Copy link").size(13)).on_press(Event::CopyLink(id)));
+    actions = actions.push(button(text(tr("Copy link")).size(13)).on_press(Event::CopyLink(id)));
     if let (Some(channel), Some(guild)) = (event.joinable_channel(), state.guild)
         && joinable(navigation, guild, channel)
     {
-        actions = actions.push(button(text("Join").size(13)).on_press(Event::Join(guild, channel)));
+        actions =
+            actions.push(button(text(tr("Join")).size(13)).on_press(Event::Join(guild, channel)));
     }
     let mut out = column![back, info, actions].spacing(8);
     if manages(navigation, event) {
@@ -811,9 +807,9 @@ fn detail_body<'a>(
             };
             out = out.push(
                 row![
-                    text(question).size(12).width(Length::Fill),
+                    text(tr(question)).size(12).width(Length::Fill),
                     act(label, Event::Do(action)),
-                    button(text("Keep").size(13)).on_press(Event::Keep),
+                    button(text(tr("Keep")).size(13)).on_press(Event::Keep),
                 ]
                 .spacing(6)
                 .align_y(iced::Alignment::Center),
@@ -821,7 +817,7 @@ fn detail_body<'a>(
         }
     }
     if busy {
-        out = out.push(text("Sending\u{2026}").size(12));
+        out = out.push(text(tr("Sending\u{2026}")).size(12));
     }
     if let Some(notice) = &state.notice {
         out = out.push(text(notice.as_str()).size(12));
@@ -835,7 +831,7 @@ fn form_body<'a>(
     busy: bool,
 ) -> Element<'a, Event> {
     let pick = |label: &'static str, kind: EventKind| {
-        button(text(label).size(13))
+        button(text(tr(label)).size(13))
             .on_press_maybe((!busy && form.editing.is_none()).then_some(Event::Kind(kind)))
             .style(if form.kind == kind {
                 button::primary
@@ -844,15 +840,15 @@ fn form_body<'a>(
             })
     };
     let input = |hint: &'static str, value: &'a str, field: Field| {
-        text_input(hint, value)
+        text_input(tr(hint), value)
             .on_input(move |v| Event::Input(field, v))
             .size(13)
     };
     let mut out = column![
         text(if form.editing.is_some() {
-            "Edit event"
+            tr("Edit event")
         } else {
-            "New event"
+            tr("New event")
         })
         .size(13),
         input("Name", &form.name, Field::Name),
@@ -876,7 +872,7 @@ fn form_body<'a>(
         let selected = options.iter().find(|c| Some(c.id) == form.channel).cloned();
         out = out.push(
             pick_list(options, selected, Event::Channel)
-                .placeholder("Channel")
+                .placeholder(tr("Channel"))
                 .width(Length::Fill),
         );
     }
@@ -900,9 +896,16 @@ fn form_body<'a>(
     }
     out.push(
         row![
-            button(text(if busy { "Sending\u{2026}" } else { "Save" }).size(13))
-                .on_press_maybe((!busy).then_some(Event::Save)),
-            button(text("Back").size(13)).on_press_maybe((!busy).then_some(Event::List)),
+            button(
+                text(if busy {
+                    tr("Sending\u{2026}")
+                } else {
+                    tr("Save")
+                })
+                .size(13)
+            )
+            .on_press_maybe((!busy).then_some(Event::Save)),
+            button(text(tr("Back")).size(13)).on_press_maybe((!busy).then_some(Event::List)),
         ]
         .spacing(6),
     )

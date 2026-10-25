@@ -37,9 +37,12 @@
   Blocked-network effectiveness and remaining manual gates are unverified.
 
 ### Added
+- Redesigned sign-in, unified settings, conversation menus, composer and call controls; English/Russian interface selection with system-language detection and persisted preferences, plus friend-based new DM/group selection.
 - WebSocket permessage-deflate: the main Gateway, remote-auth and voice WebSockets now offer Chromium's `permessage-deflate; client_max_window_bits`, negotiate the server's parameters, compress and decompress RFC 7692 messages with byte-bounded buffers, and fall back to the uncompressed transport when the server declines. The opening handshake, the accept-key/extension validation and the RFC 7692 adapter live in a new shared crate, `fastcord-ws` (no new external dependency); unsolicited or malformed extensions, a bad accept key and compression bombs are typed failures, and the offered/negotiated values still await a sanitized official capture (ADR 0005, IDENTITY_AUDIT A9).
 
 ### Changed
+- The Windows executable reserves a 4 MiB main-thread stack (pages committed on demand), preventing debug GUI stack overflow when the redesigned settings and network panels are composed. Specialized network and fake-script dispatch no longer enters the large account-handler frame.
+- Integrated scoped network recovery with the existing desktop identity, cookie/fingerprint handling and WebSocket compression. Network recovery is reachable before sign-in and from Application settings; it replaces the old byedpi switch while preserving legacy settings fields.
 - `x-discord-locale` now reports the account's chosen client locale from READY (and a live settings change) instead of the OS locale, while `system_locale` and `accept-language` keep the OS values; the locale is shape-checked, and an account switch starts from the OS locale again (ADR 0005, IDENTITY_AUDIT B5).
 - The `discord.com` cookie jar now scopes and expires cookies like the official client's browser profile: `Domain`/`Path` (host-only without `Domain`, a foreign `Domain` refused), `Max-Age`/`Expires` on the request clock, longest path first, still bounded at 32 cookies and 16 KiB in memory (IDENTITY_AUDIT A8).
 - Public CDN fetches send only the profile user agent and a purpose-specific `Accept` (Chromium's image list for an image subresource, `*/*` for a file download), with no cookie, authorization, fingerprint, installation id or super properties (IDENTITY_AUDIT C2).

@@ -9,6 +9,7 @@ use iced::Element;
 use iced::widget::{button, checkbox, column, text};
 
 use crate::Message;
+use crate::i18n::tr;
 
 const WARNING: &str = "Writes that have not been checked on a live account are off, so nothing reaches Discord by accident. Turn a group on only on the alt account, one at a time, and report what happens. This resets when you restart, log out or switch accounts.";
 
@@ -29,24 +30,24 @@ pub fn rows(client: Option<&RestClient>) -> Vec<(WriteGroup, bool)> {
 
 pub fn view<'a>(client: Option<&RestClient>, open: bool) -> Element<'a, Message> {
     let mut list = column![
-        text("Advanced").size(18),
+        text(tr("Advanced")).size(18),
         button(if open {
-            "Hide: Test unverified actions (alt account only)"
+            tr("Hide: Test unverified actions (alt account only)")
         } else {
-            "Show: Test unverified actions (alt account only)"
+            tr("Show: Test unverified actions (alt account only)")
         })
         .on_press(Message::ToggleUnverifiedList),
     ]
     .spacing(8);
     if open {
-        list = list.push(text(WARNING).size(12));
+        list = list.push(text(tr(WARNING)).size(12));
         if client.is_none() {
-            list = list.push(text("Sign in to change these.").size(12));
+            list = list.push(text(tr("Sign in to change these.")).size(12));
         }
         for (group, on) in rows(client) {
             list = list
                 .push(
-                    checkbox(on).label(group.name()).on_toggle_maybe(
+                    checkbox(on).label(tr(group.name())).on_toggle_maybe(
                         client
                             .is_some()
                             .then_some(move |on| Message::UnverifiedWrite(group, on)),

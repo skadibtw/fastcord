@@ -9,6 +9,10 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    // Windows defaults the main thread to 1 MiB. The composed native UI can
+    // exceed that in debug builds; unit-test workers already have larger stacks.
+    // Reserve virtual address space only: pages are committed on demand.
+    println!("cargo:rustc-link-arg-bin=fastcord=/STACK:4194304");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
     let icon = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets manifest dir"))
         .join("../../assets/icons/app/fastcord.ico")

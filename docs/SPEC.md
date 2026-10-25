@@ -55,7 +55,7 @@ crates/
   fastcord-video/src/       # capture orchestration, codecs, packetization, frame pools
   fastcord-video/native/    # pinned dav1d source archive + provenance; built by build.rs
   fastcord-platform/src/    # credential store, OS capture/audio, native handles
-  fastcord-bypass/src/      # embedded byedpi engine and the process-wide route through it
+  fastcord-bypass/src/      # retained legacy byedpi engine; no production app transport
   fastcord-bypass/native/   # pinned byedpi source archive, provenance, MSVC compatibility shims
   fastcord-ws/src/          # WS opening handshake and the RFC 7692 permessage-deflate adapter
   fastcord-app/src/         # binary, iced UI, orchestration, settings, image cache
@@ -79,8 +79,9 @@ Dependency direction:
 
 - `model` has no application-crate dependencies and no GUI/runtime dependency.
 - `net` has no workspace-crate dependencies; it defines platform interfaces, pure TLS transformations, the socket broker, restricted HTTP factory, private CONNECT bridge and probe controller.
-- `discord -> model, net`.
-- `media -> model, net`; contains no cpal, iced, capture, or video decoder dependency.
+- `ws` has no workspace-crate dependencies; it owns handshake validation and permessage-deflate over broker-owned IO.
+- `discord -> model, net, ws`.
+- `media -> model, net, ws`; contains no cpal, iced, capture, or video decoder dependency.
 - `platform -> model, net` (implements net-defined platform interfaces) where common IDs/settings are needed; never depends on iced.
 - `audio -> model, media, platform`.
 - `video -> model, media, platform`; it does not depend on `audio`.
@@ -228,6 +229,8 @@ Use a separate unauthenticated HTTP client for CDN resources. Do not forward `Au
 - Animated assets run only while visible and the window is active. Their timers stop when not needed.
 
 ### 5.4 Application-scoped network recovery (approved 2026-10-24)
+
+The legacy byedpi engine remains in the workspace for provenance and standalone tests; its old audio-settings fields remain readable, but it is no longer started or offered by the app. Network recovery is available from the login screen and Application settings.
 
 The app owns one shared `NetworkContext`; every production HTTP client, TLS socket and media UDP socket requires it. `fastcord-net` has no workspace-crate dependency. Authentication, credential-free CDN and credential-free upload clients stay separate, with their original URL, redirect, retry and write-verification policies. The restricted factory refuses redirects by the HTTP library: feature code revalidates each allowed hop. CI runs `scripts/check_network_boundary.py` over constructors and transport dependencies, with explicit debug/test loopback exceptions. This is architectural enforcement, not an OS security sandbox.
 

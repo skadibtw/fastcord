@@ -9,6 +9,8 @@
 
 use fastcord_discord::{CaptchaChallenge, CaptchaSolution};
 
+use crate::i18n::tr;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptchaError {
     /// No embedded view on this platform or the web-view runtime is missing.
@@ -21,10 +23,12 @@ pub enum CaptchaError {
 impl std::fmt::Display for CaptchaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unsupported => f.write_str(
+            Self::Unsupported => f.write_str(tr(
                 "Discord asked for a CAPTCHA, which this platform cannot show. Use QR or token login.",
-            ),
-            Self::Dismissed => f.write_str("CAPTCHA closed before it was completed. Log in again."),
+            )),
+            Self::Dismissed => {
+                f.write_str(tr("CAPTCHA closed before it was completed. Log in again."))
+            }
         }
     }
 }
@@ -92,7 +96,7 @@ fn run_window(script: String) -> Result<String, CaptchaError> {
 
     let mut event_loop = EventLoopBuilder::new().with_any_thread(true).build();
     let window = WindowBuilder::new()
-        .with_title("fastcord - complete the CAPTCHA")
+        .with_title(tr("fastcord - complete the CAPTCHA"))
         .with_inner_size(LogicalSize::new(440.0, 640.0))
         .build(&event_loop)
         .map_err(|_| CaptchaError::Unsupported)?;

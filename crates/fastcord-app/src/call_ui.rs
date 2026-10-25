@@ -16,6 +16,7 @@ use iced::{Element, Length};
 use crate::Message;
 use crate::call_layout::{CallView, Mode, Plan, Tile, TileId, TileSize, stream_owner};
 use crate::gateway::{CameraChoice, VoiceAudioState, VoiceControls, preview_caption};
+use crate::i18n::{tr, trf};
 use crate::icons::{self, Action, Icon};
 use crate::{desktop, playback, style};
 
@@ -53,8 +54,8 @@ fn label(tile: &Tile, voice: &VoiceControls) -> String {
         TileId::Camera(user) => voice.display_name(*user),
         TileId::Stream(key) => {
             let owner = stream_owner(key).map_or_else(
-                || "A stream".to_owned(),
-                |owner| format!("{}'s screen", voice.display_name(owner)),
+                || tr("A stream").to_owned(),
+                |owner| trf("{}'s screen", &[&voice.display_name(owner)]),
             );
             format!("{owner} · {}", tile.session.description())
         }
@@ -79,7 +80,7 @@ fn tile<'a>(
         .align_y(iced::alignment::Vertical::Center);
     controls = controls.push(icons::tool(
         if pinned { Icon::Unpin } else { Icon::Pin },
-        if pinned { "Unpin" } else { "Pin" },
+        if pinned { tr("Unpin") } else { tr("Pin") },
         Message::PinTile(id.clone()),
     ));
     controls = controls.push(icons::tool(
@@ -88,19 +89,23 @@ fn tile<'a>(
         } else {
             Icon::Fullscreen
         },
-        if full { "Exit full view" } else { "Full view" },
+        if full {
+            tr("Exit full view")
+        } else {
+            tr("Full view")
+        },
         Message::FullTile((!full).then(|| id.clone())),
     ));
     if let TileId::Stream(key) = &id {
         if tile.session.failed() {
             controls = controls.push(
-                button(text("Retry watching").size(11))
+                button(text(tr("Retry watching")).size(11))
                     .on_press(Message::WatchStream(key.clone()))
                     .style(style::action_button(false)),
             );
         }
         controls = controls.push(
-            button(icons::labeled(Icon::EyeOff, "Stop watching", 11))
+            button(icons::labeled(Icon::EyeOff, tr("Stop watching"), 11))
                 .on_press(Message::UnwatchStream(key.clone()))
                 .style(style::action_button(true)),
         );
@@ -153,9 +158,9 @@ fn stream_audio_controls<'a>(key: &str, session: &playback::Session) -> Element<
         row![
             button(
                 text(if audio.muted {
-                    "Unmute stream"
+                    tr("Unmute stream")
                 } else {
-                    "Mute stream"
+                    tr("Mute stream")
                 })
                 .size(11)
             )
@@ -241,24 +246,24 @@ pub fn panel<'a>(
     notice: Option<&str>,
 ) -> Element<'a, Message> {
     let header = row![
-        text("Call video").size(18).width(Length::Fill),
+        text(tr("Call video")).size(18).width(Length::Fill),
         pick_list(Mode::ALL, Some(view.mode), Message::SetCallMode).text_size(12),
         checkbox(!view.hide_people)
-            .label("Show people without video")
+            .label(tr("Show people without video"))
             .size(14)
             .text_size(12)
             .on_toggle(|show| Message::SetHidePeople(!show)),
         button(
             text(if window_fullscreen {
-                "Exit window full screen"
+                tr("Exit window full screen")
             } else {
-                "Window full screen"
+                tr("Window full screen")
             })
             .size(12)
         )
         .on_press(Message::SetWindowFullscreen(!window_fullscreen))
         .style(style::tool_button(window_fullscreen, false)),
-        button(icons::labeled(Icon::Chat, "Back to messages", 12))
+        button(icons::labeled(Icon::Chat, tr("Back to messages"), 12))
             .on_press(Message::ShowStream(false)),
     ]
     .spacing(10)
@@ -274,9 +279,14 @@ pub fn panel<'a>(
         content = content.push(text(refusal).size(12).style(text::danger));
     }
     let body: Element<'a, Message> = if plan.shown.is_empty() {
-        container(text("Nobody has video on. Cameras and watched streams appear here.").size(13))
-            .center(Length::Fill)
-            .into()
+        container(
+            text(tr(
+                "Nobody has video on. Cameras and watched streams appear here.",
+            ))
+            .size(13),
+        )
+        .center(Length::Fill)
+        .into()
     } else if plan.main.is_some() {
         focus(plan, tiles, voice, view)
     } else {
@@ -311,7 +321,7 @@ pub fn panel<'a>(
                             text(name).size(12),
                             text(
                                 if voice.streams.iter().any(|s| s.owner == participant.user_id) {
-                                    "LIVE"
+                                    tr("LIVE")
                                 } else {
                                     ""
                                 }
@@ -330,7 +340,7 @@ pub fn panel<'a>(
             ));
         }
         if more > 0 {
-            people = people.push(text(format!("and {more} more")).size(12));
+            people = people.push(text(trf("and {} more", &[&more])).size(12));
         }
         if listed > 0 {
             content = content.push(scrollable(people).direction(
@@ -361,7 +371,7 @@ pub fn activity_note(voice: &VoiceControls) -> Option<String> {
         .map(String::as_str)
         .filter(|name| !name.is_empty())
         .collect();
-    let mut note = "Running an Activity — join it in the official Discord client".to_owned();
+    let mut note = tr("Running an Activity — join it in the official Discord client").to_owned();
     if !names.is_empty() {
         note = format!("{note} ({})", names.join(", "));
     }
@@ -393,23 +403,23 @@ pub struct Bar {
 pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
     let (title, color, tip) = match bar.state {
         VoiceAudioState::Connecting => (
-            "Connecting\u{2026}",
+            tr("Connecting\u{2026}"),
             style::YELLOW,
-            "Connecting to voice. Click to open the call",
+            tr("Connecting to voice. Click to open the call"),
         ),
         VoiceAudioState::EngineFailed => (
-            "Audio failed",
+            tr("Audio failed"),
             style::RED,
-            "The audio devices could not be opened. Click to open the call",
+            tr("The audio devices could not be opened. Click to open the call"),
         ),
         _ => (
-            "Voice Connected",
+            tr("Voice connected"),
             style::GREEN,
-            "Connected. Click to open the call",
+            tr("Connected. Click to open the call"),
         ),
     };
     let place = if bar.place.is_empty() {
-        "Call".to_owned()
+        tr("Call").to_owned()
     } else {
         bar.place
     };
@@ -440,7 +450,7 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
         on_press: bar.can_leave.then_some(Message::LeaveVoice),
         active: true,
         danger: true,
-        tip: "Disconnect".to_owned(),
+        tip: tr("Disconnect").to_owned(),
         badge: 0,
     });
     let mut buttons = row![].spacing(4);
@@ -451,9 +461,9 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
             active: on,
             danger: false,
             tip: if on {
-                "Turn off camera"
+                tr("Turn off camera")
             } else {
-                "Turn on camera"
+                tr("Turn on camera")
             }
             .to_owned(),
             badge: 0,
@@ -470,9 +480,9 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
             active: sharing,
             danger: false,
             tip: if sharing {
-                "Stop sharing"
+                tr("Stop sharing")
             } else {
-                "Share your screen"
+                tr("Share your screen")
             }
             .to_owned(),
             badge: 0,
@@ -484,7 +494,7 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
             on_press: Some(press),
             active: open,
             danger: false,
-            tip: "Soundboard".to_owned(),
+            tip: tr("Soundboard").to_owned(),
             badge: 0,
         }));
     }
@@ -493,7 +503,7 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
         on_press: Some(Message::ToggleCompact),
         active: false,
         danger: false,
-        tip: desktop::compact_tip().to_owned(),
+        tip: tr(desktop::compact_tip()).to_owned(),
         badge: 0,
     }));
     buttons = buttons.push(icons::action(Action {
@@ -501,7 +511,7 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
         on_press: Some(Message::ToggleVoiceDetails),
         active: bar.settings_open,
         danger: false,
-        tip: "Call settings: camera, volume, streams".to_owned(),
+        tip: tr("Call settings: devices, camera, volume, streams").to_owned(),
         badge: 0,
     }));
     let mut content = column![
@@ -511,8 +521,18 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
         buttons,
     ]
     .spacing(6);
+    // Sharing is always visible while it lasts.
     if !bar.share_text.is_empty() {
-        content = content.push(text(bar.share_text).size(11).style(text::secondary));
+        content = content.push(
+            row![
+                container(text(tr("LIVE")).size(9).font(BOLD))
+                    .padding([1, 4])
+                    .style(style::live_badge),
+                text(tr(&bar.share_text).to_owned()).size(11).wrapping(NAME),
+            ]
+            .spacing(6)
+            .align_y(iced::alignment::Vertical::Center),
+        );
     }
     container(content)
         .padding([8, 8])
@@ -551,7 +571,7 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
     let heading = |label: &'static str| text(label).size(11).font(BOLD).style(text::secondary);
     let mut content = column![].spacing(6);
     if let Some(camera) = set.camera {
-        content = content.push(heading("CAMERA")).push(
+        content = content.push(heading(tr("CAMERA"))).push(
             pick_list(camera.choices, Some(camera.selected), Message::SelectCamera)
                 .text_size(12)
                 .width(Length::Fill),
@@ -567,7 +587,7 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
         );
         content = content.push(
             checkbox(camera.mirror)
-                .label("Mirror preview")
+                .label(tr("Mirror preview"))
                 .size(14)
                 .text_size(12)
                 .on_toggle(Message::SetMirrorPreview),
@@ -575,9 +595,9 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
         content = content.push(
             button(
                 text(if camera.probing {
-                    "Looking for cameras\u{2026}"
+                    tr("Looking for cameras\u{2026}")
                 } else {
-                    "Find cameras"
+                    tr("Find cameras")
                 })
                 .size(12),
             )
@@ -588,10 +608,10 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
             content = content.push(text(camera.status).size(11));
         }
     }
-    content = content.push(heading("VOLUME"));
+    content = content.push(heading(tr("VOLUME")));
     if set.voice.participants.is_empty() {
         content = content.push(
-            text("Nobody else is in the call.")
+            text(tr("Nobody else is in the call."))
                 .size(11)
                 .style(text::secondary),
         );
@@ -623,25 +643,19 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
             .spacing(2),
         );
     }
+    let restricted = match (set.voice.server_muted, set.voice.server_deafened) {
+        (true, true) => Some(tr("The server turned off your microphone and sound.")),
+        (true, false) => Some(tr("The server turned off your microphone.")),
+        (false, true) => Some(tr("The server turned off your sound.")),
+        (false, false) => None,
+    };
     content = content.push(
-        text(
-            "Server restrictions: ".to_owned()
-                + if set.voice.server_muted {
-                    "muted. "
-                } else {
-                    "none to mute. "
-                }
-                + if set.voice.server_deafened {
-                    "Deafened."
-                } else {
-                    ""
-                },
-        )
-        .size(11)
-        .style(text::secondary),
+        text(restricted.unwrap_or(""))
+            .size(11)
+            .style(text::secondary),
     );
     if !set.watching.is_empty() || !set.offers.is_empty() {
-        content = content.push(heading("STREAMS"));
+        content = content.push(heading(tr("STREAMS")));
     }
     for (session, caption) in set.watching {
         content = content.push(
@@ -649,7 +663,7 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
                 container(text(caption).size(12).wrapping(NAME))
                     .width(Length::Fill)
                     .clip(true),
-                button(text("Stop watching").size(11))
+                button(text(tr("Stop watching")).size(11))
                     .on_press(Message::UnwatchStream(session.key.clone()))
                     .style(style::action_button(true)),
             ]
@@ -660,7 +674,7 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
     }
     for (key, owner) in set.offers {
         content = content.push(
-            button(text(format!("Watch {owner}")).size(12).wrapping(NAME))
+            button(text(trf("Watch {}", &[&owner])).size(12).wrapping(NAME))
                 .on_press_maybe(set.running.then(|| Message::WatchStream(key)))
                 .style(style::action_button(false)),
         );

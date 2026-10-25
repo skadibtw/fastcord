@@ -17,6 +17,7 @@ use fastcord_discord::{
 use fastcord_model::{Message, Snowflake};
 
 use super::{History, NOT_LOADED, NOT_OPEN};
+use crate::i18n::tr;
 use fastcord_discord::gateway::Dispatch;
 
 /// Unfinished embed requests across the open channel.
@@ -37,23 +38,23 @@ pub struct EmbedsDone {
 pub fn failure(error: RestError) -> &'static str {
     match error {
         RestError::PermissionDenied => {
-            "Discord did not allow changing this message's link previews."
+            tr("Discord did not allow changing this message's link previews.")
         }
-        RestError::ResourceGone => "That message is no longer available.",
+        RestError::ResourceGone => tr("That message is no longer available."),
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this. Try again shortly."
+            tr("Discord is rate limiting this. Try again shortly.")
         }
-        RestError::Http(_) => "Discord rejected the change to the link previews.",
+        RestError::Http(_) => tr("Discord rejected the change to the link previews."),
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-            "Could not reach Discord; the link previews were not changed."
+            tr("Could not reach Discord; the link previews were not changed.")
         }
-        RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
-            "Discord did not confirm the change; it may have been applied. Trying again is safe."
-        }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "The link previews could not be changed.",
+        RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => tr(
+            "Discord did not confirm the change; it may have been applied. Trying again is safe.",
+        ),
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED),
+        _ => tr("The link previews could not be changed."),
     }
 }
 
@@ -71,24 +72,24 @@ impl History {
         self.dirty = true;
         self.notice = None;
         if self.channel != Some(channel) {
-            self.notice = Some(NOT_OPEN);
+            self.notice = Some(tr(NOT_OPEN));
             return;
         }
         let Some(held) = self.store.get(channel, message) else {
-            self.notice = Some(NOT_LOADED);
+            self.notice = Some(tr(NOT_LOADED));
             return;
         };
         let own = self.user.is_some_and(|user| is_own_message(&held, user));
         if !own && !(others && matches!(held.kind, 0 | 19)) {
-            self.notice = Some(NOT_ALLOWED);
+            self.notice = Some(tr(NOT_ALLOWED));
             return;
         }
         if self.embed_ops.contains(&(channel, message)) {
-            self.notice = Some(BUSY);
+            self.notice = Some(tr(BUSY));
             return;
         }
         if self.embed_ops.len() >= MAX_IN_FLIGHT {
-            self.notice = Some(FULL);
+            self.notice = Some(tr(FULL));
             return;
         }
         if held.embeds_suppressed() == suppressed {
@@ -128,7 +129,7 @@ impl History {
                 false
             }
             Err(error) => {
-                self.notice = Some(failure(error));
+                self.notice = Some(tr(failure(error)));
                 error == RestError::AuthenticationRequired
             }
         }

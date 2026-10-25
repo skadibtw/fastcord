@@ -62,36 +62,44 @@ impl Op {
 pub fn failure(action: Action, error: RestError) -> &'static str {
     let adding = action == Action::Add;
     match error {
-        RestError::PermissionDenied if adding => {
-            "Discord did not allow this reaction. You may lack permission to add reactions here."
+        RestError::PermissionDenied if adding => crate::i18n::tr(
+            "Discord did not allow this reaction. You may lack permission to add reactions here.",
+        ),
+        RestError::PermissionDenied => {
+            crate::i18n::tr("Discord did not allow removing this reaction.")
         }
-        RestError::PermissionDenied => "Discord did not allow removing this reaction.",
-        RestError::ResourceGone => "That message or emoji is no longer available.",
-        RestError::Http(status) if adding && status.as_u16() == 400 => {
-            "Discord rejected the reaction. The message may already have the most different reactions it allows."
-        }
-        RestError::Http(_) if adding => "Discord rejected the reaction.",
-        RestError::Http(_) => "Discord rejected removing the reaction.",
+        RestError::ResourceGone => crate::i18n::tr("That message or emoji is no longer available."),
+        RestError::Http(status) if adding && status.as_u16() == 400 => crate::i18n::tr(
+            "Discord rejected the reaction. The message may already have the most different reactions it allows.",
+        ),
+        RestError::Http(_) if adding => crate::i18n::tr("Discord rejected the reaction."),
+        RestError::Http(_) => crate::i18n::tr("Discord rejected removing the reaction."),
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-            "Could not reach Discord; the reaction was not changed."
+            crate::i18n::tr("Could not reach Discord; the reaction was not changed.")
         }
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
-            "Discord did not confirm the reaction change; it may have been applied."
+            crate::i18n::tr(
+                "Discord did not confirm the reaction change; it may have been applied.",
+            )
         }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "The reaction could not be changed.",
+        RestError::WriteNotVerified(_) => crate::i18n::tr(fastcord_discord::WRITE_NOT_VERIFIED),
+        _ => crate::i18n::tr("The reaction could not be changed."),
     }
 }
 
 /// A fixed, secret-free sentence for a list of who reacted that did not load.
 pub fn users_failure(error: RestError) -> &'static str {
     match error {
-        RestError::PermissionDenied => "Discord did not allow listing who reacted.",
-        RestError::ResourceGone => "That reaction or message is no longer available.",
-        RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-            "Could not reach Discord to list who reacted."
+        RestError::PermissionDenied => {
+            crate::i18n::tr("Discord did not allow listing who reacted.")
         }
-        _ => "Who reacted could not be loaded.",
+        RestError::ResourceGone => {
+            crate::i18n::tr("That reaction or message is no longer available.")
+        }
+        RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
+            crate::i18n::tr("Could not reach Discord to list who reacted.")
+        }
+        _ => crate::i18n::tr("Who reacted could not be loaded."),
     }
 }
 

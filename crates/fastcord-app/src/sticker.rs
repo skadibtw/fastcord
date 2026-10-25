@@ -9,6 +9,7 @@
 //! 64x64 handles (about 192 KiB). A send is made once and never retried: an
 //! ambiguous failure is reported and left to the user.
 
+use crate::i18n::{tr, trf};
 use fastcord_discord::{
     GuildSticker, MentionPolicy, NonceGenerator, OutgoingMessage, RestClient, RestError, SendError,
 };
@@ -75,26 +76,30 @@ impl Default for State {
 fn describe(error: RestError) -> &'static str {
     match error {
         RestError::PermissionDenied | RestError::AuthenticationRequired => {
-            "Discord did not let this account list stickers here."
+            tr("Discord did not let this account list stickers here.")
         }
-        RestError::ResourceGone => "This server's stickers are no longer available.",
+        RestError::ResourceGone => tr("This server's stickers are no longer available."),
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this request. Try again shortly."
+            tr("Discord is rate limiting this request. Try again shortly.")
         }
-        RestError::Retryable(_) | RestError::Http(_) => "Stickers could not be loaded. Try again.",
-        _ => "The sticker list could not be read.",
+        RestError::Retryable(_) | RestError::Http(_) => {
+            tr("Stickers could not be loaded. Try again.")
+        }
+        _ => tr("The sticker list could not be read."),
     }
 }
 
 fn describe_send(error: SendError) -> &'static str {
     if matches!(error.cause(), RestError::WriteNotVerified(_)) {
-        fastcord_discord::WRITE_NOT_VERIFIED
+        tr(fastcord_discord::WRITE_NOT_VERIFIED)
     } else if error.is_ambiguous() {
-        "The sticker may have been delivered. Check the conversation before sending again."
+        tr("The sticker may have been delivered. Check the conversation before sending again.")
     } else {
-        "Discord did not send the sticker: it may be unavailable, or you may lack permission here."
+        tr(
+            "Discord did not send the sticker: it may be unavailable, or you may lack permission here.",
+        )
     }
 }
 
@@ -233,16 +238,16 @@ impl State {
 pub fn view(state: &State) -> Option<Element<'_, Event>> {
     let open = state.open?;
     let controls = row![
-        text("Stickers of this server").size(13),
+        text(tr("Stickers of this server")).size(13),
         iced::widget::space::horizontal(),
         crate::icons::close(Some(Event::Toggle)),
     ]
     .align_y(iced::Alignment::Center);
-    let note = |line: &'static str| text(line).size(12).style(text::secondary);
+    let note = |line: &'static str| text(tr(line)).size(12).style(text::secondary);
     let status: Element<'_, Event> = match state.status {
         Status::Loading => note("Loading…").into(),
         Status::Sending => note("Sending…").into(),
-        Status::Failed(reason) => text(reason).size(12).style(text::danger).into(),
+        Status::Failed(reason) => text(tr(reason)).size(12).style(text::danger).into(),
         Status::Done if open.guild.is_none() => {
             note("Stickers from other servers and packs need Nitro; open a server channel.").into()
         }
@@ -253,14 +258,14 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
         let picture: Element<'_, Event> = match state.thumbs.get(index).cloned().flatten() {
             Some(handle) => image(handle).width(Length::Fixed(64.0)).into(),
             None if AvatarKey::sticker(sticker.id, sticker.format_type).is_none() => {
-                text("(not shown)").size(11).into()
+                text(tr("(not shown)")).size(11).into()
             }
             None => text("…").size(24).into(),
         };
         let label = if sticker.available {
             sticker.name.clone()
         } else {
-            format!("{} (unavailable)", sticker.name)
+            trf("{} (unavailable)", &[&sticker.name])
         };
         button(
             column![picture, text(label).size(11).wrapping(text::Wrapping::None)]

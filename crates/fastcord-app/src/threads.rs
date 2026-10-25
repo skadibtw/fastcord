@@ -16,6 +16,8 @@
 
 use fastcord_discord::{ArchivedThreads, RestClient, RestError, ThreadError, thread_name};
 use fastcord_model::{Channel, Snowflake};
+
+use crate::i18n::{tr, trf};
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length, Task};
 
@@ -107,31 +109,31 @@ pub struct State {
 
 fn describe(error: RestError) -> &'static str {
     match error {
-        RestError::PermissionDenied => "You are not allowed to do that with this thread.",
-        RestError::ResourceGone => "That thread or message is gone.",
-        RestError::AuthenticationRequired => "Discord no longer accepts this login.",
+        RestError::PermissionDenied => tr("You are not allowed to do that with this thread."),
+        RestError::ResourceGone => tr("That thread or message is gone."),
+        RestError::AuthenticationRequired => tr("Discord no longer accepts this login."),
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this. Try again shortly."
+            tr("Discord is rate limiting this. Try again shortly.")
         }
-        RestError::Retryable(_) | RestError::Http(_) => "Discord failed. Try again.",
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "Discord did not accept that.",
+        RestError::Retryable(_) | RestError::Http(_) => tr("Discord failed. Try again."),
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED),
+        _ => tr("Discord did not accept that."),
     }
 }
 
 /// What a failed archive or lock request tells the user.
 fn describe_write(error: RestError) -> &'static str {
     match error {
-        RestError::Retryable(_) => {
-            "Discord did not confirm. The change may have been applied; check the thread before trying again."
-        }
-        RestError::PermissionDenied => "Discord refused: you need Manage Threads here.",
+        RestError::Retryable(_) => tr(
+            "Discord did not confirm. The change may have been applied; check the thread before trying again.",
+        ),
+        RestError::PermissionDenied => tr("Discord refused: you need Manage Threads here."),
         RestError::Refused(refusal) if refusal.status.as_u16() == 403 => {
-            "Discord refused: you need Manage Threads here."
+            tr("Discord refused: you need Manage Threads here.")
         }
-        RestError::Refused(refusal) if refusal.status.as_u16() == 404 => "That thread is gone.",
+        RestError::Refused(refusal) if refusal.status.as_u16() == 404 => tr("That thread is gone."),
         other => describe(other),
     }
 }
@@ -233,7 +235,7 @@ impl State {
             return Task::none();
         }
         if !allowed {
-            self.notice = Some("This thread cannot be changed that way any more.");
+            self.notice = Some(tr("This thread cannot be changed that way any more."));
             return Task::none();
         }
         self.state_busy = true;
@@ -349,7 +351,7 @@ impl State {
                     return Task::none();
                 };
                 if thread_name(&draft.name).is_err() {
-                    self.notice = Some("Give the thread a name.");
+                    self.notice = Some(tr("Give the thread a name."));
                     return Task::none();
                 }
                 self.notice = None;
@@ -372,8 +374,10 @@ impl State {
                     draft.busy = false;
                 }
                 self.notice = Some(match error {
-                    ThreadError::InvalidName => "Give the thread a name.",
-                    ThreadError::InvalidResponse => "Discord answered with something unexpected.",
+                    ThreadError::InvalidName => tr("Give the thread a name."),
+                    ThreadError::InvalidResponse => {
+                        tr("Discord answered with something unexpected.")
+                    }
                     ThreadError::Rest(error) => describe(error),
                 });
             }
@@ -393,18 +397,20 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
     }
     let mut body = column![].spacing(6);
     if let Some(draft) = &state.draft {
-        let mut input = text_input("Thread name", &draft.name).size(14).padding(6);
+        let mut input = text_input(tr("Thread name"), &draft.name)
+            .size(14)
+            .padding(6);
         if !draft.busy {
             input = input.on_input(Event::Name).on_submit(Event::Create);
         }
         body = body
-            .push(text("Start a thread from this message").size(14))
+            .push(text(tr("Start a thread from this message")).size(14))
             .push(
                 row![
                     input,
-                    button(text("Create").size(13))
+                    button(text(tr("Create")).size(13))
                         .on_press_maybe((!draft.busy).then_some(Event::Create)),
-                    button(text("Cancel").size(13))
+                    button(text(tr("Cancel")).size(13))
                         .on_press_maybe((!draft.busy).then_some(Event::CancelCreate)),
                 ]
                 .spacing(8),
@@ -412,15 +418,16 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
     }
     if let Some(archived) = state.archived.as_ref().filter(|a| !a.inline) {
         let status: Element<'_, Event> = match &archived.status {
-            Status::Loading => text("Loading archived threads…")
+            Status::Loading => text(tr("Loading archived threads…"))
                 .size(12)
                 .color(MUTED)
                 .into(),
-            Status::Failed(reason) => text(*reason).size(12).color(WARN).into(),
-            Status::Done if archived.items.is_empty() => {
-                text("No archived threads.").size(12).color(MUTED).into()
-            }
-            Status::Done => text(format!("{} archived", archived.items.len()))
+            Status::Failed(reason) => text(tr(reason)).size(12).color(WARN).into(),
+            Status::Done if archived.items.is_empty() => text(tr("No archived threads."))
+                .size(12)
+                .color(MUTED)
+                .into(),
+            Status::Done => text(trf("{} archived", &[&archived.items.len()]))
                 .size(12)
                 .color(MUTED)
                 .into(),
@@ -432,8 +439,8 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
                 button(
                     text(format!(
                         "{}{}",
-                        thread.name.as_deref().unwrap_or("Unnamed thread"),
-                        if locked { " (locked)" } else { "" }
+                        thread.name.as_deref().unwrap_or(tr("Unnamed thread")),
+                        if locked { tr(" (locked)") } else { "" }
                     ))
                     .size(14),
                 )
@@ -447,7 +454,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             );
         }
         body = body.push(crate::icons::panel_title(
-            "Archived threads",
+            tr("Archived threads"),
             Vec::new(),
             Event::ToggleArchived(archived.guild, archived.channel),
         ));
@@ -456,11 +463,11 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             body = body.push(scrollable(list).height(Length::Fixed(180.0)));
         }
         if archived.status == Status::Done && archived.has_more {
-            body = body.push(button(text("Load more").size(13)).on_press(Event::MoreArchived));
+            body = body.push(button(text(tr("Load more")).size(13)).on_press(Event::MoreArchived));
         }
     }
     if let Some(notice) = state.notice {
-        body = body.push(text(notice).size(12).color(WARN));
+        body = body.push(text(tr(notice)).size(12).color(WARN));
     }
     Some(
         container(body)

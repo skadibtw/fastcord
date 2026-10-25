@@ -27,6 +27,7 @@ use iced::widget::{button, column, container, image, pick_list, row, scrollable,
 use iced::{Element, Length, Task};
 
 use crate::avatars::{self, AvatarKey};
+use crate::i18n::{tr, trf, trn};
 use crate::timeline;
 
 /// Cached invite codes.
@@ -238,17 +239,18 @@ pub fn visible_codes(rows: &[timeline::Row]) -> Vec<String> {
 /// What a failed membership request tells the user.
 pub fn describe(error: RestError) -> String {
     match error {
-        RestError::ResourceGone => "That invite or server no longer exists.".to_owned(),
+        RestError::ResourceGone => tr("That invite or server no longer exists.").to_owned(),
         RestError::PermissionDenied => {
-            "Discord refused: you may lack permission, or may not join this server.".to_owned()
+            tr("Discord refused: you may lack permission, or may not join this server.")
+                .to_owned()
         }
         RestError::Retryable(_) => {
-            "Discord did not confirm. The change may have been applied; check your server list before trying again.".to_owned()
+            tr("Discord did not confirm. The change may have been applied; check your server list before trying again.").to_owned()
         }
         RestError::Refused(refusal) if refusal.message().is_empty() => {
             crate::friends::failure(RestError::Refused(refusal))
         }
-        RestError::Refused(refusal) => format!("Discord refused: {}", refusal.message()),
+        RestError::Refused(refusal) => trf("Discord refused: {}", &[&refusal.message()]),
         other => crate::friends::failure(other),
     }
 }
@@ -265,19 +267,24 @@ pub(crate) fn count(n: u32) -> String {
     out
 }
 
+/// "1,200 members" with Discord's thousands separators.
+pub(crate) fn members_line(n: u32) -> String {
+    trn(u64::from(n), "{} member", "{} members").replacen(&n.to_string(), &count(n), 1)
+}
+
 fn counts_line(invite: &Invite) -> String {
     let mut parts = Vec::new();
     if !invite.channel_name.is_empty() {
         parts.push(format!("#{}", invite.channel_name));
     }
     if let Some(online) = invite.online {
-        parts.push(format!("{} online", count(online)));
+        parts.push(trf("{} online", &[&count(online)]));
     }
     if let Some(members) = invite.members {
-        parts.push(format!("{} members", count(members)));
+        parts.push(members_line(members));
     }
     if let Some(expires) = invite.expires_at.as_deref().and_then(|e| e.get(..10)) {
-        parts.push(format!("expires {expires}"));
+        parts.push(trf("expires {}", &[&expires]));
     }
     parts.join(" \u{b7} ")
 }
@@ -301,16 +308,16 @@ pub fn card<'a>(
                 card: Card::Loading,
                 ..
             }) => (
-                "Invite".to_owned(),
-                "Loading\u{2026}".to_owned(),
+                tr("Invite").to_owned(),
+                tr("Loading\u{2026}").to_owned(),
                 space().width(48).into(),
                 None,
             ),
             Some(Entry {
                 card: Card::Failed, ..
             }) => (
-                "Invite".to_owned(),
-                "Discord did not answer. It is asked again later.".to_owned(),
+                tr("Invite").to_owned(),
+                tr("Discord did not answer. It is asked again later.").to_owned(),
                 space().width(48).into(),
                 None,
             ),
@@ -318,8 +325,8 @@ pub fn card<'a>(
                 card: Card::Invalid,
                 ..
             }) => (
-                "Invite invalid".to_owned(),
-                "This invite has expired or does not exist.".to_owned(),
+                tr("Invite invalid").to_owned(),
+                tr("This invite has expired or does not exist.").to_owned(),
                 space().width(48).into(),
                 None,
             ),
@@ -383,13 +390,15 @@ pub fn card<'a>(
     .spacing(12)
     .align_y(iced::Alignment::Center);
     if let Some((label, press)) = action {
-        line = line.push(button(text(label).size(13)).on_press_maybe(press).style(
-            if label == "Join" {
-                button::success
-            } else {
-                button::secondary
-            },
-        ));
+        line = line.push(
+            button(text(tr(label)).size(13))
+                .on_press_maybe(press)
+                .style(if label == "Join" {
+                    button::success
+                } else {
+                    button::secondary
+                }),
+        );
     }
     container(line)
         .padding(12)
@@ -468,9 +477,8 @@ const DEFAULT_AGE: usize = 5;
 
 fn uses_name(uses: u8) -> String {
     match uses {
-        0 => "no limit".to_owned(),
-        1 => "1 use".to_owned(),
-        n => format!("{n} uses"),
+        0 => tr("no limit").to_owned(),
+        n => trn(u64::from(n), "{} use", "{} uses"),
     }
 }
 
@@ -502,9 +510,9 @@ fn is_gone(error: &RestError) -> bool {
 /// What a failed list or revoke request tells the user.
 fn describe_manage(error: RestError) -> String {
     match error {
-        RestError::PermissionDenied => "Discord refused: managing invites needs Manage Server (all invites) or Manage Channel (this channel only).".to_owned(),
+        RestError::PermissionDenied => tr("Discord refused: managing invites needs Manage Server (all invites) or Manage Channel (this channel only).").to_owned(),
         RestError::Refused(refusal) if refusal.status.as_u16() == 403 => describe_manage(RestError::PermissionDenied),
-        RestError::Retryable(_) => "Discord did not confirm. The change may have been applied; reopen the list before trying again.".to_owned(),
+        RestError::Retryable(_) => tr("Discord did not confirm. The change may have been applied; reopen the list before trying again.").to_owned(),
         other => describe(other),
     }
 }
@@ -586,18 +594,18 @@ impl Manage {
 /// How long until an invite stops working, at `now` (unix seconds).
 pub fn remaining(expiry: Expiry, now: i64) -> String {
     match expiry {
-        Expiry::Never => "never expires".to_owned(),
-        Expiry::Unknown => "expiry unknown".to_owned(),
-        Expiry::At(at) if at <= now => "expired".to_owned(),
+        Expiry::Never => tr("never expires").to_owned(),
+        Expiry::Unknown => tr("expiry unknown").to_owned(),
+        Expiry::At(at) if at <= now => tr("expired").to_owned(),
         Expiry::At(at) => {
             let secs = at - now;
             let (days, hours, minutes) = (secs / 86_400, secs % 86_400 / 3_600, secs % 3_600 / 60);
             if days > 0 {
-                format!("expires in {days}d {hours}h")
+                trf("expires in {}d {}h", &[&days, &hours])
             } else if hours > 0 {
-                format!("expires in {hours}h {minutes}m")
+                trf("expires in {}h {}m", &[&hours, &minutes])
             } else {
-                format!("expires in {}m", minutes.max(1))
+                trf("expires in {}m", &[&minutes.max(1)])
             }
         }
     }
@@ -670,7 +678,7 @@ impl State {
                 if self.leave.as_ref().is_some_and(|l| l.guild == guild) {
                     let name = self.leave.take().map(|l| l.name).unwrap_or_default();
                     self.notice = Some(match result {
-                        Ok(()) => format!("You left {name}."),
+                        Ok(()) => trf("You left {}.", &[&name]),
                         Err(error) => describe(error),
                     });
                 }
@@ -822,14 +830,16 @@ impl State {
                     CREATE_AGES[choose.age],
                     CREATE_USES[choose.uses],
                 );
-                self.made = Some(format!(
+                self.made = Some(trf(
                     "valid {}, {}",
-                    if max_age == 0 {
-                        "forever".to_owned()
-                    } else {
-                        format!("for {age_name}")
-                    },
-                    uses_name(max_uses)
+                    &[
+                        &if max_age == 0 {
+                            tr("forever").to_owned()
+                        } else {
+                            trf("for {}", &[&tr(age_name)])
+                        },
+                        &uses_name(max_uses),
+                    ],
                 ));
                 self.creating = Some(Creating::Busy);
                 let generation = self.generation;
@@ -910,43 +920,43 @@ impl State {
 /// One line per listed invite: facts, Copy, and Revoke with its Confirm.
 fn manage_view(manage: &Manage, now: i64) -> Element<'_, Event> {
     let scope = match manage.scope {
-        InviteScope::Guild(_) => "Invites of this server",
-        InviteScope::Channel(_) => "Invites of this channel",
+        InviteScope::Guild(_) => tr("Invites of this server"),
+        InviteScope::Channel(_) => tr("Invites of this channel"),
     };
     let mut list = column![].spacing(6);
     match (&manage.rows, &manage.error) {
         (_, Some(error)) => list = list.push(text(error.clone()).size(12).style(text::danger)),
-        (None, None) => list = list.push(text("Loading\u{2026}").size(12)),
+        (None, None) => list = list.push(text(tr("Loading\u{2026}")).size(12)),
         (Some(rows), None) if rows.is_empty() => {
-            list = list.push(text("No invites.").size(12));
+            list = list.push(text(tr("No invites.")).size(12));
         }
         (Some(rows), None) => {
             for (invite, state) in rows {
                 let mut facts = vec![format!("#{}", invite.channel_name)];
                 if !invite.inviter.is_empty() {
-                    facts.push(format!("by {}", invite.inviter));
+                    facts.push(trf("by {}", &[&invite.inviter]));
                 }
                 facts.push(if invite.max_uses == 0 {
-                    format!("{} uses", invite.uses)
+                    trn(u64::from(invite.uses), "{} use", "{} uses")
                 } else {
-                    format!("{}/{} uses", invite.uses, invite.max_uses)
+                    trf("{}/{} uses", &[&invite.uses, &invite.max_uses])
                 });
                 facts.push(remaining(invite.expiry, now));
                 if invite.temporary {
-                    facts.push("temporary".to_owned());
+                    facts.push(tr("temporary").to_owned());
                 }
                 let code = invite.code.clone();
                 let actions = match state {
                     RowState::Confirm => row![
-                        button(text("Confirm revoke").size(12))
+                        button(text(tr("Confirm revoke")).size(12))
                             .on_press(Event::ConfirmRevoke(code.clone()))
                             .style(button::danger),
-                        button(text("Cancel").size(12)).on_press(Event::CancelRevoke(code)),
+                        button(text(tr("Cancel")).size(12)).on_press(Event::CancelRevoke(code)),
                     ],
-                    RowState::Revoking => row![button(text("Revoking\u{2026}").size(12))],
+                    RowState::Revoking => row![button(text(tr("Revoking\u{2026}")).size(12))],
                     _ => row![
-                        button(text("Copy").size(12)).on_press(Event::CopyCode(code.clone())),
-                        button(text("Revoke").size(12)).on_press(Event::AskRevoke(code)),
+                        button(text(tr("Copy")).size(12)).on_press(Event::CopyCode(code.clone())),
+                        button(text(tr("Revoke")).size(12)).on_press(Event::AskRevoke(code)),
                     ],
                 }
                 .spacing(6);
@@ -972,9 +982,9 @@ fn manage_view(manage: &Manage, now: i64) -> Element<'_, Event> {
             }
             if rows.len() >= fastcord_discord::MAX_LISTED {
                 list = list.push(
-                    text(format!(
+                    text(trf(
                         "Showing the first {}.",
-                        fastcord_discord::MAX_LISTED
+                        &[&fastcord_discord::MAX_LISTED],
                     ))
                     .size(12)
                     .style(text::secondary),
@@ -1021,18 +1031,22 @@ fn opened_view<'a>(cache: &'a Cache, code: &str) -> Element<'a, Event> {
             card: Card::Invalid,
             ..
         }) => (
-            "Invite invalid".to_owned(),
-            "This invite has expired or does not exist.".to_owned(),
+            tr("Invite invalid").to_owned(),
+            tr("This invite has expired or does not exist.").to_owned(),
             None,
         ),
         Some(Entry {
             card: Card::Failed, ..
         }) => (
-            "Invite".to_owned(),
-            "Discord did not answer. Open the link again to retry.".to_owned(),
+            tr("Invite").to_owned(),
+            tr("Discord did not answer. Open the link again to retry.").to_owned(),
             None,
         ),
-        _ => ("Invite".to_owned(), "Loading\u{2026}".to_owned(), None),
+        _ => (
+            tr("Invite").to_owned(),
+            tr("Loading\u{2026}").to_owned(),
+            None,
+        ),
     };
     let mut line = row![
         column![
@@ -1045,7 +1059,7 @@ fn opened_view<'a>(cache: &'a Cache, code: &str) -> Element<'a, Event> {
     .align_y(iced::Alignment::Center);
     if let Some((label, press)) = join {
         line = line.push(
-            button(text(label).size(13))
+            button(text(tr(label)).size(13))
                 .on_press_maybe(press)
                 .style(button::success),
         );
@@ -1063,10 +1077,10 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
         any = true;
         panel = panel.push(if leave.owner {
             column![
-                text(format!("You own {}, so you cannot leave it.", leave.name)).size(13),
-                text(
+                text(trf("You own {}, so you cannot leave it.", &[&leave.name])).size(13),
+                text(tr(
                     "Transfer ownership or delete the server in the official Discord client first."
-                )
+                ))
                 .size(12)
                 .style(text::secondary),
                 crate::icons::close(Some(Event::CancelLeave)),
@@ -1074,23 +1088,23 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
             .spacing(6)
         } else {
             column![
-                text(format!(
+                text(trf(
                     "Leave {}? You will need a new invite to join again.",
-                    leave.name
+                    &[&leave.name]
                 ))
                 .size(13),
                 row![
                     button(
                         text(if leave.busy {
-                            "Leaving\u{2026}"
+                            tr("Leaving\u{2026}")
                         } else {
-                            "Leave server"
+                            tr("Leave server")
                         })
                         .size(13)
                     )
                     .on_press_maybe((!leave.busy).then_some(Event::ConfirmLeave))
                     .style(button::danger),
-                    button(text("Cancel").size(13))
+                    button(text(tr("Cancel")).size(13))
                         .on_press_maybe((!leave.busy).then_some(Event::CancelLeave)),
                 ]
                 .spacing(6),
@@ -1101,30 +1115,30 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
     match &state.creating {
         Some(Creating::Choose(choose)) => {
             any = true;
-            let ages: Vec<&str> = CREATE_AGES.iter().map(|(_, name)| *name).collect();
+            let ages: Vec<&str> = CREATE_AGES.iter().map(|(_, name)| tr(name)).collect();
             let uses: Vec<String> = CREATE_USES.iter().map(|n| uses_name(*n)).collect();
             let mut line = row![].spacing(6).align_y(iced::Alignment::Center);
             if choose.can_create {
                 line = line
-                    .push(text("Expires after").size(12))
+                    .push(text(tr("Expires after")).size(12))
                     .push(
                         pick_list(ages.clone(), Some(ages[choose.age]), move |name| {
                             Event::Age(ages.iter().position(|a| *a == name).unwrap_or(0))
                         })
                         .text_size(13),
                     )
-                    .push(text("Max uses").size(12))
+                    .push(text(tr("Max uses")).size(12))
                     .push(
                         pick_list(uses.clone(), Some(uses[choose.uses].clone()), move |name| {
                             Event::Uses(uses.iter().position(|u| *u == name).unwrap_or(0))
                         })
                         .text_size(13),
                     )
-                    .push(button(text("Create link").size(13)).on_press(Event::Make));
+                    .push(button(text(tr("Create link")).size(13)).on_press(Event::Make));
             }
             if let Some(scope) = choose.manage {
                 line = line.push(
-                    button(text("Manage invites").size(13)).on_press(Event::OpenManage(scope)),
+                    button(text(tr("Manage invites")).size(13)).on_press(Event::OpenManage(scope)),
                 );
             }
             panel = panel.push(
@@ -1137,16 +1151,16 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
         }
         Some(Creating::Busy) => {
             any = true;
-            panel = panel.push(text("Creating an invite\u{2026}").size(13));
+            panel = panel.push(text(tr("Creating an invite\u{2026}")).size(13));
         }
         Some(Creating::Link(code, detail)) => {
             any = true;
             panel = panel.push(
                 column![
-                    text(format!("Invite link ({detail})")).size(12),
+                    text(trf("Invite link ({})", &[detail])).size(12),
                     row![
                         text(link(code)).size(14).width(Length::Fill),
-                        button(text("Copy").size(13)).on_press(Event::CopyLink),
+                        button(text(tr("Copy")).size(13)).on_press(Event::CopyLink),
                         crate::icons::close(Some(Event::DismissCreated)),
                     ]
                     .spacing(6)

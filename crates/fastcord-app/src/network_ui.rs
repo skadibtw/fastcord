@@ -361,7 +361,7 @@ pub fn view<'a>(
         )
     };
     let mut body = column![
-        text("Network recovery").size(26),
+        text(crate::i18n::tr("Network recovery")).size(26),
         text(state.notice.unwrap_or("Choose routing before signing in.")),
         text(format!("Mode: {:?}", state.settings.mode)),
         row![choose("Off", Mode::Off), choose("Auto", Mode::Auto)].spacing(12),

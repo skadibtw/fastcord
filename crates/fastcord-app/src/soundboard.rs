@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 
 use crate::attachments::AttachmentCache;
 use crate::gateway::SoundCue;
+use crate::i18n::{tr, trf};
 
 /// Sounds from other participants playing at once.
 pub const MAX_REMOTE: usize = 3;
@@ -615,21 +616,21 @@ impl State {
 
 pub fn view(state: &State) -> Option<Element<'_, Event>> {
     let open = state.open?;
-    let note = |line: &'static str| text(line).size(12).style(text::secondary);
+    let note = |line: &'static str| text(tr(line)).size(12).style(text::secondary);
     let controls = row![
-        text("Soundboard of this server").size(13),
+        text(tr("Soundboard of this server")).size(13),
         iced::widget::space::horizontal(),
         crate::icons::close(Some(Event::Close)),
     ]
     .align_y(iced::Alignment::Center);
     let listening = row![
-        text(format!("Received volume {}%", state.prefs.volume)).size(12),
+        text(trf("Received volume {}%", &[&state.prefs.volume])).size(12),
         slider(0..=100u8, state.prefs.volume, Event::Volume).width(Length::Fixed(140.0)),
         button(
             text(if state.prefs.muted {
-                "Soundboard muted"
+                tr("Soundboard muted")
             } else {
-                "Mute soundboard"
+                tr("Mute soundboard")
             })
             .size(12)
         )
@@ -638,14 +639,14 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
     .spacing(8)
     .align_y(iced::Alignment::Center);
     let filter = row![
-        text_input("Search sounds", &state.query)
+        text_input(tr("Search sounds"), &state.query)
             .on_input(Event::Query)
             .size(13),
         button(
             text(if state.favorites_only {
-                "Favorites only"
+                tr("Favorites only")
             } else {
-                "All sounds"
+                tr("All sounds")
             })
             .size(12)
         )
@@ -654,7 +655,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
     .spacing(8);
     let status: Element<'_, Event> = match (state.status, state.play, state.problem) {
         (Status::Failed(reason), ..) | (_, Play::Failed(reason), _) | (_, _, Some(reason)) => {
-            text(reason).size(12).style(text::danger).into()
+            text(tr(reason)).size(12).style(text::danger).into()
         }
         (Status::Loading, ..) => note("Loading…").into(),
         (_, Play::Sending(_), _) => note("Playing…").into(),
@@ -677,7 +678,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             label = format!("{emoji} {label}");
         }
         if !sound.available {
-            label.push_str(" (unavailable)");
+            label.push_str(tr(" (unavailable)"));
         }
         let play_enabled =
             open.can_play && sound.available && !matches!(state.play, Play::Sending(_));
@@ -686,10 +687,10 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
                 .on_press(Event::Favorite(sound.id))
                 .style(button::text),
             text(label).size(13).width(Length::Fill),
-            button(text(if previewing { "Stop" } else { "Preview" }).size(12))
+            button(text(tr(if previewing { "Stop" } else { "Preview" })).size(12))
                 .on_press_maybe(sound.available.then_some(Event::Preview(sound.id)))
                 .style(button::secondary),
-            button(text("Play").size(12))
+            button(text(tr("Play")).size(12))
                 .on_press_maybe(play_enabled.then_some(Event::Play(sound.id)))
                 .style(button::primary),
         ]

@@ -1,5 +1,6 @@
 //! Participant interaction and a bounded context menu. Opening it is local;
 //! profile reads and server mutations require their own explicit action.
+use crate::i18n::{tr, trf};
 use crate::{Message, friends, gateway::VoiceControls, style};
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_discord::{MemberAction, RestError};
@@ -73,7 +74,8 @@ fn action(
     message: Option<Message>,
     danger: bool,
 ) -> Element<'static, Message> {
-    button(text(label.into()).size(13))
+    let label = label.into();
+    button(text(tr(&label).to_owned()).size(13))
         .on_press_maybe(message)
         .width(Length::Fill)
         .style(style::tool_button(false, danger))
@@ -138,7 +140,7 @@ pub fn view<'a>(
                 }
                 if voice.participants.iter().any(|p| p.user_id == user) {
                     let percent = voice.volume_percent(user);
-                    card = card.push(text(format!("User volume · {percent}%")).size(12));
+                    card = card.push(text(trf("User volume · {}%", &[&percent])).size(12));
                     card = card.push(
                         slider(0.0..=200.0, f32::from(percent), move |v| {
                             Message::SetParticipantVolume(user, v.round() as u16)
@@ -168,7 +170,7 @@ pub fn view<'a>(
                         StageSeat::Hand => ("Approve request", StageAction::Invite(user)),
                         StageSeat::Audience => ("Invite to speak", StageAction::Invite(user)),
                     };
-                    card = card.push(text("STAGE").size(11).style(text::secondary));
+                    card = card.push(text(tr("STAGE")).size(11).style(text::secondary));
                     card = card.push(action(
                         label,
                         (!restricted).then_some(Message::Stage(crate::stage::Event::Do(request))),
@@ -186,7 +188,7 @@ pub fn view<'a>(
                 own,
             );
             if state.pending.is_some() {
-                card = card.push(text("Working…").size(12));
+                card = card.push(text(tr("Working…")).size(12));
             }
             if let Some(notice) = &state.notice {
                 card = card.push(text(notice.as_str()).size(12));
@@ -230,7 +232,8 @@ fn choice(
     on: bool,
     message: Option<Message>,
 ) -> Element<'static, Message> {
-    button(text(label.into()).size(12))
+    let label = label.into();
+    button(text(tr(&label).to_owned()).size(12))
         .on_press_maybe(message)
         .width(Length::Fill)
         .style(style::tool_button(on, false))
@@ -305,9 +308,9 @@ fn server_section<'a>(
     }
     card = card.push(
         text(if own {
-            "YOUR NICKNAME"
+            tr("YOUR NICKNAME")
         } else {
-            "SERVER ACTIONS"
+            tr("SERVER ACTIONS")
         })
         .size(11)
         .style(text::secondary),
@@ -321,7 +324,7 @@ fn server_section<'a>(
         .is_some_and(MemberAction::takes_reason);
     match target.sub {
         Some(Sub::Timeout) => {
-            card = card.push(text("Time out for").size(12));
+            card = card.push(text(tr("Time out for")).size(12));
             for (seconds, label) in TIMEOUTS {
                 card = card.push(choice(
                     label,
@@ -332,7 +335,7 @@ fn server_section<'a>(
             needs_reason = true;
         }
         Some(Sub::Ban) => {
-            card = card.push(text("Delete messages from").size(12));
+            card = card.push(text(tr("Delete messages from")).size(12));
             for (seconds, label) in BAN_DELETE {
                 card = card.push(choice(
                     label,
@@ -349,7 +352,7 @@ fn server_section<'a>(
         }
         Some(Sub::Nick) => {
             card = card.push(
-                text_input("Nickname (empty resets)", &target.nick)
+                text_input(tr("Nickname (empty resets)"), &target.nick)
                     .on_input(|v| Message::MemberMenu(Event::Nick(v)))
                     .size(13),
             );
@@ -367,7 +370,7 @@ fn server_section<'a>(
             needs_reason = true;
         }
         Some(Sub::Move) => {
-            card = card.push(text("Move to voice channel").size(12));
+            card = card.push(text(tr("Move to voice channel")).size(12));
             for (channel, label) in navigation.move_targets.iter().take(24) {
                 card = card.push(choice(
                     format!("\u{266A} {label}"),
@@ -380,27 +383,28 @@ fn server_section<'a>(
     }
     if needs_reason {
         card = card.push(
-            text_input("Reason for the audit log (optional)", &target.reason)
+            text_input(tr("Reason for the audit log (optional)"), &target.reason)
                 .on_input(|v| Message::MemberMenu(Event::Reason(v)))
                 .size(12),
         );
     }
     if let Some(confirm) = &target.confirm {
         let detail = match confirm {
-            MemberAction::Ban(0) => " Message history will be kept.".to_owned(),
+            MemberAction::Ban(0) => tr(" Message history will be kept.").to_owned(),
             MemberAction::Ban(seconds) => BAN_DELETE
                 .iter()
                 .find(|(s, _)| s == seconds)
                 .map_or_else(String::new, |(_, label)| {
-                    format!(" Messages deleted: {}.", label.to_lowercase())
+                    trf(" Messages deleted: {}.", &[&tr(label).to_lowercase()])
                 }),
             MemberAction::Timeout(Some(seconds)) => TIMEOUTS
                 .iter()
                 .find(|(s, _)| s == seconds)
-                .map_or_else(String::new, |(_, label)| format!(" For {label}.")),
+                .map_or_else(String::new, |(_, label)| trf(" For {}.", &[&tr(label)])),
             _ => String::new(),
         };
-        card = card.push(text(format!("{} for {name}?{detail}", confirm.label())).size(13));
+        card =
+            card.push(text(trf("{} for {}?{}", &[&tr(confirm.label()), &name, &detail])).size(13));
         card = card.push(
             row![
                 action(

@@ -13,6 +13,7 @@
 //! retried. An ambiguous failure says the unban may have been applied; the list
 //! changes only when Discord answers. Nothing here moderates automatically.
 
+use crate::i18n::{tr, trf};
 use fastcord_discord::state::navigation::{GuildAdmin, NavigationSnapshot};
 use fastcord_discord::{
     AUDIT_FILTERS, AuditEntry, AuditPage, AuditQuery, BanEntry, BansPage, RestClient, RestError,
@@ -55,21 +56,21 @@ pub enum Event {
 /// What a failed moderation request tells the user: fixed, secret-free text.
 pub fn failure(error: RestError) -> String {
     match error {
-        RestError::PermissionDenied => "Discord refused: you lack the permission, or the member has a role at or above yours.".to_owned(),
-        RestError::ResourceGone => "That member, message or channel no longer exists.".to_owned(),
-        RestError::Retryable(_) => "Discord did not confirm. The action may have been applied; check before trying again.".to_owned(),
-        RestError::AuthenticationRequired => "Your session has expired. Log in again.".to_owned(),
+        RestError::PermissionDenied => tr("Discord refused: you lack the permission, or the member has a role at or above yours.").to_owned(),
+        RestError::ResourceGone => tr("That member, message or channel no longer exists.").to_owned(),
+        RestError::Retryable(_) => tr("Discord did not confirm. The action may have been applied; check before trying again.").to_owned(),
+        RestError::AuthenticationRequired => tr("Your session has expired. Log in again.").to_owned(),
         RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
         RestError::Http(status) if status.as_u16() == 429 => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
-        RestError::Refused(refusal) if refusal.code == Some(60003) => "Discord asks for two-factor verification for this action. fastcord does not answer that challenge: complete it in the official Discord client. Nothing was changed here.".to_owned(),
+        RestError::Refused(refusal) if refusal.code == Some(60003) => tr("Discord asks for two-factor verification for this action. fastcord does not answer that challenge: complete it in the official Discord client. Nothing was changed here.").to_owned(),
         RestError::Refused(refusal) if refusal.status.as_u16() == 403 => failure(RestError::PermissionDenied),
         RestError::Refused(refusal) if refusal.status.as_u16() == 404 => failure(RestError::ResourceGone),
         RestError::Refused(refusal) if refusal.status.as_u16() == 429 => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
         other => crate::invite::describe(other),
     }
@@ -255,9 +256,9 @@ impl State {
                             let cost = entry_bytes(&ban);
                             if list.bans.len() >= MAX_BANS || list.bytes + cost > MAX_BANS_BYTES {
                                 list.has_more = false;
-                                list.notice = Some(format!(
+                                list.notice = Some(trf(
                                     "Showing the first {} bans; the rest are not listed.",
-                                    list.bans.len()
+                                    &[&list.bans.len()],
                                 ));
                                 break;
                             }
@@ -315,14 +316,14 @@ impl State {
                         if let Some(at) = list.bans.iter().position(|b| b.user == user) {
                             list.bytes -= entry_bytes(&list.bans.remove(at));
                         }
-                        list.notice = Some("Unbanned.".to_owned());
+                        list.notice = Some(tr("Unbanned.").to_owned());
                     }
                     Err(RestError::ResourceGone) => {
                         // Not banned any more: what the click asked for.
                         if let Some(at) = list.bans.iter().position(|b| b.user == user) {
                             list.bytes -= entry_bytes(&list.bans.remove(at));
                         }
-                        list.notice = Some("That user was not banned.".to_owned());
+                        list.notice = Some(tr("That user was not banned.").to_owned());
                     }
                     Err(error) => list.notice = Some(failure(error)),
                 }
@@ -402,7 +403,7 @@ fn small<'a>(label: impl Into<String>) -> iced::widget::Text<'a> {
 
 fn header<'a>(title: &str) -> Element<'a, Event> {
     row![
-        text(title.to_owned()).size(14),
+        text(tr(title).to_owned()).size(14),
         space::horizontal(),
         crate::icons::close(Some(Event::Close)),
     ]
@@ -421,22 +422,22 @@ fn bans_view<'a>(list: &'a BanList, admin: Option<&GuildAdmin>) -> Element<'a, E
         };
         let mut line = column![text(name).size(13)].spacing(1);
         line = line.push(small(ban.reason.clone().map_or_else(
-            || "No reason given".to_owned(),
-            |reason| format!("Reason: {reason}"),
+            || tr("No reason given").to_owned(),
+            |reason| trf("Reason: {}", &[&reason]),
         )));
         let control: Element<'_, Event> = if list.confirm == Some(ban.user) {
             row![
-                text("Unban this user?").size(12).style(text::danger),
-                button(text("Confirm").size(12))
+                text(tr("Unban this user?")).size(12).style(text::danger),
+                button(text(tr("Confirm")).size(12))
                     .on_press_maybe((can && list.busy.is_none()).then_some(Event::ConfirmUnban))
                     .style(button::danger),
-                button(text("Cancel").size(12)).on_press(Event::CancelUnban),
+                button(text(tr("Cancel")).size(12)).on_press(Event::CancelUnban),
             ]
             .spacing(6)
             .align_y(iced::Alignment::Center)
             .into()
         } else {
-            button(text("Unban").size(12))
+            button(text(tr("Unban")).size(12))
                 .on_press_maybe(
                     (can && list.busy.is_none() && !list.loading)
                         .then_some(Event::AskUnban(ban.user)),
@@ -451,21 +452,21 @@ fn bans_view<'a>(list: &'a BanList, admin: Option<&GuildAdmin>) -> Element<'a, E
     }
     let mut panel = column![header("Bans")].spacing(6);
     if !can {
-        panel = panel.push(small("You need Ban Members to see the ban list."));
+        panel = panel.push(small(tr("You need Ban Members to see the ban list.")));
     }
     if list.bans.is_empty() && !list.loading && list.error.is_none() {
-        panel = panel.push(small("No one is banned."));
+        panel = panel.push(small(tr("No one is banned.")));
     }
     panel = panel.push(scrollable(rows).height(Length::Shrink));
     if list.loading {
-        panel = panel.push(small("Loading\u{2026}"));
+        panel = panel.push(small(tr("Loading\u{2026}")));
     }
     if list.busy.is_some() {
-        panel = panel.push(small("Waiting for Discord\u{2026}"));
+        panel = panel.push(small(tr("Waiting for Discord\u{2026}")));
     }
     if list.has_more && !list.loading {
         panel = panel.push(
-            button(text("Load more").size(12))
+            button(text(tr("Load more")).size(12))
                 .on_press_maybe((list.busy.is_none()).then_some(Event::MoreBans)),
         );
     }
@@ -480,7 +481,7 @@ struct ActionChoice(Option<u32>, &'static str);
 
 impl fmt::Display for ActionChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.1)
+        f.write_str(tr(self.1))
     }
 }
 
@@ -489,7 +490,7 @@ fn who(name: Option<&String>, id: Option<Snowflake>) -> String {
     match (name, id) {
         (Some(name), _) => name.clone(),
         (None, Some(id)) => id.to_string(),
-        (None, None) => "unknown".to_owned(),
+        (None, None) => tr("unknown").to_owned(),
     }
 }
 
@@ -501,7 +502,7 @@ fn audit_line(entry: &AuditEntry, offset: Option<time::UtcOffset>, now: i64) -> 
     let mut head = format!(
         "{} \u{2014} {}",
         who(entry.actor_name.as_ref(), entry.actor),
-        action_name(entry.action)
+        tr(&action_name(entry.action))
     );
     if entry.target.is_some() {
         head.push_str(&format!(
@@ -511,7 +512,7 @@ fn audit_line(entry: &AuditEntry, offset: Option<time::UtcOffset>, now: i64) -> 
     }
     let mut line = column![text(head).size(13), small(when)].spacing(1);
     if let Some(reason) = &entry.reason {
-        line = line.push(small(format!("Reason: {reason}")));
+        line = line.push(small(trf("Reason: {}", &[reason])));
     }
     if !entry.summary.is_empty() {
         line = line.push(small(entry.summary.clone()));
@@ -530,12 +531,12 @@ fn audit_view<'a>(log: &'a AuditLog, admin: Option<&GuildAdmin>) -> Element<'a, 
     let selected = choices.iter().find(|c| c.0 == log.action).cloned();
     let filters = row![
         pick_list(choices, selected, |choice| Event::Action(choice.0)).text_size(12),
-        text_input("User ID", &log.user_text)
+        text_input(tr("User ID"), &log.user_text)
             .on_input(Event::UserFilter)
             .on_submit(Event::Reload)
             .size(12)
             .width(160),
-        button(text("Apply").size(12)).on_press_maybe((!log.loading).then_some(Event::Reload)),
+        button(text(tr("Apply")).size(12)).on_press_maybe((!log.loading).then_some(Event::Reload)),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center);
@@ -548,23 +549,22 @@ fn audit_view<'a>(log: &'a AuditLog, admin: Option<&GuildAdmin>) -> Element<'a, 
     }
     let mut panel = column![header("Audit log"), filters].spacing(6);
     if !can {
-        panel = panel.push(small("You need View Audit Log to see this."));
+        panel = panel.push(small(tr("You need View Audit Log to see this.")));
     }
     if log.pages.get(log.current).is_some_and(Vec::is_empty) && !log.loading {
-        panel = panel.push(small("No entries."));
+        panel = panel.push(small(tr("No entries.")));
     }
     panel = panel.push(scrollable(entries).height(Length::Shrink));
     let at_end = log.current + 1 >= log.pages.len();
     panel = panel.push(
         row![
-            button(text("Newer").size(12))
+            button(text(tr("Newer")).size(12))
                 .on_press_maybe((log.current > 0 && !log.loading).then_some(Event::Newer)),
-            small(format!(
+            small(trf(
                 "Page {} of {} held",
-                log.current + 1,
-                log.pages.len().max(1)
+                &[&(log.current + 1), &log.pages.len().max(1)],
             )),
-            button(text("Older").size(12)).on_press_maybe(
+            button(text(tr("Older")).size(12)).on_press_maybe(
                 (!log.loading && (!at_end || log.has_more)).then_some(Event::Older)
             ),
         ]
@@ -572,7 +572,7 @@ fn audit_view<'a>(log: &'a AuditLog, admin: Option<&GuildAdmin>) -> Element<'a, 
         .align_y(iced::Alignment::Center),
     );
     if log.loading {
-        panel = panel.push(small("Loading\u{2026}"));
+        panel = panel.push(small(tr("Loading\u{2026}")));
     }
     if let Some(error) = &log.error {
         panel = panel.push(text(error.clone()).size(12));

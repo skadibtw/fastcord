@@ -23,6 +23,7 @@ use iced::font::Weight;
 use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
 use iced::{Element, Font, Length, Task, alignment};
 
+use crate::i18n::{tr, trf, trn};
 use crate::style;
 
 /// Requests in flight at once; a user can only have one.
@@ -117,39 +118,41 @@ pub struct State {
 /// What a failed relationship request tells the user to do next.
 pub fn failure(error: RestError) -> String {
     match error {
-        RestError::AccountVerificationRequired => "Discord requires an account check. Requests are paused. Open the official Discord client, complete its verification, then reconnect fastcord.".to_owned(),
-        RestError::WritesPaused(_) => format!("{error}. Try again later."),
-        RestError::Refused(refusal) => format!("Discord refused ({}{}): {}", refusal.status.as_u16(), refusal.code.map_or_else(String::new, |code| format!(", code {code}")), refusal.message()),
-        RestError::AuthenticationRequired => "Your session has expired. Log in again.".to_owned(),
+        RestError::AccountVerificationRequired => tr("Discord requires an account check. Requests are paused. Open the official Discord client, complete its verification, then reconnect fastcord.").to_owned(),
+        RestError::WritesPaused(_) => trf("{}. Try again later.", &[&tr(&error.to_string())]),
+        RestError::Refused(refusal) => trf("Discord refused ({}{}): {}", &[&refusal.status.as_u16(), &refusal.code.map_or_else(String::new, |code| trf(", code {}", &[&code])), &refusal.message()]),
+        RestError::AuthenticationRequired => tr("Your session has expired. Log in again.").to_owned(),
         RestError::PermissionDenied => {
-            "Discord refused: the user may have blocked you or may not accept friend requests."
+            tr("Discord refused: the user may have blocked you or may not accept friend requests.")
                 .to_owned()
         }
-        RestError::ResourceGone => "Discord could not find that user.".to_owned(),
+        RestError::ResourceGone => tr("Discord could not find that user.").to_owned(),
         RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
         RestError::Http(status) if status.as_u16() == 429 => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
         RestError::Http(status) if status.as_u16() == 400 => {
-            "Discord rejected the request. Check the username and try again.".to_owned()
+            tr("Discord rejected the request. Check the username and try again.").to_owned()
         }
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-            "Could not reach Discord. Check the list before trying again.".to_owned()
+            tr("Could not reach Discord. Check the list before trying again.").to_owned()
         }
         RestError::Retryable(_) => {
-            "Discord did not answer. Check the list before trying again.".to_owned()
+            tr("Discord did not answer. Check the list before trying again.").to_owned()
         }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED.to_owned(),
-        other => format!("The request failed: {other}."),
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED).to_owned(),
+        other => trf("The request failed: {}.", &[&tr(&other.to_string())]),
     }
 }
 
 fn username_failure(error: UsernameError) -> &'static str {
     match error {
-        UsernameError::Empty => "Enter a username to send a friend request.",
-        UsernameError::Invalid => "That is not a valid username (2 to 32 characters, no spaces).",
+        UsernameError::Empty => tr("Enter a username to send a friend request."),
+        UsernameError::Invalid => {
+            tr("That is not a valid username (2 to 32 characters, no spaces).")
+        }
     }
 }
 
@@ -202,7 +205,7 @@ impl State {
             return false;
         }
         if self.pending.len() >= MAX_PENDING {
-            self.notice = Some("Too many requests are still being sent. Wait a moment.".into());
+            self.notice = Some(tr("Too many requests are still being sent. Wait a moment.").into());
             return false;
         }
         self.pending.insert(user, action);
@@ -260,7 +263,7 @@ impl State {
                 match result {
                     Ok(()) => {
                         self.add_input.clear();
-                        self.notice = Some("Friend request sent.".to_owned());
+                        self.notice = Some(tr("Friend request sent.").to_owned());
                     }
                     Err(error) => self.notice = Some(failure(error)),
                 }
@@ -311,7 +314,7 @@ fn small_button<'a>(
     danger: bool,
     filled: bool,
 ) -> Element<'a, Event> {
-    let content = text(label).size(12);
+    let content = text(tr(label)).size(12);
     if filled {
         button(content)
             .on_press_maybe(event)
@@ -373,10 +376,10 @@ fn actions<'a>(
 
 fn kind_label(kind: RelationshipKind) -> &'static str {
     match kind {
-        RelationshipKind::Friend => "Friend",
-        RelationshipKind::Blocked => "Blocked",
-        RelationshipKind::IncomingRequest => "Incoming friend request",
-        RelationshipKind::OutgoingRequest => "Outgoing friend request",
+        RelationshipKind::Friend => tr("Friend"),
+        RelationshipKind::Blocked => tr("Blocked"),
+        RelationshipKind::IncomingRequest => tr("Incoming friend request"),
+        RelationshipKind::OutgoingRequest => tr("Outgoing friend request"),
     }
 }
 
@@ -388,7 +391,7 @@ fn person_row<'a>(
     let user = &relationship.user;
     let mut buttons = row![].spacing(6).align_y(alignment::Vertical::Center);
     if pending.is_some() {
-        buttons = buttons.push(text("Working…").size(12).style(text::secondary));
+        buttons = buttons.push(text(tr("Working…")).size(12).style(text::secondary));
     }
     for button in actions(Some(relationship.kind), user.id, pending.is_some()) {
         buttons = buttons.push(button);
@@ -444,12 +447,12 @@ pub fn view<'a>(
             .count()
     };
     let tab_button = |tab: Tab, label: &str| {
-        button(text(format!("{label} ({})", count(tab))).size(13))
+        button(text(format!("{} ({})", tr(label), count(tab))).size(13))
             .on_press(Event::Tab(tab))
             .style(style::tool_button(state.tab() == tab, false))
     };
     let tabs = row![
-        text("Friends").size(16).font(BOLD),
+        text(tr("Friends")).size(16).font(BOLD),
         tab_button(Tab::Online, "Online"),
         tab_button(Tab::All, "All"),
         tab_button(Tab::Pending, "Pending"),
@@ -460,7 +463,7 @@ pub fn view<'a>(
     .spacing(10)
     .align_y(alignment::Vertical::Center);
     let add = row![
-        text_input("Add a friend by username", &state.add_input)
+        text_input(tr("Add a friend by username"), &state.add_input)
             .on_input(Event::AddInput)
             .on_submit(Event::AddSubmit)
             .size(13)
@@ -494,17 +497,17 @@ pub fn view<'a>(
     if total == 0 {
         list = list.push(
             text(match state.tab() {
-                Tab::Online => "Nobody is online right now.",
-                Tab::All => "No friends yet. Add one by username above.",
-                Tab::Pending => "No pending friend requests.",
-                Tab::Blocked => "You have not blocked anyone.",
+                Tab::Online => tr("Nobody is online right now."),
+                Tab::All => tr("No friends yet. Add one by username above."),
+                Tab::Pending => tr("No pending friend requests."),
+                Tab::Blocked => tr("You have not blocked anyone."),
             })
             .size(13)
             .style(text::secondary),
         );
     } else if total > shown {
         list = list.push(
-            text(format!("{} more are not shown.", total - shown))
+            text(trf("{} more are not shown.", &[&(total - shown)]))
                 .size(12)
                 .style(text::secondary),
         );
@@ -608,16 +611,18 @@ pub fn profile_view<'a>(
     ]
     .spacing(10);
     if user.bot {
-        card = card.push(text("Bot").size(12).style(text::secondary));
+        card = card.push(text(tr("Bot")).size(12).style(text::secondary));
     }
     if let Some(kind) = kind {
         card = card.push(text(kind_label(kind)).size(12).style(text::secondary));
     }
     if context.ignored {
         card = card.push(
-            text("Ignored: their messages, notifications and calls are hidden.")
-                .size(12)
-                .style(text::secondary),
+            text(tr(
+                "Ignored: their messages, notifications and calls are hidden.",
+            ))
+            .size(12)
+            .style(text::secondary),
         );
     }
     if let Some(custom) = context.custom {
@@ -628,7 +633,7 @@ pub fn profile_view<'a>(
         context.roles[0].is_some() || context.nick.is_some(),
     ) {
         if let Some(nick) = context.nick {
-            card = card.push(text(format!("Nickname in {server}: {nick}")).size(12));
+            card = card.push(text(trf("Nickname in {}: {}", &[&server, &nick])).size(12));
         }
         if context.roles[0].is_some() {
             let mut line = context
@@ -639,14 +644,14 @@ pub fn profile_view<'a>(
                 .collect::<Vec<_>>()
                 .join(", ");
             if context.more_roles > 0 {
-                line.push_str(&format!(" and {} more", context.more_roles));
+                line.push_str(&trf(" and {} more", &[&context.more_roles]));
             }
-            card = card.push(text(format!("Roles in {server}: {line}")).size(12));
+            card = card.push(text(trf("Roles in {}: {}", &[&server, &line])).size(12));
         }
     }
     match &view.state {
         ProfileState::Loading => {
-            card = card.push(text("Loading profile…").size(13).style(text::secondary));
+            card = card.push(text(tr("Loading profile…")).size(13).style(text::secondary));
         }
         ProfileState::Failed(reason) => {
             card = card.push(text(reason.as_str()).size(13).style(text::danger));
@@ -660,8 +665,17 @@ pub fn profile_view<'a>(
             }
             card = card.push(
                 text(format!(
-                    "{} mutual servers · {} mutual friends",
-                    profile.mutual_guilds, profile.mutual_friends
+                    "{} · {}",
+                    trn(
+                        profile.mutual_guilds as u64,
+                        "{} mutual server",
+                        "{} mutual servers"
+                    ),
+                    trn(
+                        profile.mutual_friends as u64,
+                        "{} mutual friend",
+                        "{} mutual friends"
+                    )
                 ))
                 .size(12)
                 .style(text::secondary),
@@ -672,7 +686,7 @@ pub fn profile_view<'a>(
     if user.id != me && !user.bot {
         let busy = state.pending.contains_key(&user.id);
         if busy {
-            buttons = buttons.push(text("Working…").size(12).style(text::secondary));
+            buttons = buttons.push(text(tr("Working…")).size(12).style(text::secondary));
         }
         for button in actions(kind, user.id, busy) {
             buttons = buttons.push(button);

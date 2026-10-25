@@ -10,7 +10,6 @@ repository.workspace = true
 [dependencies]
 fastcord-net.workspace = true
 fastcord-model.workspace = true
-fastcord-bypass.workspace = true
 fastcord-ws.workspace = true
 davey.workspace = true
 aes-gcm.workspace = true

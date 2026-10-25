@@ -4,6 +4,7 @@
 //! the reducer rechecks it against the current state before sending, and a
 //! refusal is shown with Discord's own reason.
 use crate::gateway::{StageControls, VoiceControls};
+use crate::i18n::{tr, trf};
 use crate::{Message, friends, style};
 use fastcord_discord::state::navigation::StageSeat;
 use fastcord_discord::{MAX_TOPIC_CHARS, RestError, StageAction};
@@ -87,9 +88,9 @@ impl State {
 pub fn failure(error: RestError) -> String {
     match error {
         RestError::PermissionDenied => {
-            "That is not allowed right now. The Stage or your role may have changed.".to_owned()
+            tr("That is not allowed right now. The Stage or your role may have changed.").to_owned()
         }
-        RestError::ResourceGone => "The Stage session no longer exists.".to_owned(),
+        RestError::ResourceGone => tr("The Stage session no longer exists.").to_owned(),
         other => friends::failure(other),
     }
 }
@@ -100,7 +101,7 @@ fn act(
     enabled: bool,
     danger: bool,
 ) -> Element<'static, Message> {
-    button(text(label).size(12))
+    button(text(tr(label)).size(12))
         .on_press_maybe(enabled.then_some(Message::Stage(Event::Do(action))))
         .style(style::tool_button(false, danger))
         .into()
@@ -154,16 +155,16 @@ pub fn own<'a>(
             .into(),
         )
     };
-    let mut content = column![text(role).size(12).font(BOLD), buttons].spacing(4);
+    let mut content = column![text(tr(role)).size(12).font(BOLD), buttons].spacing(4);
     if suppressed_without_right(stage) {
         content = content.push(
-            text("You cannot ask to speak in this Stage.")
+            text(tr("You cannot ask to speak in this Stage."))
                 .size(11)
                 .style(text::secondary),
         );
     }
     if let Some(notice) = &state.notice {
-        content = content.push(text(notice.clone()).size(11).style(text::danger));
+        content = content.push(text(tr(notice).to_owned()).size(11).style(text::danger));
     }
     Some(
         container(content)
@@ -197,7 +198,7 @@ pub fn banner<'a>(
     let live = stage.topic.is_some();
     let heading = match &stage.topic {
         Some(topic) => text(topic.clone()).size(15).font(BOLD),
-        None => text("No live Stage session")
+        None => text(tr("No live Stage session"))
             .size(14)
             .style(text::secondary),
     };
@@ -208,14 +209,14 @@ pub fn banner<'a>(
         if live {
             header = header
                 .push(
-                    button(text("Edit topic").size(12))
+                    button(text(tr("Edit topic")).size(12))
                         .on_press_maybe(free.then_some(Message::Stage(Event::OpenTopic(true))))
                         .style(style::tool_button(false, false)),
                 )
                 .push(act("End Stage", StageAction::End, free, true));
         } else {
             header = header.push(
-                button(text("Start Stage").size(12))
+                button(text(tr("Start Stage")).size(12))
                     .on_press_maybe(free.then_some(Message::Stage(Event::OpenTopic(false))))
                     .style(style::tool_button(false, false)),
             );
@@ -226,14 +227,14 @@ pub fn banner<'a>(
         let valid = fastcord_discord::stage_topic(draft).is_some();
         content = content.push(
             row![
-                text_input("Topic", draft)
+                text_input(tr("Topic"), draft)
                     .on_input(|value| Message::Stage(Event::Topic(value)))
                     .on_submit_maybe((free && valid).then_some(Message::Stage(Event::SubmitTopic)))
                     .size(13),
-                button(text(if *editing { "Save" } else { "Start" }).size(12))
+                button(text(tr(if *editing { "Save" } else { "Start" })).size(12))
                     .on_press_maybe((free && valid).then_some(Message::Stage(Event::SubmitTopic)))
                     .style(style::tool_button(false, false)),
-                button(text("Cancel").size(12))
+                button(text(tr("Cancel")).size(12))
                     .on_press(Message::Stage(Event::CloseTopic))
                     .style(style::tool_button(false, false)),
             ]
@@ -241,9 +242,9 @@ pub fn banner<'a>(
             .align_y(iced::Alignment::Center),
         );
         content = content.push(
-            text(format!(
-                "{}/{MAX_TOPIC_CHARS} characters",
-                draft.chars().count()
+            text(trf(
+                "{}/{} characters",
+                &[&draft.chars().count(), &MAX_TOPIC_CHARS],
             ))
             .size(11)
             .style(text::secondary),
@@ -256,7 +257,7 @@ pub fn banner<'a>(
         .collect();
     if stage.permissions.moderate && !hands.is_empty() {
         content = content.push(
-            text(format!("RAISED HANDS ({})", hands.len()))
+            text(trf("RAISED HANDS ({})", &[&hands.len()]))
                 .size(11)
                 .font(BOLD)
                 .style(text::secondary),
@@ -273,14 +274,14 @@ pub fn banner<'a>(
         }
         if hands.len() > MAX_HANDS {
             content = content.push(
-                text(format!("+{} more", hands.len() - MAX_HANDS))
+                text(trf("+{} more", &[&(hands.len() - MAX_HANDS)]))
                     .size(11)
                     .style(text::secondary),
             );
         }
     }
     if let Some(notice) = &state.notice {
-        content = content.push(text(notice.as_str()).size(12).style(text::danger));
+        content = content.push(text(tr(notice.as_str())).size(12).style(text::danger));
     }
     content = content.push(space::vertical().height(0));
     Some(

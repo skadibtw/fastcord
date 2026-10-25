@@ -35,6 +35,7 @@
 //! drawn as if Discord had accepted it and is disabled until Discord answers.
 //!
 //! [`VariableList`]: crate::variable_list::VariableList
+use crate::i18n::{tr, trf, trn};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -932,13 +933,13 @@ pub fn view<'a>(
 }
 
 fn centered(message: &'static str) -> Element<'static, Event> {
-    container(text(message).size(14).style(text::secondary))
+    container(text(tr(message)).size(14).style(text::secondary))
         .center(Length::Fill)
         .into()
 }
 
 fn pill_button(label: &'static str, event: Event) -> Element<'static, Event> {
-    button(text(label).size(13))
+    button(text(tr(label)).size(13))
         .on_press(event)
         .padding(Padding {
             top: 4.0,
@@ -952,9 +953,9 @@ fn pill_button(label: &'static str, event: Event) -> Element<'static, Event> {
 
 fn notice_layer(notice: Notice, channel_id: Snowflake) -> Element<'static, Event> {
     let content: Element<'static, Event> = match notice {
-        Notice::Loading => text("Loading messages...").size(13).into(),
+        Notice::Loading => text(tr("Loading messages...")).size(13).into(),
         Notice::Failed(message) => row![
-            text(message).size(13).style(text::danger),
+            text(tr(message)).size(13).style(text::danger),
             pill_button("Retry", Event::Retry { channel_id }),
         ]
         .spacing(12)
@@ -976,12 +977,16 @@ fn notice_layer(notice: Notice, channel_id: Snowflake) -> Element<'static, Event
 fn select_layer(select: &SelectView, channel_id: Snowflake) -> Element<'static, Event> {
     let count = select.ids.len();
     let content: Element<'static, Event> = if select.busy {
-        text("Deleting\u{2026}").size(13).into()
+        text(tr("Deleting…")).size(13).into()
     } else if select.confirming {
         row![
-            text(format!("Delete {count} messages? This cannot be undone."))
-                .size(13)
-                .style(text::danger),
+            text(trn(
+                count as u64,
+                "Delete {} message? This cannot be undone.",
+                "Delete {} messages? This cannot be undone.",
+            ))
+            .size(13)
+            .style(text::danger),
             pill_button("Confirm", Event::ConfirmBulkDelete { channel_id }),
             pill_button("Cancel", Event::CancelBulkDelete),
         ]
@@ -990,7 +995,11 @@ fn select_layer(select: &SelectView, channel_id: Snowflake) -> Element<'static, 
         .into()
     } else {
         row![
-            text(format!("{count} selected (at most 100, under 14 days old)")).size(13),
+            text(trf(
+                "{} selected (at most 100, under 14 days old)",
+                &[&count]
+            ))
+            .size(13),
             pill_button("Delete", Event::AskBulkDelete { channel_id }),
             pill_button(
                 "Done",
@@ -1015,7 +1024,7 @@ fn select_layer(select: &SelectView, channel_id: Snowflake) -> Element<'static, 
 
 fn jump_layer(channel_id: Snowflake) -> Element<'static, Event> {
     container(
-        button(text("Jump to latest").size(13))
+        button(text(tr("Jump to latest")).size(13))
             .on_press(Event::JumpLatest { channel_id })
             .padding(Padding {
                 top: 6.0,
@@ -1087,8 +1096,8 @@ fn row_button(label: &'static str, event: Event) -> button::Button<'static, Even
         _ => None,
     };
     let content = match kind {
-        Some(kind) => icons::labeled(kind, label, 12),
-        None => text(label).size(12).into(),
+        Some(kind) => icons::labeled(kind, tr(label), 12),
+        None => text(tr(label)).size(12).into(),
     };
     button(content)
         .on_press(event)
@@ -1130,7 +1139,7 @@ fn message_tool(label: &'static str, event: Event) -> Element<'static, Event> {
         on_press: Some(event),
         active: false,
         danger: label == "Delete" || label == "Report",
-        tip: label.to_owned(),
+        tip: tr(label).to_owned(),
         badge: 0,
     })
 }
@@ -1139,7 +1148,7 @@ fn message_tool(label: &'static str, event: Event) -> Element<'static, Event> {
 const CHIP_ICON: f32 = 18.0;
 
 fn hint(line: &'static str) -> Element<'static, Event> {
-    container(text(line).size(12))
+    container(text(tr(line)).size(12))
         .padding(6)
         .style(container::rounded_box)
         .into()
@@ -1155,7 +1164,7 @@ fn chip_view<'a>(
     assets: Attachments<'a>,
 ) -> Element<'a, Event> {
     let message_id = row.message.id;
-    let fallback = chip.emoji.name.as_deref().unwrap_or("emoji");
+    let fallback = chip.emoji.name.as_deref().unwrap_or(tr("emoji"));
     let icon: Element<'a, Event> = match emoji::reaction_asset(chip.emoji) {
         Some(asset) => emoji::sensed(
             emoji::asset_view(asset, fallback, assets.emojis, CHIP_ICON),
@@ -1246,24 +1255,24 @@ fn reactions_line<'a>(
 fn describe_emoji(emoji: &Emoji) -> String {
     match (emoji.id, emoji.name.as_deref()) {
         (Some(_), Some(name)) => format!(":{name}:"),
-        (Some(_), None) => "a deleted emoji".to_owned(),
+        (Some(_), None) => tr("a deleted emoji").to_owned(),
         (None, Some(name)) => name.to_owned(),
-        (None, None) => "an unknown emoji".to_owned(),
+        (None, None) => tr("an unknown emoji").to_owned(),
     }
 }
 
 /// The names of those who reacted with one emoji, under the row asked about.
 fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
     let detail: Element<'_, Event> = match &users.state {
-        UsersState::Loading if users.poll_answer.is_some() => text("Loading voters…")
+        UsersState::Loading if users.poll_answer.is_some() => text(tr("Loading voters…"))
             .size(12)
             .style(text::secondary)
             .into(),
-        UsersState::Loading => text("Loading who reacted…")
+        UsersState::Loading => text(tr("Loading who reacted…"))
             .size(12)
             .style(text::secondary)
             .into(),
-        UsersState::Failed(reason) => text(*reason).size(12).style(text::danger).into(),
+        UsersState::Failed(reason) => text(tr(reason)).size(12).style(text::danger).into(),
         UsersState::Loaded { names, ids, more }
             if users.can_moderate && users.poll_answer.is_none() && !names.is_empty() =>
         {
@@ -1282,28 +1291,37 @@ fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
                 );
             }
             if *more {
-                list = list.push(text("and others").size(12).style(text::secondary));
+                list = list.push(text(tr("and others")).size(12).style(text::secondary));
             }
             list = list.push(row_button(
                 "Clear all of this emoji",
                 Event::AskReactionRemoval(ReactionTarget::All),
             ));
             if users.busy {
-                list = list.push(text("Waiting for Discord\u{2026}").size(12));
+                list = list.push(text(tr("Waiting for Discord…")).size(12));
             } else if let Some(target) = users.confirm {
-                let who = match target {
-                    ReactionTarget::User(id) => ids
-                        .iter()
-                        .position(|listed| *listed == id)
-                        .and_then(|at| names.get(at))
-                        .map_or_else(|| "this user".to_owned(), |name| format!("{name}'s")),
-                    ReactionTarget::All => "every".to_owned(),
+                let question = match target {
+                    ReactionTarget::User(id) => {
+                        match ids
+                            .iter()
+                            .position(|listed| *listed == id)
+                            .and_then(|at| names.get(at))
+                        {
+                            Some(name) => {
+                                trf("Remove {}'s reaction? This cannot be undone.", &[name])
+                            }
+                            None => {
+                                tr("Remove this user's reaction? This cannot be undone.").to_owned()
+                            }
+                        }
+                    }
+                    ReactionTarget::All => {
+                        tr("Remove every reaction? This cannot be undone.").to_owned()
+                    }
                 };
                 list = list.push(
                     row![
-                        text(format!("Remove {who} reaction? This cannot be undone."))
-                            .size(12)
-                            .style(text::danger),
+                        text(question).size(12).style(text::danger),
                         row_button("Confirm", Event::ConfirmReactionRemoval).style(button::danger),
                         row_button("Cancel", Event::CancelReactionRemoval),
                     ]
@@ -1315,12 +1333,13 @@ fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
         }
         UsersState::Loaded { names, more, .. } => {
             let mut line = if names.is_empty() {
-                "No one is listed.".to_owned()
+                tr("No one is listed.").to_owned()
             } else {
                 names.join(", ")
             };
             if *more {
-                line.push_str(" and others");
+                line.push(' ');
+                line.push_str(tr("and others"));
             }
             text(line)
                 .size(12)
@@ -1333,8 +1352,8 @@ fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
         column![
             row![
                 text(match &users.poll_answer {
-                    Some(answer) => format!("Voted for {answer}"),
-                    None => format!("Reacted with {}", describe_emoji(&users.emoji)),
+                    Some(answer) => trf("Voted for {}", &[answer]),
+                    None => trf("Reacted with {}", &[&describe_emoji(&users.emoji)]),
                 })
                 .font(BOLD)
                 .size(12),
@@ -1355,8 +1374,8 @@ fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
 /// time or controls.
 fn hidden_view<'a>(kind: Suppression) -> Element<'a, Event> {
     text(match kind {
-        Suppression::Ignored => "Message from an ignored user hidden.",
-        Suppression::Blocked => "Message from a blocked user hidden.",
+        Suppression::Ignored => tr("Message from an ignored user hidden."),
+        Suppression::Blocked => tr("Message from a blocked user hidden."),
     })
     .size(12)
     .style(text::secondary)
@@ -1399,19 +1418,19 @@ fn message_view<'a>(
     if highlighted {
         header = header.push(
             text(if interaction.replying == Some(message_id) {
-                "Reply target"
+                tr("Reply target")
             } else {
-                "Jumped here"
+                tr("Jumped here")
             })
             .size(12)
             .style(text::secondary),
         );
     }
     if message.edited_timestamp.is_some() {
-        header = header.push(text("(edited)").size(12).style(text::secondary));
+        header = header.push(text(tr("(edited)")).size(12).style(text::secondary));
     }
     if message.is_crossposted() {
-        header = header.push(text("Published").size(12).style(text::secondary));
+        header = header.push(text(tr("Published")).size(12).style(text::secondary));
     }
     // An edit being saved shows its new text right away.
     let content = content(row);
@@ -1419,12 +1438,12 @@ fn message_view<'a>(
     if let Some(reply) = &row.reply {
         let label = match &reply.state {
             ReplyState::Message { author, content } => {
-                format!("Replying to {author}: {content}")
+                trf("Replying to {}: {}", &[author, content])
             }
-            ReplyState::Deleted => "Original message was deleted.".to_owned(),
-            ReplyState::Loading => "Loading the original message…".to_owned(),
-            ReplyState::Unavailable => "Original message unavailable.".to_owned(),
-            ReplyState::Hidden => "Replying to a hidden message.".to_owned(),
+            ReplyState::Deleted => tr("Original message was deleted.").to_owned(),
+            ReplyState::Loading => tr("Loading the original message…").to_owned(),
+            ReplyState::Unavailable => tr("Original message unavailable.").to_owned(),
+            ReplyState::Hidden => tr("Replying to a hidden message.").to_owned(),
         };
         let preview = text(label)
             .size(12)
@@ -1449,7 +1468,7 @@ fn message_view<'a>(
     }
     if message.crosspost_source().is_some() {
         body = body.push(
-            text(format!("Published from {}", author_name(message, assets)))
+            text(trf("Published from {}", &[&author_name(message, assets)]))
                 .size(12)
                 .style(text::secondary),
         );
@@ -1512,7 +1531,7 @@ fn message_view<'a>(
     if message.is_ephemeral() {
         body = body.push(
             row![
-                text("Only you can see this")
+                text(tr("Only you can see this"))
                     .size(12)
                     .style(text::secondary),
                 row_button(
@@ -1556,7 +1575,7 @@ fn message_view<'a>(
     {
         body = body.push(users_panel(users));
     }
-    let status = |line: &'static str| text(line).size(12).style(text::secondary);
+    let status = |line: &'static str| text(tr(line)).size(12).style(text::secondary);
 
     let retry = row_button(
         "Retry",
@@ -1585,7 +1604,7 @@ fn message_view<'a>(
         )),
         RowState::Confirming => body.push(
             row![
-                text("Delete this message? This cannot be undone.")
+                text(tr("Delete this message? This cannot be undone."))
                     .size(12)
                     .style(text::danger),
                 row_button(
@@ -1609,7 +1628,7 @@ fn message_view<'a>(
                 row![retry, row_button("Edit", edit.clone()), dismiss]
             };
             body.push(
-                text(reason)
+                text(tr(reason))
                     .size(12)
                     .width(Length::Fill)
                     .wrapping(text::Wrapping::WordOrGlyph)
@@ -1645,7 +1664,7 @@ fn message_view<'a>(
         )
     };
     if continues && message.edited_timestamp.is_some() {
-        body = body.push(text("(edited)").size(11).style(text::secondary));
+        body = body.push(text(tr("(edited)")).size(11).style(text::secondary));
     }
     let inner = match gutter {
         Some(gutter) => row![gutter, body.width(Length::Fill)],
@@ -1745,7 +1764,7 @@ fn message_view<'a>(
         actions = actions
             .push(
                 container(
-                    text("Publish to every server following this channel?")
+                    text(tr("Publish to every server following this channel?"))
                         .size(12)
                         .wrapping(text::Wrapping::None),
                 )
@@ -1925,13 +1944,13 @@ fn poll_view<'a>(
             .font(BOLD)
             .size(15)
             .wrapping(text::Wrapping::WordOrGlyph),
-        text(if ended {
+        text(tr(if ended {
             "Final results"
         } else if poll.allow_multiselect {
             "Select one or more answers"
         } else {
             "Select one answer"
-        })
+        }))
         .size(12)
         .style(text::secondary),
     ]
@@ -1962,7 +1981,7 @@ fn poll_view<'a>(
             .align_y(Vertical::Center);
         if count > 0 {
             line = line.push(
-                button(text("Voters").size(12))
+                button(text(tr("Voters")).size(12))
                     .on_press(Event::PollVoters {
                         channel_id,
                         message_id,
@@ -1975,20 +1994,20 @@ fn poll_view<'a>(
         body = body.push(line);
     }
     let status = if ended {
-        "Poll ended".to_owned()
+        tr("Poll ended").to_owned()
     } else {
         match poll.expiry.as_deref() {
-            Some(expiry) => format!(
+            Some(expiry) => trf(
                 "Ends {}",
-                format_timestamp(expiry, crate::localtime::offset())
+                &[&format_timestamp(expiry, crate::localtime::offset())],
             ),
-            None => "No end time".to_owned(),
+            None => tr("No end time").to_owned(),
         }
     };
     let mut footer = row![
-        text(format!(
-            "{total} {} · {status}",
-            if total == 1 { "vote" } else { "votes" }
+        text(trf(
+            "{} · {}",
+            &[&trn(total, "{} vote", "{} votes"), &status],
         ))
         .size(12)
         .style(text::secondary)
@@ -1996,7 +2015,7 @@ fn poll_view<'a>(
     .spacing(8)
     .align_y(Vertical::Center);
     if row.poll_saving {
-        footer = footer.push(text("Saving…").size(12).style(text::secondary));
+        footer = footer.push(text(tr("Saving…")).size(12).style(text::secondary));
     } else if row.own && !ended {
         footer = footer.push(row_button(
             "End poll",
@@ -2024,7 +2043,7 @@ fn forwarded_view<'a>(
     cx: rich::Cx<'a>,
     assets: Attachments<'a>,
 ) -> Element<'a, Event> {
-    let mut body = column![text("Forwarded").size(12).style(text::secondary)].spacing(2);
+    let mut body = column![text(tr("Forwarded")).size(12).style(text::secondary)].spacing(2);
     let parts = rich::Parts::snapshot(message, snapshot);
     if !snapshot.content.is_empty() {
         body = body.push(
@@ -2063,7 +2082,7 @@ fn forwarded_view<'a>(
         && snapshot.sticker_items.is_empty()
     {
         body = body.push(
-            text("The forwarded message has no content to show.")
+            text(tr("The forwarded message has no content to show."))
                 .size(13)
                 .style(text::secondary),
         );
@@ -2093,12 +2112,12 @@ fn sticker_view<'a>(
             .into();
     }
     let note = if key.is_none() {
-        format!(
+        trf(
             "Sticker: {} (this sticker format is not shown)",
-            sticker.name
+            &[&sticker.name],
         )
     } else {
-        format!("Sticker: {}", sticker.name)
+        trf("Sticker: {}", &[&sticker.name])
     };
     text(note).size(13).style(text::secondary).into()
 }
@@ -2137,13 +2156,13 @@ fn attachment_view(
         }
         Some(AttachmentView::Loading) => {
             content = content.push(
-                text("Loading image preview…")
+                text(tr("Loading image preview…"))
                     .size(12)
                     .style(text::secondary),
             );
         }
         Some(AttachmentView::Failed(reason)) => {
-            content = content.push(text(*reason).size(12).style(text::secondary));
+            content = content.push(text(tr(reason)).size(12).style(text::secondary));
         }
         None => {}
     }
@@ -2238,21 +2257,21 @@ fn placeholder(message: &Message) -> Option<String> {
     }
     Some(match message.kind {
         3 => call_summary(message),
-        0 | 19 | 20 | 23 => "No text content.".to_owned(),
-        1 => "A member was added to the conversation.".to_owned(),
-        2 => "A member left the conversation.".to_owned(),
-        4 => "The conversation name was changed.".to_owned(),
-        5 => "The conversation icon was changed.".to_owned(),
-        6 => "A message was pinned.".to_owned(),
-        7 => "A member joined.".to_owned(),
-        8..=11 => "The server was boosted.".to_owned(),
-        12 => "A channel was followed.".to_owned(),
-        18 => "A thread was created.".to_owned(),
-        21 => "The message this thread was started from.".to_owned(),
-        22 => "An invite reminder was posted.".to_owned(),
+        0 | 19 | 20 | 23 => tr("No text content.").to_owned(),
+        1 => tr("A member was added to the conversation.").to_owned(),
+        2 => tr("A member left the conversation.").to_owned(),
+        4 => tr("The conversation name was changed.").to_owned(),
+        5 => tr("The conversation icon was changed.").to_owned(),
+        6 => tr("A message was pinned.").to_owned(),
+        7 => tr("A member joined.").to_owned(),
+        8..=11 => tr("The server was boosted.").to_owned(),
+        12 => tr("A channel was followed.").to_owned(),
+        18 => tr("A thread was created.").to_owned(),
+        21 => tr("The message this thread was started from.").to_owned(),
+        22 => tr("An invite reminder was posted.").to_owned(),
         24 => automod_summary(message),
-        46 => "A poll has ended.".to_owned(),
-        kind => format!("Message type {kind} is not displayed by this client."),
+        46 => tr("A poll has ended.").to_owned(),
+        kind => trf("Message type {} is not displayed by this client.", &[&kind]),
     })
 }
 
@@ -2269,8 +2288,11 @@ fn automod_summary(message: &Message) -> String {
         .and_then(|e| e.author.as_ref())
         .map_or_else(|| message.author.display_name(), |a| a.name.as_str());
     match rule {
-        Some(rule) => format!("AutoMod flagged a message from {user} (rule: {rule})."),
-        None => format!("AutoMod flagged a message from {user}."),
+        Some(rule) => trf(
+            "AutoMod flagged a message from {} (rule: {}).",
+            &[&user, &rule],
+        ),
+        None => trf("AutoMod flagged a message from {}.", &[&user]),
     }
 }
 
@@ -2279,17 +2301,17 @@ fn automod_summary(message: &Message) -> String {
 fn call_summary(message: &Message) -> String {
     let name = message.author.display_name();
     match &message.call {
-        None => format!("{name} started a call."),
-        Some(call) if call.ended_timestamp.is_none() => format!("{name} started a call."),
+        None => trf("{} started a call.", &[&name]),
+        Some(call) if call.ended_timestamp.is_none() => trf("{} started a call.", &[&name]),
         Some(call)
             if call
                 .participants
                 .iter()
                 .all(|user| *user == message.author.id) =>
         {
-            format!("Missed call from {name}.")
+            trf("Missed call from {}.", &[&name])
         }
-        Some(_) => format!("{name} called. The call has ended."),
+        Some(_) => trf("{} called. The call has ended.", &[&name]),
     }
 }
 
@@ -2301,17 +2323,16 @@ fn describe_attachment(attachment: &Attachment) -> String {
     if let (Some(width), Some(height)) = (attachment.width, attachment.height) {
         details.push(format!("{width}x{height}"));
     }
-    format!(
+    trf(
         "Attachment: {} ({})",
-        attachment.filename,
-        details.join(", ")
+        &[&attachment.filename, &details.join(", ")],
     )
 }
 
 pub(crate) fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
     if bytes < 1024 {
-        return format!("{bytes} B");
+        return trf("{} B", &[&bytes]);
     }
     let mut value = bytes as f64 / 1024.0;
     let mut unit = 0;
@@ -2319,7 +2340,7 @@ pub(crate) fn format_size(bytes: u64) -> String {
         value /= 1024.0;
         unit += 1;
     }
-    format!("{value:.1} {}", UNITS[unit])
+    format!("{value:.1} {}", tr(UNITS[unit]))
 }
 
 /// `2026-10-07T11:32:01+00:00` as `2026-10-07 14:32` at `+03:00`. Without a

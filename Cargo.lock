@@ -2149,6 +2149,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "softbuffer",
+ "sys-locale",
  "tao",
  "time",
  "tiny-skia",
@@ -2197,7 +2198,6 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "fastcord-bypass",
  "fastcord-model",
  "fastcord-net",
  "fastcord-ws",
@@ -2238,7 +2238,6 @@ dependencies = [
  "aes-gcm 0.11.1",
  "chacha20poly1305 0.11.0",
  "davey",
- "fastcord-bypass",
  "fastcord-model",
  "fastcord-net",
  "fastcord-ws",

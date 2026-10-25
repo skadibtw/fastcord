@@ -23,6 +23,7 @@ use crate::attachment_ui::{RestRefresh, safe_attachment_filename};
 use crate::attachments::{AttachmentError, AttachmentKey, MAX_FILE_BYTES};
 use crate::av_player::{MediaPlayer, StartError};
 use crate::gateway::GatewayPanel;
+use crate::i18n::tr;
 use crate::login::Session;
 use crate::timeline::Event;
 
@@ -149,34 +150,34 @@ pub fn is_playable(attachment: &Attachment) -> bool {
 
 fn failure_reason(failure: PlayerFailure) -> &'static str {
     match failure {
-        PlayerFailure::Device => "The audio output stopped. Check the device and try again.",
-        PlayerFailure::Damaged => "This audio file is damaged. Use Download.",
+        PlayerFailure::Device => tr("The audio output stopped. Check the device and try again."),
+        PlayerFailure::Damaged => tr("This audio file is damaged. Use Download."),
         PlayerFailure::Unsupported => {
-            "This audio format cannot be played here. Use Download or Open."
+            tr("This audio format cannot be played here. Use Download or Open.")
         }
     }
 }
 
 fn start_reason(error: StartError) -> &'static str {
     match error {
-        StartError::Damaged => "This file is damaged. Use Download.",
+        StartError::Damaged => tr("This file is damaged. Use Download."),
         StartError::UnsupportedAudio => {
-            "This audio format cannot be played here. Use Download or Open."
+            tr("This audio format cannot be played here. Use Download or Open.")
         }
-        StartError::UnsupportedVideo => {
-            "This video format cannot be played here (only H.264 or AV1 in MP4 or WebM). Use Download or Open."
-        }
+        StartError::UnsupportedVideo => tr(
+            "This video format cannot be played here (only H.264 or AV1 in MP4 or WebM). Use Download or Open.",
+        ),
         StartError::UnsupportedLayout => {
-            "This video is stored in a layout that cannot be played here. Use Download or Open."
+            tr("This video is stored in a layout that cannot be played here. Use Download or Open.")
         }
         StartError::TooLarge => {
-            "This media file is too large or complex to play here. Use Download."
+            tr("This media file is too large or complex to play here. Use Download.")
         }
         StartError::Device => {
-            "The audio output could not be opened. Check the device in audio settings."
+            tr("The audio output could not be opened. Check the device in audio settings.")
         }
         StartError::Decoder => {
-            "No video decoder is available for this file on this device. Use Download or Open."
+            tr("No video decoder is available for this file on this device. Use Download or Open.")
         }
     }
 }
@@ -184,11 +185,11 @@ fn start_reason(error: StartError) -> &'static str {
 fn fetch_reason(error: &AttachmentError) -> &'static str {
     match error {
         AttachmentError::TooLarge => {
-            "This file is larger than the 64 MiB playback limit. Use Download."
+            tr("This file is larger than the 64 MiB playback limit. Use Download.")
         }
-        AttachmentError::WorkerStopped => "Playback was cancelled.",
-        AttachmentError::CacheUnavailable => "The local attachment cache is unavailable.",
-        _ => "The file could not be fetched. Try again.",
+        AttachmentError::WorkerStopped => tr("Playback was cancelled."),
+        AttachmentError::CacheUnavailable => tr("The local attachment cache is unavailable."),
+        _ => tr("The file could not be fetched. Try again."),
     }
 }
 
@@ -241,7 +242,7 @@ pub fn play(
             // Opening the file and the device can block; neither belongs on the UI thread.
             tokio::task::spawn_blocking(move || MediaPlayer::start(&path, output))
                 .await
-                .map_err(|_| "Playback was cancelled.")?
+                .map_err(|_| tr("Playback was cancelled."))?
                 .map(|player| PlayerHandle(Arc::new(player)))
                 .map_err(start_reason)
         },
@@ -442,13 +443,17 @@ pub fn view(
     let length = metadata_duration_ms(attachment);
     let ids = (key.channel, key.message, key.attachment);
     let play = |label: &'static str| {
-        button(crate::icons::labeled(crate::icons::Icon::Play, label, 13))
-            .padding([2, 8])
-            .on_press(Event::PlayAttachment {
-                channel_id: ids.0,
-                message_id: ids.1,
-                attachment_id: ids.2,
-            })
+        button(crate::icons::labeled(
+            crate::icons::Icon::Play,
+            tr(label),
+            13,
+        ))
+        .padding([2, 8])
+        .on_press(Event::PlayAttachment {
+            channel_id: ids.0,
+            message_id: ids.1,
+            attachment_id: ids.2,
+        })
     };
     let small = |label: &'static str, control: Control| {
         use crate::icons::{self, Icon};
@@ -460,7 +465,7 @@ pub fn view(
             "Unmute" => Icon::AudioMuted,
             _ => Icon::Close,
         };
-        button(icons::labeled(kind, label, 13))
+        button(icons::labeled(kind, tr(label), 13))
             .padding([2, 8])
             .on_press(Event::Media(control))
     };
@@ -476,7 +481,7 @@ pub fn view(
         }
         return line
             .push(
-                text(length.map_or_else(|| "Voice message".to_owned(), clock))
+                text(length.map_or_else(|| tr("Voice message").to_owned(), clock))
                     .size(12)
                     .style(text::secondary),
             )
@@ -484,14 +489,14 @@ pub fn view(
     };
     match media.phase {
         Phase::Loading => row![
-            text("Loading…").size(12).style(text::secondary),
+            text(tr("Loading…")).size(12).style(text::secondary),
             small("Cancel", Control::Close)
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)
         .into(),
         Phase::Failed(reason) => row![
-            text(reason).size(12).style(text::secondary),
+            text(tr(reason)).size(12).style(text::secondary),
             play("Retry"),
             small("Close", Control::Close)
         ]
@@ -558,13 +563,13 @@ pub fn view(
             if let Some(player) = &media.player {
                 if player.video_failed() {
                     stack = stack.push(
-                        text("The video could not be decoded; any sound continues.")
+                        text(tr("The video could not be decoded; any sound continues."))
                             .size(12)
                             .style(text::secondary),
                     );
                 }
                 if let Some(notice) = player.notice() {
-                    stack = stack.push(text(notice).size(12).style(text::secondary));
+                    stack = stack.push(text(tr(notice)).size(12).style(text::secondary));
                 }
             }
             stack.into()

@@ -8,7 +8,9 @@ use fastcord_audio::{
     DeviceChoice, DeviceInfo, DeviceKey, Direction, EngineStats, NoiseSuppression,
     NoiseSuppressionStatus, list_devices,
 };
-use iced::widget::{button, checkbox, column, container, pick_list, row, slider, text};
+use iced::widget::{checkbox, column, pick_list, row, slider, text};
+
+use crate::i18n::{tr, trf};
 use iced::{Element, Length};
 use serde_json::{Value, json};
 
@@ -131,9 +133,9 @@ impl PartialEq for DeviceOption {
 impl Eq for DeviceOption {}
 impl fmt::Display for DeviceOption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.label)?;
+        f.write_str(tr(&self.label))?;
         if self.unavailable {
-            f.write_str(" — unavailable")?;
+            f.write_str(tr(" — unavailable"))?;
         }
         Ok(())
     }
@@ -200,16 +202,31 @@ fn options(devices: &[DeviceInfo], saved: &Selection) -> (Vec<DeviceOption>, Dev
 /// has an engine, otherwise the saved preference and when it applies.
 fn noise_summary(preference: NoiseSuppression, status: Option<NoiseSuppressionStatus>) -> String {
     match status {
-        None => format!("Selected: {preference}. Applied when you join a call."),
-        Some(status) if status.loading => format!(
+        None => trf(
+            "Selected: {}. Applied when you join a call.",
+            &[&Noise(preference)],
+        ),
+        Some(status) if status.loading => trf(
             "Loading High quality… {} stays active until it is ready.",
-            status.active
+            &[&Noise(status.active)],
         ),
-        Some(status) => format!(
-            "Active during this call: {} — {:.0} ms algorithmic delay.",
-            status.active,
-            status.latency_samples as f32 / 48.0
+        Some(status) => trf(
+            "Active during this call: {} — {} ms algorithmic delay.",
+            &[
+                &Noise(status.active),
+                &format!("{:.0}", status.latency_samples as f32 / 48.0),
+            ],
         ),
+    }
+}
+
+/// A noise suppression mode named in the interface language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Noise(NoiseSuppression);
+
+impl fmt::Display for Noise {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(tr(&self.0.to_string()))
     }
 }
 
@@ -217,16 +234,18 @@ fn noise_summary(preference: NoiseSuppression, status: Option<NoiseSuppressionSt
 fn stats_summary(stats: Option<EngineStats>) -> String {
     match stats {
         None => String::new(),
-        Some(s) => format!(
+        Some(s) => trf(
             "This call: {} playback underruns ({} samples of silence), {} lost or late frames concealed, {} device xruns, {} microphone samples dropped. Real-time engine threads: {}, {} callback promotions refused, {} late wake-ups.",
-            s.output_underruns,
-            s.output_underrun_samples,
-            s.plc_frames,
-            s.device_xruns,
-            s.input_overrun_samples,
-            s.realtime_threads,
-            s.callback_realtime_denied,
-            s.late_ticks
+            &[
+                &s.output_underruns,
+                &s.output_underrun_samples,
+                &s.plc_frames,
+                &s.device_xruns,
+                &s.input_overrun_samples,
+                &s.realtime_threads,
+                &s.callback_realtime_denied,
+                &s.late_ticks,
+            ],
         ),
     }
 }
@@ -237,10 +256,13 @@ fn voice_log_summary() -> String {
     if lines.is_empty() {
         return String::new();
     }
-    let place = crate::voice_log::file()
-        .map(|path| format!(" (full log: {})", path.display()))
-        .unwrap_or_default();
-    format!("Recent voice events{place}:\n{}", lines.join("\n"))
+    match crate::voice_log::file() {
+        Some(path) => trf(
+            "Recent voice events (full log: {}):\n{}",
+            &[&path.display(), &lines.join("\n")],
+        ),
+        None => trf("Recent voice events:\n{}", &[&lines.join("\n")]),
+    }
 }
 
 /// What the microphone sends in this call, so "nobody hears me" can be told
@@ -254,64 +276,212 @@ pub fn transmit_summary(
         return String::new();
     };
     let state = if !capture_on {
-        "Sending is off (muted, deafened, or push-to-talk not held)."
+        tr("Sending is off (muted, deafened, or push-to-talk not held).")
     } else if t.audio_waiting_for_keys > 0 && t.rtp_sent == 0 {
-        "Sending is waiting for end-to-end encryption keys from the call."
+        tr("Sending is waiting for end-to-end encryption keys from the call.")
     } else if s.frames_encoded > 0 && s.frames_gated >= s.frames_encoded {
-        "Everything is below the input sensitivity threshold."
+        tr("Everything is below the input sensitivity threshold.")
     } else {
-        "Sending."
+        tr("Sending.")
     };
-    format!(
-        "Microphone this call: {} frames encoded, {} held by the sensitivity gate, {} packets sent, {} waiting for encryption keys. {state}",
-        s.frames_encoded, s.frames_gated, t.rtp_sent, t.audio_waiting_for_keys
+    trf(
+        "Microphone this call: {} frames encoded, {} held by the sensitivity gate, {} packets sent, {} waiting for encryption keys. {}",
+        &[
+            &s.frames_encoded,
+            &s.frames_gated,
+            &t.rtp_sent,
+            &t.audio_waiting_for_keys,
+            &state,
+        ],
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn view<'a>(
+/// A titled group of a settings page.
+pub fn section<'a>(
+    title: &'a str,
+    rows: impl IntoIterator<Item = Element<'a, crate::Message>>,
+) -> Element<'a, crate::Message> {
+    let mut body = column![
+        text(title)
+            .size(13)
+            .font(crate::ui::BOLD)
+            .color(crate::style::SUBTLE)
+    ]
+    .spacing(10);
+    for row in rows {
+        body = body.push(row);
+    }
+    body.into()
+}
+
+fn hint<'a>(line: impl text::IntoFragment<'a>) -> Element<'a, crate::Message> {
+    text(line).size(12).color(crate::style::MUTED).into()
+}
+
+/// The input and output devices.
+pub fn devices<'a>(
     settings: &'a Settings,
     prefs: &Preferences,
     input_error: Option<fastcord_audio::DeviceErrorKind>,
     output_error: Option<fastcord_audio::DeviceErrorKind>,
-    noise_status: Option<NoiseSuppressionStatus>,
-    stats: Option<EngineStats>,
-    transmit: String,
-    voice_input: Element<'a, crate::Message>,
 ) -> Element<'a, crate::Message> {
     let (inputs, input) = options(&settings.inputs, &prefs.input);
     let (outputs, output) = options(&settings.outputs, &prefs.output);
-    container(column![
-        text("Audio devices").size(24),
-        text("Choose input and output independently. Explicit devices never fall back to speakers."),
-        text("Microphone input"),
-        pick_list(inputs, Some(input), |option| crate::Message::SelectAudioDevice(Direction::Input, option)).width(Length::Fill),
-        text(input_error.map_or_else(String::new, |error| format!("Input stopped ({error}): {} Select a device to retry.", error.advice()))),
-        text(settings.input_error.unwrap_or("")),
-        text("Playback output"),
-        pick_list(outputs, Some(output), |option| crate::Message::SelectAudioDevice(Direction::Output, option)).width(Length::Fill),
-        text(output_error.map_or_else(String::new, |error| format!("Output stopped ({error}): {} Select a device to retry.", error.advice()))),
-        text(settings.output_error.unwrap_or("")),
-        text("Microphone noise suppression"),
-        pick_list(NoiseSuppression::ALL, Some(prefs.noise_suppression), crate::Message::NoiseSuppressionChanged).width(Length::Fill),
-        text(noise_summary(prefs.noise_suppression, noise_status)),
-        text(noise_status.and_then(|status| status.error).map_or_else(String::new, |error| error.to_string())),
-        text("Light (RNNoise) is the default and uses little CPU. High quality (DeepFilterNet 3) removes keyboard and background voices better, but adds about 30 ms of delay and uses more CPU and memory; it loads only while selected and is released when you switch away. Microphone only; never applied to shared or system audio."),
-        voice_input,
-        checkbox(prefs.echo_cancellation).label("Echo cancellation").on_toggle(crate::Message::EchoCancellationChanged),
-        text("Removes what your speakers play from your microphone, so others do not hear themselves. It needs a few seconds of speech to adapt, works best with the microphone and speakers in a fixed position, and is not needed with a headset."),
-        checkbox(!prefs.notifications_off).label("Desktop notifications for DMs and mentions while the window is not active").on_toggle(crate::Message::NotificationsToggled),
-        checkbox(!prefs.notification_previews_off).label("Show message text in notifications").on_toggle(crate::Message::NotificationPreviewsToggled),
-        checkbox(prefs.interface_sounds).label("Interface sounds (mute, deafen, joining and leaving a call, pings)").on_toggle(crate::Message::InterfaceSoundsToggled),
-        row![text("Interface sound volume"), slider(0..=100u8, prefs.interface_volume, crate::Message::InterfaceVolumeChanged).width(Length::Fill), text(format!("{}%", prefs.interface_volume))].spacing(12),
-        checkbox(prefs.voice_recording).label("Voice message recording (experimental)").on_toggle(crate::Message::VoiceRecordingToggled),
-        text("Adds a Record voice message button to text channels: record, preview, then send. Discord documents voice-message recording for its mobile apps only, so whether it is accepted from this client is unverified. The microphone is open only while recording."),
-        text(stats_summary(stats)),
-        text(transmit),
-        text(voice_log_summary()).size(12),
-        text(if settings.probing { "Looking for audio devices…" } else { "System default follows the OS only when selected. Refresh lists after plugging a device in." }),
-        row![button("Refresh devices").on_press_maybe((!settings.probing).then_some(crate::Message::RefreshAudioDevices)), crate::icons::close(Some(crate::Message::CloseAudioSettings))].spacing(12),
-    ].spacing(12)).padding(24).width(Length::Fixed(650.0)).style(container::rounded_box).into()
+    let mut rows: Vec<Element<'a, crate::Message>> = vec![
+        crate::ui::label(tr("INPUT DEVICE")),
+        pick_list(inputs, Some(input), |option| {
+            crate::Message::SelectAudioDevice(Direction::Input, option)
+        })
+        .width(Length::Fill)
+        .into(),
+    ];
+    if let Some(error) = input_error {
+        rows.push(crate::ui::error(trf(
+            "Microphone stopped ({}): {} Choose a device to try again.",
+            &[&tr(&error.to_string()), &tr(error.advice())],
+        )));
+    }
+    if let Some(error) = settings.input_error {
+        rows.push(crate::ui::error(tr(error)));
+    }
+    rows.push(crate::ui::label(tr("OUTPUT DEVICE")));
+    rows.push(
+        pick_list(outputs, Some(output), |option| {
+            crate::Message::SelectAudioDevice(Direction::Output, option)
+        })
+        .width(Length::Fill)
+        .into(),
+    );
+    if let Some(error) = output_error {
+        rows.push(crate::ui::error(trf(
+            "Playback stopped ({}): {} Choose a device to try again.",
+            &[&tr(&error.to_string()), &tr(error.advice())],
+        )));
+    }
+    if let Some(error) = settings.output_error {
+        rows.push(crate::ui::error(tr(error)));
+    }
+    rows.push(
+        row![
+            hint(if settings.probing {
+                tr("Looking for audio devices…")
+            } else {
+                tr("A chosen device never falls back to another one. Refresh the lists after plugging a device in.")
+            }),
+            iced::widget::space::horizontal(),
+            crate::ui::neutral(
+                tr("Refresh"),
+                (!settings.probing).then_some(crate::Message::RefreshAudioDevices),
+            ),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center)
+        .into(),
+    );
+    section(tr("Devices"), rows)
+}
+
+/// Noise suppression and echo cancellation.
+pub fn processing<'a>(
+    prefs: &Preferences,
+    noise_status: Option<NoiseSuppressionStatus>,
+) -> Element<'a, crate::Message> {
+    let mut rows: Vec<Element<'a, crate::Message>> = vec![
+        crate::ui::label(tr("NOISE SUPPRESSION")),
+        pick_list(
+            NoiseSuppression::ALL.map(Noise),
+            Some(Noise(prefs.noise_suppression)),
+            |noise| crate::Message::NoiseSuppressionChanged(noise.0),
+        )
+        .width(Length::Fill)
+        .into(),
+        hint(noise_summary(prefs.noise_suppression, noise_status)),
+    ];
+    if let Some(error) = noise_status.and_then(|status| status.error) {
+        rows.push(crate::ui::error(tr(&error.to_string()).to_owned()));
+    }
+    rows.push(hint(tr(
+        "Light uses little CPU. High quality removes keyboard and background voices better but adds about 30 ms of delay and uses more CPU. Applies to the microphone only.",
+    )));
+    rows.push(
+        checkbox(prefs.echo_cancellation)
+            .label(tr("Echo cancellation"))
+            .on_toggle(crate::Message::EchoCancellationChanged)
+            .into(),
+    );
+    rows.push(hint(tr(
+        "Removes what your speakers play from your microphone. Not needed with a headset.",
+    )));
+    section(tr("Voice processing"), rows)
+}
+
+/// Desktop notifications and interface sounds.
+pub fn notifications<'a>(prefs: &Preferences) -> Element<'a, crate::Message> {
+    section(
+        tr("Notifications"),
+        [
+            checkbox(!prefs.notifications_off)
+                .label(tr("Desktop notifications for direct messages and mentions while the window is not active"))
+                .on_toggle(crate::Message::NotificationsToggled)
+                .into(),
+            checkbox(!prefs.notification_previews_off)
+                .label(tr("Show message text in notifications"))
+                .on_toggle(crate::Message::NotificationPreviewsToggled)
+                .into(),
+            checkbox(prefs.interface_sounds)
+                .label(tr("Interface sounds (mute, deafen, joining and leaving a call, pings)"))
+                .on_toggle(crate::Message::InterfaceSoundsToggled)
+                .into(),
+            row![
+                text(tr("Interface sound volume")),
+                slider(
+                    0..=100u8,
+                    prefs.interface_volume,
+                    crate::Message::InterfaceVolumeChanged
+                )
+                .width(Length::Fill),
+                text(format!("{}%", prefs.interface_volume)),
+            ]
+            .spacing(12)
+            .into(),
+            hint(tr(
+                "Notifications for a server or a conversation are set in its menu.",
+            )),
+        ],
+    )
+}
+
+/// The experimental voice-message recorder.
+pub fn experimental<'a>(prefs: &Preferences) -> Element<'a, crate::Message> {
+    section(
+        tr("Experimental"),
+        [
+            checkbox(prefs.voice_recording)
+                .label(tr("Voice messages"))
+                .on_toggle(crate::Message::VoiceRecordingToggled)
+                .into(),
+            hint(tr(
+                "Adds “Voice message” to the + menu of the message box. Discord documents voice messages for its mobile apps only, so it may refuse them from this client. The microphone is on only while recording.",
+            )),
+        ],
+    )
+}
+
+/// Call health counters and the recent voice log, for explaining a problem.
+pub fn diagnostics<'a>(
+    stats: Option<EngineStats>,
+    transmit: String,
+) -> Element<'a, crate::Message> {
+    let mut rows = Vec::new();
+    for line in [stats_summary(stats), transmit, voice_log_summary()] {
+        if !line.is_empty() {
+            rows.push(text(line).size(12).color(crate::style::MUTED).into());
+        }
+    }
+    if rows.is_empty() {
+        rows.push(hint(tr("Call statistics appear here during a call.")));
+    }
+    section(tr("Call diagnostics"), rows)
 }
 
 fn path() -> Option<PathBuf> {
@@ -505,13 +675,6 @@ fn save_to(path: &Path, prefs: &Preferences) -> io::Result<()> {
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, bytes)?;
     fs::rename(temporary, path)
-}
-
-/// The bypass setting, read before the interface starts.
-pub fn launch_bypass() -> crate::desktop::Bypass {
-    path()
-        .map(|path| load_from(&path).bypass)
-        .unwrap_or_default()
 }
 
 pub async fn load() -> Preferences {
