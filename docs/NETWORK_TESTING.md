@@ -64,7 +64,7 @@ and persisted-profile reuse are not claimed as production evidence.
 
 The app-managed buffer bound is an explicit code budget: shared 32 tunnel slots,
 64 KiB forwarding per tunnel, 8 KiB bounded header staging, four <=96 KiB TLS
-stages, 16 remembered connection endpoints and bounded selector/settings state.
+stages, 32 transient CONNECT receipts, one active recovery endpoint and bounded selector/settings state.
 Kernel socket buffers and existing HTTP/TLS allocations are outside that budget
 and must be reported separately in a resource measurement.
 
@@ -305,3 +305,32 @@ Still open: blocked-route effectiveness of PacketOverlap, a physical independent
 capture, kernel-inclusive resource measurements, CDN/upload breadth and
 thirty-minute bidirectional voice/camera/screen-share tests. The packet helper
 handles TCP TLS only; existing UDP preludes remain unverified and opt-in.
+
+
+## Transport review follow-up (2026-10-25)
+
+The three review findings are covered by offline regressions in `fastcord-net`:
+
+- Scoped recovery tests hold an active CDN campaign gate and verify that another
+  CDN endpoint, the API and a different role do not wait. The matching endpoint
+  does wait; unrelated requests cannot consume its pending demand. Network
+  changes remove stale demands so a new endpoint can recover without a budget
+  reset.
+- Per-attempt tests interleave two connections to the same endpoint and verify
+  distinct addresses/errors, role/authority binding, unique IDs, revocation on
+  completion/cancellation and the 32-receipt cap. Paused-clock connector tests
+  check TLS timeout reporting, permit release, cancellation without a false
+  diagnostic demand, missing-scope refusal and IPv6 authority normalization.
+- A real local HTTP proxy accepts two concurrent requests from one HTTP client
+  to the same origin: one receives proxy authentication refusal and the other
+  encounters an untrusted origin certificate. Both typed errors remain distinct;
+  private CONNECT credentials, origin queries and request canaries never reach
+  the upstream proxy headers. Existing HTTP/2 and upload fixtures continue to
+  exercise the actual reqwest connector and both proxy hops.
+- Dial tests inject `AAAA, AAAA, A` and `A, A, AAAA` answer orders. A first-family
+  timeout still leaves the other family its own complete attempt deadline;
+  duplicate addresses are not redialed and two timeouts end at two attempts.
+
+These are deterministic/local correctness checks. They do not add live blocked-
+network, native Linux/macOS, resource-measurement or media interoperability
+acceptance evidence.

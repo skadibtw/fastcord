@@ -386,3 +386,76 @@ async fn upload_body_redirect_and_proxy_credentials_stay_on_their_intended_hops(
     };
     timeout(Duration::from_secs(10), check).await.unwrap();
 }
+
+#[tokio::test]
+async fn simultaneous_http_connections_keep_proxy_authentication_and_origin_certificate_errors_separate()
+ {
+    let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let context = NetworkContext::off()
+        .with_proxy(
+            ProxyConfig {
+                kind: ProxyKind::Http,
+                host: "127.0.0.1".into(),
+                port: proxy.local_addr().unwrap().port(),
+                username: None,
+            },
+            Zeroizing::new(String::new()),
+        )
+        .unwrap();
+    let (_, server) = tls(&[]);
+    let fixture = tokio::spawn(async move {
+        let (mut a, _) = proxy.accept().await.unwrap();
+        let a_head = head(&mut a).await;
+        let (mut b, _) = proxy.accept().await.unwrap();
+        let b_head = head(&mut b).await;
+        for headers in [a_head, b_head] {
+            let headers = String::from_utf8(headers).unwrap();
+            assert!(headers.starts_with("CONNECT localhost:443 HTTP/1.1"));
+            assert!(!headers.contains("fastcord-") && !headers.contains("canary"));
+            assert!(!headers.to_ascii_lowercase().contains("proxy-authorization"));
+        }
+        b.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .unwrap();
+        let reject_certificate = tokio::spawn(async move {
+            assert!(
+                tokio_rustls::TlsAcceptor::from(Arc::new(server))
+                    .accept(b)
+                    .await
+                    .is_err()
+            );
+        });
+        a.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+            .await
+            .unwrap();
+        reject_certificate.await.unwrap();
+    });
+    let client = context
+        .http_builder(Role::Cdn)
+        .unwrap()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let check = async {
+        let (a, b) = tokio::join!(
+            client.get("https://localhost/same?canary=one").send(),
+            client.get("https://localhost/same?canary=two").send()
+        );
+        let errors = [a.unwrap_err(), b.unwrap_err()];
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.category() == NetworkError::ProxyAuthentication),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.category() == NetworkError::CertificateRejected),
+            "{errors:?}"
+        );
+        assert!(!format!("{errors:?}").contains("canary"));
+        fixture.await.unwrap();
+    };
+    timeout(Duration::from_secs(5), check).await.unwrap();
+}

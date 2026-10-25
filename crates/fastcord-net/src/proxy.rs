@@ -244,19 +244,13 @@ pub(crate) async fn connect_proxy(config: &ProxyConfig) -> Result<TcpStream, Net
     if bounded.is_empty() {
         return Err(NetworkError::ProxyDns);
     }
-    timeout(TCP_TIMEOUT, async {
-        for address in bounded.into_iter().take(2) {
-            if let Ok(stream) = TcpStream::connect(address).await {
-                stream
-                    .set_nodelay(true)
-                    .map_err(|_| NetworkError::ProxyRefused)?;
-                return Ok(stream);
-            }
-        }
-        Err(NetworkError::ProxyRefused)
-    })
-    .await
-    .map_err(|_| NetworkError::ProxyTimeout)?
+    crate::dial::connect(&bounded, TCP_TIMEOUT, &mut None)
+        .await
+        .map(|(stream, _)| stream)
+        .map_err(|error| match error {
+            NetworkError::TcpTimeout => NetworkError::ProxyTimeout,
+            _ => NetworkError::ProxyRefused,
+        })
 }
 
 fn authority(host: &str, port: u16) -> String {

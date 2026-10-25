@@ -3,6 +3,8 @@
 
 mod bridge;
 mod broker;
+mod connect;
+mod dial;
 mod http;
 pub mod proxy;
 pub mod selector;
@@ -29,7 +31,7 @@ pub const MANAGED_BUFFER_RESERVATION_BYTES: usize = bridge::TUNNEL_LIMIT * (2 * 
     + 4 * tls::MAX_STAGING_BYTES
     + udp::MAX_ASSOCIATIONS * 65_536
     // Bounded settings input/serialization and conservative room for control
-    // tasks, endpoint/controller metadata and remaining small scratch buffers.
+    // tasks, the 32 connector receipts/active endpoint and remaining small scratch buffers.
     + 2 * settings::MAX_SETTINGS_BYTES
     // One helper capture, four bounded public-hello RPCs and pipe buffers.
     + 192 * 1024

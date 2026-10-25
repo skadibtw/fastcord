@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+- Auto recovery now waits only for the failed endpoint/role/TLS profile; an unrelated CDN campaign cannot stall healthy API requests. Stale demands are discarded on network changes without resetting diagnostic budgets.
+- Concurrent HTTP connections use bounded, per-CONNECT attempt IDs and receipts instead of a last-result-per-host ledger. Proxy/TLS errors and destination addresses cannot cross between requests; cancellation revokes the ID, and connector timeouts retain their typed diagnostics without replaying requests.
+- TCP dialing prefers a different IP family for its second attempt and gives each attempt its own deadline, so multiple AAAA answers cannot hide an available IPv4 result. The two-dial cap and proxy's ten-second overall limit remain.
+
 - Add optional Windows packet recovery (M96): a separate, manually elevated
   WinDivert helper, PID-authenticated local IPC and exact ClientHello filters;
   packet fake/disorder and sequence-overlap profiles inspired by zapret.

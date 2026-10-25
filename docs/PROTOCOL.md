@@ -1147,3 +1147,21 @@ require live validation. Eight shared associations each use one reused bounded
 64 KiB receive buffer to discard oversized datagrams portably. HTTP/HTTPS
 CONNECT has no UDP capability; SOCKS5 UDP cannot work if UDP to the proxy is
 blocked. Experimental direct preludes are disabled on all proxy routes.
+
+
+### Private CONNECT attempt correlation (2026-10-25)
+
+The application-local bridge receives Basic authentication with a username of
+`fastcord-<role>-<16 hexadecimal attempt-id digits>` and the existing random
+process-lifetime private bridge secret as its password. The ID belongs to one
+active connector future, is checked against its role and normalized authority,
+and is revoked when that future completes or is cancelled. Missing scope,
+unknown/revoked IDs, wrong roles, changed authorities and invalid credentials
+are refused before an upstream dial. The registry has 32 shared slots; no
+origin URL path, query, token or request body enters it. No attempt credential
+is forwarded to the configured upstream proxy or to origin HTTP headers.
+
+The connector reports proxy negotiation/TLS errors using that attempt's receipt.
+A successful TCP tunnel records its own destination address; there is no global
+last-address lookup across concurrent requests. Healthy HTTP pools remain intact,
+requests are not serialized to obtain correlation, and no request is replayed.

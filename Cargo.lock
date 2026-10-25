@@ -2280,6 +2280,7 @@ dependencies = [
  "socket2",
  "tokio",
  "tokio-rustls",
+ "tower",
  "webpki-roots",
  "zeroize",
 ]

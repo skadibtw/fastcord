@@ -1,7 +1,7 @@
-use std::collections::VecDeque;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(debug_assertions)]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -38,8 +38,8 @@ struct Shared {
     transforms: Arc<Semaphore>,
     tunnels: Arc<Semaphore>,
     pending: Arc<Mutex<Option<Demand>>>,
-    connected: Arc<Mutex<VecDeque<Connected>>>,
-    connection_epoch: Arc<AtomicU64>,
+    attempts: Arc<crate::connect::Attempts>,
+    recovering: Arc<Mutex<Option<crate::connect::Endpoint>>>,
     recovery_gate: Arc<tokio::sync::Mutex<()>>,
     associations: Arc<Semaphore>,
     #[cfg(debug_assertions)]
@@ -56,65 +56,15 @@ struct Demand {
     generation: u64,
 }
 
-struct Connected {
-    host: String,
-    port: u16,
-    role: Role,
-    address: Option<SocketAddr>,
-    failure: Option<NetworkError>,
-    generation: u64,
-    epoch: u64,
-}
-
 /// A transport task reports failure without retaining its owning bridge.
 #[derive(Clone)]
 pub(crate) struct FailureReporter {
     controller: Controller,
     pending: Arc<Mutex<Option<Demand>>>,
-    connected: Arc<Mutex<VecDeque<Connected>>>,
-    connection_epoch: Arc<AtomicU64>,
     enabled: bool,
 }
 
 impl FailureReporter {
-    pub(crate) fn connected(&self, host: &str, port: u16, role: Role, address: SocketAddr) {
-        self.endpoint(host, port, role, Some(address), None);
-    }
-    pub(crate) fn tunneled(&self, host: &str, port: u16, role: Role) {
-        self.endpoint(host, port, role, None, None);
-    }
-    fn endpoint(
-        &self,
-        host: &str,
-        port: u16,
-        role: Role,
-        address: Option<SocketAddr>,
-        failure: Option<NetworkError>,
-    ) {
-        if host.len() > 253 {
-            return;
-        }
-        let mut connected = self.connected.lock().unwrap_or_else(|p| p.into_inner());
-        connected.retain(|entry| {
-            !(entry.host.eq_ignore_ascii_case(host) && entry.port == port && entry.role == role)
-        });
-        if connected.len() == 16 {
-            connected.pop_front();
-        }
-        let epoch = self
-            .connection_epoch
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1);
-        connected.push_back(Connected {
-            host: host.to_owned(),
-            port,
-            role,
-            address,
-            failure,
-            generation: self.controller.generation(),
-            epoch,
-        });
-    }
     pub(crate) fn record(
         &self,
         host: &str,
@@ -125,7 +75,6 @@ impl FailureReporter {
         address: Option<SocketAddr>,
     ) {
         self.controller.note_failure(role, error);
-        self.endpoint(host, port, role, address, Some(error));
         if !self.enabled
             || !error.eligible_for_selection()
             || !probe_authorized(role, host)
@@ -135,7 +84,11 @@ impl FailureReporter {
             return;
         }
         let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-        if pending.is_none() {
+        let generation = self.controller.generation();
+        if pending
+            .as_ref()
+            .is_none_or(|pending| pending.generation != generation)
+        {
             *pending = Some(Demand {
                 host: host.to_owned(),
                 port,
@@ -143,9 +96,16 @@ impl FailureReporter {
                 profile,
                 failure: error,
                 address,
-                generation: self.controller.generation(),
+                generation,
             });
         }
+    }
+}
+
+struct RecoveryScope(Arc<Mutex<Option<crate::connect::Endpoint>>>);
+impl Drop for RecoveryScope {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).take();
     }
 }
 
@@ -185,8 +145,8 @@ impl NetworkContext {
             transforms: Arc::new(Semaphore::new(4)),
             tunnels: Arc::new(Semaphore::new(crate::bridge::TUNNEL_LIMIT)),
             pending: Arc::new(Mutex::new(None)),
-            connected: Arc::new(Mutex::new(VecDeque::new())),
-            connection_epoch: Arc::new(AtomicU64::new(0)),
+            attempts: Arc::default(),
+            recovering: Arc::default(),
             recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
             associations: Arc::new(Semaphore::new(crate::udp::MAX_ASSOCIATIONS)),
             #[cfg(debug_assertions)]
@@ -206,8 +166,8 @@ impl NetworkContext {
             transforms: self.0.transforms.clone(),
             tunnels: self.0.tunnels.clone(),
             pending: self.0.pending.clone(),
-            connected: self.0.connected.clone(),
-            connection_epoch: self.0.connection_epoch.clone(),
+            attempts: self.0.attempts.clone(),
+            recovering: self.0.recovering.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
             associations: self.0.associations.clone(),
             #[cfg(debug_assertions)]
@@ -236,8 +196,8 @@ impl NetworkContext {
             transforms: self.0.transforms.clone(),
             tunnels: self.0.tunnels.clone(),
             pending: self.0.pending.clone(),
-            connected: self.0.connected.clone(),
-            connection_epoch: self.0.connection_epoch.clone(),
+            attempts: self.0.attempts.clone(),
+            recovering: self.0.recovering.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
             associations: self.0.associations.clone(),
             #[cfg(debug_assertions)]
@@ -261,8 +221,8 @@ impl NetworkContext {
             transforms: self.0.transforms.clone(),
             tunnels: self.0.tunnels.clone(),
             pending: self.0.pending.clone(),
-            connected: self.0.connected.clone(),
-            connection_epoch: self.0.connection_epoch.clone(),
+            attempts: self.0.attempts.clone(),
+            recovering: self.0.recovering.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
             associations: self.0.associations.clone(),
             #[cfg(debug_assertions)]
@@ -290,8 +250,8 @@ impl NetworkContext {
             transforms: self.0.transforms.clone(),
             tunnels: self.0.tunnels.clone(),
             pending: self.0.pending.clone(),
-            connected: self.0.connected.clone(),
-            connection_epoch: self.0.connection_epoch.clone(),
+            attempts: self.0.attempts.clone(),
+            recovering: self.0.recovering.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
             associations: self.0.associations.clone(),
             #[cfg(debug_assertions)]
@@ -342,8 +302,6 @@ impl NetworkContext {
         FailureReporter {
             controller: self.0.controller.clone(),
             pending: self.0.pending.clone(),
-            connected: self.0.connected.clone(),
-            connection_epoch: self.0.connection_epoch.clone(),
             enabled: self.mode() == Mode::Auto,
         }
     }
@@ -432,80 +390,83 @@ impl NetworkContext {
         self.0.probe_output.store(enabled, Ordering::Relaxed);
     }
 
-    pub(crate) fn recent_failure(
-        &self,
-        host: &str,
-        port: u16,
-        role: Role,
-        after_epoch: u64,
-    ) -> Option<NetworkError> {
-        self.0
-            .connected
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .rev()
-            .find(|entry| {
-                entry.host.eq_ignore_ascii_case(host)
-                    && entry.port == port
-                    && entry.role == role
-                    && entry.epoch > after_epoch
-                    && entry.generation == self.controller().generation()
-            })
-            .and_then(|entry| entry.failure)
+    pub(crate) fn attempts(&self) -> Arc<crate::connect::Attempts> {
+        self.0.attempts.clone()
     }
 
-    pub(crate) fn connection_epoch(&self) -> u64 {
-        self.0.connection_epoch.load(Ordering::Relaxed)
-    }
-    pub(crate) fn connected_address(
-        &self,
-        host: &str,
-        port: u16,
-        role: Role,
-        after_epoch: u64,
-    ) -> Option<SocketAddr> {
-        self.0
-            .connected
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .rev()
-            .find(|entry| {
-                entry.host.eq_ignore_ascii_case(host)
-                    && entry.port == port
-                    && entry.role == role
-                    && entry.generation == self.controller().generation()
-                    && entry.epoch > after_epoch
-                    && entry.failure.is_none()
-            })
-            .and_then(|entry| entry.address)
+    pub(crate) async fn wait_for_endpoint(&self, endpoint: &crate::connect::Endpoint) {
+        self.recover(None, Some(endpoint)).await;
     }
 
     /// Drives a pending failure before the next production dial. The first
     /// failed attempt returns immediately so its owner records the failure and
     /// applies its normal backoff before entering this gate. No request replay.
     pub async fn wait_for_recovery(&self) {
-        self.recover(None).await;
+        self.recover(None, None).await;
     }
 
     #[cfg(debug_assertions)]
     pub async fn debug_recover_with(&self, strategy: Strategy) {
-        self.recover(Some(strategy)).await;
+        self.recover(Some(strategy), None).await;
     }
 
-    async fn recover(&self, forced: Option<Strategy>) {
+    async fn recover(&self, forced: Option<Strategy>, endpoint: Option<&crate::connect::Endpoint>) {
         if self.mode() != Mode::Auto {
             return;
         }
-        let _gate = self.0.recovery_gate.lock().await;
+        {
+            let mut pending = self.0.pending.lock().unwrap_or_else(|p| p.into_inner());
+            if pending
+                .as_ref()
+                .is_some_and(|demand| demand.generation != self.controller().generation())
+            {
+                pending.take();
+            }
+        }
+        let matches = |demand: &Demand| {
+            endpoint.is_none_or(|endpoint| {
+                endpoint.host.eq_ignore_ascii_case(&demand.host)
+                    && endpoint.port == demand.port
+                    && endpoint.role == demand.role
+                    && endpoint.profile == demand.profile
+            })
+        };
+        let active_matches = || {
+            endpoint.is_some_and(|endpoint| {
+                self.0
+                    .recovering
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .as_ref()
+                    == Some(endpoint)
+            })
+        };
+        if endpoint.is_some()
+            && !self
+                .0
+                .pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .is_some_and(matches)
+            && !active_matches()
+        {
+            return;
+        }
+        let _gate = match self.0.recovery_gate.try_lock() {
+            Ok(gate) => gate,
+            Err(_) if endpoint.is_some() && !active_matches() => return,
+            Err(_) => self.0.recovery_gate.lock().await,
+        };
         self.0.controller.wait_for_idle().await;
-        let pending = self
-            .0
-            .pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
+        let pending = {
+            let mut pending = self.0.pending.lock().unwrap_or_else(|p| p.into_inner());
+            if pending.as_ref().is_some_and(matches) {
+                pending.take()
+            } else {
+                None
+            }
+        };
         let Some(pending) = pending else {
             return;
         };
@@ -531,6 +492,14 @@ impl NetworkContext {
         ) else {
             return;
         };
+        *self.0.recovering.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(crate::connect::Endpoint {
+                host: target.host.clone(),
+                port: target.port,
+                role: target.role,
+                profile: target.profile,
+            });
+        let _scope = RecoveryScope(self.0.recovering.clone());
         let transforms = self.0.transforms.clone();
         let factory = self.0.prefix_factory.clone();
         #[cfg(debug_assertions)]
@@ -631,7 +600,14 @@ impl SocketBroker {
         role: Role,
     ) -> Result<TlsStream, NetworkError> {
         authorize(role, host, port)?;
-        self.0.wait_for_recovery().await;
+        self.0
+            .wait_for_endpoint(&crate::connect::Endpoint {
+                host: host.to_ascii_lowercase(),
+                port,
+                role,
+                profile: TlsProfile::WebSocket,
+            })
+            .await;
         let mut failed_address = None;
         let result = self
             .connect_tls_once(host, port, role, &mut failed_address)
@@ -859,21 +835,7 @@ pub(crate) async fn dial_public(
     failed_address: &mut Option<SocketAddr>,
 ) -> Result<(TcpStream, SocketAddr), NetworkError> {
     let addresses = resolve_public(host, port).await?;
-    let mut last = NetworkError::NoRoute;
-    for address in addresses.iter().take(2) {
-        *failed_address = Some(*address);
-        match timeout(Duration::from_secs(3), TcpStream::connect(address)).await {
-            Ok(Ok(stream)) => {
-                stream
-                    .set_nodelay(true)
-                    .map_err(|_| NetworkError::NoRoute)?;
-                return Ok((stream, *address));
-            }
-            Ok(Err(error)) => last = tcp_error(&error),
-            Err(_) => last = NetworkError::TcpTimeout,
-        }
-    }
-    Err(last)
+    crate::dial::connect(&addresses, Duration::from_secs(3), failed_address).await
 }
 
 pub(crate) fn tcp_error(error: &io::Error) -> NetworkError {
@@ -1130,5 +1092,94 @@ mod tests {
         remote.read_exact(&mut received).await.unwrap();
         assert_eq!(received, [8; 64]);
         assert_eq!(*counters.lock().unwrap(), (64, 128));
+    }
+}
+
+#[cfg(test)]
+mod recovery_scope_tests {
+    use super::*;
+    use crate::connect::Endpoint;
+    fn endpoint(host: &str, role: Role) -> Endpoint {
+        Endpoint {
+            host: host.into(),
+            port: 443,
+            role,
+            profile: TlsProfile::Http,
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_cdn_campaign_does_not_block_api_or_other_cdn_endpoints() {
+        let context = NetworkContext::new(Mode::Auto);
+        let active = endpoint("cdn.discordapp.com", Role::Cdn);
+        *context.0.recovering.lock().unwrap() = Some(active.clone());
+        let scope = RecoveryScope(context.0.recovering.clone());
+        let gate = context.0.recovery_gate.lock().await;
+        for target in [
+            endpoint("discord.com", Role::Rest),
+            endpoint("media.discordapp.net", Role::Cdn),
+            endpoint("cdn.discordapp.com", Role::Upload),
+        ] {
+            timeout(Duration::from_millis(1), context.wait_for_endpoint(&target))
+                .await
+                .unwrap();
+        }
+        assert!(
+            timeout(Duration::from_millis(1), context.wait_for_endpoint(&active))
+                .await
+                .is_err()
+        );
+        drop(scope);
+        drop(gate);
+        context.wait_for_endpoint(&active).await;
+        assert!(context.0.recovering.lock().unwrap().is_none());
+    }
+    #[tokio::test]
+    async fn network_changes_cannot_leave_a_stale_demand_blocking_other_endpoints() {
+        let context = NetworkContext::new(Mode::Auto);
+        let report = |host, role| {
+            context.record_failure(
+                host,
+                443,
+                role,
+                TlsProfile::Http,
+                NetworkError::TlsReset,
+                Some("1.1.1.1:443".parse().unwrap()),
+            )
+        };
+        report("cdn.discordapp.com", Role::Cdn);
+        context.controller().network_changed();
+        report("discord.com", Role::Rest);
+        assert_eq!(
+            context.0.pending.lock().unwrap().as_ref().unwrap().host,
+            "discord.com"
+        );
+        context.controller().network_changed();
+        context
+            .wait_for_endpoint(&endpoint("media.discordapp.net", Role::Cdn))
+            .await;
+        assert!(context.0.pending.lock().unwrap().is_none());
+        assert_eq!(context.controller().budget_snapshot().rolling_dials, 0);
+    }
+    #[tokio::test]
+    async fn an_unrelated_request_does_not_take_the_failed_endpoints_pending_demand() {
+        let context = NetworkContext::new(Mode::Auto);
+        context.record_failure(
+            "cdn.discordapp.com",
+            443,
+            Role::Cdn,
+            TlsProfile::Http,
+            NetworkError::TlsReset,
+            Some("1.1.1.1:443".parse().unwrap()),
+        );
+        context
+            .wait_for_endpoint(&endpoint("discord.com", Role::Rest))
+            .await;
+        assert!(context.0.pending.lock().unwrap().is_some());
+        assert_eq!(context.controller().budget_snapshot().rolling_dials, 0);
+        context.controller().network_changed();
+        context
+            .wait_for_endpoint(&endpoint("cdn.discordapp.com", Role::Cdn))
+            .await;
+        assert!(context.0.pending.lock().unwrap().is_none());
     }
 }

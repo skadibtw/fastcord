@@ -19,6 +19,7 @@ repository = "https://github.com/skadibtw/fastcord"
 
 [workspace.dependencies]
 http = "1"
+tower = { version = "0.5", default-features = false }
 fastcord-net = { path = "crates/fastcord-net" }
 fastcord-model = { path = "crates/fastcord-model" }
 fastcord-discord = { path = "crates/fastcord-discord" }

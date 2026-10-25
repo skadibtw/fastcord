@@ -30,6 +30,7 @@ struct Upstream {
     transforms: Arc<Semaphore>,
     slots: Arc<Semaphore>,
     reporter: FailureReporter,
+    attempts: Arc<crate::connect::Attempts>,
     proxy: Option<Arc<ProxyCredentials>>,
 }
 
@@ -88,6 +89,7 @@ impl Bridge {
             transforms: context.transforms(),
             slots: context.tunnel_slots(),
             reporter: context.failure_reporter(),
+            attempts: context.attempts(),
             proxy: if context.mode() == crate::settings::Mode::Proxy {
                 context.proxy_credentials()
             } else {
@@ -122,11 +124,25 @@ impl Bridge {
     }
 
     pub(crate) fn proxy(&self, role: Role) -> Result<reqwest::Proxy, NetworkError> {
-        reqwest::Proxy::https(format!("http://{}", self.address))
-            .map(|proxy| {
-                proxy.basic_auth(&format!("fastcord-{}", role.label()), self.secret.as_str())
-            })
-            .map_err(|_| NetworkError::BridgeUnavailable)
+        let base = reqwest::Url::parse(&format!("http://{}", self.address))
+            .map_err(|_| NetworkError::BridgeUnavailable)?;
+        let secret = self.secret.clone();
+        Ok(reqwest::Proxy::custom(move |target| {
+            let id = crate::connect::current(
+                target.host_str().unwrap_or(""),
+                target.port_or_known_default().unwrap_or(443),
+            );
+            let mut proxy = base.clone();
+            let username = id.map_or_else(
+                || "missing-scope".to_owned(),
+                |id| format!("fastcord-{}-{id:016x}", role.label()),
+            );
+            // This URL is only the private loopback proxy. No origin or user
+            // proxy credential is included, and it is never formatted as an error.
+            let _ = proxy.set_username(&username);
+            let _ = proxy.set_password(Some(secret.as_str()));
+            Some(proxy)
+        }))
     }
 }
 
@@ -178,12 +194,19 @@ async fn tunnel(
         return;
     };
     let parsed = parse_connect(&headers, credentials);
-    let Ok((host, port, role)) = parsed else {
+    let Ok((host, port, role, id)) = parsed else {
         let _ = client
             .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n")
             .await;
         return;
     };
+    let attempt = id.and_then(|id| upstream.attempts.get(id, role));
+    if id.is_some() && !attempt.as_ref().is_some_and(|a| a.matches(&host, port)) {
+        let _ = client
+            .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n")
+            .await;
+        return;
+    }
     drop(headers);
     if authorize(role, &host, port).is_err() {
         let _ = client
@@ -209,17 +232,32 @@ async fn tunnel(
     let (server, address, control) = match connected {
         Ok(connected) => connected,
         Err(error) => {
-            upstream
-                .reporter
-                .record(&host, port, role, TlsProfile::Http, error, failed_address);
+            if let Some(attempt) = &attempt {
+                attempt.failed(error);
+            }
+            if attempt
+                .as_ref()
+                .is_none_or(|attempt| attempt.generation() == upstream.controller.generation())
+            {
+                upstream.reporter.record(
+                    &host,
+                    port,
+                    role,
+                    TlsProfile::Http,
+                    error,
+                    failed_address,
+                );
+            }
             let _ = client
                 .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                 .await;
             return;
         }
     };
+    if let Some(attempt) = &attempt {
+        attempt.connected(address);
+    }
     let strategy = if let Some(address) = address {
-        upstream.reporter.connected(&host, port, role, address);
         crate::broker::select_strategy(
             &upstream.controller,
             upstream.factory.as_deref(),
@@ -230,7 +268,6 @@ async fn tunnel(
             TlsProfile::Http,
         )
     } else {
-        upstream.reporter.tunneled(&host, port, role);
         Strategy::Direct
     };
     if client.set_nodelay(true).is_err()
@@ -332,7 +369,7 @@ async fn read_headers(client: &mut TcpStream) -> std::io::Result<Zeroizing<Vec<u
 fn parse_connect(
     headers: &[u8],
     credentials: &[(Role, Zeroizing<String>)],
-) -> Result<(String, u16, Role), NetworkError> {
+) -> Result<(String, u16, Role, Option<u64>), NetworkError> {
     if headers.len() > HEADER_LIMIT || !headers.ends_with(b"\r\n\r\n") || headers.contains(&0) {
         return Err(NetworkError::InvalidTarget);
     }
@@ -348,6 +385,7 @@ fn parse_connect(
     }
     let (host, port) = parse_authority(authority)?;
     let mut role = None;
+    let mut attempt = None;
     let mut host_seen = false;
     for line in lines {
         if line.is_empty() {
@@ -369,12 +407,10 @@ fn parse_connect(
             if role.is_some() {
                 return Err(NetworkError::ProxyRefused);
             }
-            role = credentials.iter().find_map(|(role, expected)| {
-                constant_time_eq(value.as_bytes(), expected.as_bytes()).then_some(*role)
-            });
-            if role.is_none() {
-                return Err(NetworkError::ProxyRefused);
-            }
+            let authenticated =
+                authenticate(value, credentials).ok_or(NetworkError::ProxyRefused)?;
+            role = Some(authenticated.0);
+            attempt = authenticated.1;
         } else if key.eq_ignore_ascii_case("host") {
             if host_seen || value != authority {
                 return Err(NetworkError::InvalidTarget);
@@ -386,7 +422,38 @@ fn parse_connect(
             return Err(NetworkError::InvalidTarget);
         }
     }
-    Ok((host, port, role.ok_or(NetworkError::ProxyRefused)?))
+    Ok((host, port, role.ok_or(NetworkError::ProxyRefused)?, attempt))
+}
+
+fn authenticate(
+    value: &str,
+    credentials: &[(Role, Zeroizing<String>)],
+) -> Option<(Role, Option<u64>)> {
+    if let Some(role) = credentials.iter().find_map(|(role, expected)| {
+        constant_time_eq(value.as_bytes(), expected.as_bytes()).then_some(*role)
+    }) {
+        return Some((role, None));
+    }
+    let decoded = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(value.strip_prefix("Basic ")?)
+            .ok()?,
+    );
+    let text = std::str::from_utf8(&decoded).ok()?;
+    let (username, secret) = text.split_once(':')?;
+    let (username, id) = username.rsplit_once('-')?;
+    if id.len() != 16 {
+        return None;
+    }
+    let id = u64::from_str_radix(id, 16).ok().filter(|id| *id != 0)?;
+    let raw = Zeroizing::new(format!("{username}:{secret}"));
+    let canonical = Zeroizing::new(format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+    ));
+    credentials.iter().find_map(|(role, expected)| {
+        constant_time_eq(canonical.as_bytes(), expected.as_bytes()).then_some((*role, Some(id)))
+    })
 }
 
 fn parse_authority(authority: &str) -> Result<(String, u16), NetworkError> {
@@ -473,7 +540,7 @@ mod tests {
         let valid = b"CONNECT discord.com:443 HTTP/1.1\r\nHost: discord.com:443\r\nProxy-Authorization: Basic canary-auth\r\n\r\n";
         assert_eq!(
             parse_connect(valid, &credentials()).unwrap(),
-            ("discord.com".into(), 443, Role::Rest)
+            ("discord.com".into(), 443, Role::Rest, None)
         );
         for bad in [
             "GET discord.com:443 HTTP/1.1\r\n\r\n",

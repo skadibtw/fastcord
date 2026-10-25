@@ -23,6 +23,7 @@ pub struct HttpBuilder {
     role: Role,
     local: bool,
     invalid_headers: bool,
+    connector: Option<crate::connect::ConnectLayer>,
 }
 
 impl HttpBuilder {
@@ -39,24 +40,29 @@ impl HttpBuilder {
             .use_preconfigured_tls(
                 (*tls_config(TlsProfile::Http, context.mode() == Mode::Auto)?).clone(),
             );
-        if !local {
-            match context.mode() {
-                Mode::Off => inner = inner.dns_resolver(Arc::new(PublicResolver { role })),
-                Mode::Auto => inner = inner.proxy(context.bridge_proxy(role)?),
-                Mode::Proxy => {
-                    if context.proxy_config().is_none() {
-                        return Err(NetworkError::ProxyConfiguration);
-                    }
-                    inner = inner.proxy(context.bridge_proxy(role)?);
-                }
+        let connector = if !local && context.mode() != Mode::Off {
+            if context.mode() == Mode::Proxy && context.proxy_config().is_none() {
+                return Err(NetworkError::ProxyConfiguration);
             }
-        }
+            inner = inner.proxy(context.bridge_proxy(role)?);
+            Some(crate::connect::ConnectLayer {
+                context: context.clone(),
+                role,
+                timeout: None,
+            })
+        } else {
+            if !local {
+                inner = inner.dns_resolver(Arc::new(PublicResolver { role }));
+            }
+            None
+        };
         Ok(Self {
             inner,
             context,
             role,
             local,
             invalid_headers: false,
+            connector,
         })
     }
 
@@ -81,7 +87,11 @@ impl HttpBuilder {
         self
     }
     pub fn connect_timeout(mut self, value: Duration) -> Self {
-        self.inner = self.inner.connect_timeout(value);
+        if let Some(connector) = &mut self.connector {
+            connector.timeout = Some(value);
+        } else {
+            self.inner = self.inner.connect_timeout(value);
+        }
         self
     }
     pub fn timeout(mut self, value: Duration) -> Self {
@@ -114,8 +124,12 @@ impl HttpBuilder {
         if self.invalid_headers {
             return Err(NetworkError::InvalidTarget);
         }
-        let inner = self
-            .inner
+        let inner = if let Some(connector) = self.connector {
+            self.inner.connector_layer(connector)
+        } else {
+            self.inner
+        };
+        let inner = inner
             .build()
             .map_err(|_| NetworkError::TlsProtocolRejected)?;
         Ok(HttpClient {
@@ -190,44 +204,25 @@ impl HttpClient {
             let bare_host = host.trim_start_matches('[').trim_end_matches(']');
             authorize(self.role, bare_host, port).map_err(HttpError::from_category)?;
         }
-        // Keep only an endpoint during this future; no path/query/header/token
-        // can enter the diagnostic controller.
-        let host = host.to_owned();
         if !self.local {
-            self.context.wait_for_recovery().await;
-        }
-        let before_connection = self.context.connection_epoch();
-        let result = self.inner.execute(request).await.map_err(|raw| {
-            let mut error = HttpError::from(raw);
-            if error.is_connect()
-                && self.context.mode() != Mode::Off
-                && let Some(category) =
-                    self.context
-                        .recent_failure(&host, port, self.role, before_connection)
-            {
-                error.category = category;
-            } else if error.is_connect()
-                && self.context.mode() == Mode::Auto
-                && self
-                    .context
-                    .connected_address(&host, port, self.role, before_connection)
-                    .is_none()
-            {
-                error.category = NetworkError::BridgeUnavailable;
-            }
-            error
-        });
-        if let Err(error) = result.as_ref() {
-            if error.is_connect() && !self.local {
-                self.context.record_failure(
-                    &host,
+            self.context
+                .wait_for_endpoint(&crate::connect::Endpoint {
+                    host: host
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .to_ascii_lowercase(),
                     port,
-                    self.role,
-                    TlsProfile::Http,
-                    error.category(),
-                    self.context
-                        .connected_address(&host, port, self.role, before_connection),
-                );
+                    role: self.role,
+                    profile: TlsProfile::Http,
+                })
+                .await;
+        }
+        let result = self.inner.execute(request).await.map_err(HttpError::from);
+        if let Err(error) = result.as_ref() {
+            if !self.local && self.context.mode() == Mode::Off && error.is_connect() {
+                self.context
+                    .controller()
+                    .note_failure(self.role, error.category());
             }
         } else {
             self.context.controller().note_service_reachable(self.role);
@@ -319,45 +314,24 @@ impl From<reqwest::Error> for HttpError {
     fn from(error: reqwest::Error) -> Self {
         let connect = error.is_connect();
         let timeout = error.is_timeout();
-        let mut category = if timeout && connect {
-            NetworkError::TcpTimeout
-        } else {
-            NetworkError::TlsProtocolRejected
-        };
-        let mut source = error.source();
-        while let Some(inner) = source {
-            if let Some(tls) = inner.downcast_ref::<tokio_rustls::rustls::Error>() {
-                category = match tls {
-                    tokio_rustls::rustls::Error::InvalidCertificate(_)
-                    | tokio_rustls::rustls::Error::NoCertificatesPresented => {
-                        NetworkError::CertificateRejected
-                    }
-                    _ => NetworkError::TlsProtocolRejected,
-                };
-                break;
-            }
-            if let Some(io) = inner.downcast_ref::<std::io::Error>() {
-                // std::io::Error's source chain does not always expose its
-                // contained rustls error. Inspect the typed payload directly;
-                // never infer certificate failures from an error string.
-                if io
-                    .get_ref()
-                    .is_some_and(|error| error.is::<tokio_rustls::rustls::Error>())
-                {
-                    category = crate::broker::tls_error(io);
-                    break;
-                }
-                category = crate::broker::tcp_error(io);
-            }
-            if let Some(net) = inner.downcast_ref::<NetworkError>() {
-                category = *net;
-            }
-            source = inner.source();
-        }
+        let category = crate::connect::classify(
+            &error,
+            if timeout && connect {
+                NetworkError::TcpTimeout
+            } else {
+                NetworkError::TlsProtocolRejected
+            },
+        );
         Self {
             category,
             connect,
-            timeout,
+            timeout: timeout
+                || matches!(
+                    category,
+                    NetworkError::TcpTimeout
+                        | NetworkError::TlsTimeout
+                        | NetworkError::ProxyTimeout
+                ),
             body: error.is_body(),
             request: error.is_request(),
         }
