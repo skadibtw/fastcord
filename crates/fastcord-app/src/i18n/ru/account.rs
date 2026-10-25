@@ -462,6 +462,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ),
     ("Friend request sent.", "Запрос в друзья отправлен."),
     ("Confirm acceptance", "Подтвердить принятие"),
+    ("Confirm remove", "Подтвердить удаление"),
+    ("Confirm block", "Подтвердить блокировку"),
     (
         "Discord considers this person a stranger. Only confirm if you recognize them and want to accept their friend request.",
         "Discord считает этого пользователя незнакомцем. Подтверждайте только если вы его узнаёте и хотите принять запрос в друзья.",

@@ -75,6 +75,10 @@ pub enum Event {
     AddInput(String),
     AddSubmit,
     Act(Snowflake, RelationshipAction),
+    /// Unfriend or block: ask first, in place of the row's buttons.
+    Ask(Snowflake, RelationshipAction),
+    /// Dismiss that question.
+    Keep,
     CancelAccept(Snowflake),
     Done(u64, Snowflake, Result<(), RestError>),
     AddDone(u64, Result<(), RestError>),
@@ -111,6 +115,8 @@ pub struct State {
     pending: HashMap<Snowflake, RelationshipAction>,
     /// At most MAX_PENDING users whose plain acceptance Discord refused.
     confirmations: HashSet<Snowflake>,
+    /// The one unfriend or block waiting for Confirm.
+    asking: Option<(Snowflake, RelationshipAction)>,
     notice: Option<String>,
     profile: Option<ProfileView>,
     /// Bumped on logout/new session: answers from an earlier one are dropped.
@@ -270,6 +276,12 @@ impl State {
         self.update(event, rest)
     }
 
+    fn asking_for(&self, user: Snowflake) -> Option<RelationshipAction> {
+        self.asking
+            .filter(|(asked, _)| *asked == user)
+            .map(|(_, action)| action)
+    }
+
     pub fn update(&mut self, event: Event, rest: &RestClient) -> Task<Event> {
         match event {
             Event::Open => self.open = true,
@@ -300,7 +312,10 @@ impl State {
                     move |result| Event::AddDone(epoch, result),
                 );
             }
+            Event::Ask(user, action) => self.asking = Some((user, action)),
+            Event::Keep => self.asking = None,
             Event::Act(user, action) => {
+                self.asking = None;
                 if !self.begin(user, action) {
                     return Task::none();
                 }
@@ -401,19 +416,40 @@ fn small_button<'a>(
 }
 
 /// The buttons that apply to one relationship.
+/// `asking` is the unfriend or block waiting for Confirm for this user: an
+/// unfriend cannot be undone alone and a block drops the conversation, so
+/// both ask first (Decline and Cancel request stay one click).
 fn actions<'a>(
     kind: Option<RelationshipKind>,
     user: Snowflake,
     busy: bool,
     confirm: bool,
+    asking: Option<RelationshipAction>,
 ) -> Vec<Element<'a, Event>> {
+    if let Some(action) = asking {
+        let label = if action == RelationshipAction::Block {
+            "Confirm block"
+        } else {
+            "Confirm remove"
+        };
+        return vec![
+            small_button(
+                label,
+                (!busy).then_some(Event::Act(user, action)),
+                true,
+                true,
+            ),
+            small_button("Cancel", Some(Event::Keep), false, false),
+        ];
+    }
     let act = |action| (!busy).then_some(Event::Act(user, action));
+    let ask = |action| (!busy).then_some(Event::Ask(user, action));
     let message = (!busy).then_some(Event::OpenDm(user));
     match kind {
         Some(RelationshipKind::Friend) => vec![
             small_button("Message", message, false, true),
-            small_button("Remove", act(RelationshipAction::Remove), true, false),
-            small_button("Block", act(RelationshipAction::Block), true, false),
+            small_button("Remove", ask(RelationshipAction::Remove), true, false),
+            small_button("Block", ask(RelationshipAction::Block), true, false),
         ],
         Some(RelationshipKind::IncomingRequest) => {
             let mut buttons = vec![small_button(
@@ -442,7 +478,7 @@ fn actions<'a>(
             ));
             buttons.push(small_button(
                 "Block",
-                act(RelationshipAction::Block),
+                ask(RelationshipAction::Block),
                 true,
                 false,
             ));
@@ -470,7 +506,7 @@ fn actions<'a>(
                 false,
                 false,
             ),
-            small_button("Block", act(RelationshipAction::Block), true, false),
+            small_button("Block", ask(RelationshipAction::Block), true, false),
         ],
     }
 }
@@ -489,13 +525,20 @@ fn person_row<'a>(
     pending: Option<RelationshipAction>,
     status: Option<Status>,
     confirm: bool,
+    asking: Option<RelationshipAction>,
 ) -> Element<'a, Event> {
     let user = &relationship.user;
     let mut buttons = row![].spacing(6).align_y(alignment::Vertical::Center);
     if pending.is_some() {
         buttons = buttons.push(text(tr("Working…")).size(12).style(text::secondary));
     }
-    for button in actions(Some(relationship.kind), user.id, pending.is_some(), confirm) {
+    for button in actions(
+        Some(relationship.kind),
+        user.id,
+        pending.is_some(),
+        confirm,
+        asking,
+    ) {
         buttons = buttons.push(button);
     }
     let main = row![
@@ -597,6 +640,7 @@ pub fn view<'a>(
                 state.pending.get(&relationship.user.id).copied(),
                 presences.get(&relationship.user.id).map(|p| p.status),
                 state.confirmations.contains(&relationship.user.id),
+                state.asking_for(relationship.user.id),
             ));
         }
     }
@@ -798,7 +842,7 @@ pub fn profile_view<'a>(
         if confirm {
             card = card.push(text(tr(STRANGER_WARNING)).size(12));
         }
-        for button in actions(kind, user.id, busy, confirm) {
+        for button in actions(kind, user.id, busy, confirm, state.asking_for(user.id)) {
             buttons = buttons.push(button);
         }
         // Ignore never changes the relationship; it is its own request.
@@ -1041,6 +1085,34 @@ mod tests {
             avatar: None,
             bot: false,
         }
+    }
+
+    #[test]
+    fn unfriend_and_block_ask_before_sending() {
+        let client = rest();
+        let mut state = State::default();
+        let bob = Snowflake(2);
+        let buttons = |state: &State| {
+            actions(
+                Some(RelationshipKind::Friend),
+                bob,
+                false,
+                false,
+                state.asking_for(bob),
+            )
+            .len()
+        };
+        assert_eq!(buttons(&state), 3, "Message, Remove, Block");
+        let _ = state.update(Event::Ask(bob, RelationshipAction::Remove), &client);
+        assert!(state.pending.is_empty(), "asking sends nothing");
+        assert_eq!(buttons(&state), 2, "Confirm and Cancel replace the row");
+        assert_eq!(state.asking_for(Snowflake(3)), None, "only Bob's row asks");
+        let _ = state.update(Event::Keep, &client);
+        assert_eq!(state.asking, None);
+        let _ = state.update(Event::Ask(bob, RelationshipAction::Block), &client);
+        let _ = state.update(Event::Act(bob, RelationshipAction::Block), &client);
+        assert_eq!(state.asking, None);
+        assert_eq!(state.pending[&bob], RelationshipAction::Block);
     }
 
     #[test]
