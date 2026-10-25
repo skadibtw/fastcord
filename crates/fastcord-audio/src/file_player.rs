@@ -561,6 +561,8 @@ mod tests {
     struct Log {
         frames: Vec<(Instant, u64, u16)>,
         gains: Vec<f32>,
+        /// Offers refused because the sink was full.
+        refused: usize,
     }
 
     struct Recorder {
@@ -572,6 +574,7 @@ mod tests {
     impl Sink for Recorder {
         fn offer(&mut self, frame: &RemoteFrame) -> Offer {
             if self.full.load(Ordering::Acquire) {
+                self.log.lock().unwrap().refused += 1;
                 return Offer::Full;
             }
             let id = packet_id(frame.packet.as_bytes());
@@ -750,8 +753,15 @@ mod tests {
     fn a_full_queue_is_retried_without_losing_or_reordering_packets() {
         let rig = rig(sample(30, 9));
         rig.full.store(true, Ordering::Release);
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(rig.ids().len() <= 1);
+        // Packets offered before the flag was seen may have landed; once the
+        // sink has refused, the player must retry the same packet and send
+        // nothing new, however the threads were scheduled.
+        let refused = || rig.log.lock().unwrap().refused;
+        wait_for(|| refused() >= 1);
+        let landed = rig.ids();
+        let seen = refused();
+        wait_for(|| refused() >= seen + 3);
+        assert_eq!(rig.ids(), landed, "nothing is sent while the sink is full");
         rig.full.store(false, Ordering::Release);
         wait_for(|| rig.state() == PlayerState::Ended);
         assert_eq!(rig.ids(), (0..30).collect::<Vec<_>>());
