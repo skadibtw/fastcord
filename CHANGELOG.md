@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- Requests to Discord carry the desktop client's Chromium header set (`sec-ch-ua*` from the pinned Chromium, `sec-fetch-*`, `accept-language`, `accept-encoding: gzip, deflate, br` with decoding, `referer`, `origin` on writes, `x-discord-timezone` from the OS) and a bounded in-memory `discord.com` cookie jar; the QR login exchange now sends the identity headers too, and the Gateway, QR and voice WebSocket handshakes carry the user agent, language and no-cache headers (ADR 0005, IDENTITY_AUDIT A7-A9). New dependencies: reqwest's gzip/deflate/brotli decoders.
 - REST and the Gateway use API version 9, the official client's (`/api/v9`, `?v=9`), instead of 10; the fake server follows (ADR 0005, IDENTITY_AUDIT A6).
 - Password login sends `X-Fingerprint`, obtained once per process from Discord's unauthenticated `GET /experiments`, as the official client does before it has a token (ADR 0005, IDENTITY_AUDIT A5).
 - The client analytics heartbeat session in the identity is regenerated every 30 minutes, and the installation id Discord issues in READY (`apex_experiments`) is kept in an `installation-id` file of the data folder and sent as `installation_id` and `X-Installation-ID` from then on (ADR 0005, IDENTITY_AUDIT A2-A4). The REST client and the Gateway now share one `Identity`; `Gateway::start` takes it from the REST client.

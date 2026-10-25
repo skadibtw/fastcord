@@ -13,14 +13,22 @@ pub struct OsRelease {
     pub window_manager: Option<String>,
     /// Linux: `PRETTY_NAME` from os-release.
     pub distro: Option<String>,
+    /// The IANA time zone (`Europe/Moscow`), when the OS names one.
+    pub timezone: Option<String>,
 }
 
 #[cfg(windows)]
 pub fn os_release() -> OsRelease {
     let (major, minor, build) = windows_version();
+    // WinRT's calendar reports the IANA name, as Chromium's ICU does.
+    let timezone = windows::Globalization::Calendar::new()
+        .and_then(|calendar| calendar.GetTimeZone())
+        .ok()
+        .map(|zone| zone.to_string_lossy());
     OsRelease {
         version: format!("{major}.{minor}.{build}"),
         sdk_version: Some(build.to_string()),
+        timezone,
         ..OsRelease::default()
     }
 }
@@ -62,6 +70,7 @@ pub fn os_release() -> OsRelease {
             env("GDMSESSION"),
         )),
         distro: pretty_name(&os_release),
+        timezone: unix_time_zone(),
     }
 }
 
@@ -76,13 +85,41 @@ pub fn os_release() -> OsRelease {
         .unwrap_or_default();
     OsRelease {
         version: version.trim().to_owned(),
+        timezone: unix_time_zone(),
         ..OsRelease::default()
     }
+}
+
+/// `TZ` when it names a zone, else the zone `/etc/localtime` links to.
+#[cfg(unix)]
+fn unix_time_zone() -> Option<String> {
+    let from_env = std::env::var("TZ").ok().and_then(|tz| zone_name(&tz));
+    from_env.or_else(|| {
+        let target = std::fs::read_link("/etc/localtime").ok()?;
+        zone_name(target.to_str()?)
+    })
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn os_release() -> OsRelease {
     OsRelease::default()
+}
+
+/// The zone in a `TZ` value or a zoneinfo path: `Europe/Moscow` from
+/// `Europe/Moscow`, `:Europe/Moscow` or `/usr/share/zoneinfo/Europe/Moscow`.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn zone_name(value: &str) -> Option<String> {
+    let value = value.strip_prefix(':').unwrap_or(value);
+    let zone = match value.rsplit_once("zoneinfo/") {
+        Some((_, zone)) => zone,
+        None if !value.starts_with('/') => value,
+        None => return None,
+    };
+    let valid = (1..=64).contains(&zone.len())
+        && zone
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'));
+    valid.then(|| zone.to_owned())
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -136,6 +173,26 @@ mod tests {
     }
 
     #[test]
+    fn zone_names_are_read_from_tz_values_and_zoneinfo_paths() {
+        assert_eq!(zone_name("Europe/Moscow").as_deref(), Some("Europe/Moscow"));
+        assert_eq!(
+            zone_name(":America/New_York").as_deref(),
+            Some("America/New_York")
+        );
+        assert_eq!(
+            zone_name("/usr/share/zoneinfo/Etc/GMT+3").as_deref(),
+            Some("Etc/GMT+3")
+        );
+        assert_eq!(
+            zone_name("/var/db/timezone/zoneinfo/Asia/Tokyo").as_deref(),
+            Some("Asia/Tokyo")
+        );
+        assert_eq!(zone_name("/etc/custom"), None);
+        assert_eq!(zone_name(""), None);
+        assert_eq!(zone_name("bad zone"), None);
+    }
+
+    #[test]
     fn the_running_os_reports_a_release() {
         let release = os_release();
         if cfg!(windows) {
@@ -147,6 +204,9 @@ mod tests {
             assert_eq!(parts.len(), 3);
             assert!(parts[0] >= 10, "{}", release.version);
             assert_eq!(release.sdk_version, Some(parts[2].to_string()));
+            let zone = release.timezone.clone().expect("Windows names a zone");
+            assert_eq!(zone_name(&zone).as_deref(), Some(zone.as_str()));
+            println!("os {} zone {zone}", release.version);
         }
         if cfg!(any(windows, target_os = "linux", target_os = "macos")) {
             assert!(!release.version.is_empty());

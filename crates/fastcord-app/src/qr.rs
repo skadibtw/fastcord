@@ -16,7 +16,10 @@ use iced::widget::qr_code;
 /// dropping its keys, when the stream is dropped, which `Handle::abort` does.
 pub fn events() -> impl Stream<Item = RemoteAuthEvent> {
     stream::unfold(None::<RemoteAuth>, |attempt| async move {
-        let mut attempt = attempt.unwrap_or_else(RemoteAuth::start);
+        let mut attempt = match attempt {
+            Some(attempt) => attempt,
+            None => RemoteAuth::start(crate::login::client_properties().await),
+        };
         let event = attempt.next_event().await?;
         Some((event, Some(attempt)))
     })

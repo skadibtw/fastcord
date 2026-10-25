@@ -302,7 +302,7 @@ impl PasswordAuth {
                 request = request.header("x-captcha-rqtoken", rqtoken);
             }
         }
-        let (status, bytes) = send(request.body(body)).await?;
+        let (status, bytes) = send(&self.http, request.body(body)).await?;
         classify_login(status, &bytes)
     }
 
@@ -333,7 +333,7 @@ impl PasswordAuth {
         if let Some(fingerprint) = crate::fingerprint::fingerprint(&self.http).await {
             request = request.header("x-fingerprint", fingerprint);
         }
-        let (status, bytes) = send(request).await?;
+        let (status, bytes) = send(&self.http, request).await?;
         match classify_login(status, &bytes)? {
             PasswordLogin::Token(token) => Ok(token),
             _ => Err(PasswordAuthError::Protocol),
@@ -342,13 +342,25 @@ impl PasswordAuth {
 }
 
 async fn send(
+    http: &reqwest::Client,
     request: reqwest::RequestBuilder,
 ) -> Result<(StatusCode, Vec<u8>), PasswordAuthError> {
-    let mut response = request
+    let request = request
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .send()
+        .header(reqwest::header::ORIGIN, crate::rest::DISCORD_ORIGIN)
+        .build()
+        .map_err(|_| PasswordAuthError::Configuration)?;
+    let mut request = request;
+    if let Some(cookies) = crate::cookies::header(request.url()) {
+        request
+            .headers_mut()
+            .insert(reqwest::header::COOKIE, cookies);
+    }
+    let mut response = http
+        .execute(request)
         .await
         .map_err(|_| PasswordAuthError::Network)?;
+    crate::cookies::store(response.url(), response.headers());
     let status = response.status();
     if response
         .content_length()

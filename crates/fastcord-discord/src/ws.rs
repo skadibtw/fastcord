@@ -19,6 +19,8 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 
+use crate::gateway::ClientProperties;
+
 #[cfg(not(feature = "fake-discord"))]
 type Stream = TlsStream<TcpStream>;
 #[cfg(feature = "fake-discord")]
@@ -93,6 +95,7 @@ pub(crate) mod fake {
     pub(super) async fn connect(
         mut request: tokio_tungstenite::tungstenite::handshake::client::Request,
         origin: &'static str,
+        browser: &super::ClientProperties,
         config: super::WebSocketConfig,
     ) -> Result<super::TlsSocket, super::ConnectError> {
         use super::{ConnectError, HeaderValue};
@@ -107,6 +110,7 @@ pub(crate) mod fake {
         request
             .headers_mut()
             .insert("Origin", HeaderValue::from_static(origin));
+        super::browser_headers(&mut request, browser);
         let tcp = TcpStream::connect(("127.0.0.1", port))
             .await
             .map_err(|_| ConnectError)?;
@@ -124,27 +128,53 @@ pub(crate) mod fake {
 pub(crate) struct ConnectError;
 
 /// Connects to a `wss://` URL. The `Origin` header is the documented client
-/// origin; Discord's gateways reject other origins.
+/// origin; Discord's gateways reject other origins. The handshake carries the
+/// rest of what the desktop client's Chromium sends (`browser_headers`).
 pub(crate) async fn connect(
     url: &str,
     origin: &'static str,
+    browser: &ClientProperties,
     config: WebSocketConfig,
     limit: Duration,
 ) -> Result<TlsSocket, ConnectError> {
-    timeout(limit, connect_inner(url, origin, config))
+    timeout(limit, connect_inner(url, origin, browser, config))
         .await
         .map_err(|_| ConnectError)?
+}
+
+/// `User-Agent`, `Accept-Language`, `Accept-Encoding` and the no-cache pair of
+/// a Chromium WebSocket handshake. No cookie: these hosts are on `discord.gg`,
+/// which never sets any. No `permessage-deflate` offer, which is not
+/// implemented.
+fn browser_headers(
+    request: &mut tokio_tungstenite::tungstenite::handshake::client::Request,
+    browser: &ClientProperties,
+) {
+    let headers = request.headers_mut();
+    if let Ok(agent) = HeaderValue::from_str(&browser.browser_user_agent) {
+        headers.insert("User-Agent", agent);
+    }
+    if let Ok(language) = HeaderValue::from_str(&browser.accept_language()) {
+        headers.insert("Accept-Language", language);
+    }
+    headers.insert(
+        "Accept-Encoding",
+        HeaderValue::from_static("gzip, deflate, br"),
+    );
+    headers.insert("Cache-Control", HeaderValue::from_static("no-cache"));
+    headers.insert("Pragma", HeaderValue::from_static("no-cache"));
 }
 
 async fn connect_inner(
     url: &str,
     origin: &'static str,
+    browser: &ClientProperties,
     config: WebSocketConfig,
 ) -> Result<TlsSocket, ConnectError> {
     let mut request = url.into_client_request().map_err(|_| ConnectError)?;
     #[cfg(feature = "fake-discord")]
     if crate::fake_origin::active() {
-        return fake::connect(request, origin, config).await;
+        return fake::connect(request, origin, browser, config).await;
     }
     let uri = request.uri().clone();
     if uri.scheme_str() != Some("wss") {
@@ -155,6 +185,7 @@ async fn connect_inner(
     request
         .headers_mut()
         .insert("Origin", HeaderValue::from_static(origin));
+    browser_headers(&mut request, browser);
     let tcp = TcpStream::connect((host.as_str(), port))
         .await
         .map_err(|_| ConnectError)?;
@@ -202,12 +233,31 @@ mod tests {
             "not a url",
         ] {
             assert_eq!(
-                connect(url, "https://discord.com", config, limit)
+                connect(url, "https://discord.com", &browser(), config, limit)
                     .await
                     .err(),
                 Some(ConnectError),
                 "{url}"
             );
         }
+    }
+
+    fn browser() -> ClientProperties {
+        ClientProperties::bundled(crate::gateway::HostOs::Windows, "en-US")
+    }
+
+    #[test]
+    fn the_handshake_carries_the_desktop_browser_headers() {
+        let mut request = "wss://gateway.discord.gg/?v=9"
+            .into_client_request()
+            .unwrap();
+        browser_headers(&mut request, &browser());
+        let headers = request.headers();
+        assert_eq!(headers["User-Agent"], browser().browser_user_agent);
+        assert_eq!(headers["Accept-Language"], "en-US,en;q=0.9");
+        assert_eq!(headers["Cache-Control"], "no-cache");
+        assert_eq!(headers["Pragma"], "no-cache");
+        assert!(!headers.contains_key("Cookie"));
+        assert!(!headers.contains_key("Sec-WebSocket-Extensions"));
     }
 }

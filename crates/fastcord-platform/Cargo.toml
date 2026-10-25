@@ -28,6 +28,7 @@ windows = { workspace = true, features = [
     "Wdk_System_SystemServices",
     "Foundation",
     "Foundation_Collections",
+    "Globalization",
     "Media_Core",
     "Media_Playback",
     "Media_SpeechSynthesis",

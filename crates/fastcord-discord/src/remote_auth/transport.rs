@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use super::RemoteAuthError;
+use crate::gateway::ClientProperties;
 use crate::ws::{self, TlsSocket};
 
 const GATEWAY_URL: &str = "wss://remote-auth-gateway.discord.gg/?v=2";
@@ -22,8 +23,14 @@ pub(crate) fn websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_MESSAGE_BYTES))
 }
 
-pub(crate) async fn connect() -> Result<GatewaySocket, RemoteAuthError> {
-    ws::connect(GATEWAY_URL, ORIGIN, websocket_config(), CONNECT_TIMEOUT)
-        .await
-        .map_err(|_| RemoteAuthError::Connect)
+pub(crate) async fn connect(browser: &ClientProperties) -> Result<GatewaySocket, RemoteAuthError> {
+    ws::connect(
+        GATEWAY_URL,
+        ORIGIN,
+        browser,
+        websocket_config(),
+        CONNECT_TIMEOUT,
+    )
+    .await
+    .map_err(|_| RemoteAuthError::Connect)
 }

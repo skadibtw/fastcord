@@ -46,7 +46,7 @@ impl Transport for Unauthenticated {
     }
 
     async fn connect(&self, url: &GatewayUrl) -> Result<TlsSocket, ConnectError> {
-        connect_tls(url).await
+        connect_tls(url, &ClientProperties::bundled(HostOs::current(), "en-US")).await
     }
 
     async fn authentication_required(&self) {

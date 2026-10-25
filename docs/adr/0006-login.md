@@ -38,6 +38,7 @@ flow is part of that identity: before authentication it must obtain a
 fingerprint through `GET /experiments` and send it in `X-Fingerprint`, keep the
 `discord.com` cookie jar created by the login page, and use the same API
 version (v9) and Electron/Chromium header set as the authenticated REST client. The
-CAPTCHA, MFA and no-bypass rules above are unchanged. Password login sends
-the fingerprint (once per process, `fastcord-discord::fingerprint`); the
-cookie jar and header set are tracked in `docs/IDENTITY_AUDIT.md` (A7-A9).
+CAPTCHA, MFA and no-bypass rules above are unchanged. Password login and
+the QR exchange send the fingerprint (once per process,
+`fastcord-discord::fingerprint`), the `discord.com` cookie jar and the same
+header set as the REST client.

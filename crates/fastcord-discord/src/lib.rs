@@ -23,6 +23,7 @@ mod automod;
 mod call;
 mod clock;
 mod community_admin;
+mod cookies;
 mod edit;
 mod error;
 #[cfg(feature = "fake-discord")]

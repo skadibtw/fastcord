@@ -153,6 +153,8 @@ async fn fetch_build_number() -> Option<u32> {
         .send()
         .await
         .ok()?;
+    // The page sets the Cloudflare cookies later API requests carry.
+    crate::cookies::store(response.url(), response.headers());
     if response.status() != reqwest::StatusCode::OK {
         return None;
     }
@@ -306,6 +308,8 @@ pub struct Host {
     pub window_manager: Option<String>,
     /// Linux only: `PRETTY_NAME` of os-release.
     pub distro: Option<String>,
+    /// The IANA time zone, for `x-discord-timezone`.
+    pub timezone: Option<String>,
 }
 
 impl Host {
@@ -317,6 +321,7 @@ impl Host {
             os_sdk_version: None,
             window_manager: None,
             distro: None,
+            timezone: None,
         }
     }
 }
@@ -354,6 +359,9 @@ pub struct ClientProperties {
     /// persisted by the app; absent until the first session supplies one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub installation_id: Option<String>,
+    /// Not a property: the IANA zone the REST headers report.
+    #[serde(skip)]
+    pub timezone: Option<String>,
 }
 
 impl ClientProperties {
@@ -388,6 +396,51 @@ impl ClientProperties {
             client_event_source: None,
             client_heartbeat_session_id: String::new(),
             installation_id: None,
+            timezone: host.timezone.clone().filter(|zone| is_time_zone(zone)),
+        }
+    }
+
+    /// `sec-ch-ua` as Chromium builds it for an embedder without a brand
+    /// (Electron): the GREASE brand and Chromium, ordered and spelled by the
+    /// major version (Chromium's `GenerateBrandVersionList`).
+    pub fn sec_ch_ua(&self) -> String {
+        let major: u32 = CHROMIUM_VERSION
+            .split('.')
+            .next()
+            .and_then(|major| major.parse().ok())
+            .unwrap_or(0);
+        const GREASE_CHARS: [char; 11] = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'];
+        const GREASE_VERSIONS: [&str; 3] = ["8", "99", "24"];
+        let seed = major as usize;
+        let grease = format!(
+            "\"Not{}A{}Brand\";v=\"{}\"",
+            GREASE_CHARS[seed % GREASE_CHARS.len()],
+            GREASE_CHARS[(seed + 1) % GREASE_CHARS.len()],
+            GREASE_VERSIONS[seed % GREASE_VERSIONS.len()]
+        );
+        let chromium = format!("\"Chromium\";v=\"{major}\"");
+        if seed.is_multiple_of(2) {
+            format!("{grease}, {chromium}")
+        } else {
+            format!("{chromium}, {grease}")
+        }
+    }
+
+    /// `sec-ch-ua-platform` without its quotes.
+    pub fn ua_platform(&self) -> &'static str {
+        match self.os {
+            "Windows" => "Windows",
+            "Mac OS X" => "macOS",
+            _ => "Linux",
+        }
+    }
+
+    /// Chromium's `Accept-Language` for the locale: the tag, then its language
+    /// at q=0.9 when the tag has a region.
+    pub fn accept_language(&self) -> String {
+        match self.system_locale.split_once('-') {
+            Some((language, _)) => format!("{},{language};q=0.9", self.system_locale),
+            None => self.system_locale.clone(),
         }
     }
 
@@ -407,6 +460,14 @@ impl ClientProperties {
         self.client_heartbeat_session_id = Uuid::new_v4().to_string();
         self
     }
+}
+
+/// An IANA zone name (`Europe/Moscow`, `UTC`): what `x-discord-timezone` may carry.
+fn is_time_zone(zone: &str) -> bool {
+    (1..=64).contains(&zone.len())
+        && zone
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'))
 }
 
 /// Whether `id` has the shape of an installation id: `<digits>.<base64url>`.
@@ -593,8 +654,7 @@ mod tests {
             os: HostOs::Windows,
             os_version: "10.0.26100".to_owned(),
             os_sdk_version: Some("26100".to_owned()),
-            window_manager: None,
-            distro: None,
+            ..Host::bare(HostOs::Windows)
         };
         let versions = Versions {
             client_version: "1.0.9999".to_owned(),
@@ -674,6 +734,48 @@ mod tests {
                 HostOs::Linux
             }
         );
+    }
+
+    #[test]
+    fn browser_headers_follow_chromium() {
+        let properties = ClientProperties::bundled(HostOs::Windows, "ru-RU");
+        // Chromium 148: seed 148 -> '/' and ')', version "99", GREASE first. The same
+        // rule gives Chrome 120 "Not_A Brand";v="8" and 124 "Not-A.Brand";v="99".
+        assert_eq!(
+            properties.sec_ch_ua(),
+            "\"Not/A)Brand\";v=\"99\", \"Chromium\";v=\"148\""
+        );
+        assert!(properties.sec_ch_ua().contains(&format!(
+            "\"Chromium\";v=\"{}\"",
+            CHROMIUM_VERSION.split('.').next().unwrap()
+        )));
+        assert_eq!(properties.ua_platform(), "Windows");
+        assert_eq!(
+            ClientProperties::bundled(HostOs::MacOs, "en").ua_platform(),
+            "macOS"
+        );
+        assert_eq!(properties.accept_language(), "ru-RU,ru;q=0.9");
+        assert_eq!(
+            ClientProperties::bundled(HostOs::Linux, "en").accept_language(),
+            "en"
+        );
+        let zoned = |zone: &str| {
+            let host = Host {
+                timezone: Some(zone.to_owned()),
+                ..Host::bare(HostOs::Linux)
+            };
+            ClientProperties::desktop(&host, "en-US", &Versions::bundled(HostOs::Linux)).timezone
+        };
+        assert_eq!(zoned("Europe/Moscow").as_deref(), Some("Europe/Moscow"));
+        assert_eq!(zoned("Etc/GMT+3").as_deref(), Some("Etc/GMT+3"));
+        assert_eq!(zoned("bad zone\r\n"), None);
+        // Not a property: never in Identify or x-super-properties.
+        let json = serde_json::to_string(&ClientProperties {
+            timezone: Some("UTC".to_owned()),
+            ..properties
+        })
+        .unwrap();
+        assert!(!json.contains("timezone"));
     }
 
     #[test]

@@ -124,12 +124,18 @@ pub async fn client_properties() -> ClientProperties {
         os_sdk_version: release.sdk_version,
         window_manager: release.window_manager,
         distro: release.distro,
+        timezone: release.timezone,
     };
-    ClientProperties {
+    let properties = ClientProperties {
         installation_id,
         ..ClientProperties::desktop(&host, &fastcord_platform::system_locale(), &versions)
     }
-    .with_launch_identity()
+    .with_launch_identity();
+    fastcord_media::set_handshake_identity(
+        &properties.browser_user_agent,
+        &properties.accept_language(),
+    );
+    properties
 }
 
 const MAX_INSTALLATION_FILE_BYTES: u64 = 256;

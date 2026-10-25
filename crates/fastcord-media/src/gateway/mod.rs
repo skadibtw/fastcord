@@ -39,6 +39,7 @@ use crate::video::{
     MAX_FRAME_BYTES, MAX_INTEREST_USERS, ReceivedVideo, VideoCodec, VideoControl, VideoError,
     VideoFrame, VideoInterest, VideoOptions,
 };
+pub use transport::set_handshake_identity;
 pub use wire::speaking;
 
 /// Encoded frames waiting for the transport key: 100 ms of 20 ms Opus. More is

@@ -19,7 +19,7 @@ pub mod video;
 pub use crypto::TransportMode;
 pub use gateway::{
     CloseReason, MediaSendError, MediaSender, ReceivedAudio, TransportStats, VoiceEvent,
-    VoiceMessage, VoiceSession, VoiceStatus, connect, connect_with_video,
+    VoiceMessage, VoiceSession, VoiceStatus, connect, connect_with_video, set_handshake_identity,
 };
 pub use session::{Correlation, Generation, JoinCorrelator, VoiceCredentials};
 pub use stream::{StreamCorrelation, StreamCorrelator, StreamCredentials};

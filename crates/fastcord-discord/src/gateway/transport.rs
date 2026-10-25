@@ -12,6 +12,7 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 use super::compression::MAX_EVENT_BYTES;
 
+use super::profile::ClientProperties;
 use super::url::GatewayUrl;
 use crate::ws::{self, ConnectError, TlsSocket};
 use crate::{Priority, RestClient, RestError};
@@ -58,8 +59,18 @@ pub(crate) fn websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_EVENT_BYTES))
 }
 
-pub(crate) async fn connect_tls(url: &GatewayUrl) -> Result<TlsSocket, ConnectError> {
-    ws::connect(url.as_str(), ORIGIN, websocket_config(), CONNECT_TIMEOUT).await
+pub(crate) async fn connect_tls(
+    url: &GatewayUrl,
+    browser: &ClientProperties,
+) -> Result<TlsSocket, ConnectError> {
+    ws::connect(
+        url.as_str(),
+        ORIGIN,
+        browser,
+        websocket_config(),
+        CONNECT_TIMEOUT,
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -96,7 +107,7 @@ impl Transport for LiveTransport {
     }
 
     async fn connect(&self, url: &GatewayUrl) -> Result<TlsSocket, ConnectError> {
-        connect_tls(url).await
+        connect_tls(url, &self.rest.identity().properties()).await
     }
 
     async fn authentication_required(&self) {

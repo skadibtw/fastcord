@@ -8,6 +8,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use super::RemoteAuthError;
+use crate::gateway::ClientProperties;
 use crate::route::api_base;
 
 const EXCHANGE_BODY_BYTE_BUDGET: usize = 16 * 1024;
@@ -26,12 +27,17 @@ pub(crate) struct HttpTicketExchange {
 }
 
 impl HttpTicketExchange {
-    pub(crate) fn new() -> Result<Self, RemoteAuthError> {
+    /// The exchange carries the same identity headers as every other request,
+    /// like the password login.
+    pub(crate) fn new(properties: &ClientProperties) -> Result<Self, RemoteAuthError> {
         #[cfg(feature = "fake-discord")]
         if crate::fake_origin::active() {
             return Err(RemoteAuthError::Connect);
         }
+        let headers =
+            crate::rest::identity_headers(properties).map_err(|_| RemoteAuthError::Connect)?;
         let http = reqwest::Client::builder()
+            .default_headers(headers)
             .use_rustls_tls()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
@@ -58,15 +64,29 @@ impl TicketExchange for HttpTicketExchange {
     async fn exchange(&self, ticket: &str) -> Result<String, RemoteAuthError> {
         let body = serde_json::to_vec(&ExchangeRequest { ticket })
             .map_err(|_| RemoteAuthError::Protocol)?;
-        let mut response = self
+        let mut request = self
             .http
             .post(format!("{}/users/@me/remote-auth/login", api_base()))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::ORIGIN, crate::rest::DISCORD_ORIGIN);
+        if let Some(fingerprint) = crate::fingerprint::fingerprint(&self.http).await {
+            request = request.header("x-fingerprint", fingerprint);
+        }
+        let mut request = request
             .body(body)
-            .send()
+            .build()
+            .map_err(|_| RemoteAuthError::Protocol)?;
+        if let Some(cookies) = crate::cookies::header(request.url()) {
+            request
+                .headers_mut()
+                .insert(reqwest::header::COOKIE, cookies);
+        }
+        let mut response = self
+            .http
+            .execute(request)
             .await
             .map_err(|_| RemoteAuthError::ExchangeNetwork)?;
+        crate::cookies::store(response.url(), response.headers());
         let status = response.status();
         if response
             .content_length()

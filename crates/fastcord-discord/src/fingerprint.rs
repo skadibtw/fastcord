@@ -24,11 +24,17 @@ pub(crate) async fn fingerprint(http: &reqwest::Client) -> Option<String> {
 }
 
 async fn fetch(http: &reqwest::Client) -> Option<String> {
-    let mut response = http
+    let mut request = http
         .get(format!("{}/experiments", crate::route::api_base()))
-        .send()
-        .await
+        .build()
         .ok()?;
+    if let Some(cookies) = crate::cookies::header(request.url()) {
+        request
+            .headers_mut()
+            .insert(reqwest::header::COOKIE, cookies);
+    }
+    let mut response = http.execute(request).await.ok()?;
+    crate::cookies::store(response.url(), response.headers());
     if response.status() != reqwest::StatusCode::OK {
         return None;
     }

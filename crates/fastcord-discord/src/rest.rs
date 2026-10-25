@@ -7,7 +7,10 @@ use std::sync::{
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{
+    ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap,
+    HeaderValue, ORIGIN, REFERER, USER_AGENT,
+};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -467,6 +470,7 @@ impl<C: Clock> RestClient<C> {
                 .execute(self.build_request(&request)?)
                 .await
                 .map_err(network_error)?;
+            crate::cookies::store(response.url(), response.headers());
             let status = response.status();
             let error = self.observe_status(status);
             if error == Some(RestError::AuthenticationRequired) {
@@ -524,10 +528,18 @@ impl<C: Clock> RestClient<C> {
     }
 
     fn build_request(&self, request: &RestRequest) -> Result<reqwest::Request, RestError> {
-        let mut builder = self.http.request(
-            request.route.key().method().clone(),
-            request.route.url.clone(),
-        );
+        let method = request.route.key().method().clone();
+        let mut builder = if method == Method::GET || method == Method::HEAD {
+            self.http.request(method, request.route.url.clone())
+        } else {
+            // Chromium adds Origin to same-origin requests that are not GET/HEAD.
+            self.http
+                .request(method, request.route.url.clone())
+                .header(ORIGIN, DISCORD_ORIGIN)
+        };
+        if let Some(cookies) = crate::cookies::header(&request.route.url) {
+            builder = builder.header(COOKIE, cookies);
+        }
         if let Some(body) = &request.body {
             let content_type = request
                 .content_type
@@ -589,20 +601,40 @@ pub(crate) fn identity_headers(properties: &ClientProperties) -> Result<HeaderMa
     Ok(headers)
 }
 
-/// The headers that never change during a run.
+pub(crate) const DISCORD_ORIGIN: &str = "https://discord.com";
+
+/// The headers that never change during a run: what the desktop client's
+/// Chromium sends on a same-origin `fetch` from the Discord app, plus Discord's
+/// own. The decoders behind `accept-encoding` are reqwest's; Chromium's `zstd`
+/// is not offered because it is not decoded.
 fn base_headers(properties: &ClientProperties) -> Result<HeaderMap, RestError> {
+    let value =
+        |text: &str| HeaderValue::from_str(text).map_err(|_| RestError::ClientConfiguration);
     let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
     headers.insert(
-        "x-discord-locale",
-        HeaderValue::from_str(&properties.system_locale)
-            .map_err(|_| RestError::ClientConfiguration)?,
+        ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip, deflate, br"),
     );
+    headers.insert(ACCEPT_LANGUAGE, value(&properties.accept_language())?);
     headers.insert(
-        USER_AGENT,
-        HeaderValue::from_str(&properties.browser_user_agent)
-            .map_err(|_| RestError::ClientConfiguration)?,
+        REFERER,
+        HeaderValue::from_static("https://discord.com/channels/@me"),
     );
+    headers.insert("sec-ch-ua", value(&properties.sec_ch_ua())?);
+    headers.insert("sec-ch-ua-mobile", HeaderValue::from_static("?0"));
+    headers.insert(
+        "sec-ch-ua-platform",
+        value(&format!("\"{}\"", properties.ua_platform()))?,
+    );
+    headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+    headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+    headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+    headers.insert("x-discord-locale", value(&properties.system_locale)?);
+    if let Some(zone) = &properties.timezone {
+        headers.insert("x-discord-timezone", value(zone)?);
+    }
+    headers.insert(USER_AGENT, value(&properties.browser_user_agent)?);
     // No X-Fingerprint here: the login requests that have no token add the one
     // `fingerprint` fetched for this process.
     Ok(headers)
@@ -718,6 +750,51 @@ mod tests {
         assert_ne!(
             after.headers()["x-super-properties"],
             before.headers()["x-super-properties"]
+        );
+    }
+
+    #[test]
+    fn the_chromium_header_set_comes_from_the_profile() {
+        let properties = ClientProperties {
+            timezone: Some("Europe/Moscow".to_owned()),
+            ..ClientProperties::bundled(HostOs::Windows, "ru-RU")
+        };
+        let headers = auth_headers(&UserToken::new("t".to_owned()), &properties).unwrap();
+        assert_eq!(headers[ACCEPT], "*/*");
+        assert_eq!(headers[ACCEPT_ENCODING], "gzip, deflate, br");
+        assert_eq!(headers[ACCEPT_LANGUAGE], "ru-RU,ru;q=0.9");
+        assert_eq!(headers["sec-ch-ua"], properties.sec_ch_ua().as_str());
+        assert_eq!(headers["sec-ch-ua-mobile"], "?0");
+        assert_eq!(headers["sec-ch-ua-platform"], "\"Windows\"");
+        assert_eq!(headers["sec-fetch-site"], "same-origin");
+        assert_eq!(headers["x-discord-timezone"], "Europe/Moscow");
+        assert_eq!(headers["x-discord-locale"], "ru-RU");
+        assert!(!headers.contains_key(ORIGIN));
+        assert!(
+            !ClientProperties::bundled(HostOs::Linux, "en-US")
+                .timezone
+                .is_some()
+        );
+
+        let client = RestClient::new(UserToken::new("t".to_owned()), properties).unwrap();
+        let get = RestRequest::new(
+            Route::new(Method::GET, "/users/@me").unwrap(),
+            Priority::UserRead,
+        );
+        assert!(
+            !client
+                .build_request(&get)
+                .unwrap()
+                .headers()
+                .contains_key(ORIGIN)
+        );
+        let write = RestRequest::new(
+            Route::new(Method::POST, "/channels/1/typing").unwrap(),
+            Priority::UserWrite,
+        );
+        assert_eq!(
+            client.build_request(&write).unwrap().headers()[ORIGIN],
+            "https://discord.com"
         );
     }
 

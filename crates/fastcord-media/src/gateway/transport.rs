@@ -5,7 +5,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{Sink, Stream};
@@ -25,6 +25,38 @@ use super::wire::VERSION;
 
 /// The client origin (ADR 0005).
 const ORIGIN: &str = "https://discord.com";
+
+/// `(User-Agent, Accept-Language)` of the profile the main connection uses.
+static BROWSER: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+/// Gives the voice handshake the desktop profile's user agent and language
+/// (ADR 0005): this crate has no profile of its own, so the app sets them when
+/// it builds one. Until then the handshake carries only the origin.
+pub fn set_handshake_identity(user_agent: &str, accept_language: &str) {
+    *BROWSER.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((user_agent.to_owned(), accept_language.to_owned()));
+}
+
+/// What the desktop client's Chromium adds to a WebSocket handshake besides
+/// the origin. No `permessage-deflate` offer, which is not implemented.
+fn browser_headers(headers: &mut tokio_tungstenite::tungstenite::http::HeaderMap) {
+    let browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let Some((agent, language)) = browser else {
+        return;
+    };
+    if let Ok(agent) = HeaderValue::from_str(&agent) {
+        headers.insert("User-Agent", agent);
+    }
+    if let Ok(language) = HeaderValue::from_str(&language) {
+        headers.insert("Accept-Language", language);
+    }
+    headers.insert(
+        "Accept-Encoding",
+        HeaderValue::from_static("gzip, deflate, br"),
+    );
+    headers.insert("Cache-Control", HeaderValue::from_static("no-cache"));
+    headers.insert("Pragma", HeaderValue::from_static("no-cache"));
+}
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Voice signaling messages are small; DAVE/MLS binary messages (milestone
 /// 18) stay far below this.
@@ -115,6 +147,7 @@ async fn connect_tls(url: &str) -> Result<TlsSocket, ConnectError> {
     request
         .headers_mut()
         .insert("Origin", HeaderValue::from_static(ORIGIN));
+    browser_headers(request.headers_mut());
     let tcp = TcpStream::connect((host.as_str(), port))
         .await
         .map_err(|_| ConnectError)?;
@@ -173,6 +206,18 @@ impl UdpLink for UdpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_voice_handshake_carries_the_profile_once_it_is_set() {
+        let mut headers = tokio_tungstenite::tungstenite::http::HeaderMap::new();
+        set_handshake_identity("Mozilla/5.0 test discord/1.0.1", "en-US,en;q=0.9");
+        browser_headers(&mut headers);
+        assert_eq!(headers["User-Agent"], "Mozilla/5.0 test discord/1.0.1");
+        assert_eq!(headers["Accept-Language"], "en-US,en;q=0.9");
+        assert_eq!(headers["Cache-Control"], "no-cache");
+        assert_eq!(headers["Pragma"], "no-cache");
+        assert!(!headers.contains_key("Sec-WebSocket-Extensions"));
+    }
 
     #[test]
     fn voice_urls_are_built_only_from_plain_endpoints() {
