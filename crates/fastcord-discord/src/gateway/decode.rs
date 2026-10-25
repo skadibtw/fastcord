@@ -525,6 +525,10 @@ impl UserTable {
         }
     }
 
+    fn get(&self, id: Snowflake) -> Option<&User> {
+        self.index.get(&id).map(|&at| &self.users[at])
+    }
+
     fn into_users(self) -> Vec<User> {
         self.users
     }
@@ -698,13 +702,16 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
     let relationships = wire
         .relationships
         .iter()
-        .filter_map(relationship_of)
+        .filter_map(|value| relationship_of(value, Some(&normalizer.users)))
         .take(MAX_RELATIONSHIPS)
         .collect();
     let ignored = wire
         .relationships
         .iter()
-        .filter(|value| relationship_of(value).is_none() && ignored_flag(value) == Some(true))
+        .filter(|value| {
+            ignored_flag(value) == Some(true)
+                && relationship_of(value, Some(&normalizer.users)).is_none()
+        })
         .filter_map(|value| snowflake_of(value.get("id")?))
         .take(MAX_RELATIONSHIPS)
         .collect();
@@ -768,12 +775,16 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
     })
 }
 
-/// `{"id", "type", "user": {...}}`; the entry's `user` is required (a
-/// relationship is shown by name), its `id` must agree, and types other than
-/// 1 to 4 are not kept.
-fn relationship_of(value: &serde_json::Value) -> Option<Relationship> {
+/// `{"id", "type", "user": {...}}`, or the deduplicated `{"id", "type",
+/// "user_id"}` whose user sits once in READY's `users` table. The entry's user
+/// is required (a relationship is shown by name), its `id` must agree, and
+/// types other than 1 to 4 are not kept.
+fn relationship_of(value: &serde_json::Value, users: Option<&UserTable>) -> Option<Relationship> {
     let kind = RelationshipKind::from_wire(value.get("type")?.as_u64()?)?;
-    let user: User = WireUser::deserialize(value.get("user")?).ok()?.into();
+    let user: User = match value.get("user") {
+        Some(raw) => WireUser::deserialize(raw).ok()?.into(),
+        None => users?.get(snowflake_of(value.get("user_id")?)?)?.clone(),
+    };
     if user.id.0 == 0 || snowflake_of(value.get("id")?)? != user.id {
         return None;
     }
@@ -1446,7 +1457,7 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
                 .ok_or(Malformed)
         }),
         "RELATIONSHIP_ADD" => json::<serde_json::Value>(raw).and_then(|value| {
-            if let Some(relationship) = relationship_of(&value) {
+            if let Some(relationship) = relationship_of(&value, None) {
                 return Ok(Dispatch::RelationshipAdd(Box::new(relationship)));
             }
             // A type this client does not keep still can carry an ignore.
@@ -1764,6 +1775,14 @@ mod tests {
         assert!(ready.private_channels[0].recipients.is_empty());
         assert_eq!(ready.private_channels[1].kind, ChannelKind::GroupDm);
         assert_eq!(ready.private_channels[1].recipient_ids.len(), 2);
+
+        // The relationship references its user by ID (`user_id`), so it is
+        // resolved from the deduplicated table instead of being dropped.
+        assert_eq!(ready.relationships.len(), 1);
+        assert_eq!(ready.relationships[0].kind, RelationshipKind::Friend);
+        assert_eq!(ready.relationships[0].user.id, id(80_351_110_224_678_912));
+        assert_eq!(ready.relationships[0].user.display_name(), "Nelly");
+        assert!(ready.ignored.is_empty());
     }
 
     #[test]
