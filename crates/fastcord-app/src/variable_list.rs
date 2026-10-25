@@ -1495,6 +1495,24 @@ pub(crate) mod harness {
             );
         }
 
+        /// A real wheel event, including for scrollables with no timeline ID.
+        pub fn wheel(&mut self, x: f32, y: f32, delta: f32) {
+            let mut messages = Vec::new();
+            let mut shell = core::Shell::new(&mut messages);
+            self.element.as_widget_mut().update(
+                &mut self.tree,
+                &core::Event::Mouse(mouse::Event::WheelScrolled {
+                    delta: mouse::ScrollDelta::Pixels { x: 0.0, y: delta },
+                }),
+                core::Layout::new(&self.node),
+                mouse::Cursor::Available(core::Point::new(x, y)),
+                &self.renderer,
+                &mut core::clipboard::Null,
+                &mut shell,
+                &core::Rectangle::with_size(self.size),
+            );
+        }
+
         /// The pointer moves to `(x, y)` and clicks there, as a user does;
         /// returns whatever the widgets published on the way.
         pub fn click(&mut self, x: f32, y: f32) -> Vec<Message> {

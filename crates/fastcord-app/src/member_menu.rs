@@ -87,6 +87,7 @@ pub fn view<'a>(
     navigation: &'a NavigationSnapshot,
     voice: VoiceControls,
     restricted: bool,
+    volume_notice: Option<&'a str>,
 ) -> Option<Element<'a, Message>> {
     let target = state.target.as_ref()?;
     let user = target.user.id;
@@ -141,6 +142,9 @@ pub fn view<'a>(
                 if voice.participants.iter().any(|p| p.user_id == user) {
                     let percent = voice.volume_percent(user);
                     card = card.push(text(trf("User volume · {}%", &[&percent])).size(12));
+                    if let Some(notice) = volume_notice {
+                        card = card.push(text(tr(notice).to_owned()).size(11));
+                    }
                     card = card.push(
                         slider(0.0..=200.0, f32::from(percent), move |v| {
                             Message::SetParticipantVolume(user, v.round() as u16)

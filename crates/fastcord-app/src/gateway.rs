@@ -1239,14 +1239,12 @@ impl NavigationBridge {
     pub fn set_volume_percent(&self, user_id: Snowflake, percent: u16) -> bool {
         let percent = percent.min(200);
         self.voice_controls.send_modify(|controls| {
-            if let Some(volume) = controls.volumes.iter_mut().find(|v| v.user_id == user_id) {
-                volume.percent = percent;
-            } else if controls.volumes.len() < 256 {
-                controls.volumes.push(UserVolume { user_id, percent });
-            } else {
+            if let Some(index) = controls.volumes.iter().position(|v| v.user_id == user_id) {
+                controls.volumes.remove(index);
+            } else if controls.volumes.len() == 256 {
                 controls.volumes.remove(0);
-                controls.volumes.push(UserVolume { user_id, percent });
             }
+            controls.volumes.push(UserVolume { user_id, percent });
         });
         true
     }
@@ -1260,8 +1258,21 @@ impl NavigationBridge {
                 percent: volume.percent.min(200),
             })
             .collect();
-        self.voice_controls
-            .send_modify(|controls| controls.volumes = volumes);
+        self.voice_controls.send_modify(|controls| {
+            let mut merged: Vec<_> = volumes
+                .into_iter()
+                .filter(|saved| {
+                    !controls
+                        .volumes
+                        .iter()
+                        .any(|live| live.user_id == saved.user_id)
+                })
+                .collect();
+            merged.append(&mut controls.volumes);
+            let excess = merged.len().saturating_sub(256);
+            merged.drain(..excess);
+            controls.volumes = merged;
+        });
     }
 
     pub fn set_audio_devices(&self, preferences: &crate::audio_devices::Preferences) {
@@ -5147,6 +5158,29 @@ mod tests {
     use fastcord_model::{Channel, ChannelKind, Guild, Snowflake, User};
 
     use super::*;
+
+    #[test]
+    fn loading_volume_settings_keeps_live_changes_and_both_bounds() {
+        let bridge = NavigationBridge::new();
+        bridge.set_volume_percent(Snowflake(1), 6);
+        bridge.set_volume_settings(
+            (1..=300)
+                .map(|id| UserVolume {
+                    user_id: Snowflake(id),
+                    percent: 999,
+                })
+                .collect(),
+        );
+        let controls = bridge.voice_controls();
+        assert_eq!(controls.volume_percent(Snowflake(1)), 6);
+        assert_eq!(controls.volume_percent(Snowflake(256)), 200);
+        assert_eq!(controls.volumes.len(), 256);
+        bridge.set_volume_percent(Snowflake(2), 67);
+        bridge.set_volume_percent(Snowflake(301), 62);
+        let controls = bridge.voice_controls();
+        assert_eq!(controls.volume_percent(Snowflake(2)), 67);
+        assert_eq!(controls.volumes.len(), 256);
+    }
 
     fn user() -> User {
         User {

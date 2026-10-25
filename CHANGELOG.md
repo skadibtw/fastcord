@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Participant voice volumes now save during slider and keyboard changes without requiring a release event (#219). A bounded background writer coalesces changes for 500 ms, flushes on release, account teardown and Quit, serializes file updates, and keeps recently changed rows. Loading preserves live changes; the call settings and member menu show save failures, and the account retention limit is visible.
+
 ### Removed
 - The retired "Blocking bypass" setting is gone. Since the transport moved to `fastcord-net`, turning it on started nothing, yet the value was still stored, still displayed as on, and still accepted byedpi options such as `-I <address>`. The app no longer reads, writes or links `fastcord-bypass` at all; an old settings file loads normally and the stale `bypass` key disappears the next time preferences are saved.
 

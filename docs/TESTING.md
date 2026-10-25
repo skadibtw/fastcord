@@ -9,6 +9,12 @@
   the app's actual slider and preset messages, tears down the account, and loads
   the CSV into fresh voice controls. The bridge regression checks live changes
   taking precedence over loaded values and the 256-entry/200% bounds.
+- Windows validation: all app tests pass (846 passed, six hardware tests
+  ignored), including the nine storage tests and app/bridge volume regressions,
+  with normal temporary-file access; Clippy passes with
+  warnings denied. A real `fastcord --fake-discord 18765 --script ...` window
+  launched, displayed the test call and saved its own screenshot. Settings
+  controls are checked with the iced layout harness, including scrolling.
 - Manual acceptance pending: change a participant's volume with keyboard and
   mouse, close the menu during a drag, restart and switch accounts, then verify
   the persisted gain audibly in an alt-account call. No live call was used by

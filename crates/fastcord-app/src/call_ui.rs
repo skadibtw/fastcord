@@ -565,6 +565,7 @@ pub struct CameraSettings {
 pub struct Settings<'a> {
     pub camera: Option<CameraSettings>,
     pub voice: &'a VoiceControls,
+    pub volume_notice: Option<&'a str>,
     /// Streams being watched: (session, caption).
     pub watching: Vec<(std::sync::Arc<playback::Session>, String)>,
     /// Streams on offer: (wire key, owner name).
@@ -615,6 +616,16 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
         }
     }
     content = content.push(heading(tr("VOLUME")));
+    content = content.push(
+        text(tr(
+            "Saved for this account: up to 256 recently changed people.",
+        ))
+        .size(11)
+        .style(text::secondary),
+    );
+    if let Some(notice) = set.volume_notice {
+        content = content.push(text(tr(notice).to_owned()).size(11));
+    }
     if set.voice.participants.is_empty() {
         content = content.push(
             text(tr("Nobody else is in the call."))
@@ -809,12 +820,15 @@ mod tests {
                 status: String::new(),
             }),
             voice: &voice,
+            volume_notice: None,
             watching: vec![(playback::Session::new("k1".into()), "Ann: live".into())],
             offers: vec![("k2".into(), "Bob".into())],
             running: true,
         });
         let mut ui = Ui::new(WIDTH, 420.0, element);
-        let hit = reachable(&mut ui, 0, WIDTH as i32, 420);
+        let mut hit = reachable(&mut ui, 0, WIDTH as i32 - 12, 320);
+        ui.wheel(WIDTH / 2.0, 160.0, -500.0);
+        hit.extend(reachable(&mut ui, 0, WIDTH as i32 - 12, 320));
         for name in [
             "SetMirrorPreview",
             "ListCameras",

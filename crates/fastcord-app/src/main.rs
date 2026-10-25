@@ -293,6 +293,8 @@ struct App {
     /// Installed speech voices, listed when the chat settings open.
     speech_voices: Vec<fastcord_platform::speech::Voice>,
     audio_saving: Option<audio_devices::Preferences>,
+    volume_writer: Option<voice_settings::Writer>,
+    volume_notice: Option<String>,
     /// The camera picker; probed only when the user asks.
     camera_list: gateway::CameraList,
     shortcuts: shortcuts::Runtime,
@@ -505,6 +507,7 @@ enum Message {
     SetParticipantVolume(Snowflake, u16),
     CommitParticipantVolume(Snowflake),
     PresetParticipantVolume(Snowflake, u16),
+    VolumeSettingsStatus(u64, voice_settings::Status),
     OpenAudioSettings,
     CloseAudioSettings,
     Settings(settings::Event),
@@ -687,6 +690,8 @@ impl App {
                 unverified_open: false,
                 speech_voices: Vec::new(),
                 audio_saving: None,
+                volume_writer: None,
+                volume_notice: None,
                 camera_list: gateway::CameraList::default(),
                 shortcuts: shortcuts::Runtime::default(),
                 window_active: true,
@@ -1673,6 +1678,7 @@ impl App {
                 }
             }
             Message::Quit => {
+                let volume_writer = self.volume_writer.take();
                 // Leaving the call first lets the server drop the voice state at
                 // once. The Gateway then closes with 1000 (waiting at most 2 s
                 // for its task) so the session ends instead of lingering until a
@@ -1682,7 +1688,7 @@ impl App {
                     Phase::Account { gateway, .. } => Some(gateway.controls.clone()),
                     _ => None,
                 };
-                if !in_call && controls.is_none() {
+                if !in_call && controls.is_none() && volume_writer.is_none() {
                     return iced::exit();
                 }
                 let leave = if in_call {
@@ -1694,6 +1700,9 @@ impl App {
                     leave,
                     Task::perform(
                         async move {
+                            if let Some(writer) = volume_writer {
+                                let _ = tokio::task::spawn_blocking(move || writer.finish()).await;
+                            }
                             if in_call {
                                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                             }
@@ -2416,7 +2425,14 @@ impl App {
                     gateway.directs = on;
                 }
             }
-            Message::ToggleVoiceDetails => self.voice_details = !self.voice_details,
+            Message::ToggleVoiceDetails => {
+                self.voice_details = !self.voice_details;
+                if !self.voice_details
+                    && let Some(writer) = &self.volume_writer
+                {
+                    writer.flush();
+                }
+            }
             Message::Search(event) => return self.search_event(event),
             Message::Pins(event) => return self.pins_event(event),
             Message::Inbox(event) => return self.inbox_event(event),
@@ -2626,6 +2642,9 @@ impl App {
                 });
             }
             Message::LeaveVoice => {
+                if let Some(writer) = &self.volume_writer {
+                    writer.flush();
+                }
                 self.stage.reset();
                 let mut cancel = None;
                 if let Phase::Account {
@@ -3015,31 +3034,30 @@ impl App {
                     gateway.controls.set_deafened(deafened);
                 }
             }
-            // The slider updates the live gain while dragging and persists once on release.
-            Message::SetParticipantVolume(user, percent) => {
+            // Both keyboard/drag changes and presets reach the same bounded writer.
+            Message::SetParticipantVolume(user, percent)
+            | Message::PresetParticipantVolume(user, percent) => {
                 if let Phase::Account { gateway, .. } = &self.phase {
                     gateway.controls.set_volume_percent(user, percent);
-                }
-            }
-            Message::CommitParticipantVolume(user) => {
-                if let Phase::Account {
-                    session, gateway, ..
-                } = &self.phase
-                {
-                    let percent = gateway.controls.voice_controls().volume_percent(user);
-                    if voice_settings::save(session.user.id, user, percent).is_err() {
-                        self.notice = Some("Could not save the voice volume setting.".to_owned());
+                    if let Some(writer) = &self.volume_writer
+                        && !writer.set(user, percent)
+                    {
+                        self.volume_notice =
+                            voice_settings::Status::Failed.notice().map(str::to_owned);
                     }
                 }
             }
-            Message::PresetParticipantVolume(user, percent) => {
-                if let Phase::Account {
-                    session, gateway, ..
-                } = &self.phase
-                    && gateway.controls.set_volume_percent(user, percent)
-                    && voice_settings::save(session.user.id, user, percent).is_err()
+            Message::CommitParticipantVolume(user) => {
+                if let Some(writer) = &self.volume_writer
+                    && let Phase::Account { gateway, .. } = &self.phase
                 {
-                    self.notice = Some("Could not save the voice volume setting.".to_owned());
+                    writer.set(user, gateway.controls.voice_controls().volume_percent(user));
+                    writer.flush();
+                }
+            }
+            Message::VolumeSettingsStatus(id, status) => {
+                if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == id) {
+                    self.volume_notice = status.notice().map(str::to_owned);
                 }
             }
             Message::SelectPrivateChannel(channel) => {
@@ -4232,6 +4250,15 @@ impl App {
     fn teardown_account(
         &mut self,
     ) -> Option<(Snowflake, Option<crate::attachments::AttachmentCache>)> {
+        // Join before account removal can purge its file rows. Shutdown wakes
+        // the writer immediately rather than waiting out the coalescing delay.
+        if let Some(writer) = self.volume_writer.take() {
+            let status = writer.finish();
+            if let Some(notice) = status.notice() {
+                self.notice = Some(notice.to_owned());
+            }
+        }
+        self.volume_notice = None;
         self.switcher = switcher::State::default();
         self.nav_pending = false;
         // The switch lives in the account's client, which is dropped with it.
@@ -4449,6 +4476,13 @@ impl App {
         let controls = gateway::NavigationBridge::new();
         controls.set_account_id(session.user.id);
         controls.set_volume_settings(voice_settings::load(session.user.id));
+        let account = session.user.id;
+        let (writer, statuses) = voice_settings::Writer::start(account);
+        self.volume_writer = Some(writer);
+        self.volume_notice = None;
+        let volume_events = Task::run(statuses, move |status| {
+            Message::VolumeSettingsStatus(id, status)
+        });
         controls.set_audio_devices(&self.audio_preferences);
         controls.set_voice_input(&self.audio_preferences.voice_input);
         self.shortcuts.rebuild(&self.audio_preferences.voice_input);
@@ -4500,7 +4534,7 @@ impl App {
             ),
         };
         self.sync_viewing();
-        task
+        Task::batch([task, volume_events])
     }
 
     /// What the timeline shows counts as read only while the window is active
@@ -5404,7 +5438,12 @@ impl App {
                 });
                 self.member_menu.notice = None;
             }
-            Event::Close => self.member_menu.close(),
+            Event::Close => {
+                self.member_menu.close();
+                if let Some(writer) = &self.volume_writer {
+                    writer.flush();
+                }
+            }
             Event::Done(serial, result) => {
                 if self.member_menu.pending == Some(serial) {
                     self.member_menu.pending = None;
@@ -6143,6 +6182,7 @@ impl App {
                             },
                         }),
                         voice: &voice_controls,
+                        volume_notice: self.volume_notice.as_deref(),
                         watching: watching
                             .iter()
                             .map(|session| {
@@ -6721,6 +6761,7 @@ impl App {
                 &gateway.navigation,
                 voice_controls.clone(),
                 session.client.writes_restricted(),
+                self.volume_notice.as_deref(),
             ) {
                 Some(menu) => iced::widget::stack![screen, menu].into(),
                 None => screen,
@@ -7016,6 +7057,40 @@ fn wanted_avatars(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn participant_volume_change_survives_account_teardown_without_release() {
+        let mut app = login_app();
+        let session = authenticate(&mut app, Persistence::MemoryOnly);
+        let path = std::env::temp_dir()
+            .join(format!(
+                "fastcord-app-volume-{}-{}",
+                std::process::id(),
+                session.user.id
+            ))
+            .join("voice-settings.csv");
+        let (writer, _) = voice_settings::Writer::at(Some(path.clone()), session.user.id);
+        app.volume_writer = Some(writer);
+        let _ = app.handle(Message::SetParticipantVolume(Snowflake(99), 67));
+        let _ = app.handle(Message::PresetParticipantVolume(Snowflake(98), 6));
+        let _ = app.handle(Message::SetParticipantVolume(Snowflake(99), 62));
+        if let Phase::Account { gateway, .. } = &app.phase {
+            assert_eq!(
+                gateway
+                    .controls
+                    .voice_controls()
+                    .volume_percent(Snowflake(99)),
+                62
+            );
+        }
+        app.teardown_account();
+        let restored = gateway::NavigationBridge::new();
+        restored.set_volume_settings(voice_settings::load_from(&path, session.user.id));
+        assert_eq!(restored.voice_controls().volume_percent(Snowflake(99)), 62);
+        assert_eq!(restored.voice_controls().volume_percent(Snowflake(98)), 6);
+        assert!(voice_settings::load_from(&path, Snowflake(session.user.id.0 + 1)).is_empty());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 
     fn login_app() -> App {
         let (mut app, _) = App::boot();
