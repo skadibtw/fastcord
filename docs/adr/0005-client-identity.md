@@ -168,8 +168,13 @@ same-origin header set with `x-discord-timezone` and a bounded `discord.com`
 cookie jar; the WebSocket handshakes carry the user agent, language and
 no-cache headers. Message nonces have the official shape (zero low 22 bits,
 one process-wide sequence). Opcode 4 stays without `self_stream`, as the
-official client sends it. The exact payload, the gaps and the per-item corrections are in
-`docs/PROTOCOL.md` and `docs/IDENTITY_AUDIT.md`.
+official client sends it. Open: the P2 items (capabilities, the persisted
+guild-version cache, the account locale) wait for a sanitized official
+capture, and the residual differences above stay. The exact payload, the gaps
+and the per-item corrections are in `docs/PROTOCOL.md` and
+`docs/IDENTITY_AUDIT.md`. Every live check so far is unauthenticated (a
+bogus-token Identify answered with 4004 on `v=9` with the desktop profile and
+the new handshake headers); acceptance with a valid account (U1) has not run.
 The accepted-shape evidence from 2026-10-07 (a bogus-token Identify over the
 real compressed Gateway answered with close 4004, not 4002; build number
 631730; Chrome 155) belongs to the web placeholder and is kept only as
