@@ -53,6 +53,11 @@ const REGULARIZATION: f32 = 1e-2;
 /// Adaptation step range: the floor keeps tracking the room, the ceiling is the NLMS limit.
 const MU_MIN: f32 = 0.03;
 const MU_MAX: f32 = 0.9;
+/// Hops of exactly silent reference after which the window and every
+/// partition's spectrum are zero, so the estimate is exactly zero and a step
+/// is the identity: the window spans `FFT` samples, the history `PARTITIONS`
+/// windows.
+const SILENT_SKIP: usize = PARTITIONS + FFT.div_ceil(HOP);
 
 struct Fft {
     cos: [f32; FFT / 2],
@@ -160,6 +165,8 @@ pub(crate) struct EchoCanceller {
     converged: bool,
     /// Steps of faster adaptation left after [`EchoCanceller::path_changed`].
     boost_steps: u32,
+    /// Consecutive hops whose reference was exactly zero.
+    silent_hops: usize,
 }
 
 /// Fast adaptation after the reference and microphone streams were re-aligned by chance:
@@ -193,6 +200,7 @@ impl EchoCanceller {
             d_error: 0.0,
             converged: false,
             boost_steps: 0,
+            silent_hops: 0,
         }
     }
 
@@ -272,6 +280,20 @@ impl EchoCanceller {
     }
 
     fn step(&mut self, near: &[f32], far: &[f32], out: &mut [f32]) {
+        // Nobody else is talking for most of a call. Once the reference has
+        // been exactly silent for the whole history, every spectrum is zero,
+        // the estimate is zero and the step returns the microphone unchanged
+        // without adapting: skip the FFTs, the result is bit-identical.
+        if far.iter().all(|sample| *sample == 0.0) {
+            self.silent_hops = self.silent_hops.saturating_add(1);
+            if self.silent_hops > SILENT_SKIP {
+                self.head = (self.head + PARTITIONS - 1) % PARTITIONS;
+                out.copy_from_slice(near);
+                return;
+            }
+        } else {
+            self.silent_hops = 0;
+        }
         self.window.copy_within(HOP.., 0);
         self.window[FFT - HOP..].copy_from_slice(far);
         self.re.copy_from_slice(&self.window);
@@ -381,11 +403,15 @@ impl EchoCanceller {
                 self.power[k] += self.xr[x + k].powi(2) + self.xi[x + k].powi(2);
             }
         }
+        // One division per bin, not per (partition, bin).
+        for power in &mut self.power {
+            *power = mu / (*power + REGULARIZATION);
+        }
         for p in 0..PARTITIONS {
             let x = ((self.head + p) % PARTITIONS) * BINS;
             let w = p * BINS;
             for k in 0..BINS {
-                let gain = mu / (self.power[k] + REGULARIZATION);
+                let gain = self.power[k];
                 let (xr, xi) = (self.xr[x + k], self.xi[x + k]);
                 self.wr[w + k] += gain * (xr * self.re[k] + xi * self.im[k]);
                 self.wi[w + k] += gain * (xr * self.im[k] - xi * self.re[k]);
@@ -471,6 +497,40 @@ impl ReferenceTap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// After the reference has been silent for the whole history the step
+    /// is skipped and the microphone passes through untouched; the filter
+    /// learned before the pause is kept for when the far end speaks again.
+    #[test]
+    fn a_silent_reference_skips_the_work_and_passes_the_microphone() {
+        let mut canceller = EchoCanceller::new();
+        let mut noise = Noise(7);
+        let mut out = [0.0; FRAME];
+        for _ in 0..100 {
+            let block: Vec<f32> = noise.speech(FRAME, 0.3);
+            canceller.push_far(&block);
+            let near: [f32; FRAME] = std::array::from_fn(|i| block[i] * 0.5);
+            canceller.process(&near, &mut out);
+        }
+        let mut learned = None;
+        let mut skipped = 0;
+        for _ in 0..200 {
+            canceller.push_far_silence(FRAME);
+            let near: [f32; FRAME] = std::array::from_fn(|_| noise.next() * 0.1);
+            canceller.process(&near, &mut out);
+            if canceller.silent_hops > SILENT_SKIP {
+                skipped += 1;
+                assert_eq!(out, near, "a skipped step is the identity");
+                learned.get_or_insert_with(|| canceller.wr.clone());
+            }
+        }
+        assert!(skipped > 100, "{skipped}");
+        assert_eq!(
+            Some(canceller.wr),
+            learned,
+            "skipped steps do not adapt the filter"
+        );
+    }
 
     struct Noise(u64);
     impl Noise {
