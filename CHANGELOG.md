@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Incoming friend requests that Discord marks as strangers now offer a warning, Confirm acceptance and Cancel after its refusal (#211). Only an explicit confirmation sends `confirm_stranger_request: true`; ordinary accepts and new requests keep their existing bodies. Adding an already-pending username opens its incoming request, and withdrawn requests cannot be accepted from a stale confirmation.
 - Participant voice volumes now save during slider and keyboard changes without requiring a release event (#219). A bounded background writer coalesces changes for 500 ms, flushes on release, account teardown and Quit, serializes file updates, and keeps recently changed rows. Loading preserves live changes; the call settings and member menu show save failures, and the account retention limit is visible.
 
 ### Removed

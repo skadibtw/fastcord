@@ -6,6 +6,8 @@
 //!
 //! - accept an incoming request, or send one to a known ID:
 //!   `PUT /users/@me/relationships/{id}` with `{}`
+//! - after Discord requests stranger confirmation and the user confirms:
+//!   the same PUT with `{"confirm_stranger_request": true}`
 //! - send a request by username: `POST /users/@me/relationships`
 //! - block: the same PUT with `{"type": 2}`
 //! - decline, cancel, remove a friend, unblock: `DELETE` of the same path
@@ -30,8 +32,13 @@ const MAX_PRONOUNS_CHARS: usize = 40;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelationshipAction {
-    /// Accept an incoming request, or send one to a known user.
+    /// Send a request to a known user.
     Befriend,
+    /// Accept an incoming request. `confirm` is only set after Discord asks
+    /// for stranger confirmation and the user explicitly agrees.
+    AcceptRequest {
+        confirm: bool,
+    },
     Block,
     /// Decline an incoming request, cancel an outgoing one, remove a friend
     /// or unblock: all the same `DELETE`.
@@ -54,9 +61,13 @@ fn action_parts(
 ) -> Result<(Route, Option<serde_json::Value>), RestError> {
     let path = format!("/users/@me/relationships/{user}");
     Ok(match action {
-        RelationshipAction::Befriend => {
+        RelationshipAction::Befriend | RelationshipAction::AcceptRequest { confirm: false } => {
             (Route::new(Method::PUT, &path)?, Some(serde_json::json!({})))
         }
+        RelationshipAction::AcceptRequest { confirm: true } => (
+            Route::new(Method::PUT, &path)?,
+            Some(serde_json::json!({"confirm_stranger_request": true})),
+        ),
         RelationshipAction::Block => (
             Route::new(Method::PUT, &path)?,
             Some(serde_json::json!({"type": 2})),
@@ -224,6 +235,21 @@ mod tests {
         assert_eq!(route.key().method(), Method::PUT);
         assert_eq!(route.url.path(), "/api/v9/users/@me/relationships/42");
         assert_eq!(body.unwrap(), serde_json::json!({}));
+        for confirm in [false, true] {
+            let action = RelationshipAction::AcceptRequest { confirm };
+            let (route, body) = action_parts(action, id).unwrap();
+            assert_eq!(route.key().method(), Method::PUT);
+            assert_eq!(route.url.path(), "/api/v9/users/@me/relationships/42");
+            assert_eq!(
+                body.unwrap(),
+                if confirm {
+                    serde_json::json!({"confirm_stranger_request": true})
+                } else {
+                    serde_json::json!({})
+                }
+            );
+            assert!(action_request(action, id).is_ok());
+        }
         let (route, body) = action_parts(RelationshipAction::Block, id).unwrap();
         assert_eq!(route.key().method(), Method::PUT);
         assert_eq!(body.unwrap(), serde_json::json!({"type": 2}));

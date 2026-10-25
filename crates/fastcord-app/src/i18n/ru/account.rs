@@ -461,6 +461,27 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Слишком много запросов ещё отправляется. Подождите немного.",
     ),
     ("Friend request sent.", "Запрос в друзья отправлен."),
+    ("Confirm acceptance", "Подтвердить принятие"),
+    (
+        "Discord considers this person a stranger. Only confirm if you recognize them and want to accept their friend request.",
+        "Discord считает этого пользователя незнакомцем. Подтверждайте только если вы его узнаёте и хотите принять запрос в друзья.",
+    ),
+    (
+        "Discord requires confirmation to accept this friend request. Open Pending and choose Accept to review it.",
+        "Discord требует подтверждения запроса в друзья. Откройте «Ожидают» и нажмите «Принять», чтобы проверить запрос.",
+    ),
+    (
+        "This friend request is no longer pending.",
+        "Этот запрос в друзья больше не ожидает ответа.",
+    ),
+    (
+        "This person already sent you a friend request. Choose Accept below to review it.",
+        "Этот пользователь уже отправил вам запрос в друзья. Нажмите «Принять» ниже, чтобы проверить его.",
+    ),
+    (
+        "Too many friend requests are waiting for confirmation. Confirm or cancel one before trying again.",
+        "Слишком много запросов в друзья ожидают подтверждения. Подтвердите или отмените один из них перед повторной попыткой.",
+    ),
     ("Message", "Сообщение"),
     ("Cancel request", "Отменить запрос"),
     ("Unblock", "Разблокировать"),

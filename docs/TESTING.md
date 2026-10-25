@@ -1,5 +1,24 @@
 # Testing
 
+## Stranger friend-request confirmation (#211, 2026-10-25)
+
+- Offline coverage: the relationship request tests check plain acceptance,
+  confirmed acceptance and add-by-ID bodies. Friends regressions check that
+  the specific refusal produces no network task until the next explicit click,
+  only one confirmed request can be in flight, arbitrary confirmations and
+  ordinary 400s cannot set the flag, cancellation/withdrawal/logout clear it,
+  the confirmation ledger is bounded, and a matching incoming username opens
+  Pending without a POST. The iced harness checks Confirm and Cancel remain
+  clickable inside the 420 px profile card.
+- Windows validation: app tests pass (850 passed, six ignored), discord tests
+  pass (685 passed, seven ignored), and Clippy passes with warnings denied.
+  A real fake-mode window opened the Friends screen, saved its own screenshot
+  and exited successfully. No live relationship write was sent.
+- Live acceptance pending: on the alt account, accept a stranger request,
+  inspect the warning, cancel once, confirm once, and verify convergence with
+  the official client. Record the sanitized numeric refusal code. The existing
+  Relationships write-group switch remains off by default.
+
 ## Participant volume persistence (#219, 2026-10-25)
 
 - Offline coverage: `voice_settings::tests` exercises changes without a release,

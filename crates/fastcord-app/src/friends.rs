@@ -10,7 +10,7 @@
 //! Presence dots and the Online tab read the reducer's shared presence table
 //! (milestone 46); an unknown presence draws no dot.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type Presences = HashMap<Snowflake, Presence>;
 
@@ -75,6 +75,7 @@ pub enum Event {
     AddInput(String),
     AddSubmit,
     Act(Snowflake, RelationshipAction),
+    CancelAccept(Snowflake),
     Done(u64, Snowflake, Result<(), RestError>),
     AddDone(u64, Result<(), RestError>),
     /// Show a user's profile (a message author or a friend-list row).
@@ -108,6 +109,8 @@ pub struct State {
     add_input: String,
     add_pending: bool,
     pending: HashMap<Snowflake, RelationshipAction>,
+    /// At most MAX_PENDING users whose plain acceptance Discord refused.
+    confirmations: HashSet<Snowflake>,
     notice: Option<String>,
     profile: Option<ProfileView>,
     /// Bumped on logout/new session: answers from an earlier one are dropped.
@@ -117,6 +120,9 @@ pub struct State {
 
 /// What a failed relationship request tells the user to do next.
 pub fn failure(error: RestError) -> String {
+    if needs_confirmation(&error) {
+        return tr("Discord requires confirmation to accept this friend request. Open Pending and choose Accept to review it.").to_owned();
+    }
     match error {
         RestError::AccountVerificationRequired => tr("Discord requires an account check. Requests are paused. Open the official Discord client, complete its verification, then reconnect fastcord.").to_owned(),
         RestError::WritesPaused(_) => trf("{}. Try again later.", &[&tr(&error.to_string())]),
@@ -146,6 +152,15 @@ pub fn failure(error: RestError) -> String {
         other => trf("The request failed: {}.", &[&tr(&other.to_string())]),
     }
 }
+
+fn needs_confirmation(error: &RestError) -> bool {
+    matches!(error, RestError::Refused(refusal)
+        if refusal.status.as_u16() == 400
+        && refusal.message().trim_end_matches('.').eq_ignore_ascii_case(
+            "You must confirm the friend request to add this user"))
+}
+
+const STRANGER_WARNING: &str = "Discord considers this person a stranger. Only confirm if you recognize them and want to accept their friend request.";
 
 fn username_failure(error: UsernameError) -> &'static str {
     match error {
@@ -183,6 +198,7 @@ impl State {
             || self.profile.is_some()
             || self.add_pending
             || !self.pending.is_empty()
+            || !self.confirmations.is_empty()
             || !self.add_input.is_empty()
             || self.notice.is_some()
         {
@@ -208,9 +224,50 @@ impl State {
             self.notice = Some(tr("Too many requests are still being sent. Wait a moment.").into());
             return false;
         }
+        if action == (RelationshipAction::AcceptRequest { confirm: true })
+            && !self.confirmations.remove(&user)
+        {
+            return false;
+        }
+        self.confirmations.remove(&user);
         self.pending.insert(user, action);
         self.notice = None;
         true
+    }
+
+    /// The live relationship slice prevents accepting a withdrawn request and
+    /// directs an add-by-username to the incoming row without sending a POST.
+    pub fn update_for(
+        &mut self,
+        event: Event,
+        relationships: &[Relationship],
+        rest: &RestClient,
+    ) -> Task<Event> {
+        let incoming = |id| {
+            relationships
+                .iter()
+                .any(|r| r.user.id == id && r.kind == RelationshipKind::IncomingRequest)
+        };
+        self.confirmations.retain(|id| incoming(*id));
+        if let Event::Act(user, RelationshipAction::AcceptRequest { .. }) = &event
+            && !incoming(*user)
+        {
+            self.notice = Some(tr("This friend request is no longer pending.").to_owned());
+            return Task::none();
+        }
+        if matches!(event, Event::AddSubmit)
+            && !self.add_pending
+            && let Ok((name, None)) = parse_username(&self.add_input)
+            && relationships
+                .iter()
+                .any(|r| r.kind == RelationshipKind::IncomingRequest && r.user.username == name)
+        {
+            self.tab = Some(Tab::Pending);
+            self.open = true;
+            self.notice = Some(tr("This person already sent you a friend request. Choose Accept below to review it.").to_owned());
+            return Task::none();
+        }
+        self.update(event, rest)
     }
 
     pub fn update(&mut self, event: Event, rest: &RestClient) -> Task<Event> {
@@ -253,8 +310,23 @@ impl State {
                     move |result| Event::Done(epoch, user, result),
                 );
             }
+            Event::CancelAccept(user) => {
+                self.confirmations.remove(&user);
+                self.notice = None;
+            }
             Event::Done(epoch, user, result) if epoch == self.epoch => {
-                self.pending.remove(&user);
+                let action = self.pending.remove(&user);
+                if matches!(action, Some(RelationshipAction::AcceptRequest { .. }))
+                    && result.as_ref().err().is_some_and(needs_confirmation)
+                {
+                    if self.confirmations.len() < MAX_PENDING {
+                        self.confirmations.insert(user);
+                        self.notice = None;
+                    } else {
+                        self.notice = Some(tr("Too many friend requests are waiting for confirmation. Confirm or cancel one before trying again.").to_owned());
+                    }
+                    return Task::none();
+                }
                 // Success shows up as the list changing (the Gateway event).
                 self.notice = result.err().map(failure);
             }
@@ -333,6 +405,7 @@ fn actions<'a>(
     kind: Option<RelationshipKind>,
     user: Snowflake,
     busy: bool,
+    confirm: bool,
 ) -> Vec<Element<'a, Event>> {
     let act = |action| (!busy).then_some(Event::Act(user, action));
     let message = (!busy).then_some(Event::OpenDm(user));
@@ -342,11 +415,39 @@ fn actions<'a>(
             small_button("Remove", act(RelationshipAction::Remove), true, false),
             small_button("Block", act(RelationshipAction::Block), true, false),
         ],
-        Some(RelationshipKind::IncomingRequest) => vec![
-            small_button("Accept", act(RelationshipAction::Befriend), false, true),
-            small_button("Decline", act(RelationshipAction::Remove), true, false),
-            small_button("Block", act(RelationshipAction::Block), true, false),
-        ],
+        Some(RelationshipKind::IncomingRequest) => {
+            let mut buttons = vec![small_button(
+                if confirm {
+                    "Confirm acceptance"
+                } else {
+                    "Accept"
+                },
+                act(RelationshipAction::AcceptRequest { confirm }),
+                false,
+                true,
+            )];
+            if confirm {
+                buttons.push(small_button(
+                    "Cancel",
+                    (!busy).then_some(Event::CancelAccept(user)),
+                    false,
+                    false,
+                ));
+            }
+            buttons.push(small_button(
+                "Decline",
+                act(RelationshipAction::Remove),
+                true,
+                false,
+            ));
+            buttons.push(small_button(
+                "Block",
+                act(RelationshipAction::Block),
+                true,
+                false,
+            ));
+            buttons
+        }
         Some(RelationshipKind::OutgoingRequest) => {
             vec![small_button(
                 "Cancel request",
@@ -387,51 +488,55 @@ fn person_row<'a>(
     relationship: &'a Relationship,
     pending: Option<RelationshipAction>,
     status: Option<Status>,
+    confirm: bool,
 ) -> Element<'a, Event> {
     let user = &relationship.user;
     let mut buttons = row![].spacing(6).align_y(alignment::Vertical::Center);
     if pending.is_some() {
         buttons = buttons.push(text(tr("Working…")).size(12).style(text::secondary));
     }
-    for button in actions(Some(relationship.kind), user.id, pending.is_some()) {
+    for button in actions(Some(relationship.kind), user.id, pending.is_some(), confirm) {
         buttons = buttons.push(button);
     }
-    container(
-        row![
-            avatar(user, 36.0),
-            button(
-                column![
-                    text(user.display_name()).font(BOLD).size(14),
-                    row![
-                        crate::status::dot(
-                            status.filter(|_| relationship.kind == RelationshipKind::Friend)
-                        ),
-                        text(format!(
-                            "{} · {}",
-                            user.username,
-                            kind_label(relationship.kind)
-                        ))
-                        .size(12)
-                        .style(text::secondary),
-                    ]
-                    .spacing(5)
-                    .align_y(alignment::Vertical::Center),
+    let main = row![
+        avatar(user, 36.0),
+        button(
+            column![
+                text(user.display_name()).font(BOLD).size(14),
+                row![
+                    crate::status::dot(
+                        status.filter(|_| relationship.kind == RelationshipKind::Friend)
+                    ),
+                    text(format!(
+                        "{} · {}",
+                        user.username,
+                        kind_label(relationship.kind)
+                    ))
+                    .size(12)
+                    .style(text::secondary),
                 ]
-                .spacing(1),
-            )
-            .padding(0)
-            .style(style::plain_button)
-            .on_press(Event::Profile(user.clone())),
-            space::horizontal(),
-            buttons,
-        ]
-        .spacing(10)
-        .align_y(alignment::Vertical::Center),
-    )
-    .padding([8, 12])
-    .width(Length::Fill)
-    .style(style::card)
-    .into()
+                .spacing(5)
+                .align_y(alignment::Vertical::Center),
+            ]
+            .spacing(1),
+        )
+        .padding(0)
+        .style(style::plain_button)
+        .on_press(Event::Profile(user.clone())),
+        space::horizontal(),
+        buttons.width(Length::FillPortion(2)).wrap(),
+    ]
+    .spacing(10)
+    .align_y(alignment::Vertical::Center);
+    let mut content = column![main].spacing(6);
+    if confirm {
+        content = content.push(text(tr(STRANGER_WARNING)).size(12));
+    }
+    container(content)
+        .padding([8, 12])
+        .width(Length::Fill)
+        .style(style::card)
+        .into()
 }
 
 /// The Friends screen, in place of the conversation.
@@ -491,6 +596,7 @@ pub fn view<'a>(
                 relationship,
                 state.pending.get(&relationship.user.id).copied(),
                 presences.get(&relationship.user.id).map(|p| p.status),
+                state.confirmations.contains(&relationship.user.id),
             ));
         }
     }
@@ -688,7 +794,11 @@ pub fn profile_view<'a>(
         if busy {
             buttons = buttons.push(text(tr("Working…")).size(12).style(text::secondary));
         }
-        for button in actions(kind, user.id, busy) {
+        let confirm = state.confirmations.contains(&user.id);
+        if confirm {
+            card = card.push(text(tr(STRANGER_WARNING)).size(12));
+        }
+        for button in actions(kind, user.id, busy, confirm) {
             buttons = buttons.push(button);
         }
         // Ignore never changes the relationship; it is its own request.
@@ -716,7 +826,7 @@ pub fn profile_view<'a>(
         false,
         false,
     ));
-    card = card.push(buttons);
+    card = card.push(buttons.wrap());
     if let Some(notice) = &state.notice {
         card = card.push(text(notice.as_str()).size(12).style(text::secondary));
     }
@@ -741,6 +851,178 @@ mod tests {
     use super::*;
     use fastcord_discord::StatusCode;
     use fastcord_discord::gateway::{ClientProperties, HostOs};
+
+    fn stranger_error() -> RestError {
+        RestError::Refused(fastcord_discord::Refusal::new(
+            StatusCode::BAD_REQUEST,
+            None,
+            "You must confirm the friend request to add this user",
+        ))
+    }
+
+    fn incoming() -> Vec<Relationship> {
+        vec![Relationship {
+            user: user(2),
+            kind: RelationshipKind::IncomingRequest,
+            ignored: false,
+        }]
+    }
+
+    #[test]
+    fn stranger_acceptance_waits_for_an_explicit_second_click_and_cannot_repeat() {
+        let (client, mut state, rows) = (rest(), State::default(), incoming());
+        let bob = Snowflake(2);
+        let plain = RelationshipAction::AcceptRequest { confirm: false };
+        let confirmed = RelationshipAction::AcceptRequest { confirm: true };
+        assert_eq!(
+            state
+                .update_for(Event::Act(bob, confirmed), &rows, &client)
+                .units(),
+            0
+        );
+        assert_eq!(
+            state
+                .update_for(Event::Act(bob, plain), &rows, &client)
+                .units(),
+            1
+        );
+        let task = state.update_for(
+            Event::Done(state.epoch, bob, Err(stranger_error())),
+            &rows,
+            &client,
+        );
+        assert_eq!(task.units(), 0, "a refusal must not automatically retry");
+        assert!(state.pending.is_empty() && state.confirmations.contains(&bob));
+        assert_eq!(
+            state
+                .update_for(Event::Act(bob, confirmed), &rows, &client)
+                .units(),
+            1
+        );
+        assert_eq!(state.pending[&bob], confirmed);
+        assert_eq!(
+            state
+                .update_for(Event::Act(bob, confirmed), &rows, &client)
+                .units(),
+            0
+        );
+        let _ = state.update_for(Event::Done(state.epoch, bob, Ok(())), &rows, &client);
+        assert!(state.pending.is_empty() && state.confirmations.is_empty());
+        assert_eq!(
+            state
+                .update_for(Event::Act(bob, confirmed), &rows, &client)
+                .units(),
+            0
+        );
+    }
+
+    #[test]
+    fn confirmation_cancel_withdrawal_reset_and_ordinary_errors_do_not_accept() {
+        let (client, mut state, rows) = (rest(), State::default(), incoming());
+        let bob = Snowflake(2);
+        let confirmed = RelationshipAction::AcceptRequest { confirm: true };
+        state.confirmations.insert(bob);
+        assert_eq!(
+            state
+                .update_for(Event::CancelAccept(bob), &rows, &client)
+                .units(),
+            0
+        );
+        assert_eq!(
+            state
+                .update_for(Event::Act(bob, confirmed), &rows, &client)
+                .units(),
+            0
+        );
+        state.confirmations.insert(bob);
+        assert_eq!(
+            state
+                .update_for(Event::Act(bob, confirmed), &[], &client)
+                .units(),
+            0
+        );
+        assert!(state.confirmations.is_empty());
+        state.confirmations.insert(bob);
+        let old = state.epoch;
+        state.reset();
+        let _ = state.update_for(Event::Done(old, bob, Err(stranger_error())), &rows, &client);
+        assert!(state.confirmations.is_empty());
+        let _ = state.update_for(
+            Event::Act(bob, RelationshipAction::AcceptRequest { confirm: false }),
+            &rows,
+            &client,
+        );
+        let _ = state.update_for(
+            Event::Done(
+                state.epoch,
+                bob,
+                Err(RestError::Http(StatusCode::BAD_REQUEST)),
+            ),
+            &rows,
+            &client,
+        );
+        assert!(state.confirmations.is_empty() && state.notice.is_some());
+        assert!(!needs_confirmation(&RestError::Refused(
+            fastcord_discord::Refusal::new(StatusCode::BAD_REQUEST, None, "some other refusal")
+        )));
+    }
+
+    #[test]
+    fn matching_incoming_username_opens_pending_without_a_new_request() {
+        let (client, mut state, rows) = (rest(), State::default(), incoming());
+        let _ = state.update(Event::AddInput(" @user2 ".into()), &client);
+        assert_eq!(
+            state.update_for(Event::AddSubmit, &rows, &client).units(),
+            0
+        );
+        assert!(state.open && state.tab() == Tab::Pending);
+        assert!(!state.add_pending && state.pending.is_empty());
+        assert!(state.notice.as_deref().unwrap().contains("Accept"));
+        assert!(failure(stranger_error()).contains("Pending"));
+    }
+
+    #[test]
+    fn confirmation_ledger_is_bounded_and_profile_buttons_wrap_within_the_card() {
+        let (client, mut state) = (rest(), State::default());
+        for id in 1..=100 {
+            state.begin(
+                Snowflake(id),
+                RelationshipAction::AcceptRequest { confirm: false },
+            );
+            let _ = state.update(
+                Event::Done(state.epoch, Snowflake(id), Err(stranger_error())),
+                &client,
+            );
+        }
+        assert_eq!(state.confirmations.len(), MAX_PENDING);
+        assert!(
+            state
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("waiting for confirmation")
+        );
+        let _ = state.update(Event::Profile(user(2)), &client);
+        let rows = incoming();
+        let element = profile_view(&state, &rows, Snowflake(99), MemberContext::default()).unwrap();
+        let mut ui = crate::variable_list::harness::Ui::new(420.0, 640.0, element);
+        let (mut confirm, mut cancel) = (false, false);
+        for y in (0..640).step_by(3) {
+            for x in (0..420).step_by(3) {
+                for event in ui.click(x as f32, y as f32) {
+                    confirm |= matches!(
+                        event,
+                        Event::Act(
+                            Snowflake(2),
+                            RelationshipAction::AcceptRequest { confirm: true }
+                        )
+                    );
+                    cancel |= matches!(event, Event::CancelAccept(Snowflake(2)));
+                }
+            }
+        }
+        assert!(confirm && cancel);
+    }
 
     fn rest() -> RestClient {
         RestClient::new(

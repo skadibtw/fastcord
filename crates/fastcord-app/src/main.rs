@@ -2539,7 +2539,11 @@ impl App {
                             }
                             return self
                                 .friends
-                                .update(event, &session.client)
+                                .update_for(
+                                    event,
+                                    &gateway.navigation.relationships,
+                                    &session.client,
+                                )
                                 .map(Message::Friends);
                         }
                     }
