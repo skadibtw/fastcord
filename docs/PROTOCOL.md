@@ -191,7 +191,7 @@ VOICE_SERVER_UPDATE (`{token, guild_id, channel_id?, endpoint}`) is decoded for 
 - `x-super-properties`: the `ClientProperties` JSON, standard-base64 encoded — the exact same object Identify sends under `properties`, with the current `client_heartbeat_session_id`.
 - `user-agent`: the profile's `browser_user_agent` (the Electron UA).
 - `x-discord-locale`: the profile's `system_locale` until the account locale is known, then the account's client locale.
-- `x-fingerprint`: the current build omits it. The target generates one through `GET /experiments` for the unauthenticated login flow; a captured value is never reused across installations/accounts.
+- `x-fingerprint`: only on the requests that have no token yet (`POST /auth/login`, `POST /auth/mfa/totp`): the `fingerprint` of the unauthenticated `GET /experiments` (same identity headers; at most 256 KiB read, assignments skipped; `<digits>.<base64url>` up to 128 bytes, verified live 2026-10-25), fetched on first use and kept for the process; a failed fetch is retried at the next attempt and the request goes without it. Never a captured value.
 - **Target additions:** `X-Installation-ID` (the persisted installation id), `x-discord-timezone`, `sec-ch-ua`/`sec-ch-ua-mobile`/`sec-ch-ua-platform` as Electron sends them, `sec-fetch-site`/`mode`/`dest`, `accept-language`, `accept-encoding`, `origin`/`referer` on writes, and a bounded cookie jar for `discord.com` sent on REST and WebSocket handshakes.
 
 Offline consistency tests use `fixtures/rest/client-identity-profiles.json` for Windows, macOS, Linux, and a non-en-US locale, comparing REST user-agent/locale and decoded `x-super-properties` against the actual Gateway Identify properties.

@@ -27,6 +27,7 @@ mod edit;
 mod error;
 #[cfg(feature = "fake-discord")]
 pub mod fake_origin;
+mod fingerprint;
 pub mod gateway;
 mod gif;
 mod group_dm;

@@ -1,8 +1,8 @@
 //! Email/password login: `POST /auth/login`, optional `POST /auth/mfa/totp`.
 //!
 //! The requests carry no token (there is none yet) but the same official-client
-//! identity headers as every other request (the official desktop profile). A
-//! CAPTCHA is never solved here: it
+//! identity headers as every other request (the official desktop profile), plus
+//! the `X-Fingerprint` from `GET /experiments`. A CAPTCHA is never solved here: it
 //! is returned as a challenge for the caller to show to the person, who then
 //! repeats the login with the key their own browser view produced. Response
 //! bodies are inspected but never copied into errors or logs: they can echo the
@@ -293,6 +293,9 @@ impl PasswordAuth {
         })
         .map_err(|_| PasswordAuthError::Protocol)?;
         let mut request = self.http.post(format!("{}/auth/login", api_base()));
+        if let Some(fingerprint) = crate::fingerprint::fingerprint(&self.http).await {
+            request = request.header("x-fingerprint", fingerprint);
+        }
         if let Some(solution) = captcha {
             request = request.header("x-captcha-key", &solution.key);
             if let Some(rqtoken) = &solution.rqtoken {
@@ -323,10 +326,13 @@ impl PasswordAuth {
             gift_code_sku_id: None,
         })
         .map_err(|_| PasswordAuthError::Protocol)?;
-        let request = self
+        let mut request = self
             .http
             .post(format!("{}/auth/mfa/totp", api_base()))
             .body(body);
+        if let Some(fingerprint) = crate::fingerprint::fingerprint(&self.http).await {
+            request = request.header("x-fingerprint", fingerprint);
+        }
         let (status, bytes) = send(request).await?;
         match classify_login(status, &bytes)? {
             PasswordLogin::Token(token) => Ok(token),

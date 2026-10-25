@@ -377,7 +377,8 @@ not another round of header work.
 
 Implemented on 2026-10-25: the desktop profile itself, A1 (launch signature
 mask), A2 (heartbeat session with 30-minute rotation), A3/A4 (installation id
-from READY, persisted, sent in Identify and `X-Installation-ID`), and C1
+from READY, persisted, sent in Identify and `X-Installation-ID`), A5
+(`X-Fingerprint` from `GET /experiments` on password login), and C1
 (version chain and the daily `identity-pin` check); see ADR 0005 "Current implementation". The
 other items below are still open.
 

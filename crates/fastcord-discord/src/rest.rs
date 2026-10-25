@@ -603,11 +603,8 @@ fn base_headers(properties: &ClientProperties) -> Result<HeaderMap, RestError> {
         HeaderValue::from_str(&properties.browser_user_agent)
             .map_err(|_| RestError::ClientConfiguration)?,
     );
-    // Current build: omitted. The target generates a fingerprint per
-    // installation through GET /experiments for the unauthenticated login flow
-    // and never reuses a captured value across accounts or installations
-    // (ADR 0005 revision 2026-10-25).
-
+    // No X-Fingerprint here: the login requests that have no token add the one
+    // `fingerprint` fetched for this process.
     Ok(headers)
 }
 
