@@ -20,6 +20,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::i18n::{tr, trf};
 use fastcord_discord::{
     ComposeError, MAX_CONTENT_CHARS, MentionPolicy, NetworkFailure, Nonce, OutgoingMessage,
     Refusal, ReplyTo, RestError, RetryableFailure, SendError, UploadError, UploadFile,
@@ -231,35 +232,35 @@ fn reason(error: SendError, reply: bool) -> &'static str {
     match error {
         SendError::NotSent(error) => match error {
             RestError::Refused(refusal) => refusal_reason(refusal, reply),
-            RestError::PermissionDenied => {
-                "Discord did not allow this message or emoji here. Check channel permissions and animated/external emoji entitlement."
-            }
-            RestError::ResourceGone => "This channel is no longer available.",
-            RestError::AuthenticationRequired => "Discord no longer accepts this login.",
-            RestError::Http(status) if status.as_u16() == 400 && reply => {
-                "Discord rejected the reply; the message it answers may be deleted, unavailable, not replyable, or the text may be too long."
-            }
-            RestError::Http(status) if status.as_u16() == 400 => {
-                "Discord rejected the message; it may be too long or empty, or a custom emoji may be unavailable or not permitted for this account."
-            }
-            RestError::Http(_) => "Discord rejected the message.",
+            RestError::PermissionDenied => tr(
+                "Discord did not allow this message or emoji here. Check channel permissions and animated/external emoji entitlement.",
+            ),
+            RestError::ResourceGone => tr("This channel is no longer available."),
+            RestError::AuthenticationRequired => tr("Discord no longer accepts this login."),
+            RestError::Http(status) if status.as_u16() == 400 && reply => tr(
+                "Discord rejected the reply; the message it answers may be deleted, unavailable, not replyable, or the text may be too long.",
+            ),
+            RestError::Http(status) if status.as_u16() == 400 => tr(
+                "Discord rejected the message; it may be too long or empty, or a custom emoji may be unavailable or not permitted for this account.",
+            ),
+            RestError::Http(_) => tr("Discord rejected the message."),
             RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-                "Could not reach Discord; the message was not sent."
+                tr("Could not reach Discord; the message was not sent.")
             }
-            RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-            _ => "The message could not be sent.",
+            RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED),
+            _ => tr("The message could not be sent."),
         },
         SendError::Ambiguous(error) => match error {
             RestError::Retryable(RetryableFailure::Server(_)) => {
-                "Discord reported a server error; the message may have been delivered."
+                tr("Discord reported a server error; the message may have been delivered.")
             }
             RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout)) => {
-                "Discord did not answer in time; the message may have been delivered."
+                tr("Discord did not answer in time; the message may have been delivered.")
             }
             RestError::Retryable(RetryableFailure::Network(_)) => {
-                "The connection failed while sending; the message may have been delivered."
+                tr("The connection failed while sending; the message may have been delivered.")
             }
-            _ => "Discord's answer could not be read; the message may have been delivered.",
+            _ => tr("Discord's answer could not be read; the message may have been delivered."),
         },
     }
 }
@@ -267,17 +268,19 @@ fn reason(error: SendError, reply: bool) -> &'static str {
 /// Sentences for the Discord error codes a send is known to meet.
 fn known_refusal(code: u32) -> Option<&'static str> {
     Some(match code {
-        50013 => {
-            "Discord says you lack permission to send here (50013). Check your role and the channel's permissions."
+        50013 => tr(
+            "Discord says you lack permission to send here (50013). Check your role and the channel's permissions.",
+        ),
+        50001 => tr("Discord says you cannot access this channel (50001)."),
+        50007 => tr("Discord says this user cannot receive messages from you (50007)."),
+        40002 => tr(
+            "Discord requires you to verify your account before sending (40002). Verify your e-mail or phone in an official client.",
+        ),
+        40003 => {
+            tr("You are opening direct messages too fast (40003). Wait a while and try again.")
         }
-        50001 => "Discord says you cannot access this channel (50001).",
-        50007 => "Discord says this user cannot receive messages from you (50007).",
-        40002 => {
-            "Discord requires you to verify your account before sending (40002). Verify your e-mail or phone in an official client."
-        }
-        40003 => "You are opening direct messages too fast (40003). Wait a while and try again.",
-        40004 => "Discord has temporarily disabled sending messages for this account (40004).",
-        20016 => "Slowmode is on in this channel (20016). Wait a moment and try again.",
+        40004 => tr("Discord has temporarily disabled sending messages for this account (40004)."),
+        20016 => tr("Slowmode is on in this channel (20016). Wait a moment and try again."),
         _ => return None,
     })
 }
@@ -319,12 +322,13 @@ fn refusal_reason(refusal: Refusal, reply: bool) -> &'static str {
     // change; it is never sent again by itself.
     if let (Some(code @ (200_000 | 200_001)), message) = (refusal.code, refusal.message()) {
         let reason = if message.is_empty() {
-            "AutoMod blocked this message".to_owned()
+            tr("AutoMod blocked this message").to_owned()
         } else {
-            format!("AutoMod blocked this message: {message}")
+            trf("AutoMod blocked this message: {}", &[&message])
         };
-        if let Some(text) = intern(format!(
-            "{reason} ({code}). Nothing was sent; change the text, then retry."
+        if let Some(text) = intern(trf(
+            "{} ({}). Nothing was sent; change the text, then retry.",
+            &[&reason, &code],
         )) {
             return text;
         }
@@ -336,18 +340,18 @@ fn refusal_reason(refusal: Refusal, reply: bool) -> &'static str {
     };
     let message = refusal.message();
     let text = if message.is_empty() {
-        format!("Discord refused the send ({code}).")
+        trf("Discord refused the send ({}).", &[&code])
     } else {
-        format!("Discord refused the send: {message} ({code}).")
+        trf("Discord refused the send: {} ({}).", &[&message, &code])
     };
     intern(text).unwrap_or_else(fallback)
 }
 
 fn compose_reason(error: ComposeError) -> &'static str {
     match error {
-        ComposeError::Empty => "A message needs some text.",
-        ComposeError::TooLong => "The message is too long for Discord.",
-        ComposeError::VoiceMessageAlone => "A voice message cannot carry text or other files.",
+        ComposeError::Empty => tr("A message needs some text."),
+        ComposeError::TooLong => tr("The message is too long for Discord."),
+        ComposeError::VoiceMessageAlone => tr("A voice message cannot carry text or other files."),
     }
 }
 
@@ -442,7 +446,7 @@ impl Outbox {
             phase: if allowed {
                 Phase::Queued
             } else {
-                Phase::Failed(NOT_ALLOWED)
+                Phase::Failed(tr(NOT_ALLOWED))
             },
         });
         id
@@ -531,7 +535,7 @@ impl Outbox {
         let reason = match failure {
             SendFailure::Send(error) => return self.finish(id, Err(error)),
             SendFailure::Upload(error) => error.reason(),
-            SendFailure::Cancelled => CANCELLED,
+            SendFailure::Cancelled => tr(CANCELLED),
         };
         match self
             .ops

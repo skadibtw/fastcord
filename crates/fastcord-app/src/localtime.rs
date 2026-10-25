@@ -2,6 +2,7 @@
 //! at process start (see `init`); there is no time-zone database, so a message
 //! sent across a DST change shows today's offset, not the offset of its day.
 
+use crate::i18n::{tr, trf, trn};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -70,7 +71,7 @@ pub fn markup(unix: i64, style: TimeStyle, offset: Option<UtcOffset>, now: i64) 
         .to_offset(offset.unwrap_or(UtcOffset::UTC));
     let (y, m, d) = (at.year(), at.month() as usize, at.day());
     let (h, min, s) = (at.hour(), at.minute(), at.second());
-    let long_date = format!("{d} {} {y}", MONTHS[m - 1]);
+    let long_date = trf("{} {} {}", &[&d, &tr(MONTHS[m - 1]), &y]);
     let hour12 = hour12();
     let short = crate::chat_prefs::clock(h, min, hour12);
     Some(match style {
@@ -86,7 +87,7 @@ pub fn markup(unix: i64, style: TimeStyle, offset: Option<UtcOffset>, now: i64) 
         TimeStyle::ShortDateTime => format!("{long_date} {short}"),
         TimeStyle::LongDateTime => format!(
             "{}, {long_date} {short}",
-            DAYS[at.weekday().number_days_from_monday() as usize]
+            tr(DAYS[at.weekday().number_days_from_monday() as usize])
         ),
         TimeStyle::Relative => unreachable!(),
     })
@@ -103,32 +104,32 @@ fn relative(unix: i64, now: i64) -> Option<String> {
         (secs + 43_200) / 86_400,
     );
     let span = if secs < 45 {
-        "a few seconds".to_owned()
+        tr("a few seconds").to_owned()
     } else if secs < 90 {
-        "a minute".to_owned()
+        tr("a minute").to_owned()
     } else if minutes < 45 {
-        format!("{minutes} minutes")
+        trn(minutes, "{} minute", "{} minutes")
     } else if minutes < 90 {
-        "an hour".to_owned()
+        tr("an hour").to_owned()
     } else if hours < 22 {
-        format!("{hours} hours")
+        trn(hours, "{} hour", "{} hours")
     } else if hours < 36 {
-        "a day".to_owned()
+        tr("a day").to_owned()
     } else if days < 26 {
-        format!("{days} days")
+        trn(days, "{} day", "{} days")
     } else if days < 45 {
-        "a month".to_owned()
+        tr("a month").to_owned()
     } else if days < 320 {
-        format!("{} months", (days * 100 / 3044).max(2))
+        trn((days * 100 / 3044).max(2), "{} month", "{} months")
     } else if days < 548 {
-        "a year".to_owned()
+        tr("a year").to_owned()
     } else {
-        format!("{} years", days * 100 / 36_525)
+        trn(days * 100 / 36_525, "{} year", "{} years")
     };
     Some(if diff >= 0 {
-        format!("in {span}")
+        trf("in {}", &[&span])
     } else {
-        format!("{span} ago")
+        trf("{} ago", &[&span])
     })
 }
 

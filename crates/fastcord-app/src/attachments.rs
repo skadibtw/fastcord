@@ -15,6 +15,7 @@
 //! * An explicit download streams straight to the file the user picks, through a
 //!   `.part` file that is renamed into place on success. It never enters the
 //!   cache and is not bounded by the cache size.
+use crate::i18n::tr;
 use fastcord_model::{Attachment, Snowflake};
 use image::imageops::FilterType;
 use image::{ImageDecoder, ImageError, Limits};
@@ -169,16 +170,16 @@ pub enum AttachmentError {
 impl std::fmt::Display for AttachmentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::InvalidUrl => "Attachment URL is invalid.",
-            Self::Network => "Attachment could not be fetched.",
-            Self::Http(_) => "Attachment server rejected the request.",
-            Self::TooLarge => "Attachment exceeds the local image or open limit.",
-            Self::UnsupportedImage => "This attachment is not a supported image.",
-            Self::InvalidImage => "The image data could not be decoded.",
-            Self::CacheUnavailable => "The local attachment cache is unavailable.",
-            Self::DestinationUnavailable => "The file could not be saved there.",
-            Self::WorkerStopped => "Attachment work was cancelled.",
-            Self::RefreshFailed => "The attachment URL could not be refreshed.",
+            Self::InvalidUrl => tr("Attachment URL is invalid."),
+            Self::Network => tr("Attachment could not be fetched."),
+            Self::Http(_) => tr("Attachment server rejected the request."),
+            Self::TooLarge => tr("Attachment exceeds the local image or open limit."),
+            Self::UnsupportedImage => tr("This attachment is not a supported image."),
+            Self::InvalidImage => tr("The image data could not be decoded."),
+            Self::CacheUnavailable => tr("The local attachment cache is unavailable."),
+            Self::DestinationUnavailable => tr("The file could not be saved there."),
+            Self::WorkerStopped => tr("Attachment work was cancelled."),
+            Self::RefreshFailed => tr("The attachment URL could not be refreshed."),
         })
     }
 }

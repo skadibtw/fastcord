@@ -9,6 +9,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::i18n::tr;
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 
 const DIR: &str = "fastcord-pastes";
@@ -48,16 +49,16 @@ pub fn png_from_dib(dib: &[u8]) -> Result<Vec<u8>, &'static str> {
         dib.get(at..at + 4)
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     };
-    let header = word(0).ok_or(BAD)? as usize;
+    let header = word(0).ok_or_else(|| tr(BAD))? as usize;
     if header < 40 || header > dib.len() {
-        return Err(BAD);
+        return Err(tr(BAD));
     }
     let bits = dib
         .get(14..16)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .ok_or(BAD)?;
-    let compression = word(16).ok_or(BAD)?;
-    let used = word(32).ok_or(BAD)? as usize;
+        .ok_or_else(|| tr(BAD))?;
+    let compression = word(16).ok_or_else(|| tr(BAD))?;
+    let used = word(32).ok_or_else(|| tr(BAD))? as usize;
     let mut colors = if bits <= 8 {
         if used == 0 { 1usize << bits } else { used }
     } else {
@@ -81,10 +82,11 @@ pub fn png_from_dib(dib: &[u8]) -> Result<Vec<u8>, &'static str> {
     limits.max_alloc = Some(MAX_DECODED_BYTES);
     let mut reader = ImageReader::with_format(Cursor::new(bmp), ImageFormat::Bmp);
     reader.limits(limits);
-    let decoded = reader.decode().map_err(|_| BAD)?;
+    let decoded = reader.decode().map_err(|_| tr(BAD))?;
     let rgb = DynamicImage::ImageRgb8(decoded.to_rgb8());
     let mut png = Cursor::new(Vec::new());
-    rgb.write_to(&mut png, ImageFormat::Png).map_err(|_| BAD)?;
+    rgb.write_to(&mut png, ImageFormat::Png)
+        .map_err(|_| tr(BAD))?;
     Ok(png.into_inner())
 }
 
@@ -107,20 +109,20 @@ pub fn save_png(png: &[u8]) -> std::io::Result<PathBuf> {
 pub fn paste_image() -> Result<PathBuf, &'static str> {
     let dib = fastcord_platform::clipboard::image_dib().map_err(|error| match error {
         fastcord_platform::clipboard::ClipboardError::Unsupported => {
-            "Pasting an image is not supported on this platform yet."
+            tr("Pasting an image is not supported on this platform yet.")
         }
         fastcord_platform::clipboard::ClipboardError::NoImage => {
-            "The clipboard does not hold an image."
+            tr("The clipboard does not hold an image.")
         }
         fastcord_platform::clipboard::ClipboardError::Busy => {
-            "The clipboard is in use by another program. Try again."
+            tr("The clipboard is in use by another program. Try again.")
         }
         fastcord_platform::clipboard::ClipboardError::TooLarge => {
-            "The clipboard image is too large to attach."
+            tr("The clipboard image is too large to attach.")
         }
     })?;
     let png = png_from_dib(&dib)?;
-    save_png(&png).map_err(|_| "The pasted image could not be saved.")
+    save_png(&png).map_err(|_| tr("The pasted image could not be saved."))
 }
 
 #[cfg(test)]

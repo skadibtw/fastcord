@@ -5,6 +5,7 @@
 //! Picking a result hands its URL to the composer; nothing is stored on disk
 //! beyond the shared byte-bounded attachment cache.
 
+use crate::i18n::tr;
 use fastcord_discord::{GifResult, MAX_GIF_QUERY_CHARS, RestClient, RestError};
 use fastcord_model::Snowflake;
 use iced::widget::{button, column, container, image, row, scrollable, text, text_input};
@@ -62,16 +63,16 @@ impl Default for State {
 fn describe(error: RestError) -> &'static str {
     match error {
         RestError::PermissionDenied | RestError::AuthenticationRequired => {
-            "Discord refused the GIF search."
+            tr("Discord refused the GIF search.")
         }
-        RestError::ResourceGone => "Discord has no GIF search for this account.",
+        RestError::ResourceGone => tr("Discord has no GIF search for this account."),
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting GIF searches. Try again shortly."
+            tr("Discord is rate limiting GIF searches. Try again shortly.")
         }
-        RestError::Retryable(_) | RestError::Http(_) => "GIF search failed. Try again.",
-        _ => "GIF results could not be read.",
+        RestError::Retryable(_) | RestError::Http(_) => tr("GIF search failed. Try again."),
+        _ => tr("GIF results could not be read."),
     }
 }
 
@@ -174,24 +175,24 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
         return None;
     }
     let controls = row![
-        text_input("Search GIFs (empty for trending)", &state.input)
+        text_input(tr("Search GIFs (empty for trending)"), &state.input)
             .on_input(Event::Input)
             .on_submit(Event::Submit)
             .width(Length::Fill),
-        button(text("Search").size(13)).on_press(Event::Submit),
+        button(text(tr("Search")).size(13)).on_press(Event::Submit),
         crate::icons::close(Some(Event::Toggle)),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
     let status: Element<'_, Event> = match &state.status {
         Status::Idle => text("").size(12).into(),
-        Status::Loading => text("Loading…").size(12).style(text::secondary).into(),
-        Status::Failed(reason) => text(*reason).size(12).style(text::danger).into(),
-        Status::Done if state.results.is_empty() => text("No GIFs found.")
+        Status::Loading => text(tr("Loading…")).size(12).style(text::secondary).into(),
+        Status::Failed(reason) => text(tr(reason)).size(12).style(text::danger).into(),
+        Status::Done if state.results.is_empty() => text(tr("No GIFs found."))
             .size(12)
             .style(text::secondary)
             .into(),
-        Status::Done => text("Pick a GIF to add its link to your message.")
+        Status::Done => text(tr("Pick a GIF to add its link to your message."))
             .size(12)
             .style(text::secondary)
             .into(),

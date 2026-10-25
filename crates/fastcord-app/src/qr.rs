@@ -11,6 +11,8 @@ use iced::futures::{Stream, stream};
 use iced::task::Handle;
 use iced::widget::qr_code;
 
+use crate::i18n::trn;
+
 /// A worker stream for one attempt. The attempt starts when the stream is first
 /// polled (inside iced's Tokio runtime) and ends, closing its socket and
 /// dropping its keys, when the stream is dropped, which `Handle::abort` does.
@@ -101,11 +103,10 @@ impl QrAttempt {
 pub fn describe_lifetime(expires_in: Duration) -> String {
     let seconds = expires_in.as_secs();
     if seconds >= 90 {
-        format!("about {} minutes", (seconds + 30) / 60)
-    } else if seconds <= 1 {
-        "about 1 second".to_owned()
+        let minutes = (seconds + 30) / 60;
+        trn(minutes, "about {} minute", "about {} minutes")
     } else {
-        format!("about {seconds} seconds")
+        trn(seconds.max(1), "about {} second", "about {} seconds")
     }
 }
 

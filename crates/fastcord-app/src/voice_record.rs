@@ -25,6 +25,8 @@ use fastcord_audio::{
 };
 use fastcord_discord::UploadFile;
 use fastcord_model::Snowflake;
+
+use crate::i18n::{tr, trf};
 use iced::widget::{button, column, container, progress_bar, row, text};
 use iced::{Element, Task};
 use parking_lot::Mutex;
@@ -297,7 +299,7 @@ impl State {
                     && matches!(state, PlayerState::Ended | PlayerState::Failed(_))
                 {
                     if matches!(state, PlayerState::Failed(_)) {
-                        self.notice = Some(PREVIEW_FAILED.to_owned());
+                        self.notice = Some(tr(PREVIEW_FAILED).to_owned());
                     }
                     self.preview = None;
                     self.previewing = false;
@@ -339,7 +341,7 @@ impl State {
                         self.ready = Some(ready);
                         self.phase = Phase::Ready;
                     }
-                    Err(RecordingFailure::Internal) => self.fail(SAVE_FAILED.to_owned()),
+                    Err(RecordingFailure::Internal) => self.fail(tr(SAVE_FAILED).to_owned()),
                     Err(failure) => self.fail(failure.to_string()),
                 }
             }
@@ -362,7 +364,7 @@ impl State {
                                 .await
                                 .ok()
                                 .and_then(Result::ok)
-                                .ok_or(PREVIEW_FAILED)
+                                .ok_or_else(|| tr(PREVIEW_FAILED))
                             },
                             move |result| Event::PreviewReady(serial, result),
                         ),
@@ -400,18 +402,22 @@ pub fn view<'a>(state: &'a State, context: &Context) -> Option<Element<'a, Event
         return None;
     }
     let small = |label: &'static str, event: Event| {
-        button(text(label).size(12))
+        button(text(tr(label)).size(12))
             .padding([2, 8])
             .on_press(event)
             .style(button::secondary)
     };
+    // Recording starts from the "+" menu; idle, only a refusal is shown.
+    if state.phase == Phase::Idle && state.notice.is_none() {
+        return None;
+    }
     let line = match state.phase {
         Phase::Idle => {
             let mut line = row![small("Record voice message", Event::Start)]
                 .spacing(8)
                 .align_y(iced::Alignment::Center);
             line = line.push(
-                text(state.notice.as_deref().unwrap_or(EXPERIMENTAL))
+                text(state.notice.as_deref().unwrap_or(tr(EXPERIMENTAL)))
                     .size(11)
                     .style(if state.notice.is_some() {
                         text::danger
@@ -422,7 +428,7 @@ pub fn view<'a>(state: &'a State, context: &Context) -> Option<Element<'a, Event
             line
         }
         Phase::Starting => row![
-            text("Opening the microphone…").size(12),
+            text(tr("Opening the microphone…")).size(12),
             small("Cancel", Event::Cancel)
         ]
         .spacing(8)
@@ -434,7 +440,7 @@ pub fn view<'a>(state: &'a State, context: &Context) -> Option<Element<'a, Event
                 stopped: None,
             });
             row![
-                text("Recording").size(12).style(text::danger),
+                text(tr("Recording")).size(12).style(text::danger),
                 text(format!(
                     "{} / {}",
                     clock(snapshot.elapsed_ms),
@@ -450,11 +456,11 @@ pub fn view<'a>(state: &'a State, context: &Context) -> Option<Element<'a, Event
             .spacing(8)
             .align_y(iced::Alignment::Center)
         }
-        Phase::Finishing => row![text("Saving the recording…").size(12)],
+        Phase::Finishing => row![text(tr("Saving the recording…")).size(12)],
         Phase::Ready => {
             let ready = state.ready.as_ref()?;
             let mut line =
-                row![text(format!("Voice message {}", clock(ready.duration_ms))).size(12)]
+                row![text(trf("Voice message {}", &[&clock(ready.duration_ms)])).size(12)]
                     .spacing(8)
                     .align_y(iced::Alignment::Center);
             if !ready.bars.is_empty() {
@@ -471,12 +477,12 @@ pub fn view<'a>(state: &'a State, context: &Context) -> Option<Element<'a, Event
                 ))
                 .push(small("Discard", Event::Cancel))
                 .push(
-                    button(text("Send").size(12))
+                    button(text(tr("Send")).size(12))
                         .padding([2, 8])
                         .on_press(Event::Send),
                 );
             if let Some(notice) = &state.notice {
-                line = line.push(text(notice.as_str()).size(11).style(text::danger));
+                line = line.push(text(tr(notice.as_str())).size(11).style(text::danger));
             }
             line
         }
@@ -629,6 +635,9 @@ mod tests {
     fn the_panel_shows_each_phase_with_its_controls() {
         let ctx = context();
         let mut state = State::default();
+        // Idle, recording starts from the message box's "+" menu.
+        assert!(view(&state, &ctx).is_none());
+        state.notice = Some("refused".to_owned());
         assert!(view(&state, &ctx).is_some());
         for phase in [Phase::Starting, Phase::Recording, Phase::Finishing] {
             state.phase = phase;

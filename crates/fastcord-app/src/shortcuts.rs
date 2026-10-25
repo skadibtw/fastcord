@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::i18n::{tr, trf};
 use fastcord_platform::shortcut::{
     Binding, Edge, GlobalShortcuts, Key, Matcher, ShortcutEvent, global_support, mods,
 };
@@ -29,8 +30,8 @@ impl InputMode {
 impl fmt::Display for InputMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::VoiceActivity => "Voice activity",
-            Self::PushToTalk => "Push to talk",
+            Self::VoiceActivity => tr("Voice activity"),
+            Self::PushToTalk => tr("Push to talk"),
         })
     }
 }
@@ -53,8 +54,8 @@ impl Scope {
 impl fmt::Display for Scope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Window => "Only while this window is focused",
-            Self::Global => "System-wide (works while another app is focused)",
+            Self::Window => tr("Only while this window is focused"),
+            Self::Global => tr("System-wide (works while another app is focused)"),
         })
     }
 }
@@ -90,10 +91,10 @@ impl Action {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::PushToTalk => "Push to talk",
-            Self::PushToMute => "Push to mute",
-            Self::ToggleMute => "Toggle mute",
-            Self::ToggleDeafen => "Toggle deafen",
+            Self::PushToTalk => tr("Push to talk"),
+            Self::PushToMute => tr("Push to mute"),
+            Self::ToggleMute => tr("Toggle mute"),
+            Self::ToggleDeafen => tr("Toggle deafen"),
         }
     }
 
@@ -217,7 +218,9 @@ impl Settings {
     /// The warning shown when the chosen mode cannot work.
     pub fn problem(&self) -> Option<&'static str> {
         (self.mode == InputMode::PushToTalk && self.binding(Action::PushToTalk).is_none())
-            .then_some("Push to talk is selected but has no key, so you will not transmit.")
+            .then_some(tr(
+                "Push to talk is selected but has no key, so you will not transmit.",
+            ))
     }
 }
 
@@ -466,13 +469,13 @@ pub fn view<'a>(
     let message = crate::Message::VoiceInput;
     let manual = settings.sensitivity;
     let mut content = column![
-        text("Input mode").size(18),
+        text(tr("Input mode")).size(18),
         pick_list(InputMode::ALL, Some(settings.mode), move |mode| message(
             Event::Mode(mode)
         ))
         .width(Length::Fill),
         text(if vad_forbidden {
-            "This channel does not allow voice activity, so push to talk is used here."
+            tr("This channel does not allow voice activity, so push to talk is used here.")
         } else {
             ""
         }),
@@ -486,15 +489,15 @@ pub fn view<'a>(
             content = content
                 .push(
                     checkbox(manual.is_none())
-                        .label("Automatic sensitivity (transmit everything the noise suppression lets through)")
+                        .label(tr("Automatic sensitivity (transmit everything the noise suppression lets through)"))
                         .on_toggle(move |automatic| message(Event::Automatic(automatic))),
                 )
                 .push(match manual {
                     Some(level) => Element::from(row![
                         slider(SENSITIVITY_RANGE, level, move |n| message(Event::Sensitivity(n))),
-                        text(format!("Speech quieter than -{level} dBFS is not sent")),
+                        text(trf("Speech quieter than -{} dBFS is not sent", &[&level])),
                     ].spacing(12)),
-                    None => text("Manual sensitivity is off.").into(),
+                    None => text(tr("Manual sensitivity is off.")).into(),
                 });
         }
         InputMode::PushToTalk => {
@@ -503,9 +506,9 @@ pub fn view<'a>(
                     slider(0..=MAX_RELEASE_MS, settings.release_ms, move |ms| {
                         message(Event::ReleaseMs(ms - ms % 50))
                     }),
-                    text(format!(
+                    text(trf(
                         "Keep transmitting {} ms after release",
-                        settings.release_ms
+                        &[&settings.release_ms],
                     )),
                 ]
                 .spacing(12),
@@ -513,7 +516,7 @@ pub fn view<'a>(
         }
     }
     content = content
-        .push(text("Shortcuts").size(18))
+        .push(text(tr("Shortcuts")).size(18))
         .push(pick_list(Scope::ALL, Some(settings.scope), move |scope| {
             message(Event::Scope(scope))
         }))
@@ -524,21 +527,21 @@ pub fn view<'a>(
             row![
                 text(action.label()).width(Length::Fixed(140.0)),
                 text(if recording {
-                    "Press a key or combination… (Esc cancels)".to_owned()
+                    tr("Press a key or combination… (Esc cancels)").to_owned()
                 } else {
                     settings
                         .binding(action)
-                        .map_or_else(|| "Not set".to_owned(), Binding::label)
+                        .map_or_else(|| tr("Not set").to_owned(), Binding::label)
                 })
                 .width(Length::Fill),
-                button(if recording { "Cancel" } else { "Set key" }).on_press(message(
+                button(tr(if recording { "Cancel" } else { "Set key" })).on_press(message(
                     if recording {
                         Event::CancelRecord
                     } else {
                         Event::Record(action)
                     }
                 )),
-                button("Clear").on_press_maybe(
+                button(tr("Clear")).on_press_maybe(
                     settings
                         .binding(action)
                         .map(|_| message(Event::Clear(action)))
@@ -548,25 +551,25 @@ pub fn view<'a>(
         );
     }
     content = content
-        .push(text(runtime.notice.as_deref().unwrap_or("")))
-        .push(text(
+        .push(text(tr(runtime.notice.as_deref().unwrap_or(""))))
+        .push(text(tr(
             "Shortcuts are heard only while you are in a call, and no other key is read or stored. The pressed key is still delivered to the focused application, so prefer a function key, a mouse-free key such as Right Ctrl, or a combination.",
-        ));
+        )));
     content.into()
 }
 
 fn scope_status(settings: &Settings, runtime: &Runtime, call_active: bool) -> String {
     match settings.scope {
         Scope::Window => {
-            "In-window shortcuts work on every system. Pressing a key in another app is not seen, and leaving this window releases every held key.".to_owned()
+            tr("In-window shortcuts work on every system. Pressing a key in another app is not seen, and leaving this window releases every held key.").to_owned()
         }
         Scope::Global => match (&runtime.global_error, global_support()) {
-            (Some(error), _) => format!("System-wide shortcuts are inactive: {error}"),
-            (None, Err(error)) => format!("System-wide shortcuts are inactive: {error}"),
+            (Some(error), _) => trf("System-wide shortcuts are inactive: {}", &[&tr(error)]),
+            (None, Err(error)) => trf("System-wide shortcuts are inactive: {}", &[&tr(&error.to_string())]),
             (None, Ok(())) if runtime.global_running && call_active => {
-                "System-wide listener running for this call.".to_owned()
+                tr("System-wide listener running for this call.").to_owned()
             }
-            (None, Ok(())) => "The system-wide listener starts when you join a call.".to_owned(),
+            (None, Ok(())) => tr("The system-wide listener starts when you join a call.").to_owned(),
         },
     }
 }

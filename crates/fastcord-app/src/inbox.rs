@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 use fastcord_discord::state::navigation::{Inbox, InboxRow};
 use fastcord_discord::{MentionFilter, MentionsPage, RestClient, RestError};
 use fastcord_model::{Message, Snowflake};
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, checkbox, column, container, row, scrollable, space, text};
+
+use crate::i18n::{tr, trf};
 use iced::{Color, Element, Length, Task};
 
 pub const MAX_MENTIONS: usize = 100;
@@ -28,7 +30,6 @@ const AUTHOR_CHARS: usize = 64;
 const JUMP_PATIENCE: Duration = Duration::from_secs(10);
 
 const PANEL: Color = crate::style::SIDEBAR;
-const ROW: Color = crate::style::CHAT;
 const MUTED: Color = crate::style::SUBTLE;
 const WARN: Color = crate::style::RED;
 
@@ -367,111 +368,186 @@ impl State {
 
 fn unread_row<'a>(index: usize, item: &'a InboxRow) -> Element<'a, Event> {
     let place = if item.guild.is_some() {
-        format!("{} · #{}", item.guild_name, item.name)
+        format!("#{}", item.name)
     } else {
         item.name.clone()
     };
-    let mut badges = String::new();
-    if item.mentions > 0 {
-        badges.push_str(&format!("{} mention(s)", item.mentions));
-    } else if item.unread {
-        badges.push_str("unread");
+    let mut detail = Vec::new();
+    if item.guild.is_some() {
+        detail.push(item.guild_name.clone());
     }
     if item.muted {
-        badges.push_str(" · muted");
+        detail.push(tr("muted").to_owned());
     }
-    let mute_label = if item.channel_muted { "Unmute" } else { "Mute" };
-    row![
-        button(column![text(place).size(14), text(badges).size(12).color(MUTED)].spacing(2),)
-            .width(Length::Fill)
-            .style(|_, _| button::Style {
-                background: Some(ROW.into()),
-                text_color: Color::WHITE,
-                ..Default::default()
-            })
-            .on_press(Event::OpenRow(index)),
-        button(text("Mark read").size(12)).on_press(Event::MarkRead(index)),
-        button(text(mute_label).size(12)).on_press(Event::ToggleMute(index)),
+    let mut line = row![
+        column![
+            text(place).size(14).font(crate::ui::BOLD),
+            text(detail.join(" · ")).size(12).color(MUTED),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
     ]
-    .spacing(4)
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    // A mention count, as in the channel list; plain unread is a dot.
+    line = line.push(if item.mentions > 0 {
+        container(text(item.mentions.min(99).to_string()).size(11).font(crate::ui::BOLD))
+            .padding([1, 6])
+            .style(crate::style::badge)
+    } else {
+        container(space().width(8).height(8)).style(|_| container::Style {
+            background: Some(crate::style::BRIGHT.into()),
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..iced::Border::default()
+            },
+            ..container::Style::default()
+        })
+    });
+    let tool = |icon, tip: &str, event| {
+        crate::icons::action(crate::icons::Action {
+            icon,
+            on_press: Some(event),
+            active: false,
+            danger: false,
+            tip: tip.to_owned(),
+            badge: 0,
+        })
+    };
+    row![
+        button(line)
+            .width(Length::Fill)
+            .padding([6, 10])
+            .style(crate::style::row_button(false, true))
+            .on_press(Event::OpenRow(index)),
+        tool(
+            crate::icons::Icon::MarkRead,
+            tr("Mark as read"),
+            Event::MarkRead(index)
+        ),
+        tool(
+            if item.channel_muted {
+                crate::icons::Icon::Bell
+            } else {
+                crate::icons::Icon::BellMuted
+            },
+            if item.channel_muted {
+                tr("Unmute")
+            } else {
+                tr("Mute")
+            },
+            Event::ToggleMute(index),
+        ),
+    ]
+    .spacing(2)
+    .align_y(iced::Alignment::Center)
     .into()
 }
 
+/// The inbox: a panel that opens beside the rail over the window, so the
+/// conversation stays where it was and a click outside closes it.
 pub fn view<'a>(state: &'a State, inbox: &'a Inbox) -> Element<'a, Event> {
-    let tab = |label: &'static str, tab: Tab| -> Element<'a, Event> {
-        let selected = state.tab == tab;
-        button(text(label).size(13))
-            .on_press_maybe((!selected).then_some(Event::Tab(tab)))
-            .padding([4, 10])
-            .style(crate::style::secondary_button(selected))
-            .into()
-    };
-    let mut body = column![crate::icons::panel_title(
-        "Inbox",
-        vec![tab("Unread", Tab::Unread), tab("Mentions", Tab::Mentions)],
-        Event::Toggle,
-    )]
-    .spacing(8);
+    let header = row![
+        crate::icons::sized(crate::icons::Icon::Inbox, crate::style::TEXT, 20.0),
+        text(tr("Inbox")).size(16).font(crate::ui::BOLD),
+        space::horizontal(),
+        crate::icons::close(Some(Event::Toggle)),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    let mut body = column![
+        header,
+        crate::ui::tabs(
+            &[(Tab::Unread, tr("Unread")), (Tab::Mentions, tr("Mentions"))],
+            state.tab,
+            Event::Tab,
+        ),
+    ]
+    .spacing(10);
     if let Some(notice) = state.notice {
-        body = body.push(text(notice).size(12).color(WARN));
+        body = body.push(text(tr(notice)).size(12).color(WARN));
     }
     match state.tab {
         Tab::Unread => {
-            let mut list = column![].spacing(4);
+            let mut list = column![].spacing(2);
             for (index, item) in inbox.rows.iter().enumerate() {
                 list = list.push(unread_row(index, item));
             }
-            let summary = if inbox.total == 0 {
-                "Nothing unread.".to_owned()
-            } else if inbox.total > inbox.rows.len() {
-                format!(
-                    "{} unread conversations, {} mentions. Showing {}.",
-                    inbox.total,
-                    inbox.mentions,
-                    inbox.rows.len()
-                )
+            if inbox.total == 0 {
+                body = body.push(
+                    container(text(tr("All caught up: nothing unread.")).size(14).color(MUTED))
+                        .center_x(Length::Fill)
+                        .padding([40, 0]),
+                );
             } else {
-                format!(
-                    "{} unread conversations, {} mentions.",
-                    inbox.total, inbox.mentions
-                )
-            };
-            body = body.push(text(summary).size(12).color(MUTED));
-            if !inbox.rows.is_empty() {
-                let label = if inbox.total > inbox.rows.len() {
-                    "Mark these as read"
+                let summary = if inbox.total > inbox.rows.len() {
+                    trf(
+                        "Unread conversations: {}, showing {}.",
+                        &[&inbox.total, &inbox.rows.len()],
+                    )
                 } else {
-                    "Mark all as read"
+                    trf("Unread conversations: {}", &[&inbox.total])
+                };
+                let label = if inbox.total > inbox.rows.len() {
+                    tr("Mark these as read")
+                } else {
+                    tr("Mark all as read")
                 };
                 body = body
-                    .push(button(text(label).size(13)).on_press(Event::MarkAllRead))
+                    .push(
+                        row![
+                            text(summary).size(12).color(MUTED).width(Length::Fill),
+                            crate::icons::secondary(label, Event::MarkAllRead),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    )
                     .push(scrollable(list).height(Length::Fill));
             }
         }
         Tab::Mentions => {
-            let flag = |label: &'static str, on: bool, event: Event| {
-                button(text(format!("{label}: {}", if on { "on" } else { "off" })).size(12))
-                    .on_press(event)
-            };
             body = body.push(
                 row![
-                    flag("Roles", state.filter.roles, Event::ToggleRoles),
-                    flag("@everyone", state.filter.everyone, Event::ToggleEveryone),
-                    button(text("Refresh").size(12)).on_press(Event::Refresh),
+                    checkbox(state.filter.roles)
+                        .label(tr("Role mentions"))
+                        .on_toggle(|_| Event::ToggleRoles)
+                        .size(14)
+                        .text_size(12),
+                    checkbox(state.filter.everyone)
+                        .label("@everyone")
+                        .on_toggle(|_| Event::ToggleEveryone)
+                        .size(14)
+                        .text_size(12),
+                    space::horizontal(),
+                    crate::icons::action(crate::icons::Action {
+                        icon: crate::icons::Icon::Refresh,
+                        on_press: Some(Event::Refresh),
+                        active: false,
+                        danger: false,
+                        tip: tr("Refresh").to_owned(),
+                        badge: 0,
+                    }),
                 ]
-                .spacing(6),
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
             );
             // A user ignored or blocked after the page loaded disappears too.
             let visible = |mention: &Mention| !inbox.suppressed.contains_key(&mention.author_id);
             let shown = state.mentions.iter().filter(|m| visible(m)).count();
-            body = body.push(match &state.status {
-                Status::Idle => text("").size(12),
-                Status::Loading => text("Loading mentions…").size(12).color(MUTED),
-                Status::Failed(reason) => text(*reason).size(12).color(WARN),
-                Status::Done if shown == 0 => text("No recent mentions.").size(12).color(MUTED),
-                Status::Done => text(format!("{shown} mentions")).size(12).color(MUTED),
-            });
-            let mut list = column![].spacing(4);
+            match &state.status {
+                Status::Idle | Status::Done if shown > 0 => {}
+                Status::Idle => {}
+                Status::Loading => body = body.push(text(tr("Loading mentions…")).size(12).color(MUTED)),
+                Status::Failed(reason) => body = body.push(text(tr(reason)).size(12).color(WARN)),
+                Status::Done => {
+                    body = body.push(
+                        container(text(tr("No recent mentions.")).size(14).color(MUTED))
+                            .center_x(Length::Fill)
+                            .padding([40, 0]),
+                    );
+                }
+            }
+            let mut list = column![].spacing(2);
             for (index, mention) in state.mentions.iter().enumerate() {
                 if !visible(mention) {
                     continue;
@@ -479,34 +555,45 @@ pub fn view<'a>(state: &'a State, inbox: &'a Inbox) -> Element<'a, Event> {
                 list = list.push(
                     button(
                         column![
-                            text(format!("{} · {}", mention.author, mention.date))
-                                .size(12)
-                                .color(MUTED),
+                            row![
+                                text(&mention.author).size(13).font(crate::ui::BOLD),
+                                text(&mention.date).size(11).color(MUTED),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::Alignment::Center),
                             text(&mention.preview).size(14),
                         ]
                         .spacing(2),
                     )
                     .width(Length::Fill)
-                    .style(|_, _| button::Style {
-                        background: Some(ROW.into()),
-                        text_color: Color::WHITE,
-                        ..Default::default()
-                    })
+                    .padding([6, 10])
+                    .style(crate::style::row_button(false, true))
                     .on_press(Event::JumpMention(index)),
                 );
             }
             body = body.push(scrollable(list).height(Length::Fill));
             if state.status == Status::Done && state.has_more {
-                body = body.push(button(text("Load more").size(13)).on_press(Event::More));
+                body = body.push(crate::icons::secondary(tr("Load more"), Event::More));
             }
         }
     }
     container(body)
-        .padding(10)
-        .width(Length::Fill)
+        .padding(14)
+        .width(440)
         .height(Length::Fill)
         .style(|_| container::Style {
             background: Some(PANEL.into()),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: crate::style::SELECTED,
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+                offset: iced::Vector::new(0.0, 8.0),
+                blur_radius: 24.0,
+            },
+            text_color: Some(crate::style::TEXT),
             ..Default::default()
         })
         .into()

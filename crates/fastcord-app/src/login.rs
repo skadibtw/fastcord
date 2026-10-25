@@ -6,6 +6,8 @@ use fastcord_discord::{Priority, RestClient, RestError, UserToken};
 use fastcord_model::{Snowflake, User};
 use fastcord_platform::{NativeCredentialStore, StoreError};
 
+use crate::i18n::{tr, trf};
+
 pub const MAX_TOKEN_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,17 +75,17 @@ impl fmt::Display for LoginError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Rest(RestError::AuthenticationRequired | RestError::InvalidToken) => {
-                f.write_str("Discord rejected this token. Login stopped; paste a valid alt-account token.")
+                f.write_str(tr("Discord rejected this token. Login stopped; paste a valid alt-account token."))
             }
             Self::Rest(RestError::Retryable(_)) => {
-                f.write_str("Could not reach Discord or Discord is temporarily unavailable. Login stopped; try again.")
+                f.write_str(tr("Could not reach Discord or Discord is temporarily unavailable. Login stopped; try again."))
             }
-            Self::Rest(error) => write!(f, "Login stopped: {error}."),
-            Self::Store(error) => write!(f, "{error} Unlock it to restore your saved login, or explicitly choose a memory-only session."),
-            Self::CredentialMissing => f.write_str("The saved token is no longer in the native credential store."),
-            Self::AccountMismatch => f.write_str("The saved token belongs to a different account. Login stopped; forget this saved login."),
-            Self::InvalidInput => f.write_str("Paste a nonempty token of at most 4096 bytes. No passwords are accepted."),
-            Self::WorkerStopped => f.write_str("The login worker stopped. No login was established; try again."),
+            Self::Rest(error) => f.write_str(&trf("Login stopped: {}.", &[&tr(&error.to_string())])),
+            Self::Store(error) => f.write_str(&trf("{} Unlock it to restore your saved login, or explicitly choose a memory-only session.", &[&tr(&error.to_string())])),
+            Self::CredentialMissing => f.write_str(tr("The saved token is no longer in the native credential store.")),
+            Self::AccountMismatch => f.write_str(tr("The saved token belongs to a different account. Login stopped; forget this saved login.")),
+            Self::InvalidInput => f.write_str(tr("Paste a nonempty token of at most 4096 bytes. No passwords are accepted.")),
+            Self::WorkerStopped => f.write_str(tr("The login worker stopped. No login was established; try again.")),
         }
     }
 }

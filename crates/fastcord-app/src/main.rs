@@ -37,18 +37,21 @@ mod gif;
 mod group_dm;
 mod guild_admin;
 mod history;
+mod i18n;
 mod icons;
 mod inbox;
 mod interactions;
 mod invite;
 mod localtime;
 mod login;
+mod login_screen;
 mod media_ui;
 mod member_menu;
 mod message_link;
 mod mic_panel;
 mod moderation;
 mod navigation;
+mod new_dm;
 mod notify;
 mod notify_settings;
 mod onboarding;
@@ -69,6 +72,7 @@ mod rich;
 mod safety;
 mod scheduled_events;
 mod search;
+mod settings;
 mod shortcuts;
 mod slash;
 mod soundboard;
@@ -88,6 +92,7 @@ mod virtual_list;
 mod voice_log;
 mod voice_record;
 mod voice_settings;
+mod ui;
 
 use crate::attachments::AttachmentKey;
 use std::sync::Arc;
@@ -189,6 +194,8 @@ fn main() -> iced::Result {
     }
     // Before any thread exists: `time` refuses the local offset afterwards on Unix.
     localtime::init();
+    // Until the settings file is read, which may choose another language.
+    i18n::set(i18n::Lang::system());
     // One session per process and per sign-in: a second launch hands its link
     // to the first and exits, never opening a second Gateway on the same token.
     #[cfg(feature = "fake-discord")]
@@ -239,6 +246,7 @@ struct App {
     token: Arc<UserToken>,
     acknowledged: bool,
     memory_only: bool,
+    login_ui: login_screen::State,
     notice: Option<String>,
     store: Option<NativeCredentialStore>,
     saved_accounts: Vec<Snowflake>,
@@ -252,7 +260,13 @@ struct App {
     attachment_purge_failed: bool,
     audio_preferences: audio_devices::Preferences,
     audio_settings: audio_devices::Settings,
-    chat_settings_open: bool,
+    /// The settings page shown while the settings screen is open.
+    settings_section: settings::Section,
+    mic_menu: bool,
+    menu: Option<Menu>,
+    new_dm: new_dm::State,
+    /// Message requests replace the conversation in direct messages.
+    requests_open: bool,
     /// The unverified-writes list in the chat settings is expanded.
     unverified_open: bool,
     /// Installed speech voices, listed when the chat settings open.
@@ -358,6 +372,25 @@ type ShareSourceList = (
     Vec<fastcord_platform::loopback::AudioSource>,
 );
 
+/// A popover menu of the main window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Menu {
+    /// Under the server's name.
+    Server(Snowflake),
+    /// The `⋯` of the conversation header.
+    Conversation,
+    /// The "+" of the message box.
+    Composer,
+}
+
+/// A tab of the expressions window behind the message box's smiley.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expressions {
+    Emoji,
+    Gif,
+    Sticker,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     #[cfg(feature = "fake-discord")]
@@ -367,6 +400,7 @@ enum Message {
     TokenEdited(Arc<UserToken>),
     InputTooLong,
     Acknowledge(bool),
+    LoginUi(login_screen::Event),
     MemoryOnly(bool),
     StartQr,
     CancelQr,
@@ -456,6 +490,17 @@ enum Message {
     CloseAudioSettings,
     OpenChatSettings,
     CloseChatSettings,
+    Settings(settings::Event),
+    /// A menu row was chosen: close the open menus, then do it.
+    MenuPick(Box<Message>),
+    /// The quick device menu above the microphone.
+    MicMenu(bool),
+    OpenMenu(Option<Menu>),
+    NewDm(new_dm::Event),
+    /// Message requests in the direct messages pane.
+    ShowRequests,
+    /// Switch the expressions window to a tab.
+    Expressions(Expressions),
     /// Settings, Advanced: show or hide the unverified-writes list.
     ToggleUnverifiedList,
     /// Turns one group of unverified writes on or off for this session.
@@ -596,6 +641,7 @@ impl App {
                 token: Arc::new(UserToken::new(String::new())),
                 acknowledged: false,
                 memory_only: false,
+                login_ui: login_screen::State::default(),
                 notice: None,
                 store: None,
                 saved_accounts: Vec::new(),
@@ -609,7 +655,11 @@ impl App {
                 attachment_purge_failed: false,
                 audio_preferences: audio_devices::Preferences::default(),
                 audio_settings: audio_devices::Settings::default(),
-                chat_settings_open: false,
+                settings_section: settings::Section::Voice,
+                mic_menu: false,
+                menu: None,
+                new_dm: new_dm::State::default(),
+                requests_open: false,
                 unverified_open: false,
                 speech_voices: Vec::new(),
                 audio_saving: None,
@@ -729,7 +779,11 @@ impl App {
                     .or(self.moderation.wanted())
                     .or(self.apps.wanted_guild())
                     .or(self.community.wanted())
-                    .or(self.automod.wanted()),
+                    .or(self.automod.wanted())
+                    .or(match self.menu {
+                        Some(Menu::Server(guild)) => Some(guild),
+                        _ => None,
+                    }),
             );
             gateway
                 .controls
@@ -1239,6 +1293,23 @@ impl App {
                 self.configure_ui_sound();
                 self.shortcuts.rebuild(&self.audio_preferences.voice_input);
                 // Fake mode signs in at once with its fixed token, memory-only.
+                // `--login-screen` shows the sign-in screen with two pretend
+                // saved accounts; Continue signs in with the fake token.
+                #[cfg(feature = "fake-discord")]
+                if fake::active() && fake::login_screen() {
+                    self.phase = Phase::Login;
+                    for (id, name) in [(1001, "Fake Me"), (1002, "Juno")] {
+                        self.saved_accounts.push(Snowflake(id));
+                        self.account_index.upsert(&fastcord_model::User {
+                            id: Snowflake(id),
+                            username: name.to_lowercase(),
+                            global_name: Some(name.to_owned()),
+                            avatar: None,
+                            bot: false,
+                        });
+                    }
+                    return Task::none();
+                }
                 #[cfg(feature = "fake-discord")]
                 if fake::active() {
                     self.phase = Phase::Authenticating {
@@ -1277,6 +1348,24 @@ impl App {
                         "emoji" => Message::EmojiPicker(emoji_picker::Event::Toggle),
                         "audio" => Message::OpenAudioSettings,
                         "chat" => Message::OpenChatSettings,
+                        "login-qr" => {
+                            Message::LoginUi(login_screen::Event::Method(login_screen::Method::Qr))
+                        }
+                        "login-password" => Message::LoginUi(login_screen::Event::Method(
+                            login_screen::Method::Password,
+                        )),
+                        "login-token" => Message::LoginUi(login_screen::Event::Method(
+                            login_screen::Method::Token,
+                        )),
+                        "login-accounts" => Message::LoginUi(login_screen::Event::Accounts),
+                        "server-menu" => Message::OpenMenu(Some(Menu::Server(Snowflake(5001)))),
+                        "conversation-menu" => Message::OpenMenu(Some(Menu::Conversation)),
+                        "account-menu" => Message::Status(status::Event::ToggleMenu),
+                        "mic-menu" => Message::MicMenu(true),
+                        "new-dm" => Message::NewDm(new_dm::Event::Open),
+                        "requests" => Message::ShowRequests,
+                        "settings" => Message::Settings(settings::Event::Open(settings::Section::Voice)),
+                        "close-menus" => Message::OpenMenu(None),
                         _ => Message::Account(account_panel::Event::Toggle),
                     }),
                     fake::Step::Join(guild, channel) => {
@@ -1445,9 +1534,98 @@ impl App {
                     }
                 }
             }
+            Message::Settings(settings::Event::Open(section)) => {
+                let opening = !self.audio_settings.open;
+                self.settings_section = section;
+                let mut tasks = Vec::new();
+                if opening {
+                    tasks.push(self.handle(Message::OpenAudioSettings));
+                }
+                if let Phase::Account { .. } = &self.phase {
+                    // The account pages are the existing panels, kept open
+                    // while their page is shown.
+                    if section == settings::Section::Profile && !self.identity.is_open() {
+                        tasks.push(self.handle(Message::Identity(profile_edit::Event::Toggle)));
+                    }
+                    if section == settings::Section::Accounts && !self.account_panel.is_open() {
+                        tasks.push(self.handle(Message::Account(account_panel::Event::Toggle)));
+                    }
+                    if section == settings::Section::Privacy {
+                        if !self.safety.is_open() {
+                            tasks.push(self.handle(Message::Safety(safety::Event::Toggle)));
+                        }
+                        tasks.push(
+                            self.handle(Message::Safety(safety::Event::Tab(safety::Tab::Privacy))),
+                        );
+                    }
+                }
+                return Task::batch(tasks);
+            }
+            Message::MenuPick(message) => {
+                self.close_menus();
+                return self.handle(*message);
+            }
+            Message::OpenMenu(menu) => {
+                self.close_menus();
+                self.menu = menu;
+            }
+            Message::NewDm(new_dm::Event::Create) => {
+                let recipients = self.new_dm.recipients();
+                let _ = self.handle(Message::PrivateRecipients(recipients));
+                if let Phase::Account {
+                    session, gateway, ..
+                } = &self.phase
+                    && parse_private_recipients(&gateway.private.recipients, session.user.id)
+                        .is_ok()
+                {
+                    self.new_dm.update(new_dm::Event::Close);
+                }
+                return self.handle(Message::OpenPrivate);
+            }
+            Message::NewDm(event) => {
+                let opening = matches!(event, new_dm::Event::Open);
+                self.new_dm.update(event);
+                if opening {
+                    self.close_menus();
+                    if let Phase::Account { gateway, .. } = &mut self.phase {
+                        gateway.private.notice = None;
+                    }
+                    return iced::widget::operation::focus("new-dm-search");
+                }
+            }
+            Message::ShowRequests => {
+                self.friends.close();
+                self.requests_open = true;
+                let mut tasks = vec![self.handle(Message::ShowDirects(true))];
+                if !self.safety.is_open() {
+                    tasks.push(self.handle(Message::Safety(safety::Event::Toggle)));
+                }
+                tasks.push(self.handle(Message::Safety(safety::Event::Tab(safety::Tab::Requests))));
+                return Task::batch(tasks);
+            }
+            Message::MicMenu(open) => {
+                self.mic_menu = open;
+                if open && self.audio_settings.inputs.is_empty() && !self.audio_settings.probing {
+                    self.audio_settings.probing = true;
+                    return Task::perform(audio_devices::enumerate(), Message::AudioDevicesListed);
+                }
+            }
+            Message::Settings(settings::Event::Close)
+            | Message::CloseChatSettings => return self.handle(Message::CloseAudioSettings),
+            Message::OpenAudioSettings if !self.audio_settings.open => {
+                {
+                    self.close_menus();
+                    self.audio_settings.open = true;
+                    let voices = Task::perform(speech::load_voices(), |voices| {
+                        Message::SpeechVoices(voices.unwrap_or_default())
+                    });
+                    return Task::batch([voices, self.handle(Message::RefreshAudioDevices)]);
+                }
+            }
             Message::OpenAudioSettings | Message::RefreshAudioDevices => {
-                self.audio_settings.open = true;
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Phase::Account { gateway, .. } = &self.phase
+                    && self.audio_settings.open
+                {
                     gateway.controls.set_diagnostics_open(true);
                 }
                 if !self.audio_settings.probing {
@@ -1458,6 +1636,23 @@ impl App {
             Message::CloseAudioSettings => {
                 self.audio_settings.open = false;
                 self.mic_panel.close();
+                let mut closing = Vec::new();
+                if self.identity.is_open() {
+                    closing.push(Message::Identity(profile_edit::Event::Toggle));
+                }
+                if self.account_panel.is_open() {
+                    closing.push(Message::Account(account_panel::Event::Toggle));
+                }
+                if self.safety.is_open() {
+                    closing.push(Message::Safety(safety::Event::Close));
+                }
+                if !closing.is_empty() {
+                    let tasks: Vec<_> = closing.into_iter().map(|m| self.handle(m)).collect();
+                    if let Phase::Account { gateway, .. } = &self.phase {
+                        gateway.controls.set_diagnostics_open(false);
+                    }
+                    return Task::batch(tasks);
+                }
                 if let Phase::Account { gateway, .. } = &self.phase {
                     gateway.controls.set_diagnostics_open(false);
                 }
@@ -1510,10 +1705,9 @@ impl App {
                 }
             }
             Message::OpenChatSettings => {
-                self.chat_settings_open = true;
-                return Task::perform(speech::load_voices(), |voices| {
-                    Message::SpeechVoices(voices.unwrap_or_default())
-                });
+                return self.handle(Message::Settings(settings::Event::Open(
+                    settings::Section::Chat,
+                )));
             }
             Message::SpeechVoices(voices) => self.speech_voices = voices,
             Message::SpeechPrefs(prefs) => {
@@ -1525,7 +1719,6 @@ impl App {
             }
             Message::SpeechTest => speech::speak("This is how messages will sound.".to_owned()),
             Message::StopSpeech => speech::stop(),
-            Message::CloseChatSettings => self.chat_settings_open = false,
             Message::ToggleUnverifiedList => self.unverified_open = !self.unverified_open,
             Message::UnverifiedWrite(group, on) => {
                 if let Phase::Account { session, .. } = &self.phase {
@@ -1705,10 +1898,11 @@ impl App {
                 self.notice = Some(LoginError::InvalidInput.to_string());
                 self.clear_token();
             }
-            Message::Acknowledge(value) if matches!(self.phase, Phase::Login) => {
+            Message::LoginUi(event) => return self.login_ui.update(event),
+            Message::Acknowledge(value) if matches!(self.phase, Phase::Login | Phase::Qr(_)) => {
                 self.acknowledged = value;
             }
-            Message::MemoryOnly(value) if matches!(self.phase, Phase::Login) => {
+            Message::MemoryOnly(value) if matches!(self.phase, Phase::Login | Phase::Qr(_)) => {
                 self.memory_only = value;
             }
             Message::Login if matches!(self.phase, Phase::Login) && self.can_login() => {
@@ -2011,6 +2205,7 @@ impl App {
             Message::Threads(event) => return self.threads_event(event),
             Message::Forum(event) => return self.forum_event(event),
             Message::Friends(event) => {
+                self.requests_open = false;
                 if matches!(
                     event,
                     friends::Event::Profile(_)
@@ -2064,6 +2259,7 @@ impl App {
                 }
             }
             Message::SelectGuild(guild) => {
+                self.requests_open = false;
                 self.member_menu.close();
                 self.threads.close();
                 if let Phase::Account { gateway, .. } = &mut self.phase {
@@ -2576,6 +2772,7 @@ impl App {
                 }
             }
             Message::SelectPrivateChannel(channel) => {
+                self.requests_open = false;
                 self.threads.close();
                 self.nav_pending = true;
                 if let Phase::Account { gateway, .. } = &mut self.phase {
@@ -3081,6 +3278,42 @@ impl App {
                     }
                 }
             }
+            Message::Composer(composer::Event::Plus) => {
+                return self.handle(Message::OpenMenu(Some(Menu::Composer)));
+            }
+            Message::Expressions(tab) => {
+                let Phase::Account { gateway, .. } = &self.phase else {
+                    return Task::none();
+                };
+                let open = self.expressions_tab(gateway);
+                let mut steps = Vec::new();
+                for (each, message) in [
+                    (Expressions::Emoji, Message::EmojiPicker(emoji_picker::Event::Toggle)),
+                    (Expressions::Gif, Message::Gif(gif::Event::Toggle)),
+                    (Expressions::Sticker, Message::Sticker(sticker::Event::Toggle)),
+                ] {
+                    // Toggle off the open tab, toggle on the chosen one.
+                    if (open == Some(each)) != (tab == each) {
+                        steps.push(message);
+                    }
+                }
+                let tasks: Vec<_> = steps.into_iter().map(|m| self.handle(m)).collect();
+                return Task::batch(tasks);
+            }
+            Message::Composer(composer::Event::Toggle(composer::Picker::Emoji))
+                if matches!(&self.phase, Phase::Account { gateway, .. }
+                    if self.expressions_tab(gateway).is_some_and(|tab| tab != Expressions::Emoji)) =>
+            {
+                // The smiley closes the window whichever tab is shown.
+                let Phase::Account { gateway, .. } = &self.phase else {
+                    return Task::none();
+                };
+                let tab = self.expressions_tab(gateway);
+                return self.handle(match tab {
+                    Some(Expressions::Gif) => Message::Gif(gif::Event::Toggle),
+                    _ => Message::Sticker(sticker::Event::Toggle),
+                });
+            }
             Message::Composer(composer::Event::Toggle(picker)) => {
                 return self.handle(match picker {
                     composer::Picker::Gif => Message::Gif(gif::Event::Toggle),
@@ -3277,31 +3510,31 @@ impl App {
         use fastcord_platform::capture::SourceKind;
         let mut content = column![
             row![
-                text("Share your screen").size(22).width(Length::Fill),
-                button("Cancel").on_press(Message::CloseSharePicker),
+                text(i18n::tr("Share your screen")).size(22).width(Length::Fill),
+                button(text(i18n::tr("Cancel"))).on_press(Message::CloseSharePicker),
             ]
             .spacing(12),
-            text(if cfg!(windows) {
+            text(i18n::tr(if cfg!(windows) {
                 "Choose a screen or a window. Windows draws a border around what is shared, and your voice stays connected."
             } else if cfg!(target_os = "linux") {
                 "Choose a screen or a window; your desktop then asks which one in its own dialog. Your voice stays connected."
             } else {
                 "Choose a screen or a window. Your voice stays connected."
-            })
+            }))
             .size(12),
         ]
         .spacing(12);
         match picker {
             gateway::SharePicker::Closed => {}
             gateway::SharePicker::Loading => {
-                content = content.push(text("Looking for screens and windows…"));
+                content = content.push(text(i18n::tr("Looking for screens and windows…")));
             }
             gateway::SharePicker::Failed(error) => {
-                content = content.push(text(error.clone()));
+                content = content.push(text(i18n::tr(error).to_owned()));
             }
             gateway::SharePicker::Listed(sources) => {
-                let mut screens = column![text("Screens").size(16)].spacing(6);
-                let mut windows = column![text("Windows").size(16)].spacing(6);
+                let mut screens = column![text(i18n::tr("Screens")).size(16)].spacing(6);
+                let mut windows = column![text(i18n::tr("Windows")).size(16)].spacing(6);
                 let mut any_window = false;
                 for source in sources {
                     let entry = button(text(source.title.clone()))
@@ -3316,13 +3549,13 @@ impl App {
                     }
                 }
                 if !any_window {
-                    windows = windows.push(text("No shareable windows are open.").size(12));
+                    windows = windows.push(text(i18n::tr("No shareable windows are open.")).size(12));
                 }
                 let offer = gateway::AudioOffer::current();
                 if offer != gateway::AudioOffer::Unavailable {
                     let mut audio = column![
                         checkbox(share_audio)
-                            .label("Share audio")
+                            .label(i18n::tr("Share audio"))
                             .on_toggle(Message::ToggleShareAudio)
                     ]
                     .spacing(4);
@@ -3330,7 +3563,7 @@ impl App {
                     if offer == gateway::AudioOffer::Choose && share_audio {
                         if audio_sources.is_empty() {
                             audio = audio
-                                .push(text("No PipeWire outputs or inputs were found.").size(12));
+                                .push(text(i18n::tr("No PipeWire outputs or inputs were found.")).size(12));
                         }
                         for source in audio_sources {
                             audio = audio.push(iced::widget::radio(
@@ -3345,7 +3578,7 @@ impl App {
                         audio_target.is_some_and(|target| target.whole_output);
                     if offer.warns() || (share_audio && chosen_carries_call) {
                         audio = audio.push(
-                            text("Warning: viewers may hear your call while this is on.")
+                            text(i18n::tr("Warning: viewers may hear your call while this is on."))
                                 .size(12)
                                 .color(iced::Color::from_rgb(0.9, 0.55, 0.1)),
                         );
@@ -3367,6 +3600,285 @@ impl App {
                 ..Default::default()
             })
             .into()
+    }
+
+    /// The menu under the server's name: invite and manage first, then the
+    /// server's pages and alerts, then report and leave. Management rows are
+    /// greyed out until the server's permissions are known and when missing.
+    fn server_menu<'a>(&'a self, gateway: &'a GatewayPanel, guild: Snowflake) -> Element<'a, Message> {
+        use fastcord_model::Permissions;
+        let pick = |message| Some(Message::MenuPick(Box::new(message)));
+        let admin = gateway
+            .navigation
+            .admin
+            .as_ref()
+            .filter(|admin| admin.id == guild);
+        let can = |allowed: fn(&fastcord_discord::state::navigation::GuildAdmin) -> bool| {
+            admin.is_some_and(allowed)
+        };
+        let invite_channel = gateway
+            .navigation
+            .selection
+            .as_ref()
+            .filter(|s| s.guild_id == guild)
+            .filter(|s| {
+                s.permissions.create_invite || s.permissions.manage_guild || s.permissions.manage_channel
+            })
+            .map(|s| s.channel_id);
+        let admin_event = |event| Message::GuildAdmin(event);
+        let mut rows = column![
+            ui::item(
+                Some(icons::Icon::Invite),
+                i18n::tr("Invite people"),
+                invite_channel
+                    .and_then(|channel| pick(Message::Invite(invite::Event::Create(guild, channel)))),
+            ),
+        ]
+        .spacing(1);
+        let manage = [
+            (
+                icons::Icon::Settings,
+                "Server settings",
+                can(|a| a.can_manage_guild),
+                guild_admin::Event::Settings(guild),
+            ),
+            (
+                icons::Icon::Plus,
+                "Create channel",
+                can(|a| a.can_manage_channels),
+                guild_admin::Event::CreateChannel(guild, None),
+            ),
+            (
+                icons::Icon::Group,
+                "Roles",
+                can(|a| a.can_manage_roles),
+                guild_admin::Event::Roles(guild),
+            ),
+            (
+                icons::Icon::Emoji,
+                "Emoji, stickers and sounds",
+                can(|a| {
+                    a.mine.contains(Permissions::CREATE_GUILD_EXPRESSIONS)
+                        || a.mine.contains(Permissions::MANAGE_GUILD_EXPRESSIONS)
+                }),
+                guild_admin::Event::Assets(guild),
+            ),
+            (
+                icons::Icon::Safety,
+                "AutoMod",
+                can(|a| a.can_manage_guild),
+                guild_admin::Event::AutoMod(guild),
+            ),
+            (
+                icons::Icon::Block,
+                "Bans",
+                can(|a| a.mine.contains(Permissions::BAN_MEMBERS)),
+                guild_admin::Event::Bans(guild),
+            ),
+            (
+                icons::Icon::File,
+                "Audit log",
+                can(|a| a.mine.contains(Permissions::VIEW_AUDIT_LOG)),
+                guild_admin::Event::Audit(guild),
+            ),
+        ];
+        // Only what this account may do is listed.
+        let allowed: Vec<_> = manage.into_iter().filter(|(_, _, ok, _)| *ok).collect();
+        if !allowed.is_empty() {
+            rows = rows.push(ui::separator());
+            for (icon, label, _, event) in allowed {
+                rows = rows.push(ui::item(Some(icon), i18n::tr(label), pick(admin_event(event))));
+            }
+        }
+        rows = rows
+            .push(ui::separator())
+            .push(ui::item(
+                Some(icons::Icon::Calendar),
+                i18n::tr("Events"),
+                pick(Message::Events(scheduled_events::Event::Open(guild))),
+            ))
+            .push(ui::item(
+                Some(icons::Icon::Info),
+                i18n::tr("Server guide"),
+                pick(Message::Onboarding(onboarding::Event::OpenGuide(guild))),
+            ))
+            .push(ui::item(
+                Some(icons::Icon::Grid),
+                i18n::tr("Channels and roles"),
+                pick(Message::Onboarding(onboarding::Event::OpenQuestions(
+                    guild, true,
+                ))),
+            ))
+            .push(ui::item(
+                Some(icons::Icon::Bell),
+                i18n::tr("Notification settings"),
+                pick(Message::NotifySettings(notify_settings::Event::Toggle)),
+            ))
+            .push(ui::separator())
+            .push(ui::item(
+                Some(icons::Icon::Report),
+                i18n::tr("Report server"),
+                pick(Message::Report(report::Event::OpenServer)),
+            ))
+            .push(ui::danger_item(
+                Some(icons::Icon::Exit),
+                i18n::tr("Leave server"),
+                pick(admin_event(guild_admin::Event::Leave(guild))),
+            ));
+        ui::popover(
+            ui::menu_card(rows, 232.0),
+            ui::Anchor::TopLeft(navigation::RAIL_WIDTH + 4.0, 50.0),
+            Message::OpenMenu(None),
+        )
+    }
+
+    /// The `⋯` menu of the open conversation, under the header's right end.
+    fn conversation_menu<'a>(&'a self, gateway: &'a GatewayPanel) -> Element<'a, Message> {
+        let mut rows = column![].spacing(1);
+        for (label, icon, message) in
+            navigation::conversation_menu(&gateway.navigation, gateway.directs, self.wide())
+        {
+            rows = rows.push(ui::item(
+                Some(icon),
+                i18n::tr(label),
+                Some(Message::MenuPick(Box::new(message))),
+            ));
+        }
+        ui::popover(
+            ui::menu_card(rows, 232.0),
+            ui::Anchor::TopRight(12.0, 46.0),
+            Message::OpenMenu(None),
+        )
+    }
+
+    /// The open tab of the expressions window, if it is open.
+    fn expressions_tab(&self, gateway: &GatewayPanel) -> Option<Expressions> {
+        if gateway.emoji_picker.request.open {
+            Some(Expressions::Emoji)
+        } else if self.gif.open {
+            Some(Expressions::Gif)
+        } else if gateway
+            .timeline
+            .channel_id
+            .is_some_and(|channel| self.sticker.is_open_for(channel))
+        {
+            Some(Expressions::Sticker)
+        } else {
+            None
+        }
+    }
+
+    /// Emoji, GIF and stickers in one window above the message box. A
+    /// reaction or an edit offers emoji only.
+    fn expressions_view<'a>(&'a self, gateway: &'a GatewayPanel) -> Element<'a, Message> {
+        let tab = self.expressions_tab(gateway).unwrap_or(Expressions::Emoji);
+        let body: Element<'a, Message> = match tab {
+            Expressions::Emoji => emoji_picker::view(
+                &gateway.emoji_picker,
+                &gateway.emoji_snapshot,
+                &gateway.emoji.views,
+            ),
+            Expressions::Gif => gif::view(&self.gif).map_or_else(
+                || text("").into(),
+                |panel| panel.map(Message::Gif),
+            ),
+            Expressions::Sticker => sticker::view(&self.sticker).map_or_else(
+                || text("").into(),
+                |panel| panel.map(Message::Sticker),
+            ),
+        };
+        let full = gateway.emoji_picker.reaction().is_none()
+            && gateway.composer.editing().is_none()
+            && gateway.timeline.can_send;
+        if !full {
+            return body;
+        }
+        let mut choices = vec![
+            (Expressions::Emoji, i18n::tr("Emoji")),
+            (Expressions::Gif, "GIF"),
+        ];
+        if !gateway.directs {
+            choices.push((Expressions::Sticker, i18n::tr("Stickers")));
+        }
+        let card = |content: Element<'a, Message>, width: f32| -> Element<'a, Message> {
+            container(content)
+                .padding(8)
+                .width(width)
+                .style(style::card)
+                .into()
+        };
+        let tabs = ui::tabs(&choices, tab, Message::Expressions);
+        match tab {
+            Expressions::Emoji => column![card(tabs, 360.0), body]
+                .spacing(6)
+                .align_x(iced::alignment::Horizontal::Right)
+                .into(),
+            _ => card(
+                column![tabs, scrollable(body).height(Length::Shrink)]
+                    .spacing(8)
+                    .into(),
+                460.0,
+            ),
+        }
+    }
+
+    /// The "+" menu of the message box.
+    fn composer_menu<'a>(&'a self, gateway: &'a GatewayPanel) -> Element<'a, Message> {
+        let pick = |message| Some(Message::MenuPick(Box::new(message)));
+        let can_send = gateway.timeline.can_send;
+        let mut rows = column![
+            ui::item(
+                Some(icons::Icon::Attach),
+                i18n::tr("Attach a file"),
+                can_send.then(|| pick(Message::Composer(composer::Event::Attach))).flatten(),
+            ),
+            ui::item(
+                Some(icons::Icon::Paste),
+                i18n::tr("Paste image"),
+                can_send
+                    .then(|| pick(Message::Composer(composer::Event::PasteImage)))
+                    .flatten(),
+            ),
+            ui::item(
+                Some(icons::Icon::Poll),
+                i18n::tr("Create poll"),
+                can_send
+                    .then(|| pick(Message::Composer(composer::Event::Toggle(
+                        composer::Picker::Poll
+                    ))))
+                    .flatten(),
+            ),
+        ]
+        .spacing(1);
+        if self.audio_preferences.voice_recording {
+            rows = rows.push(ui::item(
+                Some(icons::Icon::Record),
+                i18n::tr("Voice message"),
+                can_send
+                    .then(|| pick(Message::Voice(voice_record::Event::Start)))
+                    .flatten(),
+            ));
+        }
+        ui::popover(
+            ui::menu_card(rows, 232.0),
+            ui::Anchor::BottomLeft(
+                navigation::RAIL_WIDTH + navigation::SIDEBAR_WIDTH + 12.0,
+                64.0,
+            ),
+            Message::OpenMenu(None),
+        )
+    }
+
+    /// Wide enough for every header tool.
+    fn wide(&self) -> bool {
+        self.window_size.width >= 1000.0
+    }
+
+    /// Closes every popover menu.
+    fn close_menus(&mut self) {
+        self.status.open = false;
+        self.mic_menu = false;
+        self.menu = None;
     }
 
     fn can_login(&self) -> bool {
@@ -3534,6 +4046,17 @@ impl App {
     }
 
     fn start_restore(&mut self, account: Snowflake) -> Task<Message> {
+        #[cfg(feature = "fake-discord")]
+        if fake::active() {
+            let _ = account;
+            self.phase = Phase::Authenticating {
+                saved_account: Some(account),
+            };
+            return Task::perform(
+                login::token_login(Arc::new(UserToken::new(fake::TOKEN.to_owned())), None, false),
+                Message::LoginFinished,
+            );
+        }
         let Some(store) = self.store.clone() else {
             self.notice = Some(LoginError::Store(StoreError::Unavailable).to_string());
             return Task::none();
@@ -4862,6 +5385,23 @@ impl App {
                 Task::none()
             }
             Shortcut::Escape { captured } => {
+                // Popovers and the settings screen close first, topmost first.
+                if self.status.open || self.mic_menu || self.menu.is_some() {
+                    self.status.open = false;
+                    self.mic_menu = false;
+                    self.menu = None;
+                    return Task::none();
+                }
+                if self.new_dm.open {
+                    self.new_dm.update(new_dm::Event::Close);
+                    return Task::none();
+                }
+                if self.audio_settings.open {
+                    return Task::done(Message::Settings(settings::Event::Close));
+                }
+                if self.inbox.is_open() {
+                    return Task::done(Message::Inbox(inbox::Event::Toggle));
+                }
                 if self.member_menu.target.is_some() {
                     self.member_menu.close();
                     return Task::none();
@@ -5060,98 +5600,126 @@ impl App {
         body
     }
 
+    /// The settings screen with its current page.
+    fn settings_view(&self) -> Element<'_, Message> {
+        let account = match &self.phase {
+            Phase::Account {
+                session,
+                persistence,
+                gateway,
+            } => Some((session, persistence, gateway)),
+            _ => None,
+        };
+        let section = match self.settings_section {
+            s if s.needs_account() && account.is_none() => settings::Section::Voice,
+            s => s,
+        };
+        let controls = account.map(|(_, _, gateway)| gateway.controls.voice_controls());
+        let missing = || -> Element<'_, Message> { ui::note(i18n::tr("Not available yet.")) };
+        let content: Element<'_, Message> = match (section, account) {
+            (settings::Section::Profile, Some((session, _, gateway))) => profile_edit::view(
+                &self.identity,
+                &gateway.navigation,
+                own_user(gateway, session),
+            )
+            .map_or_else(missing, |panel| panel.map(Message::Identity)),
+            (settings::Section::Accounts, Some((session, persistence, _))) => {
+                account_panel::view(
+                    &self.account_panel,
+                    &self.account_index,
+                    session.user.id,
+                    *persistence == Persistence::Saved,
+                )
+                .map_or_else(missing, |panel| panel.map(Message::Account))
+            }
+            (settings::Section::Privacy, Some((_, _, gateway))) => {
+                safety::view(&self.safety, &gateway.navigation)
+                    .map_or_else(missing, |panel| panel.map(Message::Safety))
+            }
+            (settings::Section::Chat, _) => chat_prefs::view(
+                self.audio_preferences.chat,
+                &chat_prefs::SpeechView {
+                    prefs: &self.audio_preferences.speech,
+                    voices: &self.speech_voices,
+                    error: speech::error(),
+                    speaking: speech::speaking(),
+                },
+            ),
+            (settings::Section::Notifications, _) => {
+                audio_devices::notifications(&self.audio_preferences)
+            }
+            (settings::Section::App, _) => column![
+                desktop::view(
+                    self.audio_preferences.close_to_tray,
+                    &self.tray,
+                    self.autostart,
+                    &self.audio_preferences.bypass,
+                    self.bypass_advanced,
+                ),
+                audio_devices::experimental(&self.audio_preferences),
+                unverified::view(
+                    account.map(|(session, _, _)| &session.client),
+                    self.unverified_open,
+                ),
+                audio_devices::diagnostics(
+                    controls.as_ref().and_then(|c| c.audio_stats),
+                    controls.as_ref().map_or_else(String::new, |c| {
+                        audio_devices::transmit_summary(
+                            c.audio_stats,
+                            c.transport_stats,
+                            c.capture_enabled(),
+                        )
+                    }),
+                ),
+            ]
+            .spacing(28)
+            .into(),
+            _ => column![
+                audio_devices::devices(
+                    &self.audio_settings,
+                    &self.audio_preferences,
+                    controls.as_ref().and_then(|c| c.input_error),
+                    controls.as_ref().and_then(|c| c.output_error),
+                ),
+                mic_panel::view(
+                    &self.mic_panel,
+                    self.audio_preferences.input_gain,
+                    self.call_active(),
+                    (self.audio_preferences.voice_input.mode == shortcuts::InputMode::VoiceActivity)
+                        .then_some(self.audio_preferences.voice_input.sensitivity)
+                        .flatten(),
+                ),
+                shortcuts::view(
+                    &self.audio_preferences.voice_input,
+                    &self.shortcuts,
+                    controls.as_ref().is_some_and(|c| c.vad_forbidden),
+                    self.call_active(),
+                ),
+                audio_devices::processing(
+                    &self.audio_preferences,
+                    controls.as_ref().and_then(|c| c.noise_status),
+                ),
+            ]
+            .spacing(28)
+            .into(),
+        };
+        let content = match self.notice.as_deref() {
+            Some(notice) if account.is_none() => {
+                column![ui::error(i18n::tr(notice)), content].spacing(16).into()
+            }
+            _ => content,
+        };
+        settings::view(section, account.is_some(), content)
+    }
+
     fn view_body(&self) -> Element<'_, Message> {
         if self.compact_call
             && let Phase::Account { gateway, .. } = &self.phase
         {
             return desktop::compact_view(&gateway.controls.voice_controls());
         }
-        if self.chat_settings_open {
-            return center(scrollable(
-                column![chat_prefs::view(
-                    self.audio_preferences.chat,
-                    &chat_prefs::SpeechView {
-                        prefs: &self.audio_preferences.speech,
-                        voices: &self.speech_voices,
-                        error: speech::error(),
-                        speaking: speech::speaking(),
-                    },
-                    unverified::view(
-                        match &self.phase {
-                            Phase::Account { session, .. } => Some(&session.client),
-                            _ => None,
-                        },
-                        self.unverified_open,
-                    ),
-                )]
-                .padding(12),
-            ))
-            .into();
-        }
         if self.audio_settings.open {
-            let (input_error, output_error, noise_status, audio_stats, vad_forbidden, transmit) =
-                match &self.phase {
-                    Phase::Account { gateway, .. } => {
-                        let controls = gateway.controls.voice_controls();
-                        (
-                            controls.input_error,
-                            controls.output_error,
-                            controls.noise_status,
-                            controls.audio_stats,
-                            controls.vad_forbidden,
-                            audio_devices::transmit_summary(
-                                controls.audio_stats,
-                                controls.transport_stats,
-                                controls.capture_enabled(),
-                            ),
-                        )
-                    }
-                    _ => (None, None, None, None, false, String::new()),
-                };
-            // The dialog is taller than the default window: scroll instead of hiding Close.
-            return center(scrollable(
-                column![
-                    audio_devices::view(
-                        &self.audio_settings,
-                        &self.audio_preferences,
-                        input_error,
-                        output_error,
-                        noise_status,
-                        audio_stats,
-                        transmit,
-                        column![
-                            shortcuts::view(
-                                &self.audio_preferences.voice_input,
-                                &self.shortcuts,
-                                vad_forbidden,
-                                self.call_active(),
-                            ),
-                            desktop::view(
-                                self.audio_preferences.close_to_tray,
-                                &self.tray,
-                                self.autostart,
-                                &self.audio_preferences.bypass,
-                                self.bypass_advanced,
-                            ),
-                            mic_panel::view(
-                                &self.mic_panel,
-                                self.audio_preferences.input_gain,
-                                self.call_active(),
-                                (self.audio_preferences.voice_input.mode
-                                    == shortcuts::InputMode::VoiceActivity)
-                                    .then_some(self.audio_preferences.voice_input.sensitivity)
-                                    .flatten(),
-                            ),
-                        ]
-                        .spacing(12)
-                        .into(),
-                    ),
-                    text(self.notice.as_deref().unwrap_or("")),
-                ]
-                .spacing(12)
-                .padding(12),
-            ))
-            .into();
+            return self.settings_view();
         }
         if let Phase::Account {
             session,
@@ -5303,14 +5871,18 @@ impl App {
             }
             if let Some(error) = voice_controls.input_error {
                 say(
-                    format!("Microphone stopped: {error}. Open Audio devices to retry."),
+                    i18n::trf(
+                        "Microphone stopped: {}. Open the voice settings to try again.",
+                        &[&i18n::tr(&error.to_string())],
+                    ),
                     true,
                 );
             }
             if let Some(error) = voice_controls.output_error {
                 say(
-                    format!(
-                        "Playback stopped: {error}. Explicit devices never fall back; open Audio devices to retry."
+                    i18n::trf(
+                        "Playback stopped: {}. Open the voice settings to try again.",
+                        &[&i18n::tr(&error.to_string())],
                     ),
                     true,
                 );
@@ -5328,9 +5900,6 @@ impl App {
             {
                 banner_column = banner_column.push(pins::view(&self.pins).map(Message::Pins));
             }
-            if let Some(panel) = gif::view(&self.gif) {
-                banner_column = banner_column.push(panel.map(Message::Gif));
-            }
             if let Some(panel) = soundboard::view(&self.soundboard) {
                 banner_column = banner_column.push(panel.map(Message::Soundboard));
             }
@@ -5340,12 +5909,6 @@ impl App {
                 session.client.writes_restricted(),
             ) {
                 banner_column = banner_column.push(panel);
-            }
-            if let Some(channel) = gateway.timeline.channel_id
-                && self.sticker.is_open_for(channel)
-                && let Some(panel) = sticker::view(&self.sticker)
-            {
-                banner_column = banner_column.push(panel.map(Message::Sticker));
             }
             if let Some(channel) = gateway.timeline.channel_id
                 && let Some(panel) = slash::view(
@@ -5414,24 +5977,6 @@ impl App {
             if let Some(panel) = group_dm::view(&self.group, &gateway.navigation, session.user.id) {
                 banner_column = banner_column.push(panel.map(Message::Group));
             }
-            if let Some(panel) = profile_edit::view(
-                &self.identity,
-                &gateway.navigation,
-                own_user(gateway, session),
-            ) {
-                banner_column = banner_column.push(panel.map(Message::Identity));
-            }
-            if let Some(panel) = safety::view(&self.safety, &gateway.navigation) {
-                banner_column = banner_column.push(panel.map(Message::Safety));
-            }
-            if let Some(panel) = account_panel::view(
-                &self.account_panel,
-                &self.account_index,
-                session.user.id,
-                *persistence == Persistence::Saved,
-            ) {
-                banner_column = banner_column.push(panel.map(Message::Account));
-            }
             if let Some(panel) = report::view(&self.report, &gateway.navigation) {
                 banner_column = banner_column.push(panel.map(Message::Report));
             }
@@ -5444,7 +5989,7 @@ impl App {
                 banner_column = banner_column.push(panel.map(Message::Threads));
             }
             for (line, danger) in notes {
-                let line = text(line).size(12);
+                let line = text(i18n::tr(&line).to_owned()).size(12);
                 banner_column = banner_column.push(if danger {
                     line.style(text::danger)
                 } else {
@@ -5456,7 +6001,7 @@ impl App {
                 gateway::GatewayStatus::Stopped(reason) if reason.allows_manual_reconnect()
             ) {
                 banner_column = banner_column.push(
-                    button(text("Reconnect").size(12))
+                    button(text(i18n::tr("Reconnect")).size(12))
                         .on_press(Message::ReconnectGateway)
                         .style(style::action_button(false)),
                 );
@@ -5469,14 +6014,14 @@ impl App {
                 banner_column = banner_column.push(
                     container(
                         row![
-                            text(format!("Incoming call: {}", call.label))
+                            text(i18n::trf("Incoming call: {}", &[&call.label]))
                                 .size(13)
                                 .font(bold)
                                 .width(Length::Fill),
-                            button(text("Accept").size(12))
+                            button(text(i18n::tr("Accept")).size(12))
                                 .on_press(Message::AcceptCall(call.channel_id))
                                 .style(style::action_button(false)),
-                            button(text("Decline").size(12))
+                            button(text(i18n::tr("Decline")).size(12))
                                 .on_press(Message::DeclineCall(call.channel_id))
                                 .style(style::action_button(true)),
                         ]
@@ -5488,30 +6033,18 @@ impl App {
                 );
             }
             if session.client.writes_restricted() {
-                banner_column = banner_column.push(text("Discord requires account verification. Sending is paused; open the official Discord client, complete its check, then reconnect fastcord.").size(13).style(text::danger));
+                banner_column = banner_column.push(text(i18n::tr("Discord requires account verification. Sending is paused; open the official Discord client, complete its check, then reconnect fastcord.")).size(13).style(text::danger));
             }
             let banner: Option<Element<'_, Message>> = Some(banner_column.into());
 
             // ---- the user's panel at the foot of the sidebar ----
+            // Avatar and name (status, profile, accounts behind a click),
+            // microphone with its device menu, headphones, and the settings.
             let me = own_user(gateway, session);
             let display = me.display_name().to_owned();
             let own = gateway.navigation.presences.get(&session.user.id);
             let own_status = self.status.status(own);
             let mut foot = column![];
-            if self.status.open {
-                foot = foot.push(
-                    self.status
-                        .menu(
-                            own,
-                            if *persistence == Persistence::Saved {
-                                "Saved login"
-                            } else {
-                                "Memory-only"
-                            },
-                        )
-                        .map(Message::Status),
-                );
-            }
             if let Some(settings) = voice_settings {
                 foot = foot.push(settings);
             }
@@ -5525,138 +6058,198 @@ impl App {
             if let Some(panel) = voice_panel {
                 foot = foot.push(panel);
             }
-            let requests = gateway.navigation.requests.total;
-            let identity = row![
-                avatars::view(
-                    &gateway.avatars.views,
-                    &avatars::AvatarKey::user(me.id, me.avatar.as_deref(),),
-                    32.0,
-                    || container(text(style::initial(&display)).size(14).font(bold))
-                        .center(32)
-                        .style(style::avatar(style::avatar_color(session.user.id.0)))
-                        .into(),
-                ),
-                column![
-                    text(display)
-                        .size(13)
-                        .font(bold)
-                        .wrapping(text::Wrapping::None),
-                    button(
+            let identity = button(
+                row![
+                    avatars::view(
+                        &gateway.avatars.views,
+                        &avatars::AvatarKey::user(me.id, me.avatar.as_deref()),
+                        32.0,
+                        || ui::initials(&display, session.user.id.0, 32.0),
+                    ),
+                    column![
+                        text(display.clone())
+                            .size(13)
+                            .font(bold)
+                            .wrapping(text::Wrapping::None),
                         row![
                             status::dot(own_status),
                             text(
                                 self.status
                                     .custom(own)
                                     .or(own_status.map(status::label))
-                                    .unwrap_or("Set status")
+                                    .unwrap_or(i18n::tr("Set status"))
                                     .to_owned()
                             )
                             .size(11)
+                            .color(style::MUTED)
                             .wrapping(text::Wrapping::None),
                         ]
                         .spacing(5)
-                        .align_y(iced::alignment::Vertical::Center)
-                    )
-                    .padding(0)
-                    .on_press(Message::Status(status::Event::ToggleMenu))
-                    .style(style::tool_button(false, false)),
+                        .align_y(iced::alignment::Vertical::Center),
+                    ]
+                    .width(Length::Fill),
                 ]
-                .width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(iced::alignment::Vertical::Center);
-            let action = |icon, on_press, active, danger, tip: &str, badge| icons::Action {
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center),
+            )
+            .on_press(Message::Status(status::Event::ToggleMenu))
+            .width(Length::Fill)
+            .padding([2, 4])
+            .style(style::row_button(self.status.open, false));
+            let action = |icon, on_press, active, danger, tip: &str| icons::Action {
                 icon,
                 on_press,
                 active,
                 danger,
                 tip: tip.to_owned(),
-                badge,
+                badge: 0,
             };
+            let mic = icons::action(action(
+                icons::Icon::Mic {
+                    muted: voice_controls.self_muted,
+                },
+                running.then_some(Message::SetSelfMute(!voice_controls.self_muted)),
+                !voice_controls.self_muted,
+                voice_controls.self_muted,
+                if !running {
+                    i18n::tr("Microphone (available in a call)")
+                } else if voice_controls.self_muted {
+                    i18n::tr("Turn microphone on")
+                } else {
+                    i18n::tr("Turn microphone off")
+                },
+            ));
+            let devices = iced::widget::tooltip(
+                button(icons::sized(icons::Icon::ChevronUp, style::MUTED, 12.0))
+                    .on_press(Message::MicMenu(!self.mic_menu))
+                    .padding([8, 1])
+                    .style(style::tool_button(self.mic_menu, false)),
+                container(text(i18n::tr("Input and output devices")).size(11))
+                    .padding([3, 6])
+                    .style(container::rounded_box),
+                iced::widget::tooltip::Position::Top,
+            );
+            let headphones = icons::action(action(
+                icons::Icon::Headphones {
+                    deafened: voice_controls.deafened,
+                },
+                running.then_some(Message::SetDeafen(!voice_controls.deafened)),
+                !voice_controls.deafened,
+                voice_controls.deafened,
+                if !running {
+                    i18n::tr("Sound (available in a call)")
+                } else if voice_controls.deafened {
+                    i18n::tr("Turn sound on")
+                } else {
+                    i18n::tr("Turn sound off")
+                },
+            ));
+            let gear = icons::action(action(
+                icons::Icon::Settings,
+                Some(Message::Settings(settings::Event::Open(self.settings_section))),
+                true,
+                false,
+                i18n::tr("Settings"),
+            ));
             foot = foot.push(
-                container(icons::footer(
-                    identity.into(),
-                    [
-                        action(
-                            icons::Icon::Mic {
-                                muted: voice_controls.self_muted,
-                            },
-                            running.then_some(Message::SetSelfMute(!voice_controls.self_muted)),
-                            !voice_controls.self_muted,
-                            voice_controls.self_muted,
-                            if !running {
-                                "Microphone (join a voice channel to use)"
-                            } else if voice_controls.self_muted {
-                                "Microphone muted. Click to unmute"
-                            } else {
-                                "Microphone on. Click to mute"
-                            },
-                            0,
-                        ),
-                        action(
-                            icons::Icon::Headphones {
-                                deafened: voice_controls.deafened,
-                            },
-                            running.then_some(Message::SetDeafen(!voice_controls.deafened)),
-                            !voice_controls.deafened,
-                            voice_controls.deafened,
-                            if !running {
-                                "Deafen (join a voice channel to use)"
-                            } else if voice_controls.deafened {
-                                "Deafened. Click to hear again"
-                            } else {
-                                "Hearing. Click to deafen"
-                            },
-                            0,
-                        ),
-                        action(
-                            icons::Icon::Profile,
-                            Some(Message::Identity(profile_edit::Event::Toggle)),
-                            self.identity.is_open(),
-                            false,
-                            "Edit your profile",
-                            0,
-                        ),
-                        action(
-                            icons::Icon::Safety,
-                            Some(Message::Safety(safety::Event::Toggle)),
-                            self.safety.is_open() || requests > 0,
-                            false,
-                            &match requests {
-                                0 => "Safety and message requests".to_owned(),
-                                n => format!("Safety and message requests ({n} pending)"),
-                            },
-                            requests.try_into().unwrap_or(u32::MAX),
-                        ),
-                        action(
-                            icons::Icon::Lock,
-                            Some(Message::Account(account_panel::Event::Toggle)),
-                            self.account_panel.is_open(),
-                            false,
-                            "Accounts, security and log out",
-                            0,
-                        ),
-                        action(
-                            icons::Icon::Audio,
-                            Some(Message::OpenAudioSettings),
-                            true,
-                            false,
-                            "Audio settings",
-                            0,
-                        ),
-                        action(
-                            icons::Icon::Settings,
-                            Some(Message::OpenChatSettings),
-                            true,
-                            false,
-                            "Chat & accessibility settings",
-                            0,
-                        ),
-                    ],
-                ))
-                .padding([8, 8])
+                container(
+                    row![
+                        container(identity).width(Length::Fill).clip(true),
+                        row![mic, devices, headphones, gear]
+                            .spacing(0)
+                            .align_y(iced::alignment::Vertical::Center),
+                    ]
+                    .spacing(2)
+                    .align_y(iced::alignment::Vertical::Center),
+                )
+                .padding([6, 6])
                 .style(style::footer),
             );
+            // The menu behind the name: status, profile, accounts, log out.
+            let account_menu: Option<Element<'_, Message>> = self.status.open.then(|| {
+                let pick = |message| Message::MenuPick(Box::new(message));
+                ui::popover(
+                    ui::menu_card(
+                        column![
+                            row![
+                                ui::initials(&display, session.user.id.0, 40.0),
+                                column![
+                                    text(display.clone()).size(15).font(bold),
+                                    text(format!("@{}", me.username))
+                                        .size(12)
+                                        .color(style::MUTED),
+                                ],
+                            ]
+                            .spacing(10)
+                            .align_y(iced::alignment::Vertical::Center)
+                            .padding(6),
+                            self.status
+                                .menu(
+                                    own,
+                                    if *persistence == Persistence::Saved {
+                                        i18n::tr("Saved login")
+                                    } else {
+                                        i18n::tr("Not saved on this device")
+                                    },
+                                )
+                                .map(Message::Status),
+                            ui::separator(),
+                            ui::item(
+                                Some(icons::Icon::Edit),
+                                i18n::tr("Edit profile"),
+                                Some(pick(Message::Settings(settings::Event::Open(
+                                    settings::Section::Profile
+                                )))),
+                            ),
+                            ui::item(
+                                Some(icons::Icon::Group),
+                                i18n::tr("Switch account"),
+                                Some(pick(Message::Settings(settings::Event::Open(
+                                    settings::Section::Accounts
+                                )))),
+                            ),
+                            ui::separator(),
+                            ui::danger_item(
+                                Some(icons::Icon::Exit),
+                                i18n::tr("Log out"),
+                                Some(pick(Message::Account(account_panel::Event::Logout))),
+                            ),
+                        ]
+                        .spacing(4),
+                        300.0,
+                    ),
+                    ui::Anchor::BottomLeft(navigation::RAIL_WIDTH + 8.0, 60.0),
+                    Message::Status(status::Event::ToggleMenu),
+                )
+            });
+            // Quick device choice above the microphone.
+            let mic_menu: Option<Element<'_, Message>> = self.mic_menu.then(|| {
+                ui::popover(
+                    ui::menu_card(
+                        column![
+                            audio_devices::devices(
+                                &self.audio_settings,
+                                &self.audio_preferences,
+                                voice_controls.input_error,
+                                voice_controls.output_error,
+                            ),
+                            ui::separator(),
+                            ui::item(
+                                Some(icons::Icon::Settings),
+                                i18n::tr("Voice settings"),
+                                Some(Message::MenuPick(Box::new(Message::Settings(
+                                    settings::Event::Open(settings::Section::Voice)
+                                )))),
+                            ),
+                        ]
+                        .spacing(8)
+                        .padding(8),
+                        320.0,
+                    ),
+                    ui::Anchor::BottomLeft(navigation::RAIL_WIDTH + 8.0, 60.0),
+                    Message::MicMenu(false),
+                )
+            });
 
             let account = container(navigation::view(
                 &gateway.navigation,
@@ -5666,10 +6259,6 @@ impl App {
                     let mut interaction = gateway.interaction();
                     interaction.publishing = self.announce.publishing();
                     interaction
-                },
-                navigation::PrivateConversation {
-                    recipients: &gateway.private.recipients,
-                    notice: gateway.private.notice.as_deref(),
                 },
                 timeline::Attachments {
                     account: session.user.id,
@@ -5691,6 +6280,7 @@ impl App {
                     banner,
                     speaking: talking,
                     voice_call: gateway.voice_call.filter(|_| in_voice),
+                    wide: self.wide(),
                     forum: gateway.navigation.forum.as_ref().map(|forum| {
                         forum::view(
                             &self.forum,
@@ -5700,30 +6290,28 @@ impl App {
                             localtime::now(),
                         )
                     }),
-                    inbox: self
-                        .inbox
-                        .is_open()
-                        .then(|| {
-                            inbox::view(&self.inbox, &gateway.navigation.inbox).map(Message::Inbox)
-                        })
-                        .or_else(|| {
-                            self.notify_settings.is_open().then(|| {
-                                notify_settings::view(
-                                    &self.notify_settings,
-                                    &gateway.navigation.notifications,
-                                    gateway.directs,
-                                )
-                                .map(Message::NotifySettings)
-                            })
-                        }),
-                    friends: self.friends.open.then(|| {
+                    inbox: self.notify_settings.is_open().then(|| {
+                        notify_settings::view(
+                            &self.notify_settings,
+                            &gateway.navigation.notifications,
+                            gateway.directs,
+                        )
+                        .map(Message::NotifySettings)
+                    }),
+                    friends: if self.requests_open && self.safety.is_open() {
+                        safety::view(&self.safety, &gateway.navigation)
+                            .map(|panel| container(panel.map(Message::Safety)).padding(16).into())
+                    } else {
+                        None
+                    }
+                    .or_else(|| self.friends.open.then(|| {
                         friends::view(
                             &self.friends,
                             &gateway.navigation.relationships,
                             &gateway.navigation.presences,
                         )
                         .map(Message::Friends)
-                    }),
+                    })),
                 },
             ))
             .height(Length::Fill);
@@ -5770,13 +6358,9 @@ impl App {
                 Some(viewer) => {
                     iced::widget::stack![account, attachment_ui::viewer_view(viewer)].into()
                 }
-                None if gateway.emoji_picker.request.open => iced::widget::stack![
+                None if self.expressions_tab(gateway).is_some() => iced::widget::stack![
                     account,
-                    container(emoji_picker::view(
-                        &gateway.emoji_picker,
-                        &gateway.emoji_snapshot,
-                        &gateway.emoji.views
-                    ))
+                    container(self.expressions_view(gateway))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .align_x(iced::alignment::Horizontal::Right)
@@ -5792,6 +6376,38 @@ impl App {
                 voice_controls.clone(),
                 session.client.writes_restricted(),
             ) {
+                Some(menu) => iced::widget::stack![screen, menu].into(),
+                None => screen,
+            };
+            let menu = match self.menu {
+                Some(Menu::Server(guild)) => Some(self.server_menu(gateway, guild)),
+                Some(Menu::Conversation) => Some(self.conversation_menu(gateway)),
+                Some(Menu::Composer) => Some(self.composer_menu(gateway)),
+                None => None,
+            };
+            // The inbox floats beside the rail; the conversation stays put.
+            let inbox_panel: Option<Element<'_, Message>> = self.inbox.is_open().then(|| {
+                ui::popover(
+                    container(
+                        inbox::view(&self.inbox, &gateway.navigation.inbox).map(Message::Inbox),
+                    )
+                    .max_height(640)
+                    .into(),
+                    ui::Anchor::TopLeft(navigation::RAIL_WIDTH + 4.0, 8.0),
+                    Message::Inbox(inbox::Event::Toggle),
+                )
+            });
+            let screen = match account_menu
+                .or(mic_menu)
+                .or(menu)
+                .or(inbox_panel)
+                .or_else(|| {
+                    new_dm::view(
+                        &self.new_dm,
+                        &gateway.navigation.relationships,
+                        gateway.private.notice.as_deref(),
+                    )
+                }) {
                 Some(menu) => iced::widget::stack![screen, menu].into(),
                 None => screen,
             };
@@ -5812,174 +6428,56 @@ impl App {
                 None => screen,
             };
         }
-        let content: Element<'_, Message> = match &self.phase {
-            Phase::Starting => text("Looking for a saved login in the native credential store…").into(),
-            Phase::Login => self.login_view(),
-            Phase::Qr(attempt) => self.qr_view(attempt),
-            Phase::Mfa(_) => self.mfa_view(),
-            Phase::Authenticating { saved_account } => {
-                text(if saved_account.is_some() {
-                    "Restoring saved login: validating the token with Discord…"
-                } else {
-                    "Validating your token with Discord…"
-                }).into()
-            }
-            Phase::MemoryConsent { session, error } => column![
-                text("Token validated; login is not saved").size(26),
-                text(format!("{} (@{})", session.user.display_name(), session.user.username)),
-                text(error.to_string()),
-                text("Continue only if you accept a memory-only session. The token will not be written to a file; you will need to log in again next launch. Previously saved credentials remain until removed."),
-                row![button("Continue without saving").on_press(Message::ContinueInMemory), button("Cancel login").on_press(Message::CancelLogin)].spacing(12),
-            ].spacing(20).into(),
-            Phase::Account { .. } => unreachable!("account view returned above"),
-            Phase::Deleting { .. } => text("Account state cleared. Removing the saved credential…").into(),
-            Phase::DeleteFailed { error, .. } => column![
-                text("Account state cleared; logout is not complete").size(26),
-                text(error.to_string()),
-                text("The native store could not confirm removal of this account's saved credential. A previous saved login may restore next launch. Unlock the store and retry. Account state and in-memory secrets have already been cleared."),
-                button("Retry credential removal").on_press(Message::RetryDelete),
-            ].spacing(20).into(),
-        };
-        center(container(scrollable(content)).max_width(650).padding(28)).into()
-    }
-
-    fn login_view(&self) -> Element<'_, Message> {
-        let mut content = column![
-            row![
-                icons::sized(icons::Icon::Brand, style::BLURPLE, 40.0),
-                text("fastcord").size(36),
-            ].spacing(12).align_y(iced::Alignment::Center),
-            text("Warning: third-party Discord clients violate Discord’s Terms of Service and may get your account banned. Use an alternate account. Never share your token; it grants access to your account. Never share your password or token with anyone but Discord and this app."),
-            checkbox(self.acknowledged).label("I understand the risk and am using an alternate account").on_toggle(Message::Acknowledge),
-            checkbox(self.memory_only).label("Memory-only session (do not save this login)").on_toggle(Message::MemoryOnly),
-            text("Otherwise, the login is saved securely using Windows Credential Manager, macOS Keychain, or Linux Secret Service. Native-store and network operations do not run on the UI thread."),
-            text("Log in with QR code (recommended)").size(24),
-            text("Open Discord on your phone, go to Settings, choose Scan QR Code, and scan the code fastcord shows. You never handle the token yourself."),
-            button("Show QR code").on_press_maybe(self.acknowledged.then_some(Message::StartQr)),
-            text("Email and password").size(24),
-            text("Discord may ask you to complete a CAPTCHA and a two-factor code. fastcord only shows them to you; it never solves or bypasses them."),
-            text_input("Email or phone", &self.password_login)
-                .on_input(Message::PasswordLoginEdited)
-                .padding(12),
-            text_input("Password", self.password.expose_secret())
-                .secure(true)
-                .on_input(password_edited)
-                .on_submit_maybe(self.can_password_login().then_some(Message::PasswordSubmit))
-                .padding(12),
-            button("Log in with password").on_press_maybe(self.can_password_login().then_some(Message::PasswordSubmit)),
-            text("Token login (advanced)").size(24),
-            text_input("Paste your alt-account token", self.token.expose_secret())
-                .id("token-input")
-                .secure(true)
-                .on_input(token_edited)
-                .on_submit_maybe(self.can_login().then_some(Message::Login))
-                .padding(12),
-            button("Log in with token").on_press_maybe(self.can_login().then_some(Message::Login)),
-            button("Settings (audio, desktop, blocking bypass)").on_press(Message::OpenAudioSettings),
-        ].spacing(16).width(Length::Fill);
-        if let Some(notice) = &self.notice {
-            content = content.push(text(notice));
-        }
-        for account in &self.saved_accounts {
-            content = content.push(
-                row![
-                    button(text(format!(
-                        "Restore {}",
-                        self.account_index
-                            .get(*account)
-                            .map_or_else(|| format!("account {account}"), accounts::Entry::label)
-                    )))
-                    .on_press(Message::Restore(*account)),
-                    button("Forget saved login").on_press(Message::Forget(*account)),
-                ]
-                .spacing(12),
-            );
-        }
-        content
-            .push(button("Retry saved login").on_press(Message::RetrySaved))
-            .into()
-    }
-
-    fn mfa_view(&self) -> Element<'_, Message> {
-        let mut content = column![
-            text("Two-factor authentication").size(24),
-            text("Enter the code from your authenticator app."),
-            text_input("Authentication code", self.token.expose_secret())
-                .secure(true)
-                .on_input(token_edited)
-                .on_submit(Message::MfaSubmit)
-                .padding(12),
-            row![
-                button("Continue").on_press(Message::MfaSubmit),
-                button("Cancel").on_press(Message::CancelMfa)
-            ]
-            .spacing(12),
-        ]
-        .spacing(16)
-        .width(Length::Fill);
-        if let Some(notice) = &self.notice {
-            content = content.push(text(notice));
-        }
-        content.into()
-    }
-
-    fn qr_view<'a>(&'a self, attempt: &'a QrAttempt) -> Element<'a, Message> {
-        let mut content = column![text("Log in with QR code").size(32)]
-            .spacing(20)
-            .width(Length::Fill);
-        content = match &attempt.stage {
-            QrStage::Connecting => content.push(text(
-                "Connecting to Discord’s QR login service and generating a one-time key…",
-            )),
-            QrStage::Showing { code, expires_in } => content
-                .push(
-                    container(
-                        qr_code(code)
-                            .cell_size(7)
-                            // Scanners expect dark modules on a light field in any theme.
-                            .style(|_| qr_code::Style {
-                                cell: Color::BLACK,
-                                background: Color::WHITE,
-                            }),
-                    )
-                    .padding(8)
-                    .style(|_| container::background(Color::WHITE)),
-                )
-                .push(text(
-                    "On your phone: Discord, Settings, Scan QR Code. Then confirm the login on the phone.",
-                ))
-                .push(text(format!(
-                    "This code expires in {}. Only scan a code shown by fastcord on this screen.",
-                    qr::describe_lifetime(*expires_in)
-                )))
-                .push(
-                    row![
-                        button("Generate new code").on_press(Message::StartQr),
-                        button("Cancel").on_press(Message::CancelQr),
-                    ]
-                    .spacing(12),
+        let stage = match &self.phase {
+            Phase::Starting => login_screen::Stage::Starting,
+            Phase::Login => login_screen::Stage::Form,
+            Phase::Qr(attempt) => login_screen::Stage::Qr(&attempt.stage),
+            Phase::Mfa(_) => login_screen::Stage::Mfa,
+            Phase::Authenticating { saved_account } => login_screen::Stage::Checking {
+                restoring: saved_account.is_some(),
+            },
+            Phase::MemoryConsent { session, error } => login_screen::Stage::MemoryConsent {
+                name: format!(
+                    "{} (@{})",
+                    session.user.display_name(),
+                    session.user.username
                 ),
-            QrStage::Scanned(user) => content
-                .push(text(format!("Scanned by @{}", user.username)).size(26))
-                .push(text(format!("Account ID: {}", user.id)))
-                .push(text(
-                    "Confirm the login on your phone. If this is not your alt account, cancel on the phone or here.",
-                ))
-                .push(button("Cancel").on_press(Message::CancelQr)),
-            QrStage::Ended(error) => {
-                let mut actions = row![].spacing(12);
-                if error.can_regenerate() {
-                    actions = actions.push(button("Generate new code").on_press(Message::StartQr));
-                }
-                content
-                    .push(text(error.to_string()))
-                    .push(actions.push(button("Back to login").on_press(Message::CancelQr)))
-            }
+                error: i18n::tr(&error.to_string()).to_owned(),
+            },
+            Phase::Account { .. } => unreachable!("account view returned above"),
+            Phase::Deleting { .. } => login_screen::Stage::Deleting,
+            Phase::DeleteFailed { error, .. } => login_screen::Stage::DeleteFailed {
+                error: i18n::tr(&error.to_string()).to_owned(),
+            },
         };
-        if self.memory_only {
-            content = content.push(text("Memory-only session: this login will not be saved."));
-        }
-        content.into()
+        login_screen::view(
+            &self.login_ui,
+            login_screen::Inputs {
+                stage,
+                saved: self
+                    .saved_accounts
+                    .iter()
+                    .map(|id| {
+                        (
+                            *id,
+                            self.account_index.get(*id).map_or_else(
+                                || i18n::trf("Account {}", &[id]),
+                                accounts::Entry::label,
+                            ),
+                        )
+                    })
+                    .collect(),
+                acknowledged: self.acknowledged,
+                memory_only: self.memory_only,
+                token: self.token.expose_secret(),
+                login: &self.password_login,
+                password: self.password.expose_secret(),
+                notice: self.notice.as_deref().map(i18n::tr),
+                can_login: self.can_login(),
+                can_password: self.can_password_login(),
+                store_failed: self.store.is_none(),
+            },
+        )
     }
 }
 
@@ -7359,15 +7857,16 @@ mod tests {
             !idle.contains("OpenCall") && !idle.contains("LeaveVoice"),
             "{idle:?}"
         );
-        // The footer's own actions are there all along.
-        assert!(idle.contains("Account"), "{idle:?}");
+        // The footer's own actions are there all along: the account menu,
+        // the device menu and the settings.
+        for name in ["Status", "MicMenu", "Settings"] {
+            assert!(idle.contains(name), "{name}: {idle:?}");
+        }
         let _ = app.update(Message::JoinVoice(guild, voice));
         let joined = bottom(&app);
-        for name in ["OpenCall", "LeaveVoice", "ToggleVoiceDetails", "Account"] {
+        for name in ["OpenCall", "LeaveVoice", "ToggleVoiceDetails", "Status", "Settings"] {
             assert!(joined.contains(name), "{name}: {joined:?}");
         }
-        // Mute and deafen stay in the account footer, not in the voice panel.
-        assert!(joined.contains("OpenAudioSettings"), "{joined:?}");
     }
 
     #[test]

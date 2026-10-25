@@ -6,6 +6,7 @@
 //! requested from the server, so what this module lets through is exactly what
 //! costs CPU, memory and GPU time. The caps below are the documented budget.
 
+use crate::i18n::{tr, trf, trn};
 use std::cell::Cell;
 use std::fmt;
 use std::sync::Arc;
@@ -59,9 +60,9 @@ impl Mode {
 impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Grid => "Grid",
-            Self::Focus => "Focus",
-            Self::Speaker => "Speaker",
+            Self::Grid => tr("Grid"),
+            Self::Focus => tr("Focus"),
+            Self::Speaker => tr("Speaker"),
         })
     }
 }
@@ -155,10 +156,14 @@ impl Plan {
     /// The text that says why videos are missing, if some are.
     pub fn refusal(&self) -> Option<String> {
         (self.refused > 0).then(|| {
-            format!(
-                "{} more video{} not shown: at most {MAX_VISIBLE_TILES} are decoded and drawn at once. Pin one, or stop watching a stream, to choose.",
-                self.refused,
-                if self.refused == 1 { " is" } else { "s are" },
+            // The count fills the first `{}`, the limit the second.
+            trf(
+                &trn(
+                    self.refused as u64,
+                    "{} more video is not shown: at most {} are decoded and drawn at once. Pin one, or stop watching a stream, to choose.",
+                    "{} more videos are not shown: at most {} are decoded and drawn at once. Pin one, or stop watching a stream, to choose.",
+                ),
+                &[&MAX_VISIBLE_TILES],
             )
         })
     }

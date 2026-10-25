@@ -29,6 +29,7 @@ use fastcord_model::{Message, Snowflake};
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 
+use crate::i18n::{tr, trf};
 use crate::style;
 
 /// Requests shown per page.
@@ -141,45 +142,45 @@ pub struct State {
 fn describe(error: PrivacyRequestError, action: Action) -> String {
     let error = match error {
         PrivacyRequestError::Invalid(_) => {
-            return "That change is not one this client can send.".to_owned();
+            return tr("That change is not one this client can send.").to_owned();
         }
         PrivacyRequestError::Rest(error) => error,
     };
     match error {
-        RestError::AuthenticationRequired => "Your session has expired. Log in again.".to_owned(),
-        RestError::PermissionDenied => "Discord refused this for this account.".to_owned(),
+        RestError::AuthenticationRequired => tr("Your session has expired. Log in again.").to_owned(),
+        RestError::PermissionDenied => tr("Discord refused this for this account.").to_owned(),
         RestError::ResourceGone => match action {
             Action::Accept(_) | Action::Decline(_) => {
-                "That request is already gone; the list follows Discord.".to_owned()
+                tr("That request is already gone; the list follows Discord.").to_owned()
             }
-            _ => "Discord could not find that.".to_owned(),
+            _ => tr("Discord could not find that.").to_owned(),
         },
         RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
         RestError::Http(status) if status.as_u16() == 429 => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
         RestError::Http(status) if status.as_u16() == 400 => {
-            "Discord rejected the change, or it needs verification only the official client can complete."
+            tr("Discord rejected the change, or it needs verification only the official client can complete.")
                 .to_owned()
         }
         RestError::InvalidJson if action == Action::LoadPrivacy => {
-            "Discord answered with something unexpected, so these settings cannot be edited here."
+            tr("Discord answered with something unexpected, so these settings cannot be edited here.")
                 .to_owned()
         }
         RestError::InvalidJson => {
-            "Discord answered with something unexpected. The change may have been applied; reload to check."
+            tr("Discord answered with something unexpected. The change may have been applied; reload to check.")
                 .to_owned()
         }
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection))
         | RestError::Retryable(_) => match action {
-            Action::LoadPrivacy => "Could not reach Discord. Try Load again.".to_owned(),
-            _ => "Discord did not confirm. The change may have been applied; reload or check the list before trying again."
+            Action::LoadPrivacy => tr("Could not reach Discord. Try Load again.").to_owned(),
+            _ => tr("Discord did not confirm. The change may have been applied; reload or check the list before trying again.")
                 .to_owned(),
         },
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED.to_owned(),
-        other => format!("The request failed: {other}."),
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED).to_owned(),
+        other => trf("The request failed: {}.", &[&tr(&other.to_string())]),
     }
 }
 
@@ -199,14 +200,14 @@ fn preview_lines(
             if suppressed.contains_key(&message.author.id) {
                 return PreviewLine {
                     author: String::new(),
-                    text: "Hidden message".to_owned(),
+                    text: tr("Hidden message").to_owned(),
                 };
             }
             let text = if message.content.trim().is_empty() {
                 if message.attachments.is_empty() {
-                    "(no text)".to_owned()
+                    tr("(no text)").to_owned()
                 } else {
-                    "(attachment)".to_owned()
+                    tr("(attachment)").to_owned()
                 }
             } else {
                 clip(message.content.trim(), PREVIEW_TEXT_CHARS)
@@ -432,7 +433,7 @@ impl State {
             _ if self.busy.is_some() => {
                 // One request at a time; the answer of the first is awaited.
                 if !matches!(event, Event::Done(..)) {
-                    self.notice = Some("Wait for the previous change to finish.".to_owned());
+                    self.notice = Some(tr("Wait for the previous change to finish.").to_owned());
                 }
             }
             Event::Accept(channel) => {
@@ -450,7 +451,7 @@ impl State {
                             .map_err(PrivacyRequestError::Rest)
                     });
                 }
-                self.notice = Some("That request is no longer pending.".to_owned());
+                self.notice = Some(tr("That request is no longer pending.").to_owned());
             }
             Event::AskDecline(channel) => {
                 if navigation
@@ -481,7 +482,7 @@ impl State {
                             .map_err(PrivacyRequestError::Rest)
                     });
                 }
-                self.notice = Some("That request is no longer pending.".to_owned());
+                self.notice = Some(tr("That request is no longer pending.").to_owned());
             }
             Event::Unignore(user) => {
                 if navigation.suppressed.get(&user) == Some(&Suppression::Ignored) {
@@ -553,7 +554,7 @@ impl State {
                 };
                 let edit = form.edit();
                 if edit == PrivacyEdit::default() {
-                    self.notice = Some("Nothing changed.".to_owned());
+                    self.notice = Some(tr("Nothing changed.").to_owned());
                     return Task::none();
                 }
                 self.requested_at = navigation.privacy.latest;
@@ -581,15 +582,15 @@ impl State {
                     loaded,
                     since: navigation.privacy.latest,
                 });
-                self.notice = (action == Action::SavePrivacy).then(|| "Saved.".to_owned());
+                self.notice = (action == Action::SavePrivacy).then(|| tr("Saved.").to_owned());
             }
             Outcome::Done => {
                 self.notice = Some(match action {
                     Action::Accept(_) => {
-                        "Accepted. The conversation moves to your messages when Discord confirms."
+                        tr("Accepted. The conversation moves to your messages when Discord confirms.")
                     }
-                    Action::Decline(_) => "Declined. It leaves the list when Discord confirms.",
-                    _ => "Sent. The list changes when Discord confirms.",
+                    Action::Decline(_) => tr("Declined. It leaves the list when Discord confirms."),
+                    _ => tr("Sent. The list changes when Discord confirms."),
                 }
                 .to_owned());
             }
@@ -615,17 +616,23 @@ impl State {
 }
 
 fn small<'a>(label: &'static str, event: Option<Event>) -> Element<'a, Event> {
-    button(text(label).size(12))
+    button(text(tr(label)).size(12))
         .on_press_maybe(event)
         .style(style::tool_button(true, false))
         .into()
 }
 
 fn toggle<'a>(label: String, on: bool, event: Option<Event>) -> Element<'a, Event> {
-    button(text(format!("{label}: {}", if on { "On" } else { "Off" })).size(12))
-        .on_press_maybe(event)
-        .style(style::tool_button(on, false))
-        .into()
+    button(
+        text(format!(
+            "{label}: {}",
+            if on { tr("On") } else { tr("Off") }
+        ))
+        .size(12),
+    )
+    .on_press_maybe(event)
+    .style(style::tool_button(on, false))
+    .into()
 }
 
 fn name_of(navigation: &NavigationSnapshot, user: Snowflake) -> String {
@@ -634,7 +641,7 @@ fn name_of(navigation: &NavigationSnapshot, user: Snowflake) -> String {
         .iter()
         .find(|r| r.user.id == user)
         .map(|r| clip(r.user.display_name(), PREVIEW_AUTHOR_CHARS))
-        .unwrap_or_else(|| format!("User {user}"))
+        .unwrap_or_else(|| trf("User {}", &[&user]))
 }
 
 pub fn view<'a>(
@@ -646,13 +653,13 @@ pub fn view<'a>(
     }
     let idle = state.busy.is_none();
     let tab_button = |label: &'static str, tab: Tab| {
-        button(text(label).size(12))
+        button(text(tr(label)).size(12))
             .on_press(Event::Tab(tab))
             .style(style::tool_button(state.tab() == tab, false))
     };
     let mut panel = column![
         row![
-            text("Safety").size(13),
+            text(tr("Safety")).size(13),
             tab_button("Requests", Tab::Requests),
             tab_button("Ignored", Tab::Ignored),
             tab_button("Privacy", Tab::Privacy),
@@ -669,7 +676,11 @@ pub fn view<'a>(
         Tab::Privacy => panel.push(privacy_view(state, navigation, idle)),
     };
     if state.busy.is_some() {
-        panel = panel.push(text("Waiting for Discord…").size(12).style(text::secondary));
+        panel = panel.push(
+            text(tr("Waiting for Discord…"))
+                .size(12)
+                .style(text::secondary),
+        );
     }
     if let Some(notice) = &state.notice {
         panel = panel.push(text(notice.as_str()).size(12).style(text::secondary));
@@ -690,13 +701,13 @@ fn requests_view<'a>(
 ) -> Element<'a, Event> {
     let requests = &navigation.requests;
     let mut body = column![
-        text("Previewing a request does not accept it or mark it read. Only Accept lets this person message you normally.")
+        text(tr("Previewing a request does not accept it or mark it read. Only Accept lets this person message you normally."))
             .size(11)
             .style(text::secondary)
     ]
     .spacing(4);
     if requests.rows.is_empty() {
-        return body.push(text("No message requests.").size(12)).into();
+        return body.push(text(tr("No message requests.")).size(12)).into();
     }
     let start = state.page * PAGE_SIZE;
     for request in requests.rows.iter().skip(start).take(PAGE_SIZE) {
@@ -704,13 +715,13 @@ fn requests_view<'a>(
         let confirming = state.confirm == Some(channel);
         let mut line = row![
             text(if request.spam {
-                format!("{} (spam)", request.label)
+                trf("{} (spam)", &[&request.label])
             } else {
                 request.label.clone()
             })
             .size(12)
             .width(Length::Fill),
-            small("Preview", Some(Event::Preview(channel))),
+            small("Show preview", Some(Event::Preview(channel))),
             small("Accept", idle.then_some(Event::Accept(channel))),
         ]
         .spacing(6)
@@ -726,13 +737,14 @@ fn requests_view<'a>(
             let mut lines = column![].spacing(2);
             match &preview.state {
                 PreviewState::Loading => {
-                    lines = lines.push(text("Loading preview…").size(11).style(text::secondary));
+                    lines =
+                        lines.push(text(tr("Loading preview…")).size(11).style(text::secondary));
                 }
                 PreviewState::Failed(reason) => {
                     lines = lines.push(text(reason.as_str()).size(11).style(text::danger));
                 }
                 PreviewState::Loaded(items) if items.is_empty() => {
-                    lines = lines.push(text("No messages.").size(11).style(text::secondary));
+                    lines = lines.push(text(tr("No messages.")).size(11).style(text::secondary));
                 }
                 PreviewState::Loaded(items) => {
                     for item in items {
@@ -752,17 +764,16 @@ fn requests_view<'a>(
     }
     let pages = requests.rows.len().div_ceil(PAGE_SIZE).max(1);
     let more = if requests.total > MAX_REQUEST_ROWS {
-        format!(" ({} not listed)", requests.total - MAX_REQUEST_ROWS)
+        trf(" ({} not listed)", &[&(requests.total - MAX_REQUEST_ROWS)])
     } else {
         String::new()
     };
     body.push(
         row![
             small("Previous", (state.page > 0).then_some(Event::PagePrev)),
-            text(format!(
-                "Page {} of {pages}, {} requests{more}",
-                state.page + 1,
-                requests.total
+            text(trf(
+                "Page {} of {}, {} requests{}",
+                &[&(state.page + 1), &pages, &requests.total, &more],
             ))
             .size(11),
             small("Next", (state.page + 1 < pages).then_some(Event::PageNext)),
@@ -796,11 +807,14 @@ fn ignored_view<'a>(navigation: &'a NavigationSnapshot, idle: bool) -> Element<'
         );
     }
     let summary = if count == 0 {
-        "You are not ignoring anyone. Use Ignore on a profile card. Ignoring hides messages, notifications and calls without blocking.".to_owned()
+        tr("You are not ignoring anyone. Use Ignore on a profile card. Ignoring hides messages, notifications and calls without blocking.").to_owned()
     } else if count > MAX_IGNORED_SHOWN {
-        format!("{count} ignored users. Showing {MAX_IGNORED_SHOWN}.")
+        trf(
+            "{} ignored users. Showing {}.",
+            &[&count, &MAX_IGNORED_SHOWN],
+        )
     } else {
-        format!("{count} ignored.")
+        trf("{} ignored.", &[&count])
     };
     column![
         text(summary).size(11).style(text::secondary),
@@ -819,7 +833,7 @@ fn privacy_view<'a>(
     let loading = state.busy == Some(Action::LoadPrivacy);
     body = body.push(
         row![
-            text("Settings are read only when you ask.")
+            text(tr("Settings are read only when you ask."))
                 .size(11)
                 .style(text::secondary),
             space::horizontal(),
@@ -839,26 +853,26 @@ fn privacy_view<'a>(
     };
     let draft = &form.draft;
     let unknown = || {
-        text("Not available for this account.")
+        text(tr("Not available for this account."))
             .size(11)
             .style(text::secondary)
     };
-    body = body.push(text("Who can send you a friend request").size(12));
+    body = body.push(text(tr("Who can send you a friend request")).size(12));
     body = match draft.friend_sources {
         Some(sources) => body.push(
             row![
                 toggle(
-                    "Everyone".into(),
+                    tr("Everyone").into(),
                     sources_of(sources, Source::Everyone),
                     idle.then_some(Event::ToggleSource(Source::Everyone))
                 ),
                 toggle(
-                    "Friends of friends".into(),
+                    tr("Friends of friends").into(),
                     sources_of(sources, Source::FriendsOfFriends),
                     idle.then_some(Event::ToggleSource(Source::FriendsOfFriends))
                 ),
                 toggle(
-                    "Server members".into(),
+                    tr("Server members").into(),
                     sources_of(sources, Source::ServerMembers),
                     idle.then_some(Event::ToggleSource(Source::ServerMembers))
                 ),
@@ -867,10 +881,10 @@ fn privacy_view<'a>(
         ),
         None => body.push(unknown()),
     };
-    body = body.push(text("Direct messages from server members").size(12));
+    body = body.push(text(tr("Direct messages from server members")).size(12));
     body = match draft.default_guilds_restricted {
         Some(restricted) => body.push(toggle(
-            "Allowed in new servers".into(),
+            tr("Allowed in new servers").into(),
             !restricted,
             idle.then_some(Event::ToggleDefaultRestricted),
         )),
@@ -878,33 +892,33 @@ fn privacy_view<'a>(
     };
     body = match (navigation.selected_guild, &draft.restricted_guilds) {
         (Some(guild), Some(list)) => body.push(toggle(
-            format!("Allowed from {}", navigation.selected_guild_name),
+            trf("Allowed from {}", &[&navigation.selected_guild_name]),
             !list.contains(&guild),
             idle.then_some(Event::ToggleServer),
         )),
         (None, Some(_)) => body.push(
-            text("Open a server to change its override.")
+            text(tr("Open a server to change its override."))
                 .size(11)
                 .style(text::secondary),
         ),
         _ => body,
     };
-    body = body.push(text("Scan direct messages for explicit images").size(12));
+    body = body.push(text(tr("Scan direct messages for explicit images")).size(12));
     body = match draft.explicit_filter {
         Some(level) => body.push(
             row![
                 toggle(
-                    "Off".into(),
+                    tr("Off").into(),
                     level == 0,
                     idle.then_some(Event::SetFilter(0))
                 ),
                 toggle(
-                    "From non-friends".into(),
+                    tr("From non-friends").into(),
                     level == 1,
                     idle.then_some(Event::SetFilter(1))
                 ),
                 toggle(
-                    "From everyone".into(),
+                    tr("From everyone").into(),
                     level == 2,
                     idle.then_some(Event::SetFilter(2))
                 ),
@@ -919,7 +933,7 @@ fn privacy_view<'a>(
                 "Save changes",
                 (idle && form.edit() != PrivacyEdit::default()).then_some(Event::SavePrivacy)
             ),
-            text("Only the fields you changed are sent.")
+            text(tr("Only the fields you changed are sent."))
                 .size(11)
                 .style(text::secondary),
         ]

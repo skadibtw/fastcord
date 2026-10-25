@@ -1,3 +1,4 @@
+use crate::i18n::{tr, trf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -36,8 +37,9 @@ pub(super) async fn run(
     let session = match connect_with_video(credentials.voice_credentials(), watch_options()) {
         Ok(session) => session,
         Err(error) => {
-            (status)(StreamStatus::Failed(format!(
-                "Could not start stream session: {error}"
+            (status)(StreamStatus::Failed(trf(
+                "Could not start stream session: {}",
+                &[&tr(&error.to_string())],
             )));
             return;
         }
@@ -78,8 +80,9 @@ fn publish_session_end(voice: VoiceStatus, status: &StatusSink) -> bool {
             true
         }
         VoiceStatus::Closed(reason) => {
-            (status)(StreamStatus::Failed(format!(
-                "Stream session failed: {reason}"
+            (status)(StreamStatus::Failed(trf(
+                "Stream session failed: {}",
+                &[&tr(&reason.to_string())],
             )));
             true
         }
@@ -166,7 +169,7 @@ async fn pump(
                     decoder.refresh();
                     if refreshes == 3 {
                         (status)(StreamStatus::Failed(
-                            "No video is arriving. Retry watching; your call and screen share are still connected.".into(),
+                            tr("No video is arriving. Retry watching; your call and screen share are still connected.").into(),
                         ));
                     }
                 }
@@ -206,7 +209,7 @@ async fn pump(
     drop(playback);
     if !terminal && !publish_session_end(session.status(), &status) {
         (status)(StreamStatus::Failed(
-            "Stream session stopped unexpectedly".into(),
+            tr("Stream session stopped unexpectedly").into(),
         ));
     }
     session.leave().await;

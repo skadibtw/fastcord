@@ -9,6 +9,7 @@ mod gpu;
 /// Videos the NV12 pass can draw in one frame (plane pairs).
 pub const MAX_VIDEOS: usize = gpu::MAX_VIDEOS;
 
+use crate::i18n::{tr, trf};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -50,11 +51,11 @@ pub enum Status {
 impl Status {
     pub fn describe(&self) -> String {
         match self {
-            Self::Connecting => "Connecting to the stream…".into(),
-            Self::Waiting => "Waiting for a video keyframe…".into(),
-            Self::Playing(backend) => format!("Watching · {backend}"),
-            Self::Failed(error) => format!("Video stopped: {error}"),
-            Self::Ended => "The stream ended.".into(),
+            Self::Connecting => tr("Connecting to the stream…").into(),
+            Self::Waiting => tr("Waiting for a video keyframe…").into(),
+            Self::Playing(backend) => trf("Watching · {}", &[backend]),
+            Self::Failed(error) => trf("Video stopped: {}", &[&tr(error)]),
+            Self::Ended => tr("The stream ended.").into(),
         }
     }
 }
@@ -99,7 +100,7 @@ impl Session {
             active: Arc::new(AtomicBool::new(true)),
             visibility,
             audio: watch::channel(AudioSettings::default()).0,
-            audio_status: Mutex::new("Waiting for stream audio".into()),
+            audio_status: Mutex::new(tr("Waiting for stream audio").into()),
             latest: Mutex::new(Latest {
                 frame: None,
                 status: Status::Connecting,
@@ -241,11 +242,11 @@ impl Session {
     pub fn description(&self) -> String {
         let latest = self.latest.lock();
         if let Some(error) = &latest.frame_error {
-            return format!("Video frame unavailable: {error}");
+            return trf("Video frame unavailable: {}", &[&tr(error)]);
         }
         let mut description = latest.status.describe();
         if latest.pressure {
-            description.push_str(" · Frame pool busy; newest pictures are being dropped.");
+            description.push_str(tr(" · Frame pool busy; newest pictures are being dropped."));
         }
         description
     }

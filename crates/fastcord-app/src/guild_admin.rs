@@ -39,6 +39,8 @@ use iced::widget::{
 };
 use iced::{Element, Length, Task};
 
+use crate::i18n::{tr, trf};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     CreateServer,
@@ -422,40 +424,46 @@ pub struct State {
 fn describe(error: AdminRequestError) -> String {
     let error = match error {
         AdminRequestError::Invalid(AdminError::BadName) => {
-            return "That name has the wrong length.".to_owned();
+            return tr("That name has the wrong length.").to_owned();
         }
         AdminRequestError::Invalid(AdminError::TopicTooLong) => {
-            return format!("A topic has at most {MAX_CHANNEL_TOPIC_CHARS} characters.");
+            return trf(
+                "A topic has at most {} characters.",
+                &[&MAX_CHANNEL_TOPIC_CHARS],
+            );
         }
         AdminRequestError::Invalid(AdminError::DescriptionTooLong) => {
-            return format!("A description has at most {MAX_GUILD_DESCRIPTION_CHARS} characters.");
+            return trf(
+                "A description has at most {} characters.",
+                &[&MAX_GUILD_DESCRIPTION_CHARS],
+            );
         }
         AdminRequestError::Invalid(AdminError::UnsupportedImage) => {
-            return "Choose a PNG or JPEG image (an animated icon needs a boost).".to_owned();
+            return tr("Choose a PNG or JPEG image (an animated icon needs a boost).").to_owned();
         }
         AdminRequestError::Invalid(AdminError::ImageTooLarge) => {
-            return "The image is larger than 512 KiB.".to_owned();
+            return tr("The image is larger than 512 KiB.").to_owned();
         }
         AdminRequestError::Invalid(AdminError::NeedsCommunity) => return community_note(),
         AdminRequestError::Invalid(AdminError::NothingToChange) => {
-            return "Nothing to change.".to_owned();
+            return tr("Nothing to change.").to_owned();
         }
-        AdminRequestError::Invalid(_) => return "That value is not allowed.".to_owned(),
+        AdminRequestError::Invalid(_) => return tr("That value is not allowed.").to_owned(),
         AdminRequestError::Rest(error) => error,
     };
     describe_rest(error)
 }
 
 fn community_note() -> String {
-    "Announcement, Stage and forum channels need the Community feature, which this server does not have. Turn it on in the official Discord client (it needs rules and updates channels).".to_owned()
+    tr("Announcement, Stage and forum channels need the Community feature, which this server does not have. Turn it on in the official Discord client (it needs rules and updates channels).").to_owned()
 }
 
 pub(crate) fn describe_rest(error: RestError) -> String {
     match error {
-        RestError::PermissionDenied => "Discord refused: you lack the permission for this (Manage Server, Manage Channels, Manage Roles, a role above the one involved, or being the owner).".to_owned(),
-        RestError::ResourceGone => "That server or channel no longer exists.".to_owned(),
-        RestError::Retryable(_) => "Discord did not confirm. The change may have been applied; check the list before trying again.".to_owned(),
-        RestError::Refused(refusal) if refusal.code == Some(60003) => "Discord asks for two-factor verification for this change. fastcord does not answer that challenge: complete it in the official Discord client. Nothing was changed here.".to_owned(),
+        RestError::PermissionDenied => tr("Discord refused: you lack the permission for this (Manage Server, Manage Channels, Manage Roles, a role above the one involved, or being the owner).").to_owned(),
+        RestError::ResourceGone => tr("That server or channel no longer exists.").to_owned(),
+        RestError::Retryable(_) => tr("Discord did not confirm. The change may have been applied; check the list before trying again.").to_owned(),
+        RestError::Refused(refusal) if refusal.code == Some(60003) => tr("Discord asks for two-factor verification for this change. fastcord does not answer that challenge: complete it in the official Discord client. Nothing was changed here.").to_owned(),
         RestError::Refused(refusal) if refusal.status.as_u16() == 403 => describe_rest(RestError::PermissionDenied),
         RestError::Refused(refusal) if refusal.status.as_u16() == 404 => describe_rest(RestError::ResourceGone),
         other => crate::invite::describe(other),
@@ -487,7 +495,7 @@ fn bitrate_options(current: Option<u32>) -> Vec<u32> {
 }
 
 fn kbps(bitrate: u32) -> String {
-    format!("{} kbps", bitrate / 1000)
+    trf("{} kbps", &[&(bitrate / 1000)])
 }
 
 impl State {
@@ -674,8 +682,8 @@ impl State {
                 return Task::perform(
                     async {
                         let Some(file) = rfd::AsyncFileDialog::new()
-                            .set_title("Server icon")
-                            .add_filter("Image", &["png", "jpg", "jpeg"])
+                            .set_title(tr("Server icon"))
+                            .add_filter(tr("Image"), &["png", "jpg", "jpeg"])
                             .pick_file()
                             .await
                         else {
@@ -1036,13 +1044,13 @@ fn select<'a, T: Clone + PartialEq + 'a>(
     }
     pick_list(options, selected, move |item: Item<T>| on(item.0))
         .text_size(13)
-        .placeholder("Choose")
+        .placeholder(tr("Choose"))
         .into()
 }
 
 fn presets<T: Copy>(list: &[(T, &str)]) -> Vec<Item<T>> {
     list.iter()
-        .map(|(v, n)| Item(*v, (*n).to_owned()))
+        .map(|(v, n)| Item(*v, tr(n).to_owned()))
         .collect()
 }
 
@@ -1050,7 +1058,7 @@ fn channel_choices(
     admin: &GuildAdmin,
     wanted: impl Fn(AdminKind) -> bool,
 ) -> Vec<Item<Option<Snowflake>>> {
-    std::iter::once(Item(None, "None".to_owned()))
+    std::iter::once(Item(None, tr("None").to_owned()))
         .chain(
             admin
                 .channels
@@ -1062,7 +1070,7 @@ fn channel_choices(
 }
 
 fn categories(admin: &GuildAdmin) -> Vec<Item<Option<Snowflake>>> {
-    std::iter::once(Item(None, "No category".to_owned()))
+    std::iter::once(Item(None, tr("No category").to_owned()))
         .chain(
             admin
                 .channels
@@ -1074,11 +1082,11 @@ fn categories(admin: &GuildAdmin) -> Vec<Item<Option<Snowflake>>> {
 }
 
 fn small<'a>(label: &str) -> iced::widget::Text<'a> {
-    text(label.to_owned()).size(12).style(text::secondary)
+    text(tr(label).to_owned()).size(12).style(text::secondary)
 }
 
 fn labelled<'a>(label: &str, control: Element<'a, Event>) -> Element<'a, Event> {
-    row![text(label.to_owned()).size(12).width(150), control]
+    row![text(tr(label).to_owned()).size(12).width(150), control]
         .spacing(8)
         .align_y(iced::Alignment::Center)
         .into()
@@ -1086,7 +1094,7 @@ fn labelled<'a>(label: &str, control: Element<'a, Event>) -> Element<'a, Event> 
 
 fn header<'a>(title: String, idle: bool) -> Element<'a, Event> {
     row![
-        text(title).size(14),
+        text(tr(&title).to_owned()).size(14),
         space::horizontal(),
         crate::icons::close(idle.then_some(Event::Close)),
     ]
@@ -1108,13 +1116,13 @@ fn server_view<'a>(
         .into();
     };
     let edit = idle && admin.can_manage_guild && form.loaded;
-    let mut panel = column![header(format!("Server settings: {}", admin.name), idle)].spacing(6);
+    let mut panel = column![header(trf("Server settings: {}", &[&admin.name]), idle)].spacing(6);
     if !admin.can_manage_guild {
         panel = panel.push(small("You need Manage Server to change these settings."));
     }
     panel = panel.push(labelled(
         "Name",
-        text_input("Server name", &form.name)
+        text_input(tr("Server name"), &form.name)
             .on_input_maybe(edit.then_some(|v| Event::Input(Field::ServerName, v)))
             .size(13)
             .into(),
@@ -1129,8 +1137,9 @@ fn server_view<'a>(
         "Icon",
         row![
             small(icon_state),
-            button(text("Choose image").size(12)).on_press_maybe(edit.then_some(Event::PickIcon)),
-            button(text("Remove").size(12)).on_press_maybe(
+            button(text(tr("Choose image")).size(12))
+                .on_press_maybe(edit.then_some(Event::PickIcon)),
+            button(text(tr("Remove")).size(12)).on_press_maybe(
                 (edit && (admin.has_icon || form.icon != IconChange::Keep))
                     .then_some(Event::RemoveIcon)
             ),
@@ -1141,7 +1150,7 @@ fn server_view<'a>(
     ));
     panel = panel.push(labelled(
         "Description",
-        text_input("Shown to people finding the server", &form.description)
+        text_input(tr("Shown to people finding the server"), &form.description)
             .on_input_maybe(edit.then_some(|v| Event::Input(Field::Description, v)))
             .size(13)
             .into(),
@@ -1225,9 +1234,9 @@ fn server_view<'a>(
             }),
             button(
                 text(if admin.mfa_required {
-                    "Stop requiring"
+                    tr("Stop requiring")
                 } else {
-                    "Require 2FA"
+                    tr("Require 2FA")
                 })
                 .size(12)
             )
@@ -1238,11 +1247,12 @@ fn server_view<'a>(
     );
     panel = panel.push(
         row![
-            button(text("Save settings").size(13)).on_press_maybe(edit.then_some(Event::Save)),
-            button(text("Roles").size(13)).on_press_maybe(idle.then_some(Event::Roles(admin.id))),
-            button(text("Apps and integrations").size(13))
+            button(text(tr("Save settings")).size(13)).on_press_maybe(edit.then_some(Event::Save)),
+            button(text(tr("Roles")).size(13))
+                .on_press_maybe(idle.then_some(Event::Roles(admin.id))),
+            button(text(tr("Apps and integrations")).size(13))
                 .on_press_maybe((idle && admin.can_manage_guild).then_some(Event::Apps(admin.id))),
-            button(text("Community setup").size(13))
+            button(text(tr("Community setup")).size(13))
                 .on_press_maybe(idle.then_some(Event::Community(admin.id))),
             small(if admin.community {
                 "Community is on."
@@ -1255,9 +1265,9 @@ fn server_view<'a>(
     );
     panel = panel.push(
         row![
-            text("Channels").size(13),
+            text(tr("Channels")).size(13),
             space::horizontal(),
-            button(text("Create channel").size(12)).on_press_maybe(
+            button(text(tr("Create channel")).size(12)).on_press_maybe(
                 (idle && admin.can_manage_channels).then_some(Event::CreateChannel(admin.id, None))
             ),
         ]
@@ -1284,9 +1294,10 @@ fn channel_row<'a>(admin: &'a GuildAdmin, c: &'a AdminChannel, idle: bool) -> El
             .size(13)
             .width(Length::Fill)
             .wrapping(text::Wrapping::None),
-        button(text("Up").size(11)).on_press_maybe(move_up.then_some(Event::Move(c.id, false))),
-        button(text("Down").size(11)).on_press_maybe(move_down.then_some(Event::Move(c.id, true))),
-        button(text("Edit").size(11)).on_press_maybe(
+        button(text(tr("Up")).size(11)).on_press_maybe(move_up.then_some(Event::Move(c.id, false))),
+        button(text(tr("Down")).size(11))
+            .on_press_maybe(move_down.then_some(Event::Move(c.id, true))),
+        button(text(tr("Edit")).size(11)).on_press_maybe(
             (idle && c.can_manage).then_some(Event::EditChannel(admin.id, c.id, c.kind.is_voice()))
         ),
     ]
@@ -1296,14 +1307,14 @@ fn channel_row<'a>(admin: &'a GuildAdmin, c: &'a AdminChannel, idle: bool) -> El
 }
 
 fn danger_view<'a>(form: &'a ServerForm, admin: &'a GuildAdmin, idle: bool) -> Element<'a, Event> {
-    let mut panel = column![text("Owner").size(13)].spacing(6);
+    let mut panel = column![text(tr("Owner")).size(13)].spacing(6);
     match &form.danger {
         Danger::None => {
             panel = panel.push(
                 row![
-                    button(text("Transfer ownership").size(12))
+                    button(text(tr("Transfer ownership")).size(12))
                         .on_press_maybe(idle.then_some(Event::Ask(Ask::Transfer))),
-                    button(text("Delete server").size(12))
+                    button(text(tr("Delete server")).size(12))
                         .on_press_maybe(idle.then_some(Event::Ask(Ask::DeleteServer)))
                         .style(button::danger),
                 ]
@@ -1314,9 +1325,9 @@ fn danger_view<'a>(form: &'a ServerForm, admin: &'a GuildAdmin, idle: bool) -> E
             let matches = typed.trim() == admin.name;
             panel = panel
                 .push(
-                    text(format!(
+                    text(trf(
                         "Delete {} for everyone? This cannot be undone. Type its name to confirm.",
-                        admin.name
+                        &[&admin.name],
                     ))
                     .size(12),
                 )
@@ -1325,10 +1336,10 @@ fn danger_view<'a>(form: &'a ServerForm, admin: &'a GuildAdmin, idle: bool) -> E
                         text_input(&admin.name, typed)
                             .on_input(|v| Event::Input(Field::DeleteTyped, v))
                             .size(13),
-                        button(text("Delete server").size(12))
+                        button(text(tr("Delete server")).size(12))
                             .on_press_maybe((idle && matches).then_some(Event::Confirm))
                             .style(button::danger),
-                        button(text("Cancel").size(12))
+                        button(text(tr("Cancel")).size(12))
                             .on_press_maybe(idle.then_some(Event::Cancel)),
                     ]
                     .spacing(6),
@@ -1338,15 +1349,16 @@ fn danger_view<'a>(form: &'a ServerForm, admin: &'a GuildAdmin, idle: bool) -> E
             panel = panel.push(
                 row![
                     text(if *required {
-                        "Require two-factor authentication for moderators of this server?"
+                        tr("Require two-factor authentication for moderators of this server?")
                     } else {
-                        "Stop requiring two-factor authentication for moderators?"
+                        tr("Stop requiring two-factor authentication for moderators?")
                     })
                     .size(12),
-                    button(text("Confirm").size(12))
+                    button(text(tr("Confirm")).size(12))
                         .on_press_maybe(idle.then_some(Event::Confirm))
                         .style(button::danger),
-                    button(text("Cancel").size(12)).on_press_maybe(idle.then_some(Event::Cancel)),
+                    button(text(tr("Cancel")).size(12))
+                        .on_press_maybe(idle.then_some(Event::Cancel)),
                 ]
                 .spacing(6),
             );
@@ -1367,7 +1379,7 @@ fn danger_view<'a>(form: &'a ServerForm, admin: &'a GuildAdmin, idle: bool) -> E
                 });
             panel = panel
                 .push(
-                    text_input("Find a member by name", filter)
+                    text_input(tr("Find a member by name"), filter)
                         .on_input(|v| Event::Input(Field::TransferFilter, v))
                         .size(13),
                 )
@@ -1376,15 +1388,15 @@ fn danger_view<'a>(form: &'a ServerForm, admin: &'a GuildAdmin, idle: bool) -> E
                 Some((_, name)) => {
                     panel = panel.push(
                         row![
-                            text(format!(
-                                "Make {name} the owner of {}? You will lose owner rights.",
-                                admin.name
+                            text(trf(
+                                "Make {} the owner of {}? You will lose owner rights.",
+                                &[name, &admin.name],
                             ))
                             .size(12),
-                            button(text("Transfer").size(12))
+                            button(text(tr("Transfer")).size(12))
                                 .on_press_maybe(idle.then_some(Event::Confirm))
                                 .style(button::danger),
-                            button(text("Cancel").size(12))
+                            button(text(tr("Cancel")).size(12))
                                 .on_press_maybe(idle.then_some(Event::Cancel)),
                         ]
                         .spacing(6)
@@ -1395,7 +1407,7 @@ fn danger_view<'a>(form: &'a ServerForm, admin: &'a GuildAdmin, idle: bool) -> E
                     panel = panel.push(
                         row![
                             small("Only members this client already holds can be found."),
-                            button(text("Cancel").size(12))
+                            button(text(tr("Cancel")).size(12))
                                 .on_press_maybe(idle.then_some(Event::Cancel)),
                         ]
                         .spacing(6),
@@ -1431,13 +1443,13 @@ fn new_channel_view<'a>(
     let blocked = needs_community(form.kind.model()) && !admin.community;
     let enabled = idle && admin.can_manage_channels;
     let mut panel = column![
-        header(format!("Create channel in {}", admin.name), idle),
+        header(trf("Create channel in {}", &[&admin.name]), idle),
         labelled(
             "Kind",
             select(
                 kinds
                     .iter()
-                    .map(|k| Item(*k, k.label().to_owned()))
+                    .map(|k| Item(*k, tr(k.label()).to_owned()))
                     .collect(),
                 &form.kind,
                 enabled,
@@ -1446,7 +1458,7 @@ fn new_channel_view<'a>(
         ),
         labelled(
             "Name",
-            text_input("Channel name", &form.name)
+            text_input(tr("Channel name"), &form.name)
                 .on_input_maybe(enabled.then_some(|v| Event::Input(Field::NewName, v)))
                 .on_submit_maybe((enabled && !blocked).then_some(Event::Create))
                 .size(13)
@@ -1457,7 +1469,7 @@ fn new_channel_view<'a>(
     if has_topic(form.kind) {
         panel = panel.push(labelled(
             "Topic",
-            text_input("Optional", &form.topic)
+            text_input(tr("Optional"), &form.topic)
                 .on_input_maybe(enabled.then_some(|v| Event::Input(Field::NewTopic, v)))
                 .size(13)
                 .into(),
@@ -1478,7 +1490,7 @@ fn new_channel_view<'a>(
         panel = panel.push(small("You need Manage Channels to create channels."));
     }
     panel
-        .push(button(text("Create").size(13)).on_press_maybe(
+        .push(button(text(tr("Create")).size(13)).on_press_maybe(
             (enabled && !blocked && !form.name.trim().is_empty()).then_some(Event::Create),
         ))
         .into()
@@ -1510,10 +1522,9 @@ fn channel_view<'a>(
     let kind = current.kind;
     let enabled = idle && current.can_manage && form.loaded;
     let mut panel = column![header(
-        format!(
+        trf(
             "Edit {} channel: {}",
-            kind.label().to_lowercase(),
-            current.name
+            &[&tr(kind.label()).to_lowercase(), &current.name],
         ),
         idle
     ),]
@@ -1523,7 +1534,7 @@ fn channel_view<'a>(
     }
     panel = panel.push(labelled(
         "Name",
-        text_input("Channel name", &form.name)
+        text_input(tr("Channel name"), &form.name)
             .on_input_maybe(enabled.then_some(|v| Event::Input(Field::Name, v)))
             .size(13)
             .into(),
@@ -1531,14 +1542,14 @@ fn channel_view<'a>(
     if has_topic(kind) {
         panel = panel.push(labelled(
             "Topic",
-            text_input("Topic", &form.topic)
+            text_input(tr("Topic"), &form.topic)
                 .on_input_maybe(enabled.then_some(|v| Event::Input(Field::Topic, v)))
                 .size(13)
                 .into(),
         ));
         panel = panel.push(
             checkbox(form.nsfw)
-                .label("Age-restricted")
+                .label(tr("Age-restricted"))
                 .on_toggle_maybe(enabled.then_some(Event::Nsfw)),
         );
     }
@@ -1553,7 +1564,7 @@ fn channel_view<'a>(
     if kind == AdminKind::Voice {
         panel = panel.push(labelled(
             "User limit",
-            text_input("No limit", &form.limit)
+            text_input(tr("No limit"), &form.limit)
                 .on_input_maybe(enabled.then_some(|v| Event::Input(Field::UserLimit, v)))
                 .size(13)
                 .into(),
@@ -1562,8 +1573,8 @@ fn channel_view<'a>(
             "Video quality",
             select(
                 vec![
-                    Item(1u8, "Automatic".to_owned()),
-                    Item(2, "Full (720p)".to_owned()),
+                    Item(1u8, tr("Automatic").to_owned()),
+                    Item(2, tr("Full (720p)").to_owned()),
                 ],
                 &form.quality,
                 enabled,
@@ -1584,7 +1595,7 @@ fn channel_view<'a>(
             }),
         ));
         let mut regions: Vec<Item<Option<String>>> =
-            std::iter::once(Item(None, "Automatic".to_owned()))
+            std::iter::once(Item(None, tr("Automatic").to_owned()))
                 .chain(
                     regions
                         .unwrap_or_default()
@@ -1612,15 +1623,15 @@ fn channel_view<'a>(
             }),
         ));
     }
-    panel =
-        panel.push(button(text("Save").size(13)).on_press_maybe(enabled.then_some(Event::Save)));
+    panel = panel
+        .push(button(text(tr("Save")).size(13)).on_press_maybe(enabled.then_some(Event::Save)));
     if kind == AdminKind::Text && current.mine.contains(Permissions::MANAGE_WEBHOOKS) {
         panel = panel.push(
-            button(text("Followed announcements").size(12))
+            button(text(tr("Followed announcements")).size(12))
                 .on_press_maybe(idle.then_some(Event::Followed(admin.id, current.id))),
         );
         panel = panel.push(
-            button(text("Webhooks").size(12))
+            button(text(tr("Webhooks")).size(12))
                 .on_press_maybe(idle.then_some(Event::Webhooks(admin.id, current.id))),
         );
     }
@@ -1629,22 +1640,22 @@ fn channel_view<'a>(
         panel.push(
             row![
                 text(if kind == AdminKind::Category {
-                    format!("Delete the category {}? Its channels stay and become uncategorized.", current.name)
+                    trf("Delete the category {}? Its channels stay and become uncategorized.", &[&current.name])
                 } else {
-                    format!("Delete #{}? Its messages are removed for everyone and this cannot be undone.", current.name)
+                    trf("Delete #{}? Its messages are removed for everyone and this cannot be undone.", &[&current.name])
                 })
                 .size(12),
-                button(text("Delete").size(12))
+                button(text(tr("Delete")).size(12))
                     .on_press_maybe(enabled.then_some(Event::Confirm))
                     .style(button::danger),
-                button(text("Cancel").size(12)).on_press_maybe(idle.then_some(Event::Cancel)),
+                button(text(tr("Cancel")).size(12)).on_press_maybe(idle.then_some(Event::Cancel)),
             ]
             .spacing(6)
             .align_y(iced::Alignment::Center),
         )
     } else {
         panel.push(
-            button(text("Delete channel").size(12))
+            button(text(tr("Delete channel")).size(12))
                 .on_press_maybe(enabled.then_some(Event::Ask(Ask::DeleteChannel)))
                 .style(button::danger),
         )
@@ -1655,22 +1666,31 @@ fn channel_view<'a>(
 fn new_server_view(form: &NewServer, idle: bool) -> Element<'_, Event> {
     column![
         header("Create a server".to_owned(), idle),
-        text_input("Server name", &form.name)
+        text_input(tr("Server name"), &form.name)
             .on_input_maybe(idle.then_some(|v| Event::Input(Field::NewServerName, v)))
-            .on_submit_maybe((idle && form.name.trim().chars().count() >= 2).then_some(Event::Create))
+            .on_submit_maybe(
+                (idle && form.name.trim().chars().count() >= 2).then_some(Event::Create)
+            )
             .size(13),
         row![
-            small(if form.icon.is_some() { "Icon: chosen" } else { "Icon: none" }),
-            button(text("Choose image").size(12)).on_press_maybe(idle.then_some(Event::PickIcon)),
-            button(text("Remove").size(12))
+            small(if form.icon.is_some() {
+                "Icon: chosen"
+            } else {
+                "Icon: none"
+            }),
+            button(text(tr("Choose image")).size(12))
+                .on_press_maybe(idle.then_some(Event::PickIcon)),
+            button(text(tr("Remove")).size(12))
                 .on_press_maybe((idle && form.icon.is_some()).then_some(Event::RemoveIcon)),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),
-        button(text("Create server").size(13))
-            .on_press_maybe((idle && form.name.trim().chars().count() >= 2).then_some(Event::Create)),
-        small(&format!(
-            "A name has 2 to {MAX_GUILD_NAME_CHARS} characters. The server uses Discord's default setup."
+        button(text(tr("Create server")).size(13)).on_press_maybe(
+            (idle && form.name.trim().chars().count() >= 2).then_some(Event::Create)
+        ),
+        small(&trf(
+            "A name has 2 to {} characters. The server uses Discord's default setup.",
+            &[&MAX_GUILD_NAME_CHARS],
         )),
     ]
     .spacing(6)
@@ -1687,35 +1707,35 @@ fn menu_view<'a>(
     if let Some(admin) = admin {
         buttons =
             buttons
-                .push(button(text("Server settings").size(13)).on_press_maybe(
+                .push(button(text(tr("Server settings")).size(13)).on_press_maybe(
                     (idle && admin.can_manage_guild).then_some(Event::Settings(guild)),
                 ))
                 .push(
-                    button(text("Create channel").size(13)).on_press_maybe(
+                    button(text(tr("Create channel")).size(13)).on_press_maybe(
                         (idle && admin.can_manage_channels)
                             .then_some(Event::CreateChannel(guild, None)),
                     ),
                 )
-                .push(button(text("Roles").size(13)).on_press_maybe(
+                .push(button(text(tr("Roles")).size(13)).on_press_maybe(
                     (idle && admin.can_manage_roles).then_some(Event::Roles(guild)),
                 ))
-                .push(button(text("AutoMod").size(13)).on_press_maybe(
+                .push(button(text(tr("AutoMod")).size(13)).on_press_maybe(
                     (idle && admin.can_manage_guild).then_some(Event::AutoMod(guild)),
                 ))
                 .push(
-                    button(text("Bans").size(13)).on_press_maybe(
+                    button(text(tr("Bans")).size(13)).on_press_maybe(
                         (idle && admin.mine.contains(Permissions::BAN_MEMBERS))
                             .then_some(Event::Bans(guild)),
                     ),
                 )
                 .push(
-                    button(text("Audit log").size(13)).on_press_maybe(
+                    button(text(tr("Audit log")).size(13)).on_press_maybe(
                         (idle && admin.mine.contains(Permissions::VIEW_AUDIT_LOG))
                             .then_some(Event::Audit(guild)),
                     ),
                 )
                 .push(
-                    button(text("Emoji and sounds").size(13)).on_press_maybe(
+                    button(text(tr("Emoji and sounds")).size(13)).on_press_maybe(
                         (idle
                             && (admin.mine.contains(Permissions::CREATE_GUILD_EXPRESSIONS)
                                 || admin.mine.contains(Permissions::MANAGE_GUILD_EXPRESSIONS)))
@@ -1724,13 +1744,13 @@ fn menu_view<'a>(
                 );
     }
     buttons = buttons.push(
-        button(text("Leave server").size(13))
+        button(text(tr("Leave server")).size(13))
             .on_press_maybe(idle.then_some(Event::Leave(guild)))
             .style(button::danger),
     );
     let mut panel = column![
         header(
-            admin.map_or_else(|| "Server".to_owned(), |a| a.name.clone()),
+            admin.map_or_else(|| tr("Server").to_owned(), |a| a.name.clone()),
             idle
         ),
         buttons,
@@ -1790,8 +1810,8 @@ pub fn view<'a>(
     if let Some(notice) = &state.notice {
         panel = panel.push(
             row![
-                text(notice.clone()).size(12).width(Length::Fill),
-                button(text("Dismiss").size(12))
+                text(tr(notice).to_owned()).size(12).width(Length::Fill),
+                button(text(tr("Dismiss")).size(12))
                     .on_press_maybe(state.panel.is_none().then_some(Event::Close)),
             ]
             .spacing(6),

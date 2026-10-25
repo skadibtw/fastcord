@@ -24,6 +24,7 @@ use fastcord_model::Snowflake;
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 
+use crate::i18n::{tr, trf};
 use crate::style;
 
 /// Discord's own report form, the honest fallback (unverified link).
@@ -148,7 +149,7 @@ fn describe(error: ReportRequestError, submitting: bool) -> Failure {
     let rest = match error {
         ReportRequestError::Invalid(_) => {
             return Failure {
-                text: "That report could not be built from Discord's menu. Nothing was sent."
+                text: tr("That report could not be built from Discord's menu. Nothing was sent.")
                     .to_owned(),
                 ambiguous: false,
                 web: true,
@@ -157,7 +158,7 @@ fn describe(error: ReportRequestError, submitting: bool) -> Failure {
         ReportRequestError::Rest(rest) => rest,
     };
     let refused = |text: &str, web: bool| Failure {
-        text: format!("{text} Nothing was submitted."),
+        text: format!("{} {}", tr(text), tr("Nothing was submitted.")),
         ambiguous: false,
         web,
     };
@@ -183,7 +184,7 @@ fn describe(error: ReportRequestError, submitting: bool) -> Failure {
             true,
         ),
         RestError::InvalidJson if !submitting => Failure {
-            text: "Discord's report menu has a shape this client does not understand."
+            text: tr("Discord's report menu has a shape this client does not understand.")
                 .to_owned(),
             ambiguous: false,
             web: true,
@@ -195,19 +196,19 @@ fn describe(error: ReportRequestError, submitting: bool) -> Failure {
             if !submitting =>
         {
             Failure {
-                text: "Could not reach Discord to load the report menu. Nothing was submitted."
+                text: tr("Could not reach Discord to load the report menu. Nothing was submitted.")
                     .to_owned(),
                 ambiguous: false,
                 web: false,
             }
         }
         _ if !submitting => Failure {
-            text: "The report menu could not be loaded. Nothing was submitted.".to_owned(),
+            text: tr("The report menu could not be loaded. Nothing was submitted.").to_owned(),
             ambiguous: false,
             web: true,
         },
         _ => Failure {
-            text: "Discord did not confirm. The report may have been submitted. It is not sent again automatically; check with Discord before reporting again."
+            text: tr("Discord did not confirm. The report may have been submitted. It is not sent again automatically; check with Discord before reporting again.")
                 .to_owned(),
             ambiguous: true,
             web: false,
@@ -352,7 +353,7 @@ impl State {
                         }
                         (true, Some(NodeKind::Unsupported)) => {
                             *notice = Some(
-                                "This category asks for details this client cannot collect. Use Discord's web form."
+                                tr("This category asks for details this client cannot collect. Use Discord's web form.")
                                     .to_owned(),
                             );
                         }
@@ -415,7 +416,7 @@ impl State {
                 if let Some(session) = &mut self.session {
                     session.followed = true;
                     session.notice = Some(
-                        "Requested. The result appears under Safety (Ignored) or Friends (Blocked)."
+                        tr("Requested. The result appears under Safety (Ignored) or Friends (Blocked).")
                             .to_owned(),
                     );
                 }
@@ -450,7 +451,7 @@ impl State {
 }
 
 fn small<'a>(label: &'static str, event: Option<Event>) -> Element<'a, Event> {
-    button(text(label).size(12))
+    button(text(tr(label)).size(12))
         .on_press_maybe(event)
         .style(style::tool_button(true, false))
         .into()
@@ -479,14 +480,14 @@ pub fn view<'a>(
     let idle = !state.sending();
     let mut panel = column![
         row![
-            text(format!("Report {}", subject.label)).size(13),
+            text(trf("Report {}", &[&tr(subject.label)])).size(13),
             space::horizontal(),
             crate::icons::close(idle.then_some(Event::Close)),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),
         text(
-            "Reports go to Discord's Trust & Safety. Nothing is sent until you press Submit on the review step."
+            tr("Reports go to Discord's Trust & Safety. Nothing is sent until you press Submit on the review step.")
         )
         .size(11)
         .style(text::secondary),
@@ -495,7 +496,7 @@ pub fn view<'a>(
     let mut footer = row![].spacing(6);
     match &session.stage {
         Stage::Loading => {
-            panel = panel.push(text("Loading Discord's report menu…").size(12));
+            panel = panel.push(text(tr("Loading Discord's report menu…")).size(12));
         }
         Stage::Choosing { menu, path } => {
             let at = path.last().copied().unwrap_or(menu.root());
@@ -516,7 +517,7 @@ pub fn view<'a>(
                     list = list.push(
                         button(
                             text(if web_only {
-                                format!("{label} (web form)")
+                                trf("{} (web form)", &[label])
                             } else {
                                 label.clone()
                             })
@@ -534,10 +535,10 @@ pub fn view<'a>(
             }
         }
         Stage::Confirm { menu, path } => {
-            panel = panel.push(text("Review before sending").size(13)).push(
-                text(format!(
+            panel = panel.push(text(tr("Review before sending")).size(13)).push(
+                text(trf(
                     "Reporting: {} by/of {}",
-                    subject.label, subject.title
+                    &[&tr(subject.label), &subject.title],
                 ))
                 .size(12),
             );
@@ -545,38 +546,39 @@ pub fn view<'a>(
                 panel = panel.push(text(format!("\"{}\"", subject.excerpt)).size(12));
             }
             panel = panel
-                .push(text(format!("Reason: {}", category_path(menu, path))).size(12))
+                .push(text(trf("Reason: {}", &[&category_path(menu, path)])).size(12))
                 .push(
-                    text(format!(
+                    text(trf(
                         "Discord receives the {}'s identity, your chosen reason and your account. Discord attaches the {} itself; it is not copied from this window. The report is sent once and never retried automatically.",
-                        subject.label, subject.label
+                        &[&tr(subject.label), &tr(subject.label)],
                     ))
                     .size(11)
                     .style(text::secondary),
                 );
             footer = footer
                 .push(
-                    button(text("Submit report").size(12))
+                    button(text(tr("Submit report")).size(12))
                         .on_press(Event::Submit)
                         .style(button::danger),
                 )
                 .push(small("Back", Some(Event::Back)));
         }
         Stage::Sending => {
-            panel = panel.push(text("Sending… waiting for Discord.").size(12));
+            panel = panel.push(text(tr("Sending… waiting for Discord.")).size(12));
         }
         Stage::Done(receipt) => {
             panel = panel.push(
                 text(match &receipt.id {
-                    Some(id) => format!("Discord received the report (reference {id})."),
-                    None => "Discord received the report.".to_owned(),
+                    Some(id) => trf("Discord received the report (reference {}).", &[id]),
+                    None => tr("Discord received the report.").to_owned(),
                 })
                 .size(12),
             );
             if let Some((user, name)) = state.follow_offer(navigation) {
                 panel = panel.push(
-                    text(format!(
-                        "You can also stop seeing {name}. These are separate requests."
+                    text(trf(
+                        "You can also stop seeing {}. These are separate requests.",
+                        &[&name],
                     ))
                     .size(11)
                     .style(text::secondary),
@@ -603,7 +605,7 @@ pub fn view<'a>(
         }
         Stage::Gone => {
             panel = panel.push(
-                text("That message is no longer there (deleted, or no longer loaded). Nothing was submitted. Open the report again from the message if it is still visible.")
+                text(tr("That message is no longer there (deleted, or no longer loaded). Nothing was submitted. Open the report again from the message if it is still visible."))
                     .size(12)
                     .style(text::danger),
             );

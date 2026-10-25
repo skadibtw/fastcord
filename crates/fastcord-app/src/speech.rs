@@ -13,6 +13,8 @@ use fastcord_model::{Message, Snowflake, Status};
 use fastcord_platform::speech::{self, MAX_RATE, MIN_RATE, Speaker, SpeechError, Utterance};
 use serde_json::{Value, json};
 
+use crate::i18n::tr;
+
 /// Message IDs remembered so a replayed event is never spoken twice.
 const SEEN: usize = 128;
 /// Longest saved voice identifier, in bytes.
@@ -49,9 +51,9 @@ impl TtsMode {
 impl fmt::Display for TtsMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Never => "Never",
-            Self::SelectedChannel => "For the selected channel only",
-            Self::AllChannels => "All channels",
+            Self::Never => tr("Never"),
+            Self::SelectedChannel => tr("For the selected channel only"),
+            Self::AllChannels => tr("All channels"),
         })
     }
 }

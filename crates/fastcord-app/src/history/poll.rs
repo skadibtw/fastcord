@@ -9,6 +9,7 @@ use fastcord_discord::{RestClient, RestError, is_own_message};
 use fastcord_model::{Emoji, Message, MessageUpdate, Snowflake};
 
 use super::{History, Inspection, NOT_LOADED, NOT_OPEN};
+use crate::i18n::tr;
 use crate::polls::{self, Kind};
 use crate::timeline::UsersState;
 
@@ -65,7 +66,7 @@ impl History {
         let held = match self.poll_target(channel, message) {
             Ok(held) => held,
             Err(notice) => {
-                self.notice = Some(notice);
+                self.notice = Some(tr(notice));
                 return;
             }
         };
@@ -73,11 +74,11 @@ impl History {
             return;
         };
         if poll.ended(now_ms()) {
-            self.notice = Some(polls::ENDED);
+            self.notice = Some(tr(polls::ENDED));
             return;
         }
         if !poll.answers.iter().any(|a| a.answer_id == answer) {
-            self.notice = Some(BAD_ANSWER);
+            self.notice = Some(tr(BAD_ANSWER));
             return;
         }
         let mut chosen = poll.my_votes();
@@ -91,7 +92,7 @@ impl History {
         }
         let kind = Kind::Vote(chosen.clone());
         if let Err(notice) = self.polls.begin(channel, message) {
-            self.notice = Some(notice);
+            self.notice = Some(tr(notice));
             return;
         }
         let rest = rest.clone();
@@ -116,20 +117,20 @@ impl History {
         let held = match self.poll_target(channel, message) {
             Ok(held) => held,
             Err(notice) => {
-                self.notice = Some(notice);
+                self.notice = Some(tr(notice));
                 return;
             }
         };
         if !self.user.is_some_and(|user| is_own_message(&held, user)) {
-            self.notice = Some(polls::NOT_YOURS);
+            self.notice = Some(tr(polls::NOT_YOURS));
             return;
         }
         if held.poll.as_deref().is_some_and(|p| p.ended(now_ms())) {
-            self.notice = Some(polls::ENDED);
+            self.notice = Some(tr(polls::ENDED));
             return;
         }
         if let Err(notice) = self.polls.begin(channel, message) {
-            self.notice = Some(notice);
+            self.notice = Some(tr(notice));
             return;
         }
         let rest = rest.clone();
@@ -181,7 +182,7 @@ impl History {
             }
             (Ok(PollAnswered::Voted), Kind::End) => {}
             (Err(error), _) => {
-                self.notice = Some(polls::failure(&kind, error));
+                self.notice = Some(tr(polls::failure(&kind, error)));
                 return error == RestError::AuthenticationRequired;
             }
         }
@@ -238,7 +239,7 @@ impl History {
         let held = match self.poll_target(channel, message) {
             Ok(held) => held,
             Err(notice) => {
-                self.notice = Some(notice);
+                self.notice = Some(tr(notice));
                 return;
             }
         };
@@ -248,7 +249,7 @@ impl History {
                 .find(|a| a.answer_id == answer)
                 .map(|a| a.poll_media.text.clone())
         }) else {
-            self.notice = Some(BAD_ANSWER);
+            self.notice = Some(tr(BAD_ANSWER));
             return;
         };
         self.inspections = self.inspections.wrapping_add(1);

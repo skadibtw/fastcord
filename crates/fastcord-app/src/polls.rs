@@ -42,39 +42,45 @@ struct Op {
 pub fn failure(kind: &Kind, error: RestError) -> &'static str {
     let ending = matches!(kind, Kind::End);
     match error {
-        RestError::PermissionDenied if ending => "Discord did not allow ending this poll.",
-        RestError::PermissionDenied => "Discord did not allow voting in this poll.",
-        RestError::ResourceGone => "That poll is no longer available.",
-        RestError::Http(status) if status.as_u16() == 400 => {
-            "Discord rejected the request. The poll may have ended."
+        RestError::PermissionDenied if ending => {
+            crate::i18n::tr("Discord did not allow ending this poll.")
         }
-        RestError::Http(_) if ending => "Discord rejected ending the poll.",
-        RestError::Http(_) => "Discord rejected the vote.",
+        RestError::PermissionDenied => {
+            crate::i18n::tr("Discord did not allow voting in this poll.")
+        }
+        RestError::ResourceGone => crate::i18n::tr("That poll is no longer available."),
+        RestError::Http(status) if status.as_u16() == 400 => {
+            crate::i18n::tr("Discord rejected the request. The poll may have ended.")
+        }
+        RestError::Http(_) if ending => crate::i18n::tr("Discord rejected ending the poll."),
+        RestError::Http(_) => crate::i18n::tr("Discord rejected the vote."),
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this. Try again shortly."
+            crate::i18n::tr("Discord is rate limiting this. Try again shortly.")
         }
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-            "Could not reach Discord; the poll was not changed."
+            crate::i18n::tr("Could not reach Discord; the poll was not changed.")
         }
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
-            "Discord did not confirm the change; it may have been applied. Check the poll before trying again."
+            crate::i18n::tr(
+                "Discord did not confirm the change; it may have been applied. Check the poll before trying again.",
+            )
         }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "The poll could not be changed.",
+        RestError::WriteNotVerified(_) => crate::i18n::tr(fastcord_discord::WRITE_NOT_VERIFIED),
+        _ => crate::i18n::tr("The poll could not be changed."),
     }
 }
 
 /// A fixed, secret-free sentence for a voter list that did not load.
 pub fn voters_failure(error: RestError) -> &'static str {
     match error {
-        RestError::PermissionDenied => "Discord did not allow listing the voters.",
-        RestError::ResourceGone => "That poll is no longer available.",
+        RestError::PermissionDenied => crate::i18n::tr("Discord did not allow listing the voters."),
+        RestError::ResourceGone => crate::i18n::tr("That poll is no longer available."),
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-            "Could not reach Discord to list the voters."
+            crate::i18n::tr("Could not reach Discord to list the voters.")
         }
-        _ => "The voters could not be loaded.",
+        _ => crate::i18n::tr("The voters could not be loaded."),
     }
 }
 

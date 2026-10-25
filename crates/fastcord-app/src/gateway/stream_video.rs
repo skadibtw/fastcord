@@ -18,6 +18,7 @@
 //! mid-frame, but no further frame is submitted while hidden. Failures and
 //! backend choices are reported through a lightweight status callback.
 
+use crate::i18n::{tr, trf};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -474,8 +475,9 @@ impl StreamDecoder {
             }
             Err(error) => {
                 self.shared.lock().closed = true;
-                (self.shared.status)(StreamStatus::Failed(format!(
-                    "Could not start video decoding worker: {error}"
+                (self.shared.status)(StreamStatus::Failed(trf(
+                    "Could not start video decoding worker: {}",
+                    &[&error],
                 )));
                 false
             }
@@ -577,7 +579,7 @@ impl Drop for CloseOnExit {
         Counters::add(&self.0.counters.frames_dropped, dropped);
         if std::thread::panicking() {
             (self.0.status)(StreamStatus::Failed(
-                "Video decoding worker stopped unexpectedly".into(),
+                tr("Video decoding worker stopped unexpectedly").into(),
             ));
         }
     }
@@ -670,9 +672,9 @@ impl Worker {
                         Counters::add(&shared.counters.frames_unsupported, 1);
                     }
                     if shared.current(generation) {
-                        (shared.status)(StreamStatus::Failed(format!(
-                            "Could not open {} decoder: {error}",
-                            frame.codec.wire_name()
+                        (shared.status)(StreamStatus::Failed(trf(
+                            "Could not open {} decoder: {}",
+                            &[&frame.codec.wire_name(), &tr(&error.to_string())],
                         )));
                     }
                     return Err(error);
@@ -709,9 +711,9 @@ impl Worker {
             .fetch_add(pictures, Ordering::Relaxed);
         if shared.current(generation) {
             match &result {
-                Err(error) => (shared.status)(StreamStatus::Failed(format!(
-                    "{} decode failed: {error}",
-                    frame.codec.wire_name()
+                Err(error) => (shared.status)(StreamStatus::Failed(trf(
+                    "{} decode failed: {}",
+                    &[&frame.codec.wire_name(), &tr(&error.to_string())],
                 ))),
                 Ok(()) => {
                     let backend = decoder.backend();

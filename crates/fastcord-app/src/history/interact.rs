@@ -13,6 +13,7 @@ use fastcord_discord::{
 use fastcord_model::{BUTTON_LINK, Component, Snowflake};
 
 use super::{History, NOT_LOADED, NOT_OPEN};
+use crate::i18n::tr;
 use crate::interactions::{self as rules, Action, Entry, Target};
 
 /// What an interaction request or its timer reports.
@@ -55,7 +56,7 @@ impl History {
         request: InteractionRequest,
     ) {
         if let Err(notice) = self.interactions.begin(entry) {
-            self.notice = Some(notice);
+            self.notice = Some(tr(notice));
             return;
         }
         let rest = rest.clone();
@@ -91,7 +92,7 @@ impl History {
                 let session = match self.interaction_target(channel) {
                     Ok(session) => session.to_owned(),
                     Err(notice) => {
-                        self.notice = Some(notice);
+                        self.notice = Some(tr(notice));
                         return;
                     }
                 };
@@ -112,7 +113,7 @@ impl History {
                         };
                         self.begin_interaction(rest, nonce, entry, request);
                     }
-                    Err(error) => self.notice = Some(rules::argument(error)),
+                    Err(error) => self.notice = Some(tr(rules::argument(error))),
                 }
             }
             Action::Modal { values } => self.submit_modal(rest, values),
@@ -130,33 +131,33 @@ impl History {
         let session = match self.interaction_target(channel) {
             Ok(session) => session.to_owned(),
             Err(notice) => {
-                self.notice = Some(notice);
+                self.notice = Some(tr(notice));
                 return;
             }
         };
         let Some(held) = self.store.get(channel, message) else {
-            self.notice = Some(NOT_LOADED);
+            self.notice = Some(tr(NOT_LOADED));
             return;
         };
         let Some(found) = Component::find(&held.components, &custom_id) else {
-            self.notice = Some(rules::STALE);
+            self.notice = Some(tr(rules::STALE));
             return;
         };
         let component_type = match found {
             Component::Button(button) => {
                 if button.premium {
-                    self.notice = Some(rules::PREMIUM);
+                    self.notice = Some(tr(rules::PREMIUM));
                     return;
                 }
                 if button.disabled || button.style == BUTTON_LINK {
-                    self.notice = Some(rules::DISABLED);
+                    self.notice = Some(tr(rules::DISABLED));
                     return;
                 }
                 2
             }
             Component::Select(select) => {
                 if select.disabled {
-                    self.notice = Some(rules::DISABLED);
+                    self.notice = Some(tr(rules::DISABLED));
                     return;
                 }
                 // Only a string select lists its choices; the others are shown
@@ -170,13 +171,13 @@ impl History {
                         .iter()
                         .all(|v| select.options.iter().any(|o| o.value == *v));
                 if !offered {
-                    self.notice = Some(rules::BAD_CHOICE);
+                    self.notice = Some(tr(rules::BAD_CHOICE));
                     return;
                 }
                 select.kind
             }
             _ => {
-                self.notice = Some(rules::STALE);
+                self.notice = Some(tr(rules::STALE));
                 return;
             }
         };
@@ -208,27 +209,27 @@ impl History {
 
     fn submit_modal(&mut self, rest: &RestClient, values: Vec<String>) {
         let Some(modal) = self.modal.clone() else {
-            self.notice = Some(rules::NO_MODAL);
+            self.notice = Some(tr(rules::NO_MODAL));
             return;
         };
         let Some(channel) = modal.channel_id.or(self.channel) else {
-            self.notice = Some(rules::NO_MODAL);
+            self.notice = Some(tr(rules::NO_MODAL));
             return;
         };
         let session = match self.interaction_target(channel) {
             Ok(session) => session.to_owned(),
             Err(notice) => {
-                self.notice = Some(notice);
+                self.notice = Some(tr(notice));
                 return;
             }
         };
         if values.len() != modal.inputs.len() {
-            self.notice = Some(rules::NO_MODAL);
+            self.notice = Some(tr(rules::NO_MODAL));
             return;
         }
         for (input, value) in modal.inputs.iter().zip(&values) {
             if let Some(problem) = input.check(value) {
-                self.notice = Some(problem);
+                self.notice = Some(tr(problem));
                 return;
             }
         }
@@ -252,15 +253,15 @@ impl History {
     /// sent to Discord, which has no such message for anyone else.
     fn dismiss_ephemeral(&mut self, channel: Snowflake, message: Snowflake) {
         if self.channel != Some(channel) {
-            self.notice = Some(NOT_OPEN);
+            self.notice = Some(tr(NOT_OPEN));
             return;
         }
         let Some(held) = self.store.get(channel, message) else {
-            self.notice = Some(NOT_LOADED);
+            self.notice = Some(tr(NOT_LOADED));
             return;
         };
         if !held.is_ephemeral() {
-            self.notice = Some(rules::NOT_EPHEMERAL);
+            self.notice = Some(tr(rules::NOT_EPHEMERAL));
             return;
         }
         self.apply_store(&Dispatch::MessageDelete(MessageDelete {
@@ -286,7 +287,7 @@ impl History {
             }
             Dispatch::InteractionFailure(InteractionOutcome { nonce, .. }) => {
                 if self.interactions.settle(nonce).is_some() {
-                    self.notice = Some(rules::FAILED);
+                    self.notice = Some(tr(rules::FAILED));
                     self.dirty = true;
                 }
             }
@@ -322,12 +323,12 @@ impl History {
             }
             InteractionEvent::Sent(nonce, Err(error)) => {
                 self.interactions.settle_nonce(nonce);
-                self.notice = Some(rules::failure(error));
+                self.notice = Some(tr(rules::failure(error)));
                 error == RestError::AuthenticationRequired
             }
             InteractionEvent::Expired(nonce) => {
                 if self.interactions.settle_nonce(nonce).is_some() {
-                    self.notice = Some(rules::NO_RESPONSE);
+                    self.notice = Some(tr(rules::NO_RESPONSE));
                 }
                 false
             }

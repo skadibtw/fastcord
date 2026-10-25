@@ -1,4 +1,5 @@
 //! Bounded, worker-owned picker pages. Search never clones a full guild catalog.
+use crate::i18n::tr;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
@@ -49,7 +50,7 @@ pub enum Category {
 
 impl fmt::Display for Category {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+        f.write_str(tr(match self {
             Self::All => "All emoji",
             Self::Recent => "Recent",
             Self::Custom => "Server emoji",
@@ -58,7 +59,7 @@ impl fmt::Display for Category {
                 .copied()
                 .unwrap_or("All emoji"),
             Self::Variants(_) => "Unicode variants",
-        })
+        }))
     }
 }
 
@@ -534,34 +535,34 @@ pub fn view<'a>(
                 .align_y(iced::Alignment::Center);
             if let Some(base) = cell.variants {
                 line = line.push(
-                    button(text("Skin tones").size(11))
+                    button(text(tr("Skin tones")).size(11))
                         .on_press(Message::EmojiPicker(Event::Variants(base)))
                         .padding([2, 6]),
                 );
             }
             line.into()
         }
-        None => text("Hover an emoji for its name.")
+        None => text(tr("Hover an emoji for its name."))
             .size(13)
             .height(28)
             .into(),
     };
     let body = column![
-        row![text(if picker.reaction.is_some() { "React with emoji" } else { "Emoji" }).size(20), crate::icons::close(Some(Message::EmojiPicker(Event::Close)))].spacing(12),
-        text_input("Search names, aliases or emoji", &picker.request.query)
+        row![text(if picker.reaction.is_some() { tr("React with emoji") } else { tr("Emoji") }).size(20), crate::icons::close(Some(Message::EmojiPicker(Event::Close)))].spacing(12),
+        text_input(tr("Search names, aliases or emoji"), &picker.request.query)
             .id("emoji-search").on_input(|query| Message::EmojiPicker(Event::Search(query))),
         pick_list(categories, Some(picker.request.category), |category| Message::EmojiPicker(Event::Category(category))),
         container(virtual_list::view_rows("emoji-list", snapshot.offset / COLUMNS, snapshot.total.div_ceil(COLUMNS), cells,
             |window| Message::EmojiPicker(Event::Window(window)), CELL)).height(VIEW_HEIGHT),
         footer,
-        text(if snapshot.total == 0 && current { "No available emoji match this search." } else { "" }).size(12),
+        text(if snapshot.total == 0 && current { tr("No available emoji match this search.") } else { "" }).size(12),
         text(if picker.reaction.is_some() {
-            "Animated and external emoji may require Nitro. Account entitlements are not assumed; a reaction Discord rejects is reported above the message box."
+            tr("Animated and external emoji may require Nitro. Account entitlements are not assumed; a reaction Discord rejects is reported above the message box.")
         } else {
-            "Animated and external emoji may require Nitro. Account entitlements are not assumed; Discord rejections appear beside unsent messages."
+            tr("Animated and external emoji may require Nitro. Account entitlements are not assumed; Discord rejections appear beside unsent messages.")
         }).size(11),
         iced::widget::tooltip(
-            text("Twemoji 17.0.3 · Unicode 16.0 · Attribution (hover)").size(10),
+            text(tr("Twemoji 17.0.3 · Unicode 16.0 · Attribution (hover)")).size(10),
             container(text(include_str!("../../../assets/emoji/NOTICE.txt")).size(10)).width(420).padding(8),
             iced::widget::tooltip::Position::Top,
         ),

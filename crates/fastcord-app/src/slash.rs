@@ -11,6 +11,7 @@
 //! sends one interaction (`crate::interactions`). Autocomplete, attachment
 //! options and subcommand groups are not offered.
 
+use crate::i18n::{tr, trf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -383,7 +384,7 @@ pub fn view<'a>(
     }
     if let Some(name) = interaction.waiting.as_deref() {
         return Some(
-            text(format!("Waiting for /{name}\u{2026}"))
+            text(trf("Waiting for /{}…", &[&name]))
                 .size(12)
                 .style(text::secondary)
                 .into(),
@@ -391,16 +392,19 @@ pub fn view<'a>(
     }
     let query = query?;
     let mut list =
-        column![text("Commands (pick one, or send the text as it is)").size(12)].spacing(4);
+        column![text(tr("Commands (pick one, or send the text as it is)")).size(12)].spacing(4);
     if let Some((scope, reason)) = state.failed
         && scope == env_scope
     {
-        return Some(list.push(text(reason).size(12).style(text::danger)).into());
+        return Some(
+            list.push(text(tr(reason)).size(12).style(text::danger))
+                .into(),
+        );
     }
     let Some(index) = state.fresh(env_scope, now) else {
         return Some(
             list.push(
-                text("Loading commands\u{2026}")
+                text(tr("Loading commands…"))
                     .size(12)
                     .style(text::secondary),
             )
@@ -410,8 +414,12 @@ pub fn view<'a>(
     let found = index.matching(query, MAX_LISTED);
     if found.is_empty() {
         return Some(
-            list.push(text("No matching command.").size(12).style(text::secondary))
-                .into(),
+            list.push(
+                text(tr("No matching command."))
+                    .size(12)
+                    .style(text::secondary),
+            )
+            .into(),
         );
     }
     for command in found {
@@ -455,7 +463,7 @@ fn form_view<'a>(form: &'a Form, waiting: Option<&str>) -> Element<'a, Event> {
                 .size(12)
                 .style(text::secondary)
                 .width(Length::Fill),
-            small("Close", Event::CloseForm),
+            small(tr("Close"), Event::CloseForm),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)
@@ -491,7 +499,10 @@ fn form_view<'a>(form: &'a Form, waiting: Option<&str>) -> Element<'a, Event> {
             );
         }
         let choices: Vec<(String, String)> = if option.kind == OPTION_BOOLEAN {
-            vec![("Yes".into(), "true".into()), ("No".into(), "false".into())]
+            vec![
+                (tr("Yes").into(), "true".into()),
+                (tr("No").into(), "false".into()),
+            ]
         } else {
             option
                 .choices
@@ -501,7 +512,7 @@ fn form_view<'a>(form: &'a Form, waiting: Option<&str>) -> Element<'a, Event> {
         };
         if choices.is_empty() {
             let hint = match option.kind {
-                6..=9 => "ID or mention",
+                6..=9 => tr("ID or mention"),
                 _ => "",
             };
             line = line.push(
@@ -528,12 +539,12 @@ fn form_view<'a>(form: &'a Form, waiting: Option<&str>) -> Element<'a, Event> {
         panel = panel.push(line);
     }
     panel = panel.push(
-        button(text("Run").size(13))
+        button(text(tr("Run")).size(13))
             .on_press_maybe(waiting.is_none().then_some(Event::Run))
             .padding([4, 14]),
     );
     if let Some(error) = form.error {
-        panel = panel.push(text(error).size(12).style(text::danger));
+        panel = panel.push(text(tr(error)).size(12).style(text::danger));
     }
     container(scrollable(panel).height(Length::Shrink))
         .padding(8)
@@ -573,10 +584,17 @@ fn modal_view<'a>(
     }
     panel = panel.push(
         row![
-            button(text(if sending { "Sending\u{2026}" } else { "Submit" }).size(13))
-                .on_press_maybe((!sending).then_some(Event::ModalSubmit))
-                .padding([4, 14]),
-            button(text("Cancel").size(13))
+            button(
+                text(if sending {
+                    tr("Sending…")
+                } else {
+                    tr("Submit")
+                })
+                .size(13)
+            )
+            .on_press_maybe((!sending).then_some(Event::ModalSubmit))
+            .padding([4, 14]),
+            button(text(tr("Cancel")).size(13))
                 .on_press(Event::ModalCancel)
                 .style(button::secondary)
                 .padding([4, 14]),

@@ -27,7 +27,9 @@ static SCRIPT: OnceLock<PathBuf> = OnceLock::new();
 
 /// Panels a script can open or close.
 pub const PANELS: &[&str] = &[
-    "search", "pins", "inbox", "friends", "emoji", "audio", "chat", "account",
+    "search", "pins", "inbox", "friends", "emoji", "audio", "chat", "account", "login-qr",
+    "login-password", "login-token", "login-accounts", "server-menu", "conversation-menu",
+    "account-menu", "mic-menu", "new-dm", "requests", "settings", "close-menus",
 ];
 
 /// One step of a `--script`.
@@ -147,6 +149,11 @@ pub fn save(path: &std::path::Path, shot: &iced::window::Screenshot) {
 
 pub fn active() -> bool {
     PORT.get().is_some()
+}
+
+/// `--login-screen`: start on the sign-in screen instead of signing in.
+pub fn login_screen() -> bool {
+    std::env::args().any(|arg| arg == "--login-screen")
 }
 
 /// Reads `--fake-discord <port>` (a bare port, nothing else) and points the

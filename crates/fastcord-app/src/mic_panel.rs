@@ -20,6 +20,7 @@ use iced::widget::{button, checkbox, column, progress_bar, row, slider, text};
 use iced::{Element, Task};
 use parking_lot::Mutex;
 
+use crate::i18n::{tr, trf, trn};
 use crate::voice_record::Detached;
 
 /// Quietest level the meter draws.
@@ -244,56 +245,61 @@ impl State {
 
 fn level_text(level: Option<Level>, peak_hold: f32) -> String {
     match level {
-        None => "No level yet.".to_owned(),
-        Some(level) => format!(
-            "Level {:.0} dBFS, peak {:.0} dBFS{}",
-            level.rms_db.max(FLOOR_DB - 40.0),
-            peak_hold,
-            if level.from_call {
-                " (your microphone in this call)"
-            } else {
-                ""
-            }
+        None => tr("No level yet.").to_owned(),
+        Some(level) => trf(
+            "Level {} dBFS, peak {} dBFS{}",
+            &[
+                &format!("{:.0}", level.rms_db.max(FLOOR_DB - 40.0)),
+                &format!("{peak_hold:.0}"),
+                &if level.from_call {
+                    tr(" (your microphone in this call)")
+                } else {
+                    ""
+                },
+            ],
         ),
     }
 }
 
 fn echo_text(echo: Option<EchoDiagnostics>, in_call: bool) -> String {
     match echo {
-        Some(echo) if echo.delay_ms > 0 => format!(
-            "Echo cancellation: found an echo path of about {} ms, microphone reduced by {:.0} dB while others speak ({}).",
-            echo.delay_ms,
-            f32::from(echo.reduction_tenths_db) / 10.0,
-            if echo.converged {
-                "adapted"
-            } else {
-                "still adapting"
-            }
+        Some(echo) if echo.delay_ms > 0 => trf(
+            "Echo cancellation: found an echo path of about {} ms, microphone reduced by {} dB while others speak ({}).",
+            &[
+                &echo.delay_ms,
+                &format!("{:.0}", f32::from(echo.reduction_tenths_db) / 10.0),
+                &if echo.converged {
+                    tr("adapted")
+                } else {
+                    tr("still adapting")
+                },
+            ],
         ),
-        Some(_) => "Echo cancellation: running, no echo path found yet (it needs a few seconds of others speaking through your speakers).".to_owned(),
-        None if in_call => "Echo cancellation: off or waiting for the first audio.".to_owned(),
-        None => "Echo cancellation statistics appear during a call.".to_owned(),
+        Some(_) => tr("Echo cancellation: running, no echo path found yet (it needs a few seconds of others speaking through your speakers).").to_owned(),
+        None if in_call => tr("Echo cancellation: off or waiting for the first audio.").to_owned(),
+        None => tr("Echo cancellation statistics appear during a call.").to_owned(),
     }
 }
 
 /// What the check is doing, in a sentence.
 fn status_text(state: &State, in_call: bool) -> String {
     if let Some(notice) = &state.notice {
-        return notice.clone();
+        return tr(notice).to_owned();
     }
     if state.starting {
-        return "Opening the microphone…".to_owned();
+        return tr("Opening the microphone…").to_owned();
     }
     match (state.mode, state.phase) {
         (Some(MicTestMode::RecordAndPlay), Some(MicTestPhase::Playing)) => {
-            "Playing back what you recorded…".to_owned()
+            tr("Playing back what you recorded…").to_owned()
         }
-        (Some(MicTestMode::RecordAndPlay), _) => "Recording: speak now.".to_owned(),
+        (Some(MicTestMode::RecordAndPlay), _) => tr("Recording: speak now.").to_owned(),
         (Some(MicTestMode::Level), _) => {
-            "Listening. The microphone stays open until you stop or close this window.".to_owned()
+            tr("Listening. The microphone stays open until you stop or close this window.")
+                .to_owned()
         }
         (None, _) if in_call => {
-            "Leave the call to run the checks; the meter shows your call microphone.".to_owned()
+            tr("Leave the call to run the checks; the meter shows your call microphone.").to_owned()
         }
         (None, _) => String::new(),
     }
@@ -311,8 +317,8 @@ pub fn view<'a>(
         .map_or(FLOOR_DB, |level| level.rms_db)
         .max(FLOOR_DB);
     let mut parts: Vec<Element<'a, crate::Message>> = vec![
-        text("Microphone").size(20).into(),
-        text(format!("Input gain: {:+} dB", gain.manual_db)).into(),
+        text(tr("Microphone")).size(20).into(),
+        text(trf("Input gain: {} dB", &[&format!("{:+}", gain.manual_db)])).into(),
         slider(
             i16::from(MIN_GAIN_DB)..=i16::from(MAX_GAIN_DB),
             i16::from(gain.manual_db),
@@ -321,32 +327,33 @@ pub fn view<'a>(
         .on_release(wrap(Event::GainReleased))
         .into(),
         checkbox(gain.automatic)
-            .label("Automatic gain")
+            .label(tr("Automatic gain"))
             .on_toggle(move |on| wrap(Event::Automatic(on)))
             .into(),
-        text("Gain is applied after noise suppression and before the voice-activity threshold, with a limiter so loud speech does not clip. Automatic gain steers speech toward a steady level and leaves silence alone.").into(),
+        text(tr("Gain is applied after noise suppression and before the voice-activity threshold, with a limiter so loud speech does not clip. Automatic gain steers speech toward a steady level and leaves silence alone.")).into(),
         progress_bar(FLOOR_DB..=0.0, meter_value).into(),
         text(level_text(state.level, state.peak_hold)).into(),
     ];
     if let Some(level) = state.level {
         if level.clipped > 0 {
             parts.push(
-                text(format!(
+                text(trn(
+                    level.clipped,
+                    "{} frame reached full scale or the limiter ceiling. Lower the gain or move the microphone back.",
                     "{} frames reached full scale or the limiter ceiling. Lower the gain or move the microphone back.",
-                    level.clipped
                 ))
                 .into(),
             );
         }
         if level.silent {
-            parts.push(text(MicTestFailure::Silent.to_string()).into());
+            parts.push(text(tr(&MicTestFailure::Silent.to_string()).to_owned()).into());
         }
         if let Some(n) = sensitivity {
             let open = level.rms_db >= -f32::from(n);
             parts.push(
-                text(format!(
-                    "Voice-activity threshold -{n} dB: your voice is currently {} it.",
-                    if open { "above" } else { "below" }
+                text(trf(
+                    "Voice-activity threshold -{} dB: your voice is currently {} it.",
+                    &[&n, &tr(if open { "above" } else { "below" })],
                 ))
                 .into(),
             );
@@ -355,9 +362,9 @@ pub fn view<'a>(
     parts.push(text(echo_text(state.echo, in_call)).into());
     if let Some(bitrate) = state.send_bitrate.filter(|_| in_call) {
         parts.push(
-            text(format!(
+            text(trf(
                 "Sending your voice at {} kbps (the channel's bitrate).",
-                bitrate / 1000
+                &[&(bitrate / 1000)],
             ))
             .into(),
         );
@@ -365,19 +372,19 @@ pub fn view<'a>(
     let can_start = !in_call && !state.running();
     parts.push(
         row![
-            button("Check level")
+            button(tr("Check level"))
                 .on_press_maybe(can_start.then_some(wrap(Event::Start(MicTestMode::Level)))),
-            button("Record and play back").on_press_maybe(
+            button(tr("Record and play back")).on_press_maybe(
                 can_start.then_some(wrap(Event::Start(MicTestMode::RecordAndPlay)))
             ),
-            button("Stop").on_press_maybe(state.running().then_some(wrap(Event::Stop))),
+            button(tr("Stop")).on_press_maybe(state.running().then_some(wrap(Event::Stop))),
         ]
         .spacing(12)
         .into(),
     );
     parts.push(text(status_text(state, in_call)).into());
     parts.push(
-        text("These checks never reach a call: a recording stays in memory (5 seconds, about 20 KB) and is played only to your selected output.")
+        text(tr("These checks never reach a call: a recording stays in memory (5 seconds, about 20 KB) and is played only to your selected output."))
             .into(),
     );
     column(parts).spacing(12).into()

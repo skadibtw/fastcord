@@ -39,6 +39,7 @@ pub use self::interact::InteractionView;
 use self::moderation::{ModDone, Selection};
 use self::poll::PollDone;
 use crate::changes::{self, ChangeKind, ChangeRequest, Changes};
+use crate::i18n::tr;
 use crate::outbox::{Finished, MAX_REPLY_AUTHOR_CHARS, OpId, Outbox, Reply, SendFailure, Slots};
 use crate::polls::Polls;
 use crate::reactions::{self, Action, Reactions};
@@ -555,7 +556,7 @@ impl History {
             self.dirty = true;
         }
         if change.rejected > 0 {
-            self.error = Some(OVERSIZE);
+            self.error = Some(tr(OVERSIZE));
             self.dirty = true;
         }
     }
@@ -642,12 +643,12 @@ impl History {
         message: Snowflake,
     ) -> Result<Arc<Message>, &'static str> {
         if self.channel != Some(channel) {
-            return Err(NOT_OPEN);
+            return Err(tr(NOT_OPEN));
         }
-        let held = self.store.get(channel, message).ok_or(NOT_LOADED)?;
+        let held = self.store.get(channel, message).ok_or(tr(NOT_LOADED))?;
         match self.user {
             Some(user) if is_own_message(&held, user) => Ok(held),
-            _ => Err(NOT_OWN),
+            _ => Err(tr(NOT_OWN)),
         }
     }
 
@@ -681,7 +682,7 @@ impl History {
         let held = match self.changeable(channel, message) {
             Ok(held) => held,
             Err(notice) => {
-                self.notice = Some(notice);
+                self.notice = Some(tr(notice));
                 return;
             }
         };
@@ -698,11 +699,11 @@ impl History {
         let edit = match EditedMessage::new(content, allow_empty) {
             Ok(edit) => edit,
             Err(ComposeError::Empty) => {
-                self.notice = Some(EMPTY_EDIT);
+                self.notice = Some(tr(EMPTY_EDIT));
                 return;
             }
             Err(ComposeError::TooLong | ComposeError::VoiceMessageAlone) => {
-                self.notice = Some(LONG_EDIT);
+                self.notice = Some(tr(LONG_EDIT));
                 return;
             }
         };
@@ -726,7 +727,7 @@ impl History {
                 }
                 self.start_change(rest, channel, message, ChangeRequest::Edit(edit));
             }
-            Err(notice) => self.notice = Some(notice),
+            Err(notice) => self.notice = Some(tr(notice)),
         }
     }
 
@@ -736,7 +737,7 @@ impl History {
         self.dirty = true;
         self.notice = None;
         if let Err(notice) = self.deletable(channel, message) {
-            self.notice = Some(notice);
+            self.notice = Some(tr(notice));
             return;
         }
         match self
@@ -744,7 +745,7 @@ impl History {
             .begin(channel, message, ChangeKind::Delete, false)
         {
             Ok(()) => self.start_change(rest, channel, message, ChangeRequest::Delete),
-            Err(notice) => self.notice = Some(notice),
+            Err(notice) => self.notice = Some(tr(notice)),
         }
     }
 
@@ -763,7 +764,7 @@ impl History {
             self.changeable(channel, message)
         };
         if let Err(notice) = allowed {
-            self.notice = Some(notice);
+            self.notice = Some(tr(notice));
             return;
         }
         if let Some(request) = self.changes.retry(channel, message) {
@@ -818,11 +819,11 @@ impl History {
         self.dirty = true;
         self.notice = None;
         if self.channel != Some(channel) {
-            self.notice = Some(NOT_OPEN);
+            self.notice = Some(tr(NOT_OPEN));
             return;
         }
         let Some(held) = self.store.get(channel, message) else {
-            self.notice = Some(NOT_LOADED);
+            self.notice = Some(tr(NOT_LOADED));
             return;
         };
         let existing = held
@@ -838,15 +839,15 @@ impl History {
             Action::Add
         };
         if action == Action::Add && existing.is_none() && self.reactable != Some(channel) {
-            self.notice = Some(NO_REACTIONS);
+            self.notice = Some(tr(NO_REACTIONS));
             return;
         }
         let Ok(target) = ReactionEmoji::new(&emoji) else {
-            self.notice = Some(BAD_EMOJI);
+            self.notice = Some(tr(BAD_EMOJI));
             return;
         };
         if let Err(notice) = self.reactions.begin(channel, message, &emoji, action) {
-            self.notice = Some(notice);
+            self.notice = Some(tr(notice));
             return;
         }
         let rest = rest.clone();
@@ -886,7 +887,7 @@ impl History {
                 self.apply_own_reaction(channel, message, emoji, false);
             }
             Err(error) => {
-                self.notice = Some(reactions::failure(action, error));
+                self.notice = Some(tr(reactions::failure(action, error)));
                 return error == RestError::AuthenticationRequired;
             }
         }
@@ -930,15 +931,15 @@ impl History {
         self.dirty = true;
         self.notice = None;
         if self.channel != Some(channel) {
-            self.notice = Some(NOT_OPEN);
+            self.notice = Some(tr(NOT_OPEN));
             return;
         }
         if self.store.get(channel, message).is_none() {
-            self.notice = Some(NOT_LOADED);
+            self.notice = Some(tr(NOT_LOADED));
             return;
         }
         let Ok(target) = ReactionEmoji::new(&emoji) else {
-            self.notice = Some(BAD_EMOJI);
+            self.notice = Some(tr(BAD_EMOJI));
             return;
         };
         self.inspections = self.inspections.wrapping_add(1);
@@ -1088,7 +1089,7 @@ impl History {
                     guild_id: None,
                 }));
                 if edit {
-                    self.notice = Some(DELETED_WHILE_EDITING);
+                    self.notice = Some(tr(DELETED_WHILE_EDITING));
                 }
                 false
             }
@@ -1103,7 +1104,7 @@ impl History {
                 {
                     // No row can show this failure; say so once and let it go.
                     self.changes.dismiss(channel, message);
-                    self.notice = Some(UNSHOWN_FAILURE);
+                    self.notice = Some(tr(UNSHOWN_FAILURE));
                 }
                 error == RestError::AuthenticationRequired
             }
@@ -1199,7 +1200,7 @@ impl History {
     fn apply_created(&mut self, message: Box<Message>) {
         let change = self.store.apply_dispatch(&Dispatch::MessageCreate(message));
         if change.rejected > 0 {
-            self.error = Some(OVERSIZE);
+            self.error = Some(tr(OVERSIZE));
         }
     }
 
@@ -1636,7 +1637,7 @@ impl History {
                         if self.list.jump_to(first) {
                             self.highlight = Some(first);
                         } else {
-                            self.notice = Some(UNAVAILABLE_JUMP);
+                            self.notice = Some(tr(UNAVAILABLE_JUMP));
                         }
                         self.dirty = true;
                     }
@@ -1659,14 +1660,14 @@ impl History {
                     if self.list.jump_to(message) {
                         self.highlight = Some(message);
                     } else {
-                        self.notice = Some(UNAVAILABLE_JUMP);
+                        self.notice = Some(tr(UNAVAILABLE_JUMP));
                     }
                     self.dirty = true;
                 } else if matches!(self.reference_state(message), Some(ReferenceState::Deleted)) {
-                    self.notice = Some(DELETED_JUMP);
+                    self.notice = Some(tr(DELETED_JUMP));
                     self.dirty = true;
                 } else if self.store.covers(channel, message) {
-                    self.notice = Some(UNAVAILABLE_JUMP);
+                    self.notice = Some(tr(UNAVAILABLE_JUMP));
                     self.dirty = true;
                 } else {
                     self.start(rest, HistoryCursor::Around(message));
@@ -1843,7 +1844,7 @@ impl History {
                 {
                     self.store.cancel_page(token);
                     self.remember_reference(target, ReferenceState::Deleted);
-                    self.notice = Some(DELETED_JUMP);
+                    self.notice = Some(tr(DELETED_JUMP));
                     return false;
                 }
                 let jump = jump_target
@@ -1858,7 +1859,7 @@ impl History {
                 match self.store.merge_page(token, page) {
                     PageMerge::Applied { rejected, .. } => {
                         if rejected > 0 {
-                            self.error = Some(OVERSIZE);
+                            self.error = Some(tr(OVERSIZE));
                         }
                         self.synchronize();
                         if cursor == HistoryCursor::Latest {
@@ -1872,7 +1873,7 @@ impl History {
                                 if self.list.jump_to(target) {
                                     self.highlight = Some(target);
                                 } else {
-                                    self.notice = Some(UNAVAILABLE_JUMP);
+                                    self.notice = Some(tr(UNAVAILABLE_JUMP));
                                 }
                             } else if matches!(
                                 self.reference_state(target),
@@ -1880,17 +1881,17 @@ impl History {
                             ) || !appeared
                             {
                                 self.remember_reference(target, ReferenceState::Deleted);
-                                self.notice = Some(DELETED_JUMP);
+                                self.notice = Some(tr(DELETED_JUMP));
                             } else {
                                 self.remember_reference(target, ReferenceState::Unavailable);
-                                self.notice = Some(UNAVAILABLE_JUMP);
+                                self.notice = Some(tr(UNAVAILABLE_JUMP));
                             }
                         }
                         match first_unread {
                             Some(Some(first)) if self.list.jump_to(first) => {
                                 self.highlight = Some(first);
                             }
-                            Some(_) => self.notice = Some(NO_UNREAD),
+                            Some(_) => self.notice = Some(tr(NO_UNREAD)),
                             None => {}
                         }
                         self.check_paging = true;
@@ -1899,9 +1900,9 @@ impl History {
                     PageMerge::Stale => {
                         // Nothing changed; the same request is still available.
                         self.failed = Some(cursor);
-                        self.error = Some(
+                        self.error = Some(tr(
                             "The channel changed while loading. Retry to load a current page.",
-                        );
+                        ));
                         false
                     }
                 }
@@ -1911,14 +1912,16 @@ impl History {
                 self.failed = Some(cursor);
                 self.error = Some(match error {
                     RestError::PermissionDenied => {
-                        "Discord denied access to this history. Check your permissions here."
+                        tr("Discord denied access to this history. Check your permissions here.")
                     }
-                    RestError::ResourceGone => "This channel is no longer available.",
-                    RestError::AuthenticationRequired => "Discord no longer accepts this login.",
+                    RestError::ResourceGone => tr("This channel is no longer available."),
+                    RestError::AuthenticationRequired => {
+                        tr("Discord no longer accepts this login.")
+                    }
                     RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
-                        "Discord sent a history page fastcord could not accept."
+                        tr("Discord sent a history page fastcord could not accept.")
                     }
-                    _ => "Could not load messages. Retry when the connection is back.",
+                    _ => tr("Could not load messages. Retry when the connection is back."),
                 });
                 error == RestError::AuthenticationRequired
             }

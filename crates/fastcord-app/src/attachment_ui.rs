@@ -13,6 +13,7 @@ use crate::attachments::{
     AttachmentCache, AttachmentError, AttachmentKey, DecodedImage, UrlRefresh,
 };
 use crate::gateway::{AttachmentAction, GatewayPanel};
+use crate::i18n::tr;
 use crate::login::Session;
 use crate::timeline::{self, AttachmentPreview, AttachmentView};
 
@@ -145,29 +146,29 @@ fn find_attachment(
 
 fn failure_reason(error: &AttachmentError) -> &'static str {
     match error {
-        AttachmentError::TooLarge => "This image is too large to preview here.",
+        AttachmentError::TooLarge => tr("This image is too large to preview here."),
         AttachmentError::UnsupportedImage | AttachmentError::InvalidImage => {
-            "This image could not be decoded."
+            tr("This image could not be decoded.")
         }
         AttachmentError::Network
         | AttachmentError::Http(_)
         | AttachmentError::RefreshFailed
-        | AttachmentError::InvalidUrl => "The image could not be fetched.",
-        AttachmentError::CacheUnavailable => "The local attachment cache is unavailable.",
-        AttachmentError::DestinationUnavailable => "The file could not be saved there.",
-        AttachmentError::WorkerStopped => "The image preview was cancelled.",
+        | AttachmentError::InvalidUrl => tr("The image could not be fetched."),
+        AttachmentError::CacheUnavailable => tr("The local attachment cache is unavailable."),
+        AttachmentError::DestinationUnavailable => tr("The file could not be saved there."),
+        AttachmentError::WorkerStopped => tr("The image preview was cancelled."),
     }
 }
 
 fn action_failure(error: &AttachmentError) -> &'static str {
     match error {
         AttachmentError::TooLarge => {
-            "This file is larger than the 64 MiB limit for Open. Use Download to save it."
+            tr("This file is larger than the 64 MiB limit for Open. Use Download to save it.")
         }
-        AttachmentError::WorkerStopped => "The attachment action was cancelled.",
-        AttachmentError::CacheUnavailable => "The local attachment cache is unavailable.",
-        AttachmentError::DestinationUnavailable => "The file could not be saved there.",
-        _ => "The attachment could not be fetched.",
+        AttachmentError::WorkerStopped => tr("The attachment action was cancelled."),
+        AttachmentError::CacheUnavailable => tr("The local attachment cache is unavailable."),
+        AttachmentError::DestinationUnavailable => tr("The file could not be saved there."),
+        _ => tr("The attachment could not be fetched."),
     }
 }
 
@@ -201,7 +202,7 @@ pub fn load_preview(
     let Some(cache) = gateway.attachments.clone() else {
         gateway.attachment_views.insert(
             key,
-            AttachmentView::Failed("The local attachment cache is unavailable."),
+            AttachmentView::Failed(tr("The local attachment cache is unavailable.")),
         );
         return Task::none();
     };
@@ -341,7 +342,7 @@ pub fn start_action(
         return Task::none();
     }
     if busy(gateway) {
-        gateway.attachment_notice = Some("Attachment work is busy; try again shortly.");
+        gateway.attachment_notice = Some(tr("Attachment work is busy; try again shortly."));
         return Task::none();
     }
     let key = AttachmentKey {
@@ -354,11 +355,11 @@ pub fn start_action(
         .attachment_action_workers
         .contains_key(&(key, action))
     {
-        gateway.attachment_notice = Some("This attachment action is already in progress.");
+        gateway.attachment_notice = Some(tr("This attachment action is already in progress."));
         return Task::none();
     }
     let Some(cache) = gateway.attachments.clone() else {
-        gateway.attachment_notice = Some("The local attachment cache is unavailable.");
+        gateway.attachment_notice = Some(tr("The local attachment cache is unavailable."));
         return Task::none();
     };
     let Some(item) = find_attachment(gateway, channel, message, attachment) else {
@@ -422,7 +423,7 @@ async fn run_action(
         }
         AttachmentAction::Open => {
             if !can_open(&item) {
-                return ActionOutcome::Failed(NOT_OPENABLE);
+                return ActionOutcome::Failed(tr(NOT_OPENABLE));
             }
             let path = match cache.local_file(&refresh, key, &filename, &item.url).await {
                 Ok(path) => path,
@@ -432,7 +433,7 @@ async fn run_action(
                 .await
             {
                 Ok(Ok(())) => ActionOutcome::Opened,
-                _ => ActionOutcome::Failed(NOT_OPENABLE),
+                _ => ActionOutcome::Failed(tr(NOT_OPENABLE)),
             }
         }
     }
@@ -440,8 +441,8 @@ async fn run_action(
 
 pub fn finished(gateway: &mut GatewayPanel, outcome: ActionOutcome) {
     gateway.attachment_notice = match outcome {
-        ActionOutcome::Saved => Some("Attachment saved."),
-        ActionOutcome::Opened => Some("Opened attachment."),
+        ActionOutcome::Saved => Some(tr("Attachment saved.")),
+        ActionOutcome::Opened => Some(tr("Opened attachment.")),
         ActionOutcome::Cancelled => None,
         ActionOutcome::Failed(reason) => Some(reason),
     };
@@ -461,7 +462,7 @@ pub fn viewer_view(viewer: &AttachmentViewer) -> Element<'_, Message> {
         text(&viewer.attachment.filename)
             .size(16)
             .width(Length::Fill),
-        button("Download").on_press(event(|channel_id, message_id, attachment_id| {
+        button(tr("Download")).on_press(event(|channel_id, message_id, attachment_id| {
             timeline::Event::DownloadAttachment {
                 channel_id,
                 message_id,
@@ -471,7 +472,7 @@ pub fn viewer_view(viewer: &AttachmentViewer) -> Element<'_, Message> {
     ]
     .spacing(8);
     if can_open(&viewer.attachment) {
-        header = header.push(button("Open").on_press(event(
+        header = header.push(button(tr("Open")).on_press(event(
             |channel_id, message_id, attachment_id| timeline::Event::OpenAttachment {
                 channel_id,
                 message_id,
@@ -486,8 +487,8 @@ pub fn viewer_view(viewer: &AttachmentViewer) -> Element<'_, Message> {
             .width(Length::Fill)
             .height(Length::Fill)
             .into(),
-        AttachmentView::Loading => text("Loading image…").into(),
-        AttachmentView::Failed(reason) => text(*reason).into(),
+        AttachmentView::Loading => text(tr("Loading image…")).into(),
+        AttachmentView::Failed(reason) => text(tr(reason)).into(),
     };
     opaque(
         container(column![header, container(body).center(Length::Fill)].spacing(12))

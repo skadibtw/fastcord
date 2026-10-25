@@ -13,6 +13,7 @@
 //! * Anything else (thumbnails, galleries, files, unknown types) is a plain
 //!   "Unsupported component" line.
 
+use crate::i18n::{tr, trf};
 use fastcord_model::{BUTTON_LINK, Button, Component, Select, Snowflake};
 use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length};
@@ -69,7 +70,7 @@ fn component<'a>(item: &'a Component, cx: &Cx<'a>) -> Element<'a, Event> {
                 .into()
         }
         Component::Separator => iced::widget::rule::horizontal(1).into(),
-        Component::Unsupported(_) => text("Unsupported component")
+        Component::Unsupported(_) => text(tr("Unsupported component"))
             .size(12)
             .style(text::secondary)
             .into(),
@@ -107,15 +108,15 @@ fn option_event(s: &Select, value: &str, cx: &Cx<'_>) -> Option<Event> {
 
 fn push_button<'a>(b: &'a Button, cx: &Cx<'a>) -> Element<'a, Event> {
     let name = if b.label.is_empty() {
-        "Button"
+        tr("Button")
     } else {
         &b.label
     };
     let waiting = b.custom_id.is_some() && b.custom_id.as_deref() == cx.pending;
     let label = if b.premium {
-        format!("{name} (not available in this client)")
+        trf("{} (not available in this client)", &[&name])
     } else if b.style == BUTTON_LINK {
-        format!("[link] {name}")
+        trf("[link] {}", &[&name])
     } else if waiting {
         format!("{name}\u{2026}")
     } else {
@@ -135,23 +136,26 @@ fn push_button<'a>(b: &'a Button, cx: &Cx<'a>) -> Element<'a, Event> {
 
 fn select<'a>(s: &'a Select, cx: &Cx<'a>) -> Element<'a, Event> {
     let shown = if s.placeholder.is_empty() {
-        "Select"
+        tr("Select")
     } else {
         &s.placeholder
     };
     if s.kind != 3 || s.min_values > 1 {
         let what = match s.kind {
-            3 => "needs several values",
-            5 => "users",
-            6 => "roles",
-            7 => "users and roles",
-            8 => "channels",
-            _ => "unknown",
+            3 => tr("needs several values"),
+            5 => tr("users"),
+            6 => tr("roles"),
+            7 => tr("users and roles"),
+            8 => tr("channels"),
+            _ => tr("unknown"),
         };
-        return text(format!("{shown} ({what}: not available in this client)"))
-            .size(12)
-            .style(text::secondary)
-            .into();
+        return text(trf(
+            "{} ({}: not available in this client)",
+            &[&shown, &what],
+        ))
+        .size(12)
+        .style(text::secondary)
+        .into();
     }
     let waiting = cx.pending == Some(s.custom_id.as_str());
     let mut options = column![

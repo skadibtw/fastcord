@@ -5,6 +5,7 @@
 //! or logging out drops them. Opening a pin is a normal
 //! `history::Intent::JumpTo` in the same channel.
 
+use crate::i18n::{tr, trf, trn};
 use fastcord_discord::{PinsPage, RestClient, RestError};
 use fastcord_model::{Message, Snowflake};
 use iced::widget::{button, column, container, scrollable, text};
@@ -101,17 +102,17 @@ impl Default for State {
 
 fn describe(error: RestError) -> &'static str {
     match error {
-        RestError::PermissionDenied => "You cannot see or change pins here.",
-        RestError::ResourceGone => "That message or conversation is gone.",
-        RestError::AuthenticationRequired => "Discord no longer accepts this login.",
+        RestError::PermissionDenied => tr("You cannot see or change pins here."),
+        RestError::ResourceGone => tr("That message or conversation is gone."),
+        RestError::AuthenticationRequired => tr("Discord no longer accepts this login."),
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this. Try again shortly."
+            tr("Discord is rate limiting this. Try again shortly.")
         }
-        RestError::Retryable(_) | RestError::Http(_) => "Discord failed. Try again.",
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "Pinned messages could not be read.",
+        RestError::Retryable(_) | RestError::Http(_) => tr("Discord failed. Try again."),
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED),
+        _ => tr("Pinned messages could not be read."),
     }
 }
 
@@ -238,15 +239,15 @@ impl State {
 pub fn view(state: &State) -> Element<'_, Event> {
     let status: Element<'_, Event> = match &state.status {
         Status::Idle => text("").size(12).into(),
-        Status::Loading => text("Loading pinned messages…")
+        Status::Loading => text(tr("Loading pinned messages…"))
             .size(12)
             .color(MUTED)
             .into(),
-        Status::Failed(reason) => text(*reason).size(12).color(WARN).into(),
+        Status::Failed(reason) => text(tr(reason)).size(12).color(WARN).into(),
         Status::Done if state.pins.is_empty() => {
-            text("No pinned messages.").size(12).color(MUTED).into()
+            text(tr("No pinned messages.")).size(12).color(MUTED).into()
         }
-        Status::Done => text(format!("{} pinned", state.pins.len()))
+        Status::Done => text(trf("{} pinned", &[&state.pins.len()]))
             .size(12)
             .color(MUTED)
             .into(),
@@ -254,7 +255,11 @@ pub fn view(state: &State) -> Element<'_, Event> {
     let mut list = column![].spacing(4);
     for (index, pin) in state.pins.iter().enumerate() {
         let attachments = if pin.attachments > 0 {
-            format!(" [{} attachment(s)]", pin.attachments)
+            trn(
+                pin.attachments as u64,
+                " [{} attachment]",
+                " [{} attachments]",
+            )
         } else {
             String::new()
         };
@@ -279,8 +284,8 @@ pub fn view(state: &State) -> Element<'_, Event> {
     }
     let mut body = column![
         crate::icons::panel_title(
-            "Pinned messages",
-            vec![crate::icons::secondary("Refresh", Event::Refresh)],
+            tr("Pinned messages"),
+            vec![crate::icons::secondary(tr("Refresh"), Event::Refresh)],
             Event::Toggle,
         ),
         status
@@ -290,7 +295,7 @@ pub fn view(state: &State) -> Element<'_, Event> {
         body = body.push(scrollable(list).height(Length::Fixed(220.0)));
     }
     if state.status == Status::Done && state.has_more {
-        body = body.push(button(text("Load more").size(13)).on_press(Event::More));
+        body = body.push(button(text(tr("Load more")).size(13)).on_press(Event::More));
     }
     container(body)
         .padding(10)

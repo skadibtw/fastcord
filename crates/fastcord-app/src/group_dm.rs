@@ -19,6 +19,7 @@ use fastcord_model::{RelationshipKind, Snowflake};
 use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
 use iced::{Element, Length, Task};
 
+use crate::i18n::{tr, trf};
 use crate::style;
 
 /// Friends listed as candidates to add.
@@ -78,30 +79,30 @@ pub struct State {
 
 fn describe(error: RestError) -> String {
     match error {
-        RestError::AuthenticationRequired => "Your session has expired. Log in again.".to_owned(),
+        RestError::AuthenticationRequired => tr("Your session has expired. Log in again.").to_owned(),
         RestError::PermissionDenied => {
-            "Discord refused: you may lack permission, or the person cannot be added (for example because of blocking or privacy settings)."
+            tr("Discord refused: you may lack permission, or the person cannot be added (for example because of blocking or privacy settings).")
                 .to_owned()
         }
-        RestError::ResourceGone => "That conversation or person no longer exists.".to_owned(),
+        RestError::ResourceGone => tr("That conversation or person no longer exists.").to_owned(),
         RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
         RestError::Http(status) if status.as_u16() == 429 => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
         RestError::Http(status) if status.as_u16() == 400 => {
-            "Discord rejected the request (the group may be full, or the value is not allowed)."
+            tr("Discord rejected the request (the group may be full, or the value is not allowed).")
                 .to_owned()
         }
-        RestError::RequestBodyTooLarge => "That image is too large to send.".to_owned(),
+        RestError::RequestBodyTooLarge => tr("That image is too large to send.").to_owned(),
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection))
         | RestError::Retryable(_) => {
-            "Discord did not confirm. The change may have been applied; check the list before trying again."
+            tr("Discord did not confirm. The change may have been applied; check the list before trying again.")
                 .to_owned()
         }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED.to_owned(),
-        other => format!("The request failed: {other}."),
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED).to_owned(),
+        other => trf("The request failed: {}.", &[&tr(&other.to_string())]),
     }
 }
 
@@ -236,7 +237,7 @@ impl State {
                         | Event::PickIcon
                         | Event::ClearIcon
                 ) {
-                    self.notice = Some("Wait for the previous change to finish.".to_owned());
+                    self.notice = Some(tr("Wait for the previous change to finish.").to_owned());
                 }
             }
             Event::Rename => {
@@ -248,11 +249,12 @@ impl State {
                 }
                 let name = self.name.trim().to_owned();
                 if name.chars().count() > MAX_GROUP_NAME_CHARS {
-                    self.notice = Some(format!(
-                        "A group name has at most {MAX_GROUP_NAME_CHARS} characters."
+                    self.notice = Some(trf(
+                        "A group name has at most {} characters.",
+                        &[&MAX_GROUP_NAME_CHARS],
                     ));
                 } else if name == selection.custom_name {
-                    self.notice = Some("The name is unchanged.".to_owned());
+                    self.notice = Some(tr("The name is unchanged.").to_owned());
                 } else {
                     return self.send(Action::Rename, channel, client, Some(GroupEdit::Name(name)));
                 }
@@ -264,8 +266,8 @@ impl State {
                     return Task::perform(
                         async {
                             let Some(file) = rfd::AsyncFileDialog::new()
-                                .set_title("Group icon")
-                                .add_filter("Image", &["png", "jpg", "jpeg", "gif"])
+                                .set_title(tr("Group icon"))
+                                .add_filter(tr("Image"), &["png", "jpg", "jpeg", "gif"])
                                 .pick_file()
                                 .await
                             else {
@@ -294,7 +296,7 @@ impl State {
                             Some(GroupEdit::Icon(Some(icon))),
                         );
                     }
-                    (Err(reason), _) => self.notice = Some(reason.to_owned()),
+                    (Err(reason), _) => self.notice = Some(tr(reason).to_owned()),
                     _ => {}
                 }
             }
@@ -315,9 +317,9 @@ impl State {
                     .iter()
                     .any(|r| r.user.id == user && r.kind == RelationshipKind::Friend);
                 if !s.group {
-                    self.notice = Some("Only a group can have people added.".to_owned());
+                    self.notice = Some(tr("Only a group can have people added.").to_owned());
                 } else if !friend || user == me || s.members.iter().any(|m| m.id == user) {
-                    self.notice = Some("Pick a friend who is not in the group yet.".to_owned());
+                    self.notice = Some(tr("Pick a friend who is not in the group yet.").to_owned());
                 } else {
                     return self.send(Action::Add(user), channel, client, None);
                 }
@@ -367,15 +369,17 @@ impl State {
                             Some(GroupEdit::Owner(user)),
                         );
                     }
-                    _ => self.notice = Some("That person is no longer in the group.".to_owned()),
+                    _ => {
+                        self.notice = Some(tr("That person is no longer in the group.").to_owned())
+                    }
                 }
             }
             Event::Done(serial, action, result) if serial == self.serial => {
                 self.busy = None;
                 self.task = None;
                 self.notice = Some(match result {
-                    Ok(()) if action == Action::Leave => "Done.".to_owned(),
-                    Ok(()) => "Sent. The panel updates when Discord confirms.".to_owned(),
+                    Ok(()) if action == Action::Leave => tr("Done.").to_owned(),
+                    Ok(()) => tr("Sent. The panel updates when Discord confirms.").to_owned(),
                     Err(error) => describe(error),
                 });
             }
@@ -405,9 +409,9 @@ pub fn view<'a>(
     let idle = state.busy.is_none();
     let owner = selection.owner == Some(me);
     let title = if selection.group {
-        "Group"
+        tr("Group")
     } else {
-        "Conversation"
+        tr("Conversation")
     };
     let mut panel = column![
         row![
@@ -422,25 +426,25 @@ pub fn view<'a>(
     if selection.group {
         panel = panel.push(
             row![
-                text_input("Group name (empty restores the default)", &state.name)
+                text_input(tr("Group name (empty restores the default)"), &state.name)
                     .on_input_maybe(idle.then_some(Event::NameInput))
                     .on_submit(Event::Rename),
-                button(text("Rename").size(13)).on_press_maybe(idle.then_some(Event::Rename)),
+                button(text(tr("Rename")).size(13)).on_press_maybe(idle.then_some(Event::Rename)),
             ]
             .spacing(6),
         );
         panel = panel.push(
             row![
                 text(if selection.has_icon {
-                    "Icon: set"
+                    tr("Icon: set")
                 } else {
-                    "Icon: none"
+                    tr("Icon: none")
                 })
                 .size(12)
                 .style(text::secondary),
-                button(text("Choose icon").size(13))
+                button(text(tr("Choose icon")).size(13))
                     .on_press_maybe(idle.then_some(Event::PickIcon)),
-                button(text("Remove icon").size(13))
+                button(text(tr("Remove icon")).size(13))
                     .on_press_maybe((idle && selection.has_icon).then_some(Event::ClearIcon)),
             ]
             .spacing(6)
@@ -451,7 +455,7 @@ pub fn view<'a>(
     let members = selection.members.iter().map(|member| {
         let mut line = row![
             text(if selection.owner == Some(member.id) {
-                format!("{} (owner)", member.name)
+                trf("{} (owner)", &[&member.name])
             } else {
                 member.name.clone()
             })
@@ -463,20 +467,20 @@ pub fn view<'a>(
         if selection.group && owner {
             line = line
                 .push(
-                    button(text("Make owner").size(12))
+                    button(text(tr("Make owner")).size(12))
                         .on_press_maybe(idle.then_some(Event::AskOwner(member.id))),
                 )
                 .push(
-                    button(text("Remove").size(12))
+                    button(text(tr("Remove")).size(12))
                         .on_press_maybe(idle.then_some(Event::AskRemove(member.id)))
                         .style(button::danger),
                 );
         }
         line.into()
     });
-    panel = panel.push(text(format!("Members ({})", selection.members.len() + 1)).size(12));
+    panel = panel.push(text(trf("Members ({})", &[&(selection.members.len() + 1)])).size(12));
     panel = panel.push(
-        scrollable(column(members).spacing(2).push(text("You").size(13)))
+        scrollable(column(members).spacing(2).push(text(tr("You")).size(13)))
             .height(Length::Fixed(110.0)),
     );
 
@@ -491,7 +495,7 @@ pub fn view<'a>(
             })
             .take(MAX_CANDIDATES)
             .map(|r| {
-                button(text(format!("Add {}", r.user.display_name())).size(12))
+                button(text(trf("Add {}", &[&r.user.display_name()])).size(12))
                     .on_press_maybe(idle.then_some(Event::Add(r.user.id)))
                     .style(button::secondary)
                     .width(Length::Fill)
@@ -500,28 +504,29 @@ pub fn view<'a>(
             .collect();
         if !friends.is_empty() {
             panel = panel
-                .push(text("Add a friend").size(12))
+                .push(text(tr("Add a friend")).size(12))
                 .push(scrollable(column(friends).spacing(2)).height(Length::Fixed(90.0)));
         }
     }
 
     let leave_label = if selection.group {
-        "Leave group"
+        tr("Leave group")
     } else {
-        "Close conversation"
+        tr("Close conversation")
     };
     match state.confirm {
         Some(confirm) => {
             let question = match confirm {
                 Confirm::Leave => {
-                    "Leave this group? You will not get back in unless someone adds you.".to_owned()
+                    tr("Leave this group? You will not get back in unless someone adds you.")
+                        .to_owned()
                 }
                 Confirm::Remove(user) => {
-                    format!("Remove {} from the group?", name_of(selection, user))
+                    trf("Remove {} from the group?", &[&name_of(selection, user)])
                 }
-                Confirm::Owner(user) => format!(
+                Confirm::Owner(user) => trf(
                     "Make {} the owner? You will no longer be able to remove people.",
-                    name_of(selection, user)
+                    &[&name_of(selection, user)],
                 ),
             };
             panel = panel.push(
@@ -530,10 +535,10 @@ pub fn view<'a>(
                         .size(13)
                         .style(text::danger)
                         .width(Length::Fill),
-                    button(text("Confirm").size(13))
+                    button(text(tr("Confirm")).size(13))
                         .on_press_maybe(idle.then_some(Event::Confirm))
                         .style(button::danger),
-                    button(text("Cancel").size(13)).on_press(Event::Cancel),
+                    button(text(tr("Cancel")).size(13)).on_press(Event::Cancel),
                 ]
                 .spacing(6)
                 .align_y(iced::Alignment::Center),
@@ -552,7 +557,11 @@ pub fn view<'a>(
         }
     }
     if state.busy.is_some() {
-        panel = panel.push(text("Waiting for Discord…").size(12).style(text::secondary));
+        panel = panel.push(
+            text(tr("Waiting for Discord…"))
+                .size(12)
+                .style(text::secondary),
+        );
     }
     if let Some(notice) = &state.notice {
         panel = panel.push(text(notice.as_str()).size(12).style(text::secondary));
@@ -571,7 +580,7 @@ fn name_of(selection: &PrivateChannelSelection, user: Snowflake) -> String {
         .members
         .iter()
         .find(|m| m.id == user)
-        .map_or_else(|| "this person".to_owned(), |m| m.name.clone())
+        .map_or_else(|| tr("this person").to_owned(), |m| m.name.clone())
 }
 
 #[cfg(test)]

@@ -6,11 +6,12 @@
 
 use std::sync::RwLock;
 
-use iced::widget::{button, checkbox, column, container, pick_list, row, slider, text};
+use iced::widget::{button, checkbox, column, pick_list, row, slider, text};
 use iced::{Element, Length};
 use serde_json::{Value, json};
 
 use crate::Message;
+use crate::i18n::tr;
 
 pub const MIN_SCALE: u16 = 85;
 pub const MAX_SCALE: u16 = 150;
@@ -50,9 +51,9 @@ impl TimeFormat {
 impl std::fmt::Display for TimeFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::System => "System (24-hour)",
-            Self::Hour12 => "12-hour",
-            Self::Hour24 => "24-hour",
+            Self::System => tr("System (24-hour)"),
+            Self::Hour12 => tr("12-hour"),
+            Self::Hour24 => tr("24-hour"),
         })
     }
 }
@@ -80,6 +81,8 @@ pub struct Prefs {
     pub inline_media: bool,
     pub time_format: TimeFormat,
     pub high_contrast: bool,
+    /// Interface language; `None` follows the operating system.
+    pub language: Option<crate::i18n::Lang>,
 }
 
 impl Default for Prefs {
@@ -94,6 +97,7 @@ impl Default for Prefs {
             inline_media: true,
             time_format: TimeFormat::System,
             high_contrast: false,
+            language: None,
         }
     }
 }
@@ -108,6 +112,7 @@ static CURRENT: RwLock<Prefs> = RwLock::new(Prefs {
     inline_media: true,
     time_format: TimeFormat::System,
     high_contrast: false,
+    language: None,
 });
 
 /// The preferences in force now.
@@ -124,6 +129,7 @@ pub fn apply(prefs: Prefs) {
         Err(poisoned) => *poisoned.into_inner() = prefs,
     }
     crate::localtime::set_hour12(prefs.time_format.hour12());
+    crate::i18n::set(prefs.language.unwrap_or_else(crate::i18n::Lang::system));
 }
 
 impl Prefs {
@@ -149,6 +155,10 @@ impl Prefs {
                 .map(TimeFormat::from_persisted)
                 .unwrap_or_default(),
             high_contrast: flag("high_contrast", default.high_contrast),
+            language: value
+                .get("language")
+                .and_then(Value::as_str)
+                .and_then(crate::i18n::Lang::from_code),
         }
     }
 
@@ -163,6 +173,7 @@ impl Prefs {
             "inline_media": self.inline_media,
             "time_format": self.time_format.persisted(),
             "high_contrast": self.high_contrast,
+            "language": self.language.map_or("system", crate::i18n::Lang::code),
         })
     }
 
@@ -243,7 +254,7 @@ pub struct SpeechView<'a> {
 fn speech_rows<'a>(speech: &SpeechView<'a>) -> Element<'a, Message> {
     let default = VoiceChoice {
         id: None,
-        label: "System default".to_owned(),
+        label: tr("System default").to_owned(),
     };
     let mut choices = vec![default.clone()];
     choices.extend(speech.voices.iter().map(|voice| VoiceChoice {
@@ -260,7 +271,7 @@ fn speech_rows<'a>(speech: &SpeechView<'a>) -> Element<'a, Message> {
             .unwrap_or_else(|| {
                 let missing = VoiceChoice {
                     id: Some(id.clone()),
-                    label: "Saved voice (not installed)".to_owned(),
+                    label: tr("Saved voice (not installed)").to_owned(),
                 };
                 choices.push(missing.clone());
                 missing
@@ -270,13 +281,13 @@ fn speech_rows<'a>(speech: &SpeechView<'a>) -> Element<'a, Message> {
     let for_voice = prefs.clone();
     let for_rate = prefs.clone();
     let note = match speech.error {
-        Some(error) => error.to_string(),
-        None => "Speech is produced on this computer; no text is sent to any service. Start a message with /tts to send it as a Discord text-to-speech message (needs the Send Text-to-Speech Messages permission).".to_owned(),
+        Some(error) => tr(&error.to_string()).to_owned(),
+        None => tr("Speech is produced on this computer; no text is sent anywhere. Start a message with /tts to send it as a Discord text-to-speech message.").to_owned(),
     };
     column![
-        text("Text-to-speech").size(18),
+        text(tr("Text-to-speech")).size(13).font(crate::ui::BOLD).color(crate::style::SUBTLE),
         row![
-            text("Speak received text-to-speech messages"),
+            text(tr("Read received text-to-speech messages aloud")),
             pick_list(crate::speech::TtsMode::ALL, Some(prefs.mode), move |mode| {
                 Message::SpeechPrefs(crate::speech::Prefs {
                     mode,
@@ -286,7 +297,7 @@ fn speech_rows<'a>(speech: &SpeechView<'a>) -> Element<'a, Message> {
         ]
         .spacing(12),
         row![
-            text("Voice"),
+            text(tr("Voice")),
             pick_list(choices, Some(selected), move |choice: VoiceChoice| {
                 Message::SpeechPrefs(crate::speech::Prefs {
                     voice: choice.id,
@@ -296,7 +307,7 @@ fn speech_rows<'a>(speech: &SpeechView<'a>) -> Element<'a, Message> {
         ]
         .spacing(12),
         row![
-            text("Speaking rate"),
+            text(tr("Speaking rate")),
             slider(
                 fastcord_platform::speech::MIN_RATE..=fastcord_platform::speech::MAX_RATE,
                 speech.prefs.rate,
@@ -311,21 +322,36 @@ fn speech_rows<'a>(speech: &SpeechView<'a>) -> Element<'a, Message> {
         ]
         .spacing(12),
         row![
-            button("Test voice").on_press(Message::SpeechTest),
-            button("Stop").on_press_maybe(speech.speaking.then_some(Message::StopSpeech)),
+            button(text(tr("Test voice"))).on_press(Message::SpeechTest).style(crate::style::secondary_button(false)),
+            button(text(tr("Stop"))).on_press_maybe(speech.speaking.then_some(Message::StopSpeech)).style(crate::style::secondary_button(false)),
         ]
         .spacing(12),
-        text(note).size(12),
+        text(note).size(12).color(crate::style::MUTED),
     ]
     .spacing(12)
     .into()
 }
 
-pub fn view<'a>(
-    prefs: Prefs,
-    speech: &SpeechView<'a>,
-    advanced: Element<'a, Message>,
-) -> Element<'a, Message> {
+/// The language choice: the system's or a fixed one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LanguageChoice(Option<crate::i18n::Lang>);
+
+impl std::fmt::Display for LanguageChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            None => write!(
+                f,
+                "{} ({})",
+                tr("Same as the system"),
+                crate::i18n::Lang::system()
+            ),
+            Some(lang) => write!(f, "{lang}"),
+        }
+    }
+}
+
+/// The "Chat and appearance" page of the settings.
+pub fn view<'a>(prefs: Prefs, speech: &SpeechView<'a>) -> Element<'a, Message> {
     let set = move |edit: fn(&mut Prefs, bool)| {
         move |on| {
             let mut next = prefs;
@@ -333,43 +359,88 @@ pub fn view<'a>(
             Message::ChatPrefs(next)
         }
     };
-    container(
-        column![
-            text("Chat & accessibility").size(24),
-            row![
-                text("Text and interface size"),
-                slider(MIN_SCALE..=MAX_SCALE, prefs.text_scale, move |v| Message::ChatPrefs(prefs.with_scale(v)))
+    let languages: Vec<LanguageChoice> = std::iter::once(LanguageChoice(None))
+        .chain(crate::i18n::Lang::ALL.map(|lang| LanguageChoice(Some(lang))))
+        .collect();
+    column![
+        crate::audio_devices::section(
+            tr("Language"),
+            [pick_list(languages, Some(LanguageChoice(prefs.language)), move |choice| {
+                let mut next = prefs;
+                next.language = choice.0;
+                Message::ChatPrefs(next)
+            })
+            .width(Length::Fill)
+            .into()],
+        ),
+        crate::audio_devices::section(
+            tr("Appearance"),
+            [
+                row![
+                    text(tr("Text and interface size")),
+                    slider(MIN_SCALE..=MAX_SCALE, prefs.text_scale, move |v| {
+                        Message::ChatPrefs(prefs.with_scale(v))
+                    })
                     .step(5u16)
                     .width(Length::Fill),
-                text(format!("{}%", prefs.text_scale)),
-            ]
-            .spacing(12),
-            checkbox(prefs.compact).label("Compact messages (no avatars, tighter spacing)").on_toggle(set(|p, on| p.compact = on)),
-            checkbox(prefs.reduced_motion).label("Reduced motion (animated emoji show their first frame)").on_toggle(set(|p, on| p.reduced_motion = on)),
-            checkbox(prefs.autoplay).label("Play animated emoji").on_toggle(set(|p, on| p.autoplay = on)),
-            checkbox(prefs.reveal_spoilers).label("Always reveal spoilers").on_toggle(set(|p, on| p.reveal_spoilers = on)),
-            checkbox(prefs.link_embeds).label("Show link embeds and previews").on_toggle(set(|p, on| p.link_embeds = on)),
-            checkbox(prefs.inline_media).label("Show inline image, audio and video attachment previews").on_toggle(set(|p, on| p.inline_media = on)),
-            checkbox(prefs.high_contrast).label("High-contrast colors").on_toggle(set(|p, on| p.high_contrast = on)),
-            row![
-                text("Time format"),
-                pick_list(TimeFormat::ALL, Some(prefs.time_format), move |format| {
-                    let mut next = prefs;
-                    next.time_format = format;
-                    Message::ChatPrefs(next)
-                }),
-            ]
-            .spacing(12),
-            speech_rows(speech),
-            advanced,
-            text("Tab moves between these controls and Space toggles them. The interface has no screen-reader support yet (the toolkit exposes no accessibility tree), and spellcheck is not available in the message box.").size(12),
-            crate::icons::close(Some(Message::CloseChatSettings)),
-        ]
-        .spacing(12),
-    )
-    .padding(24)
-    .width(Length::Fixed(650.0))
-    .style(container::rounded_box)
+                    text(format!("{}%", prefs.text_scale)),
+                ]
+                .spacing(12)
+                .into(),
+                checkbox(prefs.compact)
+                    .label(tr("Compact messages (no avatars, tighter spacing)"))
+                    .on_toggle(set(|p, on| p.compact = on))
+                    .into(),
+                checkbox(prefs.high_contrast)
+                    .label(tr("High-contrast colors"))
+                    .on_toggle(set(|p, on| p.high_contrast = on))
+                    .into(),
+                row![
+                    text(tr("Time format")),
+                    pick_list(TimeFormat::ALL, Some(prefs.time_format), move |format| {
+                        let mut next = prefs;
+                        next.time_format = format;
+                        Message::ChatPrefs(next)
+                    }),
+                ]
+                .spacing(12)
+                .align_y(iced::Alignment::Center)
+                .into(),
+            ],
+        ),
+        crate::audio_devices::section(
+            tr("Messages"),
+            [
+                checkbox(prefs.link_embeds)
+                    .label(tr("Show link embeds and previews"))
+                    .on_toggle(set(|p, on| p.link_embeds = on))
+                    .into(),
+                checkbox(prefs.inline_media)
+                    .label(tr("Show images, audio and video in the conversation"))
+                    .on_toggle(set(|p, on| p.inline_media = on))
+                    .into(),
+                checkbox(prefs.reveal_spoilers)
+                    .label(tr("Always reveal spoilers"))
+                    .on_toggle(set(|p, on| p.reveal_spoilers = on))
+                    .into(),
+                checkbox(prefs.autoplay)
+                    .label(tr("Play animated emoji"))
+                    .on_toggle(set(|p, on| p.autoplay = on))
+                    .into(),
+                checkbox(prefs.reduced_motion)
+                    .label(tr("Reduced motion (animated emoji show their first frame)"))
+                    .on_toggle(set(|p, on| p.reduced_motion = on))
+                    .into(),
+            ],
+        ),
+        speech_rows(speech),
+        text(tr(
+            "Tab moves between controls and Space toggles them. Screen readers and spellcheck are not supported yet."
+        ))
+        .size(12)
+        .color(crate::style::MUTED),
+    ]
+    .spacing(28)
     .into()
 }
 
@@ -390,6 +461,7 @@ mod tests {
             inline_media: false,
             time_format: TimeFormat::Hour12,
             high_contrast: true,
+            language: Some(crate::i18n::Lang::Russian),
         };
         assert_eq!(Prefs::from_json(&custom.to_json()), custom);
         assert_eq!(

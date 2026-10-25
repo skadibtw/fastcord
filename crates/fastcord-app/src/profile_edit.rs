@@ -22,6 +22,7 @@ use fastcord_model::{Snowflake, User};
 use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
 use iced::{Element, Length, Task};
 
+use crate::i18n::{tr, trf};
 use crate::style;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,48 +94,48 @@ pub struct State {
 fn describe(error: ProfileRequestError, action: Action) -> String {
     let error = match error {
         ProfileRequestError::Invalid(ProfileError::TooLong) => {
-            return "That text is longer than Discord allows.".to_owned();
+            return tr("That text is longer than Discord allows.").to_owned();
         }
         ProfileRequestError::Invalid(ProfileError::UnsupportedImage) => {
-            return "Choose a PNG or JPEG image (animated avatars need Nitro).".to_owned();
+            return tr("Choose a PNG or JPEG image (animated avatars need Nitro).").to_owned();
         }
         ProfileRequestError::Invalid(ProfileError::ImageTooLarge) => {
-            return "The image is larger than 512 KiB.".to_owned();
+            return tr("The image is larger than 512 KiB.").to_owned();
         }
         ProfileRequestError::Invalid(ProfileError::UneditableConnection) => {
-            return "That connection cannot be changed from here.".to_owned();
+            return tr("That connection cannot be changed from here.").to_owned();
         }
         ProfileRequestError::Rest(error) => error,
     };
     match error {
-        RestError::AuthenticationRequired => "Your session has expired. Log in again.".to_owned(),
+        RestError::AuthenticationRequired => tr("Your session has expired. Log in again.").to_owned(),
         RestError::PermissionDenied => match action {
-            Action::Nick => "Discord refused: you may not be allowed to change your nickname in this server.".to_owned(),
-            _ => "Discord refused this change for this account.".to_owned(),
+            Action::Nick => tr("Discord refused: you may not be allowed to change your nickname in this server.").to_owned(),
+            _ => tr("Discord refused this change for this account.").to_owned(),
         },
-        RestError::ResourceGone => "Discord could not find that server or connection.".to_owned(),
+        RestError::ResourceGone => tr("Discord could not find that server or connection.").to_owned(),
         RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
         RestError::Http(status) if status.as_u16() == 429 => {
-            "Discord is rate limiting requests. Wait a moment and try again.".to_owned()
+            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
         }
         RestError::Http(status) if status.as_u16() == 400 => {
-            "Discord rejected the value. Names are limited in how often they change, and some changes need verification (password, two-factor or CAPTCHA) that only the official Discord client can complete. What you typed is kept."
+            tr("Discord rejected the value. Names are limited in how often they change, and some changes need verification (password, two-factor or CAPTCHA) that only the official Discord client can complete. What you typed is kept.")
                 .to_owned()
         }
-        RestError::RequestBodyTooLarge => "That image is too large to send.".to_owned(),
+        RestError::RequestBodyTooLarge => tr("That image is too large to send.").to_owned(),
         RestError::InvalidJson => {
-            "Discord answered with something unexpected. The change may have been applied; reopen this panel to check."
+            tr("Discord answered with something unexpected. The change may have been applied; reopen this panel to check.")
                 .to_owned()
         }
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection))
         | RestError::Retryable(_) => {
-            "Discord did not confirm. The change may have been applied; reopen this panel to check before trying again. What you typed is kept."
+            tr("Discord did not confirm. The change may have been applied; reopen this panel to check before trying again. What you typed is kept.")
                 .to_owned()
         }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED.to_owned(),
-        other => format!("The request failed: {other}."),
+        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED).to_owned(),
+        other => trf("The request failed: {}.", &[&tr(&other.to_string())]),
     }
 }
 
@@ -234,7 +235,7 @@ impl State {
                         });
                     }
                     Ok(None) => {}
-                    Err(reason) => self.notice = Some(reason.to_owned()),
+                    Err(reason) => self.notice = Some(tr(reason).to_owned()),
                 }
             }
             _ if !self.open => {}
@@ -249,7 +250,7 @@ impl State {
                         | Event::PronounsInput(_)
                         | Event::NickInput(_)
                 ) {
-                    self.notice = Some("Wait for the previous change to finish.".to_owned());
+                    self.notice = Some(tr("Wait for the previous change to finish.").to_owned());
                 } else {
                     self.edit_field(event);
                 }
@@ -261,10 +262,11 @@ impl State {
             Event::SaveName => {
                 let name = self.name.trim().to_owned();
                 if name == me.global_name.as_deref().unwrap_or_default() {
-                    self.notice = Some("The display name is unchanged.".to_owned());
+                    self.notice = Some(tr("The display name is unchanged.").to_owned());
                 } else if name.chars().count() > MAX_DISPLAY_NAME_CHARS {
-                    self.notice = Some(format!(
-                        "A display name has at most {MAX_DISPLAY_NAME_CHARS} characters."
+                    self.notice = Some(trf(
+                        "A display name has at most {} characters.",
+                        &[&MAX_DISPLAY_NAME_CHARS],
                     ));
                 } else {
                     return self.send(Action::Name, client, move |client| async move {
@@ -282,8 +284,8 @@ impl State {
                 return Task::perform(
                     async {
                         let Some(file) = rfd::AsyncFileDialog::new()
-                            .set_title("Avatar")
-                            .add_filter("Image", &["png", "jpg", "jpeg"])
+                            .set_title(tr("Avatar"))
+                            .add_filter(tr("Image"), &["png", "jpg", "jpeg"])
                             .pick_file()
                             .await
                         else {
@@ -307,8 +309,9 @@ impl State {
             }
             Event::SaveText => {
                 let Some((bio, pronouns)) = self.loaded.clone() else {
-                    self.notice =
-                        Some("Your current bio could not be read, so it is not edited.".to_owned());
+                    self.notice = Some(
+                        tr("Your current bio could not be read, so it is not edited.").to_owned(),
+                    );
                     return Task::none();
                 };
                 let text = ProfileText {
@@ -316,7 +319,7 @@ impl State {
                     pronouns: (self.pronouns.trim() != pronouns).then(|| self.pronouns.clone()),
                 };
                 if text == ProfileText::default() {
-                    self.notice = Some("Bio and pronouns are unchanged.".to_owned());
+                    self.notice = Some(tr("Bio and pronouns are unchanged.").to_owned());
                 } else {
                     return self.send(Action::Text, client, move |client| async move {
                         client
@@ -331,12 +334,12 @@ impl State {
                     .nick_guild
                     .filter(|g| navigation.selected_guild == Some(*g))
                 else {
-                    self.notice = Some("Select a server first.".to_owned());
+                    self.notice = Some(tr("Select a server first.").to_owned());
                     return Task::none();
                 };
                 let nick = self.nick.trim().to_owned();
                 if nick == navigation.own_nick.as_deref().unwrap_or_default() {
-                    self.notice = Some("The nickname is unchanged.".to_owned());
+                    self.notice = Some(tr("The nickname is unchanged.").to_owned());
                 } else {
                     return self.send(Action::Nick, client, move |client| async move {
                         client
@@ -416,31 +419,31 @@ impl State {
                 self.pronouns = profile.pronouns.clone();
                 self.loaded = Some((profile.bio, profile.pronouns));
             }
-            Outcome::Saved => self.notice = Some("Saved.".to_owned()),
+            Outcome::Saved => self.notice = Some(tr("Saved.").to_owned()),
             Outcome::Connections(list) => {
-                self.notice = list.is_empty().then(|| "No connections.".to_owned());
+                self.notice = list.is_empty().then(|| tr("No connections.").to_owned());
                 self.connections = Some(list);
             }
             Outcome::Visibility(index, visible) => {
                 if let Some(connection) = self.connections.as_mut().and_then(|l| l.get_mut(index)) {
                     connection.visible = visible;
                 }
-                self.notice = Some("Saved.".to_owned());
+                self.notice = Some(tr("Saved.").to_owned());
             }
             Outcome::Activity(index, show) => {
                 if let Some(connection) = self.connections.as_mut().and_then(|l| l.get_mut(index)) {
                     connection.show_activity = Some(show);
                 }
-                self.notice = Some("Saved.".to_owned());
+                self.notice = Some(tr("Saved.").to_owned());
             }
             Outcome::Done if action == Action::Text => {
                 // What was sent is now what Discord has.
                 self.loaded = Some((self.bio.trim().to_owned(), self.pronouns.trim().to_owned()));
-                self.notice = Some("Saved.".to_owned());
+                self.notice = Some(tr("Saved.").to_owned());
             }
             Outcome::Done => {
                 self.notice =
-                    Some("Sent. It shows here when Discord confirms the change.".to_owned());
+                    Some(tr("Sent. It shows here when Discord confirms the change.").to_owned());
             }
         }
     }
@@ -470,85 +473,88 @@ pub fn view<'a>(
     let editable_text = idle && state.loaded.is_some();
     let mut panel = column![
         row![
-            text("Your profile").size(13),
+            text(tr("Your profile")).size(13),
             space::horizontal(),
             crate::icons::close(idle.then_some(Event::Close)),
         ]
         .align_y(iced::Alignment::Center),
-        text(format!("Username: @{}", me.username))
+        text(trf("Username: @{}", &[&me.username]))
             .size(12)
             .style(text::secondary),
-        text("Changing your username needs your password (and two-factor code), so do it in the official Discord client.")
+        text(tr("Changing your username needs your password (and two-factor code), so do it in the official Discord client."))
             .size(11)
             .style(text::secondary),
         row![
-            text_input("Display name (empty shows your username)", &state.name)
+            text_input(tr("Display name (empty shows your username)"), &state.name)
                 .on_input(Event::NameInput)
                 .on_submit(Event::SaveName),
-            button(text("Save").size(13)).on_press_maybe(idle.then_some(Event::SaveName)),
+            button(text(tr("Save")).size(13)).on_press_maybe(idle.then_some(Event::SaveName)),
         ]
         .spacing(6),
         row![
             text(if me.avatar.is_some() {
-                "Avatar: set"
+                tr("Avatar: set")
             } else {
-                "Avatar: none"
+                tr("Avatar: none")
             })
             .size(12)
             .style(text::secondary),
-            button(text("Choose avatar").size(13)).on_press_maybe(idle.then_some(Event::PickAvatar)),
-            button(text("Remove avatar").size(13))
+            button(text(tr("Choose avatar")).size(13)).on_press_maybe(idle.then_some(Event::PickAvatar)),
+            button(text(tr("Remove avatar")).size(13))
                 .on_press_maybe((idle && me.avatar.is_some()).then_some(Event::RemoveAvatar)),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),
         row![
-            text_input("Pronouns", &state.pronouns)
+            text_input(tr("Pronouns"), &state.pronouns)
                 .on_input_maybe(editable_text.then_some(Event::PronounsInput)),
         ],
         row![
-            text_input("About me", &state.bio)
+            text_input(tr("About me"), &state.bio)
                 .on_input_maybe(editable_text.then_some(Event::BioInput))
                 .on_submit(Event::SaveText),
-            button(text("Save").size(13)).on_press_maybe(editable_text.then_some(Event::SaveText)),
+            button(text(tr("Save")).size(13)).on_press_maybe(editable_text.then_some(Event::SaveText)),
         ]
         .spacing(6),
     ]
     .spacing(6);
     if state.loaded.is_none() && idle {
         panel = panel.push(
-            text("Your current bio and pronouns could not be read; close and reopen to try again.")
-                .size(11)
-                .style(text::secondary),
+            text(tr(
+                "Your current bio and pronouns could not be read; close and reopen to try again.",
+            ))
+            .size(11)
+            .style(text::secondary),
         );
     }
     panel = if navigation.selected_guild.is_some() {
         panel
-            .push(text(format!("Nickname in {}", navigation.selected_guild_name)).size(12))
+            .push(text(trf("Nickname in {}", &[&navigation.selected_guild_name])).size(12))
             .push(
                 row![
-                    text_input("Nickname (empty removes it)", &state.nick)
+                    text_input(tr("Nickname (empty removes it)"), &state.nick)
                         .on_input(Event::NickInput)
                         .on_submit(Event::SaveNick),
-                    button(text("Save").size(13)).on_press_maybe(idle.then_some(Event::SaveNick)),
+                    button(text(tr("Save")).size(13))
+                        .on_press_maybe(idle.then_some(Event::SaveNick)),
                 ]
                 .spacing(6),
             )
     } else {
         panel.push(
-            text("Open a server to change your nickname there.")
+            text(tr("Open a server to change your nickname there."))
                 .size(11)
                 .style(text::secondary),
         )
     };
     panel = panel.push(
         row![
-            text("Connections on your profile").size(12),
+            text(tr("Connections on your profile")).size(12),
             button(
                 text(if state.connections.is_some() {
-                    "Reload"
+                    tr("Reload")
                 } else {
-                    "Load"
+                    tr("Load")
                 })
                 .size(12)
             )
@@ -563,16 +569,16 @@ pub fn view<'a>(
                 text(format!("{}: {}", c.kind, c.name))
                     .size(12)
                     .width(Length::Fill),
-                button(text(if c.visible { "Shown" } else { "Hidden" }).size(12))
+                button(text(if c.visible { tr("Shown") } else { tr("Hidden") }).size(12))
                     .on_press_maybe((idle && c.editable).then_some(Event::ToggleConnection(index)))
                     .style(button::secondary),
             ]
             .extend(c.show_activity.map(|shown| {
                 button(
                     text(if shown {
-                        "Activity shown"
+                        tr("Activity shown")
                     } else {
-                        "Activity hidden"
+                        tr("Activity hidden")
                     })
                     .size(12),
                 )
@@ -587,7 +593,11 @@ pub fn view<'a>(
         panel = panel.push(scrollable(column(rows).spacing(2)).height(Length::Fixed(80.0)));
     }
     if state.busy.is_some() {
-        panel = panel.push(text("Waiting for Discord…").size(12).style(text::secondary));
+        panel = panel.push(
+            text(tr("Waiting for Discord…"))
+                .size(12)
+                .style(text::secondary),
+        );
     }
     if let Some(notice) = &state.notice {
         panel = panel.push(text(notice.as_str()).size(12).style(text::secondary));

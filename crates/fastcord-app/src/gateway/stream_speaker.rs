@@ -10,6 +10,7 @@
 //! clock; video is presented as it is decoded and is not delayed to match.
 //! Dropping a [`Speaker`] closes the output stream.
 
+use crate::i18n::{tr, trf};
 use std::time::{Duration, Instant};
 
 use fastcord_audio::{
@@ -46,12 +47,12 @@ pub(super) fn start(controls: &VoiceControls, audio: AudioSettings) -> Result<Sp
         capture_enabled: false,
         ..EngineConfig::default()
     })
-    .map_err(|error| format!("Stream audio output failed: {error}"))?;
+    .map_err(|error| trf("Stream audio output failed: {}", &[&tr(&error.to_string())]))?;
     let mut speaker = Speaker {
         _engine: engine,
         remote: channels
             .remote_audio
-            .ok_or("Stream audio output did not open")?,
+            .ok_or_else(|| tr("Stream audio output did not open").to_owned())?,
         controls: channels.controls,
         events: channels.events,
         device: controls.output_device.clone(),
@@ -161,7 +162,7 @@ impl Playback {
         if self.speaker.as_mut().is_some_and(Speaker::failed) {
             self.speaker = None;
             self.retry_at = Some(Instant::now() + RETRY);
-            self.error = Some("Stream audio output was lost; retrying in 5 seconds".into());
+            self.error = Some(tr("Stream audio output was lost; retrying in 5 seconds").into());
         }
         if self.speaker.is_none() && self.retry_at.is_none_or(|at| Instant::now() >= at) {
             match start(controls, settings) {
@@ -180,11 +181,11 @@ impl Playback {
         }
         self.error.as_deref().unwrap_or_else(|| {
             if !controls.output_enabled() {
-                "Stream audio muted by deafen"
+                tr("Stream audio muted by deafen")
             } else if settings.muted || settings.percent == 0 {
-                "Stream audio muted"
+                tr("Stream audio muted")
             } else {
-                "Receiving stream audio"
+                tr("Receiving stream audio")
             }
         })
     }

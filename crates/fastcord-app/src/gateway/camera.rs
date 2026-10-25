@@ -35,6 +35,7 @@ use tokio::sync::watch;
 use super::VoiceControls;
 use super::stream_share::{Route, route};
 use super::stream_video::{StatusSink, StreamDecoder, StreamStatus};
+use crate::i18n::{tr, trf};
 use crate::playback::{self, Session};
 
 /// What a call connection offers: H.264 both ways and AV1 receive, plus the
@@ -310,14 +311,15 @@ impl CameraProgress {
 
 fn end_text(end: &ShareEnd) -> String {
     match end {
-        ShareEnd::Stopped => "Camera off.".to_owned(),
+        ShareEnd::Stopped => tr("Camera off.").to_owned(),
         ShareEnd::Capture(error) => capture_text(error),
-        ShareEnd::Encoder(detail) => format!("Video encoding failed: {detail}."),
+        ShareEnd::Encoder(detail) => trf("Video encoding failed: {}.", &[&detail]),
         ShareEnd::SinkClosed => {
-            "The call connection closed, so the camera was turned off.".to_owned()
+            tr("The call connection closed, so the camera was turned off.").to_owned()
         }
-        ShareEnd::Effect(detail) => format!(
-            "The background effect could not run ({detail}), so the camera was turned off instead of showing your room. Choose No effect to use the camera plainly."
+        ShareEnd::Effect(detail) => trf(
+            "The background effect could not run ({}), so the camera was turned off instead of showing your room. Choose No effect to use the camera plainly.",
+            &[&detail],
         ),
     }
 }
@@ -325,11 +327,11 @@ fn end_text(end: &ShareEnd) -> String {
 /// The user-facing text for a camera that could not open or stopped.
 pub(super) fn capture_text(error: &CaptureError) -> String {
     match error {
-        CaptureError::PermissionDenied => "Windows blocked camera access. Allow desktop apps to use the camera in Settings, Privacy and security, Camera.".to_owned(),
-        CaptureError::DeviceNotFound => "The selected camera is not connected. Pick another camera or plug it back in.".to_owned(),
-        CaptureError::SourceClosed => "The camera was unplugged or taken by another application, so it was turned off.".to_owned(),
-        CaptureError::Unsupported(detail) => (*detail).to_owned(),
-        other => format!("The camera stopped: {other}."),
+        CaptureError::PermissionDenied => tr("Windows blocked camera access. Allow desktop apps to use the camera in Settings, Privacy and security, Camera.").to_owned(),
+        CaptureError::DeviceNotFound => tr("The selected camera is not connected. Pick another camera or plug it back in.").to_owned(),
+        CaptureError::SourceClosed => tr("The camera was unplugged or taken by another application, so it was turned off.").to_owned(),
+        CaptureError::Unsupported(detail) => tr(detail).to_owned(),
+        other => trf("The camera stopped: {}.", &[&tr(&other.to_string())]),
     }
 }
 
@@ -337,14 +339,13 @@ pub(super) fn capture_text(error: &CaptureError) -> String {
 pub fn describe(controls: &CameraControls) -> String {
     match &controls.status {
         CameraStatus::Off => String::new(),
-        CameraStatus::Starting => "Starting your camera…".to_owned(),
+        CameraStatus::Starting => tr("Starting your camera…").to_owned(),
         CameraStatus::Live if controls.detail.is_empty() => {
-            format!("Camera on{}", effect_suffix(controls.effect))
+            trf("Camera on{}", &[&effect_suffix(controls.effect)])
         }
-        CameraStatus::Live => format!(
+        CameraStatus::Live => trf(
             "Camera on · {}{}",
-            controls.detail,
-            effect_suffix(controls.effect)
+            &[&controls.detail, &effect_suffix(controls.effect)],
         ),
         CameraStatus::Failed(text) => text.clone(),
     }
@@ -353,19 +354,27 @@ pub fn describe(controls: &CameraControls) -> String {
 fn effect_suffix(effect: Effect) -> String {
     match effect {
         Effect::Off => String::new(),
-        other => format!(" · {}", other.label()),
+        other => format!(" · {}", effect_text(other)),
     }
+}
+
+/// The effect's name as shown (the label itself is the English key).
+pub fn effect_text(effect: Effect) -> String {
+    tr(&effect.label()).to_owned()
 }
 
 /// The caption of the self-view: it says it is a preview and whether it is
 /// mirrored, because others see the picture the other way round.
 pub fn preview_caption(controls: &CameraControls) -> String {
     let side = if controls.mirror {
-        "mirrored; others see it unmirrored"
+        tr("mirrored; others see it unmirrored")
     } else {
-        "as others see it"
+        tr("as others see it")
     };
-    format!("You · preview ({side}){}", effect_suffix(controls.effect))
+    trf(
+        "You · preview ({}){}",
+        &[&side, &effect_suffix(controls.effect)],
+    )
 }
 
 /// A camera that is capturing.
@@ -471,7 +480,7 @@ impl CallVideo {
 
     fn start_camera(&mut self, wanted: &CameraControls) {
         if !can_send() {
-            self.fail("The camera can only be used on Windows so far.".to_owned());
+            self.fail(tr("The camera can only be used on Windows so far.").to_owned());
             return;
         }
         let progress = Arc::clone(&self.progress);
@@ -511,7 +520,10 @@ impl CallVideo {
             Err(error) => {
                 let text = match error {
                     ShareError::Capture(error) => capture_text(&error),
-                    other => format!("Could not start the camera: {other}."),
+                    other => trf(
+                        "Could not start the camera: {}.",
+                        &[&tr(&other.to_string())],
+                    ),
                 };
                 self.fail(text);
             }
@@ -566,7 +578,7 @@ impl CallVideo {
         };
         let live = progress.capturing && self.negotiated;
         let detail = if progress.capturing && !self.negotiated {
-            "waiting for the call to accept H.264 video from fastcord".to_owned()
+            tr("waiting for the call to accept H.264 video from fastcord").to_owned()
         } else {
             detail
         };
@@ -819,7 +831,7 @@ impl std::fmt::Display for CameraChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.label)?;
         if self.missing {
-            f.write_str(" (not connected)")?;
+            f.write_str(tr(" (not connected)"))?;
         }
         Ok(())
     }
@@ -840,7 +852,7 @@ impl CameraList {
     pub fn choices(&self, saved: &crate::audio_devices::CameraSelection) -> Vec<CameraChoice> {
         let mut choices = vec![CameraChoice {
             id: None,
-            label: "First camera".to_owned(),
+            label: tr("First camera").to_owned(),
             missing: false,
         }];
         choices.extend(self.devices.iter().map(|device| CameraChoice {
@@ -854,7 +866,7 @@ impl CameraList {
             choices.push(CameraChoice {
                 id: Some(id.clone()),
                 label: if saved.label.is_empty() {
-                    "Saved camera".to_owned()
+                    tr("Saved camera").to_owned()
                 } else {
                     saved.label.clone()
                 },
@@ -878,7 +890,7 @@ impl CameraList {
 pub async fn list_cameras() -> Result<Vec<CameraDevice>, String> {
     tokio::task::spawn_blocking(fastcord_platform::capture::list_cameras)
         .await
-        .map_err(|_| "Camera listing stopped unexpectedly.".to_owned())?
+        .map_err(|_| tr("Camera listing stopped unexpectedly.").to_owned())?
         .map_err(|error| capture_text(&error))
 }
 

@@ -21,6 +21,7 @@ use iced::widget::{
 use iced::{Element, Length, Padding};
 
 use crate::changes::RowChange;
+use crate::i18n::{tr, trf, trn};
 use crate::drafts::{Draft, DraftStore};
 use crate::gateway::NavigationBridge;
 use crate::outbox::{MAX_OUTBOX, MAX_REPLY_AUTHOR_CHARS, OpId, OutboxItem, OutboxState, Reply};
@@ -146,6 +147,8 @@ pub enum Event {
     DismissDropped,
     /// Open or close one of the pickers beside the text.
     Toggle(Picker),
+    /// The "+" menu: attach, paste, poll, voice message.
+    Plus,
 }
 
 /// The pickers in the composer line, as in Discord: right of the text.
@@ -792,7 +795,7 @@ pub fn update(
         Event::DismissDropped => composer.dropped = 0,
         // The dialog and the pickers are opened by the window; files come
         // back as `attach`.
-        Event::Attach | Event::PasteImage | Event::Toggle(_) => {}
+        Event::Attach | Event::PasteImage | Event::Toggle(_) | Event::Plus => {}
         Event::Detach(index) => composer.detach(index),
         Event::KeepAttachment(index, kept) => composer.set_attachment_kept(index, kept),
         Event::Spoiler(index, spoiler) => composer.set_spoiler(index, spoiler),
@@ -877,8 +880,8 @@ fn typing_line(names: &[String]) -> Option<String> {
     match names {
         [] => None,
         [one] => Some(format!("{one} is typing…")),
-        [a, b] => Some(format!("{a} and {b} are typing…")),
-        _ => Some("Several people are typing…".to_owned()),
+        [a, b] => Some(trf("{} and {} are typing…", &[a, b])),
+        _ => Some(tr("Several people are typing…").to_owned()),
     }
 }
 
@@ -925,7 +928,7 @@ fn small_button(label: &'static str, event: Event) -> Element<'static, Event> {
         "Discard" => Icon::Delete,
         _ => Icon::Close,
     };
-    button(icons::labeled(kind, label, 12))
+    button(icons::labeled(kind, tr(label), 12))
         .on_press(event)
         .padding(Padding {
             top: 2.0,
@@ -947,11 +950,11 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
         .wrapping(text::Wrapping::WordOrGlyph);
     let mut content = column![].spacing(4);
     if !here {
-        content = content.push(text("In another channel").size(11).style(text::secondary));
+        content = content.push(text(tr("In another channel")).size(11).style(text::secondary));
     }
     if let Some(reply) = &item.reply {
         content = content.push(
-            text(format!("Replying to {}: {}", reply.author, reply.content))
+            text(trf("Replying to {}: {}", &[&reply.author, &reply.content]))
                 .size(11)
                 .width(Length::Fill)
                 .wrapping(text::Wrapping::WordOrGlyph)
@@ -960,10 +963,9 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
     }
     for file in &item.files {
         content = content.push(
-            text(format!(
+            text(trf(
                 "Attachment: {} ({})",
-                file.filename(),
-                crate::timeline::format_size(file.size())
+                &[&file.filename(), &crate::timeline::format_size(file.size())],
             ))
             .size(12)
             .style(text::secondary),
@@ -972,12 +974,14 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
     content = match item.state {
         OutboxState::Sending => {
             let status = match item.upload {
-                Some((sent, total)) if total > 0 => format!(
+                Some((sent, total)) if total > 0 => trf(
                     "Uploading {} of {}\u{2026}",
-                    crate::timeline::format_size(sent.min(total)),
-                    crate::timeline::format_size(total)
+                    &[
+                        &crate::timeline::format_size(sent.min(total)),
+                        &crate::timeline::format_size(total),
+                    ],
                 ),
-                _ => "Sending\u{2026}".to_owned(),
+                _ => tr("Sending\u{2026}").to_owned(),
             };
             let mut line = row![text(status).size(12).style(text::secondary)]
                 .spacing(8)
@@ -998,7 +1002,7 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
             content
                 .push(body)
                 .push(
-                    text(format!("Not sent. {reason}"))
+                    text(trf("Not sent. {}", &[&tr(reason)]))
                         .size(12)
                         .style(text::danger),
                 )
@@ -1013,8 +1017,9 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
             content
                 .push(body)
                 .push(
-                    text(format!(
-                        "Not confirmed. {reason} If it was, it appears in its channel by itself. A retry within a few minutes cannot post it twice: Discord returns the message it already has."
+                    text(trf(
+                        "Not confirmed. {} If it was, it appears in its channel by itself. A retry within a few minutes cannot post it twice.",
+                        &[&tr(reason)],
                     ))
                     .size(12)
                     .style(text::danger),
@@ -1032,7 +1037,11 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
 /// The unconfirmed-message strip, then the editor with its controls. The
 /// editor and Send are present only where the account may send; editing one
 /// of the user's messages brings the editor wherever the message is shown.
-pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, Event> {
+pub fn view<'a>(
+    composer: &'a Composer,
+    snapshot: &'a Snapshot,
+    place: &str,
+) -> Element<'a, Event> {
     let mut layout = column![].spacing(6);
     if !snapshot.outbox.is_empty() {
         let strip = column(snapshot.outbox.iter().map(|item| {
@@ -1043,17 +1052,15 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         layout = layout.push(container(scrollable(strip)).max_height(STRIP_HEIGHT));
     }
     if let Some(notice) = snapshot.notice {
-        layout = layout.push(text(notice).size(12).style(text::danger));
+        layout = layout.push(text(tr(notice)).size(12).style(text::danger));
     }
     if composer.dropped > 0 {
         layout = layout.push(
             row![
-                text(format!(
-                    "{} older unsent draft{} discarded to stay within the draft limit ({} conversations, {} KiB).",
-                    composer.dropped,
-                    if composer.dropped == 1 { " was" } else { "s were" },
-                    crate::drafts::MAX_DRAFTS,
-                    crate::drafts::MAX_DRAFT_TEXT_BYTES / 1024,
+                text(trn(
+                    u64::try_from(composer.dropped).unwrap_or(u64::MAX),
+                    "{} older unsent draft was discarded to stay within the draft limit.",
+                    "{} older unsent drafts were discarded to stay within the draft limit.",
                 ))
                 .size(12)
                 .style(text::danger)
@@ -1072,9 +1079,9 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
     if let Some(reply) = &composer.replying {
         let deleted = snapshot.deleted.contains(&reply.message);
         let label = if deleted {
-            "That message was deleted; choose another reply target.".to_owned()
+            tr("That message was deleted; choose another reply target.").to_owned()
         } else {
-            format!("Replying to {}: {}", reply.author, reply.content)
+            trf("Replying to {}: {}", &[&reply.author, &reply.content])
         };
         let mut summary = row![
             text(label)
@@ -1085,11 +1092,11 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
         .spacing(8)
         .align_y(iced::alignment::Vertical::Center);
         if deleted {
-            summary = summary.push(text("Deleted").size(12).style(text::danger));
+            summary = summary.push(text(tr("Deleted")).size(12).style(text::danger));
         } else if !editing {
             summary = summary.push(
                 checkbox(reply.mention_author)
-                    .label("Notify replied user")
+                    .label(tr("Mention the author"))
                     .on_toggle(Event::ReplyMention)
                     .size(14)
                     .text_size(12),
@@ -1101,15 +1108,15 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
     if !snapshot.can_send && !editing {
         // Without the editor's controls row, a refused action is said here.
         if let Some(notice) = composer.notice {
-            layout = layout.push(text(notice).size(12).style(text::secondary));
+            layout = layout.push(text(tr(notice)).size(12).style(text::secondary));
         }
         return layout.into();
     }
     if editing {
         layout = layout.push(
             row![
-                text("Editing your message").size(12),
-                text("Enter saves, Escape cancels.")
+                text(tr("Editing your message")).size(12),
+                text(tr("Enter saves, Escape cancels."))
                     .size(12)
                     .style(text::secondary),
                 space::horizontal(),
@@ -1127,9 +1134,9 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
     let editor = text_editor(&composer.content)
         .id(EDITOR_ID)
         .placeholder(if editing {
-            "Edited message (Enter to save, Escape to cancel)"
+            tr("Edited message (Enter to save, Escape to cancel)").to_owned()
         } else {
-            "Message (@silent sends without a ping)"
+            trf("Message {}", &[&place])
         })
         .on_action(|action| Event::Action(Act(action)))
         .key_binding(move |press| {
@@ -1175,7 +1182,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
                     .enumerate()
                     .map(|(index, attachment)| {
                         checkbox(attachment.kept)
-                            .label(format!("Keep {}", attachment.name))
+                            .label(trf("Keep {}", &[&attachment.name]))
                             .on_toggle(move |on| Event::KeepAttachment(index, on))
                             .size(14)
                             .text_size(12)
@@ -1199,7 +1206,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
                         .width(Length::Fill)
                         .wrapping(text::Wrapping::WordOrGlyph),
                         checkbox(file.spoiler())
-                            .label("Spoiler")
+                            .label(tr("Spoiler"))
                             .on_toggle(move |on| Event::Spoiler(index, on))
                             .size(14)
                             .text_size(12),
@@ -1207,7 +1214,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
                     ]
                     .spacing(8)
                     .align_y(iced::alignment::Vertical::Center),
-                    text_input("Alt text (optional)", file.description())
+                    text_input(tr("Alt text (optional)"), file.description())
                         .on_input(move |text| Event::Describe(index, text))
                         .size(12)
                         .padding(3),
@@ -1235,7 +1242,8 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
             .wrap(),
         );
     }
-    // One line like Discord's: attach and paste before the text, send after it.
+    // One line: "+" (attach, paste, poll, voice message), the text, the
+    // expressions window (emoji, GIF, stickers) and Send.
     let (label, icon, submittable) = if editing {
         ("Save", crate::icons::Icon::Check, composer.edit_ready())
     } else {
@@ -1248,56 +1256,30 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
     };
     let mut line = row![].spacing(4).align_y(iced::alignment::Vertical::Center);
     if !editing {
-        line = line
-            .push(crate::icons::tool(
-                crate::icons::Icon::Attach,
-                "Attach files",
-                Event::Attach,
-            ))
-            .push(crate::icons::tool(
-                crate::icons::Icon::Paste,
-                "Paste image",
-                Event::PasteImage,
-            ));
+        line = line.push(crate::icons::tool(
+            crate::icons::Icon::Plus,
+            tr("Attach, poll, voice message"),
+            Event::Plus,
+        ));
     }
     line = line.push(editor);
-    let can_send = snapshot.can_send;
-    for (picker, icon, tip, shown) in [
-        (
-            Picker::Gif,
-            crate::icons::Icon::Gif,
-            "GIF",
-            can_send && !editing,
-        ),
-        (
-            Picker::Sticker,
-            crate::icons::Icon::Sticker,
-            "Sticker",
-            can_send && !editing,
-        ),
-        (
-            Picker::Emoji,
+    if snapshot.can_send || editing {
+        line = line.push(crate::icons::tool(
             crate::icons::Icon::Emoji,
-            "Emoji",
-            can_send || editing,
-        ),
-        (
-            Picker::Poll,
-            crate::icons::Icon::Poll,
-            "Create poll",
-            can_send && !editing,
-        ),
-    ] {
-        if shown {
-            line = line.push(crate::icons::tool(icon, tip, Event::Toggle(picker)));
-        }
+            if editing {
+                tr("Emoji")
+            } else {
+                tr("Emoji, GIF and stickers")
+            },
+            Event::Toggle(Picker::Emoji),
+        ));
     }
     line = line.push(crate::icons::action(crate::icons::Action {
         icon,
         on_press: submittable.then_some(Event::Send),
         active: submittable,
         danger: false,
-        tip: label.to_owned(),
+        tip: tr(label).to_owned(),
         badge: 0,
     }));
     layout = layout.push(line);
@@ -1311,7 +1293,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
     if !editing && (composer.mass_mention || composer.everyone) {
         controls = controls.push(
             checkbox(composer.everyone)
-                .label("Allow @everyone and @here to notify")
+                .label(tr("Allow @everyone and @here to notify"))
                 .on_toggle(Event::Everyone)
                 .size(14)
                 .text_size(12),
@@ -1333,21 +1315,21 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot) -> Element<'a, E
 /// A short line about why Send is unavailable or what to watch, if any.
 fn length_note(composer: &Composer, outbox_len: usize) -> Option<String> {
     if let Some(notice) = composer.notice {
-        return Some(notice.to_owned());
+        return Some(tr(notice).to_owned());
     }
     if outbox_len >= MAX_OUTBOX && composer.editing.is_none() {
-        return Some("Retry or discard unsent messages first.".to_owned());
+        return Some(tr("Retry or discard unsent messages first.").to_owned());
     }
     if composer.trimmed_chars > MAX_CONTENT_CHARS {
-        return Some(format!(
-            "{} / {MAX_CONTENT_CHARS} characters: too long for Discord.",
-            composer.trimmed_chars
+        return Some(trf(
+            "{} / {} characters: too long for Discord.",
+            &[&composer.trimmed_chars, &MAX_CONTENT_CHARS],
         ));
     }
     (composer.trimmed_chars >= NOTE_FROM_CHARS).then(|| {
-        format!(
+        trf(
             "{} characters (Discord allows 2,000, or 4,000 with Nitro).",
-            composer.trimmed_chars
+            &[&composer.trimmed_chars],
         )
     })
 }

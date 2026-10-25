@@ -29,6 +29,7 @@ use iced::widget::{
 };
 use iced::{Element, Length};
 
+use crate::i18n::tr;
 use crate::style;
 
 pub const INPUT_ID: &str = "quick-switcher-input";
@@ -211,11 +212,11 @@ pub fn view<'a>(
             line = line.push(text(&entry.guild_name).size(12).color(style::MUTED));
         }
         if entry.kind == QuickKind::Voice {
-            line = line.push(text("opens chat").size(11).color(style::MUTED));
+            line = line.push(text(tr("opens chat")).size(11).color(style::MUTED));
         }
         line = line.push(space::horizontal());
         if has_draft(entry.channel) {
-            line = line.push(text("draft").size(11).color(style::YELLOW));
+            line = line.push(text(tr("draft")).size(11).color(style::YELLOW));
         }
         if entry.mentions > 0 {
             line = line.push(
@@ -236,7 +237,7 @@ pub fn view<'a>(
     }
     if entries.is_empty() {
         list = list.push(
-            text("No matching conversation.")
+            text(tr("No matching conversation."))
                 .size(13)
                 .color(style::MUTED),
         );
@@ -244,7 +245,7 @@ pub fn view<'a>(
     let card = container(
         column![
             text_input(
-                "Jump to a conversation, or paste a Discord link",
+                tr("Jump to a conversation, or paste a Discord link"),
                 &state.query
             )
             .id(INPUT_ID)
@@ -253,9 +254,11 @@ pub fn view<'a>(
             .size(15)
             .padding(8),
             scrollable(list).height(Length::Shrink),
-            text("Enter opens, Up/Down chooses, Escape closes. A pasted Discord link opens too.")
-                .size(11)
-                .color(style::MUTED),
+            text(tr(
+                "Enter opens, Up/Down chooses, Escape closes. A pasted Discord link opens too."
+            ))
+            .size(11)
+            .color(style::MUTED),
         ]
         .spacing(8),
     )
@@ -277,14 +280,17 @@ const HELP: &[(&str, &str)] = &[
 ];
 
 pub fn help_view<'a>() -> Element<'a, Event> {
-    let mut lines = column![text("Keyboard shortcuts").size(16)].spacing(6);
+    let mut lines = column![text(tr("Keyboard shortcuts")).size(16)].spacing(6);
     for (keys, what) in HELP {
-        lines = lines.push(row![text(*keys).size(13).width(190), text(*what).size(13)].spacing(8));
+        lines =
+            lines.push(row![text(*keys).size(13).width(190), text(tr(what)).size(13)].spacing(8));
     }
     lines = lines.push(
-        text("Ctrl is Cmd on macOS. Voice shortcuts are set in the audio settings.")
-            .size(11)
-            .color(style::MUTED),
+        text(tr(
+            "Ctrl is Cmd on macOS. Voice shortcuts are set in the audio settings.",
+        ))
+        .size(11)
+        .color(style::MUTED),
     );
     lines = lines.push(crate::icons::close(Some(Event::Close)));
     backdrop(

@@ -212,36 +212,44 @@ impl Ledger {
 /// A fixed, secret-free sentence for a request Discord did not accept.
 pub fn failure(error: RestError) -> &'static str {
     match error {
-        RestError::PermissionDenied => "Discord did not allow that. You may lack the permission.",
-        RestError::ResourceGone => "That message, command or application is no longer available.",
-        RestError::Http(status) if status.as_u16() == 400 => {
-            "Discord rejected the request. The control may be out of date."
+        RestError::PermissionDenied => {
+            crate::i18n::tr("Discord did not allow that. You may lack the permission.")
         }
-        RestError::Http(_) => "Discord rejected the request.",
+        RestError::ResourceGone => {
+            crate::i18n::tr("That message, command or application is no longer available.")
+        }
+        RestError::Http(status) if status.as_u16() == 400 => {
+            crate::i18n::tr("Discord rejected the request. The control may be out of date.")
+        }
+        RestError::Http(_) => crate::i18n::tr("Discord rejected the request."),
         RestError::InvalidRateLimit
         | RestError::RateLimited
         | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this. Try again shortly."
+            crate::i18n::tr("Discord is rate limiting this. Try again shortly.")
         }
         RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-            "Could not reach Discord; nothing was sent."
+            crate::i18n::tr("Could not reach Discord; nothing was sent.")
         }
         RestError::Retryable(_) | RestError::ResponseBodyTooLarge | RestError::InvalidJson => {
-            "Discord did not confirm the request; it may have been received. Check the conversation before trying again."
+            crate::i18n::tr(
+                "Discord did not confirm the request; it may have been received. Check the conversation before trying again.",
+            )
         }
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "The request could not be sent.",
+        RestError::WriteNotVerified(_) => crate::i18n::tr(fastcord_discord::WRITE_NOT_VERIFIED),
+        _ => crate::i18n::tr("The request could not be sent."),
     }
 }
 
 /// A fixed sentence for a typed option that cannot be sent.
 pub fn argument(error: ArgError) -> &'static str {
     match error {
-        ArgError::Missing => "A required option is empty.",
-        ArgError::NotAnInteger => "An option needs a whole number.",
-        ArgError::NotANumber => "An option needs a number.",
-        ArgError::NotYesOrNo => "An option needs yes or no.",
-        ArgError::NotAnId => "A user, channel or role option needs an ID or a mention.",
+        ArgError::Missing => crate::i18n::tr("A required option is empty."),
+        ArgError::NotAnInteger => crate::i18n::tr("An option needs a whole number."),
+        ArgError::NotANumber => crate::i18n::tr("An option needs a number."),
+        ArgError::NotYesOrNo => crate::i18n::tr("An option needs yes or no."),
+        ArgError::NotAnId => {
+            crate::i18n::tr("A user, channel or role option needs an ID or a mention.")
+        }
     }
 }
 

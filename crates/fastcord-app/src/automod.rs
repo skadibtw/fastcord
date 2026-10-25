@@ -15,6 +15,7 @@
 //! Deleting a rule needs an explicit Confirm. Exemptions come from the server's
 //! roles and channels in the reducer's `GuildAdmin` read model.
 
+use crate::i18n::{tr, trf, trn};
 use fastcord_discord::state::navigation::{AdminKind, GuildAdmin, NavigationSnapshot};
 use fastcord_discord::{
     AutoModAction, AutoModChange, AutoModFeed, AutoModRequestError, AutoModRule, CREATABLE,
@@ -95,7 +96,7 @@ pub enum Event {
 /// is passed through as it came.
 pub fn failure(error: AutoModRequestError) -> String {
     match error {
-        AutoModRequestError::Invalid(error) => error.to_string(),
+        AutoModRequestError::Invalid(error) => tr(&error.to_string()).to_owned(),
         AutoModRequestError::Rest(error) => crate::moderation::failure(error),
     }
 }
@@ -168,7 +169,7 @@ impl Panel {
                 self.remove(*id);
                 if self.editor.as_ref().is_some_and(|e| e.id == Some(*id)) {
                     self.editor = None;
-                    self.notice = Some("That rule was deleted.".to_owned());
+                    self.notice = Some(tr("That rule was deleted.").to_owned());
                 }
             }
         }
@@ -237,9 +238,9 @@ impl Editor {
         let mut refused = None;
         for entry in entries.into_iter().filter(|e| !e.is_empty()) {
             if entry.chars().count() > max_chars {
-                refused = Some(format!("An entry has at most {max_chars} characters."));
+                refused = Some(trf("An entry has at most {} characters.", &[&max_chars]));
             } else if held.len() >= max {
-                refused = Some(format!("At most {max} entries."));
+                refused = Some(trf("At most {} entries.", &[&max]));
             } else if !held.contains(&entry) {
                 held.push(entry);
             }
@@ -437,7 +438,7 @@ impl State {
                     return Task::none();
                 }
                 if !may_manage(admin, panel.guild) {
-                    panel.notice = Some(NEED.to_owned());
+                    panel.notice = Some(tr(NEED).to_owned());
                     return Task::none();
                 }
                 panel.busy = Some(Op::Delete(id));
@@ -474,7 +475,7 @@ impl State {
                     .id
                     .and_then(|id| panel.rules.iter().find(|r| r.id == id).cloned());
                 if editor.id.is_some() && original.is_none() {
-                    panel.notice = Some("That rule no longer exists.".to_owned());
+                    panel.notice = Some(tr("That rule no longer exists.").to_owned());
                     return Task::none();
                 }
                 return self.send(Op::Save, original, edited, admin, client);
@@ -492,7 +493,7 @@ impl State {
                         if op == Op::Save {
                             panel.editor = None;
                         }
-                        panel.notice = Some("Done.".to_owned());
+                        panel.notice = Some(tr("Done.").to_owned());
                         match rule {
                             Some(rule) => panel.upsert(rule),
                             // Discord accepted it but the answer was unreadable.
@@ -515,11 +516,11 @@ impl State {
                 match result {
                     Ok(()) => {
                         panel.remove(id);
-                        panel.notice = Some("Deleted.".to_owned());
+                        panel.notice = Some(tr("Deleted.").to_owned());
                     }
                     Err(RestError::ResourceGone) => {
                         panel.remove(id);
-                        panel.notice = Some("That rule was already gone.".to_owned());
+                        panel.notice = Some(tr("That rule was already gone.").to_owned());
                     }
                     Err(error) => panel.notice = Some(failure(AutoModRequestError::Rest(error))),
                 }
@@ -547,7 +548,7 @@ impl State {
             return Task::none();
         }
         if !may_manage(admin, panel.guild) {
-            panel.notice = Some(NEED.to_owned());
+            panel.notice = Some(tr(NEED).to_owned());
             return Task::none();
         }
         panel.busy = Some(op);
@@ -675,9 +676,9 @@ fn duration(seconds: u32) -> String {
     TIMEOUTS
         .iter()
         .find(|(s, _)| *s == seconds)
-        .map(|(_, name)| (*name).to_owned())
-        .or_else(|| (seconds == MAX_TIMEOUT_SECONDS).then(|| "4 weeks".to_owned()))
-        .unwrap_or_else(|| format!("{seconds} seconds"))
+        .map(|(_, name)| tr(name).to_owned())
+        .or_else(|| (seconds == MAX_TIMEOUT_SECONDS).then(|| tr("4 weeks").to_owned()))
+        .unwrap_or_else(|| trn(u64::from(seconds), "{} second", "{} seconds"))
 }
 
 fn channel_name(admin: Option<&GuildAdmin>, id: Snowflake) -> String {
@@ -698,16 +699,16 @@ fn actions_line(rule: &AutoModRule, admin: Option<&GuildAdmin>) -> String {
         .actions
         .iter()
         .map(|action| match action {
-            AutoModAction::BlockMessage { message: None } => "Block message".to_owned(),
+            AutoModAction::BlockMessage { message: None } => tr("Block message").to_owned(),
             AutoModAction::BlockMessage { message: Some(_) } => {
-                "Block message with a custom message".to_owned()
+                tr("Block message with a custom message").to_owned()
             }
             AutoModAction::Alert { channel } => {
-                format!("Send an alert to {}", channel_name(admin, *channel))
+                trf("Send an alert to {}", &[&channel_name(admin, *channel)])
             }
-            AutoModAction::Timeout { seconds } => format!("Time out for {}", duration(*seconds)),
-            AutoModAction::BlockInteraction => "Block member interaction".to_owned(),
-            AutoModAction::Other(_) => "Another action".to_owned(),
+            AutoModAction::Timeout { seconds } => trf("Time out for {}", &[&duration(*seconds)]),
+            AutoModAction::BlockInteraction => tr("Block member interaction").to_owned(),
+            AutoModAction::Other(_) => tr("Another action").to_owned(),
         })
         .collect();
     parts.join(", ")
@@ -715,30 +716,36 @@ fn actions_line(rule: &AutoModRule, admin: Option<&GuildAdmin>) -> String {
 
 /// What a rule matches, in one line.
 fn trigger_line(rule: &AutoModRule) -> String {
-    let kind = trigger_name(rule.trigger);
+    let kind = tr(&trigger_name(rule.trigger)).to_owned();
     match rule.trigger {
-        TRIGGER_KEYWORD | TRIGGER_PROFILE => format!(
-            "{kind}: {} keywords, {} patterns, {} allowed",
-            rule.keywords.len(),
-            rule.regex.len(),
-            rule.allow.len()
+        TRIGGER_KEYWORD | TRIGGER_PROFILE => trf(
+            "{}: {} keywords, {} patterns, {} allowed",
+            &[
+                &kind,
+                &rule.keywords.len(),
+                &rule.regex.len(),
+                &rule.allow.len(),
+            ],
         ),
         TRIGGER_PRESET => {
             let names: Vec<&str> = PRESETS
                 .iter()
                 .filter(|(id, _)| rule.presets.contains(id))
-                .map(|(_, name)| *name)
+                .map(|(_, name)| tr(name))
                 .collect();
             format!("{kind}: {}", names.join(", "))
         }
-        TRIGGER_MENTION => format!(
-            "{kind}: more than {} mentions{}",
-            rule.mention_limit,
-            if rule.raid_protection {
-                ", with raid protection"
-            } else {
-                ""
-            }
+        TRIGGER_MENTION => trf(
+            "{}: more than {} mentions{}",
+            &[
+                &kind,
+                &rule.mention_limit,
+                &if rule.raid_protection {
+                    tr(", with raid protection")
+                } else {
+                    ""
+                },
+            ],
         ),
         _ => kind,
     }
@@ -758,7 +765,7 @@ fn exemptions_line(rule: &AutoModRule, admin: Option<&GuildAdmin>) -> Option<Str
             .iter()
             .map(|id| channel_name(admin, *id)),
     );
-    Some(format!("Exempt: {}", parts.join(", ")))
+    Some(trf("Exempt: {}", &[&parts.join(", ")]))
 }
 
 fn rule_row<'a>(
@@ -778,11 +785,11 @@ fn rule_row<'a>(
     }
     let control: Element<'_, Event> = if panel.confirm == Some(rule.id) {
         row![
-            text("Delete this rule?").size(12).style(text::danger),
-            button(text("Confirm").size(12))
+            text(tr("Delete this rule?")).size(12).style(text::danger),
+            button(text(tr("Confirm")).size(12))
                 .on_press_maybe(idle.then_some(Event::ConfirmDelete))
                 .style(button::danger),
-            button(text("Cancel").size(12)).on_press(Event::CancelDelete),
+            button(text(tr("Cancel")).size(12)).on_press(Event::CancelDelete),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center)
@@ -790,10 +797,10 @@ fn rule_row<'a>(
     } else {
         row![
             checkbox(rule.enabled)
-                .label(if rule.enabled { "On" } else { "Off" })
+                .label(if rule.enabled { tr("On") } else { tr("Off") })
                 .on_toggle_maybe(idle.then_some(|_| Event::Toggle(rule.id))),
-            button(text("Edit").size(12)).on_press_maybe(idle.then_some(Event::Edit(rule.id))),
-            button(text("Delete").size(12))
+            button(text(tr("Edit")).size(12)).on_press_maybe(idle.then_some(Event::Edit(rule.id))),
+            button(text(tr("Delete")).size(12))
                 .on_press_maybe(idle.then_some(Event::AskDelete(rule.id))),
         ]
         .spacing(6)
@@ -826,17 +833,17 @@ fn entries<'a>(
         );
     }
     if held.len() > SHOWN_ENTRIES {
-        rows = rows.push(small(format!("and {} more", held.len() - SHOWN_ENTRIES)));
+        rows = rows.push(small(trf("and {} more", &[&(held.len() - SHOWN_ENTRIES)])));
     }
     column![
-        small(format!("{title} ({}/{max})", held.len())),
+        small(trf("{} ({}/{})", &[&tr(title), &held.len(), &max])),
         rows,
         row![
-            text_input("Add", typed)
+            text_input(tr("Add"), typed)
                 .on_input(move |v| Event::Input(field, v))
                 .on_submit(Event::Add(list))
                 .size(12),
-            button(text("Add").size(12)).on_press(Event::Add(list)),
+            button(text(tr("Add")).size(12)).on_press(Event::Add(list)),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),
@@ -855,26 +862,26 @@ fn editor_view<'a>(
     let mut form = column![
         row![
             text(if editor.id.is_some() {
-                "Edit rule"
+                tr("Edit rule")
             } else {
-                "New rule"
+                tr("New rule")
             })
             .size(13),
-            small(trigger_name(trigger)),
+            small(tr(&trigger_name(trigger))),
         ]
         .spacing(8),
-        text_input("Rule name", &draft.name)
+        text_input(tr("Rule name"), &draft.name)
             .on_input(|v| Event::Input(Field::Name, v))
             .size(13),
         checkbox(draft.enabled)
-            .label("Enabled")
+            .label(tr("Enabled"))
             .on_toggle(Event::Enabled),
     ]
     .spacing(6);
     if has_keywords(trigger) {
         form = form
             .push(entries(
-                "Keywords (* matches any text)",
+                tr("Keywords (* matches any text)"),
                 List::Keywords,
                 &draft.keywords,
                 MAX_KEYWORDS,
@@ -882,7 +889,7 @@ fn editor_view<'a>(
                 Field::Keyword,
             ))
             .push(entries(
-                "Regex patterns",
+                tr("Regex patterns"),
                 List::Regex,
                 &draft.regex,
                 MAX_REGEX,
@@ -892,7 +899,7 @@ fn editor_view<'a>(
     }
     if has_keywords(trigger) || trigger == TRIGGER_PRESET {
         form = form.push(entries(
-            "Allowed phrases",
+            tr("Allowed phrases"),
             List::Allow,
             &draft.allow,
             if trigger == TRIGGER_PRESET {
@@ -905,11 +912,11 @@ fn editor_view<'a>(
         ));
     }
     if trigger == TRIGGER_PRESET {
-        let mut lists = row![small("Word lists")].spacing(10);
+        let mut lists = row![small(tr("Word lists"))].spacing(10);
         for (id, name) in PRESETS {
             lists = lists.push(
                 checkbox(draft.presets.contains(&id))
-                    .label(name)
+                    .label(tr(name))
                     .on_toggle(move |on| Event::Preset(id, on)),
             );
         }
@@ -919,8 +926,9 @@ fn editor_view<'a>(
         form = form
             .push(
                 row![
-                    small(format!(
-                        "Mentions in one message (1 to {MAX_MENTION_LIMIT})"
+                    small(trf(
+                        "Mentions in one message (1 to {})",
+                        &[&MAX_MENTION_LIMIT]
                     )),
                     text_input("10", &editor.mention)
                         .on_input(|v| Event::Input(Field::Mention, v))
@@ -932,22 +940,27 @@ fn editor_view<'a>(
             )
             .push(
                 checkbox(draft.raid_protection)
-                    .label("Raid protection: also count mentions in a burst of new members")
+                    .label(tr(
+                        "Raid protection: also count mentions in a burst of new members",
+                    ))
                     .on_toggle(Event::Raid),
             );
     }
-    form = form.push(small("Actions"));
+    form = form.push(small(tr("Actions")));
     if !matches!(trigger, TRIGGER_PROFILE) {
         let block = editor.block();
         form = form.push(
             checkbox(block.is_some())
-                .label("Block the message")
+                .label(tr("Block the message"))
                 .on_toggle(Event::Block),
         );
         if let Some(message) = block {
             form = form.push(
                 text_input(
-                    &format!("Message shown to the author (up to {MAX_BLOCK_MESSAGE_CHARS})"),
+                    &trf(
+                        "Message shown to the author (up to {})",
+                        &[&MAX_BLOCK_MESSAGE_CHARS],
+                    ),
                     message.as_deref().unwrap_or(""),
                 )
                 .on_input(|v| Event::Input(Field::BlockMessage, v))
@@ -968,7 +981,7 @@ fn editor_view<'a>(
     form = form.push(
         row![
             checkbox(alert.is_some())
-                .label("Send an alert to")
+                .label(tr("Send an alert to"))
                 .on_toggle(Event::Alert),
             pick_list(
                 channels.clone(),
@@ -978,7 +991,7 @@ fn editor_view<'a>(
                 |item: Item<Snowflake>| Event::AlertChannel(Some(item.0)),
             )
             .text_size(12)
-            .placeholder("Choose a channel"),
+            .placeholder(tr("Choose a channel")),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
@@ -986,9 +999,9 @@ fn editor_view<'a>(
     if matches!(trigger, TRIGGER_KEYWORD | TRIGGER_MENTION) {
         let mut options: Vec<Item<u32>> = TIMEOUTS
             .iter()
-            .map(|(s, name)| Item(*s, (*name).to_owned()))
+            .map(|(s, name)| Item(*s, tr(name).to_owned()))
             .collect();
-        options.push(Item(MAX_TIMEOUT_SECONDS, "4 weeks".to_owned()));
+        options.push(Item(MAX_TIMEOUT_SECONDS, tr("4 weeks").to_owned()));
         if let Some(current) = editor
             .timeout()
             .filter(|c| options.iter().all(|o| o.0 != *c))
@@ -999,7 +1012,7 @@ fn editor_view<'a>(
         form = form.push(
             row![
                 checkbox(current.is_some())
-                    .label("Time the member out for")
+                    .label(tr("Time the member out for"))
                     .on_toggle(|on| Event::Timeout(on.then_some(60))),
                 pick_list(
                     options,
@@ -1036,24 +1049,28 @@ fn editor_view<'a>(
         )
         .spacing(2);
         form = form
-            .push(small(format!(
+            .push(small(trf(
                 "Exempt roles ({}/{})",
-                draft.exempt_roles.len(),
-                fastcord_discord::MAX_EXEMPT_ROLES
+                &[
+                    &draft.exempt_roles.len(),
+                    &fastcord_discord::MAX_EXEMPT_ROLES,
+                ],
             )))
             .push(scrollable(roles).height(Length::Fixed(90.0)))
-            .push(small(format!(
+            .push(small(trf(
                 "Exempt channels ({}/{})",
-                draft.exempt_channels.len(),
-                fastcord_discord::MAX_EXEMPT_CHANNELS
+                &[
+                    &draft.exempt_channels.len(),
+                    &fastcord_discord::MAX_EXEMPT_CHANNELS,
+                ],
             )))
             .push(scrollable(chans).height(Length::Fixed(90.0)));
     }
     form.push(
         row![
-            button(text("Save rule").size(13))
+            button(text(tr("Save rule")).size(13))
                 .on_press_maybe(panel.busy.is_none().then_some(Event::Save)),
-            button(text("Cancel").size(13))
+            button(text(tr("Cancel")).size(13))
                 .on_press_maybe(panel.busy.is_none().then_some(Event::CancelEdit)),
         ]
         .spacing(8),
@@ -1069,19 +1086,22 @@ pub fn view<'a>(
     let admin = navigation.admin.as_ref().filter(|a| a.id == panel.guild);
     let can = may_manage(admin, panel.guild);
     let idle = panel.busy.is_none() && !panel.loading;
-    let mut news = row![small("New rule")]
+    let mut news = row![small(tr("New rule"))]
         .spacing(6)
         .align_y(iced::Alignment::Center);
     for trigger in CREATABLE {
-        news = news.push(button(text(trigger_name(trigger)).size(12)).on_press_maybe(
-            (can && idle && panel.loaded && panel.editor.is_none()).then_some(Event::New(trigger)),
-        ));
+        news = news.push(
+            button(text(tr(&trigger_name(trigger)).to_owned()).size(12)).on_press_maybe(
+                (can && idle && panel.loaded && panel.editor.is_none())
+                    .then_some(Event::New(trigger)),
+            ),
+        );
     }
     let mut view = column![
         row![
             text("AutoMod").size(14),
             space::horizontal(),
-            button(text("Reload").size(13)).on_press_maybe(idle.then_some(Event::Reload)),
+            button(text(tr("Reload")).size(13)).on_press_maybe(idle.then_some(Event::Reload)),
             crate::icons::close(Some(Event::Close)),
         ]
         .spacing(6)
@@ -1090,10 +1110,10 @@ pub fn view<'a>(
     ]
     .spacing(6);
     if !can {
-        view = view.push(small(NEED));
+        view = view.push(small(tr(NEED)));
     }
     if panel.loaded && panel.rules.is_empty() {
-        view = view.push(small("No AutoMod rules."));
+        view = view.push(small(tr("No AutoMod rules.")));
     }
     if let Some(editor) = &panel.editor {
         view = view.push(editor_view(panel, editor, admin));
@@ -1102,10 +1122,10 @@ pub fn view<'a>(
         view = view.push(scrollable(rows).height(Length::Shrink));
     }
     if panel.loading {
-        view = view.push(small("Loading\u{2026}"));
+        view = view.push(small(tr("Loading\u{2026}")));
     }
     if panel.busy.is_some() {
-        view = view.push(small("Waiting for Discord\u{2026}"));
+        view = view.push(small(tr("Waiting for Discord\u{2026}")));
     }
     for line in [&panel.error, &panel.notice].into_iter().flatten() {
         view = view.push(text(line.clone()).size(12));

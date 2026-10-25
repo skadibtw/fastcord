@@ -20,6 +20,7 @@ use fastcord_model::{Permissions, Snowflake};
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 
+use crate::i18n::tr;
 use crate::timeline::{self, Publish};
 
 /// What the account may publish in `channel`, from the reducer's selection.
@@ -97,12 +98,12 @@ const SENT: &str = "Sent. The message shows Published when Discord confirms.";
 
 pub(crate) fn describe(error: RestError, forbidden: &str, gone: &str) -> String {
     match error {
-        RestError::PermissionDenied => forbidden.to_owned(),
-        RestError::Refused(r) if r.status.as_u16() == 403 => forbidden.to_owned(),
-        RestError::ResourceGone => gone.to_owned(),
-        RestError::Refused(r) if r.status.as_u16() == 404 => gone.to_owned(),
+        RestError::PermissionDenied => tr(forbidden).to_owned(),
+        RestError::Refused(r) if r.status.as_u16() == 403 => tr(forbidden).to_owned(),
+        RestError::ResourceGone => tr(gone).to_owned(),
+        RestError::Refused(r) if r.status.as_u16() == 404 => tr(gone).to_owned(),
         RestError::Retryable(_) => {
-            "Discord did not confirm. It may have been applied; check before trying again."
+            tr("Discord did not confirm. It may have been applied; check before trying again.")
                 .to_owned()
         }
         other => crate::friends::failure(other),
@@ -122,13 +123,13 @@ fn publish_block(
         .iter()
         .find(|r| snapshot.channel_id == Some(channel) && r.message.id == message)
     else {
-        return Some("That message is no longer loaded.");
+        return Some(tr("That message is no longer loaded."));
     };
     match right {
-        Publish::No => Some("You cannot publish in this channel."),
-        Publish::Own if !row.own => Some("You can publish only your own messages here."),
-        _ if row.message.kind != 0 => Some("Only ordinary messages can be published."),
-        _ if row.message.is_crossposted() => Some("It is already published."),
+        Publish::No => Some(tr("You cannot publish in this channel.")),
+        Publish::Own if !row.own => Some(tr("You can publish only your own messages here.")),
+        _ if row.message.kind != 0 => Some(tr("Only ordinary messages can be published.")),
+        _ if row.message.is_crossposted() => Some(tr("It is already published.")),
         _ => None,
     }
 }
@@ -205,7 +206,7 @@ impl State {
             Event::Published(s, result) if s == serial => {
                 self.busy = None;
                 self.notice = Some(match result {
-                    Ok(()) => SENT.to_owned(),
+                    Ok(()) => tr(SENT).to_owned(),
                     Err(error) => describe(
                         error,
                         "Discord refused: you cannot publish here, or this message cannot be published.",
@@ -218,7 +219,7 @@ impl State {
                 match result {
                     Ok(()) => {
                         self.panel = None;
-                        self.notice = Some("Sent. It shows under Followed announcements in that channel's settings when Discord confirms.".to_owned());
+                        self.notice = Some(tr("Sent. It shows under Followed announcements in that channel's settings when Discord confirms.").to_owned());
                     }
                     Err(error) => {
                         self.notice = Some(describe(
@@ -263,9 +264,9 @@ impl State {
                         }
                         self.notice = Some(
                             if gone {
-                                "It was already removed."
+                                tr("It was already removed.")
                             } else {
-                                "Unfollowed."
+                                tr("Unfollowed.")
                             }
                             .to_owned(),
                         );
@@ -294,7 +295,7 @@ impl State {
             }
             Event::Close => {}
             _ if self.busy.is_some() => {
-                self.notice = Some("Wait for the previous request to finish.".to_owned());
+                self.notice = Some(tr("Wait for the previous request to finish.").to_owned());
             }
             Event::AskPublish(channel, message) => {
                 match publish_block(navigation, snapshot, channel, message) {
@@ -355,7 +356,8 @@ impl State {
                 });
                 if !offered {
                     self.notice = Some(
-                        "You can no longer follow into that channel; choose another.".to_owned(),
+                        tr("You can no longer follow into that channel; choose another.")
+                            .to_owned(),
                     );
                     return Task::none();
                 }
@@ -366,7 +368,7 @@ impl State {
             Event::OpenFollowers(guild, channel) => {
                 if !can_manage_webhooks(navigation, guild, channel) {
                     self.notice =
-                        Some("You need Manage Webhooks in a text channel for this.".to_owned());
+                        Some(tr("You need Manage Webhooks in a text channel for this.").to_owned());
                     return Task::none();
                 }
                 self.panel = Some(Panel::Followers {
@@ -400,7 +402,7 @@ impl State {
                 };
                 let webhook = *webhook;
                 if !can_manage_webhooks(navigation, *guild, *channel) {
-                    self.notice = Some("You need Manage Webhooks in this channel.".to_owned());
+                    self.notice = Some(tr("You need Manage Webhooks in this channel.").to_owned());
                     return Task::none();
                 }
                 return self.start(Busy::Remove, move || async move {
@@ -442,9 +444,9 @@ pub fn view<'a>(
     }
     let idle = state.busy.is_none();
     let title = match &state.panel {
-        Some(Panel::Follow { .. }) => "Follow this channel",
-        Some(Panel::Followers { .. }) => "Followed announcements",
-        None => "Announcements",
+        Some(Panel::Follow { .. }) => tr("Follow this channel"),
+        Some(Panel::Followers { .. }) => tr("Followed announcements"),
+        None => tr("Announcements"),
     };
     let mut panel = column![
         row![
@@ -462,13 +464,13 @@ pub fn view<'a>(
                 .as_ref()
                 .map_or(&[][..], |f| &f.targets[..]);
             panel = panel.push(
-                text("Messages published there appear in the text channel you pick. You need Manage Webhooks in it.")
+                text(tr("Messages published there appear in the text channel you pick. You need Manage Webhooks in it."))
                     .size(12)
                     .style(text::secondary),
             );
             if targets.is_empty() {
                 panel = panel.push(
-                    text("No text channel where you have Manage Webhooks.")
+                    text(tr("No text channel where you have Manage Webhooks."))
                         .size(12)
                         .style(text::secondary),
                 );
@@ -492,17 +494,17 @@ pub fn view<'a>(
             panel = panel
                 .push(scrollable(column(list).spacing(2)).height(Length::Fixed(180.0)))
                 .push(
-                    button(text("Follow").size(13))
+                    button(text(tr("Follow")).size(13))
                         .on_press_maybe((idle && picked.is_some()).then_some(Event::Follow)),
                 );
         }
         Some(Panel::Followers { list, confirm, .. }) => match list {
             None => {
-                panel = panel.push(text("Loading...").size(12).style(text::secondary));
+                panel = panel.push(text(tr("Loading...")).size(12).style(text::secondary));
             }
             Some(list) if list.is_empty() => {
                 panel = panel.push(
-                    text("This channel follows no announcement channel.")
+                    text(tr("This channel follows no announcement channel."))
                         .size(12)
                         .style(text::secondary),
                 );
@@ -514,16 +516,16 @@ pub fn view<'a>(
                         .align_y(iced::Alignment::Center);
                     if *confirm == Some(follower.id) {
                         line = line
-                            .push(text("Stop following?").size(12).style(text::danger))
+                            .push(text(tr("Stop following?")).size(12).style(text::danger))
                             .push(
-                                button(text("Unfollow").size(13))
+                                button(text(tr("Unfollow")).size(13))
                                     .style(button::danger)
                                     .on_press_maybe(idle.then_some(Event::ConfirmRemove)),
                             )
-                            .push(button(text("Cancel").size(13)).on_press(Event::Cancel));
+                            .push(button(text(tr("Cancel")).size(13)).on_press(Event::Cancel));
                     } else {
                         line = line.push(
-                            button(text("Unfollow").size(13))
+                            button(text(tr("Unfollow")).size(13))
                                 .on_press_maybe(idle.then_some(Event::AskRemove(follower.id))),
                         );
                     }

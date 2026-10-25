@@ -5,12 +5,13 @@
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot, Occupant, StageSeat};
 use iced::font::Weight;
 use iced::widget::{
-    button, column, container, image, mouse_area, row, space, stack, text, text_input, tooltip,
+    button, column, container, image, mouse_area, row, space, stack, text, tooltip,
 };
 use iced::{Element, Font, Length, Padding, alignment};
 use std::collections::HashMap;
 
 use crate::Message;
+use crate::i18n::{tr, trf, trn};
 use crate::avatars::{self, AvatarKey};
 use crate::composer::{self, Composer};
 use crate::icons::{self, Icon};
@@ -24,7 +25,7 @@ const BOLD: Font = Font {
 };
 /// Height of one server icon row in the rail.
 pub const RAIL_ROW: f32 = 56.0;
-const RAIL_WIDTH: f32 = 72.0;
+pub(crate) const RAIL_WIDTH: f32 = 72.0;
 pub(crate) const SIDEBAR_WIDTH: f32 = 240.0;
 
 /// Native offline smoke check of the real sidebar and read-only Alerts pane.
@@ -37,10 +38,6 @@ pub fn alerts_preview() -> iced::Result {
     fn view(state: &Preview) -> Element<'_, Message> {
         let sidebar = sidebar(
             &state.navigation,
-            PrivateConversation {
-                recipients: "",
-                notice: None,
-            },
             false,
             space::vertical().into(),
             &state.avatars,
@@ -94,11 +91,6 @@ pub fn alerts_preview() -> iced::Result {
     .run()
 }
 
-pub struct PrivateConversation<'a> {
-    pub recipients: &'a str,
-    pub notice: Option<&'a str>,
-}
-
 /// What the screen shows around the conversation.
 pub struct Chrome<'a> {
     /// Direct messages instead of a server's channels in the sidebar.
@@ -111,10 +103,13 @@ pub struct Chrome<'a> {
     pub speaking: Vec<fastcord_model::Snowflake>,
     /// The Friends screen, which replaces the conversation in direct messages.
     pub friends: Option<Element<'a, Message>>,
-    /// The unified inbox, which replaces the conversation while open.
+    /// A server's or conversation's notification settings, which replace
+    /// the conversation while open.
     pub inbox: Option<Element<'a, Message>>,
     /// The private call this account is connected to, if any.
     pub voice_call: Option<fastcord_model::Snowflake>,
+    /// The window is wide enough for every header tool.
+    pub wide: bool,
     /// The post list of the open forum, when the open channel is one.
     pub forum: Option<Element<'a, Message>>,
 }
@@ -125,7 +120,6 @@ pub fn view<'a>(
     history: &'a timeline::Snapshot,
     composer: &'a Composer,
     interaction: timeline::Interaction,
-    private: PrivateConversation<'a>,
     attachments: timeline::Attachments<'a>,
     chrome: Chrome<'a>,
 ) -> Element<'a, Message> {
@@ -138,11 +132,11 @@ pub fn view<'a>(
         inbox,
         voice_call,
         forum,
+        wide,
     } = chrome;
     let rail = rail(snapshot, directs, inbox.is_some(), attachments.avatars);
     let sidebar = sidebar(
         snapshot,
-        private,
         directs,
         footer,
         attachments.avatars,
@@ -160,6 +154,7 @@ pub fn view<'a>(
             banner,
             voice_call,
             forum,
+            wide,
         ),
     };
     row![rail, sidebar, main].height(Length::Fill).into()
@@ -168,9 +163,9 @@ pub fn view<'a>(
 /// The rail button's label: the unread conversations and mentions it holds.
 fn inbox_label(inbox: &fastcord_discord::state::navigation::Inbox) -> String {
     match (inbox.total, inbox.mentions) {
-        (0, _) => "Inbox".to_owned(),
-        (total, 0) => format!("Inbox\n{total}"),
-        (total, mentions) => format!("Inbox\n{total} @{mentions}"),
+        (0, _) => tr("Inbox").to_owned(),
+        (total, 0) => trf("Inbox: {} unread", &[&total]),
+        (total, mentions) => trf("Inbox: {} unread, {} mentions", &[&total, &mentions]),
     }
 }
 
@@ -376,7 +371,7 @@ fn rail<'a>(
         column![
             rail_tool(
                 Icon::Brand,
-                "Direct Messages".to_owned(),
+                tr("Direct Messages").to_owned(),
                 directs,
                 Message::ShowDirects(true),
                 None,
@@ -406,14 +401,14 @@ fn rail<'a>(
             // As in Discord, adding and finding servers close the list.
             rail_tool(
                 Icon::Plus,
-                "Add a server".to_owned(),
+                tr("Add a server").to_owned(),
                 false,
                 Message::GuildAdmin(crate::guild_admin::Event::NewServer),
                 None,
             ),
             rail_tool(
                 Icon::Discover,
-                "Discover servers".to_owned(),
+                tr("Discover servers").to_owned(),
                 false,
                 Message::Discover(crate::discover::Event::Toggle),
                 None,
@@ -468,7 +463,7 @@ fn sidebar_row<'a>(
         .style(style::row_button(selected, unread));
     // A voice or Stage row: the row joins the call, this opens its text chat.
     let content: Element<'a, Message> = match chat {
-        Some(open) => row![main, icons::tool(Icon::Chat, "Open channel chat", open),]
+        Some(open) => row![main, icons::tool(Icon::Chat, tr("Open channel chat"), open),]
             .spacing(4)
             .into(),
         None => main.into(),
@@ -495,9 +490,9 @@ pub(crate) fn occupant_row<'a>(
             .style(text::secondary)
             .into(),
         Occupant::Activity(name) => text(if name.is_empty() {
-            "ACTIVITY".to_owned()
+            tr("ACTIVITY").to_owned()
         } else {
-            format!("ACTIVITY: {name}")
+            trf("ACTIVITY: {}", &[name])
         })
         .size(10)
         .font(BOLD)
@@ -541,14 +536,14 @@ pub(crate) fn occupant_row<'a>(
             .align_y(alignment::Vertical::Center);
             if *seat == Some(StageSeat::Hand) {
                 line = line.push(
-                    container(text("HAND").size(9).font(BOLD))
+                    container(text(tr("HAND")).size(9).font(BOLD))
                         .padding([1, 4])
                         .style(style::live_badge),
                 );
             }
             if *streaming {
                 line = line.push(
-                    container(text("LIVE").size(9).font(BOLD))
+                    container(text(tr("LIVE")).size(9).font(BOLD))
                         .padding([1, 4])
                         .style(style::live_badge),
                 );
@@ -593,68 +588,65 @@ pub(crate) fn occupant_row<'a>(
 
 fn sidebar<'a>(
     snapshot: &'a NavigationSnapshot,
-    private: PrivateConversation<'a>,
     directs: bool,
     footer: Element<'a, Message>,
     avatar_views: &'a HashMap<AvatarKey, image::Handle>,
     speaking: Vec<fastcord_model::Snowflake>,
 ) -> Element<'a, Message> {
-    let PrivateConversation {
-        recipients,
-        notice: private_notice,
-    } = private;
-    let title = if directs {
-        "Direct Messages".to_owned()
-    } else if snapshot.selected_guild_name.is_empty() {
-        "fastcord".to_owned()
-    } else {
-        snapshot.selected_guild_name.clone()
+    let title = |title: String| {
+        container(
+            text(title)
+                .size(15)
+                .font(BOLD)
+                .wrapping(text::Wrapping::None)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .clip(true)
     };
-    let can_report = !directs && snapshot.selected_guild.is_some();
-    let header = container(
-        row![
-            container(
-                text(title)
-                    .size(15)
-                    .font(BOLD)
-                    .wrapping(text::Wrapping::None)
-                    .width(Length::Fill),
-            )
-            .width(Length::Fill)
-            .clip(true),
-            icons::action(icons::Action {
-                icon: Icon::Bell,
-                tip: "Alerts".to_owned(),
-                on_press: (directs || snapshot.selected_guild.is_some()).then_some(
-                    Message::NotifySettings(crate::notify_settings::Event::Toggle),
-                ),
-                active: false,
-                danger: false,
-                badge: 0,
-            }),
-            icons::action(icons::Action {
-                icon: Icon::Report,
-                tip: "Report server".to_owned(),
-                on_press: can_report.then_some(Message::Report(crate::report::Event::OpenServer)),
-                active: false,
-                danger: false,
-                badge: 0,
-            }),
+    // The server's name opens its menu (settings, events, alerts, report,
+    // leave); direct messages offer a new conversation instead.
+    let line: Element<'a, Message> = match snapshot.selected_guild.filter(|_| !directs) {
+        Some(guild) => button(
+            row![
+                title(snapshot.selected_guild_name.clone()),
+                icons::sized(Icon::ChevronDown, style::TEXT, 16.0),
+            ]
+            .spacing(6)
+            .align_y(alignment::Vertical::Center),
+        )
+        .on_press(Message::OpenMenu(Some(crate::Menu::Server(guild))))
+        .width(Length::Fill)
+        .padding([6, 8])
+        .style(style::row_button(false, false))
+        .into(),
+        None if directs => row![
+            container(title(tr("Direct Messages").to_owned())).padding([6, 8]),
+            icons::tool(
+                Icon::Plus,
+                tr("New message"),
+                Message::NewDm(crate::new_dm::Event::Open)
+            ),
         ]
-        .spacing(6)
-        .align_y(alignment::Vertical::Center),
-    )
-    .padding([13, 16])
-    .width(Length::Fill)
-    .clip(true)
-    .style(|_| container::Style {
-        border: iced::Border {
-            color: style::RAIL,
-            width: 1.0,
-            ..iced::Border::default()
-        },
-        ..container::Style::default()
-    });
+        .spacing(4)
+        .align_y(alignment::Vertical::Center)
+        .into(),
+        None => container(title("fastcord".to_owned())).padding([6, 8]).into(),
+    };
+    let header = container(line)
+        .padding([7, 8])
+        .height(49)
+        .width(Length::Fill)
+        .align_y(alignment::Vertical::Center)
+        .clip(true)
+        .style(|_| container::Style {
+            border: iced::Border {
+                color: style::RAIL,
+                width: 1.0,
+                ..iced::Border::default()
+            },
+            ..container::Style::default()
+        });
     let list: Element<'a, Message> = if directs {
         let rows = snapshot.private_channels.rows.iter().map(|channel| {
             sidebar_row(
@@ -675,29 +667,37 @@ fn sidebar<'a>(
                 None,
             )
         });
+        let requests = u32::try_from(snapshot.requests.total).unwrap_or(u32::MAX);
         column![
-            sidebar_row(
+            container(sidebar_row(
                 Icon::Friends,
-                "Friends".to_owned(),
+                tr("Friends").to_owned(),
                 false,
                 false,
                 0,
                 Some(Message::Friends(crate::friends::Event::Open)),
                 None,
                 None,
+            ))
+            .padding(Padding::new(0.0).top(8.0)),
+            // Incoming conversations belong with the conversations.
+            sidebar_row(
+                Icon::Inbox,
+                tr("Message requests").to_owned(),
+                false,
+                requests > 0,
+                requests,
+                Some(Message::ShowRequests),
+                None,
+                None,
             ),
-            column![
-                text_input("Recipient IDs, comma separated", recipients)
-                    .on_input(Message::PrivateRecipients)
-                    .on_submit(Message::OpenPrivate)
-                    .size(13)
-                    .padding(6),
-                text(private_notice.unwrap_or("Enter 1–9 IDs to start a conversation."))
+            container(
+                text(tr("DIRECT MESSAGES"))
                     .size(11)
-                    .style(text::secondary),
-            ]
-            .spacing(4)
-            .padding([8, 10]),
+                    .font(BOLD)
+                    .style(text::secondary)
+            )
+            .padding(Padding::new(0.0).left(16.0).top(14.0).bottom(4.0)),
             virtual_list::view(
                 "private-list",
                 snapshot.private_channels.offset,
@@ -754,9 +754,9 @@ fn sidebar<'a>(
                 "{}{}",
                 channel.name,
                 if channel.kind == ChannelKind::Voice && !channel.permissions.connect {
-                    " (no access)"
+                    tr(" (no access)")
                 } else if channel.thread.is_some_and(|t| t.archived) {
-                    " (archived)"
+                    tr(" (archived)")
                 } else {
                     ""
                 }
@@ -803,82 +803,78 @@ fn sidebar<'a>(
         .into()
 }
 
-/// The strip over the conversation: its name and what the account can do there.
-fn header<'a>(
-    title: String,
-    note: &'static str,
-    pins: bool,
+/// What the header shows besides the name: the call button, the group
+/// members, search and pins (when the history can be read), and the `⋯` menu
+/// with the rarer actions of the conversation.
+#[derive(Default)]
+struct Tools {
     call: Option<(&'static str, Message)>,
-) -> Element<'a, Message> {
-    header_with(title, note, pins, call, Vec::new())
+    members: Option<Message>,
+    read: bool,
+    /// A main action shown with its name (a forum's New post).
+    primary: Option<(&'static str, Message)>,
 }
 
-/// The glyph of a header tool; its label becomes the tooltip.
-fn tool_icon(label: &str) -> Icon {
-    match label {
-        "Posts" => Icon::Forum,
-        "Leave" => Icon::Exit,
-        "Join" | "New post" => Icon::Plus,
-        "Archive" | "Unarchive" => Icon::Folder,
-        "Lock" => Icon::Lock,
-        "Unlock" => Icon::Unlock,
-        "Threads" => Icon::Thread,
-        "Invite" => Icon::Invite,
-        "Follow" => Icon::Announcement,
-        "Edit channel" => Icon::Settings,
-        "Events" => Icon::Calendar,
-        "Guide" => Icon::Info,
-        "Channels & Roles" => Icon::Grid,
-        "Select messages" => Icon::Check,
-        "Members" => Icon::Group,
-        "Conversation" => Icon::Profile,
-        _ => Icon::More,
-    }
-}
-
-/// A conversation header: title, note, then compact icon tools with
-/// tooltips (so a narrow window never pushes any of them out of reach),
-/// extra ones (thread controls) before the usual ones. `pins` is whether the
-/// conversation's history can be read: it also brings the search tool. The
-/// emoji, GIF, sticker and poll tools sit in the composer line.
-fn header_with<'a>(
-    title: String,
-    note: &'static str,
-    pins: bool,
-    call: Option<(&'static str, Message)>,
-    tools: Vec<(&'static str, Message)>,
-) -> Element<'a, Message> {
+/// The strip over the conversation: its name, a short state note and its
+/// tools. The name keeps the room it needs; the note is clipped first.
+fn header<'a>(title: String, note: &'static str, tools: Tools, wide: bool) -> Element<'a, Message> {
     let mut line = row![
-        text(title).size(16).font(BOLD),
-        text(note).size(12).style(text::secondary),
-        space::horizontal(),
+        container(
+            row![
+                text(title).size(16).font(BOLD).wrapping(text::Wrapping::None),
+                text(tr(note))
+                    .size(12)
+                    .style(text::secondary)
+                    .wrapping(text::Wrapping::None),
+            ]
+            .spacing(12)
+            .align_y(alignment::Vertical::Center)
+        )
+        .width(Length::Fill)
+        .clip(true),
     ]
-    .spacing(12)
+    .spacing(4)
     .align_y(alignment::Vertical::Center);
-    if let Some((label, message)) = call {
+    if let Some((label, message)) = tools.call {
         line = line.push(
-            button(icons::labeled(Icon::Call, label, 13))
+            button(icons::labeled(Icon::Call, tr(label), 13))
                 .on_press(message)
                 .style(style::action_button(false)),
         );
     }
-    for (label, intent) in tools {
-        line = line.push(icons::tool(tool_icon(label), label, intent));
+    if let Some((label, message)) = tools.primary {
+        line = line.push(
+            button(icons::labeled(Icon::Plus, tr(label), 13))
+                .on_press(message)
+                .style(style::action_button(false)),
+        );
     }
-    if pins {
+    if let Some(members) = tools.members {
+        line = line.push(icons::tool(Icon::Group, tr("Members"), members));
+    }
+    if tools.read {
         line = line.push(icons::tool(
             Icon::Search,
-            "Search messages",
+            tr("Search messages"),
             Message::Search(crate::search::Event::Toggle),
         ));
-        line = line.push(icons::tool(
-            Icon::Pin,
-            "Pinned messages",
-            Message::Pins(crate::pins::Event::Toggle),
-        ));
+        if wide {
+            line = line.push(icons::tool(
+                Icon::Pin,
+                tr("Pinned messages"),
+                Message::Pins(crate::pins::Event::Toggle),
+            ));
+        }
     }
+    line = line.push(icons::tool(
+        Icon::More,
+        tr("More"),
+        Message::OpenMenu(Some(crate::Menu::Conversation)),
+    ));
     container(line)
-        .padding([10, 16])
+        .padding([0, 16])
+        .height(49)
+        .align_y(alignment::Vertical::Center)
         .width(Length::Fill)
         .style(|_| container::Style {
             border: iced::Border {
@@ -889,6 +885,153 @@ fn header_with<'a>(
             ..container::Style::default()
         })
         .into()
+}
+
+/// The `⋯` menu of the open conversation: English labels (translated where
+/// drawn), their glyphs and what they do. Pins are here when the window is
+/// too narrow to show them in the header.
+pub fn conversation_menu(
+    snapshot: &NavigationSnapshot,
+    directs: bool,
+    wide: bool,
+) -> Vec<(&'static str, Icon, Message)> {
+    let mut tools = Vec::new();
+    let mut read = false;
+    if directs {
+        if let Some(selection) = &snapshot.private_selection {
+            read = true;
+            tools.push((
+                if selection.group {
+                    "Group settings"
+                } else {
+                    "Conversation details"
+                },
+                Icon::Group,
+                Message::Group(crate::group_dm::Event::Toggle),
+            ));
+        }
+    } else if let Some(selection) = &snapshot.selection {
+        let permissions = selection.permissions;
+        read = permissions.read_history && selection.kind != ChannelKind::Forum;
+        if let Some(state) = selection.thread {
+            if state.forum_post {
+                tools.push((
+                    "All posts",
+                    Icon::Forum,
+                    Message::SelectChannel(selection.guild_id, state.parent_id),
+                ));
+            }
+            tools.push(if state.joined {
+                (
+                    "Leave thread",
+                    Icon::Exit,
+                    Message::Threads(crate::threads::Event::Leave(selection.channel_id)),
+                )
+            } else {
+                (
+                    "Join thread",
+                    Icon::Plus,
+                    Message::Threads(crate::threads::Event::Join(selection.channel_id)),
+                )
+            });
+            if permissions.manage_threads {
+                tools.push((
+                    if state.archived {
+                        "Unarchive thread"
+                    } else {
+                        "Archive thread"
+                    },
+                    Icon::Folder,
+                    Message::Threads(crate::threads::Event::SetState {
+                        thread: selection.channel_id,
+                        archived: Some(!state.archived),
+                        locked: None,
+                    }),
+                ));
+                tools.push((
+                    if state.locked {
+                        "Unlock thread"
+                    } else {
+                        "Lock thread"
+                    },
+                    if state.locked { Icon::Unlock } else { Icon::Lock },
+                    Message::Threads(crate::threads::Event::SetState {
+                        thread: selection.channel_id,
+                        archived: None,
+                        locked: Some(!state.locked),
+                    }),
+                ));
+            }
+        } else {
+            if permissions.read_history
+                && matches!(selection.kind, ChannelKind::Text | ChannelKind::Announcement)
+            {
+                tools.push((
+                    "Threads",
+                    Icon::Thread,
+                    Message::Threads(crate::threads::Event::ToggleArchived(
+                        selection.guild_id,
+                        selection.channel_id,
+                    )),
+                ));
+            }
+            if permissions.create_invite || permissions.manage_guild || permissions.manage_channel
+            {
+                tools.push((
+                    "Invite people",
+                    Icon::Invite,
+                    Message::Invite(crate::invite::Event::Create(
+                        selection.guild_id,
+                        selection.channel_id,
+                    )),
+                ));
+            }
+            if selection.kind == ChannelKind::Announcement {
+                tools.push((
+                    "Follow channel",
+                    Icon::Announcement,
+                    Message::Announce(crate::announce::Event::OpenFollow(
+                        selection.guild_id,
+                        selection.channel_id,
+                    )),
+                ));
+            }
+            if permissions.manage_channel {
+                tools.push((
+                    "Edit channel",
+                    Icon::Settings,
+                    Message::GuildAdmin(crate::guild_admin::Event::EditChannel(
+                        selection.guild_id,
+                        selection.channel_id,
+                        selection.kind == ChannelKind::Voice,
+                    )),
+                ));
+            }
+        }
+        if permissions.manage_messages && permissions.read_history {
+            tools.push((
+                "Select messages",
+                Icon::Check,
+                Message::Timeline(crate::timeline::Event::SelectMode {
+                    channel_id: selection.channel_id,
+                    on: true,
+                }),
+            ));
+        }
+    }
+    if read && !wide {
+        tools.push((
+            "Pinned messages",
+            Icon::Pin,
+            Message::Pins(crate::pins::Event::Toggle),
+        ));
+    }
+    tools.push((
+        "Notification settings",
+        Icon::Bell,
+        Message::NotifySettings(crate::notify_settings::Event::Toggle),
+    ));
+    tools
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -902,11 +1045,13 @@ fn main_pane<'a>(
     banner: Option<Element<'a, Message>>,
     voice_call: Option<fastcord_model::Snowflake>,
     forum: Option<Element<'a, Message>>,
+    wide: bool,
 ) -> Element<'a, Message> {
     let mut body = column![].width(Length::Fill).height(Length::Fill);
     let conversation = |body: iced::widget::Column<'a, Message>,
                         channel_id: fastcord_model::Snowflake,
-                        bar: Option<Element<'a, Message>>| {
+                        bar: Option<Element<'a, Message>>,
+                        place: String| {
         let mut body = body;
         if let Some(bar) = bar {
             body = body.push(container(bar).padding([6, 16]));
@@ -914,12 +1059,12 @@ fn main_pane<'a>(
         if history.channel_id == Some(channel_id) {
             body.push(timeline::view(history, interaction, attachments).map(Message::Timeline))
                 .push(
-                    container(composer::view(composer, history).map(Message::Composer))
+                    container(composer::view(composer, history, &place).map(Message::Composer))
                         .padding(Padding::new(0.0).left(16.0).right(16.0).bottom(16.0)),
                 )
         } else {
             body.push(
-                container(text("Loading messages…").size(14).style(text::secondary))
+                container(text(tr("Loading messages…")).size(14).style(text::secondary))
                     .center(Length::Fill),
             )
         }
@@ -934,19 +1079,18 @@ fn main_pane<'a>(
             (false, true) => Some(("Join call", Message::AcceptCall(selection.channel_id))),
             (false, false) => Some(("Call", Message::StartCall(selection.channel_id))),
         };
-        body = body.push(header_with(
+        body = body.push(header(
             format!("@ {}", selection.name),
             "",
-            true,
-            call,
-            vec![(
-                if selection.group {
-                    "Members"
-                } else {
-                    "Conversation"
-                },
-                Message::Group(crate::group_dm::Event::Toggle),
-            )],
+            Tools {
+                call,
+                members: selection
+                    .group
+                    .then_some(Message::Group(crate::group_dm::Event::Toggle)),
+                read: true,
+                primary: None,
+            },
+            wide,
         ));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
@@ -958,24 +1102,35 @@ fn main_pane<'a>(
             None,
             selection.channel_id,
         );
-        body = conversation(body, selection.channel_id, bar);
+        body = conversation(body, selection.channel_id, bar, format!("@{}", selection.name));
     } else if directs {
-        body = body.push(header("Direct Messages".to_owned(), "", false, None));
+        body = body.push(header(
+            tr("Direct Messages").to_owned(),
+            "",
+            Tools::default(),
+            wide,
+        ));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
         }
         body = body.push(
             container(
-                text("Pick a conversation, or enter recipient IDs on the left to start one.")
-                    .size(14)
-                    .style(text::secondary),
+                column![
+                    text(tr("Pick a conversation on the left or start a new one.")).size(14)
+                        .style(text::secondary),
+                    button(icons::labeled(Icon::Plus, tr("New message"), 13))
+                        .on_press(Message::NewDm(crate::new_dm::Event::Open))
+                        .style(style::action_button(false)),
+                ]
+                .spacing(12)
+                .align_x(alignment::Horizontal::Center),
             )
             .center(Length::Fill),
         );
     } else if snapshot.permissions_pending {
-        body = body.push(header("Loading".to_owned(), "", false, None)).push(
+        body = body.push(header(tr("Loading").to_owned(), "", Tools::default(), wide)).push(
             container(
-                text("Waiting for your membership and permissions. Channels stay closed until Discord supplies them.")
+                text(tr("Waiting for your membership and permissions. Channels stay closed until Discord supplies them."))
                     .size(14)
                     .style(text::secondary),
             )
@@ -1006,135 +1161,25 @@ fn main_pane<'a>(
                     }
                     (true, false, _) => "Read-only",
                 };
-                let mut tools = Vec::new();
-                let title = match thread {
-                    Some(state) => {
-                        if state.forum_post {
-                            tools.push((
-                                "Posts",
-                                Message::SelectChannel(selection.guild_id, state.parent_id),
-                            ));
-                        }
-                        tools.push(if state.joined {
-                            (
-                                "Leave",
-                                Message::Threads(crate::threads::Event::Leave(
-                                    selection.channel_id,
-                                )),
-                            )
-                        } else {
-                            (
-                                "Join",
-                                Message::Threads(crate::threads::Event::Join(selection.channel_id)),
-                            )
-                        });
-                        if permissions.manage_threads {
-                            tools.push((
-                                if state.archived {
-                                    "Unarchive"
-                                } else {
-                                    "Archive"
-                                },
-                                Message::Threads(crate::threads::Event::SetState {
-                                    thread: selection.channel_id,
-                                    archived: Some(!state.archived),
-                                    locked: None,
-                                }),
-                            ));
-                            tools.push((
-                                if state.locked { "Unlock" } else { "Lock" },
-                                Message::Threads(crate::threads::Event::SetState {
-                                    thread: selection.channel_id,
-                                    archived: None,
-                                    locked: Some(!state.locked),
-                                }),
-                            ));
-                        }
-                        format!("\u{21B3} {}", selection.name)
-                    }
-                    None => {
-                        if permissions.read_history && selection.kind != ChannelKind::Voice {
-                            tools.push((
-                                "Threads",
-                                Message::Threads(crate::threads::Event::ToggleArchived(
-                                    selection.guild_id,
-                                    selection.channel_id,
-                                )),
-                            ));
-                        }
-                        if permissions.create_invite
-                            || permissions.manage_guild
-                            || permissions.manage_channel
-                        {
-                            tools.push((
-                                "Invite",
-                                Message::Invite(crate::invite::Event::Create(
-                                    selection.guild_id,
-                                    selection.channel_id,
-                                )),
-                            ));
-                        }
-                        if selection.kind == ChannelKind::Announcement {
-                            tools.push((
-                                "Follow",
-                                Message::Announce(crate::announce::Event::OpenFollow(
-                                    selection.guild_id,
-                                    selection.channel_id,
-                                )),
-                            ));
-                        }
-                        if permissions.manage_channel {
-                            tools.push((
-                                "Edit channel",
-                                Message::GuildAdmin(crate::guild_admin::Event::EditChannel(
-                                    selection.guild_id,
-                                    selection.channel_id,
-                                    selection.kind == ChannelKind::Voice,
-                                )),
-                            ));
-                        }
-                        tools.push((
-                            "Events",
-                            Message::Events(crate::scheduled_events::Event::Open(
-                                selection.guild_id,
-                            )),
-                        ));
-                        tools.push((
-                            "Guide",
-                            Message::Onboarding(crate::onboarding::Event::OpenGuide(
-                                selection.guild_id,
-                            )),
-                        ));
-                        tools.push((
-                            "Channels & Roles",
-                            Message::Onboarding(crate::onboarding::Event::OpenQuestions(
-                                selection.guild_id,
-                                true,
-                            )),
-                        ));
-                        let prefix = if selection.kind == ChannelKind::Voice {
-                            "\u{266A}"
-                        } else {
-                            "#"
-                        };
-                        format!("{prefix} {}", selection.name)
-                    }
+                let place = match thread {
+                    Some(_) => selection.name.clone(),
+                    None => format!("#{}", selection.name),
                 };
-                if permissions.manage_messages && permissions.read_history {
-                    tools.push((
-                        "Select messages",
-                        Message::Timeline(crate::timeline::Event::SelectMode {
-                            channel_id: selection.channel_id,
-                            on: true,
-                        }),
-                    ));
-                }
-                body = body.push(header_with(
+                let title = match thread {
+                    Some(_) => format!("\u{21B3} {}", selection.name),
+                    None if selection.kind == ChannelKind::Voice => {
+                        format!("\u{266A} {}", selection.name)
+                    }
+                    None => format!("# {}", selection.name),
+                };
+                body = body.push(header(
                     title,
                     note,
-                    permissions.read_history,
-                    None,
-                    tools,
+                    Tools {
+                        read: permissions.read_history,
+                        ..Tools::default()
+                    },
+                    wide,
                 ));
                 if let Some(banner) = banner {
                     body = body.push(container(banner).padding([4, 16]));
@@ -1147,7 +1192,7 @@ fn main_pane<'a>(
                         Some(selection.guild_id),
                         selection.channel_id,
                     );
-                    body = conversation(body, selection.channel_id, bar);
+                    body = conversation(body, selection.channel_id, bar, place);
                 }
             }
             ChannelKind::Forum => {
@@ -1157,27 +1202,15 @@ fn main_pane<'a>(
                     (true, false) => "You cannot post here",
                     (true, true) => "",
                 };
-                let mut tools = if can_post {
-                    vec![("New post", Message::Forum(crate::forum::Event::New))]
-                } else {
-                    Vec::new()
-                };
-                if permissions.manage_channel {
-                    tools.push((
-                        "Edit channel",
-                        Message::GuildAdmin(crate::guild_admin::Event::EditChannel(
-                            selection.guild_id,
-                            selection.channel_id,
-                            false,
-                        )),
-                    ));
-                }
-                body = body.push(header_with(
+                body = body.push(header(
                     format!("\u{2630} {}", selection.name),
                     note,
-                    false,
-                    None,
-                    tools,
+                    Tools {
+                        primary: can_post
+                            .then_some(("New post", Message::Forum(crate::forum::Event::New))),
+                        ..Tools::default()
+                    },
+                    wide,
                 ));
                 if let Some(banner) = banner {
                     body = body.push(container(banner).padding([4, 16]));
@@ -1191,13 +1224,13 @@ fn main_pane<'a>(
             ChannelKind::Category => {}
         }
     } else {
-        body = body.push(header("fastcord".to_owned(), "", false, None));
+        body = body.push(header("fastcord".to_owned(), "", Tools::default(), wide));
         if let Some(banner) = banner {
             body = body.push(container(banner).padding([4, 16]));
         }
         body = body.push(
             container(
-                text("Select a channel to start chatting.")
+                text(tr("Select a channel to start chatting."))
                     .size(14)
                     .style(text::secondary),
             )
@@ -1223,17 +1256,20 @@ fn unread_bar<'a>(
 ) -> Option<Element<'a, Message>> {
     let acked = acked.filter(|_| unread || mention_count > 0)?;
     let summary = match mention_count {
-        0 => "You have unread messages here.".to_owned(),
-        1 => "You have unread messages here, 1 mention.".to_owned(),
-        n => format!("You have unread messages here, {n} mentions."),
+        0 => tr("New messages since you last read.").to_owned(),
+        n => trn(
+            u64::from(n),
+            "New messages since you last read, {} mention.",
+            "New messages since you last read, {} mentions.",
+        ),
     };
     Some(
         row![
             text(summary).size(13),
-            button(text("Jump to first unread").size(12))
+            button(text(tr("Jump to first unread")).size(12))
                 .on_press(Message::FirstUnread(channel, acked))
                 .style(style::action_button(false)),
-            button(text("Mark as read").size(12))
+            button(text(tr("Mark as read")).size(12))
                 .on_press(Message::MarkRead(guild, channel))
                 .style(style::tool_button(true, false)),
         ]
@@ -1250,7 +1286,7 @@ mod occupant_tests {
     use fastcord_model::Snowflake;
 
     #[test]
-    fn long_server_name_keeps_alerts_and_report_reachable_as_separate_tools() {
+    fn a_long_server_name_still_opens_the_server_menu() {
         let snapshot = NavigationSnapshot {
             selected_guild: Some(Snowflake(1)),
             selected_guild_name: "A server whose name is much too long for this sidebar".into(),
@@ -1262,10 +1298,6 @@ mod occupant_tests {
             300.0,
             sidebar(
                 &snapshot,
-                PrivateConversation {
-                    recipients: "",
-                    notice: None,
-                },
                 false,
                 space::vertical().into(),
                 &avatars,
@@ -1273,18 +1305,17 @@ mod occupant_tests {
             ),
         );
         ui.draw();
-        let (mut alerts, mut reports) = (false, false);
-        for x in (0..SIDEBAR_WIDTH as i32).step_by(2) {
-            for event in ui.click(x as f32, 28.0) {
-                match event {
-                    Message::NotifySettings(crate::notify_settings::Event::Toggle) => alerts = true,
-                    Message::Report(crate::report::Event::OpenServer) => reports = true,
-                    _ => {}
-                }
-            }
+        // Alerts and Report live in that menu now; its button spans the header.
+        for x in (8..SIDEBAR_WIDTH as i32 - 8).step_by(16) {
+            let events = ui.click(x as f32, 24.0);
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Message::OpenMenu(Some(crate::Menu::Server(Snowflake(1))))]
+                ),
+                "x={x}: {events:?}"
+            );
         }
-        assert!(alerts, "Alerts is clipped by the server name");
-        assert!(reports, "Report is clipped by the server name");
     }
 
     fn member(streaming: bool, video: bool) -> Occupant {

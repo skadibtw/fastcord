@@ -29,6 +29,8 @@ use iced::widget::{
 };
 use iced::{Element, Length, Task};
 
+use crate::i18n::{tr, trf};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Rules,
@@ -982,11 +984,12 @@ impl<T> std::fmt::Display for Item<T> {
 }
 
 fn small<'a>(label: impl Into<String>) -> iced::widget::Text<'a> {
-    text(label.into()).size(12).style(text::secondary)
+    let label = label.into();
+    text(tr(&label).to_owned()).size(12).style(text::secondary)
 }
 
 fn labelled<'a>(label: &str, control: Element<'a, Event>) -> Element<'a, Event> {
-    row![text(label.to_owned()).size(12).width(130), control]
+    row![text(tr(label).to_owned()).size(12).width(130), control]
         .spacing(8)
         .align_y(iced::Alignment::Center)
         .into()
@@ -998,7 +1001,7 @@ fn input<'a>(
     enabled: bool,
     on: impl Fn(String) -> Event + 'a,
 ) -> Element<'a, Event> {
-    text_input(placeholder, value)
+    text_input(tr(placeholder), value)
         .size(13)
         .on_input_maybe(enabled.then_some(on))
         .into()
@@ -1019,7 +1022,7 @@ fn choose<'a, T: Clone + PartialEq + 'a>(
     }
     pick_list(options, selected, move |item: Item<T>| on(item.0))
         .text_size(13)
-        .placeholder(placeholder.to_owned())
+        .placeholder(tr(placeholder).to_owned())
         .into()
 }
 
@@ -1035,7 +1038,7 @@ fn channel_items(admin: &GuildAdmin, wanted: impl Fn(AdminKind) -> bool) -> Vec<
 fn channel_name(admin: &GuildAdmin, id: Snowflake) -> String {
     admin
         .channel(id)
-        .map_or_else(|| format!("channel {id}"), |c| format!("#{}", c.name))
+        .map_or_else(|| trf("channel {}", &[&id]), |c| format!("#{}", c.name))
 }
 
 fn text_like(kind: AdminKind) -> bool {
@@ -1050,7 +1053,7 @@ fn rules_view<'a>(ed: &'a RulesEd, edit: bool) -> Element<'a, Event> {
     let rules = &ed.edit;
     let mut panel = column![
         checkbox(rules.enabled)
-            .label("Ask new members to accept the rules")
+            .label(tr("Ask new members to accept the rules"))
             .on_toggle_maybe(edit.then_some(|on| Event::Rules(RulesMsg::Enabled(on)))),
         labelled(
             "Description",
@@ -1072,20 +1075,21 @@ fn rules_view<'a>(ed: &'a RulesEd, edit: bool) -> Element<'a, Event> {
                     at, r
                 ))),
                 small(counter(rule.chars().count(), MAX_RULE_CHARS)).width(60),
-                button(text("Remove").size(11))
+                button(text(tr("Remove")).size(11))
                     .on_press_maybe(edit.then_some(Event::Rules(RulesMsg::Remove(at)))),
             ]
             .spacing(6)
             .align_y(iced::Alignment::Center),
         );
     }
-    panel = panel.push(button(text("Add rule").size(12)).on_press_maybe(
+    panel = panel.push(button(text(tr("Add rule")).size(12)).on_press_maybe(
         (edit && rules.rules.len() < MAX_RULES_EDITED).then_some(Event::Rules(RulesMsg::Add)),
     ));
     if let Some(screening) = &ed.baseline {
         for (kind, label) in RulesEdit::other_fields(screening) {
-            panel = panel.push(small(format!(
-                "{kind}: {label} (edit in the official client)"
+            panel = panel.push(small(trf(
+                "{}: {} (edit in the official client)",
+                &[&tr(&kind), &tr(&label)],
             )));
         }
         if !screening.complete() {
@@ -1100,14 +1104,14 @@ fn onboarding_view<'a>(ed: &'a OnbEd, admin: &'a GuildAdmin, edit: bool) -> Elem
     let msg = |m: OnbMsg| Event::Onboarding(m);
     let mut panel = column![
         checkbox(doc.enabled)
-            .label("Onboarding is on")
+            .label(tr("Onboarding is on"))
             .on_toggle_maybe(edit.then_some(move |on| msg(OnbMsg::Enabled(on)))),
         labelled(
             "Mode",
             choose(
                 ONBOARDING_MODES
                     .iter()
-                    .map(|(m, n)| Item(*m, (*n).to_owned()))
+                    .map(|(m, n)| Item(*m, tr(n).to_owned()))
                     .collect(),
                 Some(&doc.mode),
                 edit,
@@ -1115,7 +1119,7 @@ fn onboarding_view<'a>(ed: &'a OnbEd, admin: &'a GuildAdmin, edit: bool) -> Elem
                 move |m| msg(OnbMsg::Mode(m)),
             ),
         ),
-        text("Default channels").size(13),
+        text(tr("Default channels")).size(13),
         small("Text channels @everyone can view. Discord decides how many it needs."),
     ]
     .spacing(6);
@@ -1141,9 +1145,9 @@ fn onboarding_view<'a>(ed: &'a OnbEd, admin: &'a GuildAdmin, edit: bool) -> Elem
     .padding([0, 8]);
     panel = panel.push(scrollable(defaults).height(Length::Fixed(110.0)));
     panel = panel.push(row![
-        text("Questions").size(13),
+        text(tr("Questions")).size(13),
         space::horizontal(),
-        button(text("Add question").size(12)).on_press_maybe(
+        button(text(tr("Add question")).size(12)).on_press_maybe(
             (edit && doc.prompts.len() < MAX_PROMPTS_EDITED).then_some(msg(OnbMsg::AddPrompt))
         ),
     ]);
@@ -1156,7 +1160,7 @@ fn onboarding_view<'a>(ed: &'a OnbEd, admin: &'a GuildAdmin, edit: bool) -> Elem
                         "{}{}",
                         if selected { "> " } else { "" },
                         if prompt.title.is_empty() {
-                            "(untitled)"
+                            tr("(untitled)")
                         } else {
                             &prompt.title
                         }
@@ -1165,13 +1169,13 @@ fn onboarding_view<'a>(ed: &'a OnbEd, admin: &'a GuildAdmin, edit: bool) -> Elem
                 )
                 .on_press(msg(OnbMsg::SelectPrompt(at)))
                 .width(Length::Fill),
-                button(text("Up").size(11))
+                button(text(tr("Up")).size(11))
                     .on_press_maybe((edit && at > 0).then_some(msg(OnbMsg::MovePrompt(at, false)))),
-                button(text("Down").size(11)).on_press_maybe(
+                button(text(tr("Down")).size(11)).on_press_maybe(
                     (edit && at + 1 < doc.prompts.len())
                         .then_some(msg(OnbMsg::MovePrompt(at, true)))
                 ),
-                button(text("Delete").size(11))
+                button(text(tr("Delete")).size(11))
                     .on_press_maybe(edit.then_some(msg(OnbMsg::RemovePrompt(at)))),
             ]
             .spacing(4),
@@ -1199,20 +1203,20 @@ fn prompt_view<'a>(
         ),
         row![
             checkbox(prompt.single_select)
-                .label("Single choice")
+                .label(tr("Single choice"))
                 .on_toggle_maybe(edit.then_some(move |on| msg(OnbMsg::Single(on)))),
             checkbox(prompt.required)
-                .label("Required")
+                .label(tr("Required"))
                 .on_toggle_maybe(edit.then_some(move |on| msg(OnbMsg::Required(on)))),
             checkbox(prompt.in_onboarding)
-                .label("Ask when joining")
+                .label(tr("Ask when joining"))
                 .on_toggle_maybe(edit.then_some(move |on| msg(OnbMsg::InOnboarding(on)))),
         ]
         .spacing(12),
         row![
-            text("Answers").size(13),
+            text(tr("Answers")).size(13),
             space::horizontal(),
-            button(text("Add answer").size(12)).on_press_maybe(
+            button(text(tr("Add answer")).size(12)).on_press_maybe(
                 (edit && prompt.options.len() < MAX_OPTIONS_EDITED)
                     .then_some(msg(OnbMsg::AddOption))
             ),
@@ -1230,7 +1234,7 @@ fn prompt_view<'a>(
                         if selected { "> " } else { "" },
                         option.emoji.text(),
                         if option.title.is_empty() {
-                            "(untitled)"
+                            tr("(untitled)")
                         } else {
                             &option.title
                         }
@@ -1239,7 +1243,7 @@ fn prompt_view<'a>(
                 )
                 .on_press(msg(OnbMsg::SelectOption(at)))
                 .width(Length::Fill),
-                button(text("Delete").size(11))
+                button(text(tr("Delete")).size(11))
                     .on_press_maybe(edit.then_some(msg(OnbMsg::RemoveOption(at)))),
             ]
             .spacing(4),
@@ -1290,7 +1294,7 @@ fn option_view<'a>(
             )),
         ),
         small(emoji_note),
-        text("Roles given").size(13),
+        text(tr("Roles given")).size(13),
     ]
     .spacing(4)
     .padding([0, 10]);
@@ -1304,7 +1308,7 @@ fn option_view<'a>(
         let on = option.role_ids.contains(&id);
         let reachable = r.assign_lock.is_none() || old_roles.contains(&id);
         let label = match r.assign_lock {
-            Some(reason) if !on => format!("{} ({reason})", r.name),
+            Some(reason) if !on => trf("{} ({})", &[&r.name, &tr(reason)]),
             _ => r.name.clone(),
         };
         checkbox(on)
@@ -1314,7 +1318,7 @@ fn option_view<'a>(
     }))
     .spacing(2);
     panel = panel.push(scrollable(roles).height(Length::Fixed(90.0)));
-    panel = panel.push(text("Channels shown").size(13));
+    panel = panel.push(text(tr("Channels shown")).size(13));
     let channels = column(
         admin
             .channels
@@ -1345,7 +1349,7 @@ fn entries_view<'a>(
     let msg = |m: GuideMsg| Event::Guide(m);
     let mut panel = column![
         row![
-            text(title).size(13),
+            text(tr(title)).size(13),
             small(counter(entries.len(), max)),
             space::horizontal(),
             choose(
@@ -1381,14 +1385,14 @@ fn entries_view<'a>(
         .align_y(iced::Alignment::Center);
         if which == List::Actions {
             line = line.push(
-                text_input("Emoji", entry.emoji.text())
+                text_input(tr("Emoji"), entry.emoji.text())
                     .size(13)
                     .width(60)
                     .on_input_maybe(edit.then_some(move |t| msg(GuideMsg::Emoji(at, t)))),
             );
         }
         line = line.push(
-            button(text("Remove").size(11))
+            button(text(tr("Remove")).size(11))
                 .on_press_maybe(edit.then_some(msg(GuideMsg::Remove(which, at)))),
         );
         panel = panel.push(line);
@@ -1399,7 +1403,7 @@ fn entries_view<'a>(
 fn guide_view<'a>(ed: &'a GuideEd, admin: &'a GuildAdmin, edit: bool) -> Element<'a, Event> {
     let doc = &ed.doc;
     let author = if doc.authors.is_empty() {
-        "You".to_owned()
+        tr("You").to_owned()
     } else {
         doc.authors
             .iter()
@@ -1408,7 +1412,7 @@ fn guide_view<'a>(ed: &'a GuideEd, admin: &'a GuildAdmin, edit: bool) -> Element
                     .people
                     .iter()
                     .find(|(p, _)| p == id)
-                    .map_or_else(|| format!("user {id}"), |(_, name)| name.clone())
+                    .map_or_else(|| trf("user {}", &[&id]), |(_, name)| name.clone())
             })
             .collect::<Vec<_>>()
             .join(", ")
@@ -1420,9 +1424,12 @@ fn guide_view<'a>(ed: &'a GuideEd, admin: &'a GuildAdmin, edit: bool) -> Element
                 GuideMsg::Welcome(w)
             )),
         ),
-        small(format!(
-            "{}  Author shown: {author}",
-            counter(doc.welcome.chars().count(), MAX_WELCOME_CHARS)
+        small(trf(
+            "{}  Author shown: {}",
+            &[
+                &counter(doc.welcome.chars().count(), MAX_WELCOME_CHARS),
+                &author
+            ]
         )),
         entries_view(
             "New-member actions",
@@ -1450,14 +1457,14 @@ fn community_view<'a>(form: &'a CommEd, admin: &'a GuildAdmin, edit: bool) -> El
     let texts = |kind| kind == AdminKind::Text;
     if admin.community {
         let name = |id: Option<Snowflake>| {
-            id.map_or_else(|| "none".to_owned(), |c| channel_name(admin, c))
+            id.map_or_else(|| tr("none").to_owned(), |c| channel_name(admin, c))
         };
         let mut panel = column![
-            text("Community is on.").size(13),
-            small(format!("Rules channel: {}", name(admin.rules_channel))),
-            small(format!(
+            text(tr("Community is on.")).size(13),
+            small(trf("Rules channel: {}", &[&name(admin.rules_channel)])),
+            small(trf(
                 "Public updates channel: {}",
-                name(admin.public_updates_channel)
+                &[&name(admin.public_updates_channel)]
             )),
         ]
         .spacing(4);
@@ -1468,22 +1475,22 @@ fn community_view<'a>(form: &'a CommEd, admin: &'a GuildAdmin, edit: bool) -> El
                 ))
                 .push(
                     row![
-                        button(text("Turn off Community").size(13).style(text::danger))
+                        button(text(tr("Turn off Community")).size(13).style(text::danger))
                             .on_press_maybe(edit.then_some(Event::ConfirmDisable)),
-                        button(text("Cancel").size(13)).on_press(Event::Cancel),
+                        button(text(tr("Cancel")).size(13)).on_press(Event::Cancel),
                     ]
                     .spacing(8),
                 )
         } else {
             panel.push(
-                button(text("Turn off Community\u{2026}").size(13))
+                button(text(tr("Turn off Community\u{2026}")).size(13))
                     .on_press_maybe(edit.then_some(Event::AskDisable)),
             )
         };
         return panel.into();
     }
     column![
-        text("Community is off.").size(13),
+        text(tr("Community is off.")).size(13),
         small("Turning it on needs a rules channel, a public updates channel, a verification level of at least Low and the explicit media filter set to all members."),
         labelled(
             "Rules channel",
@@ -1502,7 +1509,7 @@ fn community_view<'a>(form: &'a CommEd, admin: &'a GuildAdmin, edit: bool) -> El
             choose(
                 VERIFICATION_LEVELS
                     .iter()
-                    .map(|(l, n)| Item(*l, (*n).to_owned()))
+                    .map(|(l, n)| Item(*l, tr(n).to_owned()))
                     .collect(),
                 Some(&form.level),
                 edit,
@@ -1526,9 +1533,9 @@ pub fn view<'a>(
     let dirty = state.dirty(panel.tab, admin);
     let tabs = row(Tab::ALL.iter().map(|tab| {
         let label = if state.dirty(*tab, admin) {
-            format!("{} *", tab.label())
+            format!("{} *", tr(tab.label()))
         } else {
-            tab.label().to_owned()
+            tr(tab.label()).to_owned()
         };
         button(text(label).size(12))
             .on_press_maybe((panel.tab != *tab).then_some(Event::Tab(*tab)))
@@ -1537,9 +1544,9 @@ pub fn view<'a>(
     .spacing(6);
     let mut body = column![
         row![
-            text(format!(
+            text(trf(
                 "Community setup: {}",
-                admin.map_or("server", |a| a.name.as_str())
+                &[&admin.map_or(tr("server"), |a| a.name.as_str())]
             ))
             .size(14),
             space::horizontal(),
@@ -1562,7 +1569,10 @@ pub fn view<'a>(
     ) -> Element<'a, Event> {
         match slot {
             Slot::Loading => small("Loading\u{2026}").into(),
-            Slot::Failed(reason) => text(reason.clone()).size(12).style(text::danger).into(),
+            Slot::Failed(reason) => text(tr(reason).to_owned())
+                .size(12)
+                .style(text::danger)
+                .into(),
             Slot::Ready(value) => show(value),
         }
     }
@@ -1589,9 +1599,9 @@ pub fn view<'a>(
                 "No changes"
             }),
             space::horizontal(),
-            button(text("Discard").size(13))
+            button(text(tr("Discard")).size(13))
                 .on_press_maybe((edit && dirty).then_some(Event::Discard)),
-            button(text(save_label).size(13))
+            button(text(tr(save_label)).size(13))
                 .on_press_maybe((edit && dirty).then_some(Event::Save)),
         ]
         .spacing(8)
@@ -1601,7 +1611,7 @@ pub fn view<'a>(
         body = body.push(small("Waiting for Discord\u{2026}"));
     }
     if let Some(notice) = &state.notice {
-        body = body.push(text(notice.clone()).size(12));
+        body = body.push(text(tr(notice).to_owned()).size(12));
     }
     Some(container(body).padding([6, 0]).into())
 }
