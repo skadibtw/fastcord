@@ -3,7 +3,12 @@ use std::time::{Duration, Instant};
 use crate::codec::{CHANNELS, FRAME_SAMPLES, MAX_FRAME_SAMPLES, VoiceDecoder};
 use crate::pipeline::RemoteFrame;
 
-const SPEAKERS: usize = 4;
+/// Speakers mixed at once. Discord mixes everyone; 16 decoders cost about
+/// 1.3 MB, allocated only as speakers appear.
+const SPEAKERS: usize = 16;
+/// A full mixer only makes room by evicting a speaker this quiet: evicting
+/// someone mid-sentence rebuilt every decoder on every packet.
+const EVICT_QUIET: Duration = Duration::from_millis(100);
 const PACKETS: usize = 12;
 const INITIAL_TARGET: Duration = Duration::from_millis(60);
 const MIN_TARGET: Duration = Duration::from_millis(40);
@@ -327,12 +332,16 @@ impl JitterMixer {
                 self.speakers.len() - 1
             }
             None => {
-                // Evict least-recently-active speaker (oldest last_packet)
+                // Evict the least recently active speaker, but only one that
+                // has gone quiet; while every slot talks the newcomer waits.
                 if let Some((evict_idx, _)) = self
                     .speakers
                     .iter()
                     .enumerate()
                     .min_by_key(|(_, speaker)| speaker.last_packet)
+                    .filter(|(_, speaker)| {
+                        now.saturating_duration_since(speaker.last_packet) >= EVICT_QUIET
+                    })
                 {
                     self.speakers.remove(evict_idx);
                     let Ok(speaker) = self.new_speaker(frame.ssrc) else {
@@ -798,42 +807,54 @@ mod tests {
         assert!(mixer.limiter.gain > 0.99, "gain {}", mixer.limiter.gain);
     }
 
-    /// Test: fifth speaker evicts the least-recently-active speaker
+    /// A full mixer makes room only by evicting a speaker who went quiet.
     #[test]
-    fn fifth_speaker_evicts_least_recently_active() {
+    fn a_full_mixer_evicts_only_a_quiet_speaker() {
         let mut mixer = JitterMixer::new().unwrap();
         let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
-
-        // Add 4 speakers in order
-        for ssrc in 1..=4 {
-            mixer.push(frame(&mut encoder, ssrc, 0));
-        }
-        assert_eq!(mixer.speakers.len(), 4);
-
         let start = Instant::now();
-        // Mix to establish next_due
-        mixer.mix(
-            &mut [0.0; FRAME_SAMPLES * CHANNELS],
+        for ssrc in 1..=SPEAKERS as u32 {
+            let at = start + Duration::from_millis(u64::from(ssrc));
+            mixer.push_at(frame(&mut encoder, ssrc, 0), at);
+        }
+        let newcomer = SPEAKERS as u32 + 1;
+        mixer.push_at(
+            frame(&mut encoder, newcomer, 0),
             start + Duration::from_millis(50),
         );
-
-        // Add fifth speaker - should evict speaker 1 (least recently active by last_packet)
-        mixer.push(frame(&mut encoder, 5, 0));
-        assert_eq!(mixer.speakers.len(), 4);
-
-        // Speaker 5 should be present
         assert!(
-            mixer.speakers.iter().any(|s| s.ssrc == 5),
-            "Speaker 5 should be present; speakers: {:?}",
-            mixer.speakers.iter().map(|s| s.ssrc).collect::<Vec<_>>()
+            !mixer.speakers.iter().any(|s| s.ssrc == newcomer),
+            "everyone spoke within 100 ms: nobody is evicted"
         );
-
-        // Speaker 1 should be evicted
+        mixer.push_at(
+            frame(&mut encoder, newcomer, 1),
+            start + Duration::from_millis(150),
+        );
+        let present: Vec<u32> = mixer.speakers.iter().map(|s| s.ssrc).collect();
+        assert!(present.contains(&newcomer), "{present:?}");
         assert!(
-            !mixer.speakers.iter().any(|s| s.ssrc == 1),
-            "Speaker 1 should be evicted; speakers: {:?}",
-            mixer.speakers.iter().map(|s| s.ssrc).collect::<Vec<_>>()
+            !present.contains(&1),
+            "the quietest speaker made room: {present:?}"
         );
+    }
+
+    /// One more sender than the mixer holds, all talking: the speakers in the
+    /// mixer keep their decoders, the extra one is not mixed. Nothing churns.
+    #[test]
+    fn one_speaker_too_many_does_not_rebuild_the_others() {
+        let mut mixer = JitterMixer::new().unwrap();
+        let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
+        let start = Instant::now();
+        let senders = SPEAKERS as u32 + 1;
+        for sequence in 0..50u64 {
+            for ssrc in 1..=senders {
+                let at = start + Duration::from_millis(sequence * 20 + u64::from(ssrc));
+                mixer.push_at(frame(&mut encoder, ssrc, sequence), at);
+            }
+        }
+        let mut present: Vec<u32> = mixer.speakers.iter().map(|s| s.ssrc).collect();
+        present.sort_unstable();
+        assert_eq!(present, (1..=SPEAKERS as u32).collect::<Vec<_>>());
     }
 
     /// Test: four 0.9-amplitude speakers never exceed 0.97 and have no step at frame boundary
