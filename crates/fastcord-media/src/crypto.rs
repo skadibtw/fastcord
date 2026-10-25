@@ -20,9 +20,10 @@
 
 use std::fmt;
 
+// The 0.10 generation, the one openmls (via davey) links: one AEAD stack.
 use aes_gcm::Aes256Gcm;
-use aes_gcm::aead::array::Array;
-use aes_gcm::aead::{AeadInOut, KeyInit};
+use aes_gcm::aead::generic_array::GenericArray as Array;
+use aes_gcm::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::XChaCha20Poly1305;
 use zeroize::Zeroizing;
 
@@ -226,10 +227,10 @@ impl TransportCipher {
         let (aad, buffer) = out.split_at_mut(clear.len());
         let tag: [u8; TAG_LEN] = match &self.cipher {
             Cipher::Aes(cipher) => cipher
-                .encrypt_inout_detached(&Array(aes_nonce(nonce)), aad, buffer.into())
+                .encrypt_in_place_detached(&Array::from(aes_nonce(nonce)), aad, buffer)
                 .map(Into::into),
             Cipher::XChaCha(cipher) => cipher
-                .encrypt_inout_detached(&Array(xchacha_nonce(nonce)), aad, buffer.into())
+                .encrypt_in_place_detached(&Array::from(xchacha_nonce(nonce)), aad, buffer)
                 .map(Into::into),
         }
         // Only oversized inputs fail, far beyond any UDP datagram.
@@ -263,17 +264,17 @@ impl TransportCipher {
         out.clear();
         out.extend_from_slice(ciphertext);
         let result = match &self.cipher {
-            Cipher::Aes(cipher) => cipher.decrypt_inout_detached(
-                &Array(aes_nonce(nonce)),
+            Cipher::Aes(cipher) => cipher.decrypt_in_place_detached(
+                &Array::from(aes_nonce(nonce)),
                 clear,
-                out.as_mut_slice().into(),
-                &Array(tag),
+                out.as_mut_slice(),
+                &Array::from(tag),
             ),
-            Cipher::XChaCha(cipher) => cipher.decrypt_inout_detached(
-                &Array(xchacha_nonce(nonce)),
+            Cipher::XChaCha(cipher) => cipher.decrypt_in_place_detached(
+                &Array::from(xchacha_nonce(nonce)),
                 clear,
-                out.as_mut_slice().into(),
-                &Array(tag),
+                out.as_mut_slice(),
+                &Array::from(tag),
             ),
         };
         if result.is_err() {

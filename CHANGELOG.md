@@ -12,6 +12,7 @@
 - A visible animated emoji no longer redraws the whole window 50 times a second (part of #212). The animation wakes once, when its earliest frame is due (still at most 50 times a second), so a 100 ms GIF costs 10 redraws a second instead of 50.
 - Masked links whose address contains balanced parentheses, such as `[Rust](https://en.wikipedia.org/wiki/Rust_(language))`, now link to the whole address instead of stopping at the first `)` and leaving a stray `)` after the link (#205).
 - Timestamps that name no real date, such as `2026-02-31`, are refused instead of rolling over into March; this affected scheduled event times and poll expiry (#204). RFC 3339 parsing and the Discord timestamp formatter now use the `time` crate instead of hand-written calendar code.
+- The voice transport cipher uses the same `aes-gcm` 0.10 / `chacha20poly1305` 0.10 generation as openmls, so the binary carries one AEAD stack instead of two (about a dozen duplicate crates fewer) (#203).
 
 ### Removed
 - The retired "Blocking bypass" setting is gone. Since the transport moved to `fastcord-net`, turning it on started nothing, yet the value was still stored, still displayed as on, and still accepted byedpi options such as `-I <address>`. The app no longer reads, writes or links `fastcord-bypass` at all; an old settings file loads normally and the stale `bypass` key disappears the next time preferences are saved.

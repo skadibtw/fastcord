@@ -30,7 +30,7 @@ fastcord-video = { path = "crates/fastcord-video" }
 fastcord-bypass = { path = "crates/fastcord-bypass" }
 fastcord-ws = { path = "crates/fastcord-ws" }
 cc = "1"
-aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "zeroize"] }
 # Linux screen capture (milestone 33): the ScreenCast portal (already in the
 # tree through rfd) and PipeWire, which links the system libpipewire-0.3.
 ashpd = { version = "0.11.1", default-features = false, features = ["tokio"] }
@@ -56,7 +56,7 @@ bytes = "1"
 bytemuck = "1"
 cpal = { version = "0.18", features = ["realtime"] }
 audio_thread_priority = { version = "0.35", default-features = false }
-chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
+chacha20poly1305 = { version = "0.10", default-features = false } # zeroizes its key on drop in 0.10 (non-optional)
 davey = { version = "=0.1.4" }
 deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "978576aa8400552a4ce9730838c635aa30db5e61", default-features = false, features = ["tract", "default-model"] }
 ndarray = { version = "0.15", default-features = false }
