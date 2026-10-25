@@ -579,18 +579,6 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Restart fastcord to apply.",
         "Перезапустите fastcord, чтобы применить.",
     ),
-    (
-        "Off: Discord is reached directly.",
-        "Выключено: Discord подключается напрямую.",
-    ),
-    (
-        "On: Discord connections go through byedpi.",
-        "Включено: подключения к Discord идут через byedpi.",
-    ),
-    (
-        "Not running: {} Discord is reached directly.",
-        "Не работает: {} Discord подключается напрямую.",
-    ),
     ("Desktop", "Рабочий стол"),
     (
         "Closing the window minimizes fastcord to the tray instead of quitting",
@@ -607,24 +595,6 @@ pub const ENTRIES: &[(&str, &str)] = &[
     (
         "Start fastcord when I sign in",
         "Запускать fastcord при входе в систему",
-    ),
-    ("Blocking bypass", "Обход блокировок"),
-    (
-        "Reach Discord through the built-in byedpi, for networks that block it",
-        "Подключаться к Discord через встроенный byedpi — для сетей, где он заблокирован",
-    ),
-    (
-        "Messages, the Gateway and media files use it; voice and video still connect directly. Automatic waits up to 2 seconds per strategy the first time it reaches each Discord server.",
-        "Его используют сообщения, Gateway и медиафайлы; голос и видео по-прежнему подключаются напрямую. Автоматический режим ждёт до 2 секунд на каждую стратегию при первом подключении к каждому серверу Discord.",
-    ),
-    ("Advanced options", "Дополнительные параметры"),
-    (
-        "byedpi options, for example -I 192.168.1.10",
-        "Параметры byedpi, например -I 192.168.1.10",
-    ),
-    (
-        "Put before the chosen strategy; with \"Only my options\" they are the whole strategy. Behind a VPN that captures traffic with a TUN adapter, -I <this computer's network address> sends byedpi past it.",
-        "Ставятся перед выбранной стратегией; в режиме «Только мои параметры» это вся стратегия. За VPN, который перехватывает трафик через адаптер TUN, параметр -I <сетевой адрес этого компьютера> направляет byedpi мимо него.",
     ),
     (
         "Compact call window (small; Wayland does not let it stay on top)",

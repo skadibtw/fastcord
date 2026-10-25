@@ -1189,18 +1189,6 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "ответ определения IP с некорректным адресом",
     ),
     (
-        "The blocking bypass is already running.",
-        "Обход блокировок уже работает.",
-    ),
-    (
-        "byedpi rejected the strategy arguments.",
-        "byedpi отклонил параметры стратегии.",
-    ),
-    (
-        "The blocking bypass did not start.",
-        "Обход блокировок не запустился.",
-    ),
-    (
         "snowflake must be a non-negative decimal integer",
         "snowflake должен быть неотрицательным десятичным целым числом",
     ),
