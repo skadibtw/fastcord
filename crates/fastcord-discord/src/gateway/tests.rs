@@ -24,7 +24,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 
 use super::compression::{MAX_EVENT_BYTES, test_support::ServerCompressor};
 use super::pacing::{JitterSource, SEND_LIMIT, backoff_delay};
-use super::profile::{ClientProperties, HostOs};
+use super::profile::{ClientProperties, HostOs, Identity};
 use super::subscription::{COALESCE, CONTROL_RESERVE};
 use super::transport::{DiscoverError, Transport, websocket_config};
 use super::url::GatewayUrl;
@@ -236,7 +236,8 @@ fn start(transport: &Arc<FakeTransport>, jitter: f64) -> Gateway {
         ClientProperties {
             client_build_number: FETCHED_BUILD,
             ..ClientProperties::bundled(HostOs::Linux, "en-US")
-        },
+        }
+        .into(),
         Fixed(jitter),
     )
 }
@@ -632,6 +633,37 @@ async fn identify_payload_is_identical_across_reconnects() {
     let three = third.handshake().await;
     assert_eq!(one, two);
     assert_eq!(two, three);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_installation_id_ready_issues_is_identified_with_from_then_on() {
+    const ID: &str = "1084179945133187083.JQddgNMmwJPghoBtFmaH7jTmdsw";
+    let transport = FakeTransport::new();
+    let mut first = transport.accept().await;
+    let mut second = transport.accept().await;
+    let identity = Identity::new(ClientProperties::bundled(HostOs::Linux, "en-US"));
+    let mut gateway = start_with(
+        Arc::clone(&transport),
+        Arc::new(UserToken::new("test-token".to_owned())),
+        identity.clone(),
+        Fixed(0.5),
+    );
+    let one = first.handshake().await;
+    assert!(one["d"]["properties"].get("installation_id").is_none());
+    let mut ready: Value = serde_json::from_str(READY).unwrap();
+    ready["apex_experiments"] = json!({"assignments": {"2": {}}, "installation": ID});
+    first.dispatch("READY", 1, &ready.to_string()).await;
+    skip_connection_states(&mut gateway).await;
+    assert!(matches!(
+        next_dispatch(&mut gateway).await.1,
+        Dispatch::Ready(_)
+    ));
+    expect_state(&mut gateway, ConnectionState::Ready).await;
+    // Shared with the REST client that owns this identity.
+    assert_eq!(identity.installation_id().as_deref(), Some(ID));
+    first.send_json(json!({"op": 9, "d": false})).await;
+    let two = second.handshake().await;
+    assert_eq!(two["d"]["properties"]["installation_id"], ID);
 }
 
 #[tokio::test(start_paused = true)]

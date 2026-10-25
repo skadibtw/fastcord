@@ -3586,12 +3586,8 @@ impl App {
         controls.set_audio_devices(&self.audio_preferences);
         controls.set_voice_input(&self.audio_preferences.voice_input);
         self.shortcuts.rebuild(&self.audio_preferences.voice_input);
-        let stream = gateway::status_stream(
-            session.client.clone(),
-            session.token(),
-            session.properties.clone(),
-            controls.clone(),
-        );
+        let stream =
+            gateway::status_stream(session.client.clone(), session.token(), controls.clone());
         let (task, worker) = Task::run(stream, move |()| Message::Navigation(id)).abortable();
         let attachment_cache =
             crate::attachments::AttachmentCache::default_root(session.user.id).ok();

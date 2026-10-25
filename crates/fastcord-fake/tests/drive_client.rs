@@ -61,7 +61,7 @@ async fn the_real_client_talks_to_the_fake() {
     );
 
     // Gateway: READY decoded into the Store.
-    let mut gateway = Gateway::start(client.clone(), token, properties());
+    let mut gateway = Gateway::start(client.clone(), token);
     let mut store = Store::new();
     loop {
         let event = next(&mut gateway).await;

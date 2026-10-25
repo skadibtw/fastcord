@@ -58,9 +58,22 @@ client_heartbeat_session_id`. `os_version` is Node's `os.release()`
 `window_manager` is `XDG_CURRENT_DESKTOP,GDMSESSION` (`unknown` for a missing
 one) and `distro` the os-release `PRETTY_NAME` (`fastcord_platform::os_release`).
 `os_arch`/`app_arch` are the build's architecture (`x64`, `arm64`, `ia32`).
-`client_app_state`, `device`, `referrer*` and `installation_id` are not sent.
-The launch signature is a UUIDv4 with the 12 client-mod bits cleared; the
-heartbeat session is a fresh UUIDv4 per launch, not yet rotated. The payload
+`client_app_state`, `device` and `referrer*` are not sent; `installation_id`
+comes last, once one is known. The launch signature is a UUIDv4 with the 12
+client-mod bits cleared; the heartbeat session is a fresh UUIDv4 regenerated
+every 30 minutes.
+
+`gateway::Identity` holds the profile one session's `RestClient` and Gateway
+share (`RestClient::identity`; `Gateway::start` takes it from the client). It
+rotates the heartbeat when 30 minutes have passed at the next use, re-encodes
+`x-super-properties` only then, and adopts the installation id READY carries
+in `apex_experiments.installation` (only `<digits>.<base64url>` up to 128
+bytes; the assignments are skipped unread). Later Identifies and every REST
+request carry the current values (`installation_id`, `X-Installation-ID`).
+The app keeps the id in the non-secret `installation-id` file of its data
+folder, one per installation and shared by every account, loads it into the
+next login's profile, and rewrites it only when READY issued a different one.
+Before any id exists both are omitted. The payload
 is `fixtures/gateway/identify.sanitized.json`. Evidence (2026-10-25, Windows,
 unauthenticated): the desktop Identify with a deliberately bogus token reached
 the real Gateway and was answered with close 4004, not 4002, so its structure

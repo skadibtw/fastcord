@@ -35,7 +35,7 @@ use std::time::Duration;
 use fastcord_video::effect::Effect;
 
 use fastcord_discord::gateway::{
-    ClientProperties, ConnectionState, Dispatch, Gateway, GatewayEvent, ReconnectReason, StopReason,
+    ConnectionState, Dispatch, Gateway, GatewayEvent, ReconnectReason, StopReason,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VoiceParticipant {
@@ -2007,7 +2007,7 @@ enum WorkerInput {
 }
 
 struct Worker {
-    start: Option<(RestClient, Arc<UserToken>, ClientProperties)>,
+    start: Option<(RestClient, Arc<UserToken>)>,
     rest: RestClient,
     gateway: Option<Gateway>,
     tracker: Tracker,
@@ -3315,7 +3315,6 @@ impl Drop for Worker {
 pub fn status_stream(
     rest: RestClient,
     token: Arc<UserToken>,
-    properties: ClientProperties,
     bridge: NavigationBridge,
 ) -> impl Stream<Item = ()> {
     let requests = bridge.requests.subscribe();
@@ -3326,7 +3325,7 @@ pub fn status_stream(
     // There is one worker per bridge; a second one would simply get no commands.
     let commands = bridge.take_commands().unwrap_or_else(|| mpsc::channel(1).1);
     let worker = Worker {
-        start: Some((rest, token, properties)),
+        start: Some((rest, token)),
         rest: rest_client,
         gateway: None,
         tracker: Tracker {
@@ -3361,8 +3360,8 @@ pub fn status_stream(
         let mut gateway = match worker.gateway.take() {
             Some(gateway) => gateway,
             None => {
-                let (rest, token, properties) = worker.start.take()?;
-                let gateway = Gateway::start(rest, token, properties);
+                let (rest, token) = worker.start.take()?;
+                let gateway = Gateway::start(rest, token);
                 *worker
                     .bridge
                     .closer
@@ -3378,6 +3377,13 @@ pub fn status_stream(
             let (status, requested) = tokio::select! {
                 event = gateway.next_event() => {
                     let event = event?;
+                    if let GatewayEvent::Dispatch {
+                        event: Dispatch::Ready(_),
+                        ..
+                    } = &event
+                    {
+                        crate::login::remember_installation(&worker.rest);
+                    }
                     let correlation = worker.voice_dispatch(&event);
                     let stream_correlation = worker.stream_dispatch(&event);
                     let status = worker.apply_gateway_event(event, |worker| {

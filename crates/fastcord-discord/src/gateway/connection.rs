@@ -44,7 +44,7 @@ use super::pacing::{
     IdentifyBudget, JitterSource, MAX_DISCOVERY_FORBIDDEN, MAX_FAILED_ATTEMPTS, SEND_WINDOW,
     SendBudget, backoff_delay, invalid_session_delay,
 };
-use super::profile::ClientProperties;
+use super::profile::Identity;
 use super::stream::StreamCommand;
 use super::subscription::{CONTROL_RESERVE, Subscriber, SubscriptionTarget};
 use super::transport::{DiscoverError, Transport};
@@ -131,7 +131,7 @@ struct Session {
 struct Driver<T: Transport, J: JitterSource> {
     transport: Arc<T>,
     token: Arc<UserToken>,
-    properties: ClientProperties,
+    properties: Identity,
     jitter: J,
     interrupt: InterruptFuture,
     outbox: Outbox,
@@ -160,7 +160,7 @@ pub(crate) struct Wanted {
 pub(crate) async fn run<T: Transport, J: JitterSource>(
     transport: Arc<T>,
     token: Arc<UserToken>,
-    properties: ClientProperties,
+    properties: Identity,
     jitter: J,
     outbox: Outbox,
     wanted: Wanted,
@@ -355,6 +355,8 @@ struct Conn {
     ack_pending: bool,
     sent: Sent,
     ready_since: Option<Instant>,
+    /// The installation id the last READY issued, for the shared identity.
+    installation: Option<String>,
 }
 
 enum Action {
@@ -528,6 +530,7 @@ async fn connection<T: Transport, J: JitterSource>(
         ack_pending: false,
         sent: Sent::Nothing,
         ready_since: None,
+        installation: None,
     };
     let mut inflater = Inflater::new();
     subscriber.pause();
@@ -677,6 +680,9 @@ async fn connection<T: Transport, J: JitterSource>(
                 match action {
                     Action::Nothing => {}
                     Action::Ready => {
+                        if let Some(installation) = conn.installation.take() {
+                            properties.set_installation_id(&installation);
+                        }
                         let now = Instant::now();
                         subscriber.start(now);
                         // A new session holds no voice state of ours.
@@ -706,7 +712,7 @@ async fn connection<T: Transport, J: JitterSource>(
                                 ConnectionState::Resuming,
                             ),
                             None => (
-                                wire::identify(token.expose_secret(), properties),
+                                wire::identify(token.expose_secret(), &properties.properties()),
                                 Sent::Identify,
                                 ConnectionState::Identifying,
                             ),
@@ -925,6 +931,7 @@ fn on_dispatch(
             });
             *identify_rejections = 0;
             conn.ready_since = Some(now);
+            conn.installation = decoded.installation;
             outbox.push(
                 GatewayEvent::Dispatch {
                     sequence: sequence.unwrap_or(0),

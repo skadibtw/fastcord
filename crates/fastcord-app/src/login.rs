@@ -19,7 +19,6 @@ pub enum Persistence {
 pub struct Session {
     pub user: User,
     pub client: RestClient,
-    pub properties: ClientProperties,
     token: Arc<UserToken>,
 }
 impl fmt::Debug for Session {
@@ -115,9 +114,10 @@ pub async fn initialize_store() -> Result<StoreReady, StoreError> {
 /// validated session (ADR 0005 revision 2026-10-25).
 pub async fn client_properties() -> ClientProperties {
     let versions = fastcord_discord::gateway::resolve_versions().await;
-    let release = tokio::task::spawn_blocking(fastcord_platform::os_release)
-        .await
-        .unwrap_or_default();
+    let (release, installation_id) =
+        tokio::task::spawn_blocking(|| (fastcord_platform::os_release(), load_installation()))
+            .await
+            .unwrap_or_default();
     let host = Host {
         os: HostOs::current(),
         os_version: release.version,
@@ -125,8 +125,54 @@ pub async fn client_properties() -> ClientProperties {
         window_manager: release.window_manager,
         distro: release.distro,
     };
-    ClientProperties::desktop(&host, &fastcord_platform::system_locale(), &versions)
-        .with_launch_identity()
+    ClientProperties {
+        installation_id,
+        ..ClientProperties::desktop(&host, &fastcord_platform::system_locale(), &versions)
+    }
+    .with_launch_identity()
+}
+
+const MAX_INSTALLATION_FILE_BYTES: u64 = 256;
+
+/// The installation id Discord issued to this installation: one non-secret
+/// file shared by every account, as the official client keeps it.
+fn installation_path() -> Option<std::path::PathBuf> {
+    crate::audio_devices::data_dir().map(|dir| dir.join("installation-id"))
+}
+
+/// Blocking; call from a worker.
+fn load_installation() -> Option<String> {
+    let path = installation_path()?;
+    if !std::fs::metadata(&path).is_ok_and(|meta| meta.len() <= MAX_INSTALLATION_FILE_BYTES) {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let id = text.trim();
+    fastcord_discord::gateway::is_installation_id(id).then(|| id.to_owned())
+}
+
+fn save_installation(id: &str) -> std::io::Result<()> {
+    let path = installation_path().ok_or_else(|| std::io::Error::other("no data folder"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, id)?;
+    std::fs::rename(temporary, path)
+}
+
+/// Keeps the installation id READY issued (the Gateway already adopted it on
+/// the shared identity) for later launches. Writes only when it changed.
+pub fn remember_installation(client: &RestClient) {
+    let Some(id) = client.identity().installation_id() else {
+        return;
+    };
+    tokio::task::spawn_blocking(move || {
+        if load_installation().as_deref() != Some(id.as_str()) {
+            // Best effort: without the file the next session is issued a new one.
+            let _ = save_installation(&id);
+        }
+    });
 }
 
 /// Exactly one validation request before an authenticated account is displayed.
@@ -138,10 +184,9 @@ pub async fn validate(
     if token.expose_secret().is_empty() || token.expose_secret().len() > MAX_TOKEN_BYTES {
         return Err(LoginError::InvalidInput);
     }
-    let properties = client_properties().await;
     let client = RestClient::new(
         UserToken::new(token.expose_secret().to_owned()),
-        properties.clone(),
+        client_properties().await,
     )
     .map_err(LoginError::Rest)?;
     let user: User = client
@@ -152,7 +197,6 @@ pub async fn validate(
     Ok(Arc::new(Session {
         user,
         client,
-        properties,
         token,
     }))
 }
@@ -240,10 +284,9 @@ pub(crate) fn fixture_session() -> Arc<Session> {
             .unwrap(),
         client: RestClient::new(
             UserToken::new("dummy-offline-secret".to_owned()),
-            properties.clone(),
+            properties,
         )
         .unwrap(),
-        properties,
         token,
     })
 }

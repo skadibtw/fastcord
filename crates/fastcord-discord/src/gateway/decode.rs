@@ -290,6 +290,15 @@ struct ReadyWire {
     user_settings: Option<serde_json::Value>,
     #[serde(default)]
     user_settings_proto: Option<serde_json::Value>,
+    #[serde(default)]
+    apex_experiments: Option<ApexWire>,
+}
+
+/// Only the installation id; the assignments are skipped unread.
+#[derive(Deserialize)]
+struct ApexWire {
+    #[serde(default)]
+    installation: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -655,6 +664,8 @@ pub(crate) struct DecodedReady {
     pub(crate) ready: Ready,
     pub(crate) resume_gateway_url: String,
     pub(crate) required_action: Option<String>,
+    /// A newly issued installation id (absent when ours was valid).
+    pub(crate) installation: Option<String>,
 }
 
 fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
@@ -739,6 +750,11 @@ fn decode_ready(raw: &str) -> Result<DecodedReady, Malformed> {
         },
         resume_gateway_url: wire.resume_gateway_url,
         required_action: wire.required_action.filter(|action| !action.is_empty()),
+        installation: wire
+            .apex_experiments
+            .and_then(|apex| apex.installation)
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|id| crate::gateway::is_installation_id(id)),
     })
 }
 

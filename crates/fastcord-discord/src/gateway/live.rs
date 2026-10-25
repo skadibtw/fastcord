@@ -149,7 +149,7 @@ async fn live_real_gateway_negotiates_zlib_stream_and_rejects_a_bogus_token() {
     let mut gateway = start_with(
         Arc::new(Unauthenticated),
         token,
-        ClientProperties::bundled(HostOs::current(), "en-US"),
+        ClientProperties::bundled(HostOs::current(), "en-US").into(),
         OsJitter,
     );
     let mut states = Vec::new();
@@ -190,7 +190,7 @@ async fn live_account_identifies_and_resumes_after_a_forced_reconnect() {
     let mut gateway = start_with(
         transport,
         Arc::new(UserToken::new(token)),
-        properties,
+        properties.into(),
         OsJitter,
     );
     let limit = Duration::from_secs(90);

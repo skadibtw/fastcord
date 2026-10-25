@@ -6,7 +6,9 @@
 //! reconnects: nothing here is randomized per connection.
 
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 /// Bump whenever the properties below change shape or meaning.
@@ -41,6 +43,12 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const BUILD_RANGE: std::ops::RangeInclusive<u32> = 100_000..=9_999_999;
 /// Plausibility window for the native metadata version.
 const NATIVE_RANGE: std::ops::RangeInclusive<u32> = 1_000..=9_999_999;
+
+/// The analytics heartbeat session is regenerated this often.
+const HEARTBEAT_ROTATION: Duration = Duration::from_secs(30 * 60);
+/// An installation id is a fingerprint (`<snowflake>.<hash>`); anything longer
+/// or with other characters is not kept or sent.
+const MAX_INSTALLATION_BYTES: usize = 128;
 
 /// The launch-signature bits Discord reads as detected client mods (JQUERY,
 /// BETTERDISCORD, RAMBOX, VENDETTA, VENCORD, REPLUGGED, LEGCORD, DORION,
@@ -342,6 +350,10 @@ pub struct ClientProperties {
     pub native_build_number: u32,
     pub client_event_source: Option<&'static str>,
     pub client_heartbeat_session_id: String,
+    /// The installation id Discord issued (READY `apex_experiments`),
+    /// persisted by the app; absent until the first session supplies one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installation_id: Option<String>,
 }
 
 impl ClientProperties {
@@ -375,6 +387,7 @@ impl ClientProperties {
             native_build_number: versions.native_build_number,
             client_event_source: None,
             client_heartbeat_session_id: String::new(),
+            installation_id: None,
         }
     }
 
@@ -387,15 +400,111 @@ impl ClientProperties {
     /// Stamps the one-off launch identity the desktop client generates when the
     /// app starts: a launch id, its signature with every client-mod bit clear,
     /// and the analytics heartbeat session. Generated once per launch, never
-    /// per Identify and never per reconnect.
-    // ponytail: the heartbeat session is not yet rotated every 30 minutes;
-    // that needs the swappable REST header (IDENTITY_AUDIT A2).
+    /// per Identify and never per reconnect; [`Identity`] rotates the heartbeat.
     pub fn with_launch_identity(mut self) -> Self {
         self.client_launch_id = Uuid::new_v4().to_string();
         self.launch_signature = launch_signature().to_string();
         self.client_heartbeat_session_id = Uuid::new_v4().to_string();
         self
     }
+}
+
+/// Whether `id` has the shape of an installation id: `<digits>.<base64url>`.
+pub fn is_installation_id(id: &str) -> bool {
+    id.len() <= MAX_INSTALLATION_BYTES
+        && id.split_once('.').is_some_and(|(snowflake, hash)| {
+            !snowflake.is_empty()
+                && snowflake.bytes().all(|b| b.is_ascii_digit())
+                && !hash.is_empty()
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
+/// The profile one session's REST client and Gateway share. It is fixed for
+/// the run except the analytics heartbeat session, regenerated every 30
+/// minutes, and the installation id Discord issues in READY. Clones share one
+/// value.
+#[derive(Clone, Debug)]
+pub struct Identity(Arc<Mutex<Current>>);
+
+#[derive(Debug)]
+struct Current {
+    properties: ClientProperties,
+    heartbeat_since: Instant,
+    /// `x-super-properties`, re-encoded only when the profile changes.
+    encoded: String,
+}
+
+impl Identity {
+    pub fn new(properties: ClientProperties) -> Self {
+        let encoded = encode(&properties);
+        Self(Arc::new(Mutex::new(Current {
+            properties,
+            heartbeat_since: Instant::now(),
+            encoded,
+        })))
+    }
+
+    /// The profile as Identify sends it now.
+    pub fn properties(&self) -> ClientProperties {
+        self.with_current(|current| current.properties.clone())
+    }
+
+    /// `(x-super-properties, X-Installation-ID)` for a request sent now.
+    pub(crate) fn headers(&self) -> (String, Option<String>) {
+        self.with_current(|current| {
+            (
+                current.encoded.clone(),
+                current.properties.installation_id.clone(),
+            )
+        })
+    }
+
+    pub fn installation_id(&self) -> Option<String> {
+        self.with_current(|current| current.properties.installation_id.clone())
+    }
+
+    /// Adopts the installation id Discord issued; a malformed one is ignored.
+    pub fn set_installation_id(&self, id: &str) {
+        if !is_installation_id(id) {
+            return;
+        }
+        self.with_current(|current| {
+            if current.properties.installation_id.as_deref() != Some(id) {
+                current.properties.installation_id = Some(id.to_owned());
+                current.encoded = encode(&current.properties);
+            }
+        });
+    }
+
+    fn with_current<R>(&self, f: impl FnOnce(&mut Current) -> R) -> R {
+        let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        if !current.properties.client_heartbeat_session_id.is_empty()
+            && now.duration_since(current.heartbeat_since) >= HEARTBEAT_ROTATION
+        {
+            current.properties.client_heartbeat_session_id = Uuid::new_v4().to_string();
+            current.heartbeat_since = now;
+            current.encoded = encode(&current.properties);
+        }
+        f(&mut current)
+    }
+}
+
+impl From<ClientProperties> for Identity {
+    fn from(properties: ClientProperties) -> Self {
+        Self::new(properties)
+    }
+}
+
+/// The properties JSON, standard-base64 encoded: the exact object Identify
+/// sends under `properties`.
+pub(crate) fn encode(properties: &ClientProperties) -> String {
+    use base64::Engine;
+    let json = serde_json::to_string(properties).expect("plain strings and numbers serialize");
+    base64::engine::general_purpose::STANDARD.encode(json)
 }
 
 /// A UUIDv4 with the client-mod bits cleared, as the official generator does.
@@ -576,6 +685,68 @@ mod tests {
             assert_eq!(signature.get_version_num(), 4);
             assert_eq!(signature.get_variant(), uuid::Variant::RFC4122);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_heartbeat_session_rotates_every_30_minutes_and_reaches_the_headers() {
+        let identity =
+            Identity::new(ClientProperties::bundled(HostOs::Linux, "en-US").with_launch_identity());
+        let first = identity.properties();
+        let (header, installation) = identity.headers();
+        assert_eq!(installation, None);
+        tokio::time::advance(HEARTBEAT_ROTATION - Duration::from_secs(1)).await;
+        assert_eq!(identity.properties(), first);
+        assert_eq!(identity.headers().0, header);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let rotated = identity.properties();
+        assert_ne!(
+            rotated.client_heartbeat_session_id,
+            first.client_heartbeat_session_id
+        );
+        assert_eq!(rotated.client_heartbeat_session_id.len(), 36);
+        // Only the heartbeat changed, and the header carries the new value.
+        assert_eq!(
+            ClientProperties {
+                client_heartbeat_session_id: first.client_heartbeat_session_id.clone(),
+                ..rotated.clone()
+            },
+            first
+        );
+        assert_eq!(identity.headers().0, encode(&rotated));
+        // Clones share the one value.
+        assert_eq!(identity.clone().properties(), rotated);
+        // A profile without a launch identity has no heartbeat to rotate.
+        let bare = Identity::new(ClientProperties::bundled(HostOs::Linux, "en-US"));
+        tokio::time::advance(HEARTBEAT_ROTATION * 3).await;
+        assert_eq!(bare.properties().client_heartbeat_session_id, "");
+    }
+
+    #[test]
+    fn the_installation_id_is_validated_then_sent_everywhere() {
+        let identity = Identity::new(ClientProperties::bundled(HostOs::Linux, "en-US"));
+        let long = format!("1.{}", "a".repeat(200));
+        for bad in [
+            "",
+            ".",
+            "123.",
+            ".abc",
+            "12a.abc",
+            "123.ab c",
+            "123.ab\r\nX: y",
+            long.as_str(),
+        ] {
+            identity.set_installation_id(bad);
+            assert_eq!(identity.installation_id(), None, "{bad:?}");
+        }
+        let id = "1084179945133187083.JQddgNMmwJPghoBtFmaH7jTmdsw";
+        identity.set_installation_id(id);
+        assert_eq!(identity.installation_id().as_deref(), Some(id));
+        assert_eq!(identity.properties().installation_id.as_deref(), Some(id));
+        let (header, installation) = identity.headers();
+        assert_eq!(installation.as_deref(), Some(id));
+        assert_eq!(header, encode(&identity.properties()));
+        let json = serde_json::to_string(&identity.properties()).unwrap();
+        assert!(json.ends_with(&format!("\"installation_id\":\"{id}\"}}")));
     }
 
     #[test]

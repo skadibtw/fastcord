@@ -31,14 +31,12 @@ async fn closes_every_second_are_resumed_with_one_identify_and_a_wait_each_time(
     .await
     .unwrap();
     fake_origin::set_origin(&format!("127.0.0.1:{}", fake.port())).unwrap();
-    let properties = ClientProperties::bundled(HostOs::Linux, "en-US");
-    let client =
-        RestClient::new(UserToken::new("fake-token".to_owned()), properties.clone()).unwrap();
-    let mut gateway = Gateway::start(
-        client,
-        Arc::new(UserToken::new("fake-token".to_owned())),
-        properties,
-    );
+    let client = RestClient::new(
+        UserToken::new("fake-token".to_owned()),
+        ClientProperties::bundled(HostOs::Linux, "en-US"),
+    )
+    .unwrap();
+    let mut gateway = Gateway::start(client, Arc::new(UserToken::new("fake-token".to_owned())));
     let mut delays = Vec::new();
     while delays.len() < 2 {
         let event = timeout(Duration::from_secs(20), gateway.next_event())

@@ -376,8 +376,9 @@ not another round of header work.
 ## F. Specification status
 
 Implemented on 2026-10-25: the desktop profile itself, A1 (launch signature
-mask), the A2 field without its 30-minute rotation, and C1 (version chain and
-the daily `identity-pin` check); see ADR 0005 "Current implementation". The
+mask), A2 (heartbeat session with 30-minute rotation), A3/A4 (installation id
+from READY, persisted, sent in Identify and `X-Installation-ID`), and C1
+(version chain and the daily `identity-pin` check); see ADR 0005 "Current implementation". The
 other items below are still open.
 
 This branch applies the policy: ADR 0005 carries the 2026-10-25 revision,

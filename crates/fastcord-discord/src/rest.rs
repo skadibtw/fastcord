@@ -1,4 +1,3 @@
-use base64::Engine;
 use std::fmt;
 use std::io::{self, Write};
 use std::sync::{
@@ -15,7 +14,7 @@ use serde::de::DeserializeOwned;
 
 use crate::attachment::{RefreshRequest, RefreshResponse, RefreshedAttachmentUrl};
 use crate::error::{ERROR_BODY_BYTE_BUDGET, PauseReason, Refusal, status_error};
-use crate::gateway::ClientProperties;
+use crate::gateway::{ClientProperties, Identity};
 use crate::rate_limit::{RateLimiter, ResponseLimits};
 use crate::{
     Clock, MonotonicClock, NetworkFailure, RestError, RetryableFailure, Route, UserToken,
@@ -239,6 +238,8 @@ impl fmt::Debug for RestResponse {
 /// queued and in-flight work, including reads and Gateway reconnection.
 pub struct RestClient<C = MonotonicClock> {
     http: reqwest::Client,
+    /// The profile this client and the account's Gateway share.
+    identity: Identity,
     limiter: RateLimiter<C>,
     writes_restricted: Arc<AtomicBool>,
     /// Bitmask of enabled `WriteGroup`s, shared by clones.
@@ -250,6 +251,7 @@ impl<C> Clone for RestClient<C> {
     fn clone(&self) -> Self {
         Self {
             http: self.http.clone(),
+            identity: self.identity.clone(),
             limiter: self.limiter.clone(),
             writes_restricted: self.writes_restricted.clone(),
             enabled_writes: self.enabled_writes.clone(),
@@ -270,8 +272,11 @@ impl<C: Clock> RestClient<C> {
         clock: C,
         properties: ClientProperties,
     ) -> Result<Self, RestError> {
-        // Encode and validate the shared identity once per client, not per request.
-        let headers = auth_headers(&token, &properties)?;
+        // Validate the whole identity once per client; the fixed part becomes
+        // default headers, the part that rotates is added per request.
+        auth_headers(&token, &properties)?;
+        let mut headers = base_headers(&properties)?;
+        headers.insert(AUTHORIZATION, authorization(&token)?);
         // The token wrapper is zeroized here; HTTP internals necessarily own
         // their header copy. No default Debug path exposes that sensitive header.
         let http = reqwest::Client::builder()
@@ -291,6 +296,7 @@ impl<C: Clock> RestClient<C> {
         let http = http.build().map_err(|_| RestError::ClientConfiguration)?;
         Ok(Self {
             http,
+            identity: Identity::new(properties),
             limiter: RateLimiter::new(clock),
             writes_restricted: Arc::new(AtomicBool::new(false)),
             enabled_writes: Arc::new(AtomicU64::new(WriteGroup::default_mask())),
@@ -301,6 +307,11 @@ impl<C: Clock> RestClient<C> {
     #[cfg(test)]
     pub(crate) fn limiter(&self) -> &RateLimiter<C> {
         &self.limiter
+    }
+
+    /// The profile shared with the account's Gateway.
+    pub fn identity(&self) -> &Identity {
+        &self.identity
     }
 
     pub fn stop_authenticated_work(&self) {
@@ -529,6 +540,11 @@ impl<C: Clock> RestClient<C> {
         if let Some(reason) = &request.audit_reason {
             builder = builder.header("x-audit-log-reason", reason.clone());
         }
+        let (super_properties, installation) = self.identity.headers();
+        builder = builder.header("x-super-properties", super_properties);
+        if let Some(installation) = installation {
+            builder = builder.header("x-installation-id", installation);
+        }
         builder.build().map_err(|_| RestError::ClientConfiguration)
     }
 }
@@ -540,31 +556,43 @@ pub(crate) fn auth_headers(
     token: &UserToken,
     properties: &ClientProperties,
 ) -> Result<HeaderMap, RestError> {
+    let mut headers = identity_headers(properties)?;
+    headers.insert(AUTHORIZATION, authorization(token)?);
+    Ok(headers)
+}
+
+fn authorization(token: &UserToken) -> Result<HeaderValue, RestError> {
     if token.expose_secret().is_empty() {
         return Err(RestError::InvalidToken);
     }
     let mut authorization =
         HeaderValue::from_str(token.expose_secret()).map_err(|_| RestError::InvalidToken)?;
     authorization.set_sensitive(true);
-    let mut headers = identity_headers(properties)?;
-    headers.insert(AUTHORIZATION, authorization);
-    Ok(headers)
+    Ok(authorization)
 }
 
 /// Everything but `Authorization`: also used by the pre-token password login.
 pub(crate) fn identity_headers(properties: &ClientProperties) -> Result<HeaderMap, RestError> {
-    let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-
+    let mut headers = base_headers(properties)?;
     // This is the exact properties object used by Gateway Identify.
-    let properties_json =
-        serde_json::to_string(properties).map_err(|_| RestError::ClientConfiguration)?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&properties_json);
     headers.insert(
         "x-super-properties",
-        HeaderValue::from_str(&encoded).map_err(|_| RestError::ClientConfiguration)?,
+        HeaderValue::from_str(&crate::gateway::profile::encode(properties))
+            .map_err(|_| RestError::ClientConfiguration)?,
     );
+    if let Some(installation) = &properties.installation_id {
+        headers.insert(
+            "x-installation-id",
+            HeaderValue::from_str(installation).map_err(|_| RestError::ClientConfiguration)?,
+        );
+    }
+    Ok(headers)
+}
 
+/// The headers that never change during a run.
+fn base_headers(properties: &ClientProperties) -> Result<HeaderMap, RestError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     headers.insert(
         "x-discord-locale",
         HeaderValue::from_str(&properties.system_locale)
@@ -662,6 +690,38 @@ mod tests {
             auth_headers(&UserToken::new(String::new()), &properties),
             Err(RestError::InvalidToken)
         ));
+    }
+
+    #[test]
+    fn every_request_carries_the_identity_as_it_is_now() {
+        let client = RestClient::new(
+            UserToken::new("offline-test-credential".to_owned()),
+            ClientProperties::bundled(HostOs::Linux, "en-US"),
+        )
+        .unwrap();
+        let request = RestRequest::new(
+            Route::new(Method::GET, "/users/@me").unwrap(),
+            Priority::UserRead,
+        );
+        let before = client.build_request(&request).unwrap();
+        assert_eq!(
+            before.headers()["x-super-properties"],
+            crate::gateway::profile::encode(&client.identity().properties())
+        );
+        assert!(!before.headers().contains_key("x-installation-id"));
+        // The Gateway adopts READY's installation id on the shared identity.
+        let id = "1084179945133187083.JQddgNMmwJPghoBtFmaH7jTmdsw";
+        client.clone().identity().set_installation_id(id);
+        let after = client.build_request(&request).unwrap();
+        assert_eq!(after.headers()["x-installation-id"], id);
+        assert_eq!(
+            after.headers()["x-super-properties"],
+            crate::gateway::profile::encode(&client.identity().properties())
+        );
+        assert_ne!(
+            after.headers()["x-super-properties"],
+            before.headers()["x-super-properties"]
+        );
     }
 
     #[test]
