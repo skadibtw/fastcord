@@ -522,6 +522,8 @@ enum Message {
     ToggleUnverifiedList,
     /// Turns one group of unverified writes on or off for this session.
     UnverifiedWrite(fastcord_discord::WriteGroup, bool),
+    /// Turns every group of unverified writes on or off for this session.
+    UnverifiedWriteAll(bool),
     ChatPrefs(chat_prefs::Prefs),
     SpeechPrefs(speech::Prefs),
     SpeechVoices(Vec<fastcord_platform::speech::Voice>),
@@ -1964,6 +1966,11 @@ impl App {
             Message::UnverifiedWrite(group, on) => {
                 if let Phase::Account { session, .. } = &self.phase {
                     session.client.set_write_group(group, on);
+                }
+            }
+            Message::UnverifiedWriteAll(on) => {
+                if let Phase::Account { session, .. } = &self.phase {
+                    unverified::set_all(&session.client, on);
                 }
             }
             Message::ChatPrefs(prefs) => {
@@ -7644,6 +7651,38 @@ mod tests {
         let next = authenticate(&mut app, Persistence::MemoryOnly);
         assert!(!next.client.write_group_enabled(WriteGroup::Reports));
         assert!(next.client.write_group_enabled(WriteGroup::Typing));
+    }
+
+    #[tokio::test]
+    async fn the_allow_all_switch_turns_every_group_on_until_logout() {
+        use fastcord_discord::WriteGroup;
+        let mut app = login_app();
+        let session = authenticate(&mut app, Persistence::Saved);
+        assert!(!session.client.write_group_enabled(WriteGroup::Reports));
+        let _ = app.update(Message::UnverifiedWriteAll(true));
+        assert!(
+            unverified::rows(Some(&session.client))
+                .iter()
+                .all(|(_, on)| *on)
+        );
+        let _ = app.update(Message::UnverifiedWriteAll(false));
+        assert!(
+            unverified::rows(Some(&session.client))
+                .iter()
+                .all(|(_, on)| !*on)
+        );
+        let _ = app.update(Message::UnverifiedWriteAll(true));
+        drop(session);
+        let _ = app.update(Message::Logout);
+        let _ = app.update(Message::Deleted(Ok(())));
+        // The next sign-in starts from the default groups, not from "allow all".
+        let next = authenticate(&mut app, Persistence::MemoryOnly);
+        assert!(
+            unverified::rows(Some(&next.client))
+                .iter()
+                .all(|(group, on)| *on == group.default_on())
+        );
+        assert!(!next.client.write_group_enabled(WriteGroup::Reports));
     }
 
     #[tokio::test]

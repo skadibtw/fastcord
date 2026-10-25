@@ -702,6 +702,12 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Процесс входа остановился. Вход не выполнен; повторите попытку.",
     ),
     // unverified
+    ("Allow all", "Разрешить всё"),
+    ("Turn all off", "Отключить всё"),
+    (
+        "Every group at once; still this session only.",
+        "Все группы сразу; по-прежнему только на текущую сессию.",
+    ),
     (
         "Hide: Test unverified actions (alt account only)",
         "Скрыть: проверка непроверенных действий (только дополнительный аккаунт)",

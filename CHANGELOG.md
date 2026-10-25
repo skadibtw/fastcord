@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Settings → Application, Advanced gained **Allow all** and **Turn all off** next to the unverified-writes list: every write group is switched for the current session in one click instead of one checkbox at a time. It is still session-only — nothing is saved, and the next restart, log-out or account switch starts from the default groups — and the shortcut only appears while an account is signed in.
+
 ## 0.1.0-alpha.3 — 2026-10-25
 
 ### Fixed

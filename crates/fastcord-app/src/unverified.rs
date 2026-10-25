@@ -6,18 +6,23 @@
 
 use fastcord_discord::{RestClient, WriteGroup};
 use iced::Element;
-use iced::widget::{button, checkbox, column, text};
+use iced::widget::{button, checkbox, column, row, text};
 
 use crate::Message;
 use crate::i18n::tr;
 
 const WARNING: &str = "Writes that have not been checked on a live account are off, so nothing reaches Discord by accident. Turn a group on only on the alt account, one at a time, and report what happens. This resets when you restart, log out or switch accounts.";
 
+/// Every group at once: the list's "Allow all" and "Turn all off" shortcut.
+pub fn set_all(client: &RestClient, on: bool) {
+    for &group in WriteGroup::ALL {
+        client.set_write_group(group, on);
+    }
+}
+
 /// Fake mode sends nothing to Discord, so every group is on there.
 pub fn enable_all(client: &RestClient) {
-    for &group in WriteGroup::ALL {
-        client.set_write_group(group, true);
-    }
+    set_all(client, true);
 }
 
 /// Every group with its current state; all off when no account is signed in.
@@ -43,6 +48,16 @@ pub fn view<'a>(client: Option<&RestClient>, open: bool) -> Element<'a, Message>
         list = list.push(text(tr(WARNING)).size(12));
         if client.is_none() {
             list = list.push(text(tr("Sign in to change these.")).size(12));
+        } else {
+            list = list.push(
+                row![
+                    button(tr("Allow all")).on_press(Message::UnverifiedWriteAll(true)),
+                    button(tr("Turn all off")).on_press(Message::UnverifiedWriteAll(false)),
+                    text(tr("Every group at once; still this session only.")).size(11),
+                ]
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center),
+            );
         }
         for (group, on) in rows(client) {
             list = list
@@ -118,5 +133,33 @@ mod tests {
         assert!(!client.write_group_enabled(WriteGroup::Reports));
         enable_all(&client);
         assert!(rows(Some(&client)).iter().all(|(_, on)| *on));
+    }
+
+    #[test]
+    fn allow_all_turns_every_group_on_and_off_again() {
+        let client = client();
+        set_all(&client, true);
+        assert!(rows(Some(&client)).iter().all(|(_, on)| *on));
+        assert!(
+            WriteGroup::ALL
+                .iter()
+                .all(|&g| client.write_group_enabled(g))
+        );
+        set_all(&client, false);
+        assert!(rows(Some(&client)).iter().all(|(_, on)| !*on));
+        assert!(
+            WriteGroup::ALL
+                .iter()
+                .all(|&g| !client.write_group_enabled(g))
+        );
+    }
+
+    #[test]
+    fn the_open_list_builds_with_and_without_a_client() {
+        let client = client();
+        // The "Allow all" row needs a client; every state must still build.
+        let _ = view(Some(&client), true);
+        let _ = view(None, true);
+        let _ = view(Some(&client), false);
     }
 }
