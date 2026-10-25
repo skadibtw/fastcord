@@ -659,6 +659,10 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Капча закрыта до завершения. Войдите снова.",
     ),
     (
+        "The CAPTCHA did not load. This window connects directly and does not use fastcord's network recovery: if discord.com or js.hcaptcha.com is blocked here, use QR or token login.",
+        "Капча не загрузилась. Это окно подключается напрямую и не использует восстановление сети fastcord: если discord.com или js.hcaptcha.com здесь недоступны, войдите по QR-коду или токену.",
+    ),
+    (
         "fastcord - complete the CAPTCHA",
         "fastcord — пройдите капчу",
     ),

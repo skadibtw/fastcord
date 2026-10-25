@@ -18,6 +18,9 @@ pub enum CaptchaError {
     /// The window was closed before a challenge was completed.
     #[cfg_attr(not(windows), allow(dead_code))]
     Dismissed,
+    /// The page never got the widget: the view has its own, direct network path.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Unreachable,
 }
 
 impl std::fmt::Display for CaptchaError {
@@ -29,8 +32,29 @@ impl std::fmt::Display for CaptchaError {
             Self::Dismissed => {
                 f.write_str(tr("CAPTCHA closed before it was completed. Log in again."))
             }
+            Self::Unreachable => f.write_str(tr(
+                "The CAPTCHA did not load. This window connects directly and does not use fastcord's network recovery: if discord.com or js.hcaptcha.com is blocked here, use QR or token login.",
+            )),
         }
     }
+}
+
+/// The page reports the key the person's interaction produced, or that the
+/// widget never loaded. A key can never be mistaken for the failure marker.
+const FAILED: &str = "fc-captcha-failed";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Report<'a> {
+    Key(&'a str),
+    Failed,
+}
+
+fn report(text: &str) -> Option<Report<'_>> {
+    if text == FAILED {
+        return Some(Report::Failed);
+    }
+    let key = text.trim();
+    (!key.is_empty() && key.len() <= 8192 && !key.starts_with(FAILED)).then_some(Report::Key(key))
 }
 
 /// The page that replaces the body: loads the provider script and reports the
@@ -43,16 +67,21 @@ fn widget_script(challenge: &CaptchaChallenge) -> Option<String> {
     let sitekey = serde_json::to_string(&challenge.sitekey).ok()?;
     let rqdata = serde_json::to_string(&challenge.rqdata).ok()?;
     Some(format!(
-        r#"document.addEventListener('DOMContentLoaded', function () {{
+        r#"window.setTimeout(function () {{
+  if (!window.fcWidgetReady) {{ window.ipc.postMessage('{FAILED}'); }}
+}}, 20000);
+document.addEventListener('DOMContentLoaded', function () {{
   document.documentElement.innerHTML = '<head><meta charset="utf-8"><title>CAPTCHA</title></head><body style="margin:0;padding:24px;display:flex;justify-content:center;background:#fff"><div id="c"></div></body>';
   window.fcLoaded = function () {{
     var options = {{ sitekey: {sitekey}, callback: function (t) {{ window.ipc.postMessage(t); }} }};
     var rqdata = {rqdata};
     if (rqdata) {{ options.rqdata = rqdata; }}
+    window.fcWidgetReady = true;
     hcaptcha.render('c', options);
   }};
   var s = document.createElement('script');
   s.src = 'https://js.hcaptcha.com/1/api.js?render=explicit&onload=fcLoaded';
+  s.onerror = function () {{ window.ipc.postMessage('{FAILED}'); }};
   document.head.appendChild(s);
 }});"#
     ))
@@ -72,6 +101,7 @@ pub async fn solve(challenge: CaptchaChallenge) -> Result<CaptchaSolution, Captc
     Ok(CaptchaSolution {
         key,
         rqtoken: challenge.rqtoken,
+        session_id: challenge.session_id,
     })
 }
 
@@ -102,18 +132,21 @@ fn run_window(script: String) -> Result<String, CaptchaError> {
         .map_err(|_| CaptchaError::Unsupported)?;
     let profile = std::env::temp_dir().join(format!("fastcord-captcha-{}", std::process::id()));
     let mut context = WebContext::new(Some(profile.clone()));
-    let answer: Arc<Mutex<Option<String>>> = Arc::default();
+    let answer: Arc<Mutex<Option<Result<String, CaptchaError>>>> = Arc::default();
     let sink = Arc::clone(&answer);
     let proxy = event_loop.create_proxy();
     let webview = WebViewBuilder::new_with_web_context(&mut context)
         .with_url("https://discord.com/robots.txt")
         .with_initialization_script(script)
         .with_ipc_handler(move |request| {
-            let key = request.into_body();
-            if !key.is_empty() && key.len() <= 8192 {
-                *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
-                let _ = proxy.send_event(());
-            }
+            let body = request.into_body();
+            let report = match report(&body) {
+                Some(Report::Key(key)) => Ok(key.to_owned()),
+                Some(Report::Failed) => Err(CaptchaError::Unreachable),
+                None => return,
+            };
+            *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
+            let _ = proxy.send_event(());
         })
         .build(&window)
         .map_err(|_| CaptchaError::Unsupported);
@@ -143,7 +176,7 @@ fn run_window(script: String) -> Result<String, CaptchaError> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
-        .ok_or(CaptchaError::Dismissed)
+        .unwrap_or(Err(CaptchaError::Dismissed))
 }
 
 #[cfg(test)]
@@ -156,6 +189,7 @@ mod tests {
             service: service.into(),
             rqdata: None,
             rqtoken: None,
+            session_id: None,
         }
     }
 
@@ -165,5 +199,24 @@ mod tests {
         let script = widget_script(&challenge("hcaptcha", "a\"</script>")).unwrap();
         assert!(script.contains(r#"sitekey: "a\"</script>""#));
         assert!(script.contains("var rqdata = null;"));
+        // A widget that never loads reports itself instead of hanging.
+        assert!(script.contains(FAILED));
+        assert!(script.contains("fcWidgetReady"));
+    }
+
+    #[test]
+    fn the_page_reports_only_a_key_or_its_own_failure() {
+        assert_eq!(report("token-key"), Some(Report::Key("token-key")));
+        assert_eq!(report("  token-key \n"), Some(Report::Key("token-key")));
+        assert_eq!(report(FAILED), Some(Report::Failed));
+        // Empty, oversized and marker-prefixed messages are not keys.
+        assert_eq!(report(""), None);
+        assert_eq!(report("   "), None);
+        assert_eq!(report(&"k".repeat(8193)), None);
+        assert_eq!(
+            report(&format!("{FAILED}-but-not-the-marker")),
+            None,
+            "a key that only starts like the marker is refused"
+        );
     }
 }

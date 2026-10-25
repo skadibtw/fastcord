@@ -166,6 +166,8 @@ pub struct CaptchaChallenge {
     pub service: String,
     pub rqdata: Option<String>,
     pub rqtoken: Option<String>,
+    /// Session the challenge belongs to; Discord expects it back as a header.
+    pub session_id: Option<String>,
 }
 
 impl fmt::Debug for CaptchaChallenge {
@@ -181,6 +183,7 @@ impl fmt::Debug for CaptchaChallenge {
 pub struct CaptchaSolution {
     pub key: String,
     pub rqtoken: Option<String>,
+    pub session_id: Option<String>,
 }
 
 impl fmt::Debug for CaptchaSolution {
@@ -244,6 +247,7 @@ struct CaptchaResponse {
     captcha_service: Option<String>,
     captcha_rqdata: Option<String>,
     captcha_rqtoken: Option<String>,
+    captcha_session_id: Option<String>,
 }
 
 pub struct PasswordAuth {
@@ -305,6 +309,9 @@ impl PasswordAuth {
             request = request.header("x-captcha-key", &solution.key);
             if let Some(rqtoken) = &solution.rqtoken {
                 request = request.header("x-captcha-rqtoken", rqtoken);
+            }
+            if let Some(session) = &solution.session_id {
+                request = request.header("x-captcha-session-id", session);
             }
         }
         let (status, bytes) = send(&self.http, request.body(body)).await?;
@@ -419,6 +426,7 @@ pub(crate) fn classify_login(
             service,
             rqdata: challenge.captcha_rqdata,
             rqtoken: challenge.captcha_rqtoken,
+            session_id: challenge.captcha_session_id,
         }));
     }
     if status == StatusCode::BAD_REQUEST && mentions_invalid_credentials(body) {
@@ -457,11 +465,12 @@ mod tests {
 
         let captcha = classify_login(
             StatusCode::BAD_REQUEST,
-            br#"{"captcha_key":["captcha-required"],"captcha_sitekey":"k","captcha_service":"hcaptcha","captcha_rqdata":"d","captcha_rqtoken":"q"}"#,
+            br#"{"captcha_key":["captcha-required"],"captcha_sitekey":"k","captcha_service":"hcaptcha","captcha_rqdata":"d","captcha_rqtoken":"q","captcha_session_id":"s"}"#,
         )
         .unwrap();
         assert!(matches!(captcha, PasswordLogin::Captcha(c)
-            if c.sitekey == "k" && c.service == "hcaptcha" && c.rqtoken.as_deref() == Some("q")));
+            if c.sitekey == "k" && c.service == "hcaptcha" && c.rqtoken.as_deref() == Some("q")
+                && c.session_id.as_deref() == Some("s")));
     }
 
     #[test]
@@ -550,6 +559,7 @@ mod tests {
         let solution = CaptchaSolution {
             key: "SECRET-KEY".into(),
             rqtoken: None,
+            session_id: Some("SECRET-SESSION".into()),
         };
         let text = format!("{mfa:?} {solution:?}");
         assert!(!text.contains("SECRET"));
