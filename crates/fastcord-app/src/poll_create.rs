@@ -108,9 +108,13 @@ fn describe_send(error: SendError) -> &'static str {
 }
 
 impl State {
-    /// Closes the panel unless it belongs to `channel`.
+    /// Closes the panel unless it belongs to `channel`. A send in flight is
+    /// awaited, never abandoned: aborting it could lose a poll Discord already
+    /// created, and a retry would then carry a fresh nonce.
     pub fn sync(&mut self, channel: Option<Snowflake>) {
-        if self.open.is_some_and(|open| Some(open.channel) != channel) {
+        if self.status != Status::Sending
+            && self.open.is_some_and(|open| Some(open.channel) != channel)
+        {
             self.close();
         }
     }
@@ -136,6 +140,7 @@ impl State {
 
     pub fn update(&mut self, event: Event, context: Context, client: &RestClient) -> Task<Event> {
         match event {
+            Event::Toggle if self.status == Status::Sending => {}
             Event::Toggle => {
                 if self.open.is_some() {
                     self.close();
@@ -238,7 +243,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
     let controls = row![
         text(tr("Create a poll")).size(13),
         iced::widget::space::horizontal(),
-        crate::icons::close(Some(Event::Toggle)),
+        crate::icons::close((!sending).then_some(Event::Toggle)),
     ]
     .align_y(iced::Alignment::Center);
     let question = text_input(tr("Question"), &state.question)
@@ -408,6 +413,11 @@ mod tests {
         let first = state.attempt.clone().unwrap();
         // A second press while sending is ignored.
         let _ = state.update(Event::Create, context(), &client());
+        assert_eq!(state.attempt.clone().unwrap().1, first.1);
+        // Neither the close button nor a channel switch abandons the send.
+        let _ = state.update(Event::Toggle, context(), &client());
+        state.sync(Some(Snowflake(999)));
+        assert_eq!(state.status, Status::Sending);
         assert_eq!(state.attempt.clone().unwrap().1, first.1);
         let serial = state.serial;
         let ambiguous = SendError::Ambiguous(fastcord_discord::RestError::InvalidJson);
