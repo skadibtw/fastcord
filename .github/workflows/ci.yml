@@ -28,6 +28,11 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Audit application network boundary
         run: python3 scripts/check_network_boundary.py
+      - name: Generated files are current (licences, icon catalog)
+        run: |
+          cargo fetch --locked
+          python3 scripts/gen_third_party_licenses.py --check
+          python3 assets/icons/generate.py --check-text
 
   check:
     strategy:

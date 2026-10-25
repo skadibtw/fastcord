@@ -12,6 +12,7 @@ import io
 import math
 from pathlib import Path
 import re
+import shutil
 import struct
 import subprocess
 
@@ -213,8 +214,8 @@ def rust():
     lines += ["}", "}", ""]
     source = "\n".join(lines)
     # Match workspace formatting without changing unrelated files.
-    rustfmt = Path.home() / ".cargo/bin/rustfmt.exe"
-    command = str(rustfmt) if rustfmt.exists() else "rustfmt"
+    fallback = Path.home() / ".cargo/bin/rustfmt.exe"
+    command = shutil.which("rustfmt") or (str(fallback) if fallback.exists() else "rustfmt")
     return subprocess.run([command, "--edition", "2024", "--emit", "stdout"], input=source,
                           text=True, capture_output=True, check=True).stdout
 
@@ -322,10 +323,15 @@ def exports():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
+    # PNG/ICO/ICNS bytes depend on the Pillow and zlib build; CI checks only
+    # the deterministic text outputs (SVGs, catalog.rs, index.html).
+    parser.add_argument("--check-text", action="store_true")
     args = parser.parse_args()
+    args.check = args.check or args.check_text
     outputs = {HERE / f"ui/{name}.svg": svg(shapes).encode() for name, shapes in ICONS.items()}
     outputs[ROOT / "crates/fastcord-app/src/icons/catalog.rs"] = rust().replace("\r\n", "\n").encode()
-    outputs.update(exports())
+    if not args.check_text:
+        outputs.update(exports())
     cards = "\n".join(f'<figure>{svg(shapes)}<figcaption>{html.escape(name)}</figcaption></figure>' for name, shapes in ICONS.items())
     outputs[HERE / "index.html"] = ('''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>fastcord icons</title>
 <style>body{margin:40px;background:#1e1f22;color:#dbdee1;font:14px system-ui}header{display:flex;align-items:center;gap:24px;margin-bottom:36px}header img{width:96px}h1{margin:0 0 8px}p{color:#949ba4}main{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px}figure{margin:0;padding:20px 4px;background:#2b2d31;border-radius:10px;text-align:center}figure svg{width:24px;height:24px}figcaption{margin-top:16px;color:#949ba4;font-size:12px}body.light{background:#f2f3f5;color:#232428}body.light figure{background:white}button{padding:8px 16px}</style>
