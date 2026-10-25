@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 fastcord-model.workspace = true
 fastcord-bypass.workspace = true
+fastcord-ws.workspace = true
 davey.workspace = true
 aes-gcm.workspace = true
 chacha20poly1305.workspace = true
@@ -26,6 +27,7 @@ tls_codec.workspace = true
 openmls.workspace = true
 
 [dev-dependencies]
+fastcord-ws = { workspace = true, features = ["test-support"] }
 parking_lot.workspace = true
 openmls_basic_credential.workspace = true
 openmls_rust_crypto.workspace = true

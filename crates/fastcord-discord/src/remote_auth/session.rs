@@ -4,12 +4,10 @@
 
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
-use tokio::io::{AsyncRead, AsyncWrite};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout};
-use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use zeroize::Zeroizing;
 
 use super::crypto::AttemptKey;
@@ -40,14 +38,14 @@ enum Flow {
     Authorized(UserToken),
 }
 
-pub(crate) async fn drive<T, E>(
-    mut socket: WebSocketStream<T>,
+pub(crate) async fn drive<S, E>(
+    mut socket: S,
     key: &AttemptKey,
     exchange: &E,
     events: &mpsc::Sender<RemoteAuthEvent>,
 ) -> Result<UserToken, RemoteAuthError>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    S: Stream<Item = Result<Message, WsError>> + Sink<Message, Error = WsError> + Unpin,
     E: TicketExchange,
 {
     let (heartbeat_every, session_for) = match timeout(HELLO_TIMEOUT, read_incoming(&mut socket))
@@ -110,21 +108,21 @@ where
         }
     };
     // Best effort: tell the gateway we are leaving; never wait long for it.
-    let _ = timeout(Duration::from_secs(2), socket.close(None)).await;
+    let _ = timeout(Duration::from_secs(2), SinkExt::close(&mut socket)).await;
     result
 }
 
-async fn handle<T, E>(
+async fn handle<S, E>(
     incoming: Incoming,
     stage: &mut Stage,
     key: &AttemptKey,
     exchange: &E,
     events: &mpsc::Sender<RemoteAuthEvent>,
-    socket: &mut WebSocketStream<T>,
+    socket: &mut S,
     deadline: Instant,
 ) -> Result<Flow, RemoteAuthError>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    S: Stream<Item = Result<Message, WsError>> + Sink<Message, Error = WsError> + Unpin,
     E: TicketExchange,
 {
     match (*stage, incoming) {
@@ -202,12 +200,9 @@ async fn emit(
         .map_err(|_| RemoteAuthError::Cancelled)
 }
 
-async fn send<T>(
-    socket: &mut WebSocketStream<T>,
-    message: &Outgoing<'_>,
-) -> Result<(), RemoteAuthError>
+async fn send<S>(socket: &mut S, message: &Outgoing<'_>) -> Result<(), RemoteAuthError>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    S: Sink<Message, Error = WsError> + Unpin,
 {
     let text = message.to_text()?;
     timeout(SEND_TIMEOUT, socket.send(Message::text(text.as_str())))
@@ -218,9 +213,9 @@ where
 
 /// Next protocol message; control frames are consumed, a close frame becomes a
 /// categorical error, and binary frames are a protocol violation.
-async fn read_incoming<T>(socket: &mut WebSocketStream<T>) -> Result<Incoming, RemoteAuthError>
+async fn read_incoming<S>(socket: &mut S) -> Result<Incoming, RemoteAuthError>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    S: Stream<Item = Result<Message, WsError>> + Unpin,
 {
     loop {
         match socket.next().await {

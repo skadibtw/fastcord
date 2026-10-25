@@ -2198,6 +2198,7 @@ dependencies = [
  "bytes",
  "fastcord-bypass",
  "fastcord-model",
+ "fastcord-ws",
  "flate2",
  "futures-util",
  "parking_lot 0.12.5",
@@ -2238,6 +2239,7 @@ dependencies = [
  "davey",
  "fastcord-bypass",
  "fastcord-model",
+ "fastcord-ws",
  "futures-util",
  "openmls",
  "openmls_basic_credential",
@@ -2315,6 +2317,17 @@ dependencies = [
  "tract-onnx",
  "windows 0.62.2",
  "windows-core 0.62.2",
+]
+
+[[package]]
+name = "fastcord-ws"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "flate2",
+ "futures-util",
+ "rand_core 0.6.4",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

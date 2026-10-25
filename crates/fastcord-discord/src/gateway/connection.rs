@@ -777,11 +777,17 @@ async fn connection<T: Transport, J: JitterSource>(
 }
 
 fn error_end(error: &WsError) -> End {
+    if fastcord_ws::is_size_limit(error) {
+        return Err(Terminal::Stop(StopReason::EventTooLarge));
+    }
     match error {
         WsError::Capacity(_) => Err(Terminal::Stop(StopReason::EventTooLarge)),
         WsError::ConnectionClosed | WsError::AlreadyClosed => {
             Ok((ReconnectReason::Closed(None), true))
         }
+        // A malformed permessage-deflate stream: reconnect rather than
+        // treating it as a dead network, exactly like a corrupt zlib stream.
+        error if fastcord_ws::classify(error).is_some() => Ok((ReconnectReason::Protocol, true)),
         _ => Ok((ReconnectReason::Network, true)),
     }
 }

@@ -87,10 +87,11 @@ fn options() -> Options {
 }
 
 type ServerSocket = WebSocketStream<DuplexStream>;
+type ClientSocket = WebSocketStream<fastcord_ws::CompressingStream<DuplexStream>>;
 
 #[derive(Default)]
 struct SignalingState {
-    sockets: VecDeque<ServerSocket>,
+    sockets: VecDeque<ClientSocket>,
     urls: Vec<String>,
 }
 
@@ -101,9 +102,19 @@ impl FakeSignaling {
     /// Queues the next connection the client will get; returns its server end.
     async fn accept(&self) -> Ws {
         let (client_io, server_io) = duplex(1024 * 1024);
-        let client =
-            WebSocketStream::from_raw_socket(client_io, Role::Client, Some(websocket_config()))
-                .await;
+        let client = WebSocketStream::from_raw_socket(
+            fastcord_ws::CompressingStream::new(
+                client_io,
+                None,
+                fastcord_ws::Limits::new(
+                    super::transport::MAX_MESSAGE_BYTES,
+                    super::transport::MAX_MESSAGE_BYTES,
+                ),
+            ),
+            Role::Client,
+            Some(websocket_config()),
+        )
+        .await;
         let server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
         self.0.lock().sockets.push_back(client);
         Ws(server, Vec::new())
@@ -112,12 +123,53 @@ impl FakeSignaling {
     fn urls(&self) -> Vec<String> {
         self.0.lock().urls.clone()
     }
+
+    /// Accepts the permessage-deflate extension and returns a raw peer.
+    async fn accept_compressed(&self, pmd: fastcord_ws::PerMessageDeflate) -> CompressedWs {
+        let (client_io, server_io) = duplex(1024 * 1024);
+        let client = WebSocketStream::from_raw_socket(
+            fastcord_ws::CompressingStream::new(
+                client_io,
+                Some(pmd),
+                fastcord_ws::Limits::new(
+                    super::transport::MAX_MESSAGE_BYTES,
+                    super::transport::MAX_MESSAGE_BYTES,
+                ),
+            ),
+            Role::Client,
+            Some(websocket_config()),
+        )
+        .await;
+        self.0.lock().sockets.push_back(client);
+        CompressedWs(fastcord_ws::test_support::Peer::new(server_io, Some(pmd)))
+    }
+}
+
+/// A voice Gateway that negotiates permessage-deflate.
+struct CompressedWs(fastcord_ws::test_support::Peer<DuplexStream>);
+
+impl CompressedWs {
+    async fn send_json(&mut self, value: Value) {
+        self.0
+            .send_compressed(0x1, value.to_string().as_bytes(), 8)
+            .await
+            .unwrap();
+    }
+
+    async fn recv_raw(&mut self) -> Value {
+        loop {
+            let (opcode, payload) = self.0.recv_message().await.unwrap().unwrap();
+            if opcode == 0x1 {
+                return serde_json::from_slice(&payload).unwrap();
+            }
+        }
+    }
 }
 
 impl Signaling for FakeSignaling {
-    type Socket = ServerSocket;
+    type Socket = ClientSocket;
 
-    async fn connect(&self, url: &str) -> Result<ServerSocket, ConnectError> {
+    async fn connect(&self, url: &str) -> Result<ClientSocket, ConnectError> {
         let mut state = self.0.lock();
         state.urls.push(url.to_owned());
         state.sockets.pop_front().ok_or(ConnectError)
@@ -1328,4 +1380,24 @@ async fn parent_voice_and_stream_establish_independent_udp_dave_sessions() {
         b"parent-survives"
     );
     parent.session.leave().await;
+}
+
+#[tokio::test]
+async fn compressed_voice_hello_identify_and_select_cross_the_deflate_adapter() {
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling
+        .accept_compressed(fastcord_ws::PerMessageDeflate::default())
+        .await;
+    ws.send_json(json!({"op": 8, "d": {"v": 8, "heartbeat_interval": QUIET_HEARTBEAT_MS}}))
+        .await;
+    let identify = ws.recv_raw().await;
+    assert_eq!(identify["op"], 0);
+    ws.send_json(ready(&BOTH_MODES)).await;
+    let mut udp = harness.udp().await;
+    let discovery = udp.recv().await;
+    udp.answer_discovery(&discovery);
+    let select = ws.recv_raw().await;
+    assert_eq!(select["op"], 1);
+    ws.0.send_close(1000).await.unwrap();
+    harness.session.leave().await;
 }

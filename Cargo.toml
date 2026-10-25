@@ -25,6 +25,7 @@ fastcord-media = { path = "crates/fastcord-media" }
 fastcord-audio = { path = "crates/fastcord-audio" }
 fastcord-video = { path = "crates/fastcord-video" }
 fastcord-bypass = { path = "crates/fastcord-bypass" }
+fastcord-ws = { path = "crates/fastcord-ws" }
 cc = "1"
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }
 # Linux screen capture (milestone 33): the ScreenCast portal (already in the

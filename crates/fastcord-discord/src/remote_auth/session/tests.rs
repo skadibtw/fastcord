@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tokio::io::{DuplexStream, duplex};
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -114,16 +115,26 @@ struct Harness {
     exchange: Arc<FakeExchange>,
     events: mpsc::Sender<RemoteAuthEvent>,
     receiver: mpsc::Receiver<RemoteAuthEvent>,
-    client_socket: Option<WebSocketStream<DuplexStream>>,
+    client_socket: Option<WebSocketStream<fastcord_ws::CompressingStream<DuplexStream>>>,
     gateway: Option<Gateway>,
 }
 
 impl Harness {
     async fn new(exchange: FakeExchange) -> Self {
         let (client_io, server_io) = duplex(64 * 1024);
-        let client =
-            WebSocketStream::from_raw_socket(client_io, Role::Client, Some(websocket_config()))
-                .await;
+        let client = WebSocketStream::from_raw_socket(
+            fastcord_ws::CompressingStream::new(
+                client_io,
+                None,
+                fastcord_ws::Limits::new(
+                    crate::remote_auth::transport::MAX_MESSAGE_BYTES,
+                    crate::remote_auth::transport::MAX_MESSAGE_BYTES,
+                ),
+            ),
+            Role::Client,
+            Some(websocket_config()),
+        )
+        .await;
         let server =
             WebSocketStream::from_raw_socket(server_io, Role::Server, Some(websocket_config()))
                 .await;
@@ -475,4 +486,63 @@ async fn dropping_the_event_receiver_cancels_the_attempt() {
         })
         .await;
     assert_eq!(result.unwrap_err(), RemoteAuthError::Cancelled);
+}
+
+#[tokio::test]
+async fn compressed_remote_auth_hello_init_and_cancel_cross_the_deflate_adapter() {
+    let pmd = fastcord_ws::PerMessageDeflate::default();
+    let (client_io, mut peer) = fastcord_ws::test_support::pair(Some(pmd)).await;
+    let limits = fastcord_ws::Limits::new(
+        crate::remote_auth::transport::MAX_MESSAGE_BYTES,
+        crate::remote_auth::transport::MAX_MESSAGE_BYTES,
+    );
+    let client = WebSocketStream::from_raw_socket(
+        fastcord_ws::CompressingStream::new(client_io, Some(pmd), limits),
+        Role::Client,
+        Some(websocket_config()),
+    )
+    .await;
+    let (events, _receiver) = mpsc::channel(EVENTS);
+    let key = AttemptKey::generate().unwrap();
+    let exchange = FakeExchange::default();
+    let task = drive(client, &key, &exchange, &events);
+    let script = async {
+        peer.send_compressed(0x1, HELLO.as_bytes(), 4)
+            .await
+            .unwrap();
+        let (opcode, payload) = peer.recv_message().await.unwrap().unwrap();
+        assert_eq!(opcode, 0x1);
+        let init: Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(init["op"], "init");
+        let public_key = init["encoded_public_key"].as_str().unwrap().to_owned();
+        let nonce = b"server-chosen-nonce-0123456789ab";
+        peer.send_compressed(
+            0x1,
+            json!({"op":"nonce_proof","encrypted_nonce":encrypt_for(&public_key, nonce)})
+                .to_string()
+                .as_bytes(),
+            3,
+        )
+        .await
+        .unwrap();
+        let (_, proof) = peer.recv_message().await.unwrap().unwrap();
+        let proof: Value = serde_json::from_slice(&proof).unwrap();
+        assert_eq!(proof["op"], "nonce_proof");
+        peer.send_compressed(
+            0x1,
+            json!({"op":"pending_remote_init","fingerprint":fingerprint_of(&public_key)})
+                .to_string()
+                .as_bytes(),
+            3,
+        )
+        .await
+        .unwrap();
+        peer.send_compressed(0x1, br#"{"op":"cancel"}"#, 2)
+            .await
+            .unwrap();
+        init
+    };
+    let (result, init) = tokio::join!(task, script);
+    assert_eq!(init["op"], "init");
+    assert_eq!(result.unwrap_err(), RemoteAuthError::CancelledOnPhone);
 }

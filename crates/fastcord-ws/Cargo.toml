@@ -1,0 +1,25 @@
+[package]
+name = "fastcord-ws"
+description = "WebSocket client handshake and RFC 7692 permessage-deflate framing for fastcord"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Test-only: a raw server-side peer that speaks real WebSocket frames and
+# permessage-deflate, so both client crates can test the adapter end to end.
+test-support = []
+
+[dependencies]
+flate2.workspace = true
+rand_core.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+tokio-tungstenite.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+
+[lints]
+workspace = true

@@ -1,12 +1,15 @@
 //! TLS WebSocket client shared by the remote-auth and main Gateway connections.
 //!
-//! TLS uses the same rustls/ring stack and webpki roots as the REST client;
+//! TLS uses the same rustls/ring stack and webpki roots as the REST client.
+//! The opening handshake and the RFC 7692 permessage-deflate adapter live in
+//! `fastcord-ws`, which also serves the voice Gateway in `fastcord-media`;
 //! `tokio-tungstenite` is used only for WebSocket framing so it cannot pull a
 //! second crypto provider into the binary.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(not(feature = "fake-discord"))]
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -16,9 +19,9 @@ use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, crypto};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 
 use crate::gateway::ClientProperties;
 
@@ -27,7 +30,7 @@ type Stream = TlsStream<TcpStream>;
 #[cfg(feature = "fake-discord")]
 type Stream = fake::Stream;
 
-pub(crate) type TlsSocket = WebSocketStream<Stream>;
+pub(crate) type TlsSocket = fastcord_ws::Socket<Stream>;
 
 /// A TLS stream, or, only in the test-only fake mode, a plain loopback one.
 #[cfg(feature = "fake-discord")]
@@ -116,11 +119,7 @@ pub(crate) mod fake {
             .await
             .map_err(|_| ConnectError)?;
         tcp.set_nodelay(true).map_err(|_| ConnectError)?;
-        let (socket, _response) =
-            super::client_async_with_config(request, Stream::Plain(tcp), Some(config))
-                .await
-                .map_err(|_| ConnectError)?;
-        Ok(socket)
+        super::handshake(Stream::Plain(tcp), request, config).await
     }
 }
 
@@ -130,7 +129,8 @@ pub(crate) struct ConnectError;
 
 /// Connects to a `wss://` URL. The `Origin` header is the documented client
 /// origin; Discord's gateways reject other origins. The handshake carries the
-/// rest of what the desktop client's Chromium sends (`browser_headers`).
+/// rest of what the desktop client's Chromium sends (`browser_headers`) and
+/// offers `permessage-deflate`.
 pub(crate) async fn connect(
     url: &str,
     origin: &'static str,
@@ -145,12 +145,9 @@ pub(crate) async fn connect(
 
 /// `User-Agent`, `Accept-Language`, `Accept-Encoding` and the no-cache pair of
 /// a Chromium WebSocket handshake. No cookie: these hosts are on `discord.gg`,
-/// which never sets any. No `permessage-deflate` offer, which is not
-/// implemented.
-fn browser_headers(
-    request: &mut tokio_tungstenite::tungstenite::handshake::client::Request,
-    browser: &ClientProperties,
-) {
+/// which never sets any. The permessage-deflate offer is added by
+/// [`handshake`].
+fn browser_headers(request: &mut Request, browser: &ClientProperties) {
     let headers = request.headers_mut();
     if let Ok(agent) = HeaderValue::from_str(&browser.browser_user_agent) {
         headers.insert("User-Agent", agent);
@@ -166,13 +163,32 @@ fn browser_headers(
     headers.insert("Pragma", HeaderValue::from_static("no-cache"));
 }
 
+/// The opening handshake, the extension negotiation and the framing adapter
+/// from `fastcord-ws`.
+async fn handshake<S>(
+    stream: S,
+    request: Request,
+    config: WebSocketConfig,
+) -> Result<fastcord_ws::Socket<S>, ConnectError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let limits = fastcord_ws::Limits::new(
+        config.max_message_size.unwrap_or(64 << 20),
+        config.max_frame_size.unwrap_or(16 << 20),
+    );
+    fastcord_ws::connect(stream, request, config, limits)
+        .await
+        .map_err(|_| ConnectError)
+}
+
 async fn connect_inner(
     url: &str,
     origin: &'static str,
     browser: &ClientProperties,
     config: WebSocketConfig,
 ) -> Result<TlsSocket, ConnectError> {
-    let mut request = url.into_client_request().map_err(|_| ConnectError)?;
+    let request = url.into_client_request().map_err(|_| ConnectError)?;
     #[cfg(feature = "fake-discord")]
     if crate::fake_origin::active() {
         return fake::connect(request, origin, browser, config).await;
@@ -183,6 +199,7 @@ async fn connect_inner(
     }
     let host = uri.host().ok_or(ConnectError)?.to_owned();
     let port = uri.port_u16().unwrap_or(443);
+    let mut request = request;
     request
         .headers_mut()
         .insert("Origin", HeaderValue::from_static(origin));
@@ -199,10 +216,7 @@ async fn connect_inner(
     // With `fake-discord` the stream is a TLS/plain wrapper; without it, TLS itself.
     #[allow(clippy::useless_conversion)]
     let stream = tls.into();
-    let (socket, _response) = client_async_with_config(request, stream, Some(config))
-        .await
-        .map_err(|_| ConnectError)?;
-    Ok(socket)
+    handshake(stream, request, config).await
 }
 
 fn tls_config() -> Result<Arc<ClientConfig>, ConnectError> {
@@ -217,6 +231,9 @@ fn tls_config() -> Result<Arc<ClientConfig>, ConnectError> {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
     use super::*;
 
     #[test]
@@ -260,6 +277,35 @@ mod tests {
         assert_eq!(headers["Pragma"], "no-cache");
         assert_eq!(headers["Accept-Encoding"], "gzip, deflate, br, zstd");
         assert!(!headers.contains_key("Cookie"));
-        assert!(!headers.contains_key("Sec-WebSocket-Extensions"));
+    }
+
+    #[tokio::test]
+    async fn the_real_handshake_offers_the_extension_and_a_decline_still_works() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let peer = tokio::spawn(async move {
+            fastcord_ws::test_support::accept(server_io, None)
+                .await
+                .expect("peer handshake")
+        });
+        let mut request = "wss://gateway.discord.gg/?v=9"
+            .into_client_request()
+            .unwrap();
+        browser_headers(&mut request, &browser());
+        let mut socket = handshake(client_io, request, WebSocketConfig::default())
+            .await
+            .unwrap();
+        let (mut peer, request) = peer.await.unwrap();
+        let lower = request.to_ascii_lowercase();
+        assert!(lower.contains("user-agent: mozilla/5.0"));
+        assert!(lower.contains("cache-control: no-cache"));
+        assert!(lower.contains("permessage-deflate; client_max_window_bits"));
+        assert!(socket.get_ref().negotiated().is_none());
+        peer.send_text("plain hello").await.unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(message, Message::text("plain hello"));
     }
 }

@@ -49,9 +49,10 @@ impl JitterSource for Fixed {
 }
 
 type ServerSocket = WebSocketStream<DuplexStream>;
+type ClientSocket = WebSocketStream<fastcord_ws::CompressingStream<DuplexStream>>;
 
 struct FakeTransport {
-    sockets: Mutex<VecDeque<Option<ServerSocket>>>,
+    sockets: Mutex<VecDeque<Option<ClientSocket>>>,
     discoveries: Mutex<VecDeque<Result<String, DiscoverError>>>,
     connected: Mutex<Vec<String>>,
     discovered: AtomicUsize,
@@ -73,15 +74,42 @@ impl FakeTransport {
     /// end of it.
     async fn accept(&self) -> Server {
         let (client_io, server_io) = duplex(16 * 1024 * 1024);
-        let client =
-            WebSocketStream::from_raw_socket(client_io, Role::Client, Some(websocket_config()))
-                .await;
+        let client = WebSocketStream::from_raw_socket(
+            fastcord_ws::CompressingStream::new(
+                client_io,
+                None,
+                fastcord_ws::Limits::new(MAX_EVENT_BYTES, MAX_EVENT_BYTES),
+            ),
+            Role::Client,
+            Some(websocket_config()),
+        )
+        .await;
         let socket = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
         self.sockets.lock().push_back(Some(client));
         Server {
             socket,
             compressor: ServerCompressor::new(),
         }
+    }
+
+    /// The next connection accepts `permessage-deflate` and speaks it.
+    async fn accept_compressed(
+        &self,
+        pmd: fastcord_ws::PerMessageDeflate,
+    ) -> fastcord_ws::test_support::Peer<DuplexStream> {
+        let (client_io, server_io) = duplex(16 * 1024 * 1024);
+        let client = WebSocketStream::from_raw_socket(
+            fastcord_ws::CompressingStream::new(
+                client_io,
+                Some(pmd),
+                fastcord_ws::Limits::new(MAX_EVENT_BYTES, MAX_EVENT_BYTES),
+            ),
+            Role::Client,
+            Some(websocket_config()),
+        )
+        .await;
+        self.sockets.lock().push_back(Some(client));
+        fastcord_ws::test_support::Peer::new(server_io, Some(pmd))
     }
 
     /// The next connect attempt fails.
@@ -99,7 +127,7 @@ impl FakeTransport {
 }
 
 impl Transport for FakeTransport {
-    type Socket = ServerSocket;
+    type Socket = ClientSocket;
 
     async fn discover(&self) -> Result<String, DiscoverError> {
         self.discovered.fetch_add(1, Ordering::SeqCst);
@@ -109,7 +137,7 @@ impl Transport for FakeTransport {
             .unwrap_or_else(|| Ok("wss://gateway.discord.gg".to_owned()))
     }
 
-    async fn connect(&self, url: &GatewayUrl) -> Result<ServerSocket, ConnectError> {
+    async fn connect(&self, url: &GatewayUrl) -> Result<ClientSocket, ConnectError> {
         self.connected.lock().push(url.as_str().to_owned());
         self.sockets
             .lock()
@@ -309,6 +337,33 @@ async fn drain(gateway: &mut Gateway) -> Option<GatewayEvent> {
 /// Connects, identifies, and consumes everything through `State(Ready)`.
 async fn ready(jitter: f64) -> (Gateway, Arc<FakeTransport>, Server) {
     ready_with_heartbeat(jitter, HEARTBEAT_MS).await
+}
+
+/// A real compressed connection: HELLO, Identify and READY all cross the
+/// permessage-deflate adapter, with the Gateway's zlib-stream inside it.
+#[tokio::test]
+async fn compressed_hello_identify_and_ready_cross_the_deflate_adapter() {
+    let transport = FakeTransport::new();
+    let mut peer = transport
+        .accept_compressed(fastcord_ws::PerMessageDeflate::default())
+        .await;
+    let mut gateway = start(&transport, 0.5);
+    let mut packer = ServerCompressor::new();
+    let hello = packer.event(br#"{"op":10,"d":{"heartbeat_interval":40000}}"#);
+    peer.send_compressed(0x2, &hello, 3).await.unwrap();
+    let (opcode, payload) = peer.recv_message().await.unwrap().unwrap();
+    assert_eq!(opcode, 0x1);
+    let identify: Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(identify["op"], 2);
+    let ready = packer.event(envelope("READY", 1, READY).as_bytes());
+    peer.send_compressed(0x2, &ready, 5).await.unwrap();
+    expect_state(&mut gateway, ConnectionState::Connecting { attempt: 0 }).await;
+    expect_state(&mut gateway, ConnectionState::AwaitHello).await;
+    expect_state(&mut gateway, ConnectionState::Identifying).await;
+    let (sequence, event) = next_dispatch(&mut gateway).await;
+    assert_eq!(sequence, 1);
+    assert!(matches!(event, Dispatch::Ready(_)));
+    expect_state(&mut gateway, ConnectionState::Ready).await;
 }
 
 async fn ready_with_heartbeat(

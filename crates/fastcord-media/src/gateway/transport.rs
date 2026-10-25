@@ -19,7 +19,6 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
-use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 
 use super::wire::VERSION;
 
@@ -38,7 +37,7 @@ pub fn set_handshake_identity(user_agent: &str, accept_language: &str) {
 }
 
 /// What the desktop client's Chromium adds to a WebSocket handshake besides
-/// the origin. No `permessage-deflate` offer, which is not implemented.
+/// the origin. The permessage-deflate offer is added by `fastcord-ws`.
 fn browser_headers(headers: &mut tokio_tungstenite::tungstenite::http::HeaderMap) {
     let browser = BROWSER.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let Some((agent, language)) = browser else {
@@ -62,7 +61,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 18) stay far below this.
 pub(crate) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
-pub(crate) type TlsSocket = WebSocketStream<TlsStream<TcpStream>>;
+pub(crate) type TlsSocket = fastcord_ws::Socket<TlsStream<TcpStream>>;
 
 /// Categorical: endpoints and TLS details never reach logs or messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,10 +156,11 @@ async fn connect_tls(url: &str) -> Result<TlsSocket, ConnectError> {
         .connect(server_name, tcp)
         .await
         .map_err(|_| ConnectError)?;
-    let (socket, _response) = client_async_with_config(request, tls, Some(websocket_config()))
+    let config = websocket_config();
+    let limits = fastcord_ws::Limits::new(MAX_MESSAGE_BYTES, MAX_MESSAGE_BYTES);
+    fastcord_ws::connect(tls, request, config, limits)
         .await
-        .map_err(|_| ConnectError)?;
-    Ok(socket)
+        .map_err(|_| ConnectError)
 }
 
 fn tls_config() -> Result<Arc<ClientConfig>, ConnectError> {

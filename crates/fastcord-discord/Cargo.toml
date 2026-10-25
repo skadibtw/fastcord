@@ -15,6 +15,7 @@ fake-discord = []
 [dependencies]
 fastcord-model.workspace = true
 fastcord-bypass.workspace = true
+fastcord-ws.workspace = true
 base64.workspace = true
 bytes.workspace = true
 flate2.workspace = true
@@ -34,6 +35,7 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+fastcord-ws = { workspace = true, features = ["test-support"] }
 parking_lot.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
