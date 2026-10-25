@@ -77,7 +77,7 @@ jobs:
         run: |
           v=${{ needs.version.outputs.version }}
           git archive --format=tar.gz --prefix="fastcord-v${v}/" -o "dist/fastcord-v${v}-source.tar.gz" HEAD
-          test "$(ls dist | wc -l)" -eq 5
+          test "$(ls dist | wc -l)" -eq 6
           (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
       - name: Publish release
         if: github.ref_type == 'tag'

@@ -30,6 +30,9 @@ cp assets/emoji/NOTICE.txt assets/emoji/TWEMOJI-LICENSE-GRAPHICS.txt \
 case "$target" in
   *-windows-msvc)
     cp "${bin_dir}/fastcord.exe" "$stage/"
+    # The same executable on its own: every native library is linked in; it needs
+    # only the Microsoft Visual C++ Redistributable (x64), see docs/RELEASE.md.
+    cp "${bin_dir}/fastcord.exe" "${out}/${name}.exe"
     zip_out="$(cd "$out" && (pwd -W 2>/dev/null || pwd))/${name}.zip"
     (cd "$(dirname "$stage")" && 7z a -tzip -bso0 "$zip_out" "$name")
     ;;
