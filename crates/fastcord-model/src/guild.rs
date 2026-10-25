@@ -1,4 +1,4 @@
-use crate::{Channel, Permissions, ScheduledEvent, Snowflake, StageInstance};
+use crate::{Channel, Permissions, ScheduledEvent, Snowflake, StageInstance, VoiceState};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Role {
@@ -124,6 +124,10 @@ pub const MAX_FEATURE_BYTES: usize = 64;
 /// Longest server description kept.
 pub const MAX_DESCRIPTION_BYTES: usize = 512;
 
+/// Occupants kept from a guild payload. A guild voice channel holds at most a
+/// few hundred; READY repeats every guild, so the cap keeps the bound honest.
+pub const MAX_GUILD_VOICE_STATES: usize = 1000;
+
 /// A normalized, available guild as delivered by the Gateway.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Guild {
@@ -138,6 +142,10 @@ pub struct Guild {
     /// Initial members: just the current user's own member until
     /// READY_SUPPLEMENTAL (or lazy member requests) provides more.
     pub members: Vec<GuildMember>,
+    /// Occupants the guild payload listed (READY, GUILD_CREATE), at most
+    /// [`MAX_GUILD_VOICE_STATES`]. `None` means the payload did not say, so
+    /// what the client already knows is kept.
+    pub voice_states: Option<Vec<VoiceState>>,
     pub member_count: u32,
     /// Live Stage sessions delivered with the guild.
     pub stage_instances: Vec<StageInstance>,

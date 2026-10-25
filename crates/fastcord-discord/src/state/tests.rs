@@ -210,6 +210,30 @@ fn supplemental_fills_voice_and_members_by_guild() {
 }
 
 #[test]
+fn ready_and_guild_create_keep_the_voice_states_they_carry() {
+    let ready = r#"{"session_id":"s","resume_gateway_url":"wss://gateway.discord.gg",
+        "user":{"id":"1","username":"me"},"guilds":[
+        {"id":"500","name":"Room","voice_states":[
+            {"user_id":"10","channel_id":"7","session_id":"a"},
+            {"user_id":"11","channel_id":"7","session_id":"b"}]}],
+        "relationships":[]}"#;
+    let mut store = Store::new();
+    apply(&mut store, "READY", ready);
+    let guild = store.guild(id(500)).unwrap();
+    assert_eq!(guild.voice_states().count(), 2);
+    assert_eq!(guild.voice_state(id(10)).unwrap().channel_id, Some(id(7)));
+
+    // A GUILD_CREATE lists the guild as it is now, so a stale occupant goes.
+    let created = r#"{"id":"500","name":"Room","voice_states":[
+        {"user_id":"11","channel_id":"8","session_id":"c"}]}"#;
+    let changes = apply(&mut store, "GUILD_CREATE", created);
+    assert!(changes.voice.contains(&id(500)));
+    let guild = store.guild(id(500)).unwrap();
+    assert_eq!(guild.voice_states().count(), 1);
+    assert_eq!(guild.voice_state(id(11)).unwrap().channel_id, Some(id(8)));
+}
+
+#[test]
 fn voice_membership_stays_fresh_in_other_guilds_while_browsing() {
     let mut store = ready_store();
     apply(&mut store, "READY_SUPPLEMENTAL", SUPPLEMENTAL);
@@ -871,6 +895,7 @@ fn big_guild(guild: u64, channels: u64) -> Guild {
         icon: Some("0123456789abcdef0123456789abcdef".to_owned()),
         owner_id: Some(id(1)),
         emojis: Vec::new(),
+        voice_states: None,
         roles: (0..12)
             .map(|n| Role {
                 id: id(if n == 0 { guild } else { guild * 100 + n }),

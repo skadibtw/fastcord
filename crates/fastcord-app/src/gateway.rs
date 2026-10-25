@@ -5168,6 +5168,7 @@ mod tests {
             channels: Vec::new(),
             emojis: Vec::new(),
             members: Vec::new(),
+            voice_states: None,
             member_count: 0,
             stage_instances: Vec::new(),
             scheduled_events: Vec::new(),

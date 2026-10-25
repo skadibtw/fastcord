@@ -631,6 +631,7 @@ mod tests {
             ],
             channels: Vec::new(),
             emojis,
+            voice_states: None,
             member_count: 1,
             stage_instances: Vec::new(),
             scheduled_events: Vec::new(),

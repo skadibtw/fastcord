@@ -34,7 +34,7 @@ pub use embed::{
 };
 pub use guild::{
     Guild, GuildEmoji, GuildMember, GuildSettings, MAX_DESCRIPTION_BYTES, MAX_FEATURE_BYTES,
-    MAX_FEATURES, Role, creator_id, null_default_string,
+    MAX_FEATURES, MAX_GUILD_VOICE_STATES, Role, creator_id, null_default_string,
 };
 pub use message::{
     Attachment, CROSSPOSTED_FLAG, Emoji, FORWARD_REFERENCE, IS_CROSSPOST_FLAG,

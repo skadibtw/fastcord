@@ -184,6 +184,10 @@ struct GuildWire {
     emojis: Vec<GuildEmoji>,
     #[serde(default, deserialize_with = "null_default")]
     members: Vec<MemberWire>,
+    /// Occupants the payload lists; the reducer installs them so a room is not
+    /// empty until everyone happens to move. Absent means "did not say".
+    #[serde(default)]
+    voice_states: Option<Vec<VoiceState>>,
     #[serde(default)]
     member_count: u32,
     #[serde(default, deserialize_with = "null_default")]
@@ -624,6 +628,12 @@ impl Normalizer {
             channels,
             emojis: wire.emojis,
             members,
+            voice_states: wire.voice_states.map(|states| {
+                states
+                    .into_iter()
+                    .take(fastcord_model::MAX_GUILD_VOICE_STATES)
+                    .collect()
+            }),
             member_count: wire.member_count,
             stage_instances: wire.stage_instances,
             scheduled_events: wire.guild_scheduled_events,

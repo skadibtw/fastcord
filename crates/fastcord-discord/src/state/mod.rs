@@ -250,6 +250,13 @@ impl GuildEntry {
         for member in guild.members {
             entry.put_member(member, tick);
         }
+        // READY (and GUILD_CREATE) list the guild's current occupants; without
+        // them a room looks empty until everyone happens to move again.
+        if let Some(states) = guild.voice_states {
+            for state in states {
+                entry.put_voice(state);
+            }
+        }
         entry
     }
 
@@ -1509,6 +1516,7 @@ impl Store {
                     self.install_guild(guild);
                 }
                 changes.guilds.insert(id);
+                changes.voice.insert(id);
             }
         }
     }
@@ -1584,6 +1592,17 @@ impl Store {
             entry.set_events(guild.scheduled_events);
             for member in guild.members {
                 entry.put_member(member, tick);
+            }
+            // GUILD_CREATE carries the guild's voice states as they are now;
+            // a payload that stays silent leaves what we know alone.
+            if let Some(states) = guild.voice_states {
+                let stale: Vec<Snowflake> = entry.voice.keys().copied().collect();
+                for user in stale {
+                    entry.take_voice(user);
+                }
+                for state in states {
+                    entry.put_voice(state);
+                }
             }
         });
     }

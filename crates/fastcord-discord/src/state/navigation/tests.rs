@@ -780,6 +780,7 @@ fn large_ready() -> Ready {
                     icon: None,
                     owner_id: Some(id(2)),
                     emojis: Vec::new(),
+                    voice_states: None,
                     roles: vec![Role {
                         id: guild_id,
                         name: "@everyone".to_owned(),
