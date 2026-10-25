@@ -600,10 +600,33 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             silence_at: None,
         };
         let mut buffer = vec![0; MAX_DATAGRAM];
+        let mut audio_open = false;
         loop {
             let media_open = conn.phase == Phase::Connected
                 && self.media.is_some()
                 && self.dave.as_ref().is_some_and(DaveSession::is_send_ready);
+            if media_open && !audio_open {
+                // Audio queued while the keys were missing (a DAVE transition,
+                // a Resume's backoff) is stale: drop it rather than play it
+                // late. Control commands still run, in order.
+                let mut kept = Vec::new();
+                while let Ok(command) = self.ch.media.try_recv() {
+                    if matches!(
+                        &command,
+                        MediaCommand::Opus(_) | MediaCommand::Soundshare(_)
+                    ) {
+                        self.ch.queued_audio.fetch_sub(1, Ordering::AcqRel);
+                    } else {
+                        kept.push(command);
+                    }
+                }
+                for command in kept {
+                    if let Err(end) = self.on_media(&mut conn, &mut socket, command).await {
+                        return end;
+                    }
+                }
+            }
+            audio_open = media_open;
             let transport_up =
                 conn.phase == Phase::Connected && self.media.is_some() && self.udp.is_some();
             self.video_gate(media_open);

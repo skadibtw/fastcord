@@ -42,8 +42,9 @@ use crate::video::{
 pub use transport::set_handshake_identity;
 pub use wire::speaking;
 
-/// Encoded frames waiting for the transport key: 100 ms of 20 ms Opus. More is
-/// refused rather than released late.
+/// Encoded frames waiting while media is paused (no transport or DAVE key):
+/// 100 ms of 20 ms Opus. More is refused, and what waited is dropped when
+/// media resumes rather than released late.
 pub const MEDIA_QUEUE_FRAMES: usize = 5;
 /// The largest Opus packet (RFC 6716 §3.2.1).
 pub const MAX_OPUS_FRAME: usize = 1275;

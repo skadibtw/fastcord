@@ -836,6 +836,35 @@ async fn transport_ready_keeps_media_paused_until_authenticated_dave_keys() {
     );
 }
 
+/// Audio pushed while the end-to-end keys were missing is never sent once
+/// they arrive: it would play as if it were current.
+#[tokio::test(start_paused = true)]
+async fn audio_queued_while_keys_were_missing_is_dropped_not_sent_late() {
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    let (mut udp, _) = negotiate(&mut harness, &mut ws, &BOTH_MODES).await;
+    ws.send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let media = harness.session.media();
+    media.send_opus(b"stale".to_vec()).unwrap();
+    let fixture = install_test_dave_group(&harness, &mut ws).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    media.send_opus(b"fresh".to_vec()).unwrap();
+    assert_eq!(ws.recv_op(5).await["d"]["speaking"], 1);
+    let datagram = loop {
+        let datagram = udp.recv().await;
+        if !is_ping(&datagram) {
+            break datagram;
+        }
+    };
+    let key = TransportKey::from_slice(&KEY).unwrap();
+    let cipher = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &key);
+    let encrypted = open_rtp(&cipher, &datagram).1;
+    let mut peer = fixture.peer;
+    assert_eq!(peer.decrypt_opus(ME.0, &encrypted).unwrap(), b"fresh");
+    assert_eq!(harness.session.stats().rtp_sent, 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_media_queue_is_bounded_and_rejects_invalid_frames() {
     let (harness, _signaling) = Harness::start(options());
