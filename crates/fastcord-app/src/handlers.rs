@@ -6,4 +6,5 @@ mod conversation;
 mod desktop;
 mod login;
 mod navigation;
+mod panels;
 mod settings;
