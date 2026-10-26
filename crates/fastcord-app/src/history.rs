@@ -249,6 +249,13 @@ impl Request {
     }
 }
 
+/// What survives a Gateway restart of the same account: the unconfirmed sends
+/// and unfinished edits/deletions. Reactions are only an overlay, nothing to lose.
+pub struct Carried {
+    outbox: Outbox,
+    changes: Changes,
+}
+
 #[derive(Default)]
 pub struct History {
     store: MessageStore,
@@ -362,6 +369,33 @@ impl History {
             },
             ..Self::default()
         }
+    }
+
+    /// Whether a send or an edit/delete of the user's is still with Discord.
+    pub fn unanswered(&self) -> bool {
+        !self.sends.is_empty() || !self.change_requests.is_empty()
+    }
+
+    /// The user's unconfirmed work, settled, for the next worker of the same
+    /// account (Reconnect after a Gateway limit stop, #149).
+    pub fn carry(&mut self) -> Carried {
+        self.outbox.settle();
+        self.changes.settle();
+        Carried {
+            outbox: std::mem::take(&mut self.outbox),
+            changes: std::mem::take(&mut self.changes),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn outbox_items(&self) -> Vec<crate::outbox::OutboxItem> {
+        self.outbox.items()
+    }
+
+    pub fn restore(&mut self, carried: Carried) {
+        self.outbox = carried.outbox;
+        self.changes = carried.changes;
+        self.dirty = true;
     }
 
     fn now(&self) -> Instant {
@@ -3088,6 +3122,40 @@ mod tests {
     /// poll them, so nothing reaches the network.
     fn take_posts(history: &mut History) -> usize {
         std::mem::take(&mut history.sends).len()
+    }
+
+    #[test]
+    fn a_stopped_workers_unconfirmed_sends_continue_in_the_next_one() {
+        let rest = rest();
+        let mut history = sending_history();
+        let posting = history.send(&rest, CHANNEL, "in flight", false, None);
+        assert_eq!(take_posts(&mut history), 1);
+        let failed = history.send(&rest, CHANNEL, "failed", false, None);
+        history.complete(
+            &rest,
+            Completed::Send(
+                posting,
+                Err(SendFailure::Send(SendError::Ambiguous(
+                    RestError::InvalidJson,
+                ))),
+            ),
+        );
+        let _ = failed;
+        let nonce = wire_nonce(&history, posting);
+
+        let carried = history.carry();
+        let mut next = History::new(Slots::default());
+        assert!(next.outbox.items().is_empty());
+        next.restore(carried);
+
+        let rows = next.outbox.items();
+        assert_eq!(rows.len(), 2, "nothing is dropped silently");
+        assert_eq!(wire_nonce(&next, posting), nonce, "same nonce for a retry");
+        assert!(
+            rows.iter()
+                .all(|row| !matches!(row.state, OutboxState::Sending)),
+            "no row waits for a request that no longer exists: {rows:?}"
+        );
     }
 
     #[test]

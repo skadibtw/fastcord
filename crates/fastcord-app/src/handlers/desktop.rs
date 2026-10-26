@@ -155,7 +155,11 @@ impl App {
                     // The user asked: the new Gateway task gets fresh
                     // reconnect attempts (#139).
                     session.client.allow_manual_gateway_reconnect();
-                    let task = self.enter_account(session, persistence);
+                    let old = match &self.phase {
+                        Phase::Account { gateway, .. } => Some(gateway.controls.clone()),
+                        _ => None,
+                    };
+                    let task = self.enter_account_from(session, persistence, old);
                     if let Some(gateway) = self.phase.gateway_mut() {
                         gateway.composer = composer;
                     }

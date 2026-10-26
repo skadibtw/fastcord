@@ -386,6 +386,23 @@ impl Outbox {
         self.ops.iter().find(|op| op.id == id).map(|op| op.nonce)
     }
 
+    /// The connection this outbox was posting over is gone and no request is
+    /// left to answer: a post that was in flight may or may not have been
+    /// created, one still waiting was never posted. Both stay for the user.
+    pub fn settle(&mut self) {
+        for op in &mut self.ops {
+            op.phase = match op.phase {
+                Phase::InFlight => Phase::Uncertain(tr(
+                    "The connection failed while sending; the message may have been delivered.",
+                )),
+                Phase::Queued => {
+                    Phase::Failed(tr("Could not reach Discord; the message was not sent."))
+                }
+                phase => phase,
+            };
+        }
+    }
+
     fn remove(&mut self, at: usize) {
         if self.ops.remove(at).is_some() {
             self.slots.release();

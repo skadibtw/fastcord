@@ -263,7 +263,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::attachments::AttachmentCache;
 use crate::composer::{Candidate, CandidateKind, Composer};
-use crate::history::{Completed, History, Intent};
+use crate::history::{Carried, Completed, History, Intent};
 use crate::outbox::{OpId, Reply, Slots};
 use crate::rich;
 use crate::shortcuts::InputMode;
@@ -1005,6 +1005,8 @@ pub struct NavigationBridge {
     commands: mpsc::Sender<Command>,
     command_receiver: Arc<Mutex<Option<mpsc::Receiver<Command>>>>,
     outbox_slots: Slots,
+    /// The user's unconfirmed work, left by a worker that stopped on a limit.
+    carried: Arc<Mutex<Option<Carried>>>,
     watched: Arc<parking_lot::Mutex<Vec<Arc<crate::playback::Session>>>>,
     share_view: watch::Sender<ShareView>,
     camera_tiles: Arc<CameraTiles>,
@@ -1118,6 +1120,7 @@ impl NavigationBridge {
             commands,
             command_receiver: Arc::new(Mutex::new(Some(receiver))),
             outbox_slots: Slots::default(),
+            carried: Arc::default(),
             watched: Arc::default(),
             share_view: watch::channel(ShareView::default()).0,
             camera_tiles: Arc::default(),
@@ -1557,6 +1560,27 @@ impl NavigationBridge {
             self.outbox_slots.release();
         }
         queued
+    }
+
+    /// Makes this (new) bridge continue `old`'s account work: the outbox's
+    /// capacity and whatever its worker left unconfirmed (#149).
+    pub fn inherit(&mut self, old: &NavigationBridge) {
+        self.outbox_slots = old.outbox_slots.clone();
+        self.carried = Arc::clone(&old.carried);
+    }
+
+    /// The worker's history: empty, or continuing a stopped worker's work.
+    fn new_history(&self) -> History {
+        let mut history = History::new(self.outbox_slots.clone());
+        if let Some(carried) = self
+            .carried
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            history.restore(carried);
+        }
+        history
     }
 
     pub fn retry_send(&self, id: OpId) -> bool {
@@ -2412,6 +2436,45 @@ impl Worker {
 }
 
 impl Worker {
+    /// A limit stop must not abort the user's posts mid-flight (their outcome
+    /// would be unknowable): wait, without a Gateway, for the answers.
+    async fn answer_in_flight(&mut self) {
+        // Commands still queued were accepted from the user (a send holds an
+        // outbox slot): run them like any other, then wait for their answers.
+        // Closing first makes later senders fail visibly instead of queueing
+        // into a receiver that is about to be dropped.
+        self.commands.close();
+        while let Ok(command) = self.commands.try_recv() {
+            if !matches!(
+                command,
+                Command::OpenPrivate(_)
+                    | Command::Stream(_)
+                    | Command::StartShare { .. }
+                    | Command::StopShare
+            ) {
+                self.command(command);
+            }
+        }
+        let wait = async {
+            while self.tracker.history.unanswered() {
+                let completed = self.tracker.history.next_completed().await;
+                self.tracker.history.complete(&self.rest, completed);
+            }
+        };
+        // A request that outlives this is settled as uncertain by `carry`.
+        let _ = tokio::time::timeout(IN_FLIGHT_WAIT, wait).await;
+    }
+
+    /// Leaves the settled unconfirmed work for the next worker of the account.
+    fn deposit_carried(&mut self) {
+        let carried = self.tracker.history.carry();
+        *self
+            .bridge
+            .carried
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(carried);
+    }
+
     /// Applies one explicit Go Live control action.
     fn stream_command(&mut self, gateway: &Gateway, intent: StreamIntent) {
         match &intent {
@@ -3371,6 +3434,9 @@ impl Drop for Worker {
 
 /// Starts only when iced polls this account-owned stream. Dropping the panel
 /// aborts it and releases the socket, store, presentation slot, and controls.
+/// How long a Gateway stop waits for posts already with Discord.
+const IN_FLIGHT_WAIT: Duration = Duration::from_secs(30);
+
 pub fn status_stream(
     rest: RestClient,
     token: Arc<UserToken>,
@@ -3383,12 +3449,13 @@ pub fn status_stream(
     let rest_client = rest.clone();
     // There is one worker per bridge; a second one would simply get no commands.
     let commands = bridge.take_commands().unwrap_or_else(|| mpsc::channel(1).1);
+    let history = bridge.new_history();
     let worker = Worker {
         start: Some((rest, token)),
         rest: rest_client,
         gateway: None,
         tracker: Tracker {
-            history: History::new(bridge.outbox_slots.clone()),
+            history,
             ..Tracker::default()
         },
         bridge,
@@ -3574,6 +3641,9 @@ pub fn status_stream(
                 status,
                 Some(GatewayStatus::Stopped(_)) | Some(GatewayStatus::AuthenticationRequired)
             );
+            if terminal {
+                worker.answer_in_flight().await;
+            }
             let snapshot_notification = worker.refresh(&gateway, request, status);
             let notice_notification = worker.bridge.take_private_notice_pending();
             let notified = notice_notification || snapshot_notification;
@@ -3581,6 +3651,8 @@ pub fn status_stream(
                 worker.start = None;
                 worker.stop_voice().await;
                 worker.stop_all_streams();
+                // After the snapshot above, which still shows the rows.
+                worker.deposit_carried();
                 return notified.then_some(((), worker));
             }
             if notified {
@@ -4580,6 +4652,21 @@ mod bridge_tests {
     }
 
     #[test]
+    fn a_continuing_bridge_shares_the_outbox_capacity_and_carried_work() {
+        let old = NavigationBridge::new();
+        assert!(old.outbox_slots.reserve());
+        let mut new = NavigationBridge::new();
+        new.inherit(&old);
+        assert_eq!(
+            new.outbox_slots.used(),
+            1,
+            "the carried send keeps its slot"
+        );
+        *old.carried.lock().unwrap() = Some(History::default().carry());
+        assert!(new.carried.lock().unwrap().is_some());
+    }
+
+    #[test]
     fn sends_are_ordered_unmerged_and_bounded_by_outbox_slots() {
         use crate::outbox::MAX_OUTBOX;
         let bridge = NavigationBridge::new();
@@ -5419,6 +5506,41 @@ mod tests {
             typing_send: TypingSend::default(),
             bridge,
         }
+    }
+
+    /// The real stop path: a send still queued in the command channel when the
+    /// Gateway stops is not lost, keeps its slot as a visible failed row, and
+    /// the Reconnect worker starts with it; later senders are refused.
+    #[tokio::test]
+    async fn a_limit_stop_carries_queued_sends_into_the_reconnect_worker() {
+        let mut worker = worker();
+        assert!(
+            worker
+                .bridge
+                .send_message(Snowflake(300), "queued".to_owned(), false, None)
+        );
+        assert_eq!(worker.bridge.outbox_slots.used(), 1);
+        worker.answer_in_flight().await;
+        assert!(
+            !worker
+                .bridge
+                .send_message(Snowflake(300), "late".to_owned(), false, None),
+            "the stopped worker accepts nothing"
+        );
+        assert_eq!(worker.bridge.outbox_slots.used(), 1, "no slot leaks");
+        worker.deposit_carried();
+
+        let mut next = NavigationBridge::new();
+        next.inherit(&worker.bridge);
+        let history = next.new_history();
+        let rows = history.outbox_items();
+        assert_eq!(rows.len(), 1, "the queued send survived: {rows:?}");
+        assert_eq!(&*rows[0].content, "queued");
+        assert!(!matches!(
+            rows[0].state,
+            crate::outbox::OutboxState::Sending
+        ));
+        assert_eq!(next.outbox_slots.used(), 1);
     }
 
     #[tokio::test]

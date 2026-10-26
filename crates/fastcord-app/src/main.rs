@@ -2174,12 +2174,26 @@ and a fourth"
     /// belongs to the panel: leaving the account screen (logout, rejected
     /// token) drops it, which closes the Gateway session.
     fn enter_account(&mut self, session: Arc<Session>, persistence: Persistence) -> Task<Message> {
+        self.enter_account_from(session, persistence, None)
+    }
+
+    /// `previous` is the bridge of the same account's stopped worker: its
+    /// unconfirmed sends and edits continue in the new one (#149).
+    fn enter_account_from(
+        &mut self,
+        session: Arc<Session>,
+        persistence: Persistence,
+        previous: Option<gateway::NavigationBridge>,
+    ) -> Task<Message> {
         self.gateway_sessions += 1;
         let id = self.gateway_sessions;
         if fake_mode() {
             unverified::enable_all(&session.client);
         }
-        let controls = gateway::NavigationBridge::new();
+        let mut controls = gateway::NavigationBridge::new();
+        if let Some(previous) = &previous {
+            controls.inherit(previous);
+        }
         controls.set_account_id(session.user.id);
         controls.set_volume_settings(voice_settings::load(session.user.id));
         let account = session.user.id;

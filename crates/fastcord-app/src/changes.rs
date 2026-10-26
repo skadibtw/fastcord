@@ -223,6 +223,23 @@ impl Changes {
         true
     }
 
+    /// No request is left to answer the changes being saved: each stays as a
+    /// failed change the user may retry (both requests are idempotent).
+    pub fn settle(&mut self) {
+        for change in &mut self.changes {
+            if change.state == ChangeState::Saving {
+                change.state = ChangeState::Failed(match change.kind {
+                    ChangeKind::Edit(_) => tr(
+                        "Discord did not confirm the edit; it may have been saved. Retrying is safe.",
+                    ),
+                    ChangeKind::Delete => tr(
+                        "Discord did not confirm the deletion; it may already be gone. Retrying is safe.",
+                    ),
+                });
+            }
+        }
+    }
+
     /// The user's explicit retry of a failed change: what to request again.
     pub fn retry(&mut self, channel: Snowflake, message: Snowflake) -> Option<ChangeRequest> {
         let at = self.position(channel, message)?;
