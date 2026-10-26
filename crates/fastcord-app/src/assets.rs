@@ -267,17 +267,16 @@ fn describe(error: AdminRequestError) -> String {
 
 /// Discord's own refusal text is kept verbatim.
 fn describe_rest(error: RestError) -> String {
-    match error {
-        RestError::PermissionDenied => {
-            "Discord refused: you lack Create or Manage Expressions here.".to_owned()
-        }
-        RestError::ResourceGone => "That server or asset no longer exists.".to_owned(),
-        RestError::Retryable(_) => {
-            "Discord did not confirm. It may have been applied; check the list before trying again."
-                .to_owned()
-        }
-        other => crate::friends::failure(other),
-    }
+    use crate::rest_text::{DEFAULT, Wording, describe};
+    describe(
+        error,
+        &Wording {
+            forbidden: "Discord refused: you lack Create or Manage Expressions here.",
+            gone: "That server or asset no longer exists.",
+            unconfirmed: "Discord did not confirm. It may have been applied; check the list before trying again.",
+            ..DEFAULT
+        },
+    )
 }
 
 /// Why an upload cannot go out now, or `None`: permission, known tier, loaded
@@ -1537,7 +1536,7 @@ mod tests {
 
     #[test]
     fn failures_are_described_and_ambiguous_ones_say_so() {
-        let network = RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection));
+        let network = RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout));
         assert!(describe_rest(network).contains("may have been applied"));
         assert!(describe_rest(RestError::PermissionDenied).contains("Expressions"));
         assert!(describe_rest(RestError::ResourceGone).contains("no longer exists"));

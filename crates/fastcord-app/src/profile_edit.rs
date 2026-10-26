@@ -16,8 +16,8 @@ use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_discord::{
     AccountEdit, AvatarImage, Connection, MAX_BIO_CHARS, MAX_DISPLAY_NAME_CHARS, MAX_NICK_CHARS,
-    MAX_PRONOUNS_CHARS, NetworkFailure, Profile, ProfileError, ProfileRequestError, ProfileText,
-    RestClient, RestError, RetryableFailure,
+    MAX_PRONOUNS_CHARS, Profile, ProfileError, ProfileRequestError, ProfileText, RestClient,
+    RestError,
 };
 use fastcord_model::{Snowflake, User};
 use iced::widget::{column, row, space, text, text_input};
@@ -107,36 +107,21 @@ fn describe(error: ProfileRequestError, action: Action) -> String {
         }
         ProfileRequestError::Rest(error) => error,
     };
-    match error {
-        RestError::AuthenticationRequired => tr("Your session has expired. Log in again.").to_owned(),
-        RestError::PermissionDenied => match action {
-            Action::Nick => tr("Discord refused: you may not be allowed to change your nickname in this server.").to_owned(),
-            _ => tr("Discord refused this change for this account.").to_owned(),
+    use crate::rest_text::Wording;
+    crate::rest_text::describe(
+        error,
+        &Wording {
+            forbidden: match action {
+                Action::Nick => {
+                    "Discord refused: you may not be allowed to change your nickname in this server."
+                }
+                _ => "Discord refused this change for this account.",
+            },
+            gone: "Discord could not find that server or connection.",
+            unconfirmed: "Discord did not confirm. The change may have been applied; reopen this panel to check before trying again. What you typed is kept.",
+            rejected: "Discord rejected the value. Names are limited in how often they change, and some changes need verification (password, two-factor or CAPTCHA) that only the official Discord client can complete. What you typed is kept.",
         },
-        RestError::ResourceGone => tr("Discord could not find that server or connection.").to_owned(),
-        RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        RestError::Http(status) if status.as_u16() == 429 => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        RestError::Http(status) if status.as_u16() == 400 => {
-            tr("Discord rejected the value. Names are limited in how often they change, and some changes need verification (password, two-factor or CAPTCHA) that only the official Discord client can complete. What you typed is kept.")
-                .to_owned()
-        }
-        RestError::RequestBodyTooLarge => tr("That image is too large to send.").to_owned(),
-        RestError::InvalidJson => {
-            tr("Discord answered with something unexpected. The change may have been applied; reopen this panel to check.")
-                .to_owned()
-        }
-        RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection))
-        | RestError::Retryable(_) => {
-            tr("Discord did not confirm. The change may have been applied; reopen this panel to check before trying again. What you typed is kept.")
-                .to_owned()
-        }
-        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED).to_owned(),
-        other => trf("The request failed: {}.", &[&tr(&other.to_string())]),
-    }
+    )
 }
 
 fn avatar_from(path: &std::path::Path) -> Result<AvatarImage, &'static str> {
@@ -632,6 +617,7 @@ pub fn view<'a>(
 mod tests {
     use super::*;
     use fastcord_discord::gateway::{ClientProperties, HostOs};
+    use fastcord_discord::{NetworkFailure, RetryableFailure};
 
     fn rest() -> RestClient {
         RestClient::new(

@@ -14,7 +14,7 @@ use crate::ui::button;
 use fastcord_discord::state::navigation::{NavigationSnapshot, PrivateChannelSelection};
 use fastcord_discord::{
     GroupEdit, GroupError, GroupRequestError, IconImage, MAX_GROUP_NAME_CHARS, MAX_ICON_BYTES,
-    NetworkFailure, RestClient, RestError, RetryableFailure,
+    RestClient, RestError,
 };
 use fastcord_model::{RelationshipKind, Snowflake};
 use iced::widget::{column, container, row, scrollable, space, text, text_input};
@@ -81,32 +81,16 @@ pub struct State {
 }
 
 fn describe(error: RestError) -> String {
-    match error {
-        RestError::AuthenticationRequired => tr("Your session has expired. Log in again.").to_owned(),
-        RestError::PermissionDenied => {
-            tr("Discord refused: you may lack permission, or the person cannot be added (for example because of blocking or privacy settings).")
-                .to_owned()
-        }
-        RestError::ResourceGone => tr("That conversation or person no longer exists.").to_owned(),
-        RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        RestError::Http(status) if status.as_u16() == 429 => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        RestError::Http(status) if status.as_u16() == 400 => {
-            tr("Discord rejected the request (the group may be full, or the value is not allowed).")
-                .to_owned()
-        }
-        RestError::RequestBodyTooLarge => tr("That image is too large to send.").to_owned(),
-        RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection))
-        | RestError::Retryable(_) => {
-            tr("Discord did not confirm. The change may have been applied; check the list before trying again.")
-                .to_owned()
-        }
-        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED).to_owned(),
-        other => trf("The request failed: {}.", &[&tr(&other.to_string())]),
-    }
+    use crate::rest_text::Wording;
+    crate::rest_text::describe(
+        error,
+        &Wording {
+            forbidden: "Discord refused: you may lack permission, or the person cannot be added (for example because of blocking or privacy settings).",
+            gone: "That conversation or person no longer exists.",
+            unconfirmed: "Discord did not confirm. The change may have been applied; check the list before trying again.",
+            rejected: "Discord rejected the request (the group may be full, or the value is not allowed).",
+        },
+    )
 }
 
 /// Reads at most one byte more than the image limit, so an oversized file is
@@ -607,6 +591,7 @@ fn name_of(selection: &PrivateChannelSelection, user: Snowflake) -> String {
 mod tests {
     use super::*;
     use fastcord_discord::state::navigation::PrivateMember;
+    use fastcord_discord::{NetworkFailure, RetryableFailure};
     use fastcord_model::{Relationship, User};
     use std::sync::Arc;
 
@@ -808,7 +793,7 @@ mod tests {
                 "full",
             ),
             (
-                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)),
+                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout)),
                 "may have been applied",
             ),
         ] {

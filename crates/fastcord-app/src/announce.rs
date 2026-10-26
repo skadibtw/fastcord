@@ -98,17 +98,15 @@ pub struct State {
 const SENT: &str = "Sent. The message shows Published when Discord confirms.";
 
 pub(crate) fn describe(error: RestError, forbidden: &str, gone: &str) -> String {
-    match error {
-        RestError::PermissionDenied => tr(forbidden).to_owned(),
-        RestError::Refused(r) if r.status.as_u16() == 403 => tr(forbidden).to_owned(),
-        RestError::ResourceGone => tr(gone).to_owned(),
-        RestError::Refused(r) if r.status.as_u16() == 404 => tr(gone).to_owned(),
-        RestError::Retryable(_) => {
-            tr("Discord did not confirm. It may have been applied; check before trying again.")
-                .to_owned()
-        }
-        other => crate::friends::failure(other),
-    }
+    use crate::rest_text::{DEFAULT, Wording};
+    crate::rest_text::describe(
+        error,
+        &Wording {
+            forbidden,
+            gone,
+            ..DEFAULT
+        },
+    )
 }
 
 /// Why the loaded message cannot be published right now, or `None`.

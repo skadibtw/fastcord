@@ -16,8 +16,7 @@ type Presences = HashMap<Snowflake, Presence>;
 
 use crate::ui::button;
 use fastcord_discord::{
-    NetworkFailure, Profile, RelationshipAction, RestClient, RestError, RetryableFailure,
-    UsernameError, parse_username,
+    Profile, RelationshipAction, RestClient, RestError, UsernameError, parse_username,
 };
 use fastcord_model::{Presence, Relationship, RelationshipKind, Snowflake, Status, User};
 use iced::font::Weight;
@@ -131,37 +130,19 @@ pub struct State {
 
 /// What a failed relationship request tells the user to do next.
 pub fn failure(error: RestError) -> String {
+    use crate::rest_text::{Wording, describe};
     if needs_confirmation(&error) {
         return tr("Discord requires confirmation to accept this friend request. Open Pending and choose Accept to review it.").to_owned();
     }
-    match error {
-        RestError::AccountVerificationRequired => tr("Discord requires an account check. Requests are paused. Open the official Discord client, complete its verification, then reconnect fastcord.").to_owned(),
-        RestError::WritesPaused(_) => trf("{}. Try again later.", &[&tr(&error.to_string())]),
-        RestError::Refused(refusal) => trf("Discord refused ({}{}): {}", &[&refusal.status.as_u16(), &refusal.code.map_or_else(String::new, |code| trf(", code {}", &[&code])), &refusal.message()]),
-        RestError::AuthenticationRequired => tr("Your session has expired. Log in again.").to_owned(),
-        RestError::PermissionDenied => {
-            tr("Discord refused: the user may have blocked you or may not accept friend requests.")
-                .to_owned()
-        }
-        RestError::ResourceGone => tr("Discord could not find that user.").to_owned(),
-        RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        RestError::Http(status) if status.as_u16() == 429 => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        RestError::Http(status) if status.as_u16() == 400 => {
-            tr("Discord rejected the request. Check the username and try again.").to_owned()
-        }
-        RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)) => {
-            tr("Could not reach Discord. Check the list before trying again.").to_owned()
-        }
-        RestError::Retryable(_) => {
-            tr("Discord did not answer. Check the list before trying again.").to_owned()
-        }
-        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED).to_owned(),
-        other => trf("The request failed: {}.", &[&tr(&other.to_string())]),
-    }
+    describe(
+        error,
+        &Wording {
+            forbidden: "Discord refused: the user may have blocked you or may not accept friend requests.",
+            gone: "Discord could not find that user.",
+            unconfirmed: "Discord did not answer. Check the list before trying again.",
+            rejected: "Discord rejected the request. Check the username and try again.",
+        },
+    )
 }
 
 fn needs_confirmation(error: &RestError) -> bool {

@@ -458,15 +458,16 @@ fn community_note() -> String {
 }
 
 pub(crate) fn describe_rest(error: RestError) -> String {
-    match error {
-        RestError::PermissionDenied => tr("Discord refused: you lack the permission for this (Manage Server, Manage Channels, Manage Roles, a role above the one involved, or being the owner).").to_owned(),
-        RestError::ResourceGone => tr("That server or channel no longer exists.").to_owned(),
-        RestError::Retryable(_) => tr("Discord did not confirm. The change may have been applied; check the list before trying again.").to_owned(),
-        RestError::Refused(refusal) if refusal.code == Some(60003) => tr("Discord asks for two-factor verification for this change. fastcord does not answer that challenge: complete it in the official Discord client. Nothing was changed here.").to_owned(),
-        RestError::Refused(refusal) if refusal.status.as_u16() == 403 => describe_rest(RestError::PermissionDenied),
-        RestError::Refused(refusal) if refusal.status.as_u16() == 404 => describe_rest(RestError::ResourceGone),
-        other => crate::invite::describe(other),
-    }
+    use crate::rest_text::{DEFAULT, Wording, describe};
+    describe(
+        error,
+        &Wording {
+            forbidden: "Discord refused: you lack the permission for this (Manage Server, Manage Channels, Manage Roles, a role above the one involved, or being the owner).",
+            gone: "That server or channel no longer exists.",
+            unconfirmed: "Discord did not confirm. The change may have been applied; check the list before trying again.",
+            ..DEFAULT
+        },
+    )
 }
 
 fn read_icon(path: &std::path::Path) -> Result<GuildIcon, &'static str> {
@@ -2293,7 +2294,7 @@ mod tests {
         assert!(
             text(RestError::Retryable(
                 fastcord_discord::RetryableFailure::Network(
-                    fastcord_discord::NetworkFailure::Connection
+                    fastcord_discord::NetworkFailure::Timeout
                 )
             ))
             .contains("may have been applied")
@@ -2524,7 +2525,7 @@ mod tests {
             Action::MemberRole,
             Err(AdminRequestError::Rest(RestError::Retryable(
                 fastcord_discord::RetryableFailure::Network(
-                    fastcord_discord::NetworkFailure::Connection,
+                    fastcord_discord::NetworkFailure::Timeout,
                 ),
             ))),
         );

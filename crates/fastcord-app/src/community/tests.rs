@@ -319,7 +319,7 @@ fn failures_keep_the_form_and_use_discords_words() {
         &mut state,
         Tab::Rules,
         RestError::Retryable(fastcord_discord::RetryableFailure::Network(
-            fastcord_discord::NetworkFailure::Connection,
+            fastcord_discord::NetworkFailure::Timeout,
         )),
     );
     assert!(note.contains("may have been applied"));

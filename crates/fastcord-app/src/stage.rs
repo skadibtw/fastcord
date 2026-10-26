@@ -6,7 +6,7 @@
 use crate::gateway::{StageControls, VoiceControls};
 use crate::i18n::{tr, trf};
 use crate::ui::{button, primary_button};
-use crate::{Message, friends, style};
+use crate::{Message, style};
 use fastcord_discord::state::navigation::StageSeat;
 use fastcord_discord::{MAX_TOPIC_CHARS, RestError, StageAction};
 use iced::widget::{column, container, row, space, text, text_input};
@@ -87,13 +87,15 @@ impl State {
 
 /// What a refused or failed Stage request tells the user.
 pub fn failure(error: RestError) -> String {
-    match error {
-        RestError::PermissionDenied => {
-            tr("That is not allowed right now. The Stage or your role may have changed.").to_owned()
-        }
-        RestError::ResourceGone => tr("The Stage session no longer exists.").to_owned(),
-        other => friends::failure(other),
-    }
+    use crate::rest_text::{DEFAULT, Wording, describe};
+    describe(
+        error,
+        &Wording {
+            forbidden: "That is not allowed right now. The Stage or your role may have changed.",
+            gone: "The Stage session no longer exists.",
+            ..DEFAULT
+        },
+    )
 }
 
 fn act(

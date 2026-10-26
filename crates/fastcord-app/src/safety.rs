@@ -23,8 +23,8 @@ use crate::ui::button;
 use fastcord_discord::state::Suppression;
 use fastcord_discord::state::navigation::{MAX_REQUEST_ROWS, NavigationSnapshot};
 use fastcord_discord::{
-    FriendSources, NetworkFailure, PrivacyEdit, PrivacyRequestError, PrivacySettings,
-    RelationshipAction, RestClient, RestError, RetryableFailure,
+    FriendSources, PrivacyEdit, PrivacyRequestError, PrivacySettings, RelationshipAction,
+    RestClient, RestError,
 };
 use fastcord_model::{Message, Snowflake};
 use iced::widget::{column, row, scrollable, space, text};
@@ -147,42 +147,29 @@ fn describe(error: PrivacyRequestError, action: Action) -> String {
         }
         PrivacyRequestError::Rest(error) => error,
     };
-    match error {
-        RestError::AuthenticationRequired => tr("Your session has expired. Log in again.").to_owned(),
-        RestError::PermissionDenied => tr("Discord refused this for this account.").to_owned(),
-        RestError::ResourceGone => match action {
-            Action::Accept(_) | Action::Decline(_) => {
-                tr("That request is already gone; the list follows Discord.").to_owned()
-            }
-            _ => tr("Discord could not find that.").to_owned(),
+    use crate::rest_text::Wording;
+    let unconfirmed = match action {
+        Action::LoadPrivacy => {
+            "Discord answered with something unexpected, so these settings cannot be edited here."
+        }
+        _ => {
+            "Discord did not confirm. The change may have been applied; reload or check the list before trying again."
+        }
+    };
+    crate::rest_text::describe(
+        error,
+        &Wording {
+            forbidden: "Discord refused this for this account.",
+            gone: match action {
+                Action::Accept(_) | Action::Decline(_) => {
+                    "That request is already gone; the list follows Discord."
+                }
+                _ => "Discord could not find that.",
+            },
+            unconfirmed,
+            rejected: "Discord rejected the change, or it needs verification only the official client can complete.",
         },
-        RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        RestError::Http(status) if status.as_u16() == 429 => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        RestError::Http(status) if status.as_u16() == 400 => {
-            tr("Discord rejected the change, or it needs verification only the official client can complete.")
-                .to_owned()
-        }
-        RestError::InvalidJson if action == Action::LoadPrivacy => {
-            tr("Discord answered with something unexpected, so these settings cannot be edited here.")
-                .to_owned()
-        }
-        RestError::InvalidJson => {
-            tr("Discord answered with something unexpected. The change may have been applied; reload to check.")
-                .to_owned()
-        }
-        RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection))
-        | RestError::Retryable(_) => match action {
-            Action::LoadPrivacy => tr("Could not reach Discord. Try Load again.").to_owned(),
-            _ => tr("Discord did not confirm. The change may have been applied; reload or check the list before trying again.")
-                .to_owned(),
-        },
-        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED).to_owned(),
-        other => trf("The request failed: {}.", &[&tr(&other.to_string())]),
-    }
+    )
 }
 
 fn clip(text: &str, limit: usize) -> String {
@@ -947,6 +934,7 @@ mod tests {
     use super::*;
     use fastcord_discord::gateway::{ClientProperties, HostOs};
     use fastcord_discord::state::navigation::{MessageRequests, RequestRow};
+    use fastcord_discord::{NetworkFailure, RetryableFailure};
     use fastcord_discord::{PrivacyLive, StatusCode};
     use std::sync::Arc;
 
@@ -1242,7 +1230,7 @@ mod tests {
                 state.serial,
                 Action::SavePrivacy,
                 Err(PrivacyRequestError::Rest(RestError::Retryable(
-                    RetryableFailure::Network(NetworkFailure::Connection),
+                    RetryableFailure::Network(NetworkFailure::Timeout),
                 ))),
             ),
             &navigation,

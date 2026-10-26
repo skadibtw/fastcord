@@ -129,23 +129,20 @@ pub struct State {
 /// What a failed request tells the user. `what` names the change a write
 /// may have made.
 pub(crate) fn failure(error: RestError, what: &str) -> String {
-    match error {
-        RestError::Retryable(_) => trf(
-            "Discord did not confirm. {} may have been applied; it was not retried. Check in the official client before trying again.",
-            &[&tr(what)],
-        ),
-        RestError::ResourceGone => tr("Discord could not find that for this server.").to_owned(),
-        RestError::PermissionDenied => {
-            tr("Discord refused (403): you may not do this in this server.").to_owned()
-        }
-        RestError::Refused(refusal) if refusal.status.as_u16() == 404 => {
-            tr("Discord could not find that for this server.").to_owned()
-        }
-        RestError::Refused(refusal) if refusal.status.as_u16() == 403 => {
-            trf("Discord refused (403): {}", &[&refusal.message()])
-        }
-        other => crate::invite::describe(other),
-    }
+    use crate::rest_text::{DEFAULT, Wording, describe};
+    let unconfirmed = trf(
+        "Discord did not confirm. {} may have been applied; it was not retried. Check in the official client before trying again.",
+        &[&tr(what)],
+    );
+    describe(
+        error,
+        &Wording {
+            forbidden: "Discord refused (403): you may not do this in this server.",
+            gone: "Discord could not find that for this server.",
+            unconfirmed: &unconfirmed,
+            ..DEFAULT
+        },
+    )
 }
 
 /// Whether the guide is simply not there for this account.
@@ -921,7 +918,7 @@ mod tests {
                 "rate limiting",
             ),
             (
-                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)),
+                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout)),
                 "may have been applied",
             ),
         ] {
@@ -1070,7 +1067,7 @@ mod tests {
                 "rate limiting",
             ),
             (
-                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)),
+                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout)),
                 "may have been applied",
             ),
         ] {

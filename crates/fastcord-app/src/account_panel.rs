@@ -14,8 +14,7 @@
 
 use crate::ui::button;
 use fastcord_discord::{
-    AuthSession, MFA_REQUIRED, RestClient, RestError, RetryableFailure, SecurityOverview,
-    is_mfa_required,
+    AuthSession, MFA_REQUIRED, RestClient, RestError, SecurityOverview, is_mfa_required,
 };
 use fastcord_model::Snowflake;
 use iced::widget::{column, row, space, text};
@@ -83,18 +82,16 @@ fn describe(error: RestError) -> String {
             &[&MFA_REQUIRED, &refusal.message()],
         );
     }
-    match error {
-        RestError::Retryable(RetryableFailure::Network(_) | RetryableFailure::Server(_)) => {
-            tr("Discord did not confirm. The session may have been logged out; reload the list before trying again.").to_owned()
-        }
-        RestError::PermissionDenied => {
-            tr("Discord refused this. Confirm in the official client.").to_owned()
-        }
-        RestError::ResourceGone => {
-            tr("Discord did not find that session list or session. Reload the list.").to_owned()
-        }
-        other => crate::invite::describe(other),
-    }
+    use crate::rest_text::{DEFAULT, Wording};
+    crate::rest_text::describe(
+        error,
+        &Wording {
+            forbidden: "Discord refused this. Confirm in the official client.",
+            gone: "Discord did not find that session list or session. Reload the list.",
+            unconfirmed: "Discord did not confirm. The session may have been logged out; reload the list before trying again.",
+            ..DEFAULT
+        },
+    )
 }
 
 impl State {
@@ -377,6 +374,7 @@ pub fn view<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fastcord_discord::RetryableFailure;
     use reqwest::StatusCode;
 
     fn client() -> RestClient {

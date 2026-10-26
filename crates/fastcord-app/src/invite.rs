@@ -239,21 +239,16 @@ pub fn visible_codes(rows: &[timeline::Row]) -> Vec<String> {
 
 /// What a failed membership request tells the user.
 pub fn describe(error: RestError) -> String {
-    match error {
-        RestError::ResourceGone => tr("That invite or server no longer exists.").to_owned(),
-        RestError::PermissionDenied => {
-            tr("Discord refused: you may lack permission, or may not join this server.")
-                .to_owned()
-        }
-        RestError::Retryable(_) => {
-            tr("Discord did not confirm. The change may have been applied; check your server list before trying again.").to_owned()
-        }
-        RestError::Refused(refusal) if refusal.message().is_empty() => {
-            crate::friends::failure(RestError::Refused(refusal))
-        }
-        RestError::Refused(refusal) => trf("Discord refused: {}", &[&refusal.message()]),
-        other => crate::friends::failure(other),
-    }
+    use crate::rest_text::{DEFAULT, Wording};
+    crate::rest_text::describe(
+        error,
+        &Wording {
+            forbidden: "Discord refused: you may lack permission, or may not join this server.",
+            gone: "That invite or server no longer exists.",
+            unconfirmed: "Discord did not confirm. The change may have been applied; check your server list before trying again.",
+            ..DEFAULT
+        },
+    )
 }
 
 pub(crate) fn count(n: u32) -> String {
@@ -510,12 +505,16 @@ fn is_gone(error: &RestError) -> bool {
 
 /// What a failed list or revoke request tells the user.
 fn describe_manage(error: RestError) -> String {
-    match error {
-        RestError::PermissionDenied => tr("Discord refused: managing invites needs Manage Server (all invites) or Manage Channel (this channel only).").to_owned(),
-        RestError::Refused(refusal) if refusal.status.as_u16() == 403 => describe_manage(RestError::PermissionDenied),
-        RestError::Retryable(_) => tr("Discord did not confirm. The change may have been applied; reopen the list before trying again.").to_owned(),
-        other => describe(other),
-    }
+    use crate::rest_text::{DEFAULT, Wording, describe};
+    describe(
+        error,
+        &Wording {
+            forbidden: "Discord refused: managing invites needs Manage Server (all invites) or Manage Channel (this channel only).",
+            gone: "That invite or server no longer exists.",
+            unconfirmed: "Discord did not confirm. The change may have been applied; reopen the list before trying again.",
+            ..DEFAULT
+        },
+    )
 }
 
 impl Manage {
@@ -1350,7 +1349,9 @@ mod tests {
         );
         assert_eq!(
             cache.get("abcd").unwrap().join,
-            Join::Refused("Discord refused: You are banned from this guild.".to_owned())
+            Join::Refused(
+                "Discord refused (403, code 40007): You are banned from this guild.".to_owned()
+            )
         );
         // An explicit new click may try again; success becomes Joined.
         assert!(cache.begin_join("abcd"));

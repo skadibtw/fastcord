@@ -54,25 +54,16 @@ pub enum Event {
 
 /// What a failed moderation request tells the user: fixed, secret-free text.
 pub fn failure(error: RestError) -> String {
-    match error {
-        RestError::PermissionDenied => tr("Discord refused: you lack the permission, or the member has a role at or above yours.").to_owned(),
-        RestError::ResourceGone => tr("That member, message or channel no longer exists.").to_owned(),
-        RestError::Retryable(_) => tr("Discord did not confirm. The action may have been applied; check before trying again.").to_owned(),
-        RestError::AuthenticationRequired => tr("Your session has expired. Log in again.").to_owned(),
-        RestError::InvalidRateLimit | RestError::RateLimited | RestError::SchedulerCapacityExceeded => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        RestError::Http(status) if status.as_u16() == 429 => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        RestError::Refused(refusal) if refusal.code == Some(60003) => tr("Discord asks for two-factor verification for this action. fastcord does not answer that challenge: complete it in the official Discord client. Nothing was changed here.").to_owned(),
-        RestError::Refused(refusal) if refusal.status.as_u16() == 403 => failure(RestError::PermissionDenied),
-        RestError::Refused(refusal) if refusal.status.as_u16() == 404 => failure(RestError::ResourceGone),
-        RestError::Refused(refusal) if refusal.status.as_u16() == 429 => {
-            tr("Discord is rate limiting requests. Wait a moment and try again.").to_owned()
-        }
-        other => crate::invite::describe(other),
-    }
+    use crate::rest_text::{DEFAULT, Wording, describe};
+    describe(
+        error,
+        &Wording {
+            forbidden: "Discord refused: you lack the permission, or the member has a role at or above yours.",
+            gone: "That member, message or channel no longer exists.",
+            unconfirmed: "Discord did not confirm. The action may have been applied; check before trying again.",
+            ..DEFAULT
+        },
+    )
 }
 
 #[derive(Debug)]

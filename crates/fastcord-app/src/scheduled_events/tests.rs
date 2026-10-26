@@ -240,7 +240,7 @@ fn failures_are_shown_and_never_applied() {
             "rate limiting",
         ),
         (
-            RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)),
+            RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout)),
             "may have been applied",
         ),
     ] {

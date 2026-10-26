@@ -71,7 +71,7 @@ pub fn failure(error: BulkRequestError) -> &'static str {
         RestError::Retryable(_) => tr(
             "Discord did not confirm. It may have been applied; check the messages before trying again.",
         ),
-        RestError::Refused(refusal) if refusal.code == Some(60003) => tr(
+        RestError::Refused(refusal) if refusal.code == Some(fastcord_discord::MFA_REQUIRED) => tr(
             "Discord asks for two-factor verification. Complete it in the official client; nothing was changed here.",
         ),
         RestError::Refused(refusal) if refusal.status.as_u16() == 403 => {

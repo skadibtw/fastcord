@@ -74,6 +74,7 @@ mod qr;
 mod reactions;
 mod render;
 mod report;
+mod rest_text;
 mod rich;
 mod safety;
 mod scheduled_events;
