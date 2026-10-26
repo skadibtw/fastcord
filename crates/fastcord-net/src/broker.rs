@@ -154,12 +154,22 @@ impl NetworkContext {
         }))
     }
 
-    pub fn with_mode(&self, mode: Mode) -> Self {
+    /// The one derivation of a view (#135): only the per-view settings are
+    /// arguments; every process-wide budget, gate and diagnostic is shared
+    /// here, so a new one cannot be split by a forgotten clone. Each view
+    /// starts its own bridge.
+    fn view(
+        &self,
+        prefix_factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>,
+        mode: Mode,
+        experimental_udp: bool,
+        proxy: Option<Arc<ProxyCredentials>>,
+    ) -> Self {
         Self(Arc::new(Shared {
-            prefix_factory: self.0.prefix_factory.clone(),
+            prefix_factory,
             mode,
-            experimental_udp: self.0.experimental_udp,
-            proxy: self.0.proxy.clone(),
+            experimental_udp,
+            proxy,
             controller: self.0.controller.clone(),
             bridge: Mutex::new(None),
             bridge_secret: self.0.bridge_secret.clone(),
@@ -173,6 +183,15 @@ impl NetworkContext {
             #[cfg(debug_assertions)]
             probe_output: self.0.probe_output.clone(),
         }))
+    }
+
+    pub fn with_mode(&self, mode: Mode) -> Self {
+        self.view(
+            self.0.prefix_factory.clone(),
+            mode,
+            self.0.experimental_udp,
+            self.0.proxy.clone(),
+        )
     }
 
     pub fn mode(&self) -> Mode {
@@ -185,24 +204,12 @@ impl NetworkContext {
     }
 
     pub fn with_experimental_udp(&self, enabled: bool) -> Self {
-        Self(Arc::new(Shared {
-            prefix_factory: self.0.prefix_factory.clone(),
-            mode: self.0.mode,
-            experimental_udp: enabled,
-            proxy: self.0.proxy.clone(),
-            controller: self.0.controller.clone(),
-            bridge: Mutex::new(None),
-            bridge_secret: self.0.bridge_secret.clone(),
-            transforms: self.0.transforms.clone(),
-            tunnels: self.0.tunnels.clone(),
-            pending: self.0.pending.clone(),
-            attempts: self.0.attempts.clone(),
-            recovering: self.0.recovering.clone(),
-            recovery_gate: self.0.recovery_gate.clone(),
-            associations: self.0.associations.clone(),
-            #[cfg(debug_assertions)]
-            probe_output: self.0.probe_output.clone(),
-        }))
+        self.view(
+            self.0.prefix_factory.clone(),
+            self.0.mode,
+            enabled,
+            self.0.proxy.clone(),
+        )
     }
     pub fn with_proxy(
         &self,
@@ -210,24 +217,12 @@ impl NetworkContext {
         password: zeroize::Zeroizing<String>,
     ) -> Result<Self, NetworkError> {
         let proxy = Arc::new(ProxyCredentials::new(config, password)?);
-        Ok(Self(Arc::new(Shared {
-            prefix_factory: self.0.prefix_factory.clone(),
-            mode: Mode::Proxy,
-            experimental_udp: self.0.experimental_udp,
-            proxy: Some(proxy),
-            controller: self.0.controller.clone(),
-            bridge: Mutex::new(None),
-            bridge_secret: self.0.bridge_secret.clone(),
-            transforms: self.0.transforms.clone(),
-            tunnels: self.0.tunnels.clone(),
-            pending: self.0.pending.clone(),
-            attempts: self.0.attempts.clone(),
-            recovering: self.0.recovering.clone(),
-            recovery_gate: self.0.recovery_gate.clone(),
-            associations: self.0.associations.clone(),
-            #[cfg(debug_assertions)]
-            probe_output: self.0.probe_output.clone(),
-        })))
+        Ok(self.view(
+            self.0.prefix_factory.clone(),
+            Mode::Proxy,
+            self.0.experimental_udp,
+            Some(proxy),
+        ))
     }
     pub fn proxy_config(&self) -> Option<&ProxyConfig> {
         self.0.proxy.as_ref().map(|proxy| &proxy.config)
@@ -239,24 +234,12 @@ impl NetworkContext {
         self.set_prefix_factory(None)
     }
     fn set_prefix_factory(&self, factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>) -> Self {
-        Self(Arc::new(Shared {
-            prefix_factory: factory,
-            mode: self.0.mode,
-            experimental_udp: self.0.experimental_udp,
-            proxy: self.0.proxy.clone(),
-            controller: self.0.controller.clone(),
-            bridge: Mutex::new(None),
-            bridge_secret: self.0.bridge_secret.clone(),
-            transforms: self.0.transforms.clone(),
-            tunnels: self.0.tunnels.clone(),
-            pending: self.0.pending.clone(),
-            attempts: self.0.attempts.clone(),
-            recovering: self.0.recovering.clone(),
-            recovery_gate: self.0.recovery_gate.clone(),
-            associations: self.0.associations.clone(),
-            #[cfg(debug_assertions)]
-            probe_output: self.0.probe_output.clone(),
-        }))
+        self.view(
+            factory,
+            self.0.mode,
+            self.0.experimental_udp,
+            self.0.proxy.clone(),
+        )
     }
     pub(crate) fn prefix_factory(&self) -> Option<Arc<dyn crate::tls::FakePrefixFactory>> {
         self.0.prefix_factory.clone()
