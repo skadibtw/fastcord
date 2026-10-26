@@ -338,3 +338,24 @@ fn corrupted_files_never_panic() {
         }
     }
 }
+
+#[test]
+fn a_webm_of_millions_of_void_elements_is_refused_quickly() {
+    // EBML header (DocType "webm"), a Segment of unknown size, then 2 M
+    // empty Void elements: only the element cap stops the walk (#124).
+    let mut file = vec![0x1A, 0x45, 0xDF, 0xA3, 0x87, 0x42, 0x82, 0x84];
+    file.extend_from_slice(b"webm");
+    file.extend_from_slice(&[
+        0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    ]);
+    for _ in 0..2_000_000 {
+        file.extend_from_slice(&[0xEC, 0x80]);
+    }
+    let started = std::time::Instant::now();
+    assert_eq!(index(&file).unwrap_err(), ContainerError::TooLarge);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}

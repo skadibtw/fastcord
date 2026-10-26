@@ -63,9 +63,84 @@ struct Header {
     body: u64,
 }
 
-fn header<R: Read + Seek>(r: &mut R, at: u64, len: u64) -> Result<Option<Header>> {
+/// Most elements of any kind one file may make the index visit: a file of
+/// millions of tiny Void elements must not keep a worker busy (#124).
+const MAX_ELEMENTS: usize = 4 * MAX_SAMPLES;
+/// The read-ahead window of [`Window`].
+const WINDOW_BYTES: usize = 64 * 1024;
+
+/// A read-ahead window over the file that, unlike `BufReader`, keeps its
+/// bytes across seeks that land inside them: the index seeks to every
+/// element, mostly a few bytes ahead (#124). It also counts the elements.
+struct Window<'a, R> {
+    inner: &'a mut R,
+    buf: Box<[u8]>,
+    /// File offset of `buf[0]`, and how much of `buf` holds file bytes.
+    start: u64,
+    filled: usize,
+    pos: u64,
+    elements: usize,
+}
+
+impl<'a, R: Read + Seek> Window<'a, R> {
+    fn new(inner: &'a mut R) -> Self {
+        Self {
+            inner,
+            buf: vec![0; WINDOW_BYTES].into_boxed_slice(),
+            start: 0,
+            filled: 0,
+            pos: 0,
+            elements: 0,
+        }
+    }
+}
+
+impl<R: Read + Seek> Read for Window<'_, R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let end = self.start + self.filled as u64;
+        if !(self.start..end).contains(&self.pos) {
+            self.inner.seek(SeekFrom::Start(self.pos))?;
+            if out.len() >= self.buf.len() {
+                let n = self.inner.read(out)?;
+                self.pos += n as u64;
+                return Ok(n);
+            }
+            self.start = self.pos;
+            self.filled = 0;
+            self.filled = self.inner.read(&mut self.buf)?;
+            if self.filled == 0 {
+                return Ok(0);
+            }
+        }
+        let at = (self.pos - self.start) as usize;
+        let n = out.len().min(self.filled - at);
+        out[..n].copy_from_slice(&self.buf[at..at + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl<R: Read + Seek> Seek for Window<'_, R> {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        self.pos = match to {
+            SeekFrom::Start(at) => at,
+            SeekFrom::Current(by) => self
+                .pos
+                .checked_add_signed(by)
+                .ok_or(std::io::ErrorKind::InvalidInput)?,
+            SeekFrom::End(_) => self.inner.seek(to)?,
+        };
+        Ok(self.pos)
+    }
+}
+
+fn header<R: Read + Seek>(r: &mut Window<'_, R>, at: u64, len: u64) -> Result<Option<Header>> {
     if at >= len {
         return Ok(None);
+    }
+    r.elements += 1;
+    if r.elements > MAX_ELEMENTS {
+        return Err(ContainerError::TooLarge);
     }
     r.seek(SeekFrom::Start(at))?;
     let mut buf = [0u8; 12];
@@ -324,7 +399,7 @@ impl Scan {
 
 /// A block's track, sample (its `key` is the SimpleBlock flag) and whether it is laced.
 fn parse_block<R: Read + Seek>(
-    r: &mut R,
+    r: &mut Window<'_, R>,
     head: &Header,
     cluster: i64,
     scale_ns: i128,
@@ -344,7 +419,11 @@ fn parse_block<R: Read + Seek>(
     }
     let timecode = i64::from(i16::from_be_bytes([buf[track_len], buf[track_len + 1]]));
     let flags = buf[track_len + 2];
-    let ticks = i128::from(cluster + timecode) * scale_ns;
+    let ticks = i128::from(
+        cluster
+            .checked_add(timecode)
+            .ok_or(ContainerError::Malformed)?,
+    ) * scale_ns;
     Ok(Some((
         track,
         Sample {
@@ -359,7 +438,7 @@ fn parse_block<R: Read + Seek>(
 
 /// Walks one cluster whose payload starts at `start`, returns the offset after it.
 fn scan_cluster<R: Read + Seek>(
-    r: &mut R,
+    r: &mut Window<'_, R>,
     start: u64,
     end: Option<u64>,
     len: u64,
@@ -444,6 +523,7 @@ fn add_block(
 }
 
 pub(super) fn open<R: Read + Seek>(r: &mut R, len: u64) -> Result<Media> {
+    let r = &mut Window::new(r);
     let ebml = header(r, 0, len)?.ok_or(ContainerError::Malformed)?;
     let ebml_size = ebml.size.ok_or(ContainerError::Malformed)?;
     if ebml.id != EBML || ebml_size > 1024 {
