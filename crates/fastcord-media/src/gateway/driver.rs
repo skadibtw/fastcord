@@ -67,6 +67,13 @@ const MAX_RECONNECTS: u32 = 5;
 const FRAME: Duration = Duration::from_millis(20);
 /// Sent as a protocol tail only when it can be protected by DAVE.
 const SILENCE_FRAMES: u8 = 5;
+/// Consecutive inbound audio packets refused by an installed DAVE session,
+/// with none decrypting in between, after which the receive keys are taken to
+/// be out of step (about one second of a single speaker).
+const DAVE_STUCK_PACKETS: u32 = 50;
+/// Key rebuilds per connection, and the least time between two of them.
+const DAVE_STUCK_RECOVERIES: u8 = 3;
+const DAVE_STUCK_RETRY: Duration = Duration::from_secs(10);
 const OPUS_SILENCE: [u8; 3] = [0xF8, 0xFF, 0xFE];
 const MAX_DAVE_MESSAGE: usize = 1024 * 1024;
 const MAX_DAVE_AUDIO_FRAME: usize = super::MAX_OPUS_FRAME + 64;
@@ -266,6 +273,12 @@ struct Driver<S, N: Network> {
     /// ping answer or RTP). Only a path that once worked can be declared dead:
     /// a server that never answers pings is not a dead path.
     udp_heard: bool,
+    /// Consecutive audio packets the DAVE session refused for lack of a key.
+    dave_refused: u32,
+    /// `dave_refused` reached [`DAVE_STUCK_PACKETS`]; handled by the main loop.
+    dave_stuck: bool,
+    dave_recoveries: u8,
+    dave_recovered_at: Option<Instant>,
 }
 
 pub(crate) async fn run<S: Signaling, N: Network>(
@@ -310,6 +323,10 @@ pub(crate) async fn run<S: Signaling, N: Network>(
         video,
         wants_closed: false,
         udp_heard: false,
+        dave_refused: 0,
+        dave_stuck: false,
+        dave_recoveries: 0,
+        dave_recovered_at: None,
     };
     let reason = driver.drive().await;
     // Sockets and keys go before anyone hears that the connection is closed.
@@ -708,10 +725,45 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     self.on_timers(&mut conn, &mut socket).await
                 }
             };
+            let result = match result {
+                Ok(()) if self.dave_stuck => self.recover_stuck_dave(&mut conn, &mut socket).await,
+                other => other,
+            };
             if let Err(end) = result {
                 return end;
             }
         }
+    }
+
+    /// Every inbound audio packet has been refused by the installed session
+    /// for a while: our epoch is not the senders'. Reports an invalid
+    /// commit/welcome and sends a fresh key package so the server adds us to
+    /// the group again. Bounded per connection and spaced out, because while
+    /// it runs nothing is sent or received.
+    async fn recover_stuck_dave(
+        &mut self,
+        conn: &mut Conn,
+        socket: &mut S::Socket,
+    ) -> Result<(), End> {
+        self.dave_stuck = false;
+        self.dave_refused = 0;
+        let now = Instant::now();
+        if self.dave_recoveries >= DAVE_STUCK_RECOVERIES
+            || self
+                .dave_recovered_at
+                .is_some_and(|at| now.duration_since(at) < DAVE_STUCK_RETRY)
+        {
+            return Ok(());
+        }
+        self.dave_recoveries += 1;
+        self.dave_recovered_at = Some(now);
+        Counters::add(&self.ch.counters.dave_stuck_recoveries, 1);
+        let transition_id = self
+            .dave
+            .as_ref()
+            .and_then(|dave| dave.transition_id())
+            .unwrap_or(0);
+        self.recover_dave(conn, socket, transition_id).await
     }
 
     async fn send_text(conn: &Conn, socket: &mut S::Socket, text: &str) -> Result<(), End> {
@@ -1198,6 +1250,12 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let payload = match dave.decrypt_opus(owner.user_id.0, &audio.payload) {
             Ok(payload) => payload,
             Err(error) => {
+                if matches!(error, DaveError::Engine) {
+                    self.dave_refused = self.dave_refused.saturating_add(1);
+                    self.dave_stuck |= self.dave_refused >= DAVE_STUCK_PACKETS;
+                } else {
+                    self.dave_refused = 0;
+                }
                 let counters = &self.ch.counters;
                 Counters::add(
                     match error {
@@ -1211,6 +1269,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 return;
             }
         };
+        self.dave_refused = 0;
         let sequence = self
             .sequences
             .entry(ssrc)

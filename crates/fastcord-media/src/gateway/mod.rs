@@ -467,6 +467,10 @@ pub struct TransportStats {
     /// Inbound audio that passed the transport cipher but that the installed
     /// DAVE session refused: no key of the sender's epoch, or a replayed nonce.
     pub audio_rejected_by_dave: u64,
+    /// Times the receive keys were rebuilt (opcode 31 and a new key package)
+    /// because audio kept failing end-to-end decryption with nothing
+    /// decrypting in between.
+    pub dave_stuck_recoveries: u64,
     /// Inbound audio dropped while a transition kept the session from receiving.
     pub audio_dave_not_ready: u64,
     /// Inbound audio from a sender that is not in the group we hold.
@@ -496,6 +500,7 @@ pub(crate) struct Counters {
     pub(crate) audio_waiting_for_keys: AtomicU64,
     pub(crate) audio_without_dave: AtomicU64,
     pub(crate) audio_rejected_by_dave: AtomicU64,
+    pub(crate) dave_stuck_recoveries: AtomicU64,
     pub(crate) audio_dave_not_ready: AtomicU64,
     pub(crate) audio_dave_unknown_sender: AtomicU64,
     pub(crate) audio_dave_unencrypted: AtomicU64,
@@ -528,6 +533,7 @@ impl Counters {
             audio_waiting_for_keys: get(&self.audio_waiting_for_keys),
             audio_without_dave: get(&self.audio_without_dave),
             audio_rejected_by_dave: get(&self.audio_rejected_by_dave),
+            dave_stuck_recoveries: get(&self.dave_stuck_recoveries),
             audio_dave_not_ready: get(&self.audio_dave_not_ready),
             audio_dave_unknown_sender: get(&self.audio_dave_unknown_sender),
             audio_dave_unencrypted: get(&self.audio_dave_unencrypted),

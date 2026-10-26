@@ -1492,3 +1492,77 @@ async fn compressed_voice_hello_identify_and_select_cross_the_deflate_adapter() 
     ws.0.send_close(1000).await.unwrap();
     harness.session.leave().await;
 }
+
+/// #215: the senders' group is one epoch ahead of ours, so every inbound
+/// packet is refused while the call looks healthy. After a run of refusals
+/// with nothing decrypting, the client reports an invalid commit/welcome and
+/// sends a fresh key package (opcode 31, then a key package frame), once.
+#[tokio::test(start_paused = true)]
+async fn audio_refused_for_a_whole_run_rebuilds_the_keys_once() {
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    let (udp, _) = negotiate(&mut harness, &mut ws, &BOTH_MODES).await;
+    let channel_id = credentials("fixture.discord.media:443").channel_id.0;
+    ws.send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let mut fixture = install_test_dave_group(&harness, &mut ws).await;
+
+    // The peers move to epoch 2 (Carol joins) without us ever seeing it.
+    let mut carol = DaveSession::new(1, CAROL.0, channel_id).unwrap();
+    carol
+        .set_external_sender(&fixture.external_sender_bytes)
+        .unwrap();
+    let key_package =
+        KeyPackageIn::tls_deserialize_exact_bytes(&carol.create_key_package().unwrap())
+            .unwrap()
+            .validate(fixture.provider.crypto(), ProtocolVersion::Mls10)
+            .unwrap();
+    let proposal = ExternalProposal::new_add::<OpenMlsRustCrypto>(
+        key_package,
+        GroupId::from_slice(&channel_id.to_be_bytes()),
+        GroupEpoch::from(fixture.peer.epoch().unwrap()),
+        &fixture.delivery_signer,
+        SenderExtensionIndex::new(0),
+    )
+    .unwrap();
+    let commit = fixture
+        .peer
+        .process_proposals(
+            0,
+            &dave_proposal_payload(&proposal),
+            &[ME.0, ALICE.0, CAROL.0],
+        )
+        .unwrap()
+        .unwrap()
+        .commit;
+    fixture.peer.process_commit(2, &commit).unwrap();
+    assert!(fixture.peer.prepare_transition(2, 1).unwrap());
+    fixture.peer.execute_transition(2).unwrap();
+
+    ws.send(json!({"op": 5, "d": {"speaking": 1, "ssrc": 555, "user_id": ALICE.0.to_string()}}))
+        .await;
+    assert_eq!(
+        harness.event().await,
+        VoiceEvent::Speaking {
+            user_id: ALICE,
+            ssrc: 555,
+            flags: 1
+        }
+    );
+    let key = TransportKey::from_slice(&KEY).unwrap();
+    let mut sender = TransportCipher::starting_at(TransportMode::Aes256GcmRtpSize, &key, 500);
+    for sequence in 0..60u16 {
+        let sealed = fixture
+            .peer
+            .encrypt_opus(b"alice-audio-in-epoch-two")
+            .unwrap();
+        udp.send(server_rtp(&mut sender, 555, sequence, &sealed));
+    }
+    let report = ws.recv_op(31).await;
+    assert_eq!(report["d"]["transition_id"], 0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let stats = harness.session.stats();
+    assert!(stats.audio_rejected_by_dave >= 50, "{stats:?}");
+    assert_eq!(stats.dave_stuck_recoveries, 1);
+    assert!(harness.session.next_audio().now_or_never().is_none());
+}

@@ -1335,6 +1335,11 @@ fn anomaly_lines(
         "inbound: audio that failed end-to-end decryption (no key of the sender's epoch, or a replayed nonce) in the last second",
     );
     grew(
+        transport.dave_stuck_recoveries,
+        t.dave_stuck_recoveries,
+        "inbound: nothing decrypted for a while; end-to-end keys re-requested from the server",
+    );
+    grew(
         transport.audio_dave_not_ready,
         t.audio_dave_not_ready,
         "inbound: audio dropped during an end-to-end key transition in the last second",
@@ -1443,6 +1448,7 @@ mod anomaly_tests {
         assert!(lines[0].contains("transport decryption") && lines[0].ends_with(": 40"));
         let refused = fastcord_media::gateway::TransportStats {
             audio_rejected_by_dave: 9,
+            dave_stuck_recoveries: 0,
             ..transport
         };
         let lines = anomaly_lines(
