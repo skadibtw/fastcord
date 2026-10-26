@@ -99,7 +99,7 @@ pub struct Cx<'a> {
     pub revealed: &'a HashSet<(Snowflake, u16)>,
     pub emojis: &'a HashMap<Asset, View>,
     /// Loaded embed pictures, keyed by [`embed_keys`].
-    pub pictures: &'a HashMap<AvatarKey, image::Handle>,
+    pub pictures: &'a crate::avatars::Views,
     /// Unix seconds, for `<t:…:R>`; read when the row is built, never ticking.
     pub now: i64,
 }
@@ -612,7 +612,7 @@ impl<'a> Renderer<'a> {
             let is_thumbnail = label == "Thumbnail";
             let loaded = media.as_ref().and_then(|m| {
                 let key = picture_key(m, is_thumbnail)?;
-                let handle = self.cx.pictures.get(&key)?.clone();
+                let handle = self.cx.pictures.peek(&key)?.clone();
                 let AvatarKey::Embed { fit, .. } = key else {
                     return None;
                 };
@@ -782,7 +782,7 @@ let a;
             names: &names,
             revealed: &revealed,
             emojis: &emojis,
-            pictures: &HashMap::new(),
+            pictures: &Default::default(),
             now: 0,
         };
         assert!(body(&message.content, &message, Snowflake(20), 1, cx).is_some());
@@ -839,7 +839,7 @@ let a;
         let message = sample();
         let names = Names::default();
         let emojis = HashMap::new();
-        let pictures = HashMap::new();
+        let pictures = crate::avatars::Views::default();
         let count = |revealed: &HashSet<(Snowflake, u16)>| {
             let cx = Cx {
                 names: &names,
@@ -872,7 +872,7 @@ let a;
         let names = Names::default();
         let revealed = HashSet::new();
         let emojis = HashMap::new();
-        let count = |pictures: &HashMap<AvatarKey, image::Handle>| {
+        let count = |pictures: &crate::avatars::Views| {
             let cx = Cx {
                 names: &names,
                 revealed: &revealed,
@@ -885,9 +885,11 @@ let a;
                 .map(|element| nodes(&iced_renderer::core::widget::Tree::new(element)))
                 .sum::<usize>()
         };
-        let fallback = count(&HashMap::new());
+        let fallback = count(&Default::default());
         let handle = image::Handle::from_rgba(1, 1, vec![0u8, 0, 0, 255]);
-        let loaded = count(&HashMap::from([(key, handle)]));
+        let mut pictures = crate::avatars::Views::new(1024, 4);
+        pictures.insert(key, handle, 4);
+        let loaded = count(&pictures);
         assert_ne!(loaded, fallback, "the picture replaces the text line");
     }
 }

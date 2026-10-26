@@ -3,7 +3,7 @@
 //! render-side store: at most [`MAX_VIEWS`] handles and [`MAX_VIEW_BYTES`] of RGBA
 //! (avatars are 64x64; link embed pictures are larger), loaded only for the keys the visible rows currently ask for. A missing,
 //! failed or still-loading image leaves the letter circle in place.
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use fastcord_model::Snowflake;
 use iced::task::Handle;
@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::Message;
 use crate::attachments::{AttachmentCache, AttachmentError, DecodedImage};
+use crate::byte_lru::ByteLru;
 
 pub const MAX_VIEWS: usize = 256;
 /// Decoded pixels the store holds, whatever the handle count.
@@ -170,16 +171,28 @@ fn transient(error: &AttachmentError) -> bool {
     }
 }
 
-#[derive(Default)]
+/// Loaded pictures, shared with every view that draws them.
+pub type Views = ByteLru<AvatarKey, image::Handle>;
+
 pub struct State {
-    pub views: HashMap<AvatarKey, image::Handle>,
-    order: VecDeque<(AvatarKey, usize)>,
-    bytes: usize,
+    pub views: Views,
     workers: HashMap<AvatarKey, Handle>,
     failed: HashSet<AvatarKey>,
     /// Keys whose last load failed for a passing reason, and when to retry.
     retry_at: HashMap<AvatarKey, std::time::Instant>,
     wanted: Vec<AvatarKey>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            views: ByteLru::new(MAX_VIEW_BYTES, MAX_VIEWS),
+            workers: HashMap::new(),
+            failed: HashSet::new(),
+            retry_at: HashMap::new(),
+            wanted: Vec::new(),
+        }
+    }
 }
 
 impl State {
@@ -204,11 +217,9 @@ impl State {
         self.retry_at.retain(|key, _| wanted.contains(key));
         // What is on screen is the most recently used: eviction takes what
         // left the screen first.
-        let (mut kept, mut shown): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.order)
-            .into_iter()
-            .partition(|(key, _)| !wanted.contains(key));
-        kept.append(&mut shown);
-        self.order = kept;
+        for key in &self.wanted {
+            self.views.touch(key);
+        }
         self.start(account, cache)
     }
 
@@ -254,18 +265,10 @@ impl State {
             Ok(image) => {
                 self.retry_at.remove(&key);
                 let size = image.rgba.len();
-                while self.views.len() >= MAX_VIEWS || self.bytes + size > MAX_VIEW_BYTES {
-                    let Some((oldest, freed)) = self.order.pop_front() else {
-                        break;
-                    };
-                    self.views.remove(&oldest);
-                    self.bytes -= freed;
-                }
-                self.bytes += size;
-                self.order.push_back((key.clone(), size));
                 self.views.insert(
                     key,
                     image::Handle::from_rgba(image.width, image.height, image.rgba),
+                    size,
                 );
             }
             Err(error) if transient(&error) => {
@@ -285,12 +288,12 @@ impl State {
 
 /// The picture when it is loaded, otherwise whatever `fallback` builds.
 pub fn view<'a, M: 'a>(
-    views: &HashMap<AvatarKey, image::Handle>,
+    views: &Views,
     key: &AvatarKey,
     size: f32,
     fallback: impl FnOnce() -> Element<'a, M>,
 ) -> Element<'a, M> {
-    match views.get(key) {
+    match views.peek(key) {
         Some(handle) => image(handle.clone())
             .width(size)
             .height(size)
@@ -521,7 +524,7 @@ mod tests {
             );
             let _ = state.loaded(1, key(n), Ok(big()), None);
         }
-        assert!(state.bytes <= MAX_VIEW_BYTES && state.views.len() == 6);
+        assert!(state.views.bytes() <= MAX_VIEW_BYTES && state.views.len() == 6);
         assert!(!state.views.contains_key(&key(0)) && state.views.contains_key(&key(9)));
         let _ = state.synchronize(vec![key(50)], 1, None);
         state.workers.insert(

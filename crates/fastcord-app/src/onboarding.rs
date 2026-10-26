@@ -20,10 +20,9 @@ use fastcord_discord::{
     onboarding_due,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{column, container, image, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text};
 use iced::{Element, Length, Task};
 
-use crate::avatars::AvatarKey;
 use crate::emoji::{Asset, View};
 use crate::i18n::{tr, trf};
 use crate::{rich, timeline};
@@ -106,7 +105,7 @@ enum Panel {
 #[derive(Default)]
 struct Plain {
     emojis: HashMap<Asset, View>,
-    pictures: HashMap<AvatarKey, image::Handle>,
+    pictures: crate::avatars::Views,
 }
 
 impl std::fmt::Debug for Plain {

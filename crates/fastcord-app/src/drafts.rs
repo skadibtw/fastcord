@@ -9,17 +9,20 @@
 //! draft is the first to go, and every eviction is counted so the composer can
 //! say so: a draft is never lost silently.
 
-use std::collections::VecDeque;
-
 use fastcord_discord::UploadFile;
 use fastcord_model::Snowflake;
 
+use crate::byte_lru::ByteLru;
 use crate::outbox::Reply;
 
 /// Conversations whose unsent draft is remembered while the user is elsewhere.
 pub const MAX_DRAFTS: usize = 64;
 /// UTF-8 bytes of draft text kept across all conversations.
 pub const MAX_DRAFT_TEXT_BYTES: usize = 256 * 1024;
+
+// The editor caps text at `MAX_EDITOR_CHARS` (UTF-8 at most 4 bytes each), so one
+// draft always fits the budget and `put` never refuses a draft for its size.
+const _: () = assert!(crate::composer::MAX_EDITOR_CHARS * 4 <= MAX_DRAFT_TEXT_BYTES);
 
 /// What the composer held for one conversation.
 #[derive(Default)]
@@ -38,61 +41,49 @@ impl Draft {
     }
 }
 
-#[derive(Default)]
-pub struct DraftStore {
-    /// Most recently left first.
-    entries: VecDeque<(Snowflake, Draft)>,
-    text_bytes: usize,
+pub struct DraftStore(ByteLru<Snowflake, Draft>);
+
+impl Default for DraftStore {
+    fn default() -> Self {
+        Self(ByteLru::new(MAX_DRAFT_TEXT_BYTES, MAX_DRAFTS))
+    }
 }
 
 impl DraftStore {
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.0.len()
     }
 
     pub fn contains(&self, channel: Snowflake) -> bool {
-        self.entries.iter().any(|(id, _)| *id == channel)
+        self.0.contains_key(&channel)
     }
 
     #[cfg(test)]
     pub fn text_bytes(&self) -> usize {
-        self.text_bytes
+        self.0.bytes()
     }
 
     /// Removes and returns the draft of `channel`.
     pub fn take(&mut self, channel: Snowflake) -> Option<Draft> {
-        let at = self.entries.iter().position(|(id, _)| *id == channel)?;
-        let (_, draft) = self.entries.remove(at)?;
-        self.text_bytes -= draft.text.len();
-        Some(draft)
+        self.0.remove(&channel)
     }
 
     /// Keeps the draft of `channel` (an empty one removes it). Returns how
-    /// many other drafts were discarded to stay within the budget.
+    /// many other drafts were discarded to stay within the budget. A draft
+    /// whose text alone exceeds the budget is not kept and counts as one.
     pub fn put(&mut self, channel: Snowflake, draft: Draft) -> usize {
         self.take(channel);
         if draft.is_empty() {
             return 0;
         }
-        self.text_bytes += draft.text.len();
-        self.entries.push_front((channel, draft));
-        let mut evicted = 0;
-        while self.entries.len() > 1
-            && (self.entries.len() > MAX_DRAFTS || self.text_bytes > MAX_DRAFT_TEXT_BYTES)
-        {
-            if let Some((_, old)) = self.entries.pop_back() {
-                self.text_bytes -= old.text.len();
-                evicted += 1;
-            }
-        }
-        evicted
+        let size = draft.text.len();
+        self.0.insert(channel, draft, size).unwrap_or(1)
     }
 
     /// Forgets every draft (logout).
     pub fn clear(&mut self) {
-        self.entries.clear();
-        self.text_bytes = 0;
+        self.0.clear();
     }
 }
 

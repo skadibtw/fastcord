@@ -24,7 +24,7 @@ use fastcord_discord::{
     extract_codes,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{column, container, image, pick_list, row, scrollable, space, text};
+use iced::widget::{column, container, pick_list, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 
 use crate::avatars::{self, AvatarKey};
@@ -300,7 +300,7 @@ fn initials(name: &str) -> String {
 pub fn card<'a>(
     cache: &'a Cache,
     code: &str,
-    pictures: &HashMap<AvatarKey, image::Handle>,
+    pictures: &crate::avatars::Views,
 ) -> Element<'a, timeline::Event> {
     let (title, detail, face, action): (String, String, Element<'a, timeline::Event>, _) =
         match cache.get(code) {

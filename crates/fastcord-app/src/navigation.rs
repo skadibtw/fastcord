@@ -5,9 +5,8 @@
 use crate::ui::button;
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot, Occupant, StageSeat};
 use iced::font::Weight;
-use iced::widget::{column, container, image, mouse_area, row, space, stack, text, tooltip};
+use iced::widget::{column, container, mouse_area, row, space, stack, text, tooltip};
 use iced::{Element, Font, Length, Padding, alignment};
-use std::collections::HashMap;
 
 use crate::Message;
 use crate::avatars::{self, AvatarKey};
@@ -33,7 +32,7 @@ pub(crate) const COMPOSER_GAP: f32 = 14.0;
 pub fn alerts_preview() -> iced::Result {
     struct Preview {
         navigation: NavigationSnapshot,
-        avatars: HashMap<AvatarKey, image::Handle>,
+        avatars: crate::avatars::Views,
         alerts: bool,
     }
     fn view(state: &Preview) -> Element<'_, Message> {
@@ -69,7 +68,7 @@ pub fn alerts_preview() -> iced::Result {
                 },
                 ..Default::default()
             },
-            avatars: HashMap::new(),
+            avatars: Default::default(),
             alerts: true,
         },
         |state: &mut Preview, event: Message| {
@@ -202,7 +201,7 @@ fn rail<'a>(
     snapshot: &'a NavigationSnapshot,
     directs: bool,
     inbox_open: bool,
-    avatars: &HashMap<AvatarKey, image::Handle>,
+    avatars: &crate::avatars::Views,
 ) -> Element<'a, Message> {
     let icon = |label: String,
                 picture: Option<&AvatarKey>,
@@ -476,7 +475,7 @@ fn sidebar_row<'a>(
 pub(crate) fn occupant_row<'a>(
     occupant: &'a Occupant,
     speaking: bool,
-    avatar_views: &HashMap<AvatarKey, image::Handle>,
+    avatar_views: &crate::avatars::Views,
 ) -> Element<'a, Message> {
     const TAG: f32 = 14.0;
     let line: Element<'a, Message> = match occupant {
@@ -585,7 +584,7 @@ fn sidebar<'a>(
     snapshot: &'a NavigationSnapshot,
     directs: bool,
     footer: Element<'a, Message>,
-    avatar_views: &'a HashMap<AvatarKey, image::Handle>,
+    avatar_views: &'a crate::avatars::Views,
     speaking: Vec<fastcord_model::Snowflake>,
 ) -> Element<'a, Message> {
     let title = |title: String| {
@@ -1310,7 +1309,7 @@ mod occupant_tests {
             selected_guild_name: "A server whose name is much too long for this sidebar".into(),
             ..Default::default()
         };
-        let avatars = HashMap::new();
+        let avatars = crate::avatars::Views::default();
         let mut ui = Ui::new(
             SIDEBAR_WIDTH,
             300.0,
@@ -1351,7 +1350,7 @@ mod occupant_tests {
 
     #[test]
     fn occupant_rows_watch_on_left_click_and_open_actions_only_on_right_click() {
-        let views = HashMap::new();
+        let views = crate::avatars::Views::default();
         for (speaking, streaming, video) in [(false, false, false), (true, true, true)] {
             let occupant = member(streaming, video);
             let mut ui = Ui::new(

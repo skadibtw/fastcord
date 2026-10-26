@@ -5,12 +5,10 @@
 //! and a page is never asked twice. There is no join route here: a server is
 //! joined with an invite link. Free-text discovery search is not implemented.
 
-use std::collections::HashMap;
-
 use crate::ui::button;
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_discord::{DISCOVERY_PAGE, DiscoveredGuild, RestClient, RestError};
-use iced::widget::{column, container, image, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text};
 use iced::{Element, Length, Task};
 
 use crate::avatars::{self, AvatarKey};
@@ -134,7 +132,7 @@ fn counts_line(guild: &DiscoveredGuild) -> String {
 pub fn view<'a>(
     state: &'a State,
     navigation: &NavigationSnapshot,
-    pictures: &HashMap<AvatarKey, image::Handle>,
+    pictures: &crate::avatars::Views,
 ) -> Option<Element<'a, Event>> {
     if !state.open {
         return None;

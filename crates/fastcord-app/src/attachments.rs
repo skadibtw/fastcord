@@ -25,7 +25,6 @@ use image::imageops::FilterType;
 use image::{ImageDecoder, ImageError, Limits};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1241,41 +1240,27 @@ fn decode_small_animation(
     Ok(DecodedAnimation { frames, delays })
 }
 
-#[derive(Default)]
-struct DecodedLru {
-    entries: HashMap<(AttachmentKey, u32, u32), DecodedImage>,
-    order: VecDeque<(AttachmentKey, u32, u32)>,
-    bytes: usize,
+type DecodedKey = (AttachmentKey, u32, u32);
+
+struct DecodedLru(crate::byte_lru::ByteLru<DecodedKey, DecodedImage>);
+
+impl Default for DecodedLru {
+    fn default() -> Self {
+        Self(crate::byte_lru::ByteLru::new(
+            DECODED_CACHE_LIMIT,
+            usize::MAX,
+        ))
+    }
 }
 
 impl DecodedLru {
-    fn get(&mut self, key: (AttachmentKey, u32, u32)) -> Option<DecodedImage> {
-        let image = self.entries.get(&key)?.clone();
-        self.order.retain(|entry| *entry != key);
-        self.order.push_back(key);
-        Some(image)
+    fn get(&mut self, key: DecodedKey) -> Option<DecodedImage> {
+        self.0.get(&key).cloned()
     }
 
-    fn insert(&mut self, key: (AttachmentKey, u32, u32), image: DecodedImage) {
+    fn insert(&mut self, key: DecodedKey, image: DecodedImage) {
         let size = image.rgba.len();
-        if size > DECODED_CACHE_LIMIT {
-            return;
-        }
-        if let Some(old) = self.entries.remove(&key) {
-            self.bytes -= old.rgba.len();
-        }
-        self.order.retain(|entry| *entry != key);
-        while self.bytes.saturating_add(size) > DECODED_CACHE_LIMIT {
-            let Some(old_key) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(old) = self.entries.remove(&old_key) {
-                self.bytes -= old.rgba.len();
-            }
-        }
-        self.bytes += size;
-        self.order.push_back(key);
-        self.entries.insert(key, image);
+        self.0.insert(key, image, size);
     }
 }
 
@@ -2247,14 +2232,14 @@ mod tests {
                 assert!(cache.get((keys[0], 512, 512)).is_some());
             }
         }
-        assert_eq!(cache.bytes, DECODED_CACHE_LIMIT);
+        assert_eq!(cache.0.bytes(), DECODED_CACHE_LIMIT);
         cache.insert((keys[12], 512, 512), image.clone());
         cache.insert((keys[13], 512, 512), image.clone());
-        assert_eq!(cache.bytes, DECODED_CACHE_LIMIT);
-        assert_eq!(cache.entries.len(), 12);
-        assert!(cache.entries.contains_key(&(keys[0], 512, 512)));
-        assert!(!cache.entries.contains_key(&(keys[1], 512, 512)));
-        assert!(!cache.entries.contains_key(&(keys[2], 512, 512)));
+        assert_eq!(cache.0.bytes(), DECODED_CACHE_LIMIT);
+        assert_eq!(cache.0.len(), 12);
+        assert!(cache.0.contains_key(&(keys[0], 512, 512)));
+        assert!(!cache.0.contains_key(&(keys[1], 512, 512)));
+        assert!(!cache.0.contains_key(&(keys[2], 512, 512)));
         // An image larger than the whole budget is never kept.
         let huge = DecodedImage {
             width: 2048,
@@ -2262,11 +2247,11 @@ mod tests {
             rgba: bytes::Bytes::from(vec![0; DECODED_CACHE_LIMIT + 4]),
         };
         cache.insert((keys[0], 2048, 2048), huge);
-        assert!(cache.bytes <= DECODED_CACHE_LIMIT);
-        assert!(!cache.entries.contains_key(&(keys[0], 2048, 2048)));
+        assert!(cache.0.bytes() <= DECODED_CACHE_LIMIT);
+        assert!(!cache.0.contains_key(&(keys[0], 2048, 2048)));
         // And a same-key re-insert replaces rather than double counts.
         cache.insert((keys[13], 512, 512), image);
-        assert_eq!(cache.bytes, DECODED_CACHE_LIMIT);
+        assert_eq!(cache.0.bytes(), DECODED_CACHE_LIMIT);
     }
 
     #[tokio::test]

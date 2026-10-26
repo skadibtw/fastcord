@@ -848,7 +848,7 @@ pub struct Attachments<'a> {
     /// The attachment being played, if any.
     pub media: Option<&'a crate::media_ui::MediaSession>,
     pub emojis: &'a HashMap<emoji::Asset, emoji::View>,
-    pub avatars: &'a HashMap<crate::avatars::AvatarKey, iced::widget::image::Handle>,
+    pub avatars: &'a crate::avatars::Views,
     pub revealed: &'a std::collections::HashSet<(Snowflake, u16)>,
     /// Held members of the open server, for nicknames (empty in a DM).
     pub members: &'a HashMap<Snowflake, fastcord_discord::state::navigation::MemberView>,
@@ -2100,12 +2100,9 @@ fn forwarded_view<'a>(
 
 /// A sticker: its first frame at 64 px once loaded; otherwise (loading,
 /// failed, deleted, Lottie or an unknown format) its name, said honestly.
-fn sticker_view<'a>(
-    sticker: &StickerItem,
-    views: &'a HashMap<crate::avatars::AvatarKey, iced::widget::image::Handle>,
-) -> Element<'a, Event> {
+fn sticker_view<'a>(sticker: &StickerItem, views: &'a crate::avatars::Views) -> Element<'a, Event> {
     let key = crate::avatars::AvatarKey::sticker(sticker.id, sticker.format_type);
-    if let Some(handle) = key.as_ref().and_then(|key| views.get(key)) {
+    if let Some(handle) = key.as_ref().and_then(|key| views.peek(key)) {
         return image(handle.clone())
             .width(Length::Fixed(64.0))
             .height(Length::Fixed(64.0))
@@ -2470,9 +2467,8 @@ mod tests {
             std::sync::LazyLock::new(HashMap::new);
         static REVEALED: std::sync::LazyLock<std::collections::HashSet<(Snowflake, u16)>> =
             std::sync::LazyLock::new(Default::default);
-        static AVATARS: std::sync::LazyLock<
-            HashMap<crate::avatars::AvatarKey, iced::widget::image::Handle>,
-        > = std::sync::LazyLock::new(HashMap::new);
+        static AVATARS: std::sync::LazyLock<crate::avatars::Views> =
+            std::sync::LazyLock::new(Default::default);
         static MEMBERS: std::sync::LazyLock<
             HashMap<Snowflake, fastcord_discord::state::navigation::MemberView>,
         > = std::sync::LazyLock::new(HashMap::new);
@@ -2721,11 +2717,12 @@ mod tests {
             format_type: 3,
             ..png.clone()
         };
-        let mut views = HashMap::new();
+        let mut views = crate::avatars::Views::new(1024, 4);
         let _ = sticker_view(&png, &views);
         views.insert(
             AvatarKey::sticker(Snowflake(3), 1).unwrap(),
             iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]),
+            4,
         );
         let _ = sticker_view(&png, &views);
         let _ = sticker_view(&lottie, &views);

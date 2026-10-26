@@ -15,6 +15,7 @@ mod audio_devices;
 mod automod;
 mod av_player;
 mod avatars;
+mod byte_lru;
 mod call_layout;
 mod call_ui;
 mod captcha;
