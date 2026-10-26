@@ -10,12 +10,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::i18n::tr;
-use image::{DynamicImage, ImageFormat, ImageReader, Limits};
+use image::ImageFormat;
 
 const DIR: &str = "fastcord-pastes";
-/// Largest decoded bitmap, in bytes of RGB pixels, a paste may expand to.
-const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
-
 fn directory() -> PathBuf {
     std::env::temp_dir().join(DIR)
 }
@@ -40,52 +37,19 @@ pub fn purge_stale() {
     }
 }
 
-/// PNG bytes for a `CF_DIB` bitmap (a `BITMAPINFOHEADER`, optional colors and
-/// masks, then pixels). The alpha channel is dropped: screenshots put zero in
-/// the unused byte of 32-bit bitmaps, which would otherwise come out invisible.
-pub fn png_from_dib(dib: &[u8]) -> Result<Vec<u8>, &'static str> {
+/// PNG bytes for straight RGBA pixels, alpha kept. A bitmap whose alpha is
+/// zero everywhere (a 32-bit screenshot leaves the spare byte empty) is made
+/// opaque, or it would come out invisible.
+pub fn png_from_rgba(width: u32, height: u32, mut rgba: Vec<u8>) -> Result<Vec<u8>, &'static str> {
     const BAD: &str = "The clipboard image could not be read.";
-    let word = |at: usize| -> Option<u32> {
-        dib.get(at..at + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
-    let header = word(0).ok_or_else(|| tr(BAD))? as usize;
-    if header < 40 || header > dib.len() {
-        return Err(tr(BAD));
+    let (pixels, _) = rgba.as_chunks_mut::<4>();
+    if pixels.iter().all(|pixel| pixel[3] == 0) {
+        pixels.iter_mut().for_each(|pixel| pixel[3] = u8::MAX);
     }
-    let bits = dib
-        .get(14..16)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .ok_or_else(|| tr(BAD))?;
-    let compression = word(16).ok_or_else(|| tr(BAD))?;
-    let used = word(32).ok_or_else(|| tr(BAD))? as usize;
-    let mut colors = if bits <= 8 {
-        if used == 0 { 1usize << bits } else { used }
-    } else {
-        used
-    };
-    colors = colors.min(256) * 4;
-    // BI_BITFIELDS keeps three masks after a 40-byte header.
-    let masks = if compression == 3 && header == 40 {
-        12
-    } else {
-        0
-    };
-    let offset = 14 + header + colors + masks;
-    let mut bmp = Vec::with_capacity(dib.len() + 14);
-    bmp.extend_from_slice(b"BM");
-    bmp.extend_from_slice(&((dib.len() + 14) as u32).to_le_bytes());
-    bmp.extend_from_slice(&[0; 4]);
-    bmp.extend_from_slice(&(offset as u32).to_le_bytes());
-    bmp.extend_from_slice(dib);
-    let mut limits = Limits::default();
-    limits.max_alloc = Some(MAX_DECODED_BYTES);
-    let mut reader = ImageReader::with_format(Cursor::new(bmp), ImageFormat::Bmp);
-    reader.limits(limits);
-    let decoded = reader.decode().map_err(|_| tr(BAD))?;
-    let rgb = DynamicImage::ImageRgb8(decoded.to_rgb8());
+    let image = image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| tr(BAD))?;
     let mut png = Cursor::new(Vec::new());
-    rgb.write_to(&mut png, ImageFormat::Png)
+    image
+        .write_to(&mut png, ImageFormat::Png)
         .map_err(|_| tr(BAD))?;
     Ok(png.into_inner())
 }
@@ -107,7 +71,7 @@ pub fn save_png(png: &[u8]) -> std::io::Result<PathBuf> {
 
 /// Reads the clipboard image and saves it as a PNG; blocking.
 pub fn paste_image() -> Result<PathBuf, &'static str> {
-    let dib = fastcord_platform::clipboard::image_dib().map_err(|error| match error {
+    let image = fastcord_platform::clipboard::image_rgba().map_err(|error| match error {
         fastcord_platform::clipboard::ClipboardError::Unsupported => {
             tr("Pasting an image is not supported on this platform yet.")
         }
@@ -121,7 +85,7 @@ pub fn paste_image() -> Result<PathBuf, &'static str> {
             tr("The clipboard image is too large to attach.")
         }
     })?;
-    let png = png_from_dib(&dib)?;
+    let png = png_from_rgba(image.width, image.height, image.rgba)?;
     save_png(&png).map_err(|_| tr("The pasted image could not be saved."))
 }
 
@@ -129,41 +93,33 @@ pub fn paste_image() -> Result<PathBuf, &'static str> {
 mod tests {
     use super::*;
 
-    /// A 2x2 bottom-up 24-bit DIB: red, green / blue, white.
-    fn dib() -> Vec<u8> {
-        let mut d = Vec::new();
-        d.extend_from_slice(&40u32.to_le_bytes());
-        d.extend_from_slice(&2i32.to_le_bytes());
-        d.extend_from_slice(&2i32.to_le_bytes());
-        d.extend_from_slice(&1u16.to_le_bytes());
-        d.extend_from_slice(&24u16.to_le_bytes());
-        d.extend_from_slice(&[0; 24]);
-        // Rows are padded to 4 bytes; BGR order; the bottom row comes first.
-        d.extend_from_slice(&[255, 0, 0, 255, 255, 255, 0, 0]); // blue, white
-        d.extend_from_slice(&[0, 0, 255, 0, 255, 0, 0, 0]); // red, green
-        d
-    }
-
     #[test]
-    fn a_clipboard_bitmap_becomes_a_png_with_the_same_pixels() {
-        let png = png_from_dib(&dib()).unwrap();
+    fn clipboard_pixels_become_a_png_that_keeps_transparency() {
+        // red, half-transparent green / blue, fully transparent white
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 128, //
+            0, 0, 255, 255, 255, 255, 255, 0,
+        ];
+        let png = png_from_rgba(2, 2, rgba).unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
-        let image = image::load_from_memory(&png).unwrap().to_rgb8();
+        let image = image::load_from_memory(&png).unwrap().to_rgba8();
         assert_eq!(image.dimensions(), (2, 2));
-        assert_eq!(image.get_pixel(0, 0).0, [255, 0, 0]);
-        assert_eq!(image.get_pixel(1, 0).0, [0, 255, 0]);
-        assert_eq!(image.get_pixel(0, 1).0, [0, 0, 255]);
-        assert_eq!(image.get_pixel(1, 1).0, [255, 255, 255]);
+        assert_eq!(image.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(image.get_pixel(1, 0).0, [0, 255, 0, 128]);
+        assert_eq!(image.get_pixel(0, 1).0, [0, 0, 255, 255]);
+        assert_eq!(image.get_pixel(1, 1).0, [255, 255, 255, 0]);
     }
 
     #[test]
-    fn garbage_and_truncated_bitmaps_are_refused_not_panicked_on() {
-        for bad in [&b""[..], &[0u8; 10][..], &[1u8; 200][..]] {
-            assert!(png_from_dib(bad).is_err());
-        }
-        let mut cut = dib();
-        cut.truncate(50);
-        assert!(png_from_dib(&cut).is_err());
+    fn a_bitmap_with_no_alpha_at_all_is_made_opaque() {
+        let png = png_from_rgba(1, 2, vec![10, 20, 30, 0, 40, 50, 60, 0]).unwrap();
+        let image = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(image.get_pixel(0, 1).0, [40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn a_short_buffer_is_refused_not_panicked_on() {
+        assert!(png_from_rgba(2, 2, vec![0; 15]).is_err());
     }
 
     #[test]

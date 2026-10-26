@@ -1,16 +1,15 @@
 //! Reading an image from the system clipboard, only when the user asks.
 //!
-//! The clipboard is never watched or read in the background: [`image_dib`] is
-//! called from an explicit "Paste image" action. It returns the device-independent
-//! bitmap (`CF_DIB`) bytes unchanged; turning them into a file is the caller's
-//! job. May block briefly (another program can hold the clipboard), so it
-//! belongs on a worker thread.
-#![allow(unsafe_code)]
+//! The clipboard is never watched or read in the background: [`image_rgba`]
+//! is called from an explicit "Paste image" action. It returns straight RGBA
+//! pixels through `arboard` (Windows, X11/Wayland, macOS); turning them into a
+//! file is the caller's job. May block briefly (another program can hold the
+//! clipboard, X11 starts a short-lived thread), so it belongs on a worker.
 
 use std::fmt;
 
-/// Largest bitmap read from the clipboard.
-pub const MAX_DIB_BYTES: usize = 64 * 1024 * 1024;
+/// Largest bitmap read from the clipboard, in RGBA bytes.
+pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Why no image was read. None of them carries clipboard contents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,7 +20,7 @@ pub enum ClipboardError {
     NoImage,
     /// Another program holds the clipboard; try again.
     Busy,
-    /// The image is larger than [`MAX_DIB_BYTES`].
+    /// The image is larger than [`MAX_IMAGE_BYTES`].
     TooLarge,
 }
 
@@ -38,68 +37,41 @@ impl fmt::Display for ClipboardError {
 
 impl std::error::Error for ClipboardError {}
 
-/// The clipboard's bitmap as `CF_DIB` bytes (a `BITMAPINFOHEADER` followed by
-/// the pixels).
-#[cfg(target_os = "windows")]
-pub fn image_dib() -> Result<Vec<u8>, ClipboardError> {
-    use windows::Win32::Foundation::{HANDLE, HGLOBAL};
-    use windows::Win32::System::DataExchange::{
-        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    };
-    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+/// A clipboard image: `width * height` straight RGBA pixels, rows top first.
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
 
-    const CF_DIB: u32 = 8;
+/// The clipboard's image, if it holds one.
+pub fn image_rgba() -> Result<Image, ClipboardError> {
+    let mut clipboard = arboard::Clipboard::new().map_err(error)?;
+    let image = clipboard.get_image().map_err(error)?;
+    let (width, height) = (
+        u32::try_from(image.width).map_err(|_| ClipboardError::TooLarge)?,
+        u32::try_from(image.height).map_err(|_| ClipboardError::TooLarge)?,
+    );
+    if image.bytes.len() > MAX_IMAGE_BYTES {
+        return Err(ClipboardError::TooLarge);
+    }
+    if width == 0 || height == 0 || image.bytes.len() != image.width * image.height * 4 {
+        return Err(ClipboardError::NoImage);
+    }
+    Ok(Image {
+        width,
+        height,
+        rgba: image.bytes.into_owned(),
+    })
+}
 
-    /// Closes the clipboard however the read ends.
-    struct Open;
-    impl Drop for Open {
-        fn drop(&mut self) {
-            // SAFETY: only constructed after `OpenClipboard` succeeded on this thread.
-            unsafe {
-                let _ = CloseClipboard();
-            }
+fn error(error: arboard::Error) -> ClipboardError {
+    match error {
+        arboard::Error::ContentNotAvailable | arboard::Error::ConversionFailure => {
+            ClipboardError::NoImage
         }
-    }
-
-    let mut opened = false;
-    for _ in 0..10 {
-        // SAFETY: a null owner window associates the clipboard with this task.
-        if unsafe { OpenClipboard(None) }.is_ok() {
-            opened = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    if !opened {
-        return Err(ClipboardError::Busy);
-    }
-    let _open = Open;
-    // SAFETY: the clipboard is open on this thread for all calls below.
-    unsafe {
-        if IsClipboardFormatAvailable(CF_DIB).is_err() {
-            return Err(ClipboardError::NoImage);
-        }
-        let handle: HANDLE = GetClipboardData(CF_DIB).map_err(|_| ClipboardError::NoImage)?;
-        let global = HGLOBAL(handle.0);
-        let size = GlobalSize(global);
-        if size == 0 {
-            return Err(ClipboardError::NoImage);
-        }
-        if size > MAX_DIB_BYTES {
-            return Err(ClipboardError::TooLarge);
-        }
-        let pointer = GlobalLock(global);
-        if pointer.is_null() {
-            return Err(ClipboardError::Busy);
-        }
-        // The block is `size` readable bytes while locked; copy before unlocking.
-        let bytes = std::slice::from_raw_parts(pointer.cast::<u8>(), size).to_vec();
-        let _ = GlobalUnlock(global);
-        Ok(bytes)
+        arboard::Error::ClipboardOccupied => ClipboardError::Busy,
+        _ => ClipboardError::Unsupported,
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn image_dib() -> Result<Vec<u8>, ClipboardError> {
-    Err(ClipboardError::Unsupported)
-}

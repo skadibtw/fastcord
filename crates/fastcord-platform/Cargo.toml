@@ -17,6 +17,7 @@ audio_thread_priority.workspace = true
 fastcord-model.workspace = true
 fastcord-net.workspace = true
 sha2.workspace = true
+arboard.workspace = true
 keyring-core.workspace = true
 parking_lot.workspace = true
 sys-locale.workspace = true
@@ -93,6 +94,7 @@ objc2-screen-capture-kit.workspace = true
 objc2-user-notifications.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+arboard = { workspace = true, features = ["wayland-data-control"] }
 ashpd.workspace = true
 futures-util.workspace = true
 pipewire.workspace = true
