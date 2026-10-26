@@ -805,6 +805,12 @@ pub(crate) fn public_ip(ip: IpAddr) -> bool {
                 return public_ip(IpAddr::V4(v4));
             }
             let segments = ip.segments();
+            // DNS64/464XLAT synthesizes `64:ff9b::a.b.c.d` (RFC 6052) for
+            // IPv4-only names: judge the embedded address (#125).
+            if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [.., a, b, c, d] = ip.octets();
+                return public_ip(IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d)));
+            }
             (segments[0] & 0xe000) == 0x2000
                 && !(segments[0] == 0x2001 && (segments[1] <= 0x1ff || segments[1] == 0xdb8))
                 && segments[0] != 0x2002
@@ -1108,10 +1114,17 @@ mod tests {
             "fe80::1",
             "fc00::1",
             "2001:db8::1",
+            "64:ff9b::a00:1",
+            "64:ff9b::7f00:1",
         ] {
             assert!(!public_ip(address.parse().unwrap()), "{address}");
         }
-        for address in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+        for address in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "2606:4700:4700::1111",
+            "64:ff9b::808:808",
+        ] {
             assert!(public_ip(address.parse().unwrap()));
         }
     }

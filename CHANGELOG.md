@@ -15,6 +15,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- On DNS64/464XLAT networks (mobile hotspots, cellular with Windows CLAT), voice and other IPv4-only Discord hosts are no longer refused as "The network destination was refused" (#125): synthesized `64:ff9b::` addresses are judged by the IPv4 address they carry.
 - On Linux with a VA-API graphics device, videos with B-frames (most phone and OBS recordings) and Go Live streams the hardware decoder cannot handle now play: at the first part the hardware path refuses, decoding moves to the bundled OpenH264 decoder and resumes at the next keyframe, instead of failing with "this video could not be decoded" (#126).
 - With network recovery or a proxy on, requests no longer fail as "The private network bridge is unavailable" because old connections still held all of its 32 tunnels (#127). A tunnel now closes 5 s after either side ends, idle pooled connections are released after 30 s instead of 90 s, and a request that finds the bridge full waits up to 2 s for a free tunnel and is otherwise answered as busy.
 - On Linux with hardware (VA-API) decoding, a stream cropped on the left no longer shows swapped or shifted colours (#128): the colour plane of the picture now starts at the same column as the brightness plane.
