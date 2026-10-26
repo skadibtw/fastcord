@@ -9,7 +9,6 @@
 //! login, and success bodies hold the token.
 
 use std::fmt;
-use std::time::Duration;
 
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -17,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use crate::UserToken;
 use crate::error::{ERROR_BODY_BYTE_BUDGET, clean};
 use crate::gateway::ClientProperties;
-use crate::rest::identity_headers;
 use crate::route::api_base;
 
 const BODY_BYTE_BUDGET: usize = 16 * 1024;
@@ -263,19 +261,8 @@ impl PasswordAuth {
         if crate::fake_origin::active() {
             return Err(PasswordAuthError::Configuration);
         }
-        let headers = identity_headers(properties).map_err(|_| PasswordAuthError::Configuration)?;
-        let http = network
-            .http_builder(fastcord_net::Role::Login)
-            .map_err(|_| PasswordAuthError::Configuration)?
-            .use_rustls_tls()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .default_headers(headers)
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|_| PasswordAuthError::Network)?;
+        let http = crate::rest::login_client(network, properties)
+            .ok_or(PasswordAuthError::Configuration)?;
         Ok(Self { http })
     }
 
@@ -356,41 +343,22 @@ impl PasswordAuth {
 async fn send(
     http: &fastcord_net::HttpClient,
     request: fastcord_net::HttpRequestBuilder,
-) -> Result<(StatusCode, Vec<u8>), PasswordAuthError> {
+) -> Result<(StatusCode, bytes::Bytes), PasswordAuthError> {
     let request = request
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(reqwest::header::ORIGIN, crate::rest::DISCORD_ORIGIN)
         .build()
         .map_err(|_| PasswordAuthError::Configuration)?;
-    let mut request = request;
-    if let Some(cookies) = crate::cookies::header(request.url()) {
-        request
-            .headers_mut()
-            .insert(reqwest::header::COOKIE, cookies);
-    }
-    let mut response = http
-        .execute(request)
+    let response = crate::cookies::send(http, request)
         .await
         .map_err(|_| PasswordAuthError::Network)?;
-    crate::cookies::store(response.url(), response.headers());
     let status = response.status();
-    if response
-        .content_length()
-        .is_some_and(|len| len > BODY_BYTE_BUDGET as u64)
-    {
-        return Err(PasswordAuthError::Protocol);
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
+    let bytes = crate::rest::read_body(response, BODY_BYTE_BUDGET)
         .await
-        .map_err(|_| PasswordAuthError::Network)?
-    {
-        if chunk.len() > BODY_BYTE_BUDGET - bytes.len() {
-            return Err(PasswordAuthError::Protocol);
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+        .map_err(|error| match error {
+            crate::RestError::ResponseBodyTooLarge => PasswordAuthError::Protocol,
+            _ => PasswordAuthError::Network,
+        })?;
     Ok((status, bytes))
 }
 

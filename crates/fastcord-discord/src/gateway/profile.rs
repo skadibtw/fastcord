@@ -154,29 +154,29 @@ fn fetch_client(network: &fastcord_net::NetworkContext) -> Option<fastcord_net::
 }
 
 async fn fetch_build_number(network: &fastcord_net::NetworkContext) -> Option<u32> {
-    let mut response = fetch_client(network)?
+    let client = fetch_client(network)?;
+    let request = client
         .get(APP_URL)
         .header(
             reqwest::header::USER_AGENT,
             ClientProperties::bundled(HostOs::current(), "en-US").browser_user_agent,
         )
         .header(reqwest::header::ACCEPT, "text/html")
-        .send()
-        .await
+        .build()
         .ok()?;
     // The page sets the Cloudflare cookies later API requests carry.
-    crate::cookies::store(response.url(), response.headers());
+    let mut response = crate::cookies::send(&client, request).await.ok()?;
     if response.status() != reqwest::StatusCode::OK {
         return None;
     }
     let mut page = Vec::new();
     while let Some(chunk) = response.chunk().await.ok()? {
+        if chunk.len() > MAX_PAGE_BYTES.saturating_sub(page.len()) {
+            return None;
+        }
         page.extend_from_slice(&chunk);
         if let Some(value) = parse_build_number(&page) {
             return Some(value);
-        }
-        if page.len() > MAX_PAGE_BYTES {
-            return None;
         }
     }
     None
@@ -216,7 +216,7 @@ async fn fetch_manifest(
     // ponytail: a fresh install_id per process; persist it with the
     // installation id once that exists.
     let install_id = Uuid::new_v4().to_string();
-    let mut response = fetch_client(network)?
+    let response = fetch_client(network)?
         .get(MANIFEST_URL)
         .query(&[
             ("channel", "stable"),
@@ -230,14 +230,11 @@ async fn fetch_manifest(
     if response.status() != reqwest::StatusCode::OK {
         return None;
     }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
-        body.extend_from_slice(&chunk);
-        if body.len() > MAX_MANIFEST_BYTES {
-            return None;
-        }
-    }
-    parse_manifest(&body)
+    parse_manifest(
+        &crate::rest::read_body(response, MAX_MANIFEST_BYTES)
+            .await
+            .ok()?,
+    )
 }
 
 fn parse_manifest(body: &[u8]) -> Option<HostRelease> {

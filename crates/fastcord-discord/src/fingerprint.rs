@@ -24,28 +24,19 @@ pub(crate) async fn fingerprint(http: &fastcord_net::HttpClient) -> Option<Strin
 }
 
 async fn fetch(http: &fastcord_net::HttpClient) -> Option<String> {
-    let mut request = http
+    let request = http
         .get(format!("{}/experiments", crate::route::api_base()))
         .build()
         .ok()?;
-    if let Some(cookies) = crate::cookies::header(request.url()) {
-        request
-            .headers_mut()
-            .insert(reqwest::header::COOKIE, cookies);
-    }
-    let mut response = http.execute(request).await.ok()?;
-    crate::cookies::store(response.url(), response.headers());
+    let response = crate::cookies::send(http, request).await.ok()?;
     if response.status() != reqwest::StatusCode::OK {
         return None;
     }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
-        if chunk.len() > BODY_BYTE_BUDGET - body.len() {
-            return None;
-        }
-        body.extend_from_slice(&chunk);
-    }
-    parse(&body)
+    parse(
+        &crate::rest::read_body(response, BODY_BYTE_BUDGET)
+            .await
+            .ok()?,
+    )
 }
 
 /// `{"fingerprint": "<snowflake>.<hash>", "assignments": [...]}`; the

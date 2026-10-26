@@ -656,6 +656,26 @@ pub(crate) fn identity_headers(properties: &ClientProperties) -> Result<HeaderMa
 
 pub(crate) const DISCORD_ORIGIN: &str = "https://discord.com";
 
+/// The pre-token `Role::Login` client of the password login and the QR
+/// ticket exchange: identity headers, HTTPS only, no redirects or retries.
+pub(crate) fn login_client(
+    network: &fastcord_net::NetworkContext,
+    properties: &ClientProperties,
+) -> Option<fastcord_net::HttpClient> {
+    network
+        .http_builder(fastcord_net::Role::Login)
+        .ok()?
+        .default_headers(identity_headers(properties).ok()?)
+        .use_rustls_tls()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .ok()
+}
+
 /// The headers that never change during a run: what the desktop client's
 /// Chromium sends on a same-origin `fetch` from the Discord app, plus Discord's
 /// own. Every advertised content encoding has a reqwest decoder enabled.
@@ -735,7 +755,10 @@ impl BodyBuffer {
     }
 }
 
-async fn read_body(mut response: reqwest::Response, budget: usize) -> Result<Bytes, RestError> {
+pub(crate) async fn read_body(
+    mut response: reqwest::Response,
+    budget: usize,
+) -> Result<Bytes, RestError> {
     if response
         .content_length()
         .is_some_and(|len| len > budget as u64)

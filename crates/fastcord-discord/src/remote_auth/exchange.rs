@@ -2,8 +2,6 @@
 //! token encrypted to this attempt's public key. The request is deliberately
 //! unauthenticated; there is no token yet.
 
-use std::time::Duration;
-
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
@@ -37,20 +35,8 @@ impl HttpTicketExchange {
         if crate::fake_origin::active() {
             return Err(RemoteAuthError::Connect);
         }
-        let headers =
-            crate::rest::identity_headers(properties).map_err(|_| RemoteAuthError::Connect)?;
-        let http = network
-            .http_builder(fastcord_net::Role::Login)
-            .map_err(|_| RemoteAuthError::Connect)?
-            .default_headers(headers)
-            .use_rustls_tls()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|_| RemoteAuthError::Connect)?;
+        let http =
+            crate::rest::login_client(network, properties).ok_or(RemoteAuthError::Connect)?;
         Ok(Self { http })
     }
 }
@@ -77,39 +63,20 @@ impl TicketExchange for HttpTicketExchange {
         if let Some(fingerprint) = crate::fingerprint::fingerprint(&self.http).await {
             request = request.header("x-fingerprint", fingerprint);
         }
-        let mut request = request
+        let request = request
             .body(body)
             .build()
             .map_err(|_| RemoteAuthError::Protocol)?;
-        if let Some(cookies) = crate::cookies::header(request.url()) {
-            request
-                .headers_mut()
-                .insert(reqwest::header::COOKIE, cookies);
-        }
-        let mut response = self
-            .http
-            .execute(request)
+        let response = crate::cookies::send(&self.http, request)
             .await
             .map_err(|_| RemoteAuthError::ExchangeNetwork)?;
-        crate::cookies::store(response.url(), response.headers());
         let status = response.status();
-        if response
-            .content_length()
-            .is_some_and(|len| len > EXCHANGE_BODY_BYTE_BUDGET as u64)
-        {
-            return Err(RemoteAuthError::Protocol);
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
+        let bytes = crate::rest::read_body(response, EXCHANGE_BODY_BYTE_BUDGET)
             .await
-            .map_err(|_| RemoteAuthError::ExchangeNetwork)?
-        {
-            if chunk.len() > EXCHANGE_BODY_BYTE_BUDGET - bytes.len() {
-                return Err(RemoteAuthError::Protocol);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+            .map_err(|error| match error {
+                crate::RestError::ResponseBodyTooLarge => RemoteAuthError::Protocol,
+                _ => RemoteAuthError::ExchangeNetwork,
+            })?;
         classify_response(status, &bytes)
     }
 }

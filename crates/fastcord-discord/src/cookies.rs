@@ -262,6 +262,22 @@ pub(crate) fn header(url: &Url) -> Option<HeaderValue> {
     Some(value)
 }
 
+/// Sends `request` with the jar's cookies and keeps what the answer sets: the
+/// one way pre-token requests (no `RestClient`) talk to Discord (#147).
+pub(crate) async fn send(
+    http: &fastcord_net::HttpClient,
+    mut request: reqwest::Request,
+) -> Result<reqwest::Response, fastcord_net::HttpError> {
+    if let Some(cookies) = header(request.url()) {
+        request
+            .headers_mut()
+            .insert(reqwest::header::COOKIE, cookies);
+    }
+    let response = http.execute(request).await?;
+    store(response.url(), response.headers());
+    Ok(response)
+}
+
 fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
