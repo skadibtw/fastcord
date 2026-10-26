@@ -1593,7 +1593,20 @@ fn visible_channels<'a>(
             let order = if kind == ChannelKind::Category {
                 (1, position, channel.id, 0, 0, channel.id, 0, Snowflake(0))
             } else {
-                (0, 0, Snowflake(0), 1, position, channel.id, 0, Snowflake(0))
+                // Text-like channels above voice ones, each by position, as
+                // Discord lists them and as the management panel does
+                // (`AdminKind::bucket`) (#154).
+                let bucket = 1 + u8::from(kind == ChannelKind::Voice);
+                (
+                    0,
+                    0,
+                    Snowflake(0),
+                    bucket,
+                    position,
+                    channel.id,
+                    0,
+                    Snowflake(0),
+                )
             };
             Some(VisibleChannel {
                 channel,

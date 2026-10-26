@@ -104,13 +104,14 @@ fn normalized_ready_exposes_available_guilds_and_accessible_text_voice_only() {
         [(id(FIRST), true), (id(SECOND), true), (id(OUTAGE), false)]
     );
     assert_eq!(snapshot.guilds.rows[2].name, OUTAGE.to_string());
+    // Text-like rows (the forum too) come before voice ones (#154).
     assert_eq!(
         ids(&snapshot.channels.rows),
-        [id(GENERAL), id(VOICE), id(FORUM)]
+        [id(GENERAL), id(FORUM), id(VOICE)]
     );
     assert_eq!(snapshot.channels.rows[0].kind, ChannelKind::Text);
-    assert_eq!(snapshot.channels.rows[1].kind, ChannelKind::Voice);
-    assert_eq!(snapshot.channels.rows[2].kind, ChannelKind::Forum);
+    assert_eq!(snapshot.channels.rows[1].kind, ChannelKind::Forum);
+    assert_eq!(snapshot.channels.rows[2].kind, ChannelKind::Voice);
     assert!(snapshot.channels.rows.iter().all(|row| row.enabled));
 
     assert!(navigation.select_channel(&store, id(VOICE)));
@@ -141,7 +142,8 @@ fn category_groups_positions_and_id_ties_have_deterministic_order() {
     assert_eq!(
         ids(&before),
         [
-            1000, 2502, 1001, 2201, 2301, 3000, 3002, 3003, 3004, 2000, 2002, 2003, 2001, 2100,
+            // Text-like before voice at each level, each by position (#154).
+            1000, 2502, 2201, 2301, 3000, 3002, 1001, 3003, 3004, 2000, 2002, 2001, 2003, 2100,
             2101, 2400,
         ]
         .map(id)
@@ -254,9 +256,10 @@ fn stable_ids_survive_updates_ready_reorder_and_per_guild_navigation() {
     navigation.reconcile(&store);
     assert_eq!(navigation.selected_channel(), Some(id(VOICE)));
     assert_eq!(navigation.selection(&store).unwrap().name, "Renamed voice");
+    // A lower position moves a voice channel up among the voice ones only.
     assert_eq!(
         ids(&rows(&navigation, &store)),
-        [id(VOICE), id(GENERAL), id(FORUM)]
+        [id(GENERAL), id(FORUM), id(VOICE)]
     );
 
     let mut fresh = ready(READY);
@@ -1792,21 +1795,21 @@ fn voice_rows_are_followed_by_their_capped_occupants() {
         ))));
     }
     let window = navigation.channel_window(&store, 0, usize::MAX);
-    // text + voice + forum + 8 people + "+3"
+    // text + forum + voice + 8 people + "+3"
     assert_eq!(window.total, 3 + 8 + 1);
     assert_eq!(window.rows.len(), window.total);
-    assert!(window.rows[1].occupant.is_none());
+    assert!(window.rows[2].occupant.is_none());
     assert!(matches!(
-        &window.rows[2].occupant,
+        &window.rows[3].occupant,
         Some(Occupant::Member { user_id, name, muted: true, deafened: false, .. })
             if *user_id == id(1) && name == "user1"
     ));
     assert!(matches!(
-        &window.rows[3].occupant,
+        &window.rows[4].occupant,
         Some(Occupant::Member { deafened: true, .. })
     ));
     assert!(matches!(
-        &window.rows[4].occupant,
+        &window.rows[5].occupant,
         Some(Occupant::Member {
             streaming: true,
             video: false,
@@ -1814,17 +1817,17 @@ fn voice_rows_are_followed_by_their_capped_occupants() {
         })
     ));
     assert!(matches!(
-        &window.rows[5].occupant,
+        &window.rows[6].occupant,
         Some(Occupant::Member {
             streaming: false,
             video: true,
             ..
         })
     ));
-    assert_eq!(window.rows[10].occupant, Some(Occupant::More(3)));
+    assert_eq!(window.rows[11].occupant, Some(Occupant::More(3)));
     // A window in the middle of the list slices the same flat rows.
-    let part = navigation.channel_window(&store, 9, 2);
-    assert_eq!((part.offset, part.total, part.rows.len()), (9, 12, 2));
+    let part = navigation.channel_window(&store, 10, 2);
+    assert_eq!((part.offset, part.total, part.rows.len()), (10, 12, 2));
     assert_eq!(part.rows[1].occupant, Some(Occupant::More(3)));
 }
 
@@ -1893,22 +1896,19 @@ fn keyboard_steps_wrap_over_channels_unreads_and_servers() {
         step(&mut navigation, StepScope::Channel, true),
         Some(id(GENERAL))
     );
+    // The forum row is a stop too, like in the official client; text-like
+    // rows come before voice ones (#154).
+    assert_eq!(
+        step(&mut navigation, StepScope::Channel, true),
+        Some(id(FORUM))
+    );
     assert_eq!(
         step(&mut navigation, StepScope::Channel, true),
         Some(id(VOICE))
     );
-    // The forum row is a stop too, like in the official client.
-    assert_eq!(
-        step(&mut navigation, StepScope::Channel, true),
-        Some(id(FORUM))
-    );
     assert_eq!(
         step(&mut navigation, StepScope::Channel, true),
         Some(id(GENERAL))
-    );
-    assert_eq!(
-        step(&mut navigation, StepScope::Channel, false),
-        Some(id(FORUM))
     );
     assert_eq!(
         step(&mut navigation, StepScope::Channel, false),

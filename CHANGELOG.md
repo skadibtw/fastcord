@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- The channel list puts text channels (and forums) above voice and Stage channels in each category, each group by position, as Discord and the server settings do (#154). Servers that number voice and text positions separately were shown interleaved.
 - A timed-out moderator is no longer offered server, channel and role management that Discord would refuse (#157). Server-level permissions now drop everything but viewing and reading history during a timeout, as channel permissions already did; administrators and the owner are unaffected.
 - Emoji inside a spoiler stay hidden until the spoiler is uncovered (#158). They were drawn in plain view between the hidden words; a hidden one is now part of the grey box, and clicking it reveals the spoiler.
 - A server icon or closed folder no longer shows an unread dot or mentions from channels you cannot open (#159). The total counts the same channels the sidebar and the inbox list, so a channel you lost access to cannot leave a badge nothing can clear.
