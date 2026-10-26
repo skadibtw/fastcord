@@ -29,11 +29,22 @@ fn begin(utterance: &Utterance) -> std::io::Result<Child> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    // At most 2 KiB: far below a pipe's buffer, so this never blocks.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(utterance.text.as_bytes())?;
+    // At most 2 KiB (plus the spaces): far below a pipe's buffer, so this
+    // never blocks.
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(error) = stdin.write_all(literal(&utterance.text).as_bytes())
+    {
+        end(child);
+        return Err(error);
     }
     Ok(child)
+}
+
+/// `say` runs `[[...]]` in its input as commands (silence, rate, volume):
+/// text from other people must be spoken, not obeyed (#144). With a space
+/// after every `[`, no `[[` is left; spaces are not spoken.
+fn literal(text: &str) -> String {
+    text.replace('[', "[ ")
 }
 
 fn end(mut child: Child) {
@@ -136,6 +147,13 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_say_commands_are_spoken_not_run() {
+        assert_eq!(literal("hi [[slnc 60000]]"), "hi [ [ slnc 60000]]");
+        assert!(!literal("[[[rate 1]]").contains("[["));
+        assert_eq!(literal("plain"), "plain");
+    }
 
     #[test]
     fn voice_listing_keeps_names_with_spaces() {
