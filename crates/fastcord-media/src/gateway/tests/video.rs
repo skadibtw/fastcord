@@ -214,6 +214,8 @@ struct Viewer {
     next_sequence: u16,
     next_timestamp: u32,
     next_rtx: u16,
+    /// The primary SSRC `forward` packetizes onto.
+    video_ssrc: u32,
     _signaling: FakeSignaling,
 }
 
@@ -240,6 +242,7 @@ async fn start_viewer() -> Viewer {
         next_sequence: 65_530,
         next_timestamp: 1_000_000,
         next_rtx: 40,
+        video_ssrc: VIDEO_SSRC,
         _signaling: signaling,
     }
 }
@@ -304,7 +307,7 @@ impl Viewer {
                 let datagram = rtp_datagram(
                     &mut self.server,
                     VIDEO_PT,
-                    VIDEO_SSRC,
+                    self.video_ssrc,
                     sequence,
                     timestamp,
                     part.marker,
@@ -560,6 +563,33 @@ async fn receiver_reports_carry_loss_and_the_sender_report_echo() {
 
 /// Cameras that were turned off do not hold the remote-user table: after 16
 /// users announced inactive streams, a 17th active camera is still asked for.
+/// Streams the server stopped forwarding (another simulcast layer, a camera
+/// turned off) do not keep a new one out: after six layers were each
+/// forwarded once, a seventh is still delivered (#171).
+#[tokio::test(start_paused = true)]
+async fn streams_no_longer_forwarded_do_not_crowd_out_a_new_one() {
+    let mut rig = start_viewer().await;
+    let layers: Vec<u32> = (0..7).map(|n| 7_000 + 2 * n).collect();
+    let streams: Vec<Value> = layers
+        .iter()
+        .enumerate()
+        .map(|(n, ssrc)| {
+            json!({"ssrc": ssrc, "rtx_ssrc": ssrc + 1, "rid": n.to_string(),
+                   "quality": 10 * (n + 1), "active": true})
+        })
+        .collect();
+    rig.announce(Value::Array(streams)).await;
+    let [keyframe, _, _] = access_units();
+    for ssrc in layers {
+        rig.video_ssrc = ssrc;
+        rig.send_frame(keyframe, false);
+        let frame = next_video(&mut rig.harness).await;
+        assert_eq!((frame.ssrc, frame.keyframe), (ssrc, true));
+        // The server switches layers; the previous one goes quiet.
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn inactive_cameras_do_not_crowd_out_a_new_one() {
     let mut rig = start_viewer().await;

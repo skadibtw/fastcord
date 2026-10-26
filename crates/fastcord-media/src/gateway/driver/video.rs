@@ -52,6 +52,14 @@ const MAX_VIDEO_RECEIVERS: usize = crate::video::MAX_INTEREST_USERS;
 const MAX_REMOTE_VIDEO_USERS: usize = 16;
 /// How often a receiver report goes out while video is arriving.
 const RECEIVER_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+/// A receiver that got no packet for this long is released at the next
+/// report: the server stopped forwarding it (camera off, tile no longer
+/// wanted, another simulcast layer). A stream that resumes starts again at
+/// a keyframe, as a new one would.
+const RECEIVER_IDLE: Duration = Duration::from_secs(5);
+/// A full table makes room for a new stream by releasing the longest-idle
+/// receiver, if it has been quiet at least this long.
+const RECEIVER_EVICTABLE: Duration = Duration::from_secs(1);
 /// Picture Loss Indications for one stream are at least this far apart.
 const PLI_INTERVAL: Duration = Duration::from_millis(500);
 /// A stream whose first packet just arrived is given this long to produce a
@@ -101,6 +109,8 @@ struct Receiver {
     /// A PLI is wanted since this moment.
     pli_pending: Option<Instant>,
     last_pli: Option<Instant>,
+    /// When the last packet (or retransmission) of the stream arrived.
+    last_packet: Instant,
 }
 
 impl Receiver {
@@ -113,6 +123,7 @@ impl Receiver {
             awaiting_keyframe: true,
             pli_pending: Some(now + INITIAL_KEYFRAME_WAIT),
             last_pli: None,
+            last_packet: now,
         }
     }
 
@@ -699,8 +710,21 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         }
         if !video.receivers.contains_key(&primary) {
             if video.receivers.len() >= MAX_VIDEO_RECEIVERS {
-                Counters::add(&counters.video_frames_dropped, 1);
-                return;
+                // A stream the server stopped forwarding must not keep a new
+                // one out for the rest of the call (#171).
+                let idle = video
+                    .receivers
+                    .iter()
+                    .min_by_key(|(_, receiver)| receiver.last_packet)
+                    .filter(|(_, receiver)| {
+                        now.saturating_duration_since(receiver.last_packet) >= RECEIVER_EVICTABLE
+                    })
+                    .map(|(ssrc, _)| *ssrc);
+                let Some(idle) = idle else {
+                    Counters::add(&counters.video_frames_dropped, 1);
+                    return;
+                };
+                video.receivers.remove(&idle);
             }
             video
                 .receivers
@@ -712,6 +736,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let Some(receiver) = video.receivers.get_mut(&primary) else {
             return;
         };
+        receiver.last_packet = now;
         let stream_header = RtpHeader {
             ssrc: primary,
             sequence,
@@ -862,6 +887,12 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             return Ok(());
         }
         let report_due = video.next_report.is_some_and(|at| at <= now);
+        if report_due {
+            // Streams nobody forwards any more get no reports, NACKs or PLIs.
+            video.receivers.retain(|_, receiver| {
+                now.saturating_duration_since(receiver.last_packet) < RECEIVER_IDLE
+            });
+        }
         let retry = video.retry_interval();
         let mut blocks = Vec::new();
         let mut nacks: Vec<(u32, Vec<u16>)> = Vec::new();
