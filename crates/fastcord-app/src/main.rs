@@ -62,6 +62,7 @@ mod notify_settings;
 mod onboarding;
 mod organize;
 mod outbox;
+mod panel_kit;
 mod password;
 mod paste;
 mod pins;

@@ -21,6 +21,7 @@ use iced::widget::{column, container, row, scrollable, space, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::i18n::{tr, trf};
+use crate::panel_kit::{Confirm as Pending, Gate, WAIT, auth_rejected};
 
 /// Friends listed as candidates to add.
 const MAX_CANDIDATES: usize = 100;
@@ -71,12 +72,10 @@ pub struct State {
     /// The conversation the panel is open for.
     channel: Option<Snowflake>,
     name: String,
-    busy: Option<Action>,
-    confirm: Option<Confirm>,
+    confirm: Pending<Confirm>,
     /// The member whose `⋯` menu is open.
     menu: Option<Snowflake>,
-    notice: Option<String>,
-    serial: u64,
+    life: Gate<Action>,
     /// Dropped (aborting the request) only on logout or account change.
     task: Option<iced::task::Handle>,
 }
@@ -138,29 +137,30 @@ impl State {
 
     #[cfg(test)]
     fn busy(&self) -> bool {
-        self.busy.is_some()
+        self.life.is_busy()
     }
 
     /// Closes the panel when the open conversation changes or disappears,
     /// unless a request is in flight (its answer must still be handled).
     pub fn sync(&mut self, selected: Option<Snowflake>) {
-        if self.busy.is_none() && self.channel.is_some() && self.channel != selected {
+        if !self.life.is_busy() && self.channel.is_some() && self.channel != selected {
             self.clear();
         }
     }
 
     /// Logout or account change: drops the panel and any request.
     pub fn clear(&mut self) {
+        let mut life = std::mem::take(&mut self.life);
+        life.reset();
         *self = Self {
-            serial: self.serial.wrapping_add(1),
+            life,
             ..Self::default()
         };
     }
 
     fn start(&mut self, action: Action) {
-        self.busy = Some(action);
-        self.confirm = None;
-        self.notice = None;
+        self.life.begin(action);
+        self.confirm.cancel();
     }
 
     /// Runs one request for the open conversation.
@@ -172,7 +172,7 @@ impl State {
         edit: Option<GroupEdit>,
     ) -> Task<Event> {
         self.start(action);
-        let serial = self.serial;
+        let serial = self.life.serial();
         let client = client.clone();
         let (task, handle) = Task::perform(
             async move {
@@ -211,7 +211,7 @@ impl State {
         match event {
             Event::Toggle => {
                 if self.channel.is_some() {
-                    if self.busy.is_none() {
+                    if !self.life.is_busy() {
                         self.clear();
                     }
                 } else if let Some(selection) = selection {
@@ -219,15 +219,15 @@ impl State {
                     self.name = selection.custom_name.clone();
                 }
             }
-            Event::Close if self.busy.is_none() => self.clear(),
+            Event::Close if !self.life.is_busy() => self.clear(),
             Event::Close => {}
-            Event::NameInput(value) if self.channel.is_some() && self.busy.is_none() => {
+            Event::NameInput(value) if self.channel.is_some() && !self.life.is_busy() => {
                 self.name = value.chars().take(MAX_GROUP_NAME_CHARS + 20).collect();
-                self.notice = None;
+                self.life.notice = None;
             }
-            Event::Cancel => self.confirm = None,
+            Event::Cancel => self.confirm.cancel(),
             Event::Menu(user) => self.menu = user,
-            _ if self.busy.is_some()
+            _ if self.life.is_busy()
                 && !matches!(event, Event::Done(..) | Event::IconPicked(..)) =>
             {
                 // One request at a time; the answer of the first is awaited.
@@ -242,7 +242,7 @@ impl State {
                         | Event::PickIcon
                         | Event::ClearIcon
                 ) {
-                    self.notice = Some(tr("Wait for the previous change to finish.").to_owned());
+                    self.life.say(tr(WAIT));
                 }
             }
             Event::Rename => {
@@ -254,12 +254,12 @@ impl State {
                 }
                 let name = self.name.trim().to_owned();
                 if name.chars().count() > MAX_GROUP_NAME_CHARS {
-                    self.notice = Some(trf(
+                    self.life.notice = Some(trf(
                         "A group name has at most {} characters.",
                         &[&MAX_GROUP_NAME_CHARS],
                     ));
                 } else if name == selection.custom_name {
-                    self.notice = Some(tr("The name is unchanged.").to_owned());
+                    self.life.notice = Some(tr("The name is unchanged.").to_owned());
                 } else {
                     return self.send(Action::Rename, channel, client, Some(GroupEdit::Name(name)));
                 }
@@ -267,7 +267,7 @@ impl State {
             Event::PickIcon => {
                 if self.channel.is_some() && selection.is_some_and(|s| s.group) {
                     self.start(Action::Icon);
-                    let serial = self.serial;
+                    let serial = self.life.serial();
                     return Task::perform(
                         async {
                             let Some(file) = rfd::AsyncFileDialog::new()
@@ -287,8 +287,7 @@ impl State {
                     );
                 }
             }
-            Event::IconPicked(serial, result) if serial == self.serial => {
-                self.busy = None;
+            Event::IconPicked(serial, result) if self.life.accept(serial) => {
                 let channel = self
                     .channel
                     .filter(|c| selection.is_some_and(|s| s.channel_id == *c));
@@ -301,7 +300,7 @@ impl State {
                             Some(GroupEdit::Icon(Some(icon))),
                         );
                     }
-                    (Err(reason), _) => self.notice = Some(tr(reason).to_owned()),
+                    (Err(reason), _) => self.life.notice = Some(tr(reason).to_owned()),
                     _ => {}
                 }
             }
@@ -322,9 +321,10 @@ impl State {
                     .iter()
                     .any(|r| r.user.id == user && r.kind == RelationshipKind::Friend);
                 if !s.group {
-                    self.notice = Some(tr("Only a group can have people added.").to_owned());
+                    self.life.notice = Some(tr("Only a group can have people added.").to_owned());
                 } else if !friend || user == me || s.members.iter().any(|m| m.id == user) {
-                    self.notice = Some(tr("Pick a friend who is not in the group yet.").to_owned());
+                    self.life.notice =
+                        Some(tr("Pick a friend who is not in the group yet.").to_owned());
                 } else {
                     return self.send(Action::Add(user), channel, client, None);
                 }
@@ -332,15 +332,15 @@ impl State {
             Event::AskRemove(user) => {
                 self.menu = None;
                 if owner && selection.is_some_and(|s| s.members.iter().any(|m| m.id == user)) {
-                    self.confirm = Some(Confirm::Remove(user));
-                    self.notice = None;
+                    self.confirm.ask(Confirm::Remove(user));
+                    self.life.notice = None;
                 }
             }
             Event::AskOwner(user) => {
                 self.menu = None;
                 if owner && selection.is_some_and(|s| s.members.iter().any(|m| m.id == user)) {
-                    self.confirm = Some(Confirm::Owner(user));
-                    self.notice = None;
+                    self.confirm.ask(Confirm::Owner(user));
+                    self.life.notice = None;
                 }
             }
             Event::Leave => {
@@ -348,8 +348,8 @@ impl State {
                     return Task::none();
                 };
                 if s.group {
-                    self.confirm = Some(Confirm::Leave);
-                    self.notice = None;
+                    self.confirm.ask(Confirm::Leave);
+                    self.life.notice = None;
                 } else {
                     return self.send(Action::Leave, channel, client, None);
                 }
@@ -377,14 +377,14 @@ impl State {
                         );
                     }
                     _ => {
-                        self.notice = Some(tr("That person is no longer in the group.").to_owned())
+                        self.life.notice =
+                            Some(tr("That person is no longer in the group.").to_owned())
                     }
                 }
             }
-            Event::Done(serial, action, result) if serial == self.serial => {
-                self.busy = None;
+            Event::Done(serial, action, result) if self.life.accept(serial) => {
                 self.task = None;
-                self.notice = Some(match result {
+                self.life.notice = Some(match result {
                     Ok(()) if action == Action::Leave => tr("Done.").to_owned(),
                     Ok(()) => tr("Sent. The panel updates when Discord confirms.").to_owned(),
                     Err(error) => describe(error),
@@ -397,10 +397,7 @@ impl State {
 
     /// A 401 from this panel's request: the caller stops the account.
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Done(_, _, Err(RestError::AuthenticationRequired))
-        )
+        matches!(event, Event::Done(_, _, r) if auth_rejected(r))
     }
 }
 
@@ -413,7 +410,7 @@ pub fn view<'a>(
     if state.channel != Some(selection.channel_id) {
         return None;
     }
-    let idle = state.busy.is_none();
+    let idle = !state.life.is_busy();
     let owner = selection.owner == Some(me);
     let title = if selection.group {
         tr("Group")
@@ -542,7 +539,7 @@ pub fn view<'a>(
     } else {
         tr("Close conversation")
     };
-    match state.confirm {
+    match state.confirm.pending() {
         Some(confirm) => {
             let question = match confirm {
                 Confirm::Leave => {
@@ -584,14 +581,14 @@ pub fn view<'a>(
             );
         }
     }
-    if state.busy.is_some() {
+    if state.life.is_busy() {
         panel = panel.push(
             text(tr("Waiting for Discord…"))
                 .size(12)
                 .color(crate::style::muted()),
         );
     }
-    if let Some(notice) = &state.notice {
+    if let Some(notice) = &state.life.notice {
         panel = panel.push(text(notice.as_str()).size(12).color(crate::style::muted()));
     }
     // Shown as a dialog, which draws the card.
@@ -697,7 +694,7 @@ mod tests {
         ] {
             let _ = state.update(ask, &nav, ME, &client());
             assert!(!state.busy(), "asking is not a request");
-            assert!(state.confirm.is_some());
+            assert!(state.confirm.pending().is_some());
         }
         // Cancel clears it; Confirm without a question does nothing.
         let _ = state.update(Event::Cancel, &nav, ME, &client());
@@ -705,7 +702,7 @@ mod tests {
         assert!(!state.busy());
         let _ = state.update(Event::AskRemove(Snowflake(2)), &nav, ME, &client());
         let _ = state.update(Event::Confirm, &nav, ME, &client());
-        assert_eq!(state.busy, Some(Action::Remove(Snowflake(2))));
+        assert_eq!(state.life.busy(), Some(Action::Remove(Snowflake(2))));
     }
 
     #[test]
@@ -714,12 +711,12 @@ mod tests {
         let mut state = State::default();
         open(&mut state, &nav);
         let _ = state.update(Event::Add(Snowflake(4)), &nav, ME, &client());
-        assert_eq!(state.busy, Some(Action::Add(Snowflake(4))));
-        let serial = state.serial;
+        assert_eq!(state.life.busy(), Some(Action::Add(Snowflake(4))));
+        let serial = state.life.serial();
         // A second click while waiting is refused, not queued.
         let _ = state.update(Event::Add(Snowflake(4)), &nav, ME, &client());
-        assert_eq!(state.busy, Some(Action::Add(Snowflake(4))));
-        assert!(state.notice.is_some());
+        assert_eq!(state.life.busy(), Some(Action::Add(Snowflake(4))));
+        assert!(state.life.notice.is_some());
         // The panel cannot be closed or moved away from under a request.
         let _ = state.update(Event::Close, &nav, ME, &client());
         state.sync(None);
@@ -743,7 +740,7 @@ mod tests {
             &client(),
         );
         assert!(!state.busy());
-        assert!(state.notice.as_deref().unwrap().contains("refused"));
+        assert!(state.life.notice.as_deref().unwrap().contains("refused"));
         state.sync(None);
         assert!(state.channel.is_none(), "closes once idle and deselected");
     }
@@ -755,7 +752,7 @@ mod tests {
         open(&mut state, &nav);
         let _ = state.update(Event::AskRemove(Snowflake(3)), &nav, ME, &client());
         let _ = state.update(Event::AskOwner(Snowflake(3)), &nav, ME, &client());
-        assert!(state.confirm.is_none(), "not the owner");
+        assert!(state.confirm.pending().is_none(), "not the owner");
         for rejected in [2, 5, 1, 99] {
             let _ = state.update(Event::Add(Snowflake(rejected)), &nav, ME, &client());
             assert!(
@@ -777,7 +774,11 @@ mod tests {
         let _ = state.update(Event::PickIcon, &dm, ME, &client());
         assert!(!state.busy());
         let _ = state.update(Event::Leave, &dm, ME, &client());
-        assert_eq!(state.busy, Some(Action::Leave), "closing a DM is immediate");
+        assert_eq!(
+            state.life.busy(),
+            Some(Action::Leave),
+            "closing a DM is immediate"
+        );
 
         let group = navigation(true, 1);
         let mut state = State::default();
@@ -789,7 +790,7 @@ mod tests {
         assert!(!state.busy());
         let _ = state.update(Event::NameInput("New".into()), &group, ME, &client());
         let _ = state.update(Event::Rename, &group, ME, &client());
-        assert_eq!(state.busy, Some(Action::Rename));
+        assert_eq!(state.life.busy(), Some(Action::Rename));
     }
 
     #[test]

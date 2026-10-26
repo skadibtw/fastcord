@@ -5,6 +5,14 @@
 use crate::*;
 
 impl App {
+    /// Discord rejected the login: stop the account like any other 401.
+    fn reject_login(&mut self, id: u64) -> Task<Message> {
+        self.handle(Message::Gateway(
+            id,
+            gateway::GatewayStatus::AuthenticationRequired,
+        ))
+    }
+
     pub(crate) fn forum_event(&mut self, event: forum::Event) -> Task<Message> {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
@@ -102,11 +110,7 @@ impl App {
         };
         let task = self.ui.assets.update(event, &env);
         if rejected {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::Assets)
     }
@@ -139,11 +143,7 @@ impl App {
             .apps
             .update(event, &gateway.navigation, &session.client);
         if rejected {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         let task = task.map(Message::Apps);
         match action {
@@ -168,11 +168,7 @@ impl App {
             &session.client,
         );
         if rejected {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::Announce)
     }
@@ -243,10 +239,7 @@ impl App {
         if rejected {
             // Discord rejected the login: stop the account like any other 401.
             let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(id);
         }
         task.map(Message::Slash)
     }
@@ -517,11 +510,7 @@ impl App {
         let task = self.ui.soundboard.update(event, &env);
         if rejected && let Some(gateway) = self.phase.gateway() {
             // Discord rejected the login: stop the account like any other 401.
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         let saved = self.save_soundboard_prefs();
         Task::batch([task.map(Message::Soundboard), saved])
@@ -564,11 +553,7 @@ impl App {
                 .update(event, &gateway.navigation, session.user.id, &session.client);
         if rejected {
             // Discord rejected the login: stop the account like any other 401.
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::Group)
     }
@@ -594,11 +579,7 @@ impl App {
             .onboarding
             .update(event, &gateway.navigation, &session.client);
         if rejected {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::Onboarding)
     }
@@ -623,11 +604,7 @@ impl App {
             &gateway.controls,
         );
         if rejected {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::Events)
     }
@@ -639,11 +616,7 @@ impl App {
         let rejected = discover::State::is_rejected(&event);
         let task = self.ui.discover.update(event, &session.client);
         if rejected && let Some(gateway) = self.phase.gateway() {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::Discover)
     }
@@ -660,11 +633,7 @@ impl App {
             &session.client,
         );
         if rejected {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::Invite)
     }
@@ -679,11 +648,7 @@ impl App {
                 .community
                 .update(event, &gateway.navigation, &session.client, session.user.id);
         if rejected {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::Community)
     }
@@ -763,11 +728,7 @@ impl App {
             .guild_admin
             .update(event, &gateway.navigation, &session.client);
         if rejected {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::GuildAdmin)
     }
@@ -782,11 +743,7 @@ impl App {
             .moderation
             .update(event, &gateway.navigation, &session.client);
         if rejected {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::Moderation)
     }
@@ -801,11 +758,7 @@ impl App {
             .automod
             .update(event, &gateway.navigation, &session.client);
         if rejected {
-            let id = gateway.id;
-            return self.handle(Message::Gateway(
-                id,
-                gateway::GatewayStatus::AuthenticationRequired,
-            ));
+            return self.reject_login(gateway.id);
         }
         task.map(Message::AutoMod)
     }

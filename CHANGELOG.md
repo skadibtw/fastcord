@@ -7,6 +7,7 @@
 - Hovering the call's network icon shows the voice ping: the UDP round trip to the voice server in milliseconds, or "measuring…" until the first answer (#221). It is cleared when the call ends.
 
 ### Changed
+- Panels share one request lifecycle (`panel_kit`: busy marker, stale-answer serial, notice, two-step confirm, 401 test); the authorized apps/integrations/webhooks panel and the group DM panel use it, and the panel event routers share one `reject_login` (#190). The second-request notice there now reads "Wait for the previous change to finish."
 - Decoded attachments, avatars and unsent drafts share one byte-bounded LRU with O(log n) recency updates (#187). Avatars now evict by last use (on-screen pictures stay newest) instead of insertion order.
 - Refactor: the per-user settings folder lookup and the temp-file-plus-rename writer live once in `fastcord-platform::paths` (`config_dir`, `write_atomic`, unique temporary names, rename retry) instead of three folder copies and six writers in the app; paths are unchanged. Saved voice volumes are loaded and purged on a worker, not in `update` (#181). The cache-folder lookup is not moved yet.
 - `assets/emoji/generate.py` regenerates `emoji_index.rs` from the pinned emoji-data v16.0.0 JSON and the Twemoji file list, byte for byte; `--check` runs in CI (#170).

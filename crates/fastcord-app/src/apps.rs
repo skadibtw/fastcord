@@ -25,6 +25,7 @@ use iced::{Element, Length, Task};
 
 use crate::announce::{can_manage_webhooks, describe};
 use crate::i18n::{tr, trf};
+use crate::panel_kit::{Confirm, Gate, auth_rejected};
 
 /// What one confirmed removal deletes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,10 +89,8 @@ pub struct State {
     panel: Option<Panel>,
     client_input: String,
     name_input: String,
-    confirm: Option<Target>,
-    busy: bool,
-    notice: Option<String>,
-    serial: u64,
+    confirm: Confirm<Target>,
+    life: Gate,
 }
 
 fn tidy(mut name: String) -> String {
@@ -115,22 +114,24 @@ impl State {
     }
 
     pub fn clear(&mut self) {
+        let mut life = std::mem::take(&mut self.life);
+        life.reset();
         *self = Self {
-            serial: self.serial.wrapping_add(1),
+            life,
             ..Self::default()
         };
     }
 
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Authorized(_, Err(RestError::AuthenticationRequired))
-                | Event::Integrations(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Webhooks(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Removed(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Created(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Edited(_, _, Err(RestError::AuthenticationRequired))
-        )
+        match event {
+            Event::Authorized(_, r) => auth_rejected(r),
+            Event::Integrations(_, _, r) => auth_rejected(r),
+            Event::Webhooks(_, _, r) => auth_rejected(r),
+            Event::Removed(_, _, r) => auth_rejected(r),
+            Event::Created(_, _, r) => auth_rejected(r),
+            Event::Edited(_, _, r) => auth_rejected(r),
+            _ => false,
+        }
     }
 
     /// The server whose permissions the open panel needs from the reducer.
@@ -144,8 +145,8 @@ impl State {
     fn open(&mut self, panel: Panel) {
         // The old panel (and any webhook token in it) is dropped here.
         self.panel = Some(panel);
-        self.confirm = None;
-        self.notice = None;
+        self.confirm.cancel();
+        self.life.notice = None;
         self.name_input.clear();
     }
 
@@ -154,8 +155,7 @@ impl State {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Event> + Send + 'static,
     {
-        self.busy = true;
-        self.notice = None;
+        self.life.begin(());
         Task::perform(run(), |event| event)
     }
 
@@ -198,15 +198,14 @@ impl State {
         navigation: &NavigationSnapshot,
         client: &RestClient,
     ) -> (Task<Event>, Option<Action>) {
-        let serial = self.serial;
+        let serial = self.life.serial();
         let client = client.clone();
         match event {
-            Event::Authorized(s, result) if s == serial => {
-                self.busy = false;
+            Event::Authorized(s, result) if self.life.accept(s) => {
                 match (&mut self.panel, result) {
                     (Some(Panel::Authorized(list)), Ok(found)) => *list = Some(found),
                     (Some(Panel::Authorized(_)), Err(error)) => {
-                        self.notice = Some(describe(
+                        self.life.notice = Some(describe(
                             error,
                             "Discord refused to list your authorized apps.",
                             "Discord has no such list (unverified route).",
@@ -215,14 +214,13 @@ impl State {
                     _ => {}
                 }
             }
-            Event::Integrations(s, guild, result) if s == serial => {
-                self.busy = false;
+            Event::Integrations(s, guild, result) if self.life.accept(s) => {
                 match (&mut self.panel, result) {
                     (Some(Panel::Guild(open, list)), Ok(found)) if *open == guild => {
                         *list = Some(found);
                     }
                     (Some(Panel::Guild(open, _)), Err(error)) if *open == guild => {
-                        self.notice = Some(describe(
+                        self.life.notice = Some(describe(
                             error,
                             "Discord refused: you need Manage Server to see integrations.",
                             "That server no longer exists.",
@@ -231,8 +229,7 @@ impl State {
                     _ => {}
                 }
             }
-            Event::Webhooks(s, channel, result) if s == serial => {
-                self.busy = false;
+            Event::Webhooks(s, channel, result) if self.life.accept(s) => {
                 if let Some(Panel::Webhooks {
                     channel: open,
                     list,
@@ -243,7 +240,7 @@ impl State {
                     match result {
                         Ok(found) => *list = Some(found),
                         Err(error) => {
-                            self.notice = Some(describe(
+                            self.life.notice = Some(describe(
                                 error,
                                 "Discord refused: you need Manage Webhooks in this channel.",
                                 "That channel no longer exists.",
@@ -252,12 +249,11 @@ impl State {
                     }
                 }
             }
-            Event::Removed(s, target, result) if s == serial => {
-                self.busy = false;
+            Event::Removed(s, target, result) if self.life.accept(s) => {
                 let gone = matches!(result, Err(RestError::ResourceGone));
                 match result {
                     Ok(()) | Err(RestError::ResourceGone) => {
-                        self.confirm = None;
+                        self.confirm.cancel();
                         match (&mut self.panel, target) {
                             (Some(Panel::Authorized(Some(list))), Target::App(id)) => {
                                 list.retain(|a| a.id != id);
@@ -275,7 +271,7 @@ impl State {
                             }
                             _ => {}
                         }
-                        self.notice = Some(
+                        self.life.notice = Some(
                             if gone {
                                 tr("It was already removed.")
                             } else {
@@ -285,7 +281,7 @@ impl State {
                         );
                     }
                     Err(error) => {
-                        self.notice = Some(describe(
+                        self.life.notice = Some(describe(
                             error,
                             "Discord refused: you lack the permission, or this cannot be removed.",
                             "That no longer exists.",
@@ -293,85 +289,79 @@ impl State {
                     }
                 }
             }
-            Event::Created(s, channel, result) if s == serial => {
-                self.busy = false;
-                match result {
-                    Ok(webhook) => {
-                        if let Some(list) = self.webhooks_mut(channel) {
-                            list.push(webhook);
-                            self.name_input.clear();
-                            self.notice = Some(tr("Webhook created.").to_owned());
-                        }
-                    }
-                    Err(error) => {
-                        self.notice = Some(describe(
-                            error,
-                            "Discord refused: you need Manage Webhooks in this channel.",
-                            "That channel no longer exists.",
-                        ));
+            Event::Created(s, channel, result) if self.life.accept(s) => match result {
+                Ok(webhook) => {
+                    if let Some(list) = self.webhooks_mut(channel) {
+                        list.push(webhook);
+                        self.name_input.clear();
+                        self.life.notice = Some(tr("Webhook created.").to_owned());
                     }
                 }
-            }
-            Event::Edited(s, channel, result) if s == serial => {
-                self.busy = false;
-                match result {
-                    Ok(webhook) => {
-                        let moved = webhook.channel != channel;
-                        let mut kept = false;
-                        if let Some(list) = self.webhooks_mut(channel) {
-                            if moved {
-                                list.retain(|w| w.id != webhook.id);
-                            } else if let Some(old) = list.iter_mut().find(|w| w.id == webhook.id) {
-                                let token = webhook.token.or(old.token.take());
-                                *old = Webhook { token, ..webhook };
-                            }
-                            kept = true;
+                Err(error) => {
+                    self.life.notice = Some(describe(
+                        error,
+                        "Discord refused: you need Manage Webhooks in this channel.",
+                        "That channel no longer exists.",
+                    ));
+                }
+            },
+            Event::Edited(s, channel, result) if self.life.accept(s) => match result {
+                Ok(webhook) => {
+                    let moved = webhook.channel != channel;
+                    let mut kept = false;
+                    if let Some(list) = self.webhooks_mut(channel) {
+                        if moved {
+                            list.retain(|w| w.id != webhook.id);
+                        } else if let Some(old) = list.iter_mut().find(|w| w.id == webhook.id) {
+                            let token = webhook.token.or(old.token.take());
+                            *old = Webhook { token, ..webhook };
                         }
-                        if kept {
-                            if moved && let Some(Panel::Webhooks { editing, .. }) = &mut self.panel
-                            {
-                                *editing = None;
-                            }
-                            self.notice =
-                                Some(if moved { tr("Moved.") } else { tr("Renamed.") }.to_owned());
-                        }
+                        kept = true;
                     }
-                    Err(error) => {
-                        self.notice = Some(describe(
-                            error,
-                            "Discord refused: you need Manage Webhooks in that channel.",
-                            "That webhook no longer exists.",
-                        ));
+                    if kept {
+                        if moved && let Some(Panel::Webhooks { editing, .. }) = &mut self.panel {
+                            *editing = None;
+                        }
+                        self.life.notice =
+                            Some(if moved { tr("Moved.") } else { tr("Renamed.") }.to_owned());
                     }
                 }
-            }
+                Err(error) => {
+                    self.life.notice = Some(describe(
+                        error,
+                        "Discord refused: you need Manage Webhooks in that channel.",
+                        "That webhook no longer exists.",
+                    ));
+                }
+            },
             Event::Authorized(..)
             | Event::Integrations(..)
             | Event::Webhooks(..)
             | Event::Removed(..)
             | Event::Created(..)
             | Event::Edited(..) => {}
-            Event::Cancel => self.confirm = None,
+            Event::Cancel => self.confirm.cancel(),
             Event::ClientInput(v) => self.client_input = v.chars().take(24).collect(),
             Event::NameInput(v) => self.name_input = tidy(v),
-            Event::Close if !self.busy => {
+            Event::Close if !self.life.is_busy() => {
                 self.panel = None;
-                self.confirm = None;
-                self.notice = None;
+                self.confirm.cancel();
+                self.life.notice = None;
                 self.name_input.clear();
                 self.client_input.clear();
             }
             Event::Close => {}
             Event::AddInBrowser => match parse_client_id(&self.client_input) {
                 Some(id) => {
-                    self.notice = Some(
+                    self.life.notice = Some(
                         tr("Opened Discord's page in your browser. Consent happens there.")
                             .to_owned(),
                     );
                     return (Task::none(), Some(Action::Open(authorize_url(id))));
                 }
                 None => {
-                    self.notice = Some(tr("Enter the app's client id: digits only.").to_owned());
+                    self.life.notice =
+                        Some(tr("Enter the app's client id: digits only.").to_owned());
                 }
             },
             Event::CopyUrl(id) => {
@@ -386,19 +376,17 @@ impl State {
                 };
                 match url {
                     Some(url) => {
-                        self.notice =
+                        self.life.notice =
                             Some(tr("Webhook URL copied. Treat it as a password.").to_owned());
                         return (Task::none(), Some(Action::Copy(url)));
                     }
                     None => {
-                        self.notice =
+                        self.life.notice =
                             Some(tr("Discord sent no token for this webhook.").to_owned());
                     }
                 }
             }
-            _ if self.busy => {
-                self.notice = Some(tr("Wait for the previous request to finish.").to_owned());
-            }
+            _ if self.life.refuse_if_busy() => {}
             Event::OpenAuthorized => {
                 self.open(Panel::Authorized(None));
                 return (
@@ -410,7 +398,7 @@ impl State {
             }
             Event::OpenGuild(guild) => {
                 if Self::guild_blocked(navigation, guild) {
-                    self.notice = Some(tr("You need Manage Server for this.").to_owned());
+                    self.life.notice = Some(tr("You need Manage Server for this.").to_owned());
                     return (Task::none(), None);
                 }
                 self.open(Panel::Guild(guild, None));
@@ -423,7 +411,7 @@ impl State {
             }
             Event::OpenWebhooks(guild, channel) => {
                 if !can_manage_webhooks(navigation, guild, channel) {
-                    self.notice =
+                    self.life.notice =
                         Some(tr("You need Manage Webhooks in a text channel for this.").to_owned());
                     return (Task::none(), None);
                 }
@@ -454,15 +442,15 @@ impl State {
                     _ => false,
                 };
                 if listed {
-                    self.confirm = Some(target);
+                    self.confirm.ask(target);
                 }
             }
             Event::Confirm => {
-                let Some(target) = self.confirm else {
+                let Some(target) = self.confirm.pending() else {
                     return (Task::none(), None);
                 };
                 if let Some(reason) = self.blocked(navigation) {
-                    self.notice = Some(reason.to_owned());
+                    self.life.notice = Some(reason.to_owned());
                     return (Task::none(), None);
                 }
                 let guild = match &self.panel {
@@ -488,14 +476,15 @@ impl State {
                 let (guild, channel) = (*guild, *channel);
                 let name = self.name_input.trim().to_owned();
                 if name.is_empty() || name.chars().count() > MAX_WEBHOOK_NAME {
-                    self.notice = Some(trf(
+                    self.life.notice = Some(trf(
                         "Name the webhook (1 to {} characters).",
                         &[&MAX_WEBHOOK_NAME],
                     ));
                     return (Task::none(), None);
                 }
                 if !can_manage_webhooks(navigation, guild, channel) {
-                    self.notice = Some(tr("You need Manage Webhooks in this channel.").to_owned());
+                    self.life.notice =
+                        Some(tr("You need Manage Webhooks in this channel.").to_owned());
                     return (Task::none(), None);
                 }
                 return (
@@ -515,7 +504,7 @@ impl State {
                 {
                     self.name_input = w.name.clone();
                     *editing = Some(id);
-                    self.confirm = None;
+                    self.confirm.cancel();
                 }
             }
             Event::SaveName | Event::MoveTo(_) => {
@@ -533,13 +522,14 @@ impl State {
                     return (Task::none(), None);
                 };
                 if !can_manage_webhooks(navigation, guild, channel) {
-                    self.notice = Some(tr("You need Manage Webhooks in this channel.").to_owned());
+                    self.life.notice =
+                        Some(tr("You need Manage Webhooks in this channel.").to_owned());
                     return (Task::none(), None);
                 }
                 let (name, to) = match event {
                     Event::MoveTo(target) => {
                         if target == channel || !can_manage_webhooks(navigation, guild, target) {
-                            self.notice =
+                            self.life.notice =
                                 Some(tr("You cannot move it to that channel.").to_owned());
                             return (Task::none(), None);
                         }
@@ -551,7 +541,7 @@ impl State {
                             || name.chars().count() > MAX_WEBHOOK_NAME
                             || name == current.name
                         {
-                            self.notice = Some(tr("Enter a new name first.").to_owned());
+                            self.life.notice = Some(tr("Enter a new name first.").to_owned());
                             return (Task::none(), None);
                         }
                         (Some(name), None)
@@ -588,7 +578,7 @@ fn when(text: &Option<String>) -> String {
 }
 
 fn removal<'a>(state: &State, target: Target, idle: bool, what: &str) -> Element<'a, Event> {
-    if state.confirm == Some(target) {
+    if state.confirm.is(target) {
         row![
             text(trf("Remove {}?", &[&tr(what)]))
                 .size(12)
@@ -634,7 +624,7 @@ pub fn view<'a>(
     navigation: &'a NavigationSnapshot,
 ) -> Option<Element<'a, Event>> {
     let panel = state.panel.as_ref()?;
-    let idle = !state.busy;
+    let idle = !state.life.is_busy();
     let title = match panel {
         Panel::Authorized(_) => tr("Authorized apps"),
         Panel::Guild(..) => tr("Apps and integrations"),
@@ -815,7 +805,7 @@ pub fn view<'a>(
                 );
         }
     }
-    if let Some(notice) = &state.notice {
+    if let Some(notice) = &state.life.notice {
         body = body.push(text(notice.as_str()).size(12));
     }
     Some(container(body).padding(8).into())
@@ -920,13 +910,13 @@ mod tests {
 
     fn open_webhooks(state: &mut State, n: &NavigationSnapshot) {
         run(state, Event::OpenWebhooks(GUILD, HERE), n);
-        assert!(state.busy);
+        assert!(state.life.is_busy());
         run(
             state,
             Event::Webhooks(0, HERE, Ok(vec![hook(7, HERE, true), hook(8, HERE, false)])),
             n,
         );
-        assert!(!state.busy);
+        assert!(!state.life.is_busy());
     }
 
     #[test]
@@ -937,7 +927,7 @@ mod tests {
             Event::OpenWebhooks(GUILD, THERE),
             &nav(true, false),
         );
-        assert!(state.panel.is_none() && state.notice.is_some());
+        assert!(state.panel.is_none() && state.life.notice.is_some());
         open_webhooks(&mut state, &nav(true, true));
         run(
             &mut state,
@@ -959,7 +949,7 @@ mod tests {
             ))
         );
         assert_eq!(run(&mut state, Event::CopyUrl(Snowflake(8)), &n), None);
-        assert!(!state.notice.as_deref().unwrap().contains("fake-token"));
+        assert!(!state.life.notice.as_deref().unwrap().contains("fake-token"));
         assert!(!format!("{:?}", state.panel).contains("fake-token"));
         run(&mut state, Event::Close, &n);
         assert!(state.panel.is_none());
@@ -972,18 +962,18 @@ mod tests {
         let mut state = State::default();
         open_webhooks(&mut state, &n);
         run(&mut state, Event::Ask(Target::Webhook(Snowflake(99))), &n);
-        assert_eq!(state.confirm, None);
+        assert_eq!(state.confirm.pending(), None);
         run(&mut state, Event::Confirm, &n);
-        assert!(!state.busy, "nothing to confirm");
+        assert!(!state.life.is_busy(), "nothing to confirm");
         run(&mut state, Event::Ask(Target::Webhook(Snowflake(7))), &n);
         let lost = NavigationSnapshot {
             admin: None,
             ..NavigationSnapshot::default()
         };
         run(&mut state, Event::Confirm, &lost);
-        assert!(!state.busy && state.notice.is_some());
+        assert!(!state.life.is_busy() && state.life.notice.is_some());
         run(&mut state, Event::Confirm, &n);
-        assert!(state.busy);
+        assert!(state.life.is_busy());
         run(&mut state, Event::Confirm, &n);
         run(&mut state, Event::Ask(Target::Webhook(Snowflake(8))), &n);
         run(
@@ -991,13 +981,13 @@ mod tests {
             Event::Removed(1, Target::Webhook(Snowflake(7)), Ok(())),
             &n,
         );
-        assert!(state.busy, "a stale answer is ignored");
+        assert!(state.life.is_busy(), "a stale answer is ignored");
         run(
             &mut state,
             Event::Removed(0, Target::Webhook(Snowflake(7)), Ok(())),
             &n,
         );
-        assert!(!state.busy);
+        assert!(!state.life.is_busy());
         let Some(Panel::Webhooks {
             list: Some(list), ..
         }) = &state.panel
@@ -1030,7 +1020,7 @@ mod tests {
                 Event::Removed(0, Target::Webhook(Snowflake(7)), Err(error)),
                 &n,
             );
-            let notice = state.notice.unwrap();
+            let notice = state.life.notice.unwrap();
             // A gone webhook is simply removed; the rest keep the panel as it was.
             assert!(
                 notice.contains(expect) || notice == "It was already removed.",
@@ -1050,10 +1040,10 @@ mod tests {
         let mut state = State::default();
         open_webhooks(&mut state, &n);
         run(&mut state, Event::Create, &n);
-        assert!(!state.busy, "an empty name is not sent");
+        assert!(!state.life.is_busy(), "an empty name is not sent");
         run(&mut state, Event::NameInput("new".into()), &n);
         run(&mut state, Event::Create, &n);
-        assert!(state.busy);
+        assert!(state.life.is_busy());
         run(
             &mut state,
             Event::Created(0, HERE, Ok(hook(9, HERE, true))),
@@ -1062,13 +1052,16 @@ mod tests {
         assert_eq!(state.name_input, "");
         run(&mut state, Event::Edit(Snowflake(9)), &n);
         run(&mut state, Event::SaveName, &n);
-        assert!(!state.busy, "an unchanged name is not sent");
+        assert!(!state.life.is_busy(), "an unchanged name is not sent");
         run(&mut state, Event::MoveTo(HERE), &n);
-        assert!(!state.busy, "moving to the same channel is not sent");
+        assert!(
+            !state.life.is_busy(),
+            "moving to the same channel is not sent"
+        );
         run(&mut state, Event::MoveTo(THERE), &nav(true, false));
-        assert!(!state.busy, "no Manage Webhooks in the target");
+        assert!(!state.life.is_busy(), "no Manage Webhooks in the target");
         run(&mut state, Event::MoveTo(THERE), &n);
-        assert!(state.busy);
+        assert!(state.life.is_busy());
         run(
             &mut state,
             Event::Edited(0, HERE, Ok(hook(9, THERE, true))),
@@ -1094,7 +1087,7 @@ mod tests {
         run(&mut state, Event::Edit(Snowflake(7)), &n);
         run(&mut state, Event::NameInput("renamed".into()), &n);
         run(&mut state, Event::SaveName, &n);
-        assert!(state.busy);
+        assert!(state.life.is_busy());
         run(
             &mut state,
             Event::Edited(0, HERE, Ok(hook(7, HERE, false))),
@@ -1118,19 +1111,19 @@ mod tests {
             Event::Integrations(5, GUILD, Ok(Vec::new())),
             &n,
         );
-        assert!(state.busy);
+        assert!(state.life.is_busy());
         run(
             &mut state,
             Event::Integrations(0, GUILD, Ok(Vec::new())),
             &n,
         );
-        assert!(!state.busy);
+        assert!(!state.life.is_busy());
         run(
             &mut state,
             Event::Ask(Target::Integration(Snowflake(1))),
             &n,
         );
-        assert_eq!(state.confirm, None, "not listed");
+        assert_eq!(state.confirm.pending(), None, "not listed");
         state.clear();
         assert!(state.panel.is_none());
         run(
@@ -1157,6 +1150,6 @@ mod tests {
                     .to_owned()
             ))
         );
-        assert!(!state.busy, "no request is sent");
+        assert!(!state.life.is_busy(), "no request is sent");
     }
 }
