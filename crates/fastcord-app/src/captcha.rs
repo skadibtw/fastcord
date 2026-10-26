@@ -43,12 +43,14 @@ impl std::fmt::Display for CaptchaError {
 /// widget never loaded. A key can never be mistaken for the failure marker.
 const FAILED: &str = "fc-captcha-failed";
 
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Report<'a> {
     Key(&'a str),
     Failed,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn report(text: &str) -> Option<Report<'_>> {
     if text == FAILED {
         return Some(Report::Failed);
