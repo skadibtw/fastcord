@@ -401,6 +401,11 @@ impl History {
         self.channel
     }
 
+    #[cfg(test)]
+    pub fn set_open_channel(&mut self, channel: Option<Snowflake>) {
+        self.channel = channel;
+    }
+
     /// The account may send to `channel` (validated by the worker).
     pub fn can_send_in(&self, channel: Snowflake) -> bool {
         self.sendable == Some(channel)

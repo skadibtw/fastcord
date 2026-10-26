@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- Someone typing in a channel you are not looking at no longer rebuilds the client's whole view of the server (#153). Typing is still recorded everywhere, so switching channels shows who is typing at once, but only the open channel's typing redraws anything or arms the expiry timer.
 - An animated emoji on screen no longer rebuilds the whole window for every frame (#155). Each emoji picks its own frame when the window redraws and asks for the next redraw when that frame ends, so a frame change is one redraw with no message, view rebuild or layout pass; an emoji scrolled out of view wakes nothing.
 - The voice log names why end-to-end decryption refused incoming audio (#215): during a key transition, from a sender outside our group, unencrypted, or no key of the sender's epoch (or a replayed packet). All four were one "keys out of step" line, so a call that kept dropping audio could not say which one it was.
 - The voice log no longer counts the end of every sentence as a playback underrun (#217). When nobody is speaking the mixer stops on purpose and the device buffer drains; that drain was logged as a dropout, so a normal conversation showed 5-15 "underruns" a minute. Only a buffer that runs dry while audio is still coming is counted now.

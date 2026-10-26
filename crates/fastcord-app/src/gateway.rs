@@ -519,21 +519,27 @@ impl Tracker {
 impl Tracker {
     /// Keeps the typing table: a started user shows (never the account's own),
     /// and a sent message, a deleted channel, or a new session clears.
+    /// Every channel is recorded, so switching shows its typers at once, but
+    /// only the open channel's changes rebuild the snapshot (#153).
     fn apply_typing(&mut self, event: &Dispatch) {
         let now = self.clock.now();
+        let open = self.history.open_channel();
         let changed = match event {
             Dispatch::TypingStart(start) => {
                 if self.store.current_user().map(|u| u.id) == Some(start.user_id) {
                     false
                 } else {
                     self.typing.start(now, start.channel_id, start.user_id);
-                    true
+                    open == Some(start.channel_id)
                 }
             }
             Dispatch::MessageCreate(message) => {
                 self.typing.stop(message.channel_id, message.author.id)
+                    && open == Some(message.channel_id)
             }
-            Dispatch::ChannelDelete(channel) => self.typing.clear_channel(channel.id),
+            Dispatch::ChannelDelete(channel) => {
+                self.typing.clear_channel(channel.id) && open == Some(channel.id)
+            }
             Dispatch::Ready(_) | Dispatch::Resumed => {
                 self.typing.clear();
                 true
@@ -2426,7 +2432,7 @@ impl Worker {
     fn typing_wait(&self) -> Duration {
         self.tracker
             .typing
-            .next_expiry()
+            .next_expiry(self.tracker.history.open_channel())
             .map_or(Duration::ZERO, |at| {
                 at.saturating_sub(self.tracker.clock.now()) + Duration::from_millis(5)
             })
@@ -3403,7 +3409,11 @@ pub fn status_stream(
         loop {
             let mut voice_changed = false;
             let typing_wait = worker.typing_wait();
-            let typing_armed = worker.tracker.typing.next_expiry().is_some();
+            let typing_armed = worker
+                .tracker
+                .typing
+                .next_expiry(worker.tracker.history.open_channel())
+                .is_some();
             let (status, requested) = tokio::select! {
                 event = gateway.next_event() => {
                     let event = event?;
@@ -3499,7 +3509,8 @@ pub fn status_stream(
                 _ = tokio::time::sleep(typing_wait), if typing_armed =>
                 {
                     let now = worker.tracker.clock.now();
-                    worker.tracker.typing_dirty |= worker.tracker.typing.prune(now);
+                    let open = worker.tracker.history.open_channel();
+                    worker.tracker.typing_dirty |= worker.tracker.typing.prune(now, open);
                     (None, false)
                 }
                 _ = tokio::time::sleep(Duration::from_millis(10)),
@@ -5746,13 +5757,25 @@ mod tests {
             channel_id: channel,
             user_id: Snowflake(9),
         });
+        // Another channel's typing is recorded but rebuilds nothing (#153).
+        tracker.apply_typing(&started);
+        assert!(!tracker.typing_dirty);
+        assert!(
+            tracker.typing.next_expiry(None).is_none(),
+            "and arms no timer"
+        );
+        assert_eq!(tracker.typing_names(Some(channel)), ["Someone"]);
+        tracker.history.set_open_channel(Some(channel));
         tracker.apply_typing(&started);
         assert!(tracker.typing_dirty);
         assert_eq!(tracker.typing_names(Some(channel)), ["Someone"]);
         assert!(tracker.typing_names(Some(Snowflake(8))).is_empty());
         tracker.apply_typing(&Dispatch::Resumed);
         assert!(tracker.typing_names(Some(channel)).is_empty());
-        assert!(tracker.typing.next_expiry().is_none(), "no timer when idle");
+        assert!(
+            tracker.typing.next_expiry(Some(channel)).is_none(),
+            "no timer when idle"
+        );
     }
 
     #[test]

@@ -70,11 +70,16 @@ impl TypingTable {
         self.entries.clear();
     }
 
-    /// Drops lapsed entries. True if any went.
-    pub fn prune(&mut self, now: Duration) -> bool {
-        let before = self.entries.len();
-        self.entries.retain(|e| e.2 > now);
-        self.entries.len() != before
+    /// Drops lapsed entries everywhere. True if any of `channel`'s went:
+    /// only the shown channel's line needs redrawing.
+    pub fn prune(&mut self, now: Duration, channel: Option<Snowflake>) -> bool {
+        let mut shown = false;
+        self.entries.retain(|e| {
+            let keep = e.2 > now;
+            shown |= !keep && Some(e.0) == channel;
+            keep
+        });
+        shown
     }
 
     /// Who is typing in `channel` at `now`, longest-typing first.
@@ -86,9 +91,14 @@ impl TypingTable {
             .collect()
     }
 
-    /// When the next entry lapses; `None` means no timer is needed.
-    pub fn next_expiry(&self) -> Option<Duration> {
-        self.entries.iter().map(|e| e.2).min()
+    /// When the next entry of `channel` lapses; `None` means no timer is
+    /// needed. Other channels' entries lapse lazily: [`Self::users`] skips them.
+    pub fn next_expiry(&self, channel: Option<Snowflake>) -> Option<Duration> {
+        self.entries
+            .iter()
+            .filter(|e| Some(e.0) == channel)
+            .map(|e| e.2)
+            .min()
     }
 }
 
@@ -136,19 +146,27 @@ mod tests {
         // A repeat refreshes rather than duplicating.
         t.start(s(8), C, Snowflake(5));
         assert_eq!(t.users(s(15), C), [Snowflake(5)]);
-        assert_eq!(t.next_expiry(), Some(s(18)));
+        assert_eq!(t.next_expiry(Some(C)), Some(s(18)));
         assert!(t.stop(C, Snowflake(5)));
         assert!(!t.stop(C, Snowflake(5)));
-        assert_eq!(t.next_expiry(), None, "idle table needs no timer");
+        assert_eq!(t.next_expiry(Some(C)), None, "idle table needs no timer");
     }
 
     #[test]
     fn prune_reports_change_only_when_something_lapsed() {
         let mut t = TypingTable::default();
         t.start(s(0), C, Snowflake(5));
-        assert!(!t.prune(s(5)));
-        assert!(t.prune(s(10)));
+        t.start(s(0), Snowflake(2), Snowflake(6));
+        assert_eq!(t.next_expiry(Some(Snowflake(3))), None, "nobody shown");
+        assert!(!t.prune(s(5), Some(C)));
+        assert!(t.prune(s(10), Some(C)));
         assert!(t.users(s(10), C).is_empty());
+        t.start(s(10), Snowflake(2), Snowflake(6));
+        assert!(
+            !t.prune(s(20), Some(C)),
+            "another channel lapsing is not shown"
+        );
+        assert!(t.users(s(20), Snowflake(2)).is_empty());
     }
 
     #[test]
@@ -167,7 +185,7 @@ mod tests {
         assert!(t.entries.len() <= MAX_TOTAL);
         assert!(t.clear_channel(Snowflake(199)));
         t.clear();
-        assert_eq!(t.next_expiry(), None);
+        assert_eq!(t.next_expiry(Some(C)), None);
     }
 
     #[test]
