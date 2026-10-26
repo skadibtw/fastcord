@@ -57,7 +57,14 @@ fn code_byte(byte: u8) -> bool {
 /// `http(s)://` and an optional `www.`), so `notdiscord.gg/x`,
 /// `evil.example/discord.gg/x` and `a.discord.gg/x` yield nothing.
 pub fn extract_codes(content: &str) -> Vec<String> {
-    if !content.contains('/') {
+    // Every host contains "discord": most messages are ruled out without the
+    // lowercase copy below (#156).
+    if !content.contains('/')
+        || !content
+            .as_bytes()
+            .windows(7)
+            .any(|window| window.eq_ignore_ascii_case(b"discord"))
+    {
         return Vec::new();
     }
     let lower = content.to_ascii_lowercase();

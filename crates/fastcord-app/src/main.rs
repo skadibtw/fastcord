@@ -7320,6 +7320,7 @@ fn wanted_avatars(
         .take(MAX_WANTED_PICTURES)
         .collect::<Vec<_>>();
     let room = avatars::MAX_WANTED - pictures.len();
+    let mut seen: std::collections::HashSet<avatars::AvatarKey> = wanted.iter().cloned().collect();
     for key in guilds
         .chain(invite_icons)
         .chain(discover.icon_keys())
@@ -7334,7 +7335,7 @@ fn wanted_avatars(
         if wanted.len() == avatars::MAX_WANTED {
             break;
         }
-        if !wanted.contains(&key) {
+        if seen.insert(key.clone()) {
             wanted.push(key);
         }
     }
