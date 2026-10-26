@@ -99,7 +99,7 @@ standard text of its declared license, credited to the authors in its manifest.
 | cipher | 0.4.4 | MIT OR Apache-2.0 | crates.io |
 | cipher | 0.5.2 | MIT OR Apache-2.0 | crates.io |
 | clang-sys | 1.9.1 | Apache-2.0 | crates.io |
-| clipboard-win | 5.4.1 | BSL-1.0 | crates.io |
+| clipboard-win | 5.4.3 | BSL-1.0 | crates.io |
 | clipboard_macos | 0.1.1 | Apache-2.0 | crates.io |
 | clipboard_wayland | 0.2.2 | Apache-2.0 | crates.io |
 | clipboard_x11 | 0.4.3 | MIT | crates.io |
@@ -141,7 +141,7 @@ standard text of its declared license, credited to the authors in its manifest.
 | crypto-common | 0.2.2 | MIT OR Apache-2.0 | crates.io |
 | ctor | 0.10.1 | Apache-2.0 OR MIT | crates.io |
 | ctr | 0.9.2 | MIT OR Apache-2.0 | crates.io |
-| ctutils | 0.4.3 | Apache-2.0 OR MIT | crates.io |
+| ctutils | 0.4.6 | Apache-2.0 OR MIT | crates.io |
 | cursor-icon | 1.2.0 | MIT OR Apache-2.0 OR Zlib | crates.io |
 | curve25519-dalek | 4.1.3 | BSD-3-Clause | crates.io |
 | curve25519-dalek-derive | 0.1.1 | MIT/Apache-2.0 | crates.io |
@@ -505,9 +505,9 @@ standard text of its declared license, credited to the authors in its manifest.
 | rustfft | 6.4.1 | MIT OR Apache-2.0 | crates.io |
 | rustix | 0.38.44 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | crates.io |
 | rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | crates.io |
-| rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT | crates.io |
+| rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | crates.io |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | crates.io |
-| rustls-webpki | 0.103.15 | ISC | crates.io |
+| rustls-webpki | 0.103.16 | ISC | crates.io |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 | crates.io |
 | safe_arch | 1.2.0 | Zlib OR Apache-2.0 OR MIT | crates.io |
 | salsa20 | 0.10.2 | MIT OR Apache-2.0 | crates.io |
@@ -593,7 +593,7 @@ standard text of its declared license, credited to the authors in its manifest.
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | crates.io |
 | tls_codec | 0.4.2 | Apache-2.0 OR MIT | crates.io |
 | tls_codec_derive | 0.4.2 | Apache-2.0 OR MIT | crates.io |
-| tokio | 1.53.2 | MIT | crates.io |
+| tokio | 1.54.1 | MIT | crates.io |
 | tokio-macros | 2.7.2 | MIT | crates.io |
 | tokio-rustls | 0.26.6 | MIT OR Apache-2.0 | crates.io |
 | tokio-tungstenite | 0.30.0 | MIT | crates.io |
@@ -655,7 +655,7 @@ standard text of its declared license, credited to the authors in its manifest.
 | wayland-scanner | 0.31.11 | MIT | crates.io |
 | wayland-sys | 0.31.11 | MIT | crates.io |
 | web-time | 1.1.0 | MIT OR Apache-2.0 | crates.io |
-| webpki-roots | 1.0.9 | CDLA-Permissive-2.0 | crates.io |
+| webpki-roots | 1.0.11 | CDLA-Permissive-2.0 | crates.io |
 | webview2-com | 0.39.1 | MIT | crates.io |
 | webview2-com-macros | 0.8.1 | MIT | crates.io |
 | webview2-com-sys | 0.39.1 | MIT | crates.io |
@@ -1499,7 +1499,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### 10. Used by: ahash 0.7.8, ahash 0.8.12, anymap2 0.13.0, arrayvec 0.7.8, async-channel 2.5.0, async-compression 0.4.51, async-executor 1.14.0, async-io 2.6.0, async-lock 3.4.2, async-process 2.5.0, async-recursion 1.2.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, autocfg 1.5.1, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, blocking 1.7.0, cc 1.6.0, cexpr 0.6.0, cfg-if 1.0.5, cmake 0.1.58, compression-codecs 0.4.46, compression-core 0.4.34, concurrent-queue 2.5.0, const-random 0.1.18, const-random-macro 0.1.16, core-foundation 0.10.1, core-foundation 0.9.4, core-foundation-sys 0.8.7, core-graphics 0.23.2, core-graphics-types 0.1.3, core-graphics-types 0.2.0, coreaudio-rs 0.14.2, crossbeam-channel 0.5.17, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, cryoglyph 0.1.0, curve25519-dalek-derive 0.1.1, displaydoc 0.2.7, either 1.19.0, equivalent 1.0.2, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, ff 0.13.1, filetime 0.2.29, find-msvc-tools 0.1.14, flate2 1.1.10, fnv 1.0.7, form_urlencoded 1.2.2, futures-lite 2.6.1, gethostname 1.1.0, gif 0.14.2, glob 0.3.4, glow 0.16.0, group 0.13.0, hashbrown 0.11.2, hashbrown 0.13.2, hashbrown 0.15.5, hashbrown 0.16.1, hashbrown 0.17.1, heck 0.5.0, httparse 1.10.1, hyper-rustls 0.27.10, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.10.5, itertools 0.14.0, jobserver 0.1.35, khronos-egl 6.0.0, lazy_static 1.5.1, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, liquid-core 0.26.11, liquid-derive 0.26.10, lock_api 0.4.14, log 0.4.34, maplit 1.0.2, matrixmultiply 0.3.11, metal 0.32.0, nasm-rs 0.3.2, ndarray 0.15.6, num 0.4.3, num-bigint 0.4.8, num-bigint-dig 0.8.6, num-complex 0.4.6, num-derive 0.4.2, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, once_cell 1.21.4, opus2 0.4.0, ordered-stream 0.2.0, parking 2.2.1, parking_lot 0.11.2, parking_lot 0.12.5, parking_lot_core 0.8.6, parking_lot_core 0.9.12, percent-encoding 2.3.2, pest 2.9.3, pest_derive 2.9.3, pest_generator 2.9.3, pest_meta 2.9.3, piper 0.2.5, pkg-config 0.3.34, png 0.18.1, polling 3.11.0, pollster 0.4.0, primal-check 0.3.4, prost 0.11.9, prost-derive 0.11.9, rawpointer 0.2.1, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.1, regex-automata 0.4.18, regex-lite 0.1.9, regex-syntax 0.8.11, renderdoc-sys 1.1.0, roxmltree 0.20.0, rsa 0.9.10, rustc-hash 1.1.0, rustc_version 0.4.1, rustix 0.38.44, rustix 1.1.5, rustls 0.23.45, scoped-tls 1.0.1, scopeguard 1.2.0, secret-service 5.2.0, security-framework 3.7.0, security-framework-sys 2.17.0, signal-hook-registry 1.4.8, smallvec 1.16.2, smol_str 0.2.2, socket2 0.6.5, stable_deref_trait 1.2.1, stacker 0.1.25, swash 0.2.10, syn 1.0.109, system-deps 7.0.8, tar 0.4.46, tract-core 0.19.16, tract-data 0.19.16, tract-hir 0.19.16, tract-linalg 0.19.16, tract-nnef 0.19.16, tract-onnx 0.19.16, tract-onnx-opl 0.19.16, tract-pulse 0.19.16, tract-pulse-opl 0.19.16, ttf-parser 0.25.1, tungstenite 0.30.0, ucd-trie 0.1.7, unicode-bidi 0.3.18, unicode-normalization 0.1.25, unicode-segmentation 1.13.3, unicode-width 0.2.2, url 2.5.8, uuid 1.27.0, version_check 0.9.5, weezl 0.1.12, wry 0.57.0, xattr 1.6.1, yazi 0.2.1, zeno 0.3.3
+### 10. Used by: ahash 0.7.8, ahash 0.8.12, anymap2 0.13.0, arrayvec 0.7.8, async-channel 2.5.0, async-compression 0.4.51, async-executor 1.14.0, async-io 2.6.0, async-lock 3.4.2, async-process 2.5.0, async-recursion 1.2.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, autocfg 1.5.1, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, blocking 1.7.0, cc 1.6.0, cexpr 0.6.0, cfg-if 1.0.5, cmake 0.1.58, compression-codecs 0.4.46, compression-core 0.4.34, concurrent-queue 2.5.0, const-random 0.1.18, const-random-macro 0.1.16, core-foundation 0.10.1, core-foundation 0.9.4, core-foundation-sys 0.8.7, core-graphics 0.23.2, core-graphics-types 0.1.3, core-graphics-types 0.2.0, coreaudio-rs 0.14.2, crossbeam-channel 0.5.17, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, cryoglyph 0.1.0, curve25519-dalek-derive 0.1.1, displaydoc 0.2.7, either 1.19.0, equivalent 1.0.2, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, ff 0.13.1, filetime 0.2.29, find-msvc-tools 0.1.14, flate2 1.1.10, fnv 1.0.7, form_urlencoded 1.2.2, futures-lite 2.6.1, gethostname 1.1.0, gif 0.14.2, glob 0.3.4, glow 0.16.0, group 0.13.0, hashbrown 0.11.2, hashbrown 0.13.2, hashbrown 0.15.5, hashbrown 0.16.1, hashbrown 0.17.1, heck 0.5.0, httparse 1.10.1, hyper-rustls 0.27.10, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.10.5, itertools 0.14.0, jobserver 0.1.35, khronos-egl 6.0.0, lazy_static 1.5.1, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, liquid-core 0.26.11, liquid-derive 0.26.10, lock_api 0.4.14, log 0.4.34, maplit 1.0.2, matrixmultiply 0.3.11, metal 0.32.0, nasm-rs 0.3.2, ndarray 0.15.6, num 0.4.3, num-bigint 0.4.8, num-bigint-dig 0.8.6, num-complex 0.4.6, num-derive 0.4.2, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, once_cell 1.21.4, opus2 0.4.0, ordered-stream 0.2.0, parking 2.2.1, parking_lot 0.11.2, parking_lot 0.12.5, parking_lot_core 0.8.6, parking_lot_core 0.9.12, percent-encoding 2.3.2, pest 2.9.3, pest_derive 2.9.3, pest_generator 2.9.3, pest_meta 2.9.3, piper 0.2.5, pkg-config 0.3.34, png 0.18.1, polling 3.11.0, pollster 0.4.0, primal-check 0.3.4, prost 0.11.9, prost-derive 0.11.9, rawpointer 0.2.1, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.1, regex-automata 0.4.18, regex-lite 0.1.9, regex-syntax 0.8.11, renderdoc-sys 1.1.0, roxmltree 0.20.0, rsa 0.9.10, rustc-hash 1.1.0, rustc_version 0.4.1, rustix 0.38.44, rustix 1.1.5, rustls 0.23.46, scoped-tls 1.0.1, scopeguard 1.2.0, secret-service 5.2.0, security-framework 3.7.0, security-framework-sys 2.17.0, signal-hook-registry 1.4.8, smallvec 1.16.2, smol_str 0.2.2, socket2 0.6.5, stable_deref_trait 1.2.1, stacker 0.1.25, swash 0.2.10, syn 1.0.109, system-deps 7.0.8, tar 0.4.46, tract-core 0.19.16, tract-data 0.19.16, tract-hir 0.19.16, tract-linalg 0.19.16, tract-nnef 0.19.16, tract-onnx 0.19.16, tract-onnx-opl 0.19.16, tract-pulse 0.19.16, tract-pulse-opl 0.19.16, ttf-parser 0.25.1, tungstenite 0.30.0, ucd-trie 0.1.7, unicode-bidi 0.3.18, unicode-normalization 0.1.25, unicode-segmentation 1.13.3, unicode-width 0.2.2, url 2.5.8, uuid 1.27.0, version_check 0.9.5, weezl 0.1.12, wry 0.57.0, xattr 1.6.1, yazi 0.2.1, zeno 0.3.3
 
 ```text
                               Apache License
@@ -2907,7 +2907,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### 32. Used by: as-raw-xcb-connection 1.0.1, audioadapter 5.0.0, audioadapter-buffers 5.2.0, audioadapter-sample 5.2.0, clang-sys 1.9.1, cmov 0.5.4, codespan-reporting 0.12.0, cpal 0.18.2, ctutils 0.4.3, kurbo 0.10.4, lru-slab 0.1.3, qrcode 0.13.0, quinn 0.11.12, quinn-proto 0.11.19, quinn-udp 0.5.16, self_cell 1.3.0, static_assertions 1.1.0, sys-locale 0.3.2, tinyvec 1.13.3, unicode-linebreak 0.1.5, utf8_iter 1.0.4, x11rb 0.13.2, x11rb-protocol 0.13.2, zeroize 1.9.1, zeroize_derive 1.5.0, zune-core 0.5.3, zune-jpeg 0.5.15
+### 32. Used by: as-raw-xcb-connection 1.0.1, audioadapter 5.0.0, audioadapter-buffers 5.2.0, audioadapter-sample 5.2.0, clang-sys 1.9.1, cmov 0.5.4, codespan-reporting 0.12.0, cpal 0.18.2, ctutils 0.4.6, kurbo 0.10.4, lru-slab 0.1.3, qrcode 0.13.0, quinn 0.11.12, quinn-proto 0.11.19, quinn-udp 0.5.16, self_cell 1.3.0, static_assertions 1.1.0, sys-locale 0.3.2, tinyvec 1.13.3, unicode-linebreak 0.1.5, utf8_iter 1.0.4, x11rb 0.13.2, x11rb-protocol 0.13.2, zeroize 1.9.1, zeroize_derive 1.5.0, zune-core 0.5.3, zune-jpeg 0.5.15
 
 ```text
                                  Apache License
@@ -5126,7 +5126,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### 78. Used by: clipboard-win 5.4.1
+### 78. Used by: clipboard-win 5.4.3
 
 ```text
 Boost Software License - Version 1.0 - August 17th, 2003
@@ -6942,7 +6942,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### 105. Used by: ctutils 0.4.3
+### 105. Used by: ctutils 0.4.6
 
 ```text
 Copyright (c) 2025-2026 The RustCrypto Project Developers
@@ -12082,7 +12082,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### 192. Used by: hyper-rustls 0.27.10, rustls 0.23.45
+### 192. Used by: hyper-rustls 0.27.10, rustls 0.23.46
 
 ```text
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
@@ -12112,7 +12112,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### 193. Used by: hyper-rustls 0.27.10, rustls 0.23.45
+### 193. Used by: hyper-rustls 0.27.10, rustls 0.23.46
 
 ```text
 ISC License (ISC)
@@ -18577,7 +18577,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### 320. Used by: rustls-webpki 0.103.15
+### 320. Used by: rustls-webpki 0.103.16
 
 ```text
 Except as otherwise noted, this project is licensed under the following
@@ -20143,7 +20143,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### 361. Used by: tokio 1.53.2, tokio-util 0.7.19
+### 361. Used by: tokio 1.54.1, tokio-util 0.7.19
 
 ```text
 MIT License
@@ -22173,7 +22173,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### 398. Used by: webpki-roots 1.0.9
+### 398. Used by: webpki-roots 1.0.11
 
 ```text
 # Community Data License Agreement - Permissive - Version 2.0

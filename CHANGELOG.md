@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- Dependencies with published security fixes are updated: rustls 0.23.46, rustls-webpki 0.103.16, webpki-roots 1.0.11, tokio 1.54.1 and ctutils 0.4.6 (#201). CI now runs `cargo deny` (advisories, GPL-3.0-compatible licences, crate sources); the advisories that DAVE's pinned crypto and the bundled DeepFilterNet model still carry are listed in `deny.toml` with the reason each is accepted.
 - Someone typing in a channel you are not looking at no longer rebuilds the client's whole view of the server (#153). Typing is still recorded everywhere, so switching channels shows who is typing at once, but only the open channel's typing redraws anything or arms the expiry timer.
 - An animated emoji on screen no longer rebuilds the whole window for every frame (#155). Each emoji picks its own frame when the window redraws and asks for the next redraw when that frame ends, so a frame change is one redraw with no message, view rebuild or layout pass; an emoji scrolled out of view wakes nothing.
 - The voice log names why end-to-end decryption refused incoming audio (#215): during a key transition, from a sender outside our group, unencrypted, or no key of the sender's epoch (or a replayed packet). All four were one "keys out of step" line, so a call that kept dropping audio could not say which one it was.

@@ -1,0 +1,64 @@
+# cargo deny check: advisories, licences, duplicate versions and sources of
+# the shipped graph (the three release targets, no dev-dependencies).
+
+[graph]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+exclude-dev = true
+
+[advisories]
+ignore = [
+    # rsa: Marvin timing side channel. Used only by QR login, with a key
+    # generated per attempt that decrypts a handful of messages; the attack
+    # needs a long-lived key and very many timed decryptions. No fixed release
+    # exists.
+    { id = "RUSTSEC-2023-0071", reason = "per-attempt QR-login key, too few decryptions for Marvin" },
+    # DAVE (davey 0.1.4 -> openmls_rust_crypto -> hpke-rs / p256) pins these;
+    # no compatible fixed release. Revisit when davey moves.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 pinned by p256 in davey" },
+    { id = "RUSTSEC-2026-0212", reason = "libcrux-secrets 0.0.5 pinned by hpke-rs in davey" },
+    { id = "RUSTSEC-2026-0207", reason = "libcrux-sha3 0.0.8 pinned by hpke-rs in davey" },
+    { id = "RUSTSEC-2026-0208", reason = "libcrux-sha3 0.0.8 pinned by hpke-rs in davey" },
+    # tract-nnef comes with deep_filter at its pinned git rev and only ever
+    # parses the model bundled in the binary, never user input.
+    { id = "RUSTSEC-2026-0217", reason = "tract-nnef parses only the bundled DeepFilterNet model" },
+]
+# Unmaintained crates deep in the graph have no replacement we control; only
+# direct dependencies of workspace crates fail the check.
+unmaintained = "workspace"
+
+[licenses]
+# Every licence must be compatible with GPL-3.0-only (the workspace licence).
+allow = [
+    "GPL-3.0-only",
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+# Workspace path crates and the rev-pinned git dependency are versionless;
+# [sources] below is what restricts where crates come from.
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/Rikorose/DeepFilterNet"]
