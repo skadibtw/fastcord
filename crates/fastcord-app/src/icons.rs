@@ -4,9 +4,10 @@
 mod catalog;
 pub use catalog::Icon;
 
+use crate::ui::button;
 use iced::mouse;
 use iced::widget::canvas::{self, Canvas};
-use iced::widget::{button, container, row, text, tooltip};
+use iced::widget::{container, row, text, tooltip};
 use iced::{Color, Element, Length, Renderer, Theme};
 
 use crate::style;

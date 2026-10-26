@@ -1,13 +1,14 @@
 //! Participant interaction and a bounded context menu. Opening it is local;
 //! profile reads and server mutations require their own explicit action.
 use crate::i18n::{tr, trf};
+use crate::ui::button;
 use crate::{Message, friends, gateway::VoiceControls, style};
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_discord::{MemberAction, RestError};
 use fastcord_model::{Snowflake, User};
 use iced::widget::{
-    button, column, container, mouse_area, opaque, responsive, row, scrollable, slider, space,
-    stack, text, text_input,
+    column, container, mouse_area, opaque, responsive, row, scrollable, slider, space, stack, text,
+    text_input,
 };
 use iced::{Element, Length, Point};
 use iced_renderer::core::{self, layout, mouse, overlay, renderer, widget};
@@ -198,7 +199,7 @@ pub fn view<'a>(
                         StageSeat::Hand => ("Approve request", StageAction::Invite(user)),
                         StageSeat::Audience => ("Invite to speak", StageAction::Invite(user)),
                     };
-                    card = card.push(text(tr("STAGE")).size(11).style(text::secondary));
+                    card = card.push(text(tr("STAGE")).size(11).color(crate::style::muted()));
                     card = card.push(action(
                         label,
                         (!restricted).then_some(Message::Stage(crate::stage::Event::Do(request))),
@@ -341,7 +342,7 @@ fn server_section<'a>(
             tr("SERVER ACTIONS")
         })
         .size(11)
-        .style(text::secondary),
+        .color(crate::style::muted()),
     );
     for element in rows {
         card = card.push(element);

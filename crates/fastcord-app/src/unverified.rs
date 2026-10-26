@@ -4,9 +4,10 @@
 //! starts over on restart, logout and account switch. In fake mode every group
 //! is already on.
 
+use crate::ui::button;
 use fastcord_discord::{RestClient, WriteGroup};
 use iced::Element;
-use iced::widget::{button, checkbox, column, row, text};
+use iced::widget::{checkbox, column, row, text};
 
 use crate::Message;
 use crate::i18n::tr;

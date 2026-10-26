@@ -12,12 +12,13 @@
 //! Discord's refusal with "Confirm in the official client" and is not answered
 //! here. Both session routes are unverified (`docs/PROTOCOL.md`).
 
+use crate::ui::button;
 use fastcord_discord::{
     AuthSession, MFA_REQUIRED, RestClient, RestError, RetryableFailure, SecurityOverview,
     is_mfa_required,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{button, column, row, scrollable, text};
+use iced::widget::{column, row, space, text};
 use iced::{Element, Length, Task};
 
 use crate::accounts::Index;
@@ -265,12 +266,12 @@ pub fn view<'a>(
     if !state.open {
         return None;
     }
-    let mut body = column![text(tr("Saved accounts")).size(14)].spacing(6);
+    let mut body = column![text(tr("Saved accounts")).size(16).font(crate::ui::BOLD)].spacing(6);
     for entry in index.entries() {
         let mut line = row![text(entry.label()).size(13).width(Length::Fill)].spacing(8);
         if entry.id == active {
             line = line
-                .push(text(tr("Active")).size(12).style(text::secondary))
+                .push(text(tr("Active")).size(12).color(crate::style::muted()))
                 .push(button(text(tr("Log out of fastcord")).size(12)).on_press(Event::Logout));
         } else {
             line =
@@ -291,11 +292,12 @@ pub fn view<'a>(
             tr("This session is memory-only; switching would lose it, so Switch is off.")
         })
         .size(12)
-        .style(text::secondary),
+        .color(crate::style::muted()),
     );
     let overview = state.overview.unwrap_or_default();
     body = body
-        .push(text(tr("Security")).size(14))
+        .push(space().height(12))
+        .push(text(tr("Security")).size(16).font(crate::ui::BOLD))
         .push(text(trf(
             "Two-factor authentication: {}",
             &[&flag(overview.mfa_enabled, "on", "off")]
@@ -311,13 +313,13 @@ pub fn view<'a>(
         .push(
             text(tr("Changing the password, two-factor authentication, passkeys and account recovery is done in the official client or Discord's website, not here."))
                 .size(12)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         )
         .push(button(text(tr("Open account settings in the browser")).size(12)).on_press(Event::OpenWeb))
         .push(button(text(tr("Authorized apps")).size(12)).on_press(Event::OpenApps))
         .push(
             row![
-                text(tr("Sessions")).size(14).width(Length::Fill),
+                text(tr("Sessions")).size(16).font(crate::ui::BOLD).width(Length::Fill),
                 button(text(tr("Reload")).size(12)).on_press_maybe((!state.loading).then_some(Event::Reload)),
             ],
         );
@@ -343,7 +345,7 @@ pub fn view<'a>(
                 tr("One of these is probably fastcord; logging it out ends this login.")
             })
             .size(12)
-            .style(text::secondary),
+            .color(crate::style::muted()),
         );
     }
     if let Some(pending) = &state.pending {
@@ -367,20 +369,9 @@ pub fn view<'a>(
     if let Some(notice) = &state.notice {
         body = body.push(text(notice.clone()).size(12).style(text::danger));
     }
-    Some(
-        column![
-            row![
-                text(tr("Accounts and security"))
-                    .size(13)
-                    .width(Length::Fill),
-                crate::icons::close(Some(Event::Toggle)),
-            ],
-            scrollable(body).height(Length::Fixed(320.0)),
-        ]
-        .spacing(6)
-        .max_width(720)
-        .into(),
-    )
+    // A page of the settings screen: it has the title, the cross and the
+    // scrolling.
+    Some(body.into())
 }
 
 #[cfg(test)]

@@ -8,10 +8,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::ui::button;
 use fastcord_model::markup::{self, Block, BlockKind, Kind, Span as Part, Style};
 use fastcord_model::{Embed, EmbedMedia, Message, SnapshotMessage, Snowflake, User};
 use iced::font::{self, Font, Weight};
-use iced::widget::{button, column, container, image, rich_text, row, space, span, text};
+use iced::widget::{column, container, image, rich_text, row, space, span, text};
 use iced::{Background, Color, Element, Length};
 
 use crate::avatars::AvatarKey;
@@ -545,7 +546,11 @@ impl<'a> Renderer<'a> {
             head.push(author.name.as_str());
         }
         if !head.is_empty() {
-            body = body.push(text(head.join(" \u{b7} ")).size(12).style(text::secondary));
+            body = body.push(
+                text(head.join(" \u{b7} "))
+                    .size(12)
+                    .color(crate::style::muted()),
+            );
         }
         if let Some(title) = &embed.title {
             let mut item = span(title.as_str()).size(15).font(Font {
@@ -630,7 +635,7 @@ impl<'a> Renderer<'a> {
             body = body.push(
                 text(footer.text.as_str())
                     .size(11)
-                    .style(text::secondary)
+                    .color(crate::style::muted())
                     .wrapping(text::Wrapping::WordOrGlyph),
             );
         }

@@ -7,9 +7,10 @@
 
 use std::collections::HashMap;
 
+use crate::ui::button;
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_discord::{DISCOVERY_PAGE, DiscoveredGuild, RestClient, RestError};
-use iced::widget::{button, column, container, image, row, scrollable, text};
+use iced::widget::{column, container, image, row, scrollable, text};
 use iced::{Element, Length, Task};
 
 use crate::avatars::{self, AvatarKey};
@@ -161,15 +162,19 @@ pub fn view<'a>(
             info = info.push(
                 text(guild.description.clone())
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             );
         }
-        info = info.push(text(counts_line(guild)).size(12).style(text::secondary));
+        info = info.push(
+            text(counts_line(guild))
+                .size(12)
+                .color(crate::style::muted()),
+        );
         let mut line = row![face, info.width(Length::Fill)]
             .spacing(10)
             .align_y(iced::Alignment::Center);
         if joined {
-            line = line.push(text(tr("Joined")).size(12).style(text::secondary));
+            line = line.push(text(tr("Joined")).size(12).color(crate::style::muted()));
         }
         list = list.push(line);
     }
@@ -188,7 +193,7 @@ pub fn view<'a>(
         list = list.push(
             text(trf("Showing the first {} servers.", &[&state.guilds.len()]))
                 .size(12)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
     }
     Some(
@@ -203,7 +208,7 @@ pub fn view<'a>(
                 "To join a server, open an invite link to it. Searching the list is not available."
             ))
             .size(12)
-            .style(text::secondary),
+            .color(crate::style::muted()),
             scrollable(list).height(Length::Fixed(280.0)),
         ]
         .spacing(6)

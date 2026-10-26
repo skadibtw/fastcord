@@ -4,11 +4,12 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
+use crate::ui::button;
 use fastcord_discord::state::Store;
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_model::{Emoji, GuildEmoji, Snowflake};
 use iced::Element;
-use iced::widget::{button, column, container, mouse_area, pick_list, row, text, text_input};
+use iced::widget::{column, container, mouse_area, pick_list, row, text, text_input};
 
 use crate::Message;
 use crate::emoji::{self, Asset, Occurrence, Origin};
@@ -547,31 +548,59 @@ pub fn view<'a>(
             .height(28)
             .into(),
     };
-    let body = column![
-        row![text(if picker.reaction.is_some() { tr("React with emoji") } else { tr("Emoji") }).size(20), crate::icons::close(Some(Message::EmojiPicker(Event::Close)))].spacing(12),
-        text_input(tr("Search names, aliases or emoji"), &picker.request.query)
-            .id("emoji-search").on_input(|query| Message::EmojiPicker(Event::Search(query))),
-        pick_list(categories, Some(picker.request.category), |category| Message::EmojiPicker(Event::Category(category))),
-        container(virtual_list::view_rows("emoji-list", snapshot.offset / COLUMNS, snapshot.total.div_ceil(COLUMNS), cells,
-            |window| Message::EmojiPicker(Event::Window(window)), CELL)).height(VIEW_HEIGHT),
-        footer,
-        text(if snapshot.total == 0 && current { tr("No available emoji match this search.") } else { "" }).size(12),
-        text(if picker.reaction.is_some() {
-            tr("Animated and external emoji may require Nitro. Account entitlements are not assumed; a reaction Discord rejects is reported above the message box.")
+    // The window around it (tabs, title, cross) is the expressions window's.
+    let empty = snapshot.total == 0 && current;
+    column![
+        row![
+            text_input(tr("Search names, aliases or emoji"), &picker.request.query)
+                .id("emoji-search")
+                .on_input(|query| Message::EmojiPicker(Event::Search(query)))
+                .width(iced::Length::Fill),
+            pick_list(categories, Some(picker.request.category), |category| {
+                Message::EmojiPicker(Event::Category(category))
+            })
+            .width(150),
+        ]
+        .spacing(6),
+        container(virtual_list::view_rows(
+            "emoji-list",
+            snapshot.offset / COLUMNS,
+            snapshot.total.div_ceil(COLUMNS),
+            cells,
+            |window| Message::EmojiPicker(Event::Window(window)),
+            CELL
+        ))
+        .height(VIEW_HEIGHT),
+        if empty {
+            Element::from(
+                text(tr("No available emoji match this search."))
+                    .size(13)
+                    .height(28)
+                    .color(crate::style::muted()),
+            )
         } else {
-            tr("Animated and external emoji may require Nitro. Account entitlements are not assumed; Discord rejections appear beside unsent messages.")
-        }).size(11),
-        iced::widget::tooltip(
-            text(tr("Twemoji 17.0.3 · Unicode 16.0 · Attribution (hover)")).size(10),
-            container(text(include_str!("../../../assets/emoji/NOTICE.txt")).size(10)).width(420).padding(8),
-            iced::widget::tooltip::Position::Top,
-        ),
-    ].spacing(8);
-    container(body)
-        .width(440)
-        .padding(12)
-        .style(container::rounded_box)
-        .into()
+            footer
+        },
+        row![
+            text(tr("Animated and external emoji may need Nitro."))
+                .size(11)
+                .color(crate::style::muted())
+                .width(iced::Length::Fill),
+            iced::widget::tooltip(
+                text(tr("Twemoji 17.0.3 · Unicode 16.0"))
+                    .size(10)
+                    .color(crate::style::muted()),
+                container(text(include_str!("../../../assets/emoji/NOTICE.txt")).size(10))
+                    .width(420)
+                    .padding(8)
+                    .style(container::rounded_box),
+                iced::widget::tooltip::Position::Top,
+            ),
+        ]
+        .spacing(6),
+    ]
+    .spacing(8)
+    .into()
 }
 
 #[cfg(test)]

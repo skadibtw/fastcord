@@ -39,13 +39,13 @@ use crate::i18n::{tr, trf, trn};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::ui::button;
 use fastcord_discord::state::Suppression;
 use fastcord_model::{Attachment, Emoji, Message, Snowflake, StickerItem, User};
 use iced::alignment::{Horizontal, Vertical};
 use iced::font::{Font, Weight};
 use iced::widget::{
-    Container, button, checkbox, column, container, hover, image, mouse_area, row, stack, text,
-    tooltip,
+    Container, checkbox, column, container, hover, image, mouse_area, row, stack, text, tooltip,
 };
 use iced::{Element, Length, Padding};
 
@@ -933,7 +933,7 @@ pub fn view<'a>(
 }
 
 fn centered(message: &'static str) -> Element<'static, Event> {
-    container(text(tr(message)).size(14).style(text::secondary))
+    container(text(tr(message)).size(14).color(crate::style::muted()))
         .center(Length::Fill)
         .into()
 }
@@ -947,7 +947,7 @@ fn pill_button(label: &'static str, event: Event) -> Element<'static, Event> {
             bottom: 4.0,
             left: 12.0,
         })
-        .style(button::secondary)
+        .style(crate::style::secondary_button(false))
         .into()
 }
 
@@ -1107,7 +1107,7 @@ fn row_button(label: &'static str, event: Event) -> button::Button<'static, Even
             bottom: 2.0,
             left: 8.0,
         })
-        .style(button::secondary)
+        .style(crate::style::secondary_button(false))
 }
 
 /// Hover actions stay compact; confirmation and attachment buttons keep captions.
@@ -1235,7 +1235,7 @@ fn reactions_line<'a>(
                         channel_id,
                         message_id: row.message.id,
                     })
-                    .style(button::secondary),
+                    .style(crate::style::secondary_button(false)),
                 hint("Add reaction"),
                 tooltip::Position::Top,
             )
@@ -1266,11 +1266,11 @@ fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
     let detail: Element<'_, Event> = match &users.state {
         UsersState::Loading if users.poll_answer.is_some() => text(tr("Loading voters…"))
             .size(12)
-            .style(text::secondary)
+            .color(crate::style::muted())
             .into(),
         UsersState::Loading => text(tr("Loading who reacted…"))
             .size(12)
-            .style(text::secondary)
+            .color(crate::style::muted())
             .into(),
         UsersState::Failed(reason) => text(tr(reason)).size(12).style(text::danger).into(),
         UsersState::Loaded { names, ids, more }
@@ -1291,7 +1291,7 @@ fn users_panel(users: &ReactionUsers) -> Element<'_, Event> {
                 );
             }
             if *more {
-                list = list.push(text(tr("and others")).size(12).style(text::secondary));
+                list = list.push(text(tr("and others")).size(12).color(crate::style::muted()));
             }
             list = list.push(row_button(
                 "Clear all of this emoji",
@@ -1378,7 +1378,7 @@ fn hidden_view<'a>(kind: Suppression) -> Element<'a, Event> {
         Suppression::Blocked => tr("Message from a blocked user hidden."),
     })
     .size(12)
-    .style(text::secondary)
+    .color(crate::style::muted())
     .into()
 }
 
@@ -1411,7 +1411,7 @@ fn message_view<'a>(
             crate::localtime::offset()
         ))
         .size(12)
-        .style(text::secondary),
+        .color(crate::style::muted()),
     ]
     .spacing(8)
     .align_y(Vertical::Center);
@@ -1423,14 +1423,14 @@ fn message_view<'a>(
                 tr("Jumped here")
             })
             .size(12)
-            .style(text::secondary),
+            .color(crate::style::muted()),
         );
     }
     if message.edited_timestamp.is_some() {
-        header = header.push(text(tr("(edited)")).size(12).style(text::secondary));
+        header = header.push(text(tr("(edited)")).size(12).color(crate::style::muted()));
     }
     if message.is_crossposted() {
-        header = header.push(text(tr("Published")).size(12).style(text::secondary));
+        header = header.push(text(tr("Published")).size(12).color(crate::style::muted()));
     }
     // An edit being saved shows its new text right away.
     let content = content(row);
@@ -1450,7 +1450,7 @@ fn message_view<'a>(
             .width(Length::Fill)
             .wrapping(text::Wrapping::WordOrGlyph);
         body = if matches!(reply.state, ReplyState::Deleted | ReplyState::Hidden) {
-            body.push(preview.style(text::secondary))
+            body.push(preview.color(crate::style::muted()))
         } else {
             body.push(
                 button(preview)
@@ -1459,7 +1459,7 @@ fn message_view<'a>(
                         message_id: reply.target,
                     })
                     .padding([2, 4])
-                    .style(button::secondary),
+                    .style(crate::style::secondary_button(false)),
             )
         };
     }
@@ -1470,7 +1470,7 @@ fn message_view<'a>(
         body = body.push(
             text(trf("Published from {}", &[&author_name(message, assets)]))
                 .size(12)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
     }
     let cx = rich::Cx {
@@ -1499,7 +1499,7 @@ fn message_view<'a>(
     } else if message.embeds.is_empty()
         && let Some(note) = placeholder(message)
     {
-        body = body.push(text(note).size(13).style(text::secondary));
+        body = body.push(text(note).size(13).color(crate::style::muted()));
     }
     if let Some(snapshot) = message.forwarded() {
         body = body.push(forwarded_view(
@@ -1533,7 +1533,7 @@ fn message_view<'a>(
             row![
                 text(tr("Only you can see this"))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
                 row_button(
                     "Dismiss",
                     Event::DismissEphemeral {
@@ -1575,7 +1575,7 @@ fn message_view<'a>(
     {
         body = body.push(users_panel(users));
     }
-    let status = |line: &'static str| text(tr(line)).size(12).style(text::secondary);
+    let status = |line: &'static str| text(tr(line)).size(12).color(crate::style::muted());
 
     let retry = row_button(
         "Retry",
@@ -1664,7 +1664,7 @@ fn message_view<'a>(
         )
     };
     if continues && message.edited_timestamp.is_some() {
-        body = body.push(text(tr("(edited)")).size(11).style(text::secondary));
+        body = body.push(text(tr("(edited)")).size(11).color(crate::style::muted()));
     }
     let inner = match gutter {
         Some(gutter) => row![gutter, body.width(Length::Fill)],
@@ -1952,7 +1952,7 @@ fn poll_view<'a>(
             "Select one answer"
         }))
         .size(12)
-        .style(text::secondary),
+        .color(crate::style::muted()),
     ]
     .spacing(4);
     for answer in &poll.answers {
@@ -1988,7 +1988,7 @@ fn poll_view<'a>(
                         answer_id: answer.answer_id,
                     })
                     .padding([2, 8])
-                    .style(button::secondary),
+                    .style(crate::style::secondary_button(false)),
             );
         }
         body = body.push(line);
@@ -2010,12 +2010,12 @@ fn poll_view<'a>(
             &[&trn(total, "{} vote", "{} votes"), &status],
         ))
         .size(12)
-        .style(text::secondary)
+        .color(crate::style::muted())
     ]
     .spacing(8)
     .align_y(Vertical::Center);
     if row.poll_saving {
-        footer = footer.push(text(tr("Saving…")).size(12).style(text::secondary));
+        footer = footer.push(text(tr("Saving…")).size(12).color(crate::style::muted()));
     } else if row.own && !ended {
         footer = footer.push(row_button(
             "End poll",
@@ -2043,7 +2043,7 @@ fn forwarded_view<'a>(
     cx: rich::Cx<'a>,
     assets: Attachments<'a>,
 ) -> Element<'a, Event> {
-    let mut body = column![text(tr("Forwarded")).size(12).style(text::secondary)].spacing(2);
+    let mut body = column![text(tr("Forwarded")).size(12).color(crate::style::muted())].spacing(2);
     let parts = rich::Parts::snapshot(message, snapshot);
     if !snapshot.content.is_empty() {
         body = body.push(
@@ -2084,7 +2084,7 @@ fn forwarded_view<'a>(
         body = body.push(
             text(tr("The forwarded message has no content to show."))
                 .size(13)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
     }
     container(body)
@@ -2119,7 +2119,7 @@ fn sticker_view<'a>(
     } else {
         trf("Sticker: {}", &[&sticker.name])
     };
-    text(note).size(13).style(text::secondary).into()
+    text(note).size(13).color(crate::style::muted()).into()
 }
 
 fn attachment_view(
@@ -2136,7 +2136,7 @@ fn attachment_view(
             .size(13)
             .width(Length::Fill)
             .wrapping(text::Wrapping::WordOrGlyph)
-            .style(text::secondary),
+            .color(crate::style::muted()),
     ]
     .spacing(4);
     match state {
@@ -2158,11 +2158,11 @@ fn attachment_view(
             content = content.push(
                 text(tr("Loading image preview…"))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             );
         }
         Some(AttachmentView::Failed(reason)) => {
-            content = content.push(text(tr(reason)).size(12).style(text::secondary));
+            content = content.push(text(tr(reason)).size(12).color(crate::style::muted()));
         }
         None => {}
     }

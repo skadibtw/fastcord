@@ -13,6 +13,7 @@
 //! again when the answer cannot be read); Community shows what `GUILD_UPDATE`
 //! brings. Discord's validation messages are shown as it wrote them.
 
+use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::{AdminKind, GuildAdmin, NavigationSnapshot};
 use fastcord_discord::{
     CommunityError, CommunityRequestError, GuideDoc, GuideEntry, Known,
@@ -25,7 +26,7 @@ use fastcord_discord::{
 };
 use fastcord_model::Snowflake;
 use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, space, text, text_input,
+    checkbox, column, container, pick_list, row, scrollable, space, text, text_input,
 };
 use iced::{Element, Length, Task};
 
@@ -313,6 +314,11 @@ impl Refs {
 }
 
 impl State {
+    /// The server the panel is open for.
+    pub fn page(&self) -> Option<Snowflake> {
+        self.panel.as_ref().map(|panel| panel.guild)
+    }
+
     /// Logout or account change.
     pub fn clear(&mut self) {
         *self = Self {
@@ -985,7 +991,9 @@ impl<T> std::fmt::Display for Item<T> {
 
 fn small<'a>(label: impl Into<String>) -> iced::widget::Text<'a> {
     let label = label.into();
-    text(tr(&label).to_owned()).size(12).style(text::secondary)
+    text(tr(&label).to_owned())
+        .size(12)
+        .color(crate::style::muted())
 }
 
 fn labelled<'a>(label: &str, control: Element<'a, Event>) -> Element<'a, Event> {
@@ -1082,9 +1090,11 @@ fn rules_view<'a>(ed: &'a RulesEd, edit: bool) -> Element<'a, Event> {
             .align_y(iced::Alignment::Center),
         );
     }
-    panel = panel.push(button(text(tr("Add rule")).size(12)).on_press_maybe(
-        (edit && rules.rules.len() < MAX_RULES_EDITED).then_some(Event::Rules(RulesMsg::Add)),
-    ));
+    panel = panel.push(
+        primary_button(text(tr("Add rule")).size(12)).on_press_maybe(
+            (edit && rules.rules.len() < MAX_RULES_EDITED).then_some(Event::Rules(RulesMsg::Add)),
+        ),
+    );
     if let Some(screening) = &ed.baseline {
         for (kind, label) in RulesEdit::other_fields(screening) {
             panel = panel.push(small(trf(
@@ -1542,20 +1552,7 @@ pub fn view<'a>(
             .into()
     }))
     .spacing(6);
-    let mut body = column![
-        row![
-            text(trf(
-                "Community setup: {}",
-                &[&admin.map_or(tr("server"), |a| a.name.as_str())]
-            ))
-            .size(14),
-            space::horizontal(),
-            crate::icons::close(idle.then_some(Event::Close)),
-        ]
-        .align_y(iced::Alignment::Center),
-        tabs,
-    ]
-    .spacing(6);
+    let mut body = column![tabs,].spacing(6);
     let Some(admin) = admin else {
         body = body.push(small("This server is not available."));
         return Some(container(body).padding([6, 0]).into());

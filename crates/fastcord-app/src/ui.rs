@@ -3,7 +3,7 @@
 //! (blurple) marks the main action or the current choice; red is only for
 //! errors and destructive actions.
 
-use iced::widget::{button, column, container, mouse_area, opaque, row, space, text};
+use iced::widget::{column, container, mouse_area, opaque, row, space, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Theme};
 
 use crate::icons::{self, Icon};
@@ -13,6 +13,22 @@ pub const BOLD: iced::Font = iced::Font {
     weight: iced::font::Weight::Bold,
     ..iced::Font::DEFAULT
 };
+
+/// iced's button module, beside the neutral [`button`] below.
+pub mod button {
+    pub use iced::widget::button::*;
+}
+
+/// A button, grey unless styled: the accent marks only the main action of a
+/// section ([`primary_button`]); red only danger.
+pub fn button<'a, M>(content: impl Into<Element<'a, M>>) -> iced::widget::Button<'a, M> {
+    iced::widget::button(content).style(style::secondary_button(false))
+}
+
+/// The main action of a section, filled with the accent.
+pub fn primary_button<'a, M>(content: impl Into<Element<'a, M>>) -> iced::widget::Button<'a, M> {
+    iced::widget::button(content).style(style::action_button(false))
+}
 
 /// The main action of a form: full width, 44 px tall.
 pub fn primary<'a, M: Clone + 'a>(
@@ -305,17 +321,25 @@ pub fn popover<'a, M: Clone + 'a>(
 
 /// A dialog in the middle of a dimmed window; a click on the dim closes it.
 pub fn modal<'a, M: Clone + 'a>(card: Element<'a, M>, close: M) -> Element<'a, M> {
+    modal_maybe(card, Some(close))
+}
+
+/// [`modal`] whose dim may do nothing (a request the dialog waits for).
+pub fn modal_maybe<'a, M: Clone + 'a>(card: Element<'a, M>, close: Option<M>) -> Element<'a, M> {
+    let dim = mouse_area(
+        container(space())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.6))),
+                ..container::Style::default()
+            }),
+    );
     iced::widget::stack![
-        mouse_area(
-            container(space())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.6))),
-                    ..container::Style::default()
-                })
-        )
-        .on_press(close),
+        match close {
+            Some(close) => dim.on_press(close),
+            None => dim,
+        },
         container(opaque(card))
             .width(Length::Fill)
             .height(Length::Fill)
@@ -323,6 +347,29 @@ pub fn modal<'a, M: Clone + 'a>(card: Element<'a, M>, close: M) -> Element<'a, M
             .center(Length::Fill),
     ]
     .into()
+}
+
+/// A panel that brings its own title and cross, as a dialog card.
+pub fn sheet<'a, M: 'a>(body: Element<'a, M>, width: f32) -> Element<'a, M> {
+    container(iced::widget::scrollable(body).spacing(6))
+        .padding(20)
+        .max_width(width)
+        .max_height(640)
+        .style(|_| container::Style {
+            background: Some(Background::Color(style::CHAT)),
+            border: Border {
+                radius: 8.0.into(),
+                ..Border::default()
+            },
+            text_color: Some(style::TEXT),
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+                offset: iced::Vector::new(0.0, 8.0),
+                blur_radius: 24.0,
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// A dialog's card: title row with a close cross, then the body.

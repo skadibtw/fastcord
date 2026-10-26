@@ -49,6 +49,18 @@ pub const PANELS: &[&str] = &[
     "requests",
     "settings",
     "close-menus",
+    "escape",
+    "gif",
+    "sticker",
+    "profile",
+    "accounts",
+    "server-settings",
+    "roles",
+    "group",
+    "long-draft",
+    "create-channel",
+    "network-details",
+    "friend-menu",
 ];
 
 /// One step of a `--script`.

@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use crate::ui::{button, primary_button};
 use fastcord_audio::{DeviceChoice, FilePlayer, PlayerState};
 use fastcord_discord::state::navigation::{GuildAssets, NavigationSnapshot};
 use fastcord_discord::{
@@ -25,9 +26,7 @@ use fastcord_discord::{
     SoundFile, SoundboardSound, StickerFile,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{
-    button, column, container, image, row, scrollable, slider, space, text, text_input,
-};
+use iced::widget::{column, container, image, row, scrollable, slider, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::attachments::{AttachmentCache, DecodedImage};
@@ -203,7 +202,8 @@ impl Preview {
 }
 
 pub struct State {
-    guild: Option<Snowflake>,
+    /// Open for this server.
+    pub guild: Option<Snowflake>,
     tab: Tab,
     serial: u64,
     busy: Option<Busy>,
@@ -951,7 +951,7 @@ impl State {
 fn small<'a>(line: impl AsRef<str>) -> iced::widget::Text<'a> {
     text(tr(line.as_ref()).to_owned())
         .size(12)
-        .style(text::secondary)
+        .color(crate::style::muted())
 }
 
 fn slots(used: usize, limit: usize) -> String {
@@ -968,10 +968,6 @@ pub fn view<'a>(
     let guild = state.guild?;
     let idle = state.busy.is_none();
     let assets = navigation.assets.as_ref().filter(|a| a.id == guild);
-    let title = assets.map_or_else(
-        || tr("Emoji, stickers and sounds").to_owned(),
-        |a| trf("Emoji, stickers and sounds: {}", &[&a.name]),
-    );
     let tab = |label: &'static str, which: Tab| {
         button(text(tr(label)).size(13))
             .on_press_maybe(idle.then_some(Event::Tab(which)))
@@ -982,12 +978,6 @@ pub fn view<'a>(
             })
     };
     let mut panel = column![
-        row![
-            text(title).size(13),
-            space::horizontal(),
-            crate::icons::close(idle.then_some(Event::Close)),
-        ]
-        .align_y(iced::Alignment::Center),
         row![
             tab("Emoji", Tab::Emoji),
             tab("Stickers", Tab::Stickers),
@@ -1041,7 +1031,7 @@ fn file_row<'a>(
         label
     }));
     line = line.push(
-        button(text(tr("Upload")).size(12))
+        primary_button(text(tr("Upload")).size(12))
             .on_press_maybe((idle && ready).then_some(Event::Upload)),
     );
     line.into()
@@ -1056,7 +1046,7 @@ fn name_input<'a>(draft: &'a Draft, hint: &'static str) -> Element<'a, Event> {
 
 fn edit_buttons<'a>(idle: bool) -> Element<'a, Event> {
     row![
-        button(text(tr("Save")).size(12)).on_press_maybe(idle.then_some(Event::Save)),
+        primary_button(text(tr("Save")).size(12)).on_press_maybe(idle.then_some(Event::Save)),
         button(text(tr("Cancel")).size(12)).on_press(Event::CancelEdit),
     ]
     .spacing(6)
@@ -1087,10 +1077,10 @@ fn actions<'a>(
     row![
         button(text(tr("Edit")).size(12))
             .on_press_maybe((idle && allowed).then_some(Event::StartEdit(target)))
-            .style(button::secondary),
+            .style(crate::style::secondary_button(false)),
         button(text(tr("Delete")).size(12))
             .on_press_maybe((idle && allowed).then_some(Event::AskDelete(target)))
-            .style(button::secondary),
+            .style(crate::style::secondary_button(false)),
     ]
     .spacing(6)
     .into()
@@ -1310,7 +1300,7 @@ fn sound_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
                         .size(12)
                     )
                     .on_press_maybe(d.picked.is_some().then_some(Event::Preview(None)))
-                    .style(button::secondary),
+                    .style(crate::style::secondary_button(false)),
                     small(length),
                 ]
                 .spacing(8)
@@ -1360,7 +1350,7 @@ fn sound_view<'a>(state: &'a State, assets: &'a GuildAssets, idle: bool) -> Elem
                     .size(12)
                 )
                 .on_press_maybe(s.available.then_some(Event::Preview(Some(s.id))))
-                .style(button::secondary),
+                .style(crate::style::secondary_button(false)),
                 actions(state, assets, target, s.creator, idle),
             ]
             .spacing(8)

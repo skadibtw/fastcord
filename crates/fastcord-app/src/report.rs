@@ -15,13 +15,14 @@
 
 use std::fmt;
 
+use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_discord::{
     NetworkFailure, NodeKind, RelationshipAction, ReportMenu, ReportReceipt, ReportRequestError,
     ReportTarget, RestClient, RestError, RetryableFailure,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{button, column, container, row, scrollable, space, text};
+use iced::widget::{column, container, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 
 use crate::i18n::{tr, trf};
@@ -490,7 +491,7 @@ pub fn view<'a>(
             tr("Reports go to Discord's Trust & Safety. Nothing is sent until you press Submit on the review step.")
         )
         .size(11)
-        .style(text::secondary),
+        .color(crate::style::muted()),
     ]
     .spacing(6);
     let mut footer = row![].spacing(6);
@@ -506,7 +507,7 @@ pub fn view<'a>(
                     panel = panel.push(
                         text(node.subheader.as_str())
                             .size(11)
-                            .style(text::secondary),
+                            .color(crate::style::muted()),
                     );
                 }
                 let mut list = column![].spacing(4);
@@ -553,11 +554,11 @@ pub fn view<'a>(
                         &[&tr(subject.label), &tr(subject.label)],
                     ))
                     .size(11)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
                 );
             footer = footer
                 .push(
-                    button(text(tr("Submit report")).size(12))
+                    primary_button(text(tr("Submit report")).size(12))
                         .on_press(Event::Submit)
                         .style(button::danger),
                 )
@@ -581,7 +582,7 @@ pub fn view<'a>(
                         &[&name],
                     ))
                     .size(11)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
                 );
                 footer = footer
                     .push(small(
@@ -622,7 +623,7 @@ pub fn view<'a>(
     }
     panel = panel.push(footer);
     if let Some(notice) = &session.notice {
-        panel = panel.push(text(notice.as_str()).size(12).style(text::secondary));
+        panel = panel.push(text(notice.as_str()).size(12).color(crate::style::muted()));
     }
     Some(
         container(panel)

@@ -73,6 +73,7 @@ mod rich;
 mod safety;
 mod scheduled_events;
 mod search;
+mod server_settings;
 mod settings;
 mod shortcuts;
 mod slash;
@@ -98,11 +99,13 @@ mod voice_settings;
 use crate::attachments::AttachmentKey;
 use std::sync::Arc;
 
+use crate::ui::{button, primary_button};
+use fastcord_discord::state::navigation::AdminKind;
 use fastcord_discord::{CallSignal, IndexScope, RemoteAuthEvent, RestError, UserToken};
 use fastcord_model::{Snowflake, VoiceStateRequest};
 use fastcord_platform::{NativeCredentialStore, StoreError};
 use gateway::{AttachmentAction, GatewayPanel, GatewayStatus};
-use iced::widget::{button, center, checkbox, column, container, row, scrollable, text};
+use iced::widget::{checkbox, column, container, row, scrollable, text};
 use iced::{Color, Element, Length, Task};
 use login::{LoginError, LoginOutcome, Persistence, Session, StoreReady};
 #[cfg(test)]
@@ -511,6 +514,9 @@ enum Message {
     OpenAudioSettings,
     CloseAudioSettings,
     Settings(settings::Event),
+    /// Opens a page of a server's (or channel's) settings screen.
+    ServerSettings(Snowflake, server_settings::Section),
+    CloseServerSettings,
     /// A menu row was chosen: close the open menus, then do it.
     MenuPick(Box<Message>),
     /// The quick device menu above the microphone.
@@ -814,6 +820,8 @@ impl App {
                     .or(self.apps.wanted_guild())
                     .or(self.community.wanted())
                     .or(self.automod.wanted())
+                    // The settings screen's list needs the server's permissions.
+                    .or(self.assets.guild)
                     .or(match self.menu {
                         Some(Menu::Server(guild)) => Some(guild),
                         _ => None,
@@ -994,7 +1002,19 @@ impl App {
     /// typing (an IME included) never produces a message.
     fn navigation_keys(&self) -> iced::Subscription<Message> {
         if !matches!(self.phase, Phase::Account { .. }) {
-            return iced::Subscription::none();
+            // Before sign-in only the settings screen listens: Esc closes it.
+            if !self.audio_settings.open {
+                return iced::Subscription::none();
+            }
+            return iced::event::listen_with(|event, status, _| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::Shortcut(switcher::Shortcut::Escape {
+                    captured: matches!(status, iced::event::Status::Captured),
+                })),
+                _ => None,
+            });
         }
         let mut parts = vec![iced::event::listen_with(|event, status, _| match event {
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
@@ -1402,8 +1422,13 @@ impl App {
                 self.network_settings.saving = false;
                 self.network_settings.notice = Some(result);
             }
-            network_ui::Action::Open => self.network_settings.open = true,
-            network_ui::Action::Close => self.network_settings.open = false,
+            // The network page is a section of the settings screen.
+            network_ui::Action::Open => {
+                return self.handle(Message::Settings(settings::Event::Open(
+                    settings::Section::Network,
+                )));
+            }
+            network_ui::Action::Details(open) => self.network_settings.details = open,
             network_ui::Action::Retry => {
                 let context = self.network.clone();
                 return Task::perform(
@@ -1543,9 +1568,14 @@ impl App {
             }
             fake::Step::Size(width, height) => iced::window::latest()
                 .and_then(move |id| iced::window::resize(id, iced::Size::new(width, height))),
-            fake::Step::Snap(path) => iced::window::latest()
-                .and_then(iced::window::screenshot)
-                .map(move |shot| Message::FakeShot(path.clone(), shot)),
+            fake::Step::Snap(path) => {
+                // A watcher may copy the screen itself: overlays drawn by the
+                // compositor are missing from the window's own pixels.
+                eprintln!("script: snap {}", path.display());
+                iced::window::latest()
+                    .and_then(iced::window::screenshot)
+                    .map(move |shot| Message::FakeShot(path.clone(), shot))
+            }
             fake::Step::Toggle(panel) => self.handle(match panel {
                 "search" => Message::Search(search::Event::Toggle),
                 "pins" => Message::Pins(pins::Event::Toggle),
@@ -1554,11 +1584,13 @@ impl App {
                 "emoji" => Message::EmojiPicker(emoji_picker::Event::Toggle),
                 "audio" => Message::OpenAudioSettings,
                 "app" => Message::Settings(settings::Event::Open(settings::Section::App)),
-                "network" => Message::Network(if self.network_settings.open {
-                    network_ui::Action::Close
-                } else {
-                    network_ui::Action::Open
-                }),
+                "network" => {
+                    if self.network_settings.open {
+                        Message::Settings(settings::Event::Close)
+                    } else {
+                        Message::Network(network_ui::Action::Open)
+                    }
+                }
                 "chat" => Message::Settings(settings::Event::Open(settings::Section::Chat)),
                 "login-qr" => {
                     Message::LoginUi(login_screen::Event::Method(login_screen::Method::Qr))
@@ -1578,6 +1610,36 @@ impl App {
                 "requests" => Message::ShowRequests,
                 "settings" => Message::Settings(settings::Event::Open(settings::Section::Voice)),
                 "close-menus" => Message::OpenMenu(None),
+                "escape" => Message::Shortcut(switcher::Shortcut::Escape { captured: false }),
+                "gif" => Message::Expressions(Expressions::Gif),
+                "sticker" => Message::Expressions(Expressions::Sticker),
+                "profile" => Message::Settings(settings::Event::Open(settings::Section::Profile)),
+                "accounts" => Message::Settings(settings::Event::Open(settings::Section::Accounts)),
+                "server-settings" => {
+                    Message::GuildAdmin(guild_admin::Event::Settings(Snowflake(5001)))
+                }
+                "roles" => Message::GuildAdmin(guild_admin::Event::Roles(Snowflake(5001))),
+                "group" => Message::Group(group_dm::Event::Toggle),
+                "create-channel" => {
+                    Message::GuildAdmin(guild_admin::Event::CreateChannel(Snowflake(5001), None))
+                }
+                "network-details" => {
+                    Message::Network(network_ui::Action::Details(!self.network_settings.details))
+                }
+                "friend-menu" => match &self.phase {
+                    Phase::Account { gateway, .. } => Message::Friends(friends::Event::Menu(
+                        gateway.navigation.relationships.first().map(|r| r.user.id),
+                    )),
+                    _ => Message::OpenMenu(None),
+                },
+                "long-draft" => Message::Composer(composer::Event::Complete {
+                    replaced: 0,
+                    insertion: "A longer draft
+with a second line
+and a third
+and a fourth"
+                        .into(),
+                }),
                 _ => Message::Account(account_panel::Event::Toggle),
             }),
             fake::Step::Join(guild, channel) => {
@@ -1593,11 +1655,11 @@ impl App {
             Message::JoinVoice(..) | Message::StartCall(_) | Message::AcceptCall(_)
         ) && !self.network.media_supported()
         {
-            self.network_settings.open = true;
+            let opened = self.network_event(network_ui::Action::Open);
             self.network_settings.notice = Some(
                 "This proxy configuration carries TCP only. Voice, camera and screen sharing require a UDP-capable relay; no direct media connection was opened.",
             );
-            return Task::none();
+            return opened;
         }
         match message {
             Message::NetworkProgress => {}
@@ -1806,8 +1868,17 @@ impl App {
             }
             Message::Settings(settings::Event::Open(section)) => {
                 let opening = !self.audio_settings.open;
-                self.settings_section = section;
-                let mut tasks = Vec::new();
+                let moved = std::mem::replace(&mut self.settings_section, section) != section;
+                self.network_settings.open = section == settings::Section::Network;
+                // A new page starts at its title.
+                let mut tasks = vec![if moved || opening {
+                    iced::widget::operation::scroll_to(
+                        settings::PAGE,
+                        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+                    )
+                } else {
+                    Task::none()
+                }];
                 if opening {
                     tasks.push(self.handle(Message::OpenAudioSettings));
                 }
@@ -1831,6 +1902,44 @@ impl App {
                 }
                 return Task::batch(tasks);
             }
+            Message::ServerSettings(guild, section) => {
+                let Phase::Account { gateway, .. } = &self.phase else {
+                    return Task::none();
+                };
+                let voice = section.channel().is_some_and(|channel| {
+                    gateway.navigation.admin.as_ref().is_some_and(|admin| {
+                        admin.channels.iter().any(|c| {
+                            c.id == channel && matches!(c.kind, AdminKind::Voice | AdminKind::Stage)
+                        })
+                    })
+                });
+                self.close_menus();
+                let close = self.close_server_pages();
+                use server_settings::Section;
+                let open = self.handle(Message::GuildAdmin(match section {
+                    Section::Overview => guild_admin::Event::Settings(guild),
+                    Section::Roles => guild_admin::Event::Roles(guild),
+                    Section::Expressions => guild_admin::Event::Assets(guild),
+                    Section::Community => guild_admin::Event::Community(guild),
+                    Section::AutoMod => guild_admin::Event::AutoMod(guild),
+                    Section::Integrations => guild_admin::Event::Apps(guild),
+                    Section::Bans => guild_admin::Event::Bans(guild),
+                    Section::Audit => guild_admin::Event::Audit(guild),
+                    Section::Channel(channel) => {
+                        guild_admin::Event::EditChannel(guild, channel, voice)
+                    }
+                    Section::Webhooks(channel) => guild_admin::Event::Webhooks(guild, channel),
+                }));
+                return Task::batch([
+                    close,
+                    open,
+                    iced::widget::operation::scroll_to(
+                        settings::PAGE,
+                        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+                    ),
+                ]);
+            }
+            Message::CloseServerSettings => return self.close_server_pages(),
             Message::MenuPick(message) => {
                 self.close_menus();
                 return self.handle(*message);
@@ -1904,6 +2013,7 @@ impl App {
             }
             Message::CloseAudioSettings => {
                 self.audio_settings.open = false;
+                self.network_settings.open = false;
                 self.mic_panel.close();
                 let mut closing = Vec::new();
                 if self.identity.is_open() {
@@ -2433,6 +2543,7 @@ impl App {
                 ]);
             }
             Message::ShowDirects(on) => {
+                self.close_expressions();
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.directs = on;
                 }
@@ -2505,6 +2616,9 @@ impl App {
             Message::Forum(event) => return self.forum_event(event),
             Message::Friends(event) => {
                 self.requests_open = false;
+                if matches!(event, friends::Event::Open) {
+                    self.close_expressions();
+                }
                 if matches!(
                     event,
                     friends::Event::Profile(_)
@@ -2562,6 +2676,7 @@ impl App {
                 }
             }
             Message::SelectGuild(guild) => {
+                self.close_expressions();
                 self.requests_open = false;
                 self.member_menu.close();
                 self.threads.close();
@@ -2575,6 +2690,7 @@ impl App {
                 }
             }
             Message::SelectChannel(guild, channel) => {
+                self.close_expressions();
                 self.member_menu.close();
                 // Opens a channel's messages (a voice or Stage channel's chat
                 // included); it never touches the voice connection.
@@ -3077,6 +3193,7 @@ impl App {
                 }
             }
             Message::SelectPrivateChannel(channel) => {
+                self.close_expressions();
                 self.requests_open = false;
                 self.threads.close();
                 self.nav_pending = true;
@@ -3924,7 +4041,6 @@ impl App {
         gateway: &'a GatewayPanel,
         guild: Snowflake,
     ) -> Element<'a, Message> {
-        use fastcord_model::Permissions;
         let pick = |message| Some(Message::MenuPick(Box::new(message)));
         let admin = gateway
             .navigation
@@ -3953,64 +4069,25 @@ impl App {
                 .and_then(|channel| pick(Message::Invite(invite::Event::Create(guild, channel)))),
         ),]
         .spacing(1);
-        let manage = [
-            (
-                icons::Icon::Settings,
-                "Server settings",
-                can(|a| a.can_manage_guild),
-                guild_admin::Event::Settings(guild),
-            ),
-            (
-                icons::Icon::Plus,
-                "Create channel",
-                can(|a| a.can_manage_channels),
-                guild_admin::Event::CreateChannel(guild, None),
-            ),
-            (
-                icons::Icon::Group,
-                "Roles",
-                can(|a| a.can_manage_roles),
-                guild_admin::Event::Roles(guild),
-            ),
-            (
-                icons::Icon::Emoji,
-                "Emoji, stickers and sounds",
-                can(|a| {
-                    a.mine.contains(Permissions::CREATE_GUILD_EXPRESSIONS)
-                        || a.mine.contains(Permissions::MANAGE_GUILD_EXPRESSIONS)
-                }),
-                guild_admin::Event::Assets(guild),
-            ),
-            (
-                icons::Icon::Safety,
-                "AutoMod",
-                can(|a| a.can_manage_guild),
-                guild_admin::Event::AutoMod(guild),
-            ),
-            (
-                icons::Icon::Block,
-                "Bans",
-                can(|a| a.mine.contains(Permissions::BAN_MEMBERS)),
-                guild_admin::Event::Bans(guild),
-            ),
-            (
-                icons::Icon::File,
-                "Audit log",
-                can(|a| a.mine.contains(Permissions::VIEW_AUDIT_LOG)),
-                guild_admin::Event::Audit(guild),
-            ),
-        ];
-        // Only what this account may do is listed.
-        let allowed: Vec<_> = manage.into_iter().filter(|(_, _, ok, _)| *ok).collect();
-        if !allowed.is_empty() {
+        // Only what this account may do is listed; every management page
+        // is a section of the one settings screen.
+        let settings = server_settings::Section::first(admin);
+        if settings.is_some() || can(|a| a.can_manage_channels) {
             rows = rows.push(ui::separator());
-            for (icon, label, _, event) in allowed {
-                rows = rows.push(ui::item(
-                    Some(icon),
-                    i18n::tr(label),
-                    pick(admin_event(event)),
-                ));
-            }
+        }
+        if let Some(section) = settings {
+            rows = rows.push(ui::item(
+                Some(icons::Icon::Settings),
+                i18n::tr("Server settings"),
+                pick(Message::ServerSettings(guild, section)),
+            ));
+        }
+        if can(|a| a.can_manage_channels) {
+            rows = rows.push(ui::item(
+                Some(icons::Icon::Plus),
+                i18n::tr("Create channel"),
+                pick(admin_event(guild_admin::Event::CreateChannel(guild, None))),
+            ));
         }
         rows = rows
             .push(ui::separator())
@@ -4073,6 +4150,103 @@ impl App {
         )
     }
 
+    /// The server or channel settings page that is open: the first open
+    /// panel that is one.
+    fn server_page(&self) -> Option<(Snowflake, server_settings::Section)> {
+        use server_settings::Section;
+        self.guild_admin
+            .page()
+            .or_else(|| self.assets.guild.map(|g| (g, Section::Expressions)))
+            .or_else(|| self.community.page().map(|g| (g, Section::Community)))
+            .or_else(|| self.automod.page().map(|g| (g, Section::AutoMod)))
+            .or_else(|| self.apps.page())
+            .or_else(|| self.moderation.page())
+    }
+
+    /// Closes every panel that is a settings page.
+    fn close_server_pages(&mut self) -> Task<Message> {
+        let mut closing = Vec::new();
+        if self.guild_admin.page().is_some() {
+            closing.push(Message::GuildAdmin(guild_admin::Event::Close));
+        }
+        if self.assets.guild.is_some() {
+            closing.push(Message::Assets(assets::Event::Close));
+        }
+        if self.community.page().is_some() {
+            closing.push(Message::Community(community::Event::Close));
+        }
+        if self.automod.page().is_some() {
+            closing.push(Message::AutoMod(automod::Event::Close));
+        }
+        if self.apps.page().is_some() {
+            closing.push(Message::Apps(apps::Event::Close));
+        }
+        if self.moderation.page().is_some() {
+            closing.push(Message::Moderation(moderation::Event::Close));
+        }
+        Task::batch(
+            closing
+                .into_iter()
+                .map(|m| self.handle(m))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// The server or channel settings screen around the open page's panel.
+    fn server_screen<'a>(
+        &'a self,
+        gateway: &'a GatewayPanel,
+        guild: Snowflake,
+        section: server_settings::Section,
+    ) -> Element<'a, Message> {
+        use server_settings::Section;
+        let navigation = &gateway.navigation;
+        let empty = || -> Element<'a, Message> { text("").into() };
+        let content: Element<'a, Message> = match section {
+            Section::Overview | Section::Roles | Section::Channel(_) => {
+                guild_admin::view(&self.guild_admin, navigation)
+                    .map_or_else(empty, |panel| panel.map(Message::GuildAdmin))
+            }
+            Section::Expressions => assets::view(&self.assets, navigation)
+                .map_or_else(empty, |panel| panel.map(Message::Assets)),
+            Section::Community => community::view(&self.community, navigation)
+                .map_or_else(empty, |panel| panel.map(Message::Community)),
+            Section::AutoMod => automod::view(&self.automod, navigation)
+                .map_or_else(empty, |panel| panel.map(Message::AutoMod)),
+            Section::Integrations | Section::Webhooks(_) => apps::view(&self.apps, navigation)
+                .map_or_else(empty, |panel| panel.map(Message::Apps)),
+            Section::Bans | Section::Audit => moderation::view(&self.moderation, navigation)
+                .map_or_else(empty, |panel| panel.map(Message::Moderation)),
+        };
+        let admin = navigation.admin.as_ref().filter(|admin| admin.id == guild);
+        let guild_name = admin.map(|admin| admin.name.as_str()).or_else(|| {
+            navigation
+                .guilds
+                .rows
+                .iter()
+                .find(|row| row.id == guild)
+                .map(|row| row.name.as_str())
+        });
+        let channel = section.channel().and_then(|id| {
+            admin?.channels.iter().find(|c| c.id == id).map(|c| {
+                (
+                    c.name.as_str(),
+                    matches!(c.kind, AdminKind::Text | AdminKind::Announcement),
+                )
+            })
+        });
+        server_settings::view(
+            server_settings::Page {
+                guild,
+                guild_name: guild_name.unwrap_or(""),
+                section,
+                channel,
+                admin,
+            },
+            content,
+        )
+    }
+
     /// The open tab of the expressions window, if it is open.
     fn expressions_tab(&self, gateway: &GatewayPanel) -> Option<Expressions> {
         if gateway.emoji_picker.request.open {
@@ -4108,36 +4282,52 @@ impl App {
         let full = gateway.emoji_picker.reaction().is_none()
             && gateway.composer.editing().is_none()
             && gateway.timeline.can_send;
-        if !full {
-            return body;
-        }
-        let mut choices = vec![
-            (Expressions::Emoji, i18n::tr("Emoji")),
-            (Expressions::Gif, "GIF"),
-        ];
-        if !gateway.directs {
-            choices.push((Expressions::Sticker, i18n::tr("Stickers")));
-        }
-        let card = |content: Element<'a, Message>, width: f32| -> Element<'a, Message> {
-            container(content)
-                .padding(8)
-                .width(width)
-                .style(style::card)
-                .into()
+        // One window of one size whatever the tab: the tabs and the cross
+        // never move under the pointer. A reaction or an edit offers emoji
+        // only, under a title instead of the tabs.
+        let head: Element<'a, Message> = if full {
+            ui::tabs(
+                &[
+                    (Expressions::Emoji, i18n::tr("Emoji")),
+                    (Expressions::Gif, "GIF"),
+                    (Expressions::Sticker, i18n::tr("Stickers")),
+                ],
+                tab,
+                Message::Expressions,
+            )
+        } else {
+            text(if gateway.emoji_picker.reaction().is_some() {
+                i18n::tr("React with emoji")
+            } else {
+                i18n::tr("Emoji")
+            })
+            .size(16)
+            .font(ui::BOLD)
+            .into()
         };
-        let tabs = ui::tabs(&choices, tab, Message::Expressions);
-        match tab {
-            Expressions::Emoji => column![card(tabs, 360.0), body]
-                .spacing(6)
-                .align_x(iced::alignment::Horizontal::Right)
-                .into(),
-            _ => card(
-                column![tabs, scrollable(body).height(Length::Shrink)]
-                    .spacing(8)
-                    .into(),
-                460.0,
-            ),
-        }
+        let close = match tab {
+            Expressions::Emoji => Message::EmojiPicker(emoji_picker::Event::Close),
+            Expressions::Gif => Message::Gif(gif::Event::Toggle),
+            Expressions::Sticker => Message::Sticker(sticker::Event::Toggle),
+        };
+        container(
+            column![
+                row![
+                    container(head).width(Length::Fill),
+                    icons::close(Some(close)),
+                ]
+                .spacing(8)
+                .height(36)
+                .align_y(iced::Alignment::Center),
+                container(body).height(Length::Fill),
+            ]
+            .spacing(10),
+        )
+        .padding(12)
+        .width(EXPRESSIONS_SIZE.width)
+        .height(EXPRESSIONS_SIZE.height)
+        .style(style::card)
+        .into()
     }
 
     /// The "+" menu of the message box.
@@ -4195,6 +4385,51 @@ impl App {
     }
 
     /// Closes every popover menu.
+    /// The emoji, GIF and sticker window belongs to the conversation it was
+    /// opened for; going elsewhere closes it.
+    fn close_expressions(&mut self) {
+        self.gif.close();
+        self.sticker.close();
+        if let Phase::Account { gateway, .. } = &mut self.phase {
+            gateway.emoji_picker.close();
+        }
+    }
+
+    /// What closes the dialog on top, if one is open (the inner `None`: it
+    /// waits for a request and cannot be closed now).
+    fn dialog_close(&self) -> Option<Option<Message>> {
+        let Phase::Account {
+            session, gateway, ..
+        } = &self.phase
+        else {
+            return None;
+        };
+        let navigation = &gateway.navigation;
+        if self.onboarding.is_open() {
+            Some(Some(Message::Onboarding(onboarding::Event::Close)))
+        } else if self.events.is_open_for(navigation.selected_guild) {
+            Some(Some(Message::Events(scheduled_events::Event::Close)))
+        } else if self.guild_admin.is_dialog() {
+            Some(Some(Message::GuildAdmin(guild_admin::Event::Close)))
+        } else if announce::view(&self.announce, navigation).is_some() {
+            Some(Some(Message::Announce(announce::Event::Close)))
+        } else if self.server_page().is_none() && apps::view(&self.apps, navigation).is_some() {
+            Some(Some(Message::Apps(apps::Event::Close)))
+        } else if self.invite.is_dialog() {
+            Some(self.invite.dismiss().map(Message::Invite))
+        } else if discover::view(&self.discover, navigation, &gateway.avatars.views).is_some() {
+            Some(Some(Message::Discover(discover::Event::Toggle)))
+        } else if group_dm::view(&self.group, navigation, session.user.id).is_some() {
+            Some(Some(Message::Group(group_dm::Event::Close)))
+        } else if report::view(&self.report, navigation).is_some() {
+            Some(Some(Message::Report(report::Event::Close)))
+        } else if self.forward.is_open() {
+            Some(Some(Message::Forward(forward::Event::Close)))
+        } else {
+            None
+        }
+    }
+
     fn close_menus(&mut self) {
         self.status.open = false;
         self.mic_menu = false;
@@ -5298,6 +5533,12 @@ impl App {
             return Task::none();
         };
         match event {
+            // The rail's right click opens the same menu as the server's name.
+            guild_admin::Event::Menu(guild) => {
+                self.close_menus();
+                self.menu = Some(Menu::Server(guild));
+                return Task::none();
+            }
             guild_admin::Event::Apps(guild) => {
                 return self.apps_event(apps::Event::OpenGuild(guild));
             }
@@ -5694,6 +5935,33 @@ impl App {
     /// A navigation chord (see [`switcher`]).
     fn navigation_shortcut(&mut self, shortcut: switcher::Shortcut) -> Task<Message> {
         use switcher::Shortcut;
+        if let Shortcut::Escape { .. } = shortcut {
+            // Whatever is on top closes first: a popover, a dialog, the
+            // expressions window, a settings screen, then the side panels.
+            if self.status.open || self.mic_menu || self.menu.is_some() {
+                self.close_menus();
+                return Task::none();
+            }
+            if self.new_dm.open {
+                self.new_dm.update(new_dm::Event::Close);
+                return Task::none();
+            }
+            if let Some(close) = self.dialog_close() {
+                return close.map_or_else(Task::none, |close| self.handle(close));
+            }
+            if let Phase::Account { gateway, .. } = &self.phase
+                && self.expressions_tab(gateway).is_some()
+            {
+                self.close_expressions();
+                return iced::widget::operation::focus(composer::EDITOR_ID);
+            }
+            if self.server_page().is_some() {
+                return self.close_server_pages();
+            }
+            if self.audio_settings.open {
+                return self.handle(Message::Settings(settings::Event::Close));
+            }
+        }
         let Phase::Account { gateway, .. } = &mut self.phase else {
             return Task::none();
         };
@@ -5740,22 +6008,22 @@ impl App {
                 Task::none()
             }
             Shortcut::Escape { captured } => {
-                // Popovers and the settings screen close first, topmost first.
-                if self.status.open || self.mic_menu || self.menu.is_some() {
-                    self.status.open = false;
-                    self.mic_menu = false;
-                    self.menu = None;
-                    return Task::none();
-                }
-                if self.new_dm.open {
-                    self.new_dm.update(new_dm::Event::Close);
-                    return Task::none();
-                }
-                if self.audio_settings.open {
-                    return Task::done(Message::Settings(settings::Event::Close));
-                }
+                // Then the side panels, the topmost first.
                 if self.inbox.is_open() {
                     return Task::done(Message::Inbox(inbox::Event::Toggle));
+                }
+                if self.notify_settings.is_open() {
+                    return Task::done(Message::NotifySettings(notify_settings::Event::Toggle));
+                }
+                if self.search.open {
+                    return Task::done(Message::Search(search::Event::Toggle));
+                }
+                if gateway
+                    .timeline
+                    .channel_id
+                    .is_some_and(|channel| self.pins.shows(channel))
+                {
+                    return Task::done(Message::Pins(pins::Event::Toggle));
                 }
                 if self.member_menu.target.is_some() {
                     self.member_menu.close();
@@ -5946,14 +6214,7 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let body = if self.network_settings.open {
-            center(scrollable(network_ui::view(
-                &self.network_settings,
-                &self.network,
-                matches!(self.phase, Phase::Login),
-            )))
-            .into()
-        } else if self.audio_settings.open {
+        let body = if self.audio_settings.open {
             self.settings_view()
         } else {
             self.view_body()
@@ -6011,11 +6272,12 @@ impl App {
             (settings::Section::Notifications, _) => {
                 audio_devices::notifications(&self.audio_preferences)
             }
+            (settings::Section::Network, _) => network_ui::view(
+                &self.network_settings,
+                &self.network,
+                matches!(self.phase, Phase::Login),
+            ),
             (settings::Section::App, _) => column![
-                ui::neutral(
-                    i18n::tr("Network recovery"),
-                    Some(Message::Network(network_ui::Action::Open))
-                ),
                 desktop::view(
                     self.audio_preferences.close_to_tray,
                     &self.tray,
@@ -6083,6 +6345,11 @@ impl App {
             && let Phase::Account { gateway, .. } = &self.phase
         {
             return desktop::compact_view(&gateway.controls.voice_controls());
+        }
+        if let Phase::Account { gateway, .. } = &self.phase
+            && let Some((guild, section)) = self.server_page()
+        {
+            return self.server_screen(gateway, guild, section);
         }
         if let Phase::Account {
             session,
@@ -6257,7 +6524,7 @@ impl App {
             let has_search = self.search.open && !search_bar_is_empty(gateway);
             let mut banner_column = column![].spacing(2);
             for (label, role) in [
-                ("Voice", fastcord_net::Role::Voice),
+                ("Voice calls", fastcord_net::Role::Voice),
                 ("Stream", fastcord_net::Role::Stream),
             ] {
                 let status = self.network.controller().service_status(role);
@@ -6272,9 +6539,15 @@ impl App {
                 ) {
                     banner_column = banner_column.push(
                         row![
-                            text(format!("{label}: {}", network_ui::status_text(status))).size(13),
-                            button("Network recovery")
-                                .on_press(Message::Network(network_ui::Action::Open)),
+                            text(format!(
+                                "{}: {}",
+                                i18n::tr(label),
+                                network_ui::status_text(status)
+                            ))
+                            .size(13),
+                            button(text(i18n::tr("Network settings")).size(12))
+                                .on_press(Message::Network(network_ui::Action::Open))
+                                .style(style::secondary_button(false)),
                         ]
                         .spacing(8),
                     );
@@ -6325,54 +6598,89 @@ impl App {
             {
                 banner_column = banner_column.push(panel.map(Message::Voice));
             }
+            // Forms open as dialogs over the window; only their reminder
+            // lines and notices stay above the conversation.
+            let mut dialogs: Vec<(Element<'_, Message>, Option<Message>)> = Vec::new();
             if let Some(panel) =
                 onboarding::view(&self.onboarding, &gateway.navigation, &gateway.revealed)
             {
-                banner_column = banner_column.push(panel.map(Message::Onboarding));
+                let panel = panel.map(Message::Onboarding);
+                if self.onboarding.is_open() {
+                    dialogs.push((panel, Some(Message::Onboarding(onboarding::Event::Close))));
+                } else {
+                    banner_column = banner_column.push(panel);
+                }
             }
             if let Some(panel) = scheduled_events::view(&self.events, &gateway.navigation) {
-                banner_column = banner_column.push(panel.map(Message::Events));
+                let panel = panel.map(Message::Events);
+                if self.events.is_open_for(gateway.navigation.selected_guild) {
+                    dialogs.push((panel, Some(Message::Events(scheduled_events::Event::Close))));
+                } else {
+                    banner_column = banner_column.push(panel);
+                }
             }
             if let Some(panel) = guild_admin::view(&self.guild_admin, &gateway.navigation) {
-                banner_column = banner_column.push(panel.map(Message::GuildAdmin));
-            }
-            if let Some(panel) = community::view(&self.community, &gateway.navigation) {
-                banner_column = banner_column.push(panel.map(Message::Community));
+                let panel = panel.map(Message::GuildAdmin);
+                if self.guild_admin.is_dialog() {
+                    dialogs.push((panel, Some(Message::GuildAdmin(guild_admin::Event::Close))));
+                } else {
+                    banner_column = banner_column.push(panel);
+                }
             }
             if let Some(panel) = announce::view(&self.announce, &gateway.navigation) {
-                banner_column = banner_column.push(panel.map(Message::Announce));
-            }
-            if let Some(panel) = moderation::view(&self.moderation, &gateway.navigation) {
-                banner_column = banner_column.push(panel.map(Message::Moderation));
+                dialogs.push((
+                    panel.map(Message::Announce),
+                    Some(Message::Announce(announce::Event::Close)),
+                ));
             }
             if let Some(panel) = apps::view(&self.apps, &gateway.navigation) {
-                banner_column = banner_column.push(panel.map(Message::Apps));
-            }
-            if let Some(panel) = assets::view(&self.assets, &gateway.navigation) {
-                banner_column = banner_column.push(panel.map(Message::Assets));
-            }
-            if let Some(panel) = automod::view(&self.automod, &gateway.navigation) {
-                banner_column = banner_column.push(panel.map(Message::AutoMod));
+                // The account's authorized apps; server pages are a screen.
+                dialogs.push((
+                    panel.map(Message::Apps),
+                    Some(Message::Apps(apps::Event::Close)),
+                ));
             }
             if let Some(panel) = invite::view(&self.invite, localtime::now()) {
-                banner_column = banner_column.push(panel.map(Message::Invite));
+                let panel = panel.map(Message::Invite);
+                if self.invite.is_dialog() {
+                    dialogs.push((panel, self.invite.dismiss().map(Message::Invite)));
+                } else {
+                    banner_column = banner_column.push(panel);
+                }
             }
             if let Some(panel) =
                 discover::view(&self.discover, &gateway.navigation, &gateway.avatars.views)
             {
-                banner_column = banner_column.push(panel.map(Message::Discover));
+                dialogs.push((
+                    panel.map(Message::Discover),
+                    Some(Message::Discover(discover::Event::Toggle)),
+                ));
             }
             if let Some(panel) = group_dm::view(&self.group, &gateway.navigation, session.user.id) {
-                banner_column = banner_column.push(panel.map(Message::Group));
+                dialogs.push((
+                    panel.map(Message::Group),
+                    Some(Message::Group(group_dm::Event::Close)),
+                ));
             }
             if let Some(panel) = report::view(&self.report, &gateway.navigation) {
-                banner_column = banner_column.push(panel.map(Message::Report));
+                dialogs.push((
+                    panel.map(Message::Report),
+                    Some(Message::Report(report::Event::Close)),
+                ));
             }
             if self.forward.is_open()
                 && let Some(panel) = forward::view(&self.forward, &forward_candidates(gateway))
             {
-                banner_column = banner_column.push(panel.map(Message::Forward));
+                dialogs.push((
+                    panel.map(Message::Forward),
+                    Some(Message::Forward(forward::Event::Close)),
+                ));
             }
+            // One at a time: the first open one.
+            let dialog = dialogs
+                .into_iter()
+                .next()
+                .map(|(panel, close)| ui::modal_maybe(ui::sheet(panel, 640.0), close));
             if let Some(panel) = threads::view(&self.threads) {
                 banner_column = banner_column.push(panel.map(Message::Threads));
             }
@@ -6381,7 +6689,7 @@ impl App {
                 banner_column = banner_column.push(if danger {
                     line.style(text::danger)
                 } else {
-                    line.style(text::secondary)
+                    line.color(crate::style::muted())
                 });
             }
             if matches!(
@@ -6406,7 +6714,7 @@ impl App {
                                 .size(13)
                                 .font(bold)
                                 .width(Length::Fill),
-                            button(text(i18n::tr("Accept")).size(12))
+                            primary_button(text(i18n::tr("Accept")).size(12))
                                 .on_press(Message::AcceptCall(call.channel_id))
                                 .style(style::action_button(false)),
                             button(text(i18n::tr("Decline")).size(12))
@@ -6804,6 +7112,10 @@ impl App {
                 Some(menu) => iced::widget::stack![screen, menu].into(),
                 None => screen,
             };
+            let screen = match dialog {
+                Some(dialog) => iced::widget::stack![screen, dialog].into(),
+                None => screen,
+            };
             let overlay: Option<Element<'_, Message>> = if self.switcher.is_open() {
                 Some(
                     switcher::view(&self.switcher, &gateway.navigation.quick, |channel| {
@@ -6975,6 +7287,9 @@ fn own_user<'a>(
         .filter(|user| user.id == session.user.id)
         .unwrap_or(&session.user)
 }
+
+/// The emoji, GIF and sticker window: the emoji grid sets its size.
+const EXPRESSIONS_SIZE: iced::Size = iced::Size::new(440.0, 470.0);
 
 /// Most embed pictures asked for at once.
 const MAX_WANTED_PICTURES: usize = 16;
@@ -7861,6 +8176,30 @@ mod tests {
         // Plain arrows do nothing while the switcher is closed.
         let _ = app.update(Message::Shortcut(Shortcut::Move(1)));
         assert!(!app.switcher.is_open());
+    }
+
+    #[test]
+    fn escape_closes_the_topmost_layer_first_and_settings_before_sign_in() {
+        use switcher::Shortcut;
+        let escape = Message::Shortcut(Shortcut::Escape { captured: false });
+        // Before sign-in the settings screen closes too.
+        let mut app = login_app();
+        let _ = app.update(Message::Settings(settings::Event::Open(
+            settings::Section::Network,
+        )));
+        assert!(app.audio_settings.open && app.network_settings.open);
+        let _ = app.update(escape.clone());
+        assert!(!app.audio_settings.open && !app.network_settings.open);
+        // Signed in: a menu over the settings goes first, then the screen.
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let _ = app.update(Message::Settings(settings::Event::Open(
+            settings::Section::Chat,
+        )));
+        app.mic_menu = true;
+        let _ = app.update(escape.clone());
+        assert!(!app.mic_menu && app.audio_settings.open);
+        let _ = app.update(escape);
+        assert!(!app.audio_settings.open);
     }
 
     #[test]

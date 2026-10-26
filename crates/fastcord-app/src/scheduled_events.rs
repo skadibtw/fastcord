@@ -11,6 +11,7 @@
 //! an ambiguous failure reads "may have been applied". Times are shown and
 //! typed in the local time zone as it was at start-up (no DST history).
 
+use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot};
 use fastcord_discord::{DraftError, EventAction, EventDraft, RestClient, RestError};
 use fastcord_model::markup::TimeStyle;
@@ -18,7 +19,7 @@ use fastcord_model::{
     EventKind, EventStatus, MAX_DESCRIPTION_CHARS, MAX_LOCATION_CHARS, MAX_NAME_CHARS,
     ScheduledEvent, Snowflake,
 };
-use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
+use iced::widget::{column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
@@ -290,6 +291,11 @@ fn draft_of(form: &Form) -> Result<EventDraft, String> {
 }
 
 impl State {
+    /// The events of `selected`, the open server, are shown.
+    pub fn is_open_for(&self, selected: Option<Snowflake>) -> bool {
+        self.guild.is_some() && self.guild == selected
+    }
+
     /// Logout or account change.
     pub fn clear(&mut self) {
         *self = Self {
@@ -653,8 +659,8 @@ fn banner<'a>(state: &'a State, navigation: &'a NavigationSnapshot) -> Option<El
     if let Some(channel) = event.joinable_channel()
         && joinable(navigation, guild, channel)
     {
-        actions =
-            actions.push(button(text(tr("Join")).size(13)).on_press(Event::Join(guild, channel)));
+        actions = actions
+            .push(primary_button(text(tr("Join")).size(13)).on_press(Event::Join(guild, channel)));
     }
     actions = actions
         .push(button(text(tr("Details")).size(13)).on_press(Event::Open(guild)))
@@ -676,7 +682,8 @@ fn list_body<'a>(
     let mut tools = row![].spacing(6);
     if permissions.manage || permissions.create {
         tools = tools.push(
-            button(text(tr("New event")).size(13)).on_press_maybe((!busy).then_some(Event::New)),
+            primary_button(text(tr("New event")).size(13))
+                .on_press_maybe((!busy).then_some(Event::New)),
         );
     }
     tools = tools.push(
@@ -697,7 +704,7 @@ fn list_body<'a>(
                         count(event)
                     ))
                     .size(11)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
                 ]
                 .spacing(2),
             )
@@ -779,8 +786,8 @@ fn detail_body<'a>(
     if let (Some(channel), Some(guild)) = (event.joinable_channel(), state.guild)
         && joinable(navigation, guild, channel)
     {
-        actions =
-            actions.push(button(text(tr("Join")).size(13)).on_press(Event::Join(guild, channel)));
+        actions = actions
+            .push(primary_button(text(tr("Join")).size(13)).on_press(Event::Join(guild, channel)));
     }
     let mut out = column![back, info, actions].spacing(8);
     if manages(navigation, event) {

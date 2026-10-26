@@ -13,13 +13,14 @@
 //! zeroized) when the panel closes or the account changes. Nothing is ever
 //! posted through a webhook.
 
+use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::{AdminKind, NavigationSnapshot};
 use fastcord_discord::{
     AuthorizedApp, Integration, MAX_WEBHOOK_NAME, RestClient, RestError, Webhook, authorize_url,
     parse_client_id,
 };
 use fastcord_model::{Permissions, Snowflake};
-use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
+use iced::widget::{column, container, row, scrollable, space, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::announce::{can_manage_webhooks, describe};
@@ -103,6 +104,16 @@ fn tidy(mut name: String) -> String {
 }
 
 impl State {
+    /// The server settings page this panel is, when it is one.
+    pub fn page(&self) -> Option<(Snowflake, crate::server_settings::Section)> {
+        use crate::server_settings::Section;
+        match self.panel.as_ref()? {
+            Panel::Guild(guild, _) => Some((*guild, Section::Integrations)),
+            Panel::Webhooks { guild, channel, .. } => Some((*guild, Section::Webhooks(*channel))),
+            Panel::Authorized(_) => None,
+        }
+    }
+
     pub fn clear(&mut self) {
         *self = Self {
             serial: self.serial.wrapping_add(1),
@@ -604,7 +615,7 @@ fn add_app<'a>(state: &'a State, idle: bool) -> Element<'a, Event> {
             text_input(tr("App client id"), &state.client_input)
                 .on_input(Event::ClientInput)
                 .size(13),
-            button(text(tr("Add app via the browser")).size(12))
+            primary_button(text(tr("Add app via the browser")).size(12))
                 .on_press_maybe(idle.then_some(Event::AddInBrowser)),
         ]
         .spacing(6),
@@ -612,7 +623,7 @@ fn add_app<'a>(state: &'a State, idle: bool) -> Element<'a, Event> {
             "Consent happens on Discord's own page; fastcord never authorizes an app itself."
         ))
         .size(12)
-        .style(text::secondary),
+        .color(crate::style::muted()),
     ]
     .spacing(4)
     .into()
@@ -629,23 +640,28 @@ pub fn view<'a>(
         Panel::Guild(..) => tr("Apps and integrations"),
         Panel::Webhooks { .. } => tr("Webhooks"),
     };
-    let mut body = column![
-        row![
-            text(title).size(13),
-            space::horizontal(),
-            crate::icons::close(idle.then_some(Event::Close)),
-        ]
-        .align_y(iced::Alignment::Center)
-    ]
-    .spacing(6);
-    let loading =
-        |loaded: bool| (!loaded).then(|| text(tr("Loading...")).size(12).style(text::secondary));
+    // Server and channel pages sit in the settings screen, which has the
+    // title and the cross; the account's list keeps its own.
+    let mut body = column![].spacing(6);
+    if matches!(panel, Panel::Authorized(_)) {
+        body = body.push(
+            row![
+                text(title).size(13),
+                space::horizontal(),
+                crate::icons::close(idle.then_some(Event::Close)),
+            ]
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    let loading = |loaded: bool| {
+        (!loaded).then(|| text(tr("Loading...")).size(12).color(crate::style::muted()))
+    };
     match panel {
         Panel::Authorized(list) => {
             body = body.push(
                 text(tr("Apps you authorized with your account. This list uses an unverified Discord route."))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             );
             body = body.extend(loading(list.is_some()).map(iced::Element::from));
             let rows = list.iter().flatten().map(|app| {
@@ -662,7 +678,7 @@ pub fn view<'a>(
                         when(&app.authorized_at)
                     ))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
                     removal(state, Target::App(app.id), idle, "this authorization"),
                 ]
                 .spacing(2)
@@ -678,7 +694,7 @@ pub fn view<'a>(
                 body = body.push(
                     text(tr("No integrations or bots."))
                         .size(12)
-                        .style(text::secondary),
+                        .color(crate::style::muted()),
                 );
             }
             let rows = list.iter().flatten().map(|i| {
@@ -704,7 +720,7 @@ pub fn view<'a>(
                         "Command permissions of each app are managed in the official client.",
                     ))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
                 )
                 .push(add_app(state, idle));
         }
@@ -717,14 +733,14 @@ pub fn view<'a>(
             body = body.push(
                 text(tr("Incoming webhooks of this channel. The URL is a secret: copying it is your click only, and fastcord never posts through a webhook."))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             );
             body = body.extend(loading(list.is_some()).map(iced::Element::from));
             if list.as_ref().is_some_and(Vec::is_empty) {
                 body = body.push(
                     text(tr("No incoming webhooks."))
                         .size(12)
-                        .style(text::secondary),
+                        .color(crate::style::muted()),
                 );
             }
             let targets: Vec<_> = navigation
@@ -765,20 +781,20 @@ pub fn view<'a>(
                                 .on_press_maybe(idle.then_some(Event::SaveName)),
                         ]
                         .spacing(6),
-                        text(tr("Move to:")).size(12).style(text::secondary),
+                        text(tr("Move to:")).size(12).color(crate::style::muted()),
                     ]
                     .spacing(4);
                     if targets.is_empty() {
                         edit = edit.push(
                             text(tr("No other text channel where you have Manage Webhooks."))
                                 .size(12)
-                                .style(text::secondary),
+                                .color(crate::style::muted()),
                         );
                     }
                     for t in &targets {
                         edit = edit.push(
                             button(text(format!("#{}", t.name)).size(12))
-                                .style(button::secondary)
+                                .style(crate::style::secondary_button(false))
                                 .on_press_maybe(idle.then_some(Event::MoveTo(t.id))),
                         );
                     }
@@ -792,7 +808,7 @@ pub fn view<'a>(
                         text_input(tr("New webhook name"), &state.name_input)
                             .on_input(Event::NameInput)
                             .size(13),
-                        button(text(tr("Create")).size(12))
+                        primary_button(text(tr("Create")).size(12))
                             .on_press_maybe(idle.then_some(Event::Create)),
                     ]
                     .spacing(6),

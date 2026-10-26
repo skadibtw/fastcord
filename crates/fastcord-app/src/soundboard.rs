@@ -21,10 +21,11 @@
 
 use std::sync::Arc;
 
+use crate::ui::button;
 use fastcord_audio::{DeviceChoice, FilePlayer, PlayerState};
 use fastcord_discord::{RestClient, RestError, SoundboardSound};
 use fastcord_model::Snowflake;
-use iced::widget::{button, column, container, row, scrollable, slider, text, text_input};
+use iced::widget::{column, container, row, scrollable, slider, text, text_input};
 use iced::{Element, Length, Task};
 use serde_json::{Value, json};
 
@@ -616,7 +617,7 @@ impl State {
 
 pub fn view(state: &State) -> Option<Element<'_, Event>> {
     let open = state.open?;
-    let note = |line: &'static str| text(tr(line)).size(12).style(text::secondary);
+    let note = |line: &'static str| text(tr(line)).size(12).color(crate::style::muted());
     let controls = row![
         text(tr("Soundboard of this server")).size(13),
         iced::widget::space::horizontal(),
@@ -689,7 +690,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             text(label).size(13).width(Length::Fill),
             button(text(tr(if previewing { "Stop" } else { "Preview" })).size(12))
                 .on_press_maybe(sound.available.then_some(Event::Preview(sound.id)))
-                .style(button::secondary),
+                .style(crate::style::secondary_button(false)),
             button(text(tr("Play")).size(12))
                 .on_press_maybe(play_enabled.then_some(Event::Play(sound.id)))
                 .style(button::primary),

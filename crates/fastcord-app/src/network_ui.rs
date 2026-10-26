@@ -1,8 +1,9 @@
 //! Network preferences share the per-user settings directory and fake namespace.
+use crate::ui::button;
 use fastcord_discord::UserToken;
 use fastcord_net::proxy::{ProxyConfig, ProxyKind};
 use fastcord_net::settings::{Mode, Settings};
-use iced::widget::{button, checkbox, column, container, row, text, text_input};
+use iced::widget::{checkbox, column, container, row, text, text_input};
 use iced::{Element, Length};
 use std::sync::Arc;
 
@@ -112,6 +113,8 @@ impl Default for Loaded {
 #[derive(Default)]
 pub struct State {
     pub open: bool,
+    /// The technical explanations are unfolded.
+    pub details: bool,
     pub settings: Settings,
     pub notice: Option<&'static str>,
     pub saving: bool,
@@ -126,7 +129,7 @@ pub struct State {
 #[derive(Clone, Debug)]
 pub enum Action {
     Open,
-    Close,
+    Details(bool),
     Retry,
     Retried,
     Mode(Mode),
@@ -355,50 +358,190 @@ pub fn view<'a>(
     context: &fastcord_net::NetworkContext,
     editable: bool,
 ) -> Element<'a, crate::Message> {
-    let choose = |label, mode| {
-        button(label).on_press_maybe(
-            (editable && !state.saving).then_some(crate::Message::Network(Action::Mode(mode))),
-        )
+    use crate::i18n::tr;
+    use crate::{style, ui};
+    let open = editable && !state.saving;
+    let act = move |action: Action| open.then_some(crate::Message::Network(action));
+    let choice = |label: &'a str, selected: bool, on: Option<crate::Message>| {
+        button(text(label).size(14))
+            .on_press_maybe(on.filter(|_| !selected))
+            .padding([7, 14])
+            .style(style::secondary_button(selected))
     };
-    let mut body = column![
-        text(crate::i18n::tr("Network recovery")).size(26),
-        text(state.notice.unwrap_or("Choose routing before signing in.")),
-        text(format!("Mode: {:?}", state.settings.mode)),
-        text(path_text(state.settings.mode, state.packet_active, state.proxy_kind)),
-        text(budget_text(context.controller().budget_snapshot())),
-        row![choose("Off", Mode::Off), choose("Auto", Mode::Auto)].spacing(12),
-        text(if state.packet_active { "Windows packet recovery: active for this session" } else { "Windows packet recovery: off" }),
-        button(if state.packet_active { "Stop packet recovery" } else { "Start packet recovery (administrator prompt)" }).on_press_maybe((editable && !state.saving).then_some(crate::Message::Network(if state.packet_active { Action::PacketStop } else { Action::PacketStart }))),
-        button("Check Discord API without signing in").on_press_maybe((editable && !state.saving).then_some(crate::Message::Network(Action::PacketCheck))),
-        text("Optional Windows helper requires UAC once per session. It handles only the public TLS handshake for fastcord connections. The client and account stay unprivileged. Starting it selects Auto."),
-        checkbox(state.settings.experimental_udp)
-            .label("Experimental UDP discovery preludes (unverified)")
-            .on_toggle_maybe((editable && !state.saving && state.settings.mode != Mode::Proxy).then_some(|value| crate::Message::Network(Action::ExperimentalUdp(value)))),
-        text(if state.settings.mode == Mode::Proxy { "Experimental preludes are disabled in Proxy mode. SOCKS5 UDP uses ordinary discovery." } else { "Separate opt-in for direct media routes. Tries up to three UDP flows before protocol selection. Effectiveness on filtered networks is unverified; proxy routing does not enable it." }),
-        text("Auto checks only a required service after an eligible connection failure. TLS reachability does not establish that Discord or media works. Recovery is bounded; it never bypasses certificate verification."),
-        text("TLS splitting is best effort. TCP writes do not guarantee packet boundaries. UDP media has a separate connection path."),
-        text(if editable { "Changes apply to the next connection." } else { "Sign out before changing routing. Healthy sessions remain connected." }),
-        button("Retry pending TLS check").on_press(crate::Message::Network(Action::Retry)),
-        button("Close").on_press(crate::Message::Network(Action::Close)),
-    ].spacing(12);
+    let section = |title: &'a str| text(title).size(16).font(ui::BOLD);
+
+    let mut body = column![].spacing(12);
+    // Where things stand, then why (an error or a check result) if anything.
+    body = body.push(
+        column![
+            text(path_text(
+                state.settings.mode,
+                state.packet_active,
+                state.proxy_kind
+            ))
+            .size(14),
+            ui::note(if editable {
+                tr("Changes apply to the next connection.")
+            } else {
+                tr("Sign out to change routing. Connected sessions are not interrupted.")
+            }),
+        ]
+        .spacing(4),
+    );
+    if let Some(notice) = state.notice {
+        body = body.push(ui::callout(text(tr(notice)).size(13)));
+    }
+
+    // Recovery mode.
+    body = body.push(section(tr("Connection recovery"))).push(
+        row![
+            choice(
+                tr("Off"),
+                state.settings.mode == Mode::Off,
+                act(Action::Mode(Mode::Off))
+            ),
+            choice(
+                tr("Automatic"),
+                state.settings.mode == Mode::Auto,
+                act(Action::Mode(Mode::Auto))
+            ),
+        ]
+        .spacing(6),
+    );
+    body = body.push(ui::note(tr(
+        "Automatic retries a blocked secure connection by another route. Certificates are always checked.",
+    )));
+    if cfg!(target_os = "windows") {
+        body = body.push(
+            row![
+                button(
+                    text(if state.packet_active {
+                        tr("Stop packet helper")
+                    } else {
+                        tr("Start packet helper")
+                    })
+                    .size(14),
+                )
+                .on_press_maybe(act(if state.packet_active {
+                    Action::PacketStop
+                } else {
+                    Action::PacketStart
+                }))
+                .padding([7, 14])
+                .style(style::secondary_button(false)),
+                button(text(tr("Check connection")).size(14))
+                    .on_press_maybe(act(Action::PacketCheck))
+                    .padding([7, 14])
+                    .style(style::secondary_button(false)),
+            ]
+            .spacing(6)
+            .wrap(),
+        );
+        body = body.push(ui::note(if state.packet_active {
+            tr("The packet helper is on for this session.")
+        } else {
+            tr(
+                "The packet helper asks for administrator rights once per session and selects Automatic.",
+            )
+        }));
+    }
+
+    // Proxy.
     let password = state
         .proxy_password
         .as_ref()
         .map_or("", |password| password.expose_secret());
-    let proxy_choice = |label, kind| {
-        button(label).on_press_maybe(
-            (editable && !state.saving).then_some(crate::Message::Network(Action::ProxyKind(kind))),
-        )
+    let kind = state.proxy_kind.unwrap_or(ProxyKind::Http);
+    let field = |label: &'a str, input: iced::widget::TextInput<'a, crate::Message>| {
+        column![ui::label(label), input.padding(8).size(14)].spacing(4)
     };
-    body = body.push(text("Proxy").size(22))
-        .push(row![proxy_choice("HTTP CONNECT", ProxyKind::Http), proxy_choice("HTTPS CONNECT", ProxyKind::Https), proxy_choice("SOCKS5", ProxyKind::Socks5)].spacing(8))
-        .push(text(format!("Type: {}", state.proxy_kind.unwrap_or(ProxyKind::Http))))
-        .push(text_input("Proxy host (no scheme or path)", &state.proxy_host).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyHost(value)))))
-        .push(text_input("Proxy port", &state.proxy_port).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyPort(value)))))
-        .push(text_input("Username (optional)", &state.proxy_username).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyUsername(value)))))
-        .push(text_input("Password", password).secure(true).on_input_maybe((editable && !state.saving).then_some(|value| crate::Message::Network(Action::ProxyPassword(Arc::new(UserToken::new(value)))))))
-        .push(button("Save and use proxy").on_press_maybe((editable && !state.saving).then_some(crate::Message::Network(Action::ApplyProxy))))
-        .push(text("Proxy mode never falls back to a direct connection. CONNECT proxies carry TCP only: voice, camera and screen sharing cannot join through them. SOCKS5 UDP requires a UDP-capable proxy and a working UDP route to that proxy. It does not carry media over TCP and does not encrypt the client-to-proxy transport. Passwords are saved in native credential storage."));
+    body = body
+        .push(section(tr("Proxy")))
+        .push(
+            row![
+                choice(
+                    "HTTP CONNECT",
+                    kind == ProxyKind::Http,
+                    act(Action::ProxyKind(ProxyKind::Http))
+                ),
+                choice(
+                    "HTTPS CONNECT",
+                    kind == ProxyKind::Https,
+                    act(Action::ProxyKind(ProxyKind::Https))
+                ),
+                choice(
+                    "SOCKS5",
+                    kind == ProxyKind::Socks5,
+                    act(Action::ProxyKind(ProxyKind::Socks5))
+                ),
+            ]
+            .spacing(6)
+            .wrap(),
+        )
+        .push(
+            row![
+                container(field(
+                    tr("Host"),
+                    text_input("proxy.example.com", &state.proxy_host).on_input_maybe(
+                        open.then_some(|value| crate::Message::Network(Action::ProxyHost(value)))
+                    ),
+                ))
+                .width(Length::FillPortion(3)),
+                container(field(
+                    tr("Port"),
+                    text_input("1080", &state.proxy_port).on_input_maybe(
+                        open.then_some(|value| crate::Message::Network(Action::ProxyPort(value)))
+                    ),
+                ))
+                .width(Length::FillPortion(1)),
+            ]
+            .spacing(10),
+        )
+        .push(
+            row![
+                container(field(
+                    tr("Username (optional)"),
+                    text_input("", &state.proxy_username).on_input_maybe(open.then_some(
+                        |value| crate::Message::Network(Action::ProxyUsername(value))
+                    )),
+                ))
+                .width(Length::Fill),
+                container(field(
+                    tr("Password"),
+                    text_input("", password)
+                        .secure(true)
+                        .on_input_maybe(open.then_some(|value| {
+                            crate::Message::Network(Action::ProxyPassword(Arc::new(
+                                UserToken::new(value),
+                            )))
+                        })),
+                ))
+                .width(Length::Fill),
+            ]
+            .spacing(10),
+        )
+        .push(
+            button(text(tr("Save and use proxy")).size(14).font(ui::BOLD))
+                .on_press_maybe(act(Action::ApplyProxy))
+                .padding([8, 16])
+                .style(style::action_button(false)),
+        )
+        .push(ui::note(tr(
+            "A proxy is never bypassed. Voice and video need SOCKS5 with UDP. The password is kept in the system's credential store.",
+        )));
+
+    // Media.
+    body = body.push(section(tr("Voice and video"))).push(
+        checkbox(state.settings.experimental_udp)
+            .label(tr("Experimental UDP discovery (unverified)"))
+            .on_toggle_maybe(
+                (open && state.settings.mode != Mode::Proxy)
+                    .then_some(|value| crate::Message::Network(Action::ExperimentalUdp(value))),
+            ),
+    );
+
+    // Each service's state, short.
+    let mut services = column![].spacing(4);
     for (label, role) in [
         ("API", fastcord_net::Role::Rest),
         ("Gateway", fastcord_net::Role::Gateway),
@@ -407,68 +550,120 @@ pub fn view<'a>(
         ("Profile", fastcord_net::Role::Profile),
         ("CDN", fastcord_net::Role::Cdn),
         ("Uploads", fastcord_net::Role::Upload),
-        ("Voice", fastcord_net::Role::Voice),
+        ("Voice calls", fastcord_net::Role::Voice),
         ("Streams", fastcord_net::Role::Stream),
     ] {
-        body = body.push(text(format!(
-            "{label}: {}",
-            status_text(context.controller().service_status(role))
-        )));
+        services = services.push(
+            row![
+                text(tr(label)).size(13).width(140),
+                text(status_text(context.controller().service_status(role)))
+                    .size(13)
+                    .color(style::SUBTLE)
+                    .width(Length::Fill),
+            ]
+            .spacing(8),
+        );
     }
-    container(body)
-        .padding(24)
-        .width(Length::Fixed(650.0))
-        .into()
+    body = body.push(section(tr("Services"))).push(services);
+
+    // Technical details, folded.
+    body = body.push(ui::link(
+        if state.details {
+            tr("Hide details")
+        } else {
+            tr("Details")
+        },
+        crate::Message::Network(Action::Details(!state.details)),
+    ));
+    if state.details {
+        body = body.push(
+            column![
+                text(budget_text(context.controller().budget_snapshot())).size(13),
+                ui::note(tr(
+                    "Auto checks only a required service after an eligible connection failure. TLS reachability does not establish that Discord or media works. Recovery is bounded; it never bypasses certificate verification."
+                )),
+                ui::note(tr(
+                    "TLS splitting is best effort. TCP writes do not guarantee packet boundaries. UDP media has a separate connection path."
+                )),
+                ui::note(tr(
+                    "Optional Windows helper requires UAC once per session. It handles only the public TLS handshake for fastcord connections. The client and account stay unprivileged. Starting it selects Auto."
+                )),
+                ui::note(tr(
+                    "Proxy mode never falls back to a direct connection. CONNECT proxies carry TCP only: voice, camera and screen sharing cannot join through them. SOCKS5 UDP requires a UDP-capable proxy and a working UDP route to that proxy. It does not carry media over TCP and does not encrypt the client-to-proxy transport. Passwords are saved in native credential storage."
+                )),
+                ui::note(if state.settings.mode == Mode::Proxy {
+                    tr(
+                        "Experimental preludes are disabled in Proxy mode. SOCKS5 UDP uses ordinary discovery.",
+                    )
+                } else {
+                    tr(
+                        "Separate opt-in for direct media routes. Tries up to three UDP flows before protocol selection. Effectiveness on filtered networks is unverified; proxy routing does not enable it.",
+                    )
+                }),
+                button(text(tr("Retry pending TLS check")).size(13))
+                    .on_press(crate::Message::Network(Action::Retry))
+                    .padding([6, 12])
+                    .style(style::secondary_button(false)),
+            ]
+            .spacing(8),
+        );
+    }
+    body.into()
 }
 
 /// The route a new dial takes, so a user who lost the connection can see which
 /// one is in force. There is no byedpi path: that engine is not linked.
 fn path_text(mode: Mode, packet: bool, proxy: Option<ProxyKind>) -> String {
+    use crate::i18n::{tr, trf};
     match mode {
-        Mode::Off => "Active path: direct, no recovery".into(),
-        Mode::Auto if packet => "Active path: direct, TLS recovery and the packet helper".into(),
-        Mode::Auto => "Active path: direct with TLS recovery; no packet helper".into(),
-        Mode::Proxy => format!(
+        Mode::Off => tr("Active path: direct, no recovery").into(),
+        Mode::Auto if packet => {
+            tr("Active path: direct, TLS recovery and the packet helper").into()
+        }
+        Mode::Auto => tr("Active path: direct with TLS recovery; no packet helper").into(),
+        Mode::Proxy => trf(
             "Active path: proxy ({}), never direct",
-            proxy.unwrap_or(ProxyKind::Http)
+            &[&proxy.unwrap_or(ProxyKind::Http)],
         ),
     }
 }
 
 fn budget_text(budget: fastcord_net::selector::BudgetSnapshot) -> String {
+    use crate::i18n::{tr, trf};
     use fastcord_net::selector::{MAX_ROLLING_DIALS, MAX_TLS_PROBES};
     let campaign = if budget.campaign_active {
-        format!(
-            "checking, {}/{MAX_TLS_PROBES} probes",
-            budget.campaign_probes
+        trf(
+            "checking, {}/{} probes",
+            &[&budget.campaign_probes, &MAX_TLS_PROBES],
         )
     } else {
-        "idle".into()
+        tr("idle").into()
     };
     let rest = if budget.rolling_dials + 2 > MAX_ROLLING_DIALS {
-        " Budget spent: new checks wait up to 10 minutes."
+        tr(" Budget spent: new checks wait up to 10 minutes.")
     } else {
         ""
     };
-    format!(
-        "Recovery: {campaign}; {}/{MAX_ROLLING_DIALS} dials used in the last 10 minutes.{rest}",
-        budget.rolling_dials
+    trf(
+        "Recovery: {}; {}/{} dials used in the last 10 minutes.{}",
+        &[&campaign, &budget.rolling_dials, &MAX_ROLLING_DIALS, &rest],
     )
 }
 
 pub(crate) fn status_text(status: fastcord_net::selector::ServiceStatus) -> String {
+    use crate::i18n::{tr, trf};
     use fastcord_net::selector::ServiceStatus;
     match status {
-        ServiceStatus::Unknown => "Not checked".into(),
-        ServiceStatus::Selecting => "Checking TLS routes…".into(),
-        ServiceStatus::TlsReachable => "TLS reachable; service not confirmed".into(),
-        ServiceStatus::ServiceReachable => "Service answered".into(),
-        ServiceStatus::SessionHealthy => "Session connected".into(),
-        ServiceStatus::UdpUnreachable => "UDP media did not answer; TLS is separate".into(),
+        ServiceStatus::Unknown => tr("Not checked").into(),
+        ServiceStatus::Selecting => tr("Checking TLS routes…").into(),
+        ServiceStatus::TlsReachable => tr("TLS reachable; service not confirmed").into(),
+        ServiceStatus::ServiceReachable => tr("Service answered").into(),
+        ServiceStatus::SessionHealthy => tr("Session connected").into(),
+        ServiceStatus::UdpUnreachable => tr("UDP media did not answer; TLS is separate").into(),
         ServiceStatus::UdpDiscovering { variant } => {
-            format!("Experimental UDP discovery: variant {variant}/3")
+            trf("Experimental UDP discovery: variant {}/3", &[&variant])
         }
-        ServiceStatus::Failed(error) => error.to_string(),
+        ServiceStatus::Failed(error) => tr(&error.to_string()).to_owned(),
     }
 }
 
@@ -618,11 +813,11 @@ pub fn preview() -> iced::Result {
         context: fastcord_net::NetworkContext,
     }
     fn view(state: &Preview) -> Element<'_, crate::Message> {
-        iced::widget::center(iced::widget::scrollable(super::network_ui::view(
-            &state.state,
-            &state.context,
-            true,
-        )))
+        iced::widget::center(iced::widget::scrollable(
+            container(super::network_ui::view(&state.state, &state.context, true))
+                .padding(24)
+                .width(650),
+        ))
         .into()
     }
     crate::render::application(
@@ -639,7 +834,7 @@ pub fn preview() -> iced::Result {
         |state: &mut Preview, message: crate::Message| {
             if let crate::Message::Network(action) = message {
                 match action {
-                    Action::Close => return iced::exit(),
+                    Action::Details(open) => state.state.details = open,
                     Action::PacketStart if !state.state.saving => {
                         state.state.saving = true;
                         state.state.notice = Some("Waiting for Windows administrator approval…");

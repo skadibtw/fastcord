@@ -15,10 +15,11 @@
 
 use std::time::{Duration, Instant};
 
+use crate::ui::button;
 use fastcord_discord::state::navigation::{Inbox, InboxRow};
 use fastcord_discord::{MentionFilter, MentionsPage, RestClient, RestError};
 use fastcord_model::{Message, Snowflake};
-use iced::widget::{button, checkbox, column, container, row, scrollable, space, text};
+use iced::widget::{checkbox, column, container, row, scrollable, space, text};
 
 use crate::i18n::{tr, trf};
 use iced::{Color, Element, Length, Task};

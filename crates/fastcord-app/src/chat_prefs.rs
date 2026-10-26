@@ -6,7 +6,8 @@
 
 use std::sync::RwLock;
 
-use iced::widget::{button, checkbox, column, pick_list, row, slider, text};
+use crate::ui::button;
+use iced::widget::{checkbox, column, pick_list, row, slider, text};
 use iced::{Element, Length};
 use serde_json::{Value, json};
 

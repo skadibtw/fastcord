@@ -17,13 +17,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_discord::{
     CREATE_AGES, CREATE_USES, Expiry, Invite, InviteScope, ManagedInvite, RestClient, RestError,
     extract_codes,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{button, column, container, image, pick_list, row, scrollable, space, text};
+use iced::widget::{column, container, image, pick_list, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 
 use crate::avatars::{self, AvatarKey};
@@ -381,7 +382,7 @@ pub fn card<'a>(
             if refused {
                 detail.style(text::danger)
             } else {
-                detail.style(text::secondary)
+                detail.color(crate::style::muted())
             },
         ]
         .spacing(2)
@@ -630,6 +631,32 @@ fn link(code: &str) -> String {
 }
 
 impl State {
+    /// What closes the shown leave question, invite form or list; `None`
+    /// while an invite is being made or when only a notice is left.
+    pub fn dismiss(&self) -> Option<Event> {
+        if self.leave.is_some() {
+            Some(Event::CancelLeave)
+        } else if self.manage.is_some() {
+            Some(Event::CloseManage)
+        } else if matches!(self.creating, Some(Creating::Busy)) {
+            None
+        } else if self.creating.is_some() {
+            Some(Event::DismissCreated)
+        } else if self.opened.is_some() {
+            Some(Event::CloseOpened)
+        } else {
+            None
+        }
+    }
+
+    /// Something more than a notice is shown.
+    pub fn is_dialog(&self) -> bool {
+        self.leave.is_some()
+            || self.creating.is_some()
+            || self.manage.is_some()
+            || self.opened.is_some()
+    }
+
     /// Logout or account change: drops every card, panel and request.
     pub fn clear(&mut self) {
         *self = Self {
@@ -966,7 +993,7 @@ fn manage_view(manage: &Manage, now: i64) -> Element<'_, Event> {
                             text(invite.code.clone()).size(13),
                             text(facts.join(" \u{b7} "))
                                 .size(12)
-                                .style(text::secondary)
+                                .color(crate::style::muted())
                                 .wrapping(text::Wrapping::None),
                         ]
                         .width(Length::Fill),
@@ -987,7 +1014,7 @@ fn manage_view(manage: &Manage, now: i64) -> Element<'_, Event> {
                         &[&fastcord_discord::MAX_LISTED],
                     ))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
                 );
             }
         }
@@ -1051,7 +1078,7 @@ fn opened_view<'a>(cache: &'a Cache, code: &str) -> Element<'a, Event> {
     let mut line = row![
         column![
             text(title).size(14),
-            text(detail).size(12).style(text::secondary)
+            text(detail).size(12).color(crate::style::muted())
         ]
         .width(Length::Fill),
     ]
@@ -1082,7 +1109,7 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
                     "Transfer ownership or delete the server in the official Discord client first."
                 ))
                 .size(12)
-                .style(text::secondary),
+                .color(crate::style::muted()),
                 crate::icons::close(Some(Event::CancelLeave)),
             ]
             .spacing(6)
@@ -1134,7 +1161,7 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
                         })
                         .text_size(13),
                     )
-                    .push(button(text(tr("Create link")).size(13)).on_press(Event::Make));
+                    .push(primary_button(text(tr("Create link")).size(13)).on_press(Event::Make));
             }
             if let Some(scope) = choose.manage {
                 line = line.push(
@@ -1196,7 +1223,7 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
         && state.leave.is_none()
     {
         any = true;
-        panel = panel.push(text(notice.clone()).size(12).style(text::secondary));
+        panel = panel.push(text(notice.clone()).size(12).color(crate::style::muted()));
     }
     any.then(|| container(panel).padding([6, 0]).into())
 }

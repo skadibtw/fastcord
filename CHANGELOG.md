@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+- Secondary screens share one frame. Server settings, roles, emoji and sounds, Community, AutoMod, apps and integrations, bans, the audit log and a channel's own settings are pages of a full-window settings screen with a list of sections, like the user settings, instead of forms stacked over the conversation; "Server settings" in the server menu (and a right click on a server) opens it at the first page the account may use. Network recovery is the "Network" page of the user settings, translated, with short explanations and the technical ones under "Details". Smaller forms (a new channel or server, a member's roles, invites, reports, forwarding, events, rules and onboarding, the group panel, discovery, authorized apps) open as dialogs.
+- Every settings screen and dialog has one title and one close cross; Esc closes what is on top: a popover, a dialog, the emoji/GIF/sticker window, a settings screen, then the inbox, alerts, search and pins. A new settings section opens at its top instead of where the previous one was scrolled to. Profile, Accounts and Privacy no longer repeat their own title and cross inside the page.
+- Buttons are grey unless they are the main action of their section (Save, Create, Send…), which stays blurple; destructive confirmations stay red. Unavailable buttons fade their text as well as their fill. Role colours are picked from real colour squares, the chosen one ringed and ticked. Secondary text is lighter (#a5abb4) while staying apart from body text.
+- The emoji, GIF and sticker window keeps one size and one place: the tabs and the cross no longer move when switching tabs, the Stickers tab is always there, and empty states and errors show inside the window. Going to another conversation closes it.
+- Friends and group members keep the main action on the row (Message, Accept); removing a friend, declining, blocking, removing a member and handing over a group are in the row's `⋯` menu and still ask before anything is sent.
+- The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
+
 ### Fixed
 - Incoming friend requests that Discord marks as strangers now offer a warning, Confirm acceptance and Cancel after its refusal (#211). Only an explicit confirmation sends `confirm_stranger_request: true`; ordinary accepts and new requests keep their existing bodies. Adding an already-pending username opens its incoming request, and withdrawn requests cannot be accepted from a stale confirmation.
 - Participant voice volumes now save during slider and keyboard changes without requiring a release event (#219). A bounded background writer coalesces changes for 500 ms, flushes on release, account teardown and Quit, serializes file updates, and keeps recently changed rows. Loading preserves live changes; the call settings and member menu show save failures, and the account retention limit is visible.

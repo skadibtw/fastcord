@@ -5,9 +5,10 @@
 //! short, its details one click away, and settings stay reachable before
 //! signing in.
 
+use crate::ui::button;
 use fastcord_model::Snowflake;
 use iced::widget::{
-    button, checkbox, column, container, qr_code, row, scrollable, space, text, text_input,
+    checkbox, column, container, qr_code, row, scrollable, space, text, text_input,
 };
 use iced::{Alignment, Color, Element, Length};
 

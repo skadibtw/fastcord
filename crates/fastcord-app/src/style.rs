@@ -2,8 +2,9 @@
 //! client's: a near-black server rail, a dark-grey channel sidebar, a lighter
 //! chat pane, blurple actions, red mentions and green "speaking".
 
+use crate::ui::button;
 use iced::theme::Palette;
-use iced::widget::{button, container};
+use iced::widget::container;
 use iced::{Background, Border, Color, Theme};
 
 pub const RAIL: Color = Color::from_rgb(0.118, 0.122, 0.133); // #1e1f22
@@ -13,7 +14,7 @@ pub const FOOTER: Color = Color::from_rgb(0.137, 0.141, 0.157); // #232428
 pub const HOVER: Color = Color::from_rgb(0.231, 0.239, 0.263); // #3b3d43
 pub const SELECTED: Color = Color::from_rgb(0.251, 0.259, 0.282); // #404048
 pub const TEXT: Color = Color::from_rgb(0.859, 0.871, 0.882); // #dbdee1
-pub const MUTED: Color = Color::from_rgb(0.580, 0.608, 0.643); // #949ba4
+pub const MUTED: Color = Color::from_rgb(0.647, 0.671, 0.706); // #a5abb4
 pub const BRIGHT: Color = Color::WHITE;
 pub const BLURPLE: Color = Color::from_rgb(0.345, 0.396, 0.949); // #5865f2
 pub const GREEN: Color = Color::from_rgb(0.137, 0.647, 0.349); // #23a559
@@ -264,12 +265,22 @@ pub fn action_button(danger: bool) -> impl Fn(&Theme, button::Status) -> button:
         let base = if danger { RED } else { BLURPLE };
         let faded = Color { a: 0.4, ..base };
         button::Style {
-            background: Some(Background::Color(if status == button::Status::Disabled {
-                faded
-            } else {
-                base
+            background: Some(Background::Color(match status {
+                button::Status::Disabled => faded,
+                button::Status::Hovered | button::Status::Pressed => Color {
+                    r: base.r * 0.85,
+                    g: base.g * 0.85,
+                    b: base.b * 0.85,
+                    a: 1.0,
+                },
+                button::Status::Active => base,
             })),
-            text_color: BRIGHT,
+            // Unavailable reads as such: faded fill and faded text.
+            text_color: if status == button::Status::Disabled {
+                Color { a: 0.5, ..BRIGHT }
+            } else {
+                BRIGHT
+            },
             border: Border {
                 radius: 4.0.into(),
                 ..Border::default()
@@ -287,10 +298,14 @@ pub fn secondary_button(selected: bool) -> impl Fn(&Theme, button::Status) -> bu
         button::Style {
             background: Some(Background::Color(match status {
                 button::Status::Hovered | button::Status::Pressed => HOVER,
-                button::Status::Disabled => Color { a: 0.4, ..base },
+                button::Status::Disabled => Color { a: 0.35, ..base },
                 button::Status::Active => base,
             })),
-            text_color: if selected { BRIGHT } else { TEXT },
+            text_color: match status {
+                button::Status::Disabled => Color { a: 0.4, ..TEXT },
+                _ if selected => BRIGHT,
+                _ => TEXT,
+            },
             border: Border {
                 radius: 4.0.into(),
                 ..Border::default()

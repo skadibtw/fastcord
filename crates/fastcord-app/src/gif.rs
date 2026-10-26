@@ -6,9 +6,10 @@
 //! beyond the shared byte-bounded attachment cache.
 
 use crate::i18n::tr;
+use crate::ui::button;
 use fastcord_discord::{GifResult, MAX_GIF_QUERY_CHARS, RestClient, RestError};
 use fastcord_model::Snowflake;
-use iced::widget::{button, column, container, image, row, scrollable, text, text_input};
+use iced::widget::{column, container, image, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::attachments::{AttachmentCache, DecodedImage};
@@ -179,22 +180,26 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             .on_input(Event::Input)
             .on_submit(Event::Submit)
             .width(Length::Fill),
-        button(text(tr("Search")).size(13)).on_press(Event::Submit),
-        crate::icons::close(Some(Event::Toggle)),
+        button(text(tr("Search")).size(13))
+            .on_press(Event::Submit)
+            .style(crate::style::secondary_button(false)),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
     let status: Element<'_, Event> = match &state.status {
         Status::Idle => text("").size(12).into(),
-        Status::Loading => text(tr("Loading…")).size(12).style(text::secondary).into(),
+        Status::Loading => text(tr("Loading…"))
+            .size(12)
+            .color(crate::style::muted())
+            .into(),
         Status::Failed(reason) => text(tr(reason)).size(12).style(text::danger).into(),
         Status::Done if state.results.is_empty() => text(tr("No GIFs found."))
             .size(12)
-            .style(text::secondary)
+            .color(crate::style::muted())
             .into(),
         Status::Done => text(tr("Pick a GIF to add its link to your message."))
             .size(12)
-            .style(text::secondary)
+            .color(crate::style::muted())
             .into(),
     };
     let cells = state.results.iter().enumerate().map(|(index, gif)| {
@@ -212,7 +217,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
         )
         .on_press(Event::Pick(index))
         .padding(4)
-        .style(button::secondary)
+        .style(crate::style::secondary_button(false))
         .into()
     });
     Some(
@@ -220,11 +225,11 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             column![
                 controls,
                 status,
-                scrollable(row(cells).spacing(6).wrap()).height(Length::Fixed(220.0)),
+                scrollable(row(cells).spacing(6).wrap()).height(Length::Fill),
             ]
-            .spacing(6),
+            .spacing(8),
         )
-        .padding(8)
+        .height(Length::Fill)
         .into(),
     )
 }

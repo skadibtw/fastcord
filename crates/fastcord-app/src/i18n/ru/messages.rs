@@ -460,10 +460,7 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ),
     ("React with emoji", "Отреагировать эмодзи"),
     ("Emoji", "Эмодзи"),
-    (
-        "Search names, aliases or emoji",
-        "Поиск по названиям, псевдонимам или эмодзи",
-    ),
+    ("Search names, aliases or emoji", "Найти эмодзи"),
     (
         "No available emoji match this search.",
         "Подходящих доступных эмодзи нет.",

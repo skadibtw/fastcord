@@ -3,8 +3,9 @@
 //! the same dialog. Opening goes through the existing private-conversation
 //! request, so its limits and notices are unchanged.
 
+use crate::ui::button;
 use fastcord_model::{Relationship, RelationshipKind, Snowflake};
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use crate::i18n::{tr, trn};

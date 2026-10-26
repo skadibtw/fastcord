@@ -27,7 +27,8 @@ use fastcord_discord::UploadFile;
 use fastcord_model::Snowflake;
 
 use crate::i18n::{tr, trf};
-use iced::widget::{button, column, container, progress_bar, row, text};
+use crate::ui::{button, primary_button};
+use iced::widget::{column, container, progress_bar, row, text};
 use iced::{Element, Task};
 use parking_lot::Mutex;
 
@@ -405,7 +406,7 @@ pub fn view<'a>(state: &'a State, context: &Context) -> Option<Element<'a, Event
         button(text(tr(label)).size(12))
             .padding([2, 8])
             .on_press(event)
-            .style(button::secondary)
+            .style(crate::style::secondary_button(false))
     };
     // Recording starts from the "+" menu; idle, only a refusal is shown.
     if state.phase == Phase::Idle && state.notice.is_none() {
@@ -477,7 +478,7 @@ pub fn view<'a>(state: &'a State, context: &Context) -> Option<Element<'a, Event
                 ))
                 .push(small("Discard", Event::Cancel))
                 .push(
-                    button(text(tr("Send")).size(12))
+                    primary_button(text(tr("Send")).size(12))
                         .padding([2, 8])
                         .on_press(Event::Send),
                 );

@@ -22,6 +22,7 @@
 
 mod access;
 
+use crate::ui::{button, primary_button};
 use access::{Access, RolesForm, Tri};
 use fastcord_discord::state::navigation::{
     AdminChannel, AdminKind, GuildAdmin, NavigationSnapshot,
@@ -34,9 +35,7 @@ use fastcord_discord::{
     needs_community,
 };
 use fastcord_model::{OverwriteKind, Permissions, Snowflake};
-use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, space, text, text_input,
-};
+use iced::widget::{checkbox, column, container, pick_list, row, space, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::i18n::{tr, trf};
@@ -504,6 +503,30 @@ impl State {
             serial: self.serial.wrapping_add(1),
             ..Self::default()
         };
+    }
+
+    /// The settings page this panel is, when it is one.
+    pub fn page(&self) -> Option<(Snowflake, crate::server_settings::Section)> {
+        use crate::server_settings::Section;
+        match self.panel.as_ref()? {
+            Panel::Server(form) => Some((form.guild, Section::Overview)),
+            Panel::Roles(form) => Some((form.guild, Section::Roles)),
+            Panel::Channel(form) => Some((form.guild, Section::Channel(form.channel))),
+            _ => None,
+        }
+    }
+
+    /// A small form shown as a dialog: a new server or channel, or a member's roles.
+    pub fn is_dialog(&self) -> bool {
+        matches!(
+            self.panel,
+            Some(
+                Panel::NewServer(_)
+                    | Panel::NewChannel(_)
+                    | Panel::MemberRoles(..)
+                    | Panel::Menu(_)
+            )
+        )
     }
 
     /// The server the panel needs the read model of.
@@ -1082,7 +1105,9 @@ fn categories(admin: &GuildAdmin) -> Vec<Item<Option<Snowflake>>> {
 }
 
 fn small<'a>(label: &str) -> iced::widget::Text<'a> {
-    text(tr(label).to_owned()).size(12).style(text::secondary)
+    text(tr(label).to_owned())
+        .size(12)
+        .color(crate::style::muted())
 }
 
 fn labelled<'a>(label: &str, control: Element<'a, Event>) -> Element<'a, Event> {
@@ -1108,15 +1133,11 @@ fn server_view<'a>(
     idle: bool,
 ) -> Element<'a, Event> {
     let Some(admin) = admin.filter(|a| a.id == form.guild) else {
-        return column![
-            header("Server settings".to_owned(), idle),
-            small("This server is not available, or your roles in it are not known yet."),
-        ]
-        .spacing(6)
-        .into();
+        return small("This server is not available, or your roles in it are not known yet.")
+            .into();
     };
     let edit = idle && admin.can_manage_guild && form.loaded;
-    let mut panel = column![header(trf("Server settings: {}", &[&admin.name]), idle)].spacing(6);
+    let mut panel = column![].spacing(10);
     if !admin.can_manage_guild {
         panel = panel.push(small("You need Manage Server to change these settings."));
     }
@@ -1219,19 +1240,20 @@ fn server_view<'a>(
             |c| Event::Choose(Choice::Alerts(c)),
         ),
     ));
+    // Long notes wrap in the page; the action stays beside them.
+    panel = panel.push(small(if admin.raid_alerts_disabled {
+        "Join raid alerts are off (change in the official client)."
+    } else {
+        "Join raid alerts are on (change in the official client)."
+    }));
     panel = panel.push(
         row![
-            small(if admin.raid_alerts_disabled {
-                "Join raid alerts are off (change in the official client)."
-            } else {
-                "Join raid alerts are on (change in the official client)."
-            }),
-            space::horizontal(),
             small(if admin.mfa_required {
                 "Moderators need two-factor authentication (Confirm to change)."
             } else {
                 "Moderators do not need two-factor authentication."
-            }),
+            })
+            .width(Length::Fill),
             button(
                 text(if admin.mfa_required {
                     tr("Stop requiring")
@@ -1245,38 +1267,35 @@ fn server_view<'a>(
         .spacing(8)
         .align_y(iced::Alignment::Center),
     );
+    // Roles, apps and Community are pages of the screen's list.
     panel = panel.push(
         row![
-            button(text(tr("Save settings")).size(13)).on_press_maybe(edit.then_some(Event::Save)),
-            button(text(tr("Roles")).size(13))
-                .on_press_maybe(idle.then_some(Event::Roles(admin.id))),
-            button(text(tr("Apps and integrations")).size(13))
-                .on_press_maybe((idle && admin.can_manage_guild).then_some(Event::Apps(admin.id))),
-            button(text(tr("Community setup")).size(13))
-                .on_press_maybe(idle.then_some(Event::Community(admin.id))),
+            primary_button(text(tr("Save settings")).size(13))
+                .on_press_maybe(edit.then_some(Event::Save)),
             small(if admin.community {
                 "Community is on."
             } else {
                 "Community is off."
-            }),
+            })
+            .width(Length::Fill),
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center),
     );
-    panel = panel.push(
+    panel = panel.push(space().height(12)).push(
         row![
-            text(tr("Channels")).size(13),
-            space::horizontal(),
-            button(text(tr("Create channel")).size(12)).on_press_maybe(
+            text(tr("Channels"))
+                .size(16)
+                .font(crate::ui::BOLD)
+                .width(Length::Fill),
+            primary_button(text(tr("Create channel")).size(12)).on_press_maybe(
                 (idle && admin.can_manage_channels).then_some(Event::CreateChannel(admin.id, None))
             ),
         ]
         .align_y(iced::Alignment::Center),
     );
-    let list = column(admin.channels.iter().map(|c| channel_row(admin, c, idle)))
-        .spacing(2)
-        .padding([0, 8]);
-    panel = panel.push(scrollable(list).height(Length::Fixed(200.0)));
+    panel =
+        panel.push(column(admin.channels.iter().map(|c| channel_row(admin, c, idle))).spacing(2));
     if admin.owner {
         panel = panel.push(danger_view(form, admin, idle));
     }
@@ -1293,11 +1312,11 @@ fn channel_row<'a>(admin: &'a GuildAdmin, c: &'a AdminChannel, idle: bool) -> El
         text(c.name.clone())
             .size(13)
             .width(Length::Fill)
-            .wrapping(text::Wrapping::None),
-        button(text(tr("Up")).size(11)).on_press_maybe(move_up.then_some(Event::Move(c.id, false))),
-        button(text(tr("Down")).size(11))
+            .wrapping(text::Wrapping::WordOrGlyph),
+        button(text(tr("Up")).size(12)).on_press_maybe(move_up.then_some(Event::Move(c.id, false))),
+        button(text(tr("Down")).size(12))
             .on_press_maybe(move_down.then_some(Event::Move(c.id, true))),
-        button(text(tr("Edit")).size(11)).on_press_maybe(
+        button(text(tr("Edit")).size(12)).on_press_maybe(
             (idle && c.can_manage).then_some(Event::EditChannel(admin.id, c.id, c.kind.is_voice()))
         ),
     ]
@@ -1490,7 +1509,7 @@ fn new_channel_view<'a>(
         panel = panel.push(small("You need Manage Channels to create channels."));
     }
     panel
-        .push(button(text(tr("Create")).size(13)).on_press_maybe(
+        .push(primary_button(text(tr("Create")).size(13)).on_press_maybe(
             (enabled && !blocked && !form.name.trim().is_empty()).then_some(Event::Create),
         ))
         .into()
@@ -1504,31 +1523,15 @@ fn channel_view<'a>(
     idle: bool,
 ) -> Element<'a, Event> {
     let Some(admin) = admin.filter(|a| a.id == form.guild) else {
-        return column![
-            header("Edit channel".to_owned(), idle),
-            small("This server is not available, or your roles in it are not known yet."),
-        ]
-        .spacing(6)
-        .into();
+        return small("This server is not available, or your roles in it are not known yet.")
+            .into();
     };
     let Some(current) = admin.channel(form.channel) else {
-        return column![
-            header("Edit channel".to_owned(), idle),
-            small("That channel no longer exists."),
-        ]
-        .spacing(6)
-        .into();
+        return small("That channel no longer exists.").into();
     };
     let kind = current.kind;
     let enabled = idle && current.can_manage && form.loaded;
-    let mut panel = column![header(
-        trf(
-            "Edit {} channel: {}",
-            &[&tr(kind.label()).to_lowercase(), &current.name],
-        ),
-        idle
-    ),]
-    .spacing(6);
+    let mut panel = column![small(&trf("Type: {}", &[&tr(kind.label())]))].spacing(10);
     if !current.can_manage {
         panel = panel.push(small("You need Manage Channels for this channel."));
     }
@@ -1623,8 +1626,9 @@ fn channel_view<'a>(
             }),
         ));
     }
-    panel = panel
-        .push(button(text(tr("Save")).size(13)).on_press_maybe(enabled.then_some(Event::Save)));
+    panel = panel.push(
+        primary_button(text(tr("Save")).size(13)).on_press_maybe(enabled.then_some(Event::Save)),
+    );
     if kind == AdminKind::Text && current.mine.contains(Permissions::MANAGE_WEBHOOKS) {
         panel = panel.push(
             button(text(tr("Followed announcements")).size(12))
@@ -1685,7 +1689,7 @@ fn new_server_view(form: &NewServer, idle: bool) -> Element<'_, Event> {
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),
-        button(text(tr("Create server")).size(13)).on_press_maybe(
+        primary_button(text(tr("Create server")).size(13)).on_press_maybe(
             (idle && form.name.trim().chars().count() >= 2).then_some(Event::Create)
         ),
         small(&trf(
@@ -1711,7 +1715,7 @@ fn menu_view<'a>(
                     (idle && admin.can_manage_guild).then_some(Event::Settings(guild)),
                 ))
                 .push(
-                    button(text(tr("Create channel")).size(13)).on_press_maybe(
+                    primary_button(text(tr("Create channel")).size(13)).on_press_maybe(
                         (idle && admin.can_manage_channels)
                             .then_some(Event::CreateChannel(guild, None)),
                     ),

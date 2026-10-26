@@ -12,12 +12,13 @@
 //! Confirm; webhook tokens are never read. No scheduler and no automatic
 //! posting exist here.
 
+use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::{
     AdminKind, ChannelKind, ChannelSelection, NavigationSnapshot,
 };
 use fastcord_discord::{Follower, RestClient, RestError};
 use fastcord_model::{Permissions, Snowflake};
-use iced::widget::{button, column, container, row, scrollable, space, text};
+use iced::widget::{column, container, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 
 use crate::i18n::tr;
@@ -466,13 +467,13 @@ pub fn view<'a>(
             panel = panel.push(
                 text(tr("Messages published there appear in the text channel you pick. You need Manage Webhooks in it."))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             );
             if targets.is_empty() {
                 panel = panel.push(
                     text(tr("No text channel where you have Manage Webhooks."))
                         .size(12)
-                        .style(text::secondary),
+                        .color(crate::style::muted()),
                 );
             }
             let list = targets.iter().map(|t| {
@@ -487,26 +488,26 @@ pub fn view<'a>(
                     .size(13),
                 )
                 .on_press_maybe(idle.then_some(Event::Pick(t.channel)))
-                .style(button::secondary)
+                .style(crate::style::secondary_button(false))
                 .width(Length::Fill)
                 .into()
             });
             panel = panel
                 .push(scrollable(column(list).spacing(2)).height(Length::Fixed(180.0)))
                 .push(
-                    button(text(tr("Follow")).size(13))
+                    primary_button(text(tr("Follow")).size(13))
                         .on_press_maybe((idle && picked.is_some()).then_some(Event::Follow)),
                 );
         }
         Some(Panel::Followers { list, confirm, .. }) => match list {
             None => {
-                panel = panel.push(text(tr("Loading...")).size(12).style(text::secondary));
+                panel = panel.push(text(tr("Loading...")).size(12).color(crate::style::muted()));
             }
             Some(list) if list.is_empty() => {
                 panel = panel.push(
                     text(tr("This channel follows no announcement channel."))
                         .size(12)
-                        .style(text::secondary),
+                        .color(crate::style::muted()),
                 );
             }
             Some(list) => {

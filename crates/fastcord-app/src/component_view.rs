@@ -14,8 +14,9 @@
 //!   "Unsupported component" line.
 
 use crate::i18n::{tr, trf};
+use crate::ui::button;
 use fastcord_model::{BUTTON_LINK, Button, Component, Select, Snowflake};
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{column, container, row, text};
 use iced::{Element, Length};
 
 use crate::timeline::{Event, Row};
@@ -72,7 +73,7 @@ fn component<'a>(item: &'a Component, cx: &Cx<'a>) -> Element<'a, Event> {
         Component::Separator => iced::widget::rule::horizontal(1).into(),
         Component::Unsupported(_) => text(tr("Unsupported component"))
             .size(12)
-            .style(text::secondary)
+            .color(crate::style::muted())
             .into(),
     }
 }
@@ -154,7 +155,7 @@ fn select<'a>(s: &'a Select, cx: &Cx<'a>) -> Element<'a, Event> {
             &[&shown, &what],
         ))
         .size(12)
-        .style(text::secondary)
+        .color(crate::style::muted())
         .into();
     }
     let waiting = cx.pending == Some(s.custom_id.as_str());
@@ -165,7 +166,7 @@ fn select<'a>(s: &'a Select, cx: &Cx<'a>) -> Element<'a, Event> {
             shown.to_owned()
         })
         .size(12)
-        .style(text::secondary)
+        .color(crate::style::muted())
     ]
     .spacing(2);
     for option in &s.options {
@@ -186,7 +187,7 @@ fn select<'a>(s: &'a Select, cx: &Cx<'a>) -> Element<'a, Event> {
             .width(Length::Fill)
             .padding([2, 8])
             .on_press_maybe(option_event(s, &option.value, cx))
-            .style(button::secondary),
+            .style(crate::style::secondary_button(false)),
         );
     }
     container(options).max_width(360).into()

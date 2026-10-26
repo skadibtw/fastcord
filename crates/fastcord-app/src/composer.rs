@@ -11,12 +11,13 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::ui::button;
 use fastcord_discord::{MAX_CONTENT_CHARS, MAX_UPLOAD_FILES, UploadFile};
 use fastcord_model::Snowflake;
 use iced::keyboard::{self, key};
 use iced::widget::text_editor::{Action, Binding, Content, Edit, Motion, Status};
 use iced::widget::{
-    button, checkbox, column, container, row, scrollable, space, text, text_editor, text_input,
+    checkbox, column, container, row, scrollable, space, text, text_editor, text_input,
 };
 use iced::{Element, Length, Padding};
 
@@ -934,7 +935,7 @@ fn small_button(label: &'static str, event: Event) -> Element<'static, Event> {
             bottom: 2.0,
             left: 8.0,
         })
-        .style(button::secondary)
+        .style(crate::style::secondary_button(false))
         .into()
 }
 
@@ -951,7 +952,7 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
         content = content.push(
             text(tr("In another channel"))
                 .size(11)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
     }
     if let Some(reply) = &item.reply {
@@ -960,7 +961,7 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
                 .size(11)
                 .width(Length::Fill)
                 .wrapping(text::Wrapping::WordOrGlyph)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
     }
     for file in &item.files {
@@ -970,7 +971,7 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
                 &[&file.filename(), &crate::timeline::format_size(file.size())],
             ))
             .size(12)
-            .style(text::secondary),
+            .color(crate::style::muted()),
         );
     }
     content = match item.state {
@@ -985,13 +986,13 @@ fn outbox_row(item: &OutboxItem, here: bool, can_send: bool) -> Element<'_, Even
                 ),
                 _ => tr("Sending\u{2026}").to_owned(),
             };
-            let mut line = row![text(status).size(12).style(text::secondary)]
+            let mut line = row![text(status).size(12).color(crate::style::muted())]
                 .spacing(8)
                 .align_y(iced::alignment::Vertical::Center);
             if item.upload.is_some() {
                 line = line.push(small_button("Cancel upload", Event::CancelUpload(item.id)));
             }
-            content.push(body.style(text::secondary)).push(line)
+            content.push(body.color(crate::style::muted())).push(line)
         }
         OutboxState::Failed(reason) => {
             let mut actions = row![].spacing(8);
@@ -1070,7 +1071,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot, place: &str) -> 
         );
     }
     if let Some(line) = typing_line(&snapshot.typing) {
-        layout = layout.push(text(line).size(12).style(text::secondary));
+        layout = layout.push(text(line).size(12).color(crate::style::muted()));
     }
     let editing = composer.editing.is_some();
     let replying = composer.replying.is_some();
@@ -1106,7 +1107,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot, place: &str) -> 
     if !snapshot.can_send && !editing {
         // Without the editor's controls row, a refused action is said here.
         if let Some(notice) = composer.notice {
-            layout = layout.push(text(tr(notice)).size(12).style(text::secondary));
+            layout = layout.push(text(tr(notice)).size(12).color(crate::style::muted()));
         }
         return layout.into();
     }
@@ -1116,7 +1117,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot, place: &str) -> 
                 text(tr("Editing your message")).size(12),
                 text(tr("Enter saves, Escape cancels."))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
                 space::horizontal(),
                 small_button("Cancel", Event::CancelEdit),
             ]
@@ -1233,7 +1234,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot, place: &str) -> 
                         insertion: candidate.reference(),
                     })
                     .padding([2, 6])
-                    .style(button::secondary)
+                    .style(crate::style::secondary_button(false))
                     .into()
             }))
             .spacing(4)
@@ -1301,7 +1302,7 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot, place: &str) -> 
     if let Some(note) = length_note(composer, snapshot.outbox.len()) {
         controls = controls
             .push(space::horizontal())
-            .push(text(note).size(12).style(text::secondary));
+            .push(text(note).size(12).color(crate::style::muted()));
         any = true;
     }
     if any {

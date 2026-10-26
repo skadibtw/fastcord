@@ -10,11 +10,12 @@
 //! ambiguous failure is reported and left to the user.
 
 use crate::i18n::{tr, trf};
+use crate::ui::button;
 use fastcord_discord::{
     GuildSticker, MentionPolicy, NonceGenerator, OutgoingMessage, RestClient, RestError, SendError,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{button, column, container, image, row, scrollable, text};
+use iced::widget::{column, container, image, row, scrollable, text};
 use iced::{Element, Length, Task};
 
 use crate::attachments::{AttachmentCache, DecodedImage};
@@ -237,13 +238,7 @@ impl State {
 
 pub fn view(state: &State) -> Option<Element<'_, Event>> {
     let open = state.open?;
-    let controls = row![
-        text(tr("Stickers of this server")).size(13),
-        iced::widget::space::horizontal(),
-        crate::icons::close(Some(Event::Toggle)),
-    ]
-    .align_y(iced::Alignment::Center);
-    let note = |line: &'static str| text(tr(line)).size(12).style(text::secondary);
+    let note = |line: &'static str| text(tr(line)).size(12).color(crate::style::muted());
     let status: Element<'_, Event> = match state.status {
         Status::Loading => note("Loading…").into(),
         Status::Sending => note("Sending…").into(),
@@ -274,19 +269,18 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
         )
         .on_press_maybe(sticker.available.then_some(Event::Pick(index)))
         .padding(4)
-        .style(button::secondary)
+        .style(crate::style::secondary_button(false))
         .into()
     });
     Some(
         container(
             column![
-                controls,
                 status,
-                scrollable(row(cells).spacing(6).wrap()).height(Length::Fixed(220.0)),
+                scrollable(row(cells).spacing(6).wrap()).height(Length::Fill),
             ]
-            .spacing(6),
+            .spacing(8),
         )
-        .padding(8)
+        .height(Length::Fill)
         .into(),
     )
 }

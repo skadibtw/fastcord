@@ -7,13 +7,14 @@
 //! (`RestClient::set_notification`); the panel shows what Discord's
 //! `USER_GUILD_SETTINGS_UPDATE` echo says, never its own guess.
 
+use crate::ui::button;
 use fastcord_discord::gateway::NotifyLevel;
 use fastcord_discord::state::navigation::NotificationView;
 use fastcord_discord::{
     MuteFor, NOTIFICATION_WRITES_ENABLED, NotifySetting, RestClient, RestError,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{button, checkbox, column, container, pick_list, row, space, text};
+use iced::widget::{checkbox, column, container, pick_list, row, space, text};
 use iced::{Color, Element, Length, Task};
 
 use crate::i18n::{tr, trf};

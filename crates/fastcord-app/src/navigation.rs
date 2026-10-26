@@ -2,11 +2,10 @@
 //! sidebar of channels (or direct messages) with the user's own panel at its
 //! foot, and the conversation. Presentation of compact reducer-owned
 //! navigation windows, never full state.
+use crate::ui::button;
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot, Occupant, StageSeat};
 use iced::font::Weight;
-use iced::widget::{
-    button, column, container, image, mouse_area, row, space, stack, text, tooltip,
-};
+use iced::widget::{column, container, image, mouse_area, row, space, stack, text, tooltip};
 use iced::{Element, Font, Length, Padding, alignment};
 use std::collections::HashMap;
 
@@ -27,6 +26,8 @@ const BOLD: Font = Font {
 pub const RAIL_ROW: f32 = 56.0;
 pub(crate) const RAIL_WIDTH: f32 = 72.0;
 pub(crate) const SIDEBAR_WIDTH: f32 = 240.0;
+/// Air between the timeline and the message box.
+pub(crate) const COMPOSER_GAP: f32 = 14.0;
 
 /// Native offline smoke check of the real sidebar and read-only Alerts pane.
 pub fn alerts_preview() -> iced::Result {
@@ -481,7 +482,7 @@ pub(crate) fn occupant_row<'a>(
     let line: Element<'a, Message> = match occupant {
         Occupant::More(more) => text(format!("+{more}"))
             .size(12)
-            .style(text::secondary)
+            .color(crate::style::muted())
             .into(),
         Occupant::Activity(name) => text(if name.is_empty() {
             tr("ACTIVITY").to_owned()
@@ -490,12 +491,12 @@ pub(crate) fn occupant_row<'a>(
         })
         .size(10)
         .font(BOLD)
-        .style(text::secondary)
+        .color(crate::style::muted())
         .into(),
         Occupant::Heading(label) => text(label.to_uppercase())
             .size(10)
             .font(BOLD)
-            .style(text::secondary)
+            .color(crate::style::muted())
             .into(),
         Occupant::Member {
             user_id,
@@ -691,7 +692,7 @@ fn sidebar<'a>(
                 text(tr("DIRECT MESSAGES"))
                     .size(11)
                     .font(BOLD)
-                    .style(text::secondary)
+                    .color(crate::style::muted())
             )
             .padding(Padding::new(0.0).left(16.0).top(14.0).bottom(4.0)),
             virtual_list::view(
@@ -725,7 +726,7 @@ fn sidebar<'a>(
                             .size(11)
                             .font(BOLD)
                             .wrapping(text::Wrapping::None)
-                            .style(text::secondary),
+                            .color(crate::style::muted()),
                     )
                     .height(ROW_HEIGHT)
                     .width(Length::Fill)
@@ -823,7 +824,7 @@ fn header<'a>(title: String, note: &'static str, tools: Tools, wide: bool) -> El
                     .wrapping(text::Wrapping::None),
                 text(tr(note))
                     .size(12)
-                    .style(text::secondary)
+                    .color(crate::style::muted())
                     .wrapping(text::Wrapping::None),
             ]
             .spacing(12)
@@ -1065,14 +1066,16 @@ fn main_pane<'a>(
             body.push(timeline::view(history, interaction, attachments).map(Message::Timeline))
                 .push(
                     container(composer::view(composer, history, &place).map(Message::Composer))
-                        .padding(Padding::new(0.0).left(16.0).right(16.0).bottom(16.0)),
+                        // A fixed gap keeps the last message, its reactions or
+                        // attachments off the message box at any box height.
+                        .padding(Padding::new(16.0).top(COMPOSER_GAP)),
                 )
         } else {
             body.push(
                 container(
                     text(tr("Loading messages…"))
                         .size(14)
-                        .style(text::secondary),
+                        .color(crate::style::muted()),
                 )
                 .center(Length::Fill),
             )
@@ -1132,7 +1135,7 @@ fn main_pane<'a>(
                 column![
                     text(tr("Pick a conversation on the left or start a new one."))
                         .size(14)
-                        .style(text::secondary),
+                        .color(crate::style::muted()),
                     button(icons::labeled(Icon::Plus, tr("New message"), 13))
                         .on_press(Message::NewDm(crate::new_dm::Event::Open))
                         .style(style::action_button(false)),
@@ -1147,7 +1150,7 @@ fn main_pane<'a>(
             container(
                 text(tr("Waiting for your membership and permissions. Channels stay closed until Discord supplies them."))
                     .size(14)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             )
             .center(Length::Fill),
         );
@@ -1247,7 +1250,7 @@ fn main_pane<'a>(
             container(
                 text(tr("Select a channel to start chatting."))
                     .size(14)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             )
             .center(Length::Fill),
         );

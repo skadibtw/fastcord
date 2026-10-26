@@ -6,10 +6,11 @@
 //! Drawing only: which tiles exist and which are drawn is decided by
 //! [`CallView::plan`], and a tile that is not drawn here is not decoded.
 
+use crate::ui::button;
 use fastcord_model::Snowflake;
 use fastcord_video::effect::Effect;
 use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, slider, text, tooltip,
+    checkbox, column, container, pick_list, row, scrollable, slider, text, tooltip,
 };
 use iced::{Element, Length};
 
@@ -177,7 +178,7 @@ fn stream_audio_controls<'a>(key: &str, session: &playback::Session) -> Element<
         .align_y(iced::alignment::Vertical::Center),
         text(session.audio_description())
             .size(11)
-            .style(text::secondary),
+            .color(crate::style::muted()),
     ]
     .width(Length::Fill)
     .spacing(3)
@@ -429,7 +430,10 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
                 icons::icon(Icon::Signal, color),
                 column![
                     text(title).size(13).font(BOLD).color(color).wrapping(NAME),
-                    text(place).size(11).style(text::secondary).wrapping(NAME),
+                    text(place)
+                        .size(11)
+                        .color(crate::style::muted())
+                        .wrapping(NAME),
                 ]
                 .width(Length::Fill),
             ]
@@ -575,7 +579,8 @@ pub struct Settings<'a> {
 }
 
 pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
-    let heading = |label: &'static str| text(label).size(11).font(BOLD).style(text::secondary);
+    let heading =
+        |label: &'static str| text(label).size(11).font(BOLD).color(crate::style::muted());
     let mut content = column![].spacing(6);
     if let Some(camera) = set.camera {
         content = content.push(heading(tr("CAMERA"))).push(
@@ -621,7 +626,7 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
             "Saved for this account: up to 256 recently changed people.",
         ))
         .size(11)
-        .style(text::secondary),
+        .color(crate::style::muted()),
     );
     if let Some(notice) = set.volume_notice {
         content = content.push(text(tr(notice).to_owned()).size(11));
@@ -630,7 +635,7 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
         content = content.push(
             text(tr("Nobody else is in the call."))
                 .size(11)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
     }
     for participant in &set.voice.participants {
@@ -669,7 +674,7 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
     content = content.push(
         text(restricted.unwrap_or(""))
             .size(11)
-            .style(text::secondary),
+            .color(crate::style::muted()),
     );
     if !set.watching.is_empty() || !set.offers.is_empty() {
         content = content.push(heading(tr("STREAMS")));

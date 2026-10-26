@@ -321,7 +321,7 @@ pub fn compact_view(voice: &VoiceControls) -> Element<'static, Message> {
     .align_y(iced::Alignment::Center);
     container(
         column![
-            text(tr("In call")).size(12).style(text::secondary),
+            text(tr("In call")).size(12).color(crate::style::muted()),
             scrollable(people).height(Length::Fill),
             controls,
         ]

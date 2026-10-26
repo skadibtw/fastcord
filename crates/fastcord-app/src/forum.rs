@@ -18,6 +18,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::ui::button;
 use fastcord_discord::state::navigation::{ForumView, PostRow};
 use fastcord_discord::{
     ForumPost, MAX_UPLOAD_FILES, PostError, PostInvalid, PostRules, RestClient, RestError,
@@ -25,9 +26,7 @@ use fastcord_discord::{
 };
 use fastcord_model::markup::TimeStyle;
 use fastcord_model::{Channel, MAX_APPLIED_TAGS, Snowflake};
-use iced::widget::{
-    button, column, container, row, scrollable, space, text, text_editor, text_input,
-};
+use iced::widget::{column, container, row, scrollable, space, text, text_editor, text_input};
 use iced::{Color, Element, Length, Task};
 
 use crate::composer::Act;

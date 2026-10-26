@@ -12,10 +12,11 @@
 //! other audio and video format stays Download/Open-only.
 use std::sync::Arc;
 
+use crate::ui::button;
 use fastcord_audio::{DeviceChoice, PlayerFailure, PlayerSnapshot, PlayerState};
 use fastcord_model::{Attachment, Snowflake};
 use iced::task::Handle;
-use iced::widget::{button, column, container, row, slider, space, text};
+use iced::widget::{column, container, row, slider, space, text};
 use iced::{Element, Length, Task};
 
 use crate::Message;
@@ -483,20 +484,20 @@ pub fn view(
             .push(
                 text(length.map_or_else(|| tr("Voice message").to_owned(), clock))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             )
             .into();
     };
     match media.phase {
         Phase::Loading => row![
-            text(tr("Loading…")).size(12).style(text::secondary),
+            text(tr("Loading…")).size(12).color(crate::style::muted()),
             small("Cancel", Control::Close)
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)
         .into(),
         Phase::Failed(reason) => row![
-            text(tr(reason)).size(12).style(text::secondary),
+            text(tr(reason)).size(12).color(crate::style::muted()),
             play("Retry"),
             small("Close", Control::Close)
         ]
@@ -524,10 +525,11 @@ pub fn view(
                     .push(
                         text(format!("{} / {}", clock(position), clock(duration)))
                             .size(12)
-                            .style(text::secondary),
+                            .color(crate::style::muted()),
                     );
             } else {
-                controls = controls.push(text(clock(position)).size(12).style(text::secondary));
+                controls =
+                    controls.push(text(clock(position)).size(12).color(crate::style::muted()));
             }
             let controls = controls
                 .push(small(
@@ -565,11 +567,11 @@ pub fn view(
                     stack = stack.push(
                         text(tr("The video could not be decoded; any sound continues."))
                             .size(12)
-                            .style(text::secondary),
+                            .color(crate::style::muted()),
                     );
                 }
                 if let Some(notice) = player.notice() {
-                    stack = stack.push(text(tr(notice)).size(12).style(text::secondary));
+                    stack = stack.push(text(tr(notice)).size(12).color(crate::style::muted()));
                 }
             }
             stack.into()

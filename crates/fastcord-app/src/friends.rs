@@ -14,13 +14,14 @@ use std::collections::{HashMap, HashSet};
 
 type Presences = HashMap<Snowflake, Presence>;
 
+use crate::ui::button;
 use fastcord_discord::{
     NetworkFailure, Profile, RelationshipAction, RestClient, RestError, RetryableFailure,
     UsernameError, parse_username,
 };
 use fastcord_model::{Presence, Relationship, RelationshipKind, Snowflake, Status, User};
 use iced::font::Weight;
-use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
+use iced::widget::{column, container, row, scrollable, space, text, text_input};
 use iced::{Element, Font, Length, Task, alignment};
 
 use crate::i18n::{tr, trf, trn};
@@ -79,6 +80,8 @@ pub enum Event {
     Ask(Snowflake, RelationshipAction),
     /// Dismiss that question.
     Keep,
+    /// The `⋯` menu of one row (removing, declining, blocking), or none.
+    Menu(Option<Snowflake>),
     CancelAccept(Snowflake),
     Done(u64, Snowflake, Result<(), RestError>),
     AddDone(u64, Result<(), RestError>),
@@ -117,6 +120,8 @@ pub struct State {
     confirmations: HashSet<Snowflake>,
     /// The one unfriend or block waiting for Confirm.
     asking: Option<(Snowflake, RelationshipAction)>,
+    /// The row whose `⋯` menu is open.
+    menu: Option<Snowflake>,
     notice: Option<String>,
     profile: Option<ProfileView>,
     /// Bumped on logout/new session: answers from an earlier one are dropped.
@@ -312,8 +317,12 @@ impl State {
                     move |result| Event::AddDone(epoch, result),
                 );
             }
-            Event::Ask(user, action) => self.asking = Some((user, action)),
+            Event::Ask(user, action) => {
+                self.menu = None;
+                self.asking = Some((user, action));
+            }
             Event::Keep => self.asking = None,
+            Event::Menu(user) => self.menu = user,
             Event::Act(user, action) => {
                 self.asking = None;
                 if !self.begin(user, action) {
@@ -520,26 +529,68 @@ fn kind_label(kind: RelationshipKind) -> &'static str {
     }
 }
 
+/// What a row's `⋯` menu holds: label, what it does, whether it is
+/// destructive. Unfriending and blocking still ask before anything is sent.
+fn menu_items(kind: RelationshipKind, user: Snowflake) -> Vec<(&'static str, Event, bool)> {
+    match kind {
+        RelationshipKind::Friend => vec![
+            (
+                "Remove friend",
+                Event::Ask(user, RelationshipAction::Remove),
+                true,
+            ),
+            ("Block", Event::Ask(user, RelationshipAction::Block), true),
+        ],
+        RelationshipKind::IncomingRequest => vec![
+            (
+                "Decline",
+                Event::Act(user, RelationshipAction::Remove),
+                true,
+            ),
+            ("Block", Event::Ask(user, RelationshipAction::Block), true),
+        ],
+        RelationshipKind::OutgoingRequest | RelationshipKind::Blocked => Vec::new(),
+    }
+}
+
 fn person_row<'a>(
     relationship: &'a Relationship,
     pending: Option<RelationshipAction>,
     status: Option<Status>,
     confirm: bool,
     asking: Option<RelationshipAction>,
+    menu_open: bool,
 ) -> Element<'a, Event> {
     let user = &relationship.user;
+    let busy = pending.is_some();
     let mut buttons = row![].spacing(6).align_y(alignment::Vertical::Center);
-    if pending.is_some() {
-        buttons = buttons.push(text(tr("Working…")).size(12).style(text::secondary));
+    if busy {
+        buttons = buttons.push(text(tr("Working…")).size(12).color(crate::style::muted()));
     }
-    for button in actions(
-        Some(relationship.kind),
-        user.id,
-        pending.is_some(),
-        confirm,
-        asking,
-    ) {
+    // The main action stays in sight; the rest is behind `⋯`.
+    let menu = if asking.is_some() {
+        Vec::new()
+    } else {
+        menu_items(relationship.kind, user.id)
+    };
+    let shown = actions(Some(relationship.kind), user.id, busy, confirm, asking);
+    let keep = if asking.is_some() {
+        shown.len()
+    } else {
+        shown.len().saturating_sub(menu.len())
+    };
+    for button in shown.into_iter().take(keep) {
         buttons = buttons.push(button);
+    }
+    if !menu.is_empty() {
+        buttons = buttons.push(crate::icons::action(crate::icons::Action {
+            icon: crate::icons::Icon::More,
+            on_press: (!busy).then_some(Event::Menu((!menu_open).then_some(user.id))),
+            active: menu_open,
+            danger: false,
+            tip: tr("More").to_owned(),
+            badge: 0,
+        }));
     }
     let main = row![
         avatar(user, 36.0),
@@ -556,7 +607,7 @@ fn person_row<'a>(
                         kind_label(relationship.kind)
                     ))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
                 ]
                 .spacing(5)
                 .align_y(alignment::Vertical::Center),
@@ -572,6 +623,22 @@ fn person_row<'a>(
     .spacing(10)
     .align_y(alignment::Vertical::Center);
     let mut content = column![main].spacing(6);
+    if menu_open && !menu.is_empty() {
+        let mut items = column![].spacing(1);
+        for (label, event, danger) in menu {
+            let on = (!busy).then_some(event);
+            items = items.push(if danger {
+                crate::ui::danger_item(None, tr(label), on)
+            } else {
+                crate::ui::item(None, tr(label), on)
+            });
+        }
+        content = content.push(
+            container(crate::ui::menu_card(items, 200.0))
+                .width(Length::Fill)
+                .align_x(alignment::Horizontal::Right),
+        );
+    }
     if confirm {
         content = content.push(text(tr(STRANGER_WARNING)).size(12));
     }
@@ -641,6 +708,7 @@ pub fn view<'a>(
                 presences.get(&relationship.user.id).map(|p| p.status),
                 state.confirmations.contains(&relationship.user.id),
                 state.asking_for(relationship.user.id),
+                state.menu == Some(relationship.user.id),
             ));
         }
     }
@@ -653,20 +721,20 @@ pub fn view<'a>(
                 Tab::Blocked => tr("You have not blocked anyone."),
             })
             .size(13)
-            .style(text::secondary),
+            .color(crate::style::muted()),
         );
     } else if total > shown {
         list = list.push(
             text(trf("{} more are not shown.", &[&(total - shown)]))
                 .size(12)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
     }
     let mut body = column![tabs, add].spacing(10);
     body = body.push(
         text(state.notice.as_deref().unwrap_or(""))
             .size(12)
-            .style(text::secondary),
+            .color(crate::style::muted()),
     );
     body = body.push(scrollable(list).height(Length::Fill));
     container(body.padding(16))
@@ -752,7 +820,7 @@ pub fn profile_view<'a>(
                 text(user.display_name()).size(18).font(BOLD),
                 text(format!("@{}", user.username))
                     .size(13)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             ]
             .spacing(2),
         ]
@@ -761,10 +829,10 @@ pub fn profile_view<'a>(
     ]
     .spacing(10);
     if user.bot {
-        card = card.push(text(tr("Bot")).size(12).style(text::secondary));
+        card = card.push(text(tr("Bot")).size(12).color(crate::style::muted()));
     }
     if let Some(kind) = kind {
-        card = card.push(text(kind_label(kind)).size(12).style(text::secondary));
+        card = card.push(text(kind_label(kind)).size(12).color(crate::style::muted()));
     }
     if context.ignored {
         card = card.push(
@@ -772,7 +840,7 @@ pub fn profile_view<'a>(
                 "Ignored: their messages, notifications and calls are hidden.",
             ))
             .size(12)
-            .style(text::secondary),
+            .color(crate::style::muted()),
         );
     }
     if let Some(custom) = context.custom {
@@ -801,7 +869,11 @@ pub fn profile_view<'a>(
     }
     match &view.state {
         ProfileState::Loading => {
-            card = card.push(text(tr("Loading profile…")).size(13).style(text::secondary));
+            card = card.push(
+                text(tr("Loading profile…"))
+                    .size(13)
+                    .color(crate::style::muted()),
+            );
         }
         ProfileState::Failed(reason) => {
             card = card.push(text(reason.as_str()).size(13).style(text::danger));
@@ -828,7 +900,7 @@ pub fn profile_view<'a>(
                     )
                 ))
                 .size(12)
-                .style(text::secondary),
+                .color(crate::style::muted()),
             );
         }
     }
@@ -836,7 +908,7 @@ pub fn profile_view<'a>(
     if user.id != me && !user.bot {
         let busy = state.pending.contains_key(&user.id);
         if busy {
-            buttons = buttons.push(text(tr("Working…")).size(12).style(text::secondary));
+            buttons = buttons.push(text(tr("Working…")).size(12).color(crate::style::muted()));
         }
         let confirm = state.confirmations.contains(&user.id);
         if confirm {
@@ -872,7 +944,7 @@ pub fn profile_view<'a>(
     ));
     card = card.push(buttons.wrap());
     if let Some(notice) = &state.notice {
-        card = card.push(text(notice.as_str()).size(12).style(text::secondary));
+        card = card.push(text(notice.as_str()).size(12).color(crate::style::muted()));
     }
     Some(
         container(
@@ -1085,6 +1157,27 @@ mod tests {
             avatar: None,
             bot: false,
         }
+    }
+
+    #[test]
+    fn a_rows_menu_holds_only_the_destructive_actions_and_they_still_ask() {
+        let bob = Snowflake(2);
+        let friend = menu_items(RelationshipKind::Friend, bob);
+        assert_eq!(friend.len(), 2);
+        assert!(
+            friend
+                .iter()
+                .all(|(_, event, danger)| *danger && matches!(event, Event::Ask(..)))
+        );
+        let shown = actions(Some(RelationshipKind::Friend), bob, false, false, None);
+        // Message stays on the row; Remove and Block are the menu's.
+        assert_eq!(shown.len() - friend.len(), 1);
+        assert!(menu_items(RelationshipKind::Blocked, bob).is_empty());
+        let mut state = State::default();
+        let _ = state.update(Event::Menu(Some(bob)), &rest());
+        let _ = state.update(Event::Ask(bob, RelationshipAction::Block), &rest());
+        assert_eq!(state.menu, None, "choosing closes the menu");
+        assert!(state.pending.is_empty(), "and only asks");
     }
 
     #[test]

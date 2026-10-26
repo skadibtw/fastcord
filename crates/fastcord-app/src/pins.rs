@@ -6,9 +6,10 @@
 //! `history::Intent::JumpTo` in the same channel.
 
 use crate::i18n::{tr, trf, trn};
+use crate::ui::button;
 use fastcord_discord::{PinsPage, RestClient, RestError};
 use fastcord_model::{Message, Snowflake};
-use iced::widget::{button, column, container, scrollable, text};
+use iced::widget::{column, container, scrollable, text};
 use iced::{Color, Element, Length, Task};
 
 /// Discord allows 250 pins per channel.

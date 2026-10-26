@@ -9,10 +9,11 @@
 //! shown from `local`, which is dropped as soon as the table's own entry
 //! differs from what it was when the choice was made.
 
+use crate::ui::{button, primary_button};
 use fastcord_discord::{RestClient, RestError, StatusChange};
 use fastcord_model::{MAX_CUSTOM_STATUS_CHARS, Presence, Status};
 use iced::font::Weight;
-use iced::widget::{button, column, container, row, space, text, text_input};
+use iced::widget::{column, container, row, space, text, text_input};
 use iced::{Color, Element, Font, Length, Task, alignment};
 
 use crate::i18n::tr;
@@ -226,7 +227,7 @@ impl State {
                 .on_submit(Event::SaveCustom)
                 .size(13)
                 .padding(6),
-            button(text(tr("Set")).size(12))
+            primary_button(text(tr("Set")).size(12))
                 .on_press_maybe((!self.pending).then_some(Event::SaveCustom))
                 .style(style::action_button(false)),
             button(text(tr("Clear")).size(12))
@@ -240,12 +241,12 @@ impl State {
                 text(tr("Status"))
                     .size(12)
                     .font(BOLD)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
                 choices,
                 custom,
                 text(self.notice.as_deref().unwrap_or(persistence))
                     .size(11)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             ]
             .spacing(6),
         )

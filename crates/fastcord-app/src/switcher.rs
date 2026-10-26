@@ -21,11 +21,12 @@
 //! | `Escape` | Close overlay, then cancel edit or reply |
 //! | `F1`, `Ctrl+Shift+?` | Shortcuts help |
 
+use crate::ui::button;
 use fastcord_discord::state::navigation::{QuickEntry, QuickKind, Step, StepScope};
 use fastcord_model::Snowflake;
 use iced::keyboard::{self, Key, Modifiers};
 use iced::widget::{
-    button, column, container, mouse_area, opaque, row, scrollable, space, text, text_input,
+    column, container, mouse_area, opaque, row, scrollable, space, text, text_input,
 };
 use iced::{Element, Length};
 

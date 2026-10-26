@@ -16,7 +16,8 @@ use fastcord_discord::{
 use fastcord_model::{REPLY_PREVIEW_CHARS, Snowflake};
 
 use crate::i18n::{tr, trf};
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use crate::ui::{button, primary_button};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 
 /// Most destinations one forward may be sent to at once.
@@ -305,7 +306,7 @@ pub fn view<'a>(state: &'a State, candidates: &[Candidate]) -> Option<Element<'a
         open.preview.as_str()
     })
     .size(12)
-    .style(text::secondary);
+    .color(crate::style::muted());
     let note = text_input(tr("Add a message (optional)"), &state.note)
         .on_input_maybe((!busy).then_some(Event::Input))
         .on_submit(Event::Send);
@@ -333,7 +334,7 @@ pub fn view<'a>(state: &'a State, candidates: &[Candidate]) -> Option<Element<'a
             .size(13),
         )
         .on_press_maybe((!busy).then_some(Event::Toggle(candidate.id)))
-        .style(button::secondary)
+        .style(crate::style::secondary_button(false))
         .width(Length::Fill)
         .into()
     });
@@ -343,14 +344,14 @@ pub fn view<'a>(state: &'a State, candidates: &[Candidate]) -> Option<Element<'a
         note,
         scrollable(column(list).spacing(2)).height(Length::Fixed(180.0)),
         row![
-            button(text(tr("Forward")).size(13))
+            primary_button(text(tr("Forward")).size(13))
                 .on_press_maybe((!busy && !state.picked.is_empty()).then_some(Event::Send)),
             text(trf(
                 "{} of {} places",
                 &[&state.picked.len(), &MAX_DESTINATIONS],
             ))
             .size(12)
-            .style(text::secondary),
+            .color(crate::style::muted()),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),

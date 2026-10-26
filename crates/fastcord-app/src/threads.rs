@@ -18,7 +18,8 @@ use fastcord_discord::{ArchivedThreads, RestClient, RestError, ThreadError, thre
 use fastcord_model::{Channel, Snowflake};
 
 use crate::i18n::{tr, trf};
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use crate::ui::{button, primary_button};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length, Task};
 
 pub const MAX_ARCHIVED: usize = 200;
@@ -408,7 +409,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             .push(
                 row![
                     input,
-                    button(text(tr("Create")).size(13))
+                    primary_button(text(tr("Create")).size(13))
                         .on_press_maybe((!draft.busy).then_some(Event::Create)),
                     button(text(tr("Cancel")).size(13))
                         .on_press_maybe((!draft.busy).then_some(Event::CancelCreate)),

@@ -7,11 +7,12 @@
 use crate::i18n::{tr, trf, trn};
 use std::time::{Duration, Instant};
 
+use crate::ui::button;
 use fastcord_discord::{
     RestClient, RestError, SEARCH_PAGE_SIZE, SearchHas, SearchOutcome, SearchQuery, SearchScope,
 };
 use fastcord_model::{Message, Snowflake};
-use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
+use iced::widget::{checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length, Task};
 
 pub const MAX_HITS: usize = 100;

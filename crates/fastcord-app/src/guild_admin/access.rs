@@ -15,7 +15,8 @@ use fastcord_model::{
     OverwriteKind, PERMISSION_GROUPS, PermissionInfo, Permissions, permission_scope as scope,
 };
 
-use iced::widget::{button, checkbox, column, row, scrollable, space, text, text_input};
+use crate::ui::{button, primary_button};
+use iced::widget::{checkbox, column, row, scrollable, space, text, text_input};
 
 use super::*;
 
@@ -542,10 +543,68 @@ fn swatch<'a>(color: u32) -> Element<'a, Event> {
     let c = iced::Color::from_rgb8((color >> 16) as u8, (color >> 8) as u8, color as u8);
     let dot = text("\u{25CF}").size(13);
     if color == 0 {
-        dot.style(text::secondary).into()
+        dot.color(crate::style::muted()).into()
     } else {
         dot.color(c).into()
     }
+}
+
+/// A colour to pick: a filled square (a crossed one for no colour), ringed
+/// in white when it is the role's colour, its name on hover.
+fn color_choice<'a>(
+    label: &'static str,
+    color: u32,
+    chosen: bool,
+    on: Option<Event>,
+) -> Element<'a, Event> {
+    let fill = if color == 0 {
+        iced::Color::TRANSPARENT
+    } else {
+        iced::Color::from_rgb8((color >> 16) as u8, (color >> 8) as u8, color as u8)
+    };
+    let enabled = on.is_some();
+    let square = button(
+        container(if color == 0 {
+            text("\u{2215}").size(18).color(crate::style::muted())
+        } else if chosen {
+            text("\u{2713}").size(16).color(iced::Color::WHITE)
+        } else {
+            text("")
+        })
+        .center(28),
+    )
+    .on_press_maybe(on)
+    .padding(0)
+    .width(28)
+    .height(28)
+    .style(move |_: &iced::Theme, status| button::Style {
+        background: Some(iced::Background::Color(iced::Color {
+            a: if enabled { 1.0 } else { 0.4 },
+            ..fill
+        })),
+        border: iced::Border {
+            radius: 6.0.into(),
+            width: if chosen || matches!(status, button::Status::Hovered) {
+                2.0
+            } else {
+                1.0
+            },
+            color: if chosen {
+                iced::Color::WHITE
+            } else {
+                crate::style::SELECTED
+            },
+        },
+        ..button::Style::default()
+    });
+    iced::widget::tooltip(
+        square,
+        container(text(tr(label)).size(11))
+            .padding([3, 6])
+            .style(container::rounded_box),
+        iced::widget::tooltip::Position::Top,
+    )
+    .into()
 }
 
 fn lock_note<'a>(reason: Option<&'static str>) -> Element<'a, Event> {
@@ -561,45 +620,54 @@ pub(super) fn roles_view<'a>(
     idle: bool,
 ) -> Element<'a, Event> {
     let Some(admin) = admin.filter(|a| a.id == form.guild) else {
-        return column![
-            header("Roles".to_owned(), idle),
-            small("This server is not available, or your roles in it are not known yet."),
-        ]
-        .spacing(6)
-        .into();
+        return small("This server is not available, or your roles in it are not known yet.")
+            .into();
     };
-    let mut panel = column![header(trf("Roles: {}", &[&admin.name]), idle)].spacing(6);
+    let mut panel = column![].spacing(10);
     if !admin.can_manage_roles {
         panel = panel.push(small(
             fastcord_discord::state::navigation::NEEDS_MANAGE_ROLES,
         ));
     }
     panel = panel.push(
-        button(text(tr("New role")).size(12))
+        primary_button(text(tr("New role")).size(12))
             .on_press_maybe((idle && admin.can_manage_roles).then_some(Event::NewRole)),
     );
     let list = column(admin.roles.iter().map(|role| {
         let up = idle && admin.plan_role_move(role.id, false).is_some();
         let down = idle && admin.plan_role_move(role.id, true).is_some();
-        row![
-            swatch(role.color),
-            text(role.name.clone())
-                .size(13)
-                .width(Length::Fill)
-                .wrapping(text::Wrapping::None),
-            button(text(tr("Up")).size(11))
-                .on_press_maybe(up.then_some(Event::MoveRole(role.id, false))),
-            button(text(tr("Down")).size(11))
-                .on_press_maybe(down.then_some(Event::MoveRole(role.id, true))),
-            button(text(tr("Edit")).size(11)).on_press(Event::PickRole(role.id)),
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center)
+        let picked = form.selected == Some(role.id);
+        container(
+            row![
+                swatch(role.color),
+                text(role.name.clone())
+                    .size(14)
+                    .width(Length::Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+                button(text(tr("Up")).size(12))
+                    .on_press_maybe(up.then_some(Event::MoveRole(role.id, false))),
+                button(text(tr("Down")).size(12))
+                    .on_press_maybe(down.then_some(Event::MoveRole(role.id, true))),
+                button(text(tr("Edit")).size(12))
+                    .on_press_maybe((!picked).then_some(Event::PickRole(role.id)))
+                    .style(crate::style::secondary_button(picked)),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([4, 8])
+        .style(move |_| container::Style {
+            background: picked.then_some(iced::Background::Color(crate::style::HOVER)),
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..iced::Border::default()
+            },
+            ..container::Style::default()
+        })
         .into()
     }))
-    .spacing(2)
-    .padding([0, 8]);
-    panel = panel.push(scrollable(list).height(Length::Fixed(160.0)));
+    .spacing(2);
+    panel = panel.push(list);
     if let Some(role) = form.selected.and_then(|id| admin.role(id)) {
         panel = panel.push(role_editor(form, role, admin, idle));
     }
@@ -629,15 +697,19 @@ fn role_editor<'a>(
                 .size(13)
                 .into(),
         ));
+        let current = parse_color(&form.color).unwrap_or(0);
         let presets = PRESET_COLORS.iter().map(|(label, color)| {
-            button(text(tr(label)).size(11))
-                .on_press_maybe(plain.then_some(Event::Color(*color)))
-                .into()
+            color_choice(
+                label,
+                *color,
+                current == *color,
+                plain.then_some(Event::Color(*color)),
+            )
         });
         panel = panel.push(labelled(
             "Colour",
             column![
-                row(presets).spacing(3).wrap(),
+                row(presets).spacing(6).wrap(),
                 text_input(tr("Hex, such as 3498DB"), &form.color)
                     .on_input_maybe(plain.then_some(|v| Event::Input(Field::RoleColor, v)))
                     .size(13),
@@ -659,7 +731,7 @@ fn role_editor<'a>(
     }
     let mut perms = column![].spacing(2);
     for (group, list) in PERMISSION_GROUPS {
-        perms = perms.push(text(tr(group)).size(12).style(text::secondary));
+        perms = perms.push(text(tr(group)).size(12).color(crate::style::muted()));
         for info in list {
             let may = enabled && admin.can_grant(admin.mine, info.flag());
             perms = perms.push(
@@ -677,9 +749,10 @@ fn role_editor<'a>(
         } else {
             "Permissions (you can only change ones you have yourself)"
         }))
-        .push(scrollable(perms.padding([0, 8])).height(Length::Fixed(200.0)))
+        .push(perms.padding([0, 8]))
         .push(
-            button(text(tr("Save role")).size(13)).on_press_maybe(enabled.then_some(Event::Save)),
+            primary_button(text(tr("Save role")).size(13))
+                .on_press_maybe(enabled.then_some(Event::Save)),
         );
     if let Some(reason) = role.move_lock {
         panel = panel.push(small(reason));
@@ -905,7 +978,7 @@ pub(super) fn access_view<'a>(
         let mut last = "";
         for (group, info) in relevant(current.kind) {
             if group != last {
-                rows = rows.push(text(tr(group)).size(12).style(text::secondary));
+                rows = rows.push(text(tr(group)).size(12).color(crate::style::muted()));
                 last = group;
             }
             rows = rows.push(tri_row(
@@ -919,7 +992,7 @@ pub(super) fn access_view<'a>(
         panel = panel.push(scrollable(rows.padding([0, 8])).height(Length::Fixed(220.0)));
         let exists = current.overwrites.iter().any(|o| o.id == target);
         panel = panel.push(
-            button(text(tr("Save overwrite")).size(13))
+            primary_button(text(tr("Save overwrite")).size(13))
                 .on_press_maybe(enabled.then_some(Event::SaveOverwrite)),
         );
         if exists {

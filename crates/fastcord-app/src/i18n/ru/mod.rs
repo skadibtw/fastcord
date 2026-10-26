@@ -8,6 +8,7 @@ mod conversation;
 mod errors;
 mod messages;
 mod moderation;
+mod network;
 mod server;
 mod voice;
 mod window;
@@ -22,6 +23,7 @@ const PARTS: &[&[(&str, &str)]] = &[
     account::ENTRIES,
     voice::ENTRIES,
     errors::ENTRIES,
+    network::ENTRIES,
 ];
 
 pub fn entries() -> impl Iterator<Item = (&'static str, &'static str)> {

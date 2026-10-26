@@ -15,12 +15,13 @@ use crate::i18n::{tr, trf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::ui::button;
 use fastcord_discord::{
     AppCommand, CommandArg, CommandIndex, CommandOption, IndexScope, InteractionModal,
     OPTION_BOOLEAN, OPTION_SUB_COMMAND, RestClient, RestError,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::gateway::NavigationBridge;
@@ -363,7 +364,7 @@ fn small(label: &'static str, event: Event) -> Element<'static, Event> {
     button(text(label).size(12))
         .on_press(event)
         .padding([2, 8])
-        .style(button::secondary)
+        .style(crate::style::secondary_button(false))
         .into()
 }
 
@@ -386,7 +387,7 @@ pub fn view<'a>(
         return Some(
             text(trf("Waiting for /{}…", &[&name]))
                 .size(12)
-                .style(text::secondary)
+                .color(crate::style::muted())
                 .into(),
         );
     }
@@ -406,7 +407,7 @@ pub fn view<'a>(
             list.push(
                 text(tr("Loading commands…"))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             )
             .into(),
         );
@@ -417,7 +418,7 @@ pub fn view<'a>(
             list.push(
                 text(tr("No matching command."))
                     .size(12)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             )
             .into(),
         );
@@ -436,7 +437,7 @@ pub fn view<'a>(
                 .width(Length::Fill)
                 .padding([3, 8])
                 .on_press(Event::Pick(command.id))
-                .style(button::secondary),
+                .style(crate::style::secondary_button(false)),
         );
     }
     Some(
@@ -461,7 +462,7 @@ fn form_view<'a>(form: &'a Form, waiting: Option<&str>) -> Element<'a, Event> {
             text(format!("/{}", form.command.name)).size(13),
             text(form.command.description.as_str())
                 .size(12)
-                .style(text::secondary)
+                .color(crate::style::muted())
                 .width(Length::Fill),
             small(tr("Close"), Event::CloseForm),
         ]
@@ -495,7 +496,7 @@ fn form_view<'a>(form: &'a Form, waiting: Option<&str>) -> Element<'a, Event> {
             line = line.push(
                 text(option.description.as_str())
                     .size(11)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             );
         }
         let choices: Vec<(String, String)> = if option.kind == OPTION_BOOLEAN {
@@ -596,7 +597,7 @@ fn modal_view<'a>(
             .padding([4, 14]),
             button(text(tr("Cancel")).size(13))
                 .on_press(Event::ModalCancel)
-                .style(button::secondary)
+                .style(crate::style::secondary_button(false))
                 .padding([4, 14]),
         ]
         .spacing(8),

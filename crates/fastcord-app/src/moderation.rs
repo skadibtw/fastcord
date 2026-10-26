@@ -14,6 +14,7 @@
 //! changes only when Discord answers. Nothing here moderates automatically.
 
 use crate::i18n::{tr, trf};
+use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::{GuildAdmin, NavigationSnapshot};
 use fastcord_discord::{
     AUDIT_FILTERS, AuditEntry, AuditPage, AuditQuery, BanEntry, BansPage, RestClient, RestError,
@@ -21,9 +22,7 @@ use fastcord_discord::{
 };
 use fastcord_model::markup::TimeStyle;
 use fastcord_model::{Permissions, Snowflake};
-use iced::widget::{
-    button, column, container, pick_list, row, scrollable, space, text, text_input,
-};
+use iced::widget::{column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 use std::fmt;
 
@@ -137,6 +136,15 @@ fn allowed(admin: Option<&GuildAdmin>, guild: Snowflake, permission: Permissions
 }
 
 impl State {
+    /// The server settings page this panel is.
+    pub fn page(&self) -> Option<(Snowflake, crate::server_settings::Section)> {
+        use crate::server_settings::Section;
+        match self.panel.as_ref()? {
+            Panel::Bans(list) => Some((list.guild, Section::Bans)),
+            Panel::Audit(log) => Some((log.guild, Section::Audit)),
+        }
+    }
+
     pub fn clear(&mut self) {
         self.panel = None;
         self.serial = self.serial.wrapping_add(1);
@@ -398,17 +406,7 @@ impl State {
 }
 
 fn small<'a>(label: impl Into<String>) -> iced::widget::Text<'a> {
-    text(label.into()).size(12).style(text::secondary)
-}
-
-fn header<'a>(title: &str) -> Element<'a, Event> {
-    row![
-        text(tr(title).to_owned()).size(14),
-        space::horizontal(),
-        crate::icons::close(Some(Event::Close)),
-    ]
-    .align_y(iced::Alignment::Center)
-    .into()
+    text(label.into()).size(12).color(crate::style::muted())
 }
 
 fn bans_view<'a>(list: &'a BanList, admin: Option<&GuildAdmin>) -> Element<'a, Event> {
@@ -450,7 +448,7 @@ fn bans_view<'a>(list: &'a BanList, admin: Option<&GuildAdmin>) -> Element<'a, E
                 .align_y(iced::Alignment::Center),
         );
     }
-    let mut panel = column![header("Bans")].spacing(6);
+    let mut panel = column![].spacing(6);
     if !can {
         panel = panel.push(small(tr("You need Ban Members to see the ban list.")));
     }
@@ -536,7 +534,8 @@ fn audit_view<'a>(log: &'a AuditLog, admin: Option<&GuildAdmin>) -> Element<'a, 
             .on_submit(Event::Reload)
             .size(12)
             .width(160),
-        button(text(tr("Apply")).size(12)).on_press_maybe((!log.loading).then_some(Event::Reload)),
+        primary_button(text(tr("Apply")).size(12))
+            .on_press_maybe((!log.loading).then_some(Event::Reload)),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center);
@@ -547,7 +546,7 @@ fn audit_view<'a>(log: &'a AuditLog, admin: Option<&GuildAdmin>) -> Element<'a, 
             entries = entries.push(audit_line(entry, offset, now));
         }
     }
-    let mut panel = column![header("Audit log"), filters].spacing(6);
+    let mut panel = column![filters].spacing(6);
     if !can {
         panel = panel.push(small(tr("You need View Audit Log to see this.")));
     }

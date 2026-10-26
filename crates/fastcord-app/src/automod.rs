@@ -16,6 +16,7 @@
 //! roles and channels in the reducer's `GuildAdmin` read model.
 
 use crate::i18n::{tr, trf, trn};
+use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::{AdminKind, GuildAdmin, NavigationSnapshot};
 use fastcord_discord::{
     AutoModAction, AutoModChange, AutoModFeed, AutoModRequestError, AutoModRule, CREATABLE,
@@ -26,7 +27,7 @@ use fastcord_discord::{
 };
 use fastcord_model::Snowflake;
 use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, space, text, text_input,
+    checkbox, column, container, pick_list, row, scrollable, space, text, text_input,
 };
 use iced::{Element, Length, Task};
 use std::fmt;
@@ -283,6 +284,11 @@ fn toggle(list: &mut Vec<Snowflake>, id: Snowflake, on: bool) {
 }
 
 impl State {
+    /// The server the panel is open for.
+    pub fn page(&self) -> Option<Snowflake> {
+        self.panel.as_ref().map(|panel| panel.guild)
+    }
+
     pub fn clear(&mut self) {
         self.panel = None;
         self.serial = self.serial.wrapping_add(1);
@@ -660,7 +666,7 @@ impl State {
 }
 
 fn small<'a>(label: impl Into<String>) -> iced::widget::Text<'a> {
-    text(label.into()).size(12).style(text::secondary)
+    text(label.into()).size(12).color(crate::style::muted())
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1068,7 +1074,7 @@ fn editor_view<'a>(
     }
     form.push(
         row![
-            button(text(tr("Save rule")).size(13))
+            primary_button(text(tr("Save rule")).size(13))
                 .on_press_maybe(panel.busy.is_none().then_some(Event::Save)),
             button(text(tr("Cancel")).size(13))
                 .on_press_maybe(panel.busy.is_none().then_some(Event::CancelEdit)),
@@ -1099,10 +1105,8 @@ pub fn view<'a>(
     }
     let mut view = column![
         row![
-            text("AutoMod").size(14),
             space::horizontal(),
             button(text(tr("Reload")).size(13)).on_press_maybe(idle.then_some(Event::Reload)),
-            crate::icons::close(Some(Event::Close)),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),

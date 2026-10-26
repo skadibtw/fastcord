@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::ui::button;
 use fastcord_discord::state::Suppression;
 use fastcord_discord::state::navigation::{MAX_REQUEST_ROWS, NavigationSnapshot};
 use fastcord_discord::{
@@ -26,7 +27,7 @@ use fastcord_discord::{
     RelationshipAction, RestClient, RestError, RetryableFailure,
 };
 use fastcord_model::{Message, Snowflake};
-use iced::widget::{button, column, container, row, scrollable, space, text};
+use iced::widget::{column, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 
 use crate::i18n::{tr, trf};
@@ -659,12 +660,9 @@ pub fn view<'a>(
     };
     let mut panel = column![
         row![
-            text(tr("Safety")).size(13),
             tab_button("Requests", Tab::Requests),
             tab_button("Ignored", Tab::Ignored),
             tab_button("Privacy", Tab::Privacy),
-            space::horizontal(),
-            crate::icons::close(idle.then_some(Event::Close)),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center)
@@ -679,19 +677,13 @@ pub fn view<'a>(
         panel = panel.push(
             text(tr("Waiting for Discord…"))
                 .size(12)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
     }
     if let Some(notice) = &state.notice {
-        panel = panel.push(text(notice.as_str()).size(12).style(text::secondary));
+        panel = panel.push(text(notice.as_str()).size(12).color(crate::style::muted()));
     }
-    Some(
-        container(panel)
-            .padding(8)
-            .width(Length::Fill)
-            .style(style::card)
-            .into(),
-    )
+    Some(panel.spacing(12).into())
 }
 
 fn requests_view<'a>(
@@ -703,7 +695,7 @@ fn requests_view<'a>(
     let mut body = column![
         text(tr("Previewing a request does not accept it or mark it read. Only Accept lets this person message you normally."))
             .size(11)
-            .style(text::secondary)
+            .color(crate::style::muted())
     ]
     .spacing(4);
     if requests.rows.is_empty() {
@@ -737,14 +729,21 @@ fn requests_view<'a>(
             let mut lines = column![].spacing(2);
             match &preview.state {
                 PreviewState::Loading => {
-                    lines =
-                        lines.push(text(tr("Loading preview…")).size(11).style(text::secondary));
+                    lines = lines.push(
+                        text(tr("Loading preview…"))
+                            .size(11)
+                            .color(crate::style::muted()),
+                    );
                 }
                 PreviewState::Failed(reason) => {
                     lines = lines.push(text(reason.as_str()).size(11).style(text::danger));
                 }
                 PreviewState::Loaded(items) if items.is_empty() => {
-                    lines = lines.push(text(tr("No messages.")).size(11).style(text::secondary));
+                    lines = lines.push(
+                        text(tr("No messages."))
+                            .size(11)
+                            .color(crate::style::muted()),
+                    );
                 }
                 PreviewState::Loaded(items) => {
                     for item in items {
@@ -817,7 +816,7 @@ fn ignored_view<'a>(navigation: &'a NavigationSnapshot, idle: bool) -> Element<'
         trf("{} ignored.", &[&count])
     };
     column![
-        text(summary).size(11).style(text::secondary),
+        text(summary).size(11).color(crate::style::muted()),
         scrollable(list).height(Length::Fixed(140.0)),
     ]
     .spacing(4)
@@ -835,7 +834,7 @@ fn privacy_view<'a>(
         row![
             text(tr("Settings are read only when you ask."))
                 .size(11)
-                .style(text::secondary),
+                .color(crate::style::muted()),
             space::horizontal(),
             small(
                 if state.form.is_some() {
@@ -855,7 +854,7 @@ fn privacy_view<'a>(
     let unknown = || {
         text(tr("Not available for this account."))
             .size(11)
-            .style(text::secondary)
+            .color(crate::style::muted())
     };
     body = body.push(text(tr("Who can send you a friend request")).size(12));
     body = match draft.friend_sources {
@@ -899,7 +898,7 @@ fn privacy_view<'a>(
         (None, Some(_)) => body.push(
             text(tr("Open a server to change its override."))
                 .size(11)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         ),
         _ => body,
     };
@@ -935,7 +934,7 @@ fn privacy_view<'a>(
             ),
             text(tr("Only the fields you changed are sent."))
                 .size(11)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),

@@ -8,10 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::i18n::{tr, trf};
+use crate::ui::button;
 use fastcord_platform::shortcut::{
     Binding, Edge, GlobalShortcuts, Key, Matcher, ShortcutEvent, global_support, mods,
 };
-use iced::widget::{button, checkbox, column, pick_list, row, slider, text};
+use iced::widget::{checkbox, column, pick_list, row, slider, text};
 use iced::{Element, Length};
 use serde_json::{Value, json};
 

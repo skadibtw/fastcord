@@ -12,6 +12,7 @@
 //! cosmetics (banner, animated avatar, theme colors, effects, per-server
 //! profiles) are not offered.
 
+use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_discord::{
     AccountEdit, AvatarImage, Connection, MAX_BIO_CHARS, MAX_DISPLAY_NAME_CHARS, MAX_NICK_CHARS,
@@ -19,7 +20,7 @@ use fastcord_discord::{
     RestClient, RestError, RetryableFailure,
 };
 use fastcord_model::{Snowflake, User};
-use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
+use iced::widget::{column, row, space, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::i18n::{tr, trf};
@@ -54,7 +55,6 @@ pub enum Outcome {
 #[derive(Clone, Debug)]
 pub enum Event {
     Toggle,
-    Close,
     NameInput(String),
     SaveName,
     PickAvatar,
@@ -213,8 +213,6 @@ impl State {
                         .map_err(ProfileRequestError::Rest)
                 });
             }
-            Event::Close if self.busy.is_none() => self.clear(),
-            Event::Close => {}
             Event::Done(serial, action, result) if serial == self.serial => {
                 self.busy = None;
                 self.task = None;
@@ -471,107 +469,135 @@ pub fn view<'a>(
     }
     let idle = state.busy.is_none();
     let editable_text = idle && state.loaded.is_some();
+    // A page of the settings screen, which has the title and the cross.
+    // Each field saves on its own: its Save is the one filled button there.
+    let save = |on: Option<Event>| {
+        primary_button(text(tr("Save")).size(13))
+            .on_press_maybe(on)
+            .padding([7, 14])
+            .style(style::action_button(false))
+    };
+    let neutral = |label: &'a str, on: Option<Event>| {
+        button(text(label).size(13))
+            .on_press_maybe(on)
+            .padding([7, 14])
+            .style(style::secondary_button(false))
+    };
+    fn field<'a>(
+        label: impl text::IntoFragment<'a>,
+        body: Element<'a, Event>,
+    ) -> Element<'a, Event> {
+        column![crate::ui::label(label), body].spacing(6).into()
+    }
     let mut panel = column![
-        row![
-            text(tr("Your profile")).size(13),
-            space::horizontal(),
-            crate::icons::close(idle.then_some(Event::Close)),
-        ]
-        .align_y(iced::Alignment::Center),
-        text(trf("Username: @{}", &[&me.username]))
-            .size(12)
-            .style(text::secondary),
-        text(tr("Changing your username needs your password (and two-factor code), so do it in the official Discord client."))
-            .size(11)
-            .style(text::secondary),
-        row![
-            text_input(tr("Display name (empty shows your username)"), &state.name)
-                .on_input(Event::NameInput)
-                .on_submit(Event::SaveName),
-            button(text(tr("Save")).size(13)).on_press_maybe(idle.then_some(Event::SaveName)),
-        ]
-        .spacing(6),
-        row![
-            text(if me.avatar.is_some() {
-                tr("Avatar: set")
-            } else {
-                tr("Avatar: none")
-            })
-            .size(12)
-            .style(text::secondary),
-            button(text(tr("Choose avatar")).size(13)).on_press_maybe(idle.then_some(Event::PickAvatar)),
-            button(text(tr("Remove avatar")).size(13))
-                .on_press_maybe((idle && me.avatar.is_some()).then_some(Event::RemoveAvatar)),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center),
-        row![
-            text_input(tr("Pronouns"), &state.pronouns)
-                .on_input_maybe(editable_text.then_some(Event::PronounsInput)),
-        ],
-        row![
-            text_input(tr("About me"), &state.bio)
-                .on_input_maybe(editable_text.then_some(Event::BioInput))
-                .on_submit(Event::SaveText),
-            button(text(tr("Save")).size(13)).on_press_maybe(editable_text.then_some(Event::SaveText)),
-        ]
-        .spacing(6),
+        field(
+            tr("Display name"),
+            column![
+                row![
+                    text_input(tr("Empty shows your username"), &state.name)
+                        .on_input(Event::NameInput)
+                        .on_submit(Event::SaveName)
+                        .padding(8),
+                    save(idle.then_some(Event::SaveName)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+                crate::ui::note(trf("Username: @{}", &[&me.username])),
+                crate::ui::note(tr("Changing your username needs your password (and two-factor code), so do it in the official Discord client.")),
+            ]
+            .spacing(4)
+            .into(),
+        ),
+        field(
+            tr("Avatar"),
+            row![
+                neutral(tr("Choose avatar"), idle.then_some(Event::PickAvatar)),
+                neutral(
+                    tr("Remove avatar"),
+                    (idle && me.avatar.is_some()).then_some(Event::RemoveAvatar)
+                ),
+                crate::ui::note(if me.avatar.is_some() {
+                    tr("Avatar: set")
+                } else {
+                    tr("Avatar: none")
+                }),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .wrap()
+            .into(),
+        ),
+        field(
+            tr("About me"),
+            column![
+                text_input(tr("Pronouns"), &state.pronouns)
+                    .on_input_maybe(editable_text.then_some(Event::PronounsInput))
+                    .padding(8),
+                row![
+                    text_input(tr("About me"), &state.bio)
+                        .on_input_maybe(editable_text.then_some(Event::BioInput))
+                        .on_submit(Event::SaveText)
+                        .padding(8),
+                    save(editable_text.then_some(Event::SaveText)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(6)
+            .into(),
+        ),
     ]
-    .spacing(6);
+    .spacing(24);
     if state.loaded.is_none() && idle {
-        panel = panel.push(
-            text(tr(
-                "Your current bio and pronouns could not be read; close and reopen to try again.",
-            ))
-            .size(11)
-            .style(text::secondary),
-        );
+        panel = panel.push(crate::ui::note(tr(
+            "Your current bio and pronouns could not be read; close and reopen to try again.",
+        )));
     }
     panel = if navigation.selected_guild.is_some() {
-        panel
-            .push(text(trf("Nickname in {}", &[&navigation.selected_guild_name])).size(12))
-            .push(
-                row![
-                    text_input(tr("Nickname (empty removes it)"), &state.nick)
-                        .on_input(Event::NickInput)
-                        .on_submit(Event::SaveNick),
-                    button(text(tr("Save")).size(13))
-                        .on_press_maybe(idle.then_some(Event::SaveNick)),
-                ]
-                .spacing(6),
-            )
+        panel.push(field(
+            trf("Nickname in {}", &[&navigation.selected_guild_name]),
+            row![
+                text_input(tr("Nickname (empty removes it)"), &state.nick)
+                    .on_input(Event::NickInput)
+                    .on_submit(Event::SaveNick)
+                    .padding(8),
+                save(idle.then_some(Event::SaveNick)),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        ))
     } else {
-        panel.push(
-            text(tr("Open a server to change your nickname there."))
-                .size(11)
-                .style(text::secondary),
-        )
+        panel.push(crate::ui::note(tr(
+            "Open a server to change your nickname there.",
+        )))
     };
-    panel = panel.push(
+    let mut connections = column![
         row![
-            text(tr("Connections on your profile")).size(12),
-            button(
-                text(if state.connections.is_some() {
+            crate::ui::note(tr("Shown on your profile when Discord allows it.")),
+            space::horizontal(),
+            neutral(
+                if state.connections.is_some() {
                     tr("Reload")
                 } else {
                     tr("Load")
-                })
-                .size(12)
-            )
-            .on_press_maybe(idle.then_some(Event::LoadConnections)),
+                },
+                idle.then_some(Event::LoadConnections)
+            ),
         ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center),
-    );
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+    ]
+    .spacing(6);
     if let Some(list) = &state.connections {
         let rows = list.iter().enumerate().map(|(index, c)| {
             row![
                 text(format!("{}: {}", c.kind, c.name))
-                    .size(12)
+                    .size(13)
                     .width(Length::Fill),
                 button(text(if c.visible { tr("Shown") } else { tr("Hidden") }).size(12))
                     .on_press_maybe((idle && c.editable).then_some(Event::ToggleConnection(index)))
-                    .style(button::secondary),
+                    .style(style::secondary_button(c.visible)),
             ]
             .extend(c.show_activity.map(|shown| {
                 button(
@@ -583,32 +609,23 @@ pub fn view<'a>(
                     .size(12),
                 )
                 .on_press_maybe((idle && c.editable).then_some(Event::ToggleActivity(index)))
-                .style(button::secondary)
+                .style(style::secondary_button(shown))
                 .into()
             }))
             .spacing(6)
             .align_y(iced::Alignment::Center)
             .into()
         });
-        panel = panel.push(scrollable(column(rows).spacing(2)).height(Length::Fixed(80.0)));
+        connections = connections.push(column(rows).spacing(4));
     }
+    panel = panel.push(field(tr("Connections"), connections.into()));
     if state.busy.is_some() {
-        panel = panel.push(
-            text(tr("Waiting for Discord…"))
-                .size(12)
-                .style(text::secondary),
-        );
+        panel = panel.push(crate::ui::note(tr("Waiting for Discord…")));
     }
     if let Some(notice) = &state.notice {
-        panel = panel.push(text(notice.as_str()).size(12).style(text::secondary));
+        panel = panel.push(crate::ui::note(notice.as_str()));
     }
-    Some(
-        container(panel)
-            .padding(8)
-            .width(Length::Fill)
-            .style(style::card)
-            .into(),
-    )
+    Some(panel.into())
 }
 
 #[cfg(test)]
@@ -739,7 +756,7 @@ mod tests {
             Err(ProfileRequestError::Rest(RestError::AuthenticationRequired)),
         );
         assert!(State::is_rejected(&rejected));
-        assert!(!State::is_rejected(&Event::Close));
+        assert!(!State::is_rejected(&Event::Toggle));
     }
 
     #[tokio::test]

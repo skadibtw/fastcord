@@ -10,17 +10,17 @@
 //! first. Nothing here creates groups or invites anyone by itself: only friends
 //! the user picks one by one can be added.
 
+use crate::ui::button;
 use fastcord_discord::state::navigation::{NavigationSnapshot, PrivateChannelSelection};
 use fastcord_discord::{
     GroupEdit, GroupError, GroupRequestError, IconImage, MAX_GROUP_NAME_CHARS, MAX_ICON_BYTES,
     NetworkFailure, RestClient, RestError, RetryableFailure,
 };
 use fastcord_model::{RelationshipKind, Snowflake};
-use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
+use iced::widget::{column, container, row, scrollable, space, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::i18n::{tr, trf};
-use crate::style;
 
 /// Friends listed as candidates to add.
 const MAX_CANDIDATES: usize = 100;
@@ -57,6 +57,8 @@ pub enum Event {
     Add(Snowflake),
     AskRemove(Snowflake),
     AskOwner(Snowflake),
+    /// The `⋯` menu of one member (make owner, remove), or none.
+    Menu(Option<Snowflake>),
     /// Leave a group, or close a DM (which needs no confirmation).
     Leave,
     Confirm,
@@ -71,6 +73,8 @@ pub struct State {
     name: String,
     busy: Option<Action>,
     confirm: Option<Confirm>,
+    /// The member whose `⋯` menu is open.
+    menu: Option<Snowflake>,
     notice: Option<String>,
     serial: u64,
     /// Dropped (aborting the request) only on logout or account change.
@@ -222,6 +226,7 @@ impl State {
                 self.notice = None;
             }
             Event::Cancel => self.confirm = None,
+            Event::Menu(user) => self.menu = user,
             _ if self.busy.is_some()
                 && !matches!(event, Event::Done(..) | Event::IconPicked(..)) =>
             {
@@ -325,12 +330,14 @@ impl State {
                 }
             }
             Event::AskRemove(user) => {
+                self.menu = None;
                 if owner && selection.is_some_and(|s| s.members.iter().any(|m| m.id == user)) {
                     self.confirm = Some(Confirm::Remove(user));
                     self.notice = None;
                 }
             }
             Event::AskOwner(user) => {
+                self.menu = None;
                 if owner && selection.is_some_and(|s| s.members.iter().any(|m| m.id == user)) {
                     self.confirm = Some(Confirm::Owner(user));
                     self.notice = None;
@@ -441,7 +448,7 @@ pub fn view<'a>(
                     tr("Icon: none")
                 })
                 .size(12)
-                .style(text::secondary),
+                .color(crate::style::muted()),
                 button(text(tr("Choose icon")).size(13))
                     .on_press_maybe(idle.then_some(Event::PickIcon)),
                 button(text(tr("Remove icon")).size(13))
@@ -464,25 +471,46 @@ pub fn view<'a>(
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center);
+        // Handing over the group and removing someone are behind `⋯`;
+        // both still ask before anything is sent.
+        let open = state.menu == Some(member.id);
         if selection.group && owner {
-            line = line
-                .push(
-                    button(text(tr("Make owner")).size(12))
-                        .on_press_maybe(idle.then_some(Event::AskOwner(member.id))),
-                )
-                .push(
-                    button(text(tr("Remove")).size(12))
-                        .on_press_maybe(idle.then_some(Event::AskRemove(member.id)))
-                        .style(button::danger),
-                );
+            line = line.push(crate::icons::action(crate::icons::Action {
+                icon: crate::icons::Icon::More,
+                on_press: idle.then_some(Event::Menu((!open).then_some(member.id))),
+                active: open,
+                danger: false,
+                tip: tr("More").to_owned(),
+                badge: 0,
+            }));
         }
-        line.into()
+        let mut entry = column![line].spacing(4);
+        if open && selection.group && owner {
+            entry = entry.push(
+                container(crate::ui::menu_card(
+                    column![
+                        crate::ui::item(
+                            None,
+                            tr("Make owner"),
+                            idle.then_some(Event::AskOwner(member.id))
+                        ),
+                        crate::ui::danger_item(
+                            None,
+                            tr("Remove from group"),
+                            idle.then_some(Event::AskRemove(member.id))
+                        ),
+                    ]
+                    .spacing(1),
+                    200.0,
+                ))
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right),
+            );
+        }
+        entry.into()
     });
     panel = panel.push(text(trf("Members ({})", &[&(selection.members.len() + 1)])).size(12));
-    panel = panel.push(
-        scrollable(column(members).spacing(2).push(text(tr("You")).size(13)))
-            .height(Length::Fixed(110.0)),
-    );
+    panel = panel.push(column(members).spacing(2).push(text(tr("You")).size(13)));
 
     if selection.group {
         let friends: Vec<Element<'a, Event>> = navigation
@@ -497,7 +525,7 @@ pub fn view<'a>(
             .map(|r| {
                 button(text(trf("Add {}", &[&r.user.display_name()])).size(12))
                     .on_press_maybe(idle.then_some(Event::Add(r.user.id)))
-                    .style(button::secondary)
+                    .style(crate::style::secondary_button(false))
                     .width(Length::Fill)
                     .into()
             })
@@ -560,19 +588,14 @@ pub fn view<'a>(
         panel = panel.push(
             text(tr("Waiting for Discord…"))
                 .size(12)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
     }
     if let Some(notice) = &state.notice {
-        panel = panel.push(text(notice.as_str()).size(12).style(text::secondary));
+        panel = panel.push(text(notice.as_str()).size(12).color(crate::style::muted()));
     }
-    Some(
-        container(panel)
-            .padding(8)
-            .width(Length::Fill)
-            .style(style::card)
-            .into(),
-    )
+    // Shown as a dialog, which draws the card.
+    Some(panel.into())
 }
 
 fn name_of(selection: &PrivateChannelSelection, user: Snowflake) -> String {

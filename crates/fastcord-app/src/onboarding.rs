@@ -13,13 +13,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::ui::button;
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_discord::{
     ApplicationStatus, Guide, Onboarding, OnboardingPrompt, RestClient, RestError, Screening,
     onboarding_due,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{button, column, container, image, row, scrollable, text};
+use iced::widget::{column, container, image, row, scrollable, text};
 use iced::{Element, Length, Task};
 
 use crate::avatars::AvatarKey;
@@ -213,6 +214,11 @@ fn now_ms() -> u64 {
 }
 
 impl State {
+    /// The rules, questions or guide are shown (not just the reminder line).
+    pub fn is_open(&self) -> bool {
+        self.panel.is_some()
+    }
+
     /// Logout or account change.
     pub fn clear(&mut self) {
         *self = Self {
@@ -606,7 +612,7 @@ fn rules_body<'a>(state: &'a State, rules: &'a Rules) -> Element<'a, Event> {
                     }],
                 ))
                 .size(12)
-                .style(text::secondary),
+                .color(crate::style::muted()),
             );
         }
     }
@@ -643,7 +649,7 @@ fn rules_body<'a>(state: &'a State, rules: &'a Rules) -> Element<'a, Event> {
         }
         None => text(tr("This server asks for more than this client can answer. Finish joining in the official client."))
             .size(12)
-            .style(text::secondary)
+            .color(crate::style::muted())
             .into(),
     });
     column![scrollable(list).height(Length::Fixed(260.0)), footer]
@@ -685,7 +691,7 @@ fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> 
                 tr("Choose any")
             })
             .size(11)
-            .style(text::secondary),
+            .color(crate::style::muted()),
         );
         for option in &prompt.options {
             let picked = q.chosen.contains(&option.id);
@@ -708,7 +714,7 @@ fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> 
                 item = item.push(
                     text(option.description.as_str())
                         .size(11)
-                        .style(text::secondary),
+                        .color(crate::style::muted()),
                 );
             }
             block = block.push(item);
@@ -721,7 +727,7 @@ fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> 
             "Roles and channels change only when Discord sends them after you save."
         ))
         .size(11)
-        .style(text::secondary)
+        .color(crate::style::muted())
     ]
     .spacing(4);
     if let Some(error) = &q.error {
@@ -797,14 +803,14 @@ fn guide_body<'a>(
                 line = line.push(
                     text(item.description.as_str())
                         .size(11)
-                        .style(text::secondary),
+                        .color(crate::style::muted()),
                 );
             }
             if !open {
                 line = line.push(
                     text(tr("You cannot open this channel."))
                         .size(11)
-                        .style(text::secondary),
+                        .color(crate::style::muted()),
                 );
             }
             list = list.push(line);

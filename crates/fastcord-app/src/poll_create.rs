@@ -11,11 +11,12 @@
 //! a second one, while a changed poll is a new, deliberate send.
 
 use crate::i18n::{tr, trf};
+use crate::ui::{button, primary_button};
 use fastcord_discord::{
     Nonce, NonceGenerator, OutgoingMessage, PollDraft, PollError, RestClient, SendError,
 };
 use fastcord_model::{MAX_POLL_ANSWERS, Snowflake};
-use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
+use iced::widget::{checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 
 /// Offered durations in hours (Discord accepts 1 to 768).
@@ -262,7 +263,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
                     .on_press_maybe(
                         (!sending && state.answers.len() > 2).then_some(Event::RemoveAnswer(at))
                     )
-                    .style(button::secondary),
+                    .style(crate::style::secondary_button(false)),
             ]
             .spacing(6),
         );
@@ -293,7 +294,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
                     (!sending && state.answers.len() < MAX_POLL_ANSWERS)
                         .then_some(Event::AddAnswer)
                 )
-                .style(button::secondary),
+                .style(crate::style::secondary_button(false)),
             checkbox(state.multiselect)
                 .label(tr("Allow several answers"))
                 .size(14)
@@ -305,12 +306,15 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
         scrollable(durations).direction(scrollable::Direction::Horizontal(
             scrollable::Scrollbar::default()
         )),
-        button(text(tr("Create")).size(13)).on_press_maybe((!sending).then_some(Event::Create)),
+        primary_button(text(tr("Create")).size(13))
+            .on_press_maybe((!sending).then_some(Event::Create)),
     ]
     .spacing(6);
     match state.status {
         Status::Editing => {}
-        Status::Sending => panel = panel.push(text(tr("Sending…")).size(12).style(text::secondary)),
+        Status::Sending => {
+            panel = panel.push(text(tr("Sending…")).size(12).color(crate::style::muted()))
+        }
         Status::Invalid(error) => {
             panel = panel.push(
                 text(tr(&error.to_string()).to_string())

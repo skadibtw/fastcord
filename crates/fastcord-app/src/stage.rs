@@ -5,10 +5,11 @@
 //! refusal is shown with Discord's own reason.
 use crate::gateway::{StageControls, VoiceControls};
 use crate::i18n::{tr, trf};
+use crate::ui::{button, primary_button};
 use crate::{Message, friends, style};
 use fastcord_discord::state::navigation::StageSeat;
 use fastcord_discord::{MAX_TOPIC_CHARS, RestError, StageAction};
-use iced::widget::{button, column, container, row, space, text, text_input};
+use iced::widget::{column, container, row, space, text, text_input};
 use iced::{Element, Font, Length};
 
 const BOLD: Font = Font {
@@ -160,7 +161,7 @@ pub fn own<'a>(
         content = content.push(
             text(tr("You cannot ask to speak in this Stage."))
                 .size(11)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
     }
     if let Some(notice) = &state.notice {
@@ -200,7 +201,7 @@ pub fn banner<'a>(
         Some(topic) => text(topic.clone()).size(15).font(BOLD),
         None => text(tr("No live Stage session"))
             .size(14)
-            .style(text::secondary),
+            .color(crate::style::muted()),
     };
     let mut header = row![container(heading).width(Length::Fill)]
         .spacing(6)
@@ -216,7 +217,7 @@ pub fn banner<'a>(
                 .push(act("End Stage", StageAction::End, free, true));
         } else {
             header = header.push(
-                button(text(tr("Start Stage")).size(12))
+                primary_button(text(tr("Start Stage")).size(12))
                     .on_press_maybe(free.then_some(Message::Stage(Event::OpenTopic(false))))
                     .style(style::tool_button(false, false)),
             );
@@ -247,7 +248,7 @@ pub fn banner<'a>(
                 &[&draft.chars().count(), &MAX_TOPIC_CHARS],
             ))
             .size(11)
-            .style(text::secondary),
+            .color(crate::style::muted()),
         );
     }
     let hands: Vec<_> = stage
@@ -260,7 +261,7 @@ pub fn banner<'a>(
             text(trf("RAISED HANDS ({})", &[&hands.len()]))
                 .size(11)
                 .font(BOLD)
-                .style(text::secondary),
+                .color(crate::style::muted()),
         );
         for (user, _) in hands.iter().take(MAX_HANDS) {
             content = content.push(
@@ -276,7 +277,7 @@ pub fn banner<'a>(
             content = content.push(
                 text(trf("+{} more", &[&(hands.len() - MAX_HANDS)]))
                     .size(11)
-                    .style(text::secondary),
+                    .color(crate::style::muted()),
             );
         }
     }

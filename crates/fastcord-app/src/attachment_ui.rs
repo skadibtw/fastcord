@@ -3,9 +3,10 @@
 //! an abortable task owned by the account panel, so leaving the channel, the
 //! message, or the account cancels it; nothing here touches the disk or the
 //! network on the UI thread.
+use crate::ui::button;
 use fastcord_model::{Attachment, Snowflake};
 use iced::task::Handle;
-use iced::widget::{button, column, container, image, opaque, row, text};
+use iced::widget::{column, container, image, opaque, row, text};
 use iced::{ContentFit, Element, Length, Task};
 
 use crate::Message;

@@ -12,11 +12,12 @@
 
 use std::sync::Arc;
 
+use crate::ui::button;
 use fastcord_audio::{
     DeviceChoice, EchoDiagnostics, InputDiagnostics, InputGain, MAX_GAIN_DB, MIN_GAIN_DB, MicTest,
     MicTestFailure, MicTestMode, MicTestPhase, MicTestSnapshot, NoiseSuppression,
 };
-use iced::widget::{button, checkbox, column, progress_bar, row, slider, text};
+use iced::widget::{checkbox, column, progress_bar, row, slider, text};
 use iced::{Element, Task};
 use parking_lot::Mutex;
 
