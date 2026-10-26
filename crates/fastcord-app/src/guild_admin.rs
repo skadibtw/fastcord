@@ -1313,9 +1313,10 @@ fn channel_row<'a>(admin: &'a GuildAdmin, c: &'a AdminChannel, idle: bool) -> El
             .size(13)
             .width(Length::Fill)
             .wrapping(text::Wrapping::WordOrGlyph),
-        button(text(tr("Up")).size(12)).on_press_maybe(move_up.then_some(Event::Move(c.id, false))),
-        button(text(tr("Down")).size(12))
-            .on_press_maybe(move_down.then_some(Event::Move(c.id, true))),
+        crate::ui::move_arrows(
+            move_up.then_some(Event::Move(c.id, false)),
+            move_down.then_some(Event::Move(c.id, true)),
+        ),
         button(text(tr("Edit")).size(12)).on_press_maybe(
             (idle && c.can_manage).then_some(Event::EditChannel(admin.id, c.id, c.kind.is_voice()))
         ),

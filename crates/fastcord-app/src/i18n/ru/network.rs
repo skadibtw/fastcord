@@ -344,6 +344,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Показываются в профиле, если Discord это разрешает.",
     ),
     ("Remove friend", "Удалить из друзей"),
+    ("Move up", "Переместить вверх"),
+    ("Move down", "Переместить вниз"),
     ("Remove from group", "Удалить из группы"),
     (
         "Animated and external emoji may need Nitro.",

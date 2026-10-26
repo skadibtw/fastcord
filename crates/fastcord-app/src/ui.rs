@@ -71,6 +71,37 @@ pub fn link<'a, M: Clone + 'a>(label: impl text::IntoFragment<'a>, on: M) -> Ele
         .into()
 }
 
+/// The pair of arrows that moves a row of an ordered list. `None` greys an
+/// arrow out: up at the top of the list, down at the bottom.
+pub fn move_arrows<'a, M: Clone + 'a>(up: Option<M>, down: Option<M>) -> Element<'a, M> {
+    let arrow = |icon, on: Option<M>, tip: &'static str| -> Element<'a, M> {
+        let color = if on.is_some() {
+            style::TEXT
+        } else {
+            Color {
+                a: 0.3,
+                ..style::TEXT
+            }
+        };
+        iced::widget::tooltip(
+            button(icons::sized(icon, color, 14.0))
+                .on_press_maybe(on)
+                .padding([6, 8]),
+            container(text(crate::i18n::tr(tip)).size(11))
+                .padding([3, 6])
+                .style(container::rounded_box),
+            iced::widget::tooltip::Position::Top,
+        )
+        .into()
+    };
+    row![
+        arrow(Icon::ChevronUp, up, "Move up"),
+        arrow(Icon::ChevronDown, down, "Move down"),
+    ]
+    .spacing(4)
+    .into()
+}
+
 /// A field's permanent label above it.
 pub fn label<'a, M: 'a>(label: impl text::IntoFragment<'a>) -> Element<'a, M> {
     text(label).size(12).font(BOLD).color(style::SUBTLE).into()

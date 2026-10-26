@@ -1179,11 +1179,10 @@ fn onboarding_view<'a>(ed: &'a OnbEd, admin: &'a GuildAdmin, edit: bool) -> Elem
                 )
                 .on_press(msg(OnbMsg::SelectPrompt(at)))
                 .width(Length::Fill),
-                button(text(tr("Up")).size(11))
-                    .on_press_maybe((edit && at > 0).then_some(msg(OnbMsg::MovePrompt(at, false)))),
-                button(text(tr("Down")).size(11)).on_press_maybe(
+                crate::ui::move_arrows(
+                    (edit && at > 0).then_some(msg(OnbMsg::MovePrompt(at, false))),
                     (edit && at + 1 < doc.prompts.len())
-                        .then_some(msg(OnbMsg::MovePrompt(at, true)))
+                        .then_some(msg(OnbMsg::MovePrompt(at, true))),
                 ),
                 button(text(tr("Delete")).size(11))
                     .on_press_maybe(edit.then_some(msg(OnbMsg::RemovePrompt(at)))),

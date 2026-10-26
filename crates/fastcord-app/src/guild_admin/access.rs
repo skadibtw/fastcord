@@ -644,10 +644,10 @@ pub(super) fn roles_view<'a>(
                     .size(14)
                     .width(Length::Fill)
                     .wrapping(text::Wrapping::WordOrGlyph),
-                button(text(tr("Up")).size(12))
-                    .on_press_maybe(up.then_some(Event::MoveRole(role.id, false))),
-                button(text(tr("Down")).size(12))
-                    .on_press_maybe(down.then_some(Event::MoveRole(role.id, true))),
+                crate::ui::move_arrows(
+                    up.then_some(Event::MoveRole(role.id, false)),
+                    down.then_some(Event::MoveRole(role.id, true)),
+                ),
                 button(text(tr("Edit")).size(12))
                     .on_press_maybe((!picked).then_some(Event::PickRole(role.id)))
                     .style(crate::style::secondary_button(picked)),
