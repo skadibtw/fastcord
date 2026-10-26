@@ -566,9 +566,10 @@ impl<C: Clock> RestClient<C> {
                     return Err(paused);
                 }
                 let throttle = limits.throttle(&body)?;
+                let excessive = throttle.excessive;
                 reservation.complete(limits, Some(throttle));
                 rate_limited += 1;
-                if rate_limited >= MAX_CONSECUTIVE_429 {
+                if excessive || rate_limited >= MAX_CONSECUTIVE_429 {
                     return Err(RestError::RateLimited);
                 }
                 continue;

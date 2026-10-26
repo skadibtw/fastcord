@@ -34,5 +34,24 @@
       "retry_after": 0.25,
       "global": true
     }
+  },
+  "edge_429": {
+    "headers": {
+      "retry-after": "30",
+      "content-type": "text/html"
+    },
+    "body": "<html><title>429 Too Many Requests</title></html>"
+  },
+  "huge_429": {
+    "headers": {
+      "x-ratelimit-bucket": "fixture-shared-bucket",
+      "x-ratelimit-scope": "user",
+      "retry-after": "1000000"
+    },
+    "body": {
+      "message": "You are being rate limited.",
+      "retry_after": 1000000,
+      "global": false
+    }
   }
 }

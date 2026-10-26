@@ -164,6 +164,43 @@ fn global_429_pauses_every_route_including_unknown_routes() {
 }
 
 #[test]
+fn a_429_without_discord_headers_pauses_every_route() {
+    // Cloudflare's edge limits the address: a second route must not go on
+    // collecting 429s of its own (#143).
+    let clock = TestClock::default();
+    let limiter = RateLimiter::new(clock.clone());
+    let one = route(Method::GET, "/channels/1/messages");
+    let two = route(Method::GET, "/users/@me");
+    let reservation = acquire(&limiter, &one);
+    let (limits, body) = fixture("edge_429", limiter.now());
+    limiter.pause_from_headers(&one, &limits);
+    let throttle = limits.throttle(&body).unwrap();
+    assert!(!throttle.excessive);
+    reservation.complete(limits, Some(throttle));
+    let mut other = Box::pin(limiter.acquire(two, Priority::UserRead, 1024));
+    assert!(poll(other.as_mut()).is_pending());
+    clock.advance(Duration::from_secs(30));
+    let _other = ready(other.as_mut()).unwrap();
+}
+
+#[test]
+fn an_absurd_retry_after_waits_at_most_an_hour_and_is_reported() {
+    let clock = TestClock::default();
+    let limiter = RateLimiter::new(clock.clone());
+    let key = route(Method::GET, "/channels/1/messages");
+    let reservation = acquire(&limiter, &key);
+    let (limits, body) = fixture("huge_429", limiter.now());
+    limiter.pause_from_headers(&key, &limits);
+    let throttle = limits.throttle(&body).unwrap();
+    assert!(throttle.excessive, "the caller fails instead of sleeping");
+    reservation.complete(limits, Some(throttle));
+    let mut next = Box::pin(limiter.acquire(key, Priority::UserRead, 1024));
+    assert!(poll(next.as_mut()).is_pending());
+    clock.advance(MAX_RETRY_AFTER);
+    let _next = ready(next.as_mut()).unwrap();
+}
+
+#[test]
 fn per_route_429_honors_longest_retry_without_pausing_another_major() {
     let clock = TestClock::default();
     let limiter = RateLimiter::new(clock.clone());

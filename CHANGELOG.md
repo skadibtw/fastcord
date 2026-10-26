@@ -15,6 +15,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- A 429 from Cloudflare (no Discord rate-limit headers) now pauses every request for its stated wait, not just the one route, so the client stops collecting more 429s on other routes and lengthening a temporary ban (#143). A stated wait over an hour is cut to an hour and the request reports "rate limited" instead of hanging silently for days.
 - On macOS, read-aloud and TTS messages can no longer control the speech engine (#144): `[[slnc 60000]]`, `[[volm 0]]` and other embedded `say` commands in someone's message are spoken as text instead of silencing or slowing everything queued after them. A `say` process that fails to take its text is now stopped and reaped.
 - A CAPTCHA or verification challenge with a long body (over 4 KiB, as real ones with their request tokens are) now stops all writes like a short one, instead of showing "REST request failed (400)" and letting the next write repeat it (#145). Error bodies are read up to 64 KiB, as rate-limit ones already were.
 - The sign-in requests made before a token exists (password login, QR ticket exchange, fingerprint, version check) share one cookie-and-size-limited transport (#147). The `/app` page fetch now sends the `discord.com` cookies it already kept, as a browser would, and none of them can read past its size limit.

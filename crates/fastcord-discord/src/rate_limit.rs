@@ -25,6 +25,9 @@ pub(crate) struct ResponseLimits {
 
 /// The wait after a 429 whose stated delay is zero.
 pub(crate) const MIN_RETRY_AFTER: Duration = Duration::from_secs(1);
+/// The longest stated delay honoured by waiting; a longer one pauses this
+/// long and fails the request instead of hanging it for days (#143).
+pub(crate) const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
 
 fn seconds(value: f64) -> Option<Duration> {
     Duration::try_from_secs_f64(value).ok()
@@ -46,16 +49,23 @@ impl ResponseLimits {
             remaining: text("x-ratelimit-remaining").and_then(|value| value.parse().ok()),
             reset_after: duration("x-ratelimit-reset-after"),
             retry_after: duration("retry-after"),
+            // No `x-ratelimit-*` header at all: Cloudflare's edge limits the
+            // address, not one route, so every route waits (#143).
             global: text("x-ratelimit-global")
                 .is_some_and(|value| value.eq_ignore_ascii_case("true"))
                 || text("x-ratelimit-scope")
-                    .is_some_and(|value| value.eq_ignore_ascii_case("global")),
+                    .is_some_and(|value| value.eq_ignore_ascii_case("global"))
+                || !headers
+                    .keys()
+                    .any(|name| name.as_str().starts_with("x-ratelimit-")),
             observed_at,
         }
     }
 
     fn header_retry(&self) -> Option<Duration> {
-        self.retry_after.max(self.reset_after)
+        self.retry_after
+            .max(self.reset_after)
+            .map(|after| after.min(MAX_RETRY_AFTER))
     }
 
     pub(crate) fn throttle(&self, body: &[u8]) -> Result<Throttle, RestError> {
@@ -74,10 +84,11 @@ impl ResponseLimits {
             .max(self.header_retry())
             .ok_or(RestError::InvalidRateLimit)?;
         // A stated delay of zero would make the reschedule loop spin.
+        let excessive = delay > MAX_RETRY_AFTER;
         let delay = if delay.is_zero() {
             MIN_RETRY_AFTER
         } else {
-            delay
+            delay.min(MAX_RETRY_AFTER)
         };
         let until = self
             .observed_at
@@ -86,6 +97,7 @@ impl ResponseLimits {
         Ok(Throttle {
             until,
             global: self.global || decoded.is_some_and(|body| body.global),
+            excessive,
         })
     }
 }
@@ -93,6 +105,9 @@ impl ResponseLimits {
 pub(crate) struct Throttle {
     until: Duration,
     global: bool,
+    /// The stated delay was over [`MAX_RETRY_AFTER`]: wait no longer than
+    /// that, and report the request as rate limited instead of retrying.
+    pub(crate) excessive: bool,
 }
 
 #[derive(Default)]
