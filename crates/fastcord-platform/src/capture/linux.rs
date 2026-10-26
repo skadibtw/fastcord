@@ -164,11 +164,29 @@ pub(super) fn start_camera(
     Err(CAMERA_UNSUPPORTED)
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime, CaptureError> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| CaptureError::Worker("the portal runtime could not be started"))
+/// The one runtime every portal call runs on (#136). ashpd keeps a single
+/// process-wide D-Bus connection whose socket and reader task belong to the
+/// runtime it was first made on, so that runtime lives as long as the process,
+/// driven by its own thread (parked in the reactor: no idle CPU). A runtime
+/// per call left the connection dead for every later portal call, the file
+/// dialogs included.
+fn runtime() -> Result<&'static tokio::runtime::Handle, CaptureError> {
+    static PORTAL: OnceLock<Option<tokio::runtime::Handle>> = OnceLock::new();
+    PORTAL
+        .get_or_init(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            let handle = runtime.handle().clone();
+            std::thread::Builder::new()
+                .name("fastcord-portal".to_owned())
+                .spawn(move || runtime.block_on(std::future::pending::<()>()))
+                .ok()?;
+            Some(handle)
+        })
+        .as_ref()
+        .ok_or(CaptureError::Worker("the portal runtime could not be started"))
 }
 
 fn portal_error(error: ashpd::Error) -> CaptureError {
@@ -612,6 +630,20 @@ fn stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_portal_runtime_outlives_each_call_and_runs_its_tasks() {
+        // ashpd's shared D-Bus reader is such a task: it must keep running
+        // between portal calls, with nobody blocking on it (#136).
+        let first = runtime().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        first.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = tx.send(());
+        });
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
+        assert!(std::ptr::eq(first, runtime().unwrap()), "one runtime");
+    }
 
     /// Width, height and first luma byte of each delivered picture.
     type Frames = Rc<RefCell<Vec<(u32, u32, u8)>>>;
