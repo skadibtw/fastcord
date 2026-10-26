@@ -28,6 +28,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Audit application network boundary
         run: python3 scripts/check_network_boundary.py
+      - name: AGENTS.md crate map matches the manifests
+        run: python3 scripts/check_agents_map.py
       - name: Generated files are current (licences, icon catalog)
         run: |
           cargo fetch --locked
