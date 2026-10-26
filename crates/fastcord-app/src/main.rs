@@ -3423,8 +3423,8 @@ and a fourth"
                                     link.channel,
                                     Some(link.message),
                                 );
-                            } else if rich::safe_url(&url) {
-                                let _ = fastcord_platform::open_url(&url);
+                            } else if let Some(url) = rich::link_target(&url) {
+                                let _ = fastcord_platform::open_url(url.as_str());
                             }
                         }
                         timeline::Event::Report {

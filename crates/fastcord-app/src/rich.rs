@@ -290,10 +290,16 @@ fn ends_link(parts: &[Part<'_>], n: usize) -> bool {
     !matches!((parts[n].kind, parts.get(n + 1)), (Kind::Link(a), Some(next)) if next.kind == Kind::Link(a))
 }
 
-fn host(url: &str) -> &str {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    rest[..end].rsplit('@').next().unwrap_or("")
+/// The host (and port) a link opens, from the same parse that opens it, so a
+/// masked label's hint cannot name another host (#161).
+fn host(url: &str) -> String {
+    link_target(url).map_or_else(String::new, |url| {
+        let host = url.host_str().unwrap_or_default();
+        match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_owned(),
+        }
+    })
 }
 
 impl<'a> Renderer<'a> {
@@ -658,10 +664,25 @@ impl<'a> Renderer<'a> {
 
 /// Whether a link target may be handed to the operating system.
 pub fn safe_url(url: &str) -> bool {
-    url.len() <= 2048
-        && (url.starts_with("https://") || url.starts_with("http://"))
-        && !url.contains(|c: char| c.is_whitespace() || c.is_control())
-        && !host(url).is_empty()
+    link_target(url).is_some()
+}
+
+/// A link that may go to the OS handler: one http(s) token with a host and no
+/// credentials, parsed as a browser would (a backslash is a path separator). Open
+/// passes this normalized form, never the raw text.
+pub fn link_target(raw: &str) -> Option<reqwest::Url> {
+    if raw.len() > 2048
+        || !(raw.starts_with("https://") || raw.starts_with("http://"))
+        || raw.contains(|c: char| c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    let url = reqwest::Url::parse(raw).ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some_and(|host| !host.is_empty())
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then_some(url)
 }
 
 #[cfg(test)]
@@ -683,9 +704,16 @@ mod tests {
         ] {
             assert!(!safe_url(bad), "{bad:?}");
         }
+        // Credentials are refused: they are how a label hides the real host.
+        assert!(!safe_url("https://user:pw@example.com:8080/x"));
+        assert_eq!(host("https://example.com:8080/x"), "example.com:8080");
+        // A browser reads a backslash as "/": the host is the first name, not
+        // the one after "@", and that is what is shown and opened.
+        let spoof = "https://evil.test\\@discord.com/gift";
+        assert_eq!(host(spoof), "evil.test");
         assert_eq!(
-            host("https://user:pw@example.com:8080/x"),
-            "example.com:8080"
+            link_target(spoof).unwrap().as_str(),
+            "https://evil.test/@discord.com/gift"
         );
     }
 

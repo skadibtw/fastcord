@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- A masked link can no longer show one host and open another (#161). The host in brackets after a link and the address that is opened now come from the same URL parse, done the way a browser reads it (a backslash counts as `/`), and links that carry a user name or password are not opened.
 - Messages from people you blocked or ignored no longer add to the mention count of the channel, the server icon or the tray (#162). Their notifications and mention-list entries were already hidden; the counters now follow the same rule.
 - A channel with many emoji no longer re-reads each message once per emoji on every update (#163): the check of which emoji are still on screen now parses each message once per update.
 - Server icons and your own avatar no longer fall back to letter circles after browsing many channels, and pictures that failed while the network was coming up are tried again (#165). The picture store now evicts what left the screen first; a network, 429 or 5xx failure is retried after 30 s, and a definite failure is forgotten once its picture leaves the screen.
