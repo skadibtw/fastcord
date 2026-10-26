@@ -12,7 +12,12 @@
 //! device is touched, and a broken DRM discovery (`/dev/dri` unreadable)
 //! fails before any candidate exists, as [`OpenError::Discovery`].
 
-use crate::codec::{EncoderConfig, VideoDecoder, VideoEncoder};
+use std::time::Duration;
+
+use crate::codec::{
+    Backend, BackendKind, BackendPreference, CodecError, DecodedFrame, EncoderConfig, VideoDecoder,
+    VideoEncoder,
+};
 use crate::openh264::{SoftwareDecoderSource, SoftwareEncoderSource};
 use crate::select::{Candidate, OpenError, Selected, select};
 use crate::vaapi::{self, HardwareSource};
@@ -76,7 +81,7 @@ fn merged_decoder_candidates(
 /// an attempt, and a broken device discovery as [`OpenError::Discovery`].
 pub(crate) fn open_encoder(
     config: EncoderConfig,
-    preference: crate::codec::BackendPreference,
+    preference: BackendPreference,
 ) -> Result<Selected<Box<dyn VideoEncoder>>, OpenError> {
     // A rejected configuration never touches the devices (nor the software
     // codec's own validation).
@@ -97,12 +102,13 @@ pub(crate) fn open_encoder(
 }
 
 /// Opens the platform decoder, in the same order and with the same
-/// preference semantics as above.
+/// preference semantics as above. Under `Auto` a VA-API decoder is wrapped so
+/// that a stream it cannot express moves to OpenH264 ([`Fallback`]).
 pub(crate) fn open_decoder(
-    preference: crate::codec::BackendPreference,
+    preference: BackendPreference,
 ) -> Result<Selected<Box<dyn VideoDecoder>>, OpenError> {
     let hardware = vaapi::decoder_candidates().map_err(OpenError::Discovery)?;
-    select(
+    let mut selected = select(
         preference,
         merged_decoder_candidates(hardware),
         |source| match source {
@@ -113,13 +119,60 @@ pub(crate) fn open_decoder(
                 Ok(Box::new(software.open()?) as Box<dyn VideoDecoder>)
             }
         },
-    )
+    )?;
+    if preference == BackendPreference::Auto
+        && selected.codec.backend().kind == BackendKind::Hardware
+    {
+        selected.codec = Box::new(Fallback {
+            current: selected.codec,
+            software: Some(SoftwareDecoderSource),
+        });
+    }
+    Ok(selected)
+}
+
+/// A VA-API decoder that hands over to OpenH264 once (#126). VA-API is chosen
+/// before the stream is seen and refuses B slices, POC type 1, deep DPBs and
+/// other common High-profile features as `Unsupported`; OpenH264 decodes
+/// them. VA-API's references are lost in the switch, so the failing unit is
+/// reported as damaged and the caller resumes at the next keyframe.
+struct Fallback {
+    current: Box<dyn VideoDecoder>,
+    software: Option<SoftwareDecoderSource>,
+}
+
+impl VideoDecoder for Fallback {
+    fn backend(&self) -> &Backend {
+        self.current.backend()
+    }
+
+    fn decode(
+        &mut self,
+        access_unit: &[u8],
+        timestamp: Duration,
+        out: &mut dyn FnMut(DecodedFrame<'_>),
+    ) -> Result<(), CodecError> {
+        match self.current.decode(access_unit, timestamp, out) {
+            Err(CodecError::Unsupported(_)) if self.software.is_some() => {
+                if let Some(software) = self.software.take() {
+                    self.current = Box::new(software.open()?);
+                }
+                Err(CodecError::InvalidBitstream(
+                    "the hardware decoder cannot decode this stream; continuing in software",
+                ))
+            }
+            other => other,
+        }
+    }
+
+    fn flush(&mut self, out: &mut dyn FnMut(DecodedFrame<'_>)) -> Result<(), CodecError> {
+        self.current.flush(out)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::{BackendKind, BackendPreference, CodecError};
     use crate::select::{Attempt, OpenError};
     use crate::vaapi::HardwareSource;
     use crate::vaapi::bindings::VAProfile_VAProfileH264ConstrainedBaseline;
@@ -256,5 +309,45 @@ mod tests {
                 crate::openh264::NAME
             ]
         );
+    }
+
+    /// A hardware decoder that refuses the stream, as VA-API does B slices.
+    struct Refusing(Backend);
+
+    impl VideoDecoder for Refusing {
+        fn backend(&self) -> &Backend {
+            &self.0
+        }
+        fn decode(
+            &mut self,
+            _: &[u8],
+            _: Duration,
+            _: &mut dyn FnMut(DecodedFrame<'_>),
+        ) -> Result<(), CodecError> {
+            Err(CodecError::Unsupported(
+                "B, SP and SI slices are not supported",
+            ))
+        }
+        fn flush(&mut self, _: &mut dyn FnMut(DecodedFrame<'_>)) -> Result<(), CodecError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_stream_the_hardware_refuses_moves_to_openh264_once() {
+        let mut decoder = Fallback {
+            current: Box::new(Refusing(Backend {
+                kind: BackendKind::Hardware,
+                api: "VA-API",
+                name: "test".to_owned(),
+            })),
+            software: Some(SoftwareDecoderSource),
+        };
+        let unit = [0, 0, 0, 1, 0x41, 0x9a];
+        let switched = decoder.decode(&unit, Duration::ZERO, &mut |_| {});
+        // Not fatal: the caller waits for the next keyframe.
+        assert!(matches!(switched, Err(CodecError::InvalidBitstream(_))));
+        assert_eq!(decoder.backend().kind, BackendKind::Software);
+        assert!(decoder.software.is_none(), "only once");
     }
 }
