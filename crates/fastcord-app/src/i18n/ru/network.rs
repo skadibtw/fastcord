@@ -158,6 +158,18 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Анонимная проверка API Discord не прошла: пакетное восстановление не вернуло доступ.",
     ),
     (
+        "Anonymous Discord API check failed on the direct route. Recovery is off: choose Automatic to try other TLS shapes.",
+        "Анонимная проверка API Discord не прошла по прямому маршруту. Восстановление выключено: выберите «Автоматически», чтобы попробовать другие формы TLS.",
+    ),
+    (
+        "Anonymous Discord API check failed with TLS recovery. The packet helper is not running.",
+        "Анонимная проверка API Discord не прошла с восстановлением TLS. Пакетный помощник не запущен.",
+    ),
+    (
+        "Anonymous Discord API check failed through the proxy.",
+        "Анонимная проверка API Discord не прошла через прокси.",
+    ),
+    (
         "Network settings could not be read. Routing is stopped until you choose a mode.",
         "Не удалось прочитать настройки сети. Подключения остановлены, пока вы не выберете режим.",
     ),

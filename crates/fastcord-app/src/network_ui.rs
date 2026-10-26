@@ -166,9 +166,11 @@ pub async fn start_packet() -> Result<PacketRoute, &'static str> {
 pub async fn packet_check(context: fastcord_net::NetworkContext) -> &'static str {
     use fastcord_net::tls::Strategy;
     use std::time::Duration;
+    let mut packet_tried = false;
     for strategy in [Strategy::PacketFake, Strategy::PacketOverlap] {
         let packet =
             context.mode() == Mode::Auto && context.select_packet_strategy(strategy).is_ok();
+        packet_tried |= packet;
         if !packet && strategy == Strategy::PacketOverlap {
             break;
         }
@@ -210,7 +212,24 @@ pub async fn packet_check(context: fastcord_net::NetworkContext) -> &'static str
             }
         }
     }
-    "Anonymous Discord API check failed. Packet recovery has not restored access."
+    check_failed(context.mode(), packet_tried)
+}
+
+/// Names the route the failed check took, so it never blames a helper that
+/// was not running (#218).
+fn check_failed(mode: Mode, packet: bool) -> &'static str {
+    match mode {
+        Mode::Off => {
+            "Anonymous Discord API check failed on the direct route. Recovery is off: choose Automatic to try other TLS shapes."
+        }
+        Mode::Auto if packet => {
+            "Anonymous Discord API check failed. Packet recovery has not restored access."
+        }
+        Mode::Auto => {
+            "Anonymous Discord API check failed with TLS recovery. The packet helper is not running."
+        }
+        Mode::Proxy => "Anonymous Discord API check failed through the proxy.",
+    }
 }
 
 fn now() -> u64 {
@@ -886,6 +905,13 @@ pub fn preview() -> iced::Result {
 mod tests {
     use super::*;
     use fastcord_net::selector::BudgetSnapshot;
+
+    #[test]
+    fn a_failed_check_blames_only_the_route_it_took() {
+        assert!(!check_failed(Mode::Off, false).contains("Packet"));
+        assert!(check_failed(Mode::Auto, false).contains("not running"));
+        assert!(check_failed(Mode::Auto, true).contains("Packet recovery"));
+    }
 
     #[test]
     fn budget_line_says_when_checks_must_wait() {
