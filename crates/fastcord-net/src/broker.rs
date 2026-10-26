@@ -501,7 +501,13 @@ impl NetworkContext {
             });
         let _scope = RecoveryScope(self.0.recovering.clone());
         let transforms = self.0.transforms.clone();
-        let factory = self.0.prefix_factory.clone();
+        // A helper that is gone cannot be probed either: fall back to the
+        // ordinary catalog instead of planning a campaign around it.
+        let factory = self
+            .0
+            .prefix_factory
+            .clone()
+            .filter(|factory| factory.available());
         #[cfg(debug_assertions)]
         let output = self.0.probe_output.clone();
         let catalog = forced
@@ -574,7 +580,9 @@ pub(crate) fn select_strategy(
     if !probe_authorized(role, host) {
         return Strategy::Direct;
     }
-    if let Some(factory) = factory {
+    if let Some(factory) = factory
+        && factory.available()
+    {
         return factory.strategy();
     }
     let family = if address.is_ipv4() {
@@ -940,6 +948,67 @@ async fn run_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct DeadFactory;
+    impl crate::tls::FakePrefixFactory for DeadFactory {
+        fn available(&self) -> bool {
+            false
+        }
+        fn start(
+            &self,
+            _: std::net::TcpStream,
+            _: Vec<u8>,
+            _: Vec<u8>,
+            _: Strategy,
+        ) -> io::Result<crate::tls::PrefixFuture> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
+    #[test]
+    fn a_dead_packet_factory_falls_back_to_the_ordinary_catalog() {
+        let controller = Controller::new();
+        let address: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        // Alive factory: its own strategy wins, as before.
+        struct AliveFactory(DeadFactory);
+        impl crate::tls::FakePrefixFactory for AliveFactory {
+            fn start(
+                &self,
+                socket: std::net::TcpStream,
+                original: Vec<u8>,
+                fake: Vec<u8>,
+                strategy: Strategy,
+            ) -> io::Result<crate::tls::PrefixFuture> {
+                self.0.start(socket, original, fake, strategy)
+            }
+        }
+        assert_eq!(
+            select_strategy(
+                &controller,
+                Some(&AliveFactory(DeadFactory)),
+                "discord.com",
+                443,
+                Role::Rest,
+                address,
+                TlsProfile::Http
+            ),
+            Strategy::PacketFake
+        );
+        // The same factory once its helper is gone must not be selected: the
+        // ordinary catalog (here Direct, nothing confirmed yet) takes over.
+        assert_eq!(
+            select_strategy(
+                &controller,
+                Some(&DeadFactory),
+                "discord.com",
+                443,
+                Role::Rest,
+                address,
+                TlsProfile::Http
+            ),
+            Strategy::Direct
+        );
+    }
 
     #[test]
     fn private_bridge_credential_lasts_across_all_application_context_views() {

@@ -120,6 +120,16 @@ impl std::fmt::Debug for PacketHelper {
     }
 }
 impl PacketHelper {
+    /// False once the elevated child or its pipe is gone. The transport then
+    /// stops selecting the packet strategy instead of failing every dial with
+    /// it for the rest of the process.
+    pub fn available(&self) -> bool {
+        self.pipe
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+    }
+
     /// Blocking UI-worker operation. Windows presents UAC to the human.
     pub fn launch() -> io::Result<Arc<Self>> {
         let mut random = [0u8; 16];
@@ -262,6 +272,9 @@ impl Drop for Pending {
     }
 }
 impl fastcord_net::tls::FakePrefixFactory for PacketFactory {
+    fn available(&self) -> bool {
+        self.0.available()
+    }
     fn strategy(&self) -> Strategy {
         if self.0.strategy.load(Ordering::Relaxed) == 0 {
             Strategy::PacketFake

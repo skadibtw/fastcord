@@ -31,6 +31,19 @@ pub const PROBE_SPACING: Duration = Duration::from_millis(250);
 pub const CAMPAIGN_SPACING: Duration = Duration::from_secs(60);
 pub const ROLLING_WINDOW: Duration = Duration::from_secs(10 * 60);
 pub const HINT_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long one endpoint's confirmed shape is reused as the first try for the
+/// other endpoints of the same generation and address family. Short on purpose:
+/// a provider that rotates its filter must not keep a stale shape for long, and
+/// a failed reuse costs one dial before that endpoint gets its own campaign.
+pub const PREFERENCE_LIFETIME: Duration = Duration::from_secs(10 * 60);
+
+fn exact_lifetime() -> u64 {
+    HINT_LIFETIME.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn preference_lifetime() -> u64 {
+    PREFERENCE_LIFETIME.as_millis().min(u64::MAX as u128) as u64
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AddressFamily {
@@ -418,15 +431,35 @@ impl Controller {
         }
     }
 
+    /// The shape a new dial should use. An exact confirmation of this endpoint
+    /// wins for its hint lifetime. Otherwise the newest confirmation from the
+    /// same generation and address family is reused: one dial instead of a
+    /// campaign, which is what lets the REST, CDN, Gateway and voice endpoints
+    /// all follow the first service that recovered. This is not a claim about
+    /// the other endpoint — a dial that fails with it records its own demand
+    /// and the ordinary campaign still runs for that endpoint.
     pub fn strategy_for(&self, target: &DiagnosticTarget) -> Option<Strategy> {
         let now = self.now_ms();
         let policy = self.policy();
-        policy.confirmations.iter().find_map(|candidate| {
-            (candidate.target == *target
-                && candidate.generation == policy.generation
-                && now.saturating_sub(candidate.verified_at_ms) < HINT_LIFETIME.as_millis() as u64)
-                .then_some(candidate.strategy)
-        })
+        let fresh = |candidate: &Candidate, lifetime: u64| {
+            candidate.generation == policy.generation
+                && now.saturating_sub(candidate.verified_at_ms) < lifetime
+        };
+        if let Some(exact) = policy
+            .confirmations
+            .iter()
+            .find(|candidate| candidate.target == *target && fresh(candidate, exact_lifetime()))
+        {
+            return Some(exact.strategy);
+        }
+        policy
+            .confirmations
+            .iter()
+            .filter(|candidate| {
+                candidate.target.family == target.family && fresh(candidate, preference_lifetime())
+            })
+            .max_by_key(|candidate| candidate.verified_at_ms)
+            .map(|candidate| candidate.strategy)
     }
 
     pub fn service_status(&self, role: Role) -> ServiceStatus {
@@ -792,6 +825,64 @@ mod tests {
             ),
             Err(NetworkError::BudgetExhausted)
         );
+    }
+
+    #[tokio::test]
+    async fn a_recent_confirmation_is_reused_by_other_endpoints_of_the_family() {
+        let controller = Controller::new();
+        // The campaign starts from Direct and confirms it after two successes;
+        // pretend it found the fragmenting shape instead.
+        let candidate = controller
+            .diagnose(target(), NetworkError::TlsReset, |request| async move {
+                let ok = request.strategy != Strategy::Direct;
+                ProbeOutcome {
+                    result: if ok {
+                        Ok(())
+                    } else {
+                        Err(NetworkError::TlsTimeout)
+                    },
+                    sent_bytes: 300,
+                    received_bytes: 1000,
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.strategy, Strategy::RecordFragment);
+        // The REST, CDN and voice endpoints of the same family start with it
+        // instead of waiting a campaign spacing for their own probe.
+        for (host, role, profile) in [
+            ("discord.com", Role::Rest, TlsProfile::Http),
+            ("cdn.discordapp.com", Role::Cdn, TlsProfile::Http),
+            (
+                "voice.example.discord.media",
+                Role::Voice,
+                TlsProfile::WebSocket,
+            ),
+        ] {
+            let other =
+                DiagnosticTarget::new(host, port_for(host), role, AddressFamily::V4, profile)
+                    .unwrap();
+            assert_eq!(
+                controller.strategy_for(&other),
+                Some(Strategy::RecordFragment),
+                "{host}"
+            );
+        }
+        // Another address family and another network generation do not inherit.
+        let mut ipv6 = target();
+        ipv6.family = AddressFamily::V6;
+        assert_eq!(controller.strategy_for(&ipv6), None);
+        controller.network_changed();
+        assert_eq!(controller.strategy_for(&target()), None);
+    }
+
+    fn port_for(host: &str) -> u16 {
+        if host.contains("discord.media") {
+            8443
+        } else {
+            443
+        }
     }
 
     #[tokio::test]

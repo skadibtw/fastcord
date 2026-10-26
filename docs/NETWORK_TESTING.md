@@ -387,3 +387,39 @@ fragment layout was verified on this one route; other filters may need a
 different one, which is why recovery keeps the rest of the catalog and the
 privileged helper.
 
+### Follow-up: one recovered service did not carry the others (same day)
+
+A live app session on the same route recovered login and then stayed useless:
+no message history, no avatars or attachments, and the voice Gateway retried
+`connection: connecting` nine times before closing with `Network`. A measurement
+that walks the app's own sequence in one process showed why:
+
+| step | first dial | second dial | probes run | rolling dials |
+|---|---|---|---|---|
+| login (`Role::Login`, Http) | `TlsTimeout` 8.0 s | **HTTP 200** 4.9 s | Direct failed, RecordFragment twice | 6 |
+| REST (`Role::Rest`, Http) | `TlsTimeout` 8.0 s | `TlsTimeout` 8.0 s | **none** | 6 |
+| CDN (`Role::Cdn`, Http) | `TlsTimeout` 8.0 s | `TlsTimeout` 8.0 s | **none** | 6 |
+| Gateway (`Role::Gateway`, WS) | `TlsTimeout` 4.1 s | `TlsTimeout` 4.0 s | **none** | 6 |
+
+The confirmation was per exact endpoint, and the next endpoint's campaign was
+refused by the 60 s start spacing, so REST, CDN and voice could only recover
+minutes later, one service at a time, inside a 24-dial rolling cap. Reusing the
+newest confirmation for the other endpoints of the same family (ten minutes)
+changes the same measurement to:
+
+| step | result | probes run | rolling dials |
+|---|---|---|---|
+| login | HTTP 200 after one campaign | Direct failed, RecordFragment twice | 6 |
+| REST | **HTTP 200** 128 ms | none | 6 |
+| CDN | **HTTP 200** 156 ms | none | 6 |
+| Gateway | **TLS handshake** 127 ms | none | 6 |
+
+The reuse is a preference, not a claim: an endpoint that fails with it still
+records its own demand and gets its own campaign. The same day also exposed the
+privileged path's failure mode — the helper exited while the app ran, `select_strategy`
+kept choosing `PacketFake`, and every later dial failed with `ConnectionAborted`
+while the panel still said the helper was on; a factory that reports itself
+unavailable is now never selected, and recovery plans the ordinary catalog
+instead.
+
+

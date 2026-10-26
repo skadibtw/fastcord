@@ -475,6 +475,13 @@ pub trait PrefixControl: Send + Sync {
 
 pub type PrefixFuture = Pin<Box<dyn Future<Output = io::Result<usize>> + Send>>;
 pub trait FakePrefixFactory: Send + Sync {
+    /// False once the privilege boundary behind this factory is gone (a helper
+    /// that exited, a pipe that closed). Selection then stops choosing its
+    /// strategy instead of failing every dial with it for the rest of the
+    /// process; the ordinary catalog takes over.
+    fn available(&self) -> bool {
+        true
+    }
     fn strategy(&self) -> Strategy {
         Strategy::PacketFake
     }

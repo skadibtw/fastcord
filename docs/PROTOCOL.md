@@ -1084,6 +1084,11 @@ errors and demand-only TLS probe budgets are in SPEC §5.4. Probes send no HTTP,
 WebSocket Upgrade, discovery, Identify, headers or token. A TLS candidate is not
 DPI detection or service/session health. No captured hello or ambiguous request
 is replayed on another socket. Network-change hints do not disconnect sessions.
+Selection uses an exact endpoint confirmation for its hint lifetime, and reuses
+the newest confirmation of the same generation and address family as the first
+shape for another authorized service endpoint for ten minutes; a failed reuse
+still records that endpoint's own demand. A packet factory whose helper is gone
+reports itself unavailable and is not selected again in this process.
 
 ## User-configured TCP proxies (M93)
 
