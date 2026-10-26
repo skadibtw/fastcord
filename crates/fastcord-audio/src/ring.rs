@@ -15,7 +15,7 @@
 //! channel count fixed at construction.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering, fence};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering, fence};
 
 struct Shared {
     slots: Box<[AtomicU32]>,
@@ -27,6 +27,9 @@ struct Shared {
     /// Next position the consumer reads. The consumer advances it after a
     /// read; an overwriting producer advances it to discard old samples.
     read: AtomicUsize,
+    /// The producer stopped on purpose (nobody is speaking), so a ring that
+    /// runs dry now is not a dropout.
+    idle: AtomicBool,
 }
 
 /// Creates a ring holding at most `limit_frames` frames of `channels`
@@ -49,6 +52,7 @@ pub(crate) fn sample_ring(channels: usize, limit_frames: usize) -> (RingProducer
         channels,
         write: AtomicUsize::new(0),
         read: AtomicUsize::new(0),
+        idle: AtomicBool::new(false),
     });
     (
         RingProducer {
@@ -90,6 +94,11 @@ impl RingProducer {
     /// Buffered (unread) samples.
     pub(crate) fn len(&self) -> usize {
         self.shared.fill()
+    }
+
+    /// Marks whether the producer has stopped on purpose; see [`RingConsumer::idle`].
+    pub(crate) fn set_idle(&self, idle: bool) {
+        self.shared.idle.store(idle, Ordering::Release);
     }
 
     /// Samples that can be written without discarding anything.
@@ -198,6 +207,11 @@ impl RingConsumer {
     /// Buffered (unread) samples.
     pub(crate) fn len(&self) -> usize {
         self.shared.fill()
+    }
+
+    /// The producer has nothing more to play for now.
+    pub(crate) fn idle(&self) -> bool {
+        self.shared.idle.load(Ordering::Acquire)
     }
 
     /// Reads up to `out.len()` samples (rounded down to whole frames),

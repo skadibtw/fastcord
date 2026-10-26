@@ -138,7 +138,8 @@ impl OutputCallback {
         let missing = out.len() - written;
         if missing > 0 {
             out[written..].fill(T::EQUILIBRIUM);
-            if self.flowing || written > 0 {
+            // The end of a talkspurt drains the ring on purpose (#217).
+            if (self.flowing || written > 0) && !self.ring.idle() {
                 self.counters.underruns.fetch_add(1, Ordering::Relaxed);
                 self.counters
                     .underrun_samples
@@ -286,6 +287,24 @@ mod tests {
         callback.process(&mut out);
         assert_eq!(counters.underruns.load(Ordering::Relaxed), 1);
         assert_eq!(counters.underrun_samples.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn output_does_not_count_the_drain_after_speech_ends() {
+        let (mut callback, ring, counters) = output(1, 8);
+        let mut ring = ring;
+        let mut out = [0.0f32; 4];
+        ring.push_available([0.1; 6].into_iter());
+        ring.set_idle(true);
+        callback.process(&mut out);
+        callback.process(&mut out);
+        callback.process(&mut out);
+        assert_eq!(counters.underruns.load(Ordering::Relaxed), 0);
+        ring.set_idle(false);
+        ring.push_available([0.1; 4].into_iter());
+        callback.process(&mut out);
+        callback.process(&mut out);
+        assert_eq!(counters.underruns.load(Ordering::Relaxed), 1);
     }
 
     #[test]

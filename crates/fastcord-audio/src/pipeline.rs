@@ -549,6 +549,7 @@ impl PlaybackPipeline {
                     continue;
                 }
                 self.target.idle();
+                self.ring.set_idle(true);
                 return;
             };
             attempts += 1;
@@ -580,6 +581,7 @@ impl PlaybackPipeline {
             return;
         }
         let channels = self.ring.channels();
+        self.ring.set_idle(false);
         let written = self.ring.push_available(stereo_to_device(stereo, channels));
         if let Some(tap) = &mut self.tap {
             for frame in stereo.as_chunks::<2>().0.iter().take(written / channels) {
