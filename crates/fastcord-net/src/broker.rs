@@ -686,10 +686,23 @@ impl SocketBroker {
     }
 }
 
+/// The client config for a profile, built once per process (#131): one
+/// config means one session cache, so WebSocket and proxy reconnects outside
+/// Auto mode resume TLS instead of verifying the whole chain again. Probes
+/// share a config too; theirs never resumes.
 pub(crate) fn tls_config(
     profile: TlsProfile,
     probe: bool,
 ) -> Result<Arc<ClientConfig>, NetworkError> {
+    type Slot = std::sync::OnceLock<Result<Arc<ClientConfig>, NetworkError>>;
+    static CONFIGS: [Slot; 4] = [const { Slot::new() }; 4];
+    let index = usize::from(profile == TlsProfile::WebSocket) * 2 + usize::from(probe);
+    CONFIGS[index]
+        .get_or_init(|| build_tls_config(profile, probe))
+        .clone()
+}
+
+fn build_tls_config(profile: TlsProfile, probe: bool) -> Result<Arc<ClientConfig>, NetworkError> {
     let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut config =
         ClientConfig::builder_with_provider(Arc::new(crypto::ring::default_provider()))
@@ -931,6 +944,21 @@ async fn run_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_configs_are_built_once_so_sessions_can_resume() {
+        let first = tls_config(TlsProfile::WebSocket, false).unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &tls_config(TlsProfile::WebSocket, false).unwrap()
+        ));
+        let probe = tls_config(TlsProfile::WebSocket, true).unwrap();
+        assert!(!Arc::ptr_eq(&first, &probe));
+        assert!(!probe.enable_early_data);
+        let http = tls_config(TlsProfile::Http, false).unwrap();
+        assert_eq!(http.alpn_protocols, [b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert!(first.alpn_protocols.is_empty());
+    }
 
     struct DeadFactory;
     impl crate::tls::FakePrefixFactory for DeadFactory {
