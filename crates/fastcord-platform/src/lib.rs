@@ -10,6 +10,7 @@ pub mod instance;
 pub mod loopback;
 pub mod network;
 pub mod notify;
+pub mod paths;
 pub mod realtime;
 pub mod shortcut;
 pub mod speech;

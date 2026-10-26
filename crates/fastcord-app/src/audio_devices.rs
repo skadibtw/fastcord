@@ -487,17 +487,7 @@ fn path() -> Option<PathBuf> {
 
 /// fastcord's per-user data folder (settings, the voice log).
 pub(crate) fn data_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    let root = std::env::var_os("APPDATA").map(PathBuf::from)?;
-    #[cfg(target_os = "macos")]
-    let root = std::env::var_os("HOME")
-        .map(PathBuf::from)?
-        .join("Library/Application Support");
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let root = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(root.join(app_dir_name()))
+    fastcord_platform::paths::config_dir(app_dir_name())
 }
 
 /// The per-user directory name under the config and cache roots. The test-only
@@ -664,9 +654,7 @@ fn save_to(path: &Path, prefs: &Preferences) -> io::Result<()> {
         path.parent()
             .ok_or_else(|| io::Error::other("settings parent missing"))?,
     )?;
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)
+    fastcord_platform::paths::write_atomic(path, &bytes)
 }
 
 pub async fn load() -> Preferences {

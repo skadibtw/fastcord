@@ -207,12 +207,7 @@ fn load_installation() -> Option<String> {
 
 fn save_installation(id: &str) -> std::io::Result<()> {
     let path = installation_path().ok_or_else(|| std::io::Error::other("no data folder"))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, id)?;
-    std::fs::rename(temporary, path)
+    fastcord_platform::paths::write_atomic(&path, id.as_bytes())
 }
 
 /// Keeps the installation id READY issued (the Gateway already adopted it on

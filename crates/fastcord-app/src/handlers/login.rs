@@ -273,14 +273,21 @@ impl App {
                 if result.is_ok() {
                     self.saved_accounts.retain(|id| *id != account);
                     self.account_index.remove(account);
-                    let _ = voice_settings::purge(account);
-                    return self.save_account_index();
+                    return Task::batch([
+                        Self::purge_voice_volumes(account),
+                        self.save_account_index(),
+                    ]);
                 }
                 self.ui
                     .account_panel
                     .fail("The native store could not remove that saved login.");
             }
-            Message::AccountIndexSaved => {}
+            Message::AccountIndexSaved | Message::VolumeSettingsLoaded => {}
+            Message::VoiceVolumesPurged { failed } => {
+                if failed && matches!(self.phase, Phase::Login) && self.notice.is_some() {
+                    self.notice = Some("Logged out locally. The saved credential was removed, but saved voice volumes could not be cleared. Other Discord sessions were not revoked.".to_owned());
+                }
+            }
             Message::Forget(account) if matches!(self.phase, Phase::Login) => {
                 return self.start_delete(account);
             }
@@ -299,13 +306,12 @@ impl App {
                             let purge_failed = self.attachment_purge_failed;
                             self.attachment_purge_failed = false;
                             self.reset_login();
-                            let voice_purge_failed = voice_settings::purge(account).is_err();
-                            self.notice = Some(if purge_failed || voice_purge_failed {
+                            self.notice = Some(if purge_failed {
                                 "Logged out locally. The saved credential was removed, but some local attachment cache or saved voice volumes could not be cleared. Other Discord sessions were not revoked."
                             } else {
                                 "Logged out locally. The saved credential was removed and account state was cleared. Other Discord sessions were not revoked."
                             }.to_owned());
-                            return index_task;
+                            return Task::batch([index_task, Self::purge_voice_volumes(account)]);
                         }
                         Err(error) => {
                             self.phase = Phase::DeleteFailed { account, error };

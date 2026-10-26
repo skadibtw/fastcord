@@ -186,20 +186,7 @@ impl Drop for Writer {
 }
 
 fn settings_path() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    let root = std::env::var_os("APPDATA").map(PathBuf::from)?;
-    #[cfg(target_os = "macos")]
-    let root = std::env::var_os("HOME")
-        .map(PathBuf::from)?
-        .join("Library/Application Support");
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let root = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(
-        root.join(crate::audio_devices::app_dir_name())
-            .join("voice-settings.csv"),
-    )
+    crate::audio_devices::data_dir().map(|dir| dir.join("voice-settings.csv"))
 }
 
 fn parse(contents: &str) -> Vec<(Snowflake, UserVolume)> {
@@ -341,13 +328,7 @@ fn save_many_to(
     if output.len() as u64 > MAX_FILE_BYTES {
         return Err(io::Error::other("voice settings exceed the file limit"));
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("settings parent unavailable"))?;
-    fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("csv.tmp");
-    fs::write(&temporary, output)?;
-    fs::rename(temporary, path)?;
+    fastcord_platform::paths::write_atomic(path, output.as_bytes())?;
     Ok(evicted)
 }
 
@@ -371,9 +352,7 @@ fn purge_from(path: &std::path::Path, account: Snowflake) -> io::Result<()> {
     if entries.is_empty() {
         return fs::remove_file(path);
     }
-    let temporary = path.with_extension("csv.tmp");
-    fs::write(&temporary, encode(&entries))?;
-    fs::rename(temporary, path)
+    fastcord_platform::paths::write_atomic(path, encode(&entries).as_bytes())
 }
 
 #[cfg(test)]

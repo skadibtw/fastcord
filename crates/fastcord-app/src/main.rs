@@ -457,6 +457,10 @@ enum Message {
     SwitchAccount(Snowflake),
     AccountRemoved(Snowflake, Result<(), StoreError>),
     AccountIndexSaved,
+    VolumeSettingsLoaded,
+    VoiceVolumesPurged {
+        failed: bool,
+    },
     Forget(Snowflake),
     RetryDelete,
     Deleted(Result<(), StoreError>),
@@ -1679,6 +1683,8 @@ and a fourth"
             | Message::Account(..)
             | Message::AccountRemoved(..)
             | Message::AccountIndexSaved
+            | Message::VolumeSettingsLoaded
+            | Message::VoiceVolumesPurged { .. }
             | Message::Forget(..)
             | Message::RetryDelete
             | Message::Deleted(..)) => self.login_message(message),
@@ -2206,8 +2212,18 @@ and a fourth"
             controls.inherit(previous);
         }
         controls.set_account_id(session.user.id);
-        controls.set_volume_settings(voice_settings::load(session.user.id));
         let account = session.user.id;
+        let volumes_loaded = {
+            let controls = controls.clone();
+            Task::perform(
+                async move { tokio::task::spawn_blocking(move || voice_settings::load(account)).await },
+                move |volumes| {
+                    // Merged under anything changed meanwhile.
+                    controls.set_volume_settings(volumes.unwrap_or_default());
+                    Message::VolumeSettingsLoaded
+                },
+            )
+        };
         let (writer, statuses) = voice_settings::Writer::start(account);
         self.volume_writer = Some(writer);
         self.volume_notice = None;
@@ -2235,7 +2251,18 @@ and a fourth"
             ),
         };
         self.sync_viewing();
-        Task::batch([task, volume_events])
+        Task::batch([task, volume_events, volumes_loaded])
+    }
+
+    fn purge_voice_volumes(account: Snowflake) -> Task<Message> {
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || voice_settings::purge(account).is_err())
+                    .await
+                    .unwrap_or(true)
+            },
+            |failed| Message::VoiceVolumesPurged { failed },
+        )
     }
 
     /// What the timeline shows counts as read only while the window is active

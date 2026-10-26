@@ -363,10 +363,7 @@ pub async fn save(settings: Settings) -> Result<(), &'static str> {
             .encode(now())
             .map_err(|_| "Network settings are invalid.")?;
         let dir = crate::audio_devices::data_dir().ok_or("The settings folder is unavailable.")?;
-        std::fs::create_dir_all(&dir).map_err(|_| "Network settings could not be saved.")?;
-        let pending = dir.join("network-settings.json.pending");
-        std::fs::write(&pending, bytes).map_err(|_| "Network settings could not be saved.")?;
-        std::fs::rename(pending, dir.join("network-settings.json"))
+        fastcord_platform::paths::write_atomic(&dir.join("network-settings.json"), &bytes)
             .map_err(|_| "Network settings could not be saved.")
     })
     .await

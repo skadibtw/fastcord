@@ -135,20 +135,7 @@ impl Index {
 }
 
 fn index_path() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    let root = std::env::var_os("APPDATA").map(PathBuf::from)?;
-    #[cfg(target_os = "macos")]
-    let root = std::env::var_os("HOME")
-        .map(PathBuf::from)?
-        .join("Library/Application Support");
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let root = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(
-        root.join(crate::audio_devices::app_dir_name())
-            .join("accounts.tsv"),
-    )
+    crate::audio_devices::data_dir().map(|dir| dir.join("accounts.tsv"))
 }
 
 fn load_from(path: &Path) -> Index {
@@ -159,13 +146,7 @@ fn load_from(path: &Path) -> Index {
 }
 
 fn save_to(path: &Path, index: &Index) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("index parent unavailable"))?;
-    fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("tsv.tmp");
-    fs::write(&temporary, index.encode())?;
-    fs::rename(temporary, path)
+    fastcord_platform::paths::write_atomic(path, index.encode().as_bytes())
 }
 
 /// Blocking; call from a worker.
