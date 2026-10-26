@@ -15,7 +15,10 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::Com::CoIncrementMTAUsage;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
+use windows::Win32::System::Threading::{
+    AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, SetEvent,
+    WaitForMultipleObjects,
+};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 use windows::core::{Error, PCWSTR};
 
@@ -153,6 +156,15 @@ pub(in crate::capture) struct Native {
     thread: Option<JoinHandle<()>>,
 }
 
+/// Registers the calling thread with MMCSS's "Capture" task so a game that saturates
+/// the CPU or GPU does not starve the frame pump (issue #213). Best effort: `None`
+/// when refused, and the thread then keeps its normal priority.
+fn join_capture_task() -> Option<HANDLE> {
+    let mut index = 0u32;
+    // SAFETY: a plain call with a valid NUL-terminated name and out pointer.
+    unsafe { AvSetMmThreadCharacteristicsW(windows::core::w!("Capture"), &mut index) }.ok()
+}
+
 impl Native {
     /// Runs `run` on a new thread named `name`. `run` receives the stop event
     /// (manual reset: once signaled it stays signaled) and the wake event
@@ -170,8 +182,13 @@ impl Native {
         let thread = thread::Builder::new()
             .name(name.to_owned())
             .spawn(move || {
+                let mmcss = join_capture_task();
                 let result = catch_unwind(AssertUnwindSafe(|| run(&thread_stop, &thread_poke)))
                     .unwrap_or_else(|panic| Err(panicked(&*panic)));
+                if let Some(task) = mmcss {
+                    // SAFETY: the handle came from `join_capture_task` on this thread.
+                    let _ = unsafe { AvRevertMmThreadCharacteristics(task) };
+                }
                 status.set(match &result {
                     Ok(()) => CaptureState::Stopped,
                     Err(error) => CaptureState::Failed(error.clone()),

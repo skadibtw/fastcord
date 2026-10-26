@@ -53,6 +53,9 @@ pub(super) struct Device {
     pub(super) software: bool,
 }
 
+/// DXGI's range is -7..=7 with 0 the default.
+const GPU_THREAD_PRIORITY: i32 = 7;
+
 impl Device {
     pub(super) fn new() -> Result<Self, CaptureError> {
         let (device, context, software) = match Self::create(D3D_DRIVER_TYPE_HARDWARE) {
@@ -66,6 +69,11 @@ impl Device {
         // SAFETY: a plain COM call on a valid interface.
         let _previous = unsafe { multithread.SetMultithreadProtected(true) };
         let dxgi: IDXGIDevice = device.cast().capture("ID3D11Device as IDXGIDevice")?;
+        // Ask the GPU scheduler to favor this device (the capture converter and the
+        // zero-copy encoder run on it) over a game's queue; the call is a request and
+        // may be refused without elevation, which is fine (issue #213).
+        // SAFETY: a plain COM call on a valid interface.
+        let _ = unsafe { dxgi.SetGPUThreadPriority(GPU_THREAD_PRIORITY) };
         // SAFETY: wraps a live DXGI device in its WinRT projection.
         let winrt: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
             .capture("CreateDirect3D11DeviceFromDXGIDevice")?
