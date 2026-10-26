@@ -243,7 +243,9 @@ pub struct MemberScope<'a> {
     pub timed_out: bool,
 }
 
-/// Guild-level permissions (no channel overwrites).
+/// Guild-level permissions (no channel overwrites). A timed-out member who is
+/// neither owner nor administrator keeps only viewing and reading history,
+/// as in [`channel_permissions`] (#157).
 pub fn guild_permissions(guild: GuildScope<'_>, member: MemberScope<'_>) -> Permissions {
     if member.user_id == guild.owner_id {
         return Permissions::ALL;
@@ -255,6 +257,8 @@ pub fn guild_permissions(guild: GuildScope<'_>, member: MemberScope<'_>) -> Perm
         .fold(Permissions::NONE, |acc, r| acc | r.permissions);
     if base.contains(Permissions::ADMINISTRATOR) {
         Permissions::ALL
+    } else if member.timed_out {
+        base & (Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY)
     } else {
         base
     }
@@ -326,6 +330,50 @@ mod tests {
             .find(|info| info.name == name)
             .unwrap_or_else(|| panic!("{name}"))
             .flag()
+    }
+
+    #[test]
+    fn a_timed_out_moderator_loses_guild_management_but_an_administrator_does_not() {
+        let role = |id: u64, permissions: Permissions| Role {
+            id: Snowflake(id),
+            name: String::new(),
+            permissions,
+            position: 0,
+            color: 0,
+            hoist: false,
+            mentionable: false,
+            managed: false,
+        };
+        let roles = [
+            role(
+                1,
+                Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY,
+            ),
+            role(2, Permissions::MANAGE_CHANNELS | Permissions::MANAGE_ROLES),
+            role(3, Permissions::ADMINISTRATOR),
+        ];
+        let guild = GuildScope {
+            id: Snowflake(1),
+            owner_id: Snowflake(99),
+            roles: &roles,
+        };
+        let member = |role_ids: &'static [Snowflake], timed_out| MemberScope {
+            user_id: Snowflake(7),
+            role_ids,
+            timed_out,
+        };
+        let moderator = guild_permissions(guild, member(&[Snowflake(2)], true));
+        assert!(!moderator.contains(Permissions::MANAGE_CHANNELS));
+        assert!(!moderator.contains(Permissions::MANAGE_ROLES));
+        assert!(moderator.contains(Permissions::VIEW_CHANNEL));
+        assert!(
+            guild_permissions(guild, member(&[Snowflake(2)], false))
+                .contains(Permissions::MANAGE_ROLES)
+        );
+        assert_eq!(
+            guild_permissions(guild, member(&[Snowflake(3)], true)),
+            Permissions::ALL
+        );
     }
 
     #[test]

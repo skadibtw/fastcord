@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- A timed-out moderator is no longer offered server, channel and role management that Discord would refuse (#157). Server-level permissions now drop everything but viewing and reading history during a timeout, as channel permissions already did; administrators and the owner are unaffected.
 - Emoji inside a spoiler stay hidden until the spoiler is uncovered (#158). They were drawn in plain view between the hidden words; a hidden one is now part of the grey box, and clicking it reveals the spoiler.
 - A server icon or closed folder no longer shows an unread dot or mentions from channels you cannot open (#159). The total counts the same channels the sidebar and the inbox list, so a channel you lost access to cannot leave a badge nothing can clear.
 - A masked link can no longer show one host and open another (#161). The host in brackets after a link and the address that is opened now come from the same URL parse, done the way a browser reads it (a backslash counts as `/`), and links that carry a user name or password are not opened.
