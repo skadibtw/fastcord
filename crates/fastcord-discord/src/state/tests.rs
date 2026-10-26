@@ -495,6 +495,15 @@ fn member_events_keep_members_and_counts_current() {
     );
     assert_eq!(store.guild(id(FIRST)).unwrap().member_count(), before);
     assert!(store.guild(id(FIRST)).unwrap().member(id(NELLY)).is_none());
+    // A user nothing else holds is released with the removal (#152).
+    store.apply(member_event(FIRST, 7));
+    assert!(store.user(id(1_000_007)).is_some());
+    apply(
+        &mut store,
+        "GUILD_MEMBER_REMOVE",
+        &format!(r#"{{"guild_id":"{FIRST}","user":{{"id":"1000007","username":"x"}}}}"#),
+    );
+    assert!(store.user(id(1_000_007)).is_none());
     // Events for guilds we do not hold change nothing.
     let stranger = MEMBER_UPDATE.replace(&FIRST.to_string(), "5");
     assert!(apply(&mut store, "GUILD_MEMBER_ADD", &stranger).is_empty());
@@ -503,6 +512,12 @@ fn member_events_keep_members_and_counts_current() {
 /// READY with a read cursor for GENERAL, one for a DM-less channel that does
 /// not exist, and a muted second guild.
 fn ready_with_read_state(acked: u64, mentions: u64) -> Store {
+    let mut store = Store::new();
+    apply_read_state_ready(&mut store, acked, mentions);
+    store
+}
+
+fn apply_read_state_ready(store: &mut Store, acked: u64, mentions: u64) {
     let mut value: serde_json::Value = serde_json::from_str(READY).unwrap();
     value["read_state"] = serde_json::json!({
         "entries": [
@@ -520,11 +535,9 @@ fn ready_with_read_state(acked: u64, mentions: u64) -> Store {
                                     "mute_config": {"end_time": "2001-01-01T00:00:00+00:00"}}]},
         ],
     });
-    let mut store = Store::new();
     store.apply(fixture("READY", &value.to_string()));
     store.apply(fixture("READY_SUPPLEMENTAL", SUPPLEMENTAL));
-    check(&store);
-    store
+    check(store);
 }
 
 fn channel_message(channel: u64, message: u64, author: u64, mentions: &[u64]) -> GatewayEvent {
@@ -1120,6 +1133,20 @@ fn the_metadata_budget_holds_through_a_large_account_and_flood_of_members() {
         newest.member(id(1_000_000 + 59_999)).is_some(),
         "the newest members are kept"
     );
+}
+
+#[test]
+fn shedding_members_keeps_unread_markers() {
+    // Members can be shed to fit, so read state must survive (#152).
+    let floor = ready_with_read_state(1, 2).bytes();
+    let mut store = Store::with_budget(floor + 20 * 400);
+    apply_read_state_ready(&mut store, 1, 2);
+    for n in 0..400 {
+        let changes = store.apply(member_event(FIRST, n));
+        assert!(!changes.reset, "after member {n}");
+    }
+    assert!(store.bytes() <= store.budget());
+    assert_eq!(general_unread(&store).mentions, 2, "read state kept");
 }
 
 #[test]

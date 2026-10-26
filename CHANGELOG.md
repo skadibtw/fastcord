@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- On large accounts, unread dots and mention counts no longer vanish when the client trims its memory (#152). Users nothing refers to are now released first, and as soon as a member, channel or server is removed; read state is the last thing dropped, and if it is, the badges update instead of silently going stale.
 - The channel list puts text channels (and forums) above voice and Stage channels in each category, each group by position, as Discord and the server settings do (#154). Servers that number voice and text positions separately were shown interleaved.
 - A timed-out moderator is no longer offered server, channel and role management that Discord would refuse (#157). Server-level permissions now drop everything but viewing and reading history during a timeout, as channel permissions already did; administrators and the owner are unaffected.
 - Emoji inside a spoiler stay hidden until the spoiler is uncovered (#158). They were drawn in plain view between the hidden words; a hidden one is now part of the grey box, and clicking it reveals the spoiler.

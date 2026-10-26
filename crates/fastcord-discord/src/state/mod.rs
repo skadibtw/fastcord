@@ -9,9 +9,11 @@
 //! Retention. Budget eviction never sheds navigable guild/channel/role
 //! identity, permission data, or the current user's own member.
 //! Everything else is optional detail that is cheap to fetch again and goes
-//! first when the budget is exceeded, in this order: member lists other than
-//! the visible one, members nobody references (oldest write first), users
-//! nobody references. A member is referenced while it is the current user,
+//! first when the budget is exceeded, in this order: users nobody references
+//! (removals also release theirs at once), member lists other than the
+//! visible one, scheduled events, members nobody references (oldest write
+//! first), and last the read state (every unread marker and mention count,
+//! reported as a read change; READY restores it). A member is referenced while it is the current user,
 //! has a voice state, was asked for by the consumer (visible authors, reply
 //! targets, permission computation), or is a row of a retained member list.
 //! Member lists exist only for the guild currently selected in the consumer's
@@ -816,8 +818,7 @@ impl Store {
             })
     }
 
-    fn prune_presences(&mut self) -> bool {
-        let mut wanted = self.user_references();
+    fn prune_presences_with(&mut self, mut wanted: HashMap<Snowflake, usize>) -> bool {
         wanted.extend(self.relationships.ids().map(|id| (id, 1)));
         self.presences.retain(|id| wanted.contains_key(&id))
     }
@@ -1125,8 +1126,9 @@ impl Store {
         self.checked_changes(changes)
     }
 
-    fn checked_changes(&mut self, changes: Changes) -> Changes {
-        self.enforce_budget();
+    fn checked_changes(&mut self, mut changes: Changes) -> Changes {
+        // Dropped read state changes every badge: the UI must hear of it.
+        changes.read |= self.enforce_budget();
         if self.limit_exceeded {
             Changes {
                 reset: true,
@@ -1388,8 +1390,14 @@ impl Store {
             // Typing is transient and lives outside the store.
             | Dispatch::TypingStart(_) => {}
         }
-        if unreferences && self.prune_presences() {
-            changes.presence = true;
+        // A removal frees its users at once, so they never build up the
+        // pressure that would cost read state later (#152).
+        if unreferences {
+            let references = self.user_references();
+            self.sweep_users_with(&references);
+            if self.prune_presences_with(references) {
+                changes.presence = true;
+            }
         }
         self.refresh_list_key(&mut changes);
         changes
@@ -2039,34 +2047,42 @@ impl Store {
 
     // ----- retention -----
 
-    fn enforce_budget(&mut self) {
+    /// Sheds detail until the store is under budget; true when read state
+    /// (every unread marker and mention count) had to go.
+    fn enforce_budget(&mut self) -> bool {
         if self.bytes() <= self.budget {
-            return;
+            return false;
         }
         // Spare buckets alone must not force eviction of live detail.
         self.compact_optional();
         if self.bytes() <= self.budget {
-            return;
+            return false;
         }
         let target = self.budget / 100 * LOW_WATER_PERCENT;
-        self.shed_lists();
+        // Users nothing references are free garbage: they go first (#152).
+        self.sweep_users();
+        if self.bytes() > target {
+            self.shed_lists();
+        }
         if self.bytes() > target {
             self.shed_events();
         }
-        // Unread markers are optional detail: under pressure they go before
-        // members do, and READY brings them back.
-        if self.bytes() > target {
-            self.read = ReadStates::default();
-        }
-        self.sweep_users();
         if self.bytes() > target {
             self.shed_members(target);
+        }
+        // Unread markers go last: losing them silently clears every badge
+        // until the next READY brings them back.
+        let mut read_dropped = false;
+        if self.bytes() > target {
+            self.read = ReadStates::default();
+            read_dropped = true;
         }
         if self.bytes() > self.budget {
             let budget = self.budget;
             *self = Self::with_budget(budget);
             self.limit_exceeded = true;
         }
+        read_dropped
     }
 
     fn compact_optional(&mut self) {
@@ -2156,6 +2172,10 @@ impl Store {
     /// Drops every user nothing references any more.
     fn sweep_users(&mut self) {
         let references = self.user_references();
+        self.sweep_users_with(&references);
+    }
+
+    fn sweep_users_with(&mut self, references: &HashMap<Snowflake, usize>) {
         let mut freed = 0;
         self.users.retain(|id, user| {
             let keep = references.contains_key(id);
