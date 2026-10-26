@@ -354,6 +354,14 @@ impl NoiseStatus<'_> {
         });
     }
 
+    /// Publishes the voice ping, only when the rounded value changed.
+    fn publish_ping(&self, rtt: Duration) {
+        let ms = u32::try_from(rtt.as_micros().saturating_add(500) / 1000).unwrap_or(u32::MAX);
+        self.0.send_if_modified(|controls| {
+            super::replace_if_changed(&mut controls.voice_ping_ms, Some(ms))
+        });
+    }
+
     /// Publishes the engine counters the dialog shows, only when one of them changed.
     /// `transport` is `Some` only while the audio dialog is open; the
     /// microphone counters then join the change key.
@@ -394,6 +402,7 @@ impl Drop for NoiseStatus<'_> {
             controls.audio_stats = None;
             controls.transport_stats = None;
             controls.input_diagnostics = None;
+            controls.voice_ping_ms = None;
         });
     }
 }
@@ -499,6 +508,9 @@ async fn run_with(
                         });
                     }
                     Some(VoiceMessage::Event(event)) => {
+                        if let VoiceEvent::UdpLatency(rtt) = event {
+                            noise_status.publish_ping(rtt);
+                        }
                         video.on_event(&event);
                         apply_voice_event(event, &mut participants, &mut release_at);
                         publish_participants(&controls_tx, &participants);
@@ -839,8 +851,11 @@ mod tests {
             let published = NoiseStatus(&controls_tx);
             published.publish(status);
             assert_eq!(controls.borrow().noise_status, Some(status));
+            published.publish_ping(Duration::from_micros(41_600));
+            assert_eq!(controls.borrow().voice_ping_ms, Some(42));
         }
         assert_eq!(controls.borrow().noise_status, None);
+        assert_eq!(controls.borrow().voice_ping_ms, None);
     }
     #[test]
     fn speaking_identity_survives_ssrc_replacement_and_has_release_delay() {

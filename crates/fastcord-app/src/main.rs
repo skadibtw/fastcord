@@ -6420,6 +6420,7 @@ and a fourth"
                     settings_open: self.voice_details,
                     can_leave: gateway.voice_guild.or(gateway.voice_call).is_some(),
                     share_text: share.text.clone(),
+                    ping_ms: voice_controls.voice_ping_ms,
                 })
             });
             let voice_settings: Option<Element<'_, Message>> = (in_voice && self.voice_details)

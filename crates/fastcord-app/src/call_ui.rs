@@ -397,6 +397,8 @@ pub struct Bar {
     pub can_leave: bool,
     /// Progress or the last failure of the screen share.
     pub share_text: String,
+    /// UDP round trip to the voice server, ms; `None` before the first answer.
+    pub ping_ms: Option<u32>,
 }
 
 /// The connected panel above the account footer: state and place (opening the
@@ -417,6 +419,15 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
             tr("Voice connected"),
             style::GREEN,
             tr("Connected. Click to open the call"),
+        ),
+    };
+    // The voice server's UDP round trip, not the Gateway's.
+    let tip = match (bar.state, bar.ping_ms) {
+        (VoiceAudioState::Connecting | VoiceAudioState::EngineFailed, _) => tip.to_owned(),
+        (_, ping) => format!(
+            "{tip}
+{}",
+            ping_text(ping)
         ),
     };
     let place = if bar.place.is_empty() {
@@ -711,6 +722,13 @@ pub fn settings(set: Settings<'_>) -> Element<'static, Message> {
     .into()
 }
 
+fn ping_text(ms: Option<u32>) -> String {
+    match ms {
+        Some(ms) => trf("Voice ping: {} ms", &[&ms]),
+        None => tr("Voice ping: measuring…").to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,7 +748,14 @@ mod tests {
             settings_open: false,
             can_leave: true,
             share_text: String::new(),
+            ping_ms: None,
         }
+    }
+
+    #[test]
+    fn the_ping_says_measuring_until_the_first_answer() {
+        assert_eq!(ping_text(Some(42)), "Voice ping: 42 ms");
+        assert_eq!(ping_text(None), "Voice ping: measuring…");
     }
 
     /// Every message a click anywhere in the area publishes, as its debug name.

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Hovering the call's network icon shows the voice ping: the UDP round trip to the voice server in milliseconds, or "measuring…" until the first answer (#221). It is cleared when the call ends.
+
 ### Changed
 - Secondary screens share one frame. Server settings, roles, emoji and sounds, Community, AutoMod, apps and integrations, bans, the audit log and a channel's own settings are pages of a full-window settings screen with a list of sections, like the user settings, instead of forms stacked over the conversation; "Server settings" in the server menu (and a right click on a server) opens it at the first page the account may use. Network recovery is the "Network" page of the user settings, translated, with short explanations and the technical ones under "Details". Smaller forms (a new channel or server, a member's roles, invites, reports, forwarding, events, rules and onboarding, the group panel, discovery, authorized apps) open as dialogs.
 - Every settings screen and dialog has one title and one close cross; Esc closes what is on top: a popover, a dialog, the emoji/GIF/sticker window, a settings screen, then the inbox, alerts, search and pins. A new settings section opens at its top instead of where the previous one was scrolled to. Profile, Accounts and Privacy no longer repeat their own title and cross inside the page.

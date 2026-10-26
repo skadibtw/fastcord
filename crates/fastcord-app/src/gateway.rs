@@ -121,6 +121,9 @@ pub struct VoiceControls {
     /// The call connection's packet counters, kept only while the audio
     /// dialog is open (so an idle call never redraws for them).
     pub transport_stats: Option<fastcord_media::gateway::TransportStats>,
+    /// The latest UDP round trip to the voice server in whole milliseconds;
+    /// `None` until the first ping answer and outside a call.
+    pub voice_ping_ms: Option<u32>,
     /// Manual and automatic microphone gain (the saved preference).
     pub input_gain: fastcord_audio::InputGain,
     /// The audio dialog is open, so the running engine measures the microphone level.
