@@ -361,11 +361,12 @@ impl State {
             if !active || (pool == 1 && !picker) {
                 continue;
             }
+            let mut seen = HashSet::new();
             for occurrence in &self.visible[pool] {
                 if desired.len() == MAX_ASSETS {
                     break;
                 }
-                if !desired.contains(&occurrence.asset) {
+                if seen.insert(occurrence.asset) {
                     desired.push(occurrence.asset);
                 }
             }

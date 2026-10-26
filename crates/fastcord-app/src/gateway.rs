@@ -3770,6 +3770,19 @@ fn occurrence_in(
     page: &emoji_picker::Snapshot,
     occurrence: &emoji::Occurrence,
 ) -> bool {
+    occurrence_in_parsed(timeline, picker, page, occurrence, &mut HashMap::new())
+}
+
+/// `occurrence_in` with the rows' emoji already found kept in `parsed`, so a
+/// pass over many occurrences parses each message once, not once per emoji
+/// (#163).
+fn occurrence_in_parsed(
+    timeline: &timeline::Snapshot,
+    picker: &emoji_picker::Picker,
+    page: &emoji_picker::Snapshot,
+    occurrence: &emoji::Occurrence,
+    parsed: &mut HashMap<(Snowflake, u64), Vec<emoji::Asset>>,
+) -> bool {
     match occurrence.origin {
         emoji::Origin::Timeline {
             channel,
@@ -3783,7 +3796,10 @@ fn occurrence_in(
                     .iter()
                     .find(|row| row.message.id == message && row.revision == revision)
                     .is_some_and(|row| {
-                        rich::emoji_assets(timeline::content(row)).get(usize::from(run))
+                        parsed
+                            .entry((message, revision))
+                            .or_insert_with(|| rich::emoji_assets(timeline::content(row)))
+                            .get(usize::from(run))
                             == Some(&occurrence.asset)
                     })
         }
@@ -3881,8 +3897,10 @@ impl GatewayPanel {
         let timeline = &self.timeline;
         let picker = &self.emoji_picker;
         let page = &self.emoji_snapshot;
-        self.emoji
-            .retain(|occurrence| occurrence_in(timeline, picker, page, occurrence));
+        let mut parsed = HashMap::new();
+        self.emoji.retain(|occurrence| {
+            occurrence_in_parsed(timeline, picker, page, occurrence, &mut parsed)
+        });
         let open_channel = self.timeline.channel_id;
         let timeline = &self.timeline;
         let still_loaded =
