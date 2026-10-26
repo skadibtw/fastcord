@@ -1211,11 +1211,9 @@ impl VaDecoder {
         let (x, y) = (sps.display_x as usize, sps.display_y as usize);
         let (width, height) = (sps.display_width as usize, sps.display_height as usize);
         // The mapped image must hold the whole display window of both planes.
-        // The window is reached by starting each row at its x offset (the
-        // crop offsets are even, so the chroma offset stays sample aligned).
         let chroma_rows = height.div_ceil(2);
-        let luma_window = offset_y + y * pitch_y + x;
-        let chroma_window = offset_uv + (y / 2) * pitch_uv + x / 2;
+        let (luma_window, chroma_window) =
+            display_window(offset_y, pitch_y, offset_uv, pitch_uv, x, y);
         let fits = height > 0
             && pitch_y >= width
             && pitch_uv >= width
@@ -1279,6 +1277,23 @@ impl VideoDecoder for VaDecoder {
     fn flush(&mut self, _out: &mut dyn FnMut(DecodedFrame<'_>)) -> Result<(), CodecError> {
         Ok(())
     }
+}
+
+/// Byte offsets of the display window's first luma and chroma rows. The crop
+/// offsets are even and NV12 chroma is interleaved U,V pairs, so luma column
+/// `x` is chroma byte `x`: half as many pairs, two bytes each (#128).
+fn display_window(
+    offset_y: usize,
+    pitch_y: usize,
+    offset_uv: usize,
+    pitch_uv: usize,
+    x: usize,
+    y: usize,
+) -> (usize, usize) {
+    (
+        offset_y + y * pitch_y + x,
+        offset_uv + (y / 2) * pitch_uv + x,
+    )
 }
 
 #[cfg(test)]

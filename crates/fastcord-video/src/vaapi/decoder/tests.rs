@@ -8,6 +8,14 @@ use crate::codec::{CodecError, DecodedFrame};
 use crate::test_vectors::{self, BitWriter, IPCM_FRAMES, escape};
 use std::time::Duration;
 
+#[test]
+fn a_left_crop_starts_chroma_on_a_u_byte() {
+    // Pitch 16, chroma after 4 luma rows; crop 2 left, 2 top (#128).
+    let (luma, chroma) = display_window(0, 16, 64, 16, 2, 2);
+    assert_eq!(luma, 2 * 16 + 2);
+    assert_eq!(chroma, 64 + 16 + 2, "pair 1 starts at byte 2: U, not V");
+}
+
 /// The smallest SPS metadata the record/rejection tests build from directly.
 fn bare_sps(profile_idc: u8, constraint_flags: u8) -> SpsMeta {
     SpsMeta {
