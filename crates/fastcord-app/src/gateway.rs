@@ -1021,18 +1021,17 @@ impl NavigationBridge {
         reason: Option<String>,
     ) -> Result<(), fastcord_discord::RestError> {
         let (reply, answer) = tokio::sync::oneshot::channel();
-        self.commands
-            .try_send(Command::Moderate {
+        self.ask(
+            Command::Moderate {
                 guild,
                 user,
                 action,
                 reason,
                 reply,
-            })
-            .map_err(|_| fastcord_discord::RestError::SchedulerCapacityExceeded)?;
-        answer
-            .await
-            .unwrap_or(Err(fastcord_discord::RestError::AuthenticationRequired))
+            },
+            answer,
+        )
+        .await
     }
     /// One explicit Stage action; the reducer rechecks permissions and state
     /// immediately before handing the request to the transport.
@@ -1043,17 +1042,16 @@ impl NavigationBridge {
         action: fastcord_discord::StageAction,
     ) -> Result<(), fastcord_discord::RestError> {
         let (reply, answer) = tokio::sync::oneshot::channel();
-        self.commands
-            .try_send(Command::Stage {
+        self.ask(
+            Command::Stage {
                 guild,
                 channel,
                 action,
                 reply,
-            })
-            .map_err(|_| fastcord_discord::RestError::SchedulerCapacityExceeded)?;
-        answer
-            .await
-            .unwrap_or(Err(fastcord_discord::RestError::AuthenticationRequired))
+            },
+            answer,
+        )
+        .await
     }
     /// One explicit scheduled-event write; the reducer rechecks permissions and
     /// the event's state immediately before handing the request to the transport.
@@ -1063,17 +1061,35 @@ impl NavigationBridge {
         action: fastcord_discord::EventAction,
     ) -> Result<(), fastcord_discord::RestError> {
         let (reply, answer) = tokio::sync::oneshot::channel();
-        self.commands
-            .try_send(Command::Event {
+        self.ask(
+            Command::Event {
                 guild,
                 action,
                 reply,
-            })
-            .map_err(|_| fastcord_discord::RestError::SchedulerCapacityExceeded)?;
-        answer
-            .await
-            .unwrap_or(Err(fastcord_discord::RestError::AuthenticationRequired))
+            },
+            answer,
+        )
+        .await
     }
+    /// Queues one write for the reducer and waits for its answer. A worker
+    /// that is gone (the Gateway stopped, the account is closing) is
+    /// `Disconnected`, never a rejected login (#173); only a full queue is
+    /// back-pressure.
+    async fn ask(
+        &self,
+        command: Command,
+        answer: tokio::sync::oneshot::Receiver<Result<(), fastcord_discord::RestError>>,
+    ) -> Result<(), fastcord_discord::RestError> {
+        use fastcord_discord::RestError;
+        self.commands
+            .try_send(command)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RestError::SchedulerCapacityExceeded,
+                mpsc::error::TrySendError::Closed(_) => RestError::Disconnected,
+            })?;
+        answer.await.unwrap_or(Err(RestError::Disconnected))
+    }
+
     /// Hands a guild's freshly listed events to the reducer. Dropped when the
     /// queue is full: the list can be loaded again.
     pub fn set_scheduled_events(
@@ -4179,6 +4195,28 @@ impl GatewayPanel {
 #[cfg(test)]
 mod bridge_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_gone_worker_is_disconnected_not_a_rejected_login() {
+        use fastcord_discord::{MemberAction, RestError};
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        // The worker took the command and ended without answering.
+        let (result, _) = tokio::join!(
+            bridge.moderate(Snowflake(1), Snowflake(2), MemberAction::Kick, None),
+            async {
+                let command = commands.recv().await;
+                drop(command);
+            }
+        );
+        assert_eq!(result, Err(RestError::Disconnected));
+        // The worker is gone: its queue is closed.
+        drop(commands);
+        let result = bridge
+            .moderate(Snowflake(1), Snowflake(2), MemberAction::Kick, None)
+            .await;
+        assert_eq!(result, Err(RestError::Disconnected));
+    }
 
     #[test]
     fn requests_coalesce_without_queueing_navigation_or_viewports() {

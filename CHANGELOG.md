@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- Moderation, Stage and scheduled-event changes made while the account is not connected (the Gateway stopped and shows Reconnect) now say "not connected to Discord; reconnect and try again" (#173). Before, they reported rate limiting, or treated the lost answer as a refused login and signed the account out.
 - AGENTS.md describes the workspace again (#185): one `fastcord-net` row, the AutoMod entry once, `fastcord-fake` and `platform` in the dependency block, `audio`/`video` arrows matching their manifests, and the bundled OpenH264 codec, VA-API and the Windows CAPTCHA web view named. `scripts/check_agents_map.py`, run in CI, fails when a crate has no row or an arrow no longer matches its manifest.
 - Echo cancellation costs less than half as much CPU during a call (#194): 19 µs instead of 43 µs per 10 ms block, with identical cancellation in every echo test. It now uses real-valued SIMD transforms (`realfft`, already in the build through DeepFilterNet) and keeps the reference power as a running sum.
 - Dependencies with published security fixes are updated: rustls 0.23.46, rustls-webpki 0.103.16, webpki-roots 1.0.11, tokio 1.54.1 and ctutils 0.4.6 (#201). CI now runs `cargo deny` (advisories, GPL-3.0-compatible licences, crate sources); the advisories that DAVE's pinned crypto and the bundled DeepFilterNet model still carry are listed in `deny.toml` with the reason each is accepted.

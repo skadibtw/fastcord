@@ -198,6 +198,10 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "лимит памяти планировщика REST исчерпан",
     ),
     (
+        "not connected to Discord; reconnect and try again",
+        "нет подключения к Discord; переподключитесь и попробуйте снова",
+    ),
+    (
         "a required option is empty",
         "обязательный параметр не заполнен",
     ),

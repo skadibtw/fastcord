@@ -158,6 +158,10 @@ pub enum RestError {
     RequestBodyTooLarge,
     ResponseBodyTooLarge,
     SchedulerCapacityExceeded,
+    /// The account's worker is not running (the Gateway stopped or the
+    /// account is closing), so the request was never sent. Not a login
+    /// refusal: reconnecting is enough.
+    Disconnected,
 }
 
 impl fmt::Display for RestError {
@@ -194,6 +198,7 @@ impl fmt::Display for RestError {
             Self::RequestBodyTooLarge => f.write_str("REST request exceeds the body byte budget"),
             Self::ResponseBodyTooLarge => f.write_str("REST response exceeds the body byte budget"),
             Self::SchedulerCapacityExceeded => f.write_str("REST scheduler byte budget exhausted"),
+            Self::Disconnected => f.write_str("not connected to Discord; reconnect and try again"),
         }
     }
 }

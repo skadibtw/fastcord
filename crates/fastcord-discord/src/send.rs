@@ -543,7 +543,8 @@ impl SendError {
             | RestError::InvalidRateLimit
             | RestError::ClientConfiguration
             | RestError::RequestBodyTooLarge
-            | RestError::SchedulerCapacityExceeded => Self::NotSent(error),
+            | RestError::SchedulerCapacityExceeded
+            | RestError::Disconnected => Self::NotSent(error),
         }
     }
 }
