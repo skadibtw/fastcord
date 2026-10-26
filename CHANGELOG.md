@@ -15,6 +15,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- Reconnect works after the client gave up following a network outage (#139). The ten failed attempts (or two refused Gateway lookups) were remembered by the account's shared connection state, so the new connection stopped at once without trying; pressing Reconnect now starts the count again. The 24-hour sign-in budget is unchanged.
 - Opening a link or an attachment no longer pauses the window while the browser or viewer starts, and works for addresses and paths with commas (#140). Windows hands them to the shell directly (`ShellExecuteExW`) instead of `explorer.exe`, which split them on commas and never reported a failure; on Linux and macOS the `xdg-open`/`open` helper is reaped instead of left as a zombie process.
 - Cloudflare cookies (`__cf_bm`, `cf_clearance`) now expire when they should (#141). Their `Expires` dates use two-digit years (`25-Oct-25`), which were not understood, so the cookies were kept and sent until the app closed; dates are now read the way RFC 6265 and browsers do.
 - A 429 from Cloudflare (no Discord rate-limit headers) now pauses every request for its stated wait, not just the one route, so the client stops collecting more 429s on other routes and lengthening a temporary ban (#143). A stated wait over an hour is cut to an hour and the request reports "rate limited" instead of hanging silently for days.

@@ -92,6 +92,15 @@ impl RetryLedger {
         state.forbidden
     }
 
+    /// The user pressed Reconnect after a stop that allows it: the failure
+    /// counts start again (#139). The Identify budget and a scheduled
+    /// earliest retry are kept.
+    pub(crate) fn user_reconnect(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.failures = 0;
+        state.forbidden = 0;
+    }
+
     pub(crate) fn discovery_succeeded(&self) {
         self.state
             .lock()

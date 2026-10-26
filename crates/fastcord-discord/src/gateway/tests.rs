@@ -949,6 +949,29 @@ async fn replacing_a_gateway_driver_does_not_refill_failed_attempts() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_user_reconnect_after_failures_dials_again() {
+    let transport = FakeTransport::new();
+    for _ in 0..12 {
+        transport.refuse();
+    }
+    let mut first = start(&transport, 0.5);
+    drain(&mut first).await;
+    drop(first);
+    assert_eq!(transport.connected().len(), 10);
+    transport.retries.discovery_forbidden();
+    transport.retries.discovery_forbidden();
+    // The Reconnect button (#139).
+    transport.retries.user_reconnect();
+    assert_eq!(transport.retries.forbidden(), 0);
+    let mut replacement = start(&transport, 0.5);
+    drain(&mut replacement).await;
+    assert!(
+        transport.connected().len() > 10,
+        "the user's reconnect dials"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn replacing_a_gateway_driver_keeps_the_first_failed_production_attempt_and_backoff() {
     let transport = FakeTransport::new();
     transport.refuse();

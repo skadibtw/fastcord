@@ -354,6 +354,13 @@ impl<C: Clock> RestClient<C> {
         &self.network
     }
 
+    /// Lets the next Gateway task dial again after a stop the user may end
+    /// with Reconnect (`StopReason::allows_manual_reconnect`). A replaced
+    /// driver alone never gets new attempts.
+    pub fn allow_manual_gateway_reconnect(&self) {
+        self.gateway_retries.user_reconnect();
+    }
+
     pub(crate) fn gateway_retries(&self) -> Arc<crate::gateway::RetryLedger> {
         self.gateway_retries.clone()
     }

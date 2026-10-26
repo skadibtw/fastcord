@@ -1789,7 +1789,9 @@ and a fourth"
                         Phase::Account { gateway, .. } => std::mem::take(&mut gateway.composer),
                         _ => composer::Composer::default(),
                     };
-                    // A new Gateway task starts with empty reconnect counters.
+                    // The user asked: the new Gateway task gets fresh
+                    // reconnect attempts (#139).
+                    session.client.allow_manual_gateway_reconnect();
                     let task = self.enter_account(session, persistence);
                     if let Phase::Account { gateway, .. } = &mut self.phase {
                         gateway.composer = composer;
