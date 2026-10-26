@@ -802,6 +802,16 @@ impl Store {
     }
 
     /// Whether anything on screen or in a list still refers to this user.
+    /// Whether the navigation snapshot draws this user's presence.
+    fn presence_drawn(&self, id: Snowflake) -> bool {
+        self.current_user == Some(id)
+            || self.relationships.kind(id).is_some()
+            || self
+                .private_channels
+                .values()
+                .any(|channel| channel.recipient_ids.contains(&id))
+    }
+
     fn presence_wanted(&self, id: Snowflake) -> bool {
         self.current_user == Some(id)
             || self.relationships.kind(id).is_some()
@@ -1205,7 +1215,11 @@ impl Store {
             }
             Dispatch::PresenceUpdate(update) => {
                 if self.presence_wanted(update.user) {
-                    changes.presence = self.presences.apply(&update);
+                    // Held for profile cards, but only the account, friends and
+                    // direct-message recipients are drawn from the snapshot;
+                    // churn of other members must not redraw the window (#212).
+                    let applied = self.presences.apply(&update);
+                    changes.presence = applied && self.presence_drawn(update.user);
                 }
             }
             Dispatch::RelationshipAdd(relationship) => {

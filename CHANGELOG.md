@@ -3,9 +3,11 @@
 ## Unreleased
 
 ### Added
+- Debug builds print redraw statistics (`view` and `update` counts per 5 s) when `FASTCORD_UI_STATS=1` (#212). No user data.
 - Hovering the call's network icon shows the voice ping: the UDP round trip to the voice server in milliseconds, or "measuring…" until the first answer (#221). It is cleared when the call ends.
 
 ### Changed
+- Presence changes of server members who are not friends or direct-message recipients no longer rebuild the window snapshot and redraw it (#212); they are still held for profile cards. Emoji animation and typing were already fixed (#153, #155); stream presentation still redraws the whole window per frame (iced limit).
 - Paste image works on Linux (X11 and Wayland) and macOS as well as Windows, and a pasted image keeps its transparency (#146). The clipboard is read through `arboard` instead of hand-written Windows code; it is still read only when you ask.
 - Secondary screens share one frame. Server settings, roles, emoji and sounds, Community, AutoMod, apps and integrations, bans, the audit log and a channel's own settings are pages of a full-window settings screen with a list of sections, like the user settings, instead of forms stacked over the conversation; "Server settings" in the server menu (and a right click on a server) opens it at the first page the account may use. Network recovery is the "Network" page of the user settings, translated, with short explanations and the technical ones under "Details". Smaller forms (a new channel or server, a member's roles, invites, reports, forwarding, events, rules and onboarding, the group panel, discovery, authorized apps) open as dialogs.
 - Every settings screen and dialog has one title and one close cross; Esc closes what is on top: a popover, a dialog, the emoji/GIF/sticker window, a settings screen, then the inbox, alerts, search and pins. A new settings section opens at its top instead of where the previous one was scrolled to. Profile, Accounts and Privacy no longer repeat their own title and cross inside the page.

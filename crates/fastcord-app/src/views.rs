@@ -9,6 +9,7 @@ use iced::widget::{column, row};
 
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
+        crate::ui_stats::view();
         let body = if self.audio_settings.open {
             self.settings_view()
         } else {

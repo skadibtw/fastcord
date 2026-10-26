@@ -91,6 +91,7 @@ mod thumbs;
 mod timeline;
 mod ui;
 mod ui_sound;
+mod ui_stats;
 mod unverified;
 mod variable_list;
 mod views;
@@ -747,6 +748,7 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        ui_stats::update();
         let resynchronize = !matches!(
             message,
             Message::EmojiLoaded(..)

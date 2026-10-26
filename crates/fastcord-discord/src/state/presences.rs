@@ -134,6 +134,27 @@ mod tests {
     }
 
     #[test]
+    fn guild_member_presence_is_held_but_does_not_dirty_the_snapshot() {
+        let mut store = Store::new();
+        apply(&mut store, "READY", READY);
+        let guild = r#"{"id":"500","name":"Room","members":[
+            {"user":{"id":"50","username":"member"}}]}"#;
+        apply(&mut store, "GUILD_CREATE", guild);
+        let changes = apply(
+            &mut store,
+            "PRESENCE_UPDATE",
+            r#"{"user":{"id":"50"},"status":"online"}"#,
+        );
+        assert!(changes.is_empty(), "nothing drawn changed: {changes:?}");
+        assert_eq!(held(&store, 50), Some((Status::Online, None)));
+        // A friend's presence is drawn, so it still reports.
+        assert!(update(
+            &mut store,
+            r#"{"user":{"id":"10"},"status":"online"}"#
+        ));
+    }
+
+    #[test]
     fn partial_updates_merge_and_repeats_change_nothing() {
         let mut store = Store::new();
         apply(&mut store, "READY", READY);
