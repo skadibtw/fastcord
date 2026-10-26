@@ -1773,8 +1773,18 @@ and a fourth"
                     _ => None,
                 };
                 if let Some((session, persistence)) = stopped {
+                    // Drafts are the user's, not the worker's: the composer
+                    // moves to the new panel (#149).
+                    let composer = match &mut self.phase {
+                        Phase::Account { gateway, .. } => std::mem::take(&mut gateway.composer),
+                        _ => composer::Composer::default(),
+                    };
                     // A new Gateway task starts with empty reconnect counters.
-                    return self.enter_account(session, persistence);
+                    let task = self.enter_account(session, persistence);
+                    if let Phase::Account { gateway, .. } = &mut self.phase {
+                        gateway.composer = composer;
+                    }
+                    return task;
                 }
             }
             Message::CloseToTrayToggled(on) => {
@@ -7934,7 +7944,18 @@ mod tests {
             GatewayStatus::Stopped(StopReason::ReconnectFailures),
         ));
         assert!(gateway_status(&app).1.describe().contains("Ten connection"));
+        // A draft in another conversation is kept across the reconnect.
+        if let Phase::Account { gateway, .. } = &mut app.phase {
+            gateway.composer.select(Some(Snowflake(41)));
+            assert!(gateway.composer.restore("half-written"));
+            gateway.composer.select(Some(Snowflake(42)));
+            assert!(gateway.composer.has_draft(Snowflake(41)));
+        }
         drop(app.update(Message::ReconnectGateway));
+        let Phase::Account { gateway, .. } = &app.phase else {
+            panic!("account");
+        };
+        assert!(gateway.composer.has_draft(Snowflake(41)), "draft survives");
         let (new_id, status) = gateway_status(&app);
         assert_ne!(new_id, id);
         assert_eq!(status, GatewayStatus::Connecting { attempt: 0 });
