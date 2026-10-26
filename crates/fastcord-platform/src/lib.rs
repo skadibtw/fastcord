@@ -189,10 +189,12 @@ impl fmt::Display for MarkError {
 
 impl std::error::Error for MarkError {}
 
-/// Marks an existing file as downloaded from the Internet (Windows
-/// `Zone.Identifier` alternate data stream with `ZoneId=3`). It fails when the
-/// file does not exist or its volume has no alternate streams (FAT, exFAT,
-/// network shares); callers decide whether that is fatal. A no-op elsewhere.
+/// Marks an existing file as downloaded from the Internet: on Windows the
+/// `Zone.Identifier` alternate data stream with `ZoneId=3` (it fails when the
+/// volume has no alternate streams: FAT, exFAT, network shares), on macOS the
+/// `com.apple.quarantine` attribute Gatekeeper checks before running it
+/// (#137). It fails when the file does not exist; callers decide whether that
+/// is fatal. A no-op elsewhere.
 pub fn mark_downloaded(path: &std::path::Path) -> Result<(), MarkError> {
     #[cfg(target_os = "windows")]
     {
@@ -212,7 +214,30 @@ pub fn mark_downloaded(path: &std::path::Path) -> Result<(), MarkError> {
             .and_then(|mut file| file.write_all(ZONE_IDENTIFIER))
             .map_err(|_| MarkError)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        // `0083`: a web download Gatekeeper must check, as browsers set it.
+        // The system tool, so no FFI: called once per download, on a worker.
+        std::fs::metadata(path)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .ok_or(MarkError)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        let status = std::process::Command::new("/usr/bin/xattr")
+            .arg("-w")
+            .arg("com.apple.quarantine")
+            .arg(format!("0083;{now:08x};fastcord;"))
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|_| MarkError)?;
+        status.success().then_some(()).ok_or(MarkError)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = path;
         Ok(())
@@ -521,14 +546,14 @@ mod tests {
             "fastcord-platform-{}-never-created.png",
             std::process::id()
         ));
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             assert_eq!(mark_downloaded(&missing), Err(MarkError));
             assert!(!missing.exists());
             assert_eq!(open_local_file(&missing), Err(FileOpenError));
             assert!(!missing.exists());
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         assert_eq!(mark_downloaded(&missing), Ok(()));
     }
 
@@ -549,7 +574,24 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn marking_sets_the_quarantine_attribute_gatekeeper_checks() {
+        let path = scratch_file("quarantined.command");
+        assert_eq!(mark_downloaded(&path), Ok(()));
+        let read = std::process::Command::new("/usr/bin/xattr")
+            .args(["-p", "com.apple.quarantine"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(read.status.success());
+        let value = String::from_utf8(read.stdout).unwrap();
+        assert!(value.starts_with("0083;") && value.trim_end().ends_with(";fastcord;"));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(mark_downloaded(&path), Err(MarkError), "a missing file");
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn marking_is_a_no_op_outside_windows() {
         let path = scratch_file("unmarked.png");
