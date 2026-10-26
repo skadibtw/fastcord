@@ -22,6 +22,11 @@ pub(crate) const HEADER_LIMIT: usize = 8 * 1024;
 pub(crate) const TUNNEL_LIMIT: usize = 32;
 pub(crate) const FORWARD_BUFFER: usize = 32 * 1024;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a CONNECT waits for a free tunnel slot before a 503 (#127).
+const SLOT_WAIT: Duration = Duration::from_secs(2);
+/// How long a tunnel stays up after one side has closed: CONNECT clients never
+/// rely on half-close, and a dead origin must not hold a slot for minutes.
+const HALF_CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 struct Upstream {
@@ -164,17 +169,27 @@ async fn run(
         if !source.ip().is_loopback() {
             continue;
         }
-        let Ok(slot) = upstream.slots.clone().try_acquire_owned() else {
-            continue;
-        };
         let credentials = credentials.clone();
         let upstream = upstream.clone();
         let mut closing = closed.subscribe();
         tokio::spawn(async move {
-            let _slot = slot;
+            let serve = async {
+                // A full bridge waits briefly for a tunnel to end, then says
+                // so, instead of dropping the request unanswered (#127).
+                let slots = upstream.slots.clone();
+                let Ok(Ok(_slot)) = tokio::time::timeout(SLOT_WAIT, slots.acquire_owned()).await
+                else {
+                    let mut client = client;
+                    let _ = client
+                        .write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+                        .await;
+                    return;
+                };
+                tunnel(client, &credentials, &upstream).await;
+            };
             tokio::select! {
                 _ = closing.changed() => {},
-                _ = tunnel(client, &credentials, &upstream) => {},
+                () = serve => {},
             }
         });
     }
@@ -338,8 +353,14 @@ async fn forward_with_control<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + 
             client_write.write_all(&buffer[..len]).await?;
         }
     };
-    tokio::try_join!(outgoing, incoming)?;
-    Ok(())
+    // Once either side ends, the other gets a short grace and the slot is
+    // freed (#127).
+    tokio::pin!(outgoing, incoming);
+    let rest = tokio::select! {
+        ended = &mut outgoing => { ended?; tokio::time::timeout(HALF_CLOSE_GRACE, incoming).await }
+        ended = &mut incoming => { ended?; tokio::time::timeout(HALF_CLOSE_GRACE, outgoing).await }
+    };
+    rest.unwrap_or(Ok(()))
 }
 
 /// A half-close that fails because the far side already reset or went away
@@ -621,6 +642,31 @@ mod tests {
         stream.read_to_end(&mut response).await.unwrap();
         assert!(response.starts_with(b"HTTP/1.1 403"));
     }
+    #[tokio::test(start_paused = true)]
+    async fn a_tunnel_ends_shortly_after_the_client_closes_even_if_the_origin_stays() {
+        // The origin never closes: before #127 the slot was held until the
+        // kernel gave up on it.
+        let relay = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let client = TcpStream::connect(relay.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (bridge_in, _) = relay.accept().await.unwrap();
+        let bridge_out = TcpStream::connect(origin.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (_silent_origin, _) = origin.accept().await.unwrap();
+        let forwarding = tokio::spawn(forward(
+            bridge_in,
+            bridge_out,
+            Strategy::Combined,
+            Arc::new(Semaphore::new(4)),
+        ));
+        drop(client);
+        let ended = tokio::time::timeout(Duration::from_secs(60), forwarding).await;
+        assert!(ended.is_ok(), "the tunnel outlived its grace");
+    }
+
     #[tokio::test]
     async fn bounded_header_reader_rejects_oversize_and_pipelining() {
         for payload in [

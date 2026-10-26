@@ -37,6 +37,8 @@ impl HttpBuilder {
             .https_only(!local)
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
+            // Each idle pooled connection holds a bridge tunnel slot (#127).
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
             .use_preconfigured_tls(
                 (*tls_config(TlsProfile::Http, context.mode() == Mode::Auto)?).clone(),
             );

@@ -15,6 +15,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- With network recovery or a proxy on, requests no longer fail as "The private network bridge is unavailable" because old connections still held all of its 32 tunnels (#127). A tunnel now closes 5 s after either side ends, idle pooled connections are released after 30 s instead of 90 s, and a request that finds the bridge full waits up to 2 s for a free tunnel and is otherwise answered as busy.
 - On Linux with hardware (VA-API) decoding, a stream cropped on the left no longer shows swapped or shifted colours (#128): the colour plane of the picture now starts at the same column as the brightness plane.
 - A compressed WebSocket message that the server ends with a final deflate block (allowed by RFC 7692 and accepted by Chromium) no longer drops the connection as corrupt (#129).
 - Reconnecting the Gateway, voice and stream connections (and HTTPS proxy hops) without network recovery on now resumes the earlier TLS session instead of a full handshake each time (#131): the TLS settings are built once per process, so their session cache survives between connections. Recovery probes still never resume. Trusting the system's certificate store is not done yet.
