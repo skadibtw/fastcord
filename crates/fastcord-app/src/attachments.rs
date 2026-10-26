@@ -484,7 +484,8 @@ impl AttachmentCache {
                     .map_err(|_| AttachmentError::CacheUnavailable)?;
             }
             debug_assert!(size <= limit);
-            trim_disk_to(&root, DISK_CACHE_LIMIT, Some(&destination))?;
+            // No second scan: `reserve` already counted the whole body, and the
+            // stored file is at most that size (#168).
             Ok(destination)
         })
         .await
@@ -606,6 +607,43 @@ impl AttachmentCache {
             .map_err(|_| AttachmentError::CacheUnavailable)?;
         drop(file);
         Ok(written)
+    }
+
+    /// The body of `url`, at most `limit` bytes, held in memory: for small public
+    /// images that are decoded at once and never served from this cache.
+    async fn fetch_bytes<R: UrlRefresh>(
+        &self,
+        refresh: &R,
+        url: &str,
+        limit: u64,
+        accept: &'static str,
+    ) -> Result<Vec<u8>, AttachmentError> {
+        use futures_util::StreamExt;
+
+        self.ensure_active()?;
+        let _permit = self
+            .fetch_slots
+            .acquire()
+            .await
+            .map_err(|_| AttachmentError::WorkerStopped)?;
+        let response = self.fetch_response_refreshing(refresh, url, accept).await?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit)
+        {
+            return Err(AttachmentError::TooLarge);
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            self.ensure_active()?;
+            let chunk = chunk.map_err(|_| AttachmentError::Network)?;
+            if (body.len() + chunk.len()) as u64 > limit {
+                return Err(AttachmentError::TooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     /// Atomically accounts for a complete in-flight file before its first byte
@@ -828,17 +866,6 @@ impl AttachmentCache {
         limit: u64,
         fit: (u32, u32),
     ) -> Result<DecodedImage, AttachmentError> {
-        // Zero channel plus a message >= 2 cannot collide with emoji (0/1) or
-        // with any real attachment.
-        let digest = Sha256::digest(hash.as_bytes());
-        let mut fold = [0u8; 8];
-        fold.copy_from_slice(&digest[..8]);
-        let key = AttachmentKey {
-            account: self.account,
-            channel: Snowflake(0),
-            message: Snowflake((u64::from_le_bytes(fold) << 8) | u64::from(kind.max(2))),
-            attachment: id,
-        };
         // A sized copy from an earlier run answers with one small file read:
         // no fetch slot, no network, no decode.
         let thumb = crate::thumbs::name(kind, id.0, hash, fit);
@@ -857,9 +884,40 @@ impl AttachmentCache {
                 return Ok(image);
             }
         }
-        let path = self
-            .fetch_file_accepting(&PublicEmoji, key, "avatar.png", url, limit, IMAGE_ACCEPT)
-            .await?;
+        // When the sized copy is sure to fit the thumbnail store (avatars,
+        // icons, stickers), it is the only copy ever read again: decode the
+        // original from memory and do not store it (#168). Larger pictures keep
+        // their compressed copy in the attachment cache.
+        let source =
+            if u64::from(fit.0) * u64::from(fit.1) * 4 <= crate::thumbs::MAX_THUMB_BYTES as u64 {
+                Source::Memory(
+                    self.fetch_bytes(&PublicEmoji, url, limit, IMAGE_ACCEPT)
+                        .await?,
+                )
+            } else {
+                // Zero channel plus a message >= 2 cannot collide with emoji (0/1)
+                // or with any real attachment.
+                let digest = Sha256::digest(hash.as_bytes());
+                let mut fold = [0u8; 8];
+                fold.copy_from_slice(&digest[..8]);
+                let key = AttachmentKey {
+                    account: self.account,
+                    channel: Snowflake(0),
+                    message: Snowflake((u64::from_le_bytes(fold) << 8) | u64::from(kind.max(2))),
+                    attachment: id,
+                };
+                Source::File(
+                    self.fetch_file_accepting(
+                        &PublicEmoji,
+                        key,
+                        "avatar.png",
+                        url,
+                        limit,
+                        IMAGE_ACCEPT,
+                    )
+                    .await?,
+                )
+            };
         let permit = self
             .decode_slots
             .clone()
@@ -869,7 +927,12 @@ impl AttachmentCache {
         self.ensure_active()?;
         let image = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            decode_thumbnail(&path, fit.0, fit.1)
+            match source {
+                Source::Memory(body) => {
+                    decode_thumbnail_from(std::io::Cursor::new(body), fit.0, fit.1)
+                }
+                Source::File(path) => decode_thumbnail(&path, fit.0, fit.1),
+            }
         })
         .await
         .map_err(|_| AttachmentError::WorkerStopped)??;
@@ -1014,13 +1077,27 @@ fn exceeds_pixel_limits(width: u32, height: u32) -> bool {
 /// Decodes a cached image no larger than the display box. The header is read
 /// and checked against the dimension, pixel, and allocation limits before the
 /// decoder allocates anything for pixels. Animated formats show their first frame.
+/// Where a public image's original bytes are.
+enum Source {
+    Memory(Vec<u8>),
+    File(PathBuf),
+}
+
 fn decode_thumbnail(
     path: &Path,
     max_width: u32,
     max_height: u32,
 ) -> Result<DecodedImage, AttachmentError> {
     let file = fs::File::open(path).map_err(|_| AttachmentError::CacheUnavailable)?;
-    let mut reader = image::ImageReader::new(std::io::BufReader::new(file))
+    decode_thumbnail_from(std::io::BufReader::new(file), max_width, max_height)
+}
+
+fn decode_thumbnail_from(
+    source: impl std::io::BufRead + std::io::Seek,
+    max_width: u32,
+    max_height: u32,
+) -> Result<DecodedImage, AttachmentError> {
+    let mut reader = image::ImageReader::new(source)
         .with_guessed_format()
         .map_err(|_| AttachmentError::CacheUnavailable)?;
     let mut limits = Limits::default();
@@ -1994,9 +2071,9 @@ mod tests {
         assert_eq!(seen.lock().len(), 1);
         assert!(root.join("images").join("1").is_dir());
         drop(first);
-        // New instance on the same directory; the URL is unreachable and the
-        // compressed copy is gone, so only the sized thumbnail can answer.
-        fs::remove_dir_all(root.join("1")).unwrap();
+        // The compressed original was never stored (#168): only the sized
+        // thumbnail can answer a new instance whose URL is unreachable.
+        assert!(!root.join("1").exists());
         let second = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
         let hit = second
             .avatar(2, Snowflake(9), "h1", "http://127.0.0.1:1/never")
