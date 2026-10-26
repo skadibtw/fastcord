@@ -572,14 +572,12 @@ fn bare(tail: &str) -> Option<(usize, Kind<'_>)> {
     if !(tail.starts_with("http://") || tail.starts_with("https://")) {
         return None;
     }
-    let mut end = tail
-        .bytes()
-        .take(MAX_URL)
-        .position(|b| b.is_ascii_whitespace() || b == b'<')
-        .unwrap_or_else(|| tail.len().min(MAX_URL));
-    while !tail.is_char_boundary(end) {
-        end -= 1;
-    }
+    let mut end = tail.floor_char_boundary(
+        tail.bytes()
+            .take(MAX_URL)
+            .position(|b| b.is_ascii_whitespace() || b == b'<')
+            .unwrap_or(MAX_URL),
+    );
     // Sentence punctuation after a link is not part of it.
     while let Some(last) = tail[..end].chars().next_back() {
         let unbalanced_paren =

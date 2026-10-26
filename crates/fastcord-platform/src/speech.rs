@@ -79,13 +79,8 @@ impl Queue {
         if self.0.len() >= MAX_QUEUE {
             return Err(SpeechError::Full);
         }
-        if utterance.text.len() > MAX_TEXT_BYTES {
-            let mut end = MAX_TEXT_BYTES;
-            while !utterance.text.is_char_boundary(end) {
-                end -= 1;
-            }
-            utterance.text.truncate(end);
-        }
+        let end = utterance.text.floor_char_boundary(MAX_TEXT_BYTES);
+        utterance.text.truncate(end);
         utterance.rate = utterance.rate.clamp(MIN_RATE, MAX_RATE);
         self.0.push_back(utterance);
         Ok(())

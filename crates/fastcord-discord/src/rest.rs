@@ -77,16 +77,14 @@ impl RestRequest {
     /// Blank text adds nothing. The reason is never part of `Debug` output.
     pub fn with_audit_reason(mut self, reason: &str) -> Self {
         let reason = reason.trim();
-        let mut end = reason.len().min(MAX_AUDIT_REASON_BYTES);
-        while !reason.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = reason.floor_char_boundary(MAX_AUDIT_REASON_BYTES);
         let mut encoded = String::new();
         for byte in reason[..end].bytes() {
             if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
                 encoded.push(char::from(byte));
             } else {
-                encoded.push_str(&format!("%{byte:02X}"));
+                use std::fmt::Write as _;
+                let _ = write!(encoded, "%{byte:02X}");
             }
         }
         self.audit_reason = HeaderValue::from_str(&encoded).ok().filter(|_| end > 0);

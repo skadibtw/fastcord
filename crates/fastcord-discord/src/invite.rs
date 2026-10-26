@@ -125,13 +125,7 @@ struct WireInvite {
 }
 
 pub(crate) fn cut_at(mut text: String, max: usize) -> String {
-    if text.len() > max {
-        let mut end = max;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-    }
+    text.truncate(text.floor_char_boundary(max));
     text
 }
 

@@ -1349,20 +1349,14 @@ fn unread_of(store: &Store, channel: &Channel) -> Unread {
 }
 
 fn clip_bytes(value: &str, limit: usize) -> String {
-    let mut end = value.len().min(limit);
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
+    value[..value.floor_char_boundary(limit)].to_owned()
 }
 
 fn capped_name(value: Option<&str>, fallback: &str) -> String {
-    let value = value.filter(|name| !name.is_empty()).unwrap_or(fallback);
-    let mut end = value.len().min(MAX_NAME_BYTES);
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
+    clip_bytes(
+        value.filter(|name| !name.is_empty()).unwrap_or(fallback),
+        MAX_NAME_BYTES,
+    )
 }
 
 /// An ordinary direct or group conversation. A message request is not one

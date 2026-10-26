@@ -1130,14 +1130,8 @@ fn guild_settings(
     safety: Safety,
 ) -> GuildSettings {
     let mut description = description;
-    if let Some(text) = &mut description
-        && text.len() > MAX_DESCRIPTION_BYTES
-    {
-        let mut end = MAX_DESCRIPTION_BYTES;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
+    if let Some(text) = &mut description {
+        text.truncate(text.floor_char_boundary(MAX_DESCRIPTION_BYTES));
     }
     GuildSettings {
         description,

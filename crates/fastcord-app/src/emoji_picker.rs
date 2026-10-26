@@ -241,11 +241,7 @@ impl Picker {
             }
             Event::Close => self.close(),
             Event::Search(mut query) => {
-                let mut end = query.len().min(MAX_QUERY_BYTES);
-                while !query.is_char_boundary(end) {
-                    end -= 1;
-                }
-                query.truncate(end);
+                query.truncate(query.floor_char_boundary(MAX_QUERY_BYTES));
                 query.shrink_to_fit();
                 self.request.query = query;
                 self.request.window = first_window();

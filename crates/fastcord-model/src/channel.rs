@@ -193,14 +193,8 @@ fn capped<'de, D: serde::Deserializer<'de>>(
     max: usize,
 ) -> Result<Option<Box<str>>, D::Error> {
     let mut text = <Option<String> as serde::Deserialize>::deserialize(d)?;
-    if let Some(text) = &mut text
-        && text.len() > max
-    {
-        let mut end = max;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
+    if let Some(text) = &mut text {
+        text.truncate(text.floor_char_boundary(max));
     }
     Ok(text.map(String::into_boxed_str))
 }

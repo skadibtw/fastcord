@@ -56,11 +56,7 @@ impl GuildFolders {
 }
 
 fn clip(name: &str) -> String {
-    let mut end = name.len().min(MAX_FOLDER_NAME_BYTES);
-    while !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    name[..end].to_owned()
+    name[..name.floor_char_boundary(MAX_FOLDER_NAME_BYTES)].to_owned()
 }
 
 fn id_of(value: &serde_json::Value) -> Option<u64> {
