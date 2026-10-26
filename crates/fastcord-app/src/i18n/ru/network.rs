@@ -42,8 +42,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Прокси никогда не обходится. Для голоса и видео нужен SOCKS5 с UDP. Пароль хранится в системном хранилище учётных данных.",
     ),
     (
-        "Experimental UDP discovery (unverified)",
-        "Экспериментальное обнаружение UDP (не проверено)",
+        "Voice and video use UDP. The TLS bypass above cannot reach a blocked voice server; only a SOCKS5 proxy with UDP can.",
+        "Голос и видео идут по UDP. Обход TLS выше не достанет заблокированный голосовой сервер; поможет только SOCKS5-прокси с UDP.",
     ),
     (
         "Changes apply to the next connection.",
@@ -119,14 +119,6 @@ pub const ENTRIES: &[(&str, &str)] = &[
     (
         "Proxy mode never falls back to a direct connection. CONNECT proxies carry TCP only: voice, camera and screen sharing cannot join through them. SOCKS5 UDP requires a UDP-capable proxy and a working UDP route to that proxy. It does not carry media over TCP and does not encrypt the client-to-proxy transport. Passwords are saved in native credential storage.",
         "В режиме прокси прямое подключение не используется никогда. Прокси CONNECT передают только TCP: голос, камера и демонстрация экрана через них не подключатся. Для SOCKS5 UDP нужен прокси с поддержкой UDP и рабочий UDP-маршрут до него; медиа не передаётся поверх TCP, а канал до прокси не шифруется. Пароли хранятся в системном хранилище учётных данных.",
-    ),
-    (
-        "Experimental preludes are disabled in Proxy mode. SOCKS5 UDP uses ordinary discovery.",
-        "В режиме прокси экспериментальные прелюдии выключены: SOCKS5 UDP использует обычное обнаружение.",
-    ),
-    (
-        "Separate opt-in for direct media routes. Tries up to three UDP flows before protocol selection. Effectiveness on filtered networks is unverified; proxy routing does not enable it.",
-        "Отдельная настройка для прямых медиамаршрутов: до выбора протокола пробуются до трёх UDP-потоков. Действенность в фильтруемых сетях не проверена; через прокси не включается.",
     ),
     // Notices.
     (

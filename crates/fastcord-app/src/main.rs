@@ -1458,20 +1458,6 @@ impl App {
                     );
                 }
             }
-            network_ui::Action::ExperimentalUdp(enabled) => {
-                if matches!(self.phase, Phase::Login)
-                    && !self.network_settings.saving
-                    && self.network.mode() != fastcord_net::settings::Mode::Proxy
-                {
-                    self.network_settings.saving = true;
-                    self.network_settings.settings.experimental_udp = enabled;
-                    self.network = self.network.with_experimental_udp(enabled);
-                    return Task::perform(
-                        network_ui::save(self.network_settings.settings.clone()),
-                        |result| Message::Network(network_ui::Action::Saved(result)),
-                    );
-                }
-            }
             network_ui::Action::ProxyKind(kind) => {
                 if matches!(self.phase, Phase::Login) {
                     self.network_settings.proxy_kind = Some(kind);

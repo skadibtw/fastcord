@@ -1108,6 +1108,12 @@ replayed. M93 sends no UDP ASSOCIATE and refuses proxy media joins explicitly.
 
 ## Experimental UDP discovery preludes (M94)
 
+**Not reachable from the app since #223.** The settings flag is still stored
+and loaded for compatibility but no longer applied, and the network page has no
+control for it: on a filtered route the prelude flows only spent the join's
+discovery budget and closed calls that a plain retry could still start. The
+laboratory code below stays in `fastcord-media` for its fixtures.
+
 Only an explicit experimental opt-in changes discovery. The first flow sends
 ordinary 74-byte Discord discovery requests. If it does not answer, the next
 fresh bound flow sends three 1200-byte zero datagrams once, then ordinary

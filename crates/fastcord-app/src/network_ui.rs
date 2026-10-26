@@ -3,7 +3,7 @@ use crate::ui::button;
 use fastcord_discord::UserToken;
 use fastcord_net::proxy::{ProxyConfig, ProxyKind};
 use fastcord_net::settings::{Mode, Settings};
-use iced::widget::{checkbox, column, container, row, text, text_input};
+use iced::widget::{column, container, row, text, text_input};
 use iced::{Element, Length};
 use std::sync::Arc;
 
@@ -133,7 +133,6 @@ pub enum Action {
     Retry,
     Retried,
     Mode(Mode),
-    ExperimentalUdp(bool),
     Saved(Result<(), &'static str>),
     ProxyKind(ProxyKind),
     ProxyHost(String),
@@ -300,7 +299,9 @@ pub fn configure(
     } else {
         context.with_mode(loaded.settings.mode)
     };
-    Ok(context.with_experimental_udp(loaded.settings.experimental_udp))
+    // The saved experimental UDP flag is ignored: its preludes only cost a
+    // filtered call its discovery budget (#223).
+    Ok(context)
 }
 
 pub async fn apply_proxy(
@@ -531,14 +532,9 @@ pub fn view<'a>(
         )));
 
     // Media.
-    body = body.push(section(tr("Voice and video"))).push(
-        checkbox(state.settings.experimental_udp)
-            .label(tr("Experimental UDP discovery (unverified)"))
-            .on_toggle_maybe(
-                (open && state.settings.mode != Mode::Proxy)
-                    .then_some(|value| crate::Message::Network(Action::ExperimentalUdp(value))),
-            ),
-    );
+    body = body.push(section(tr("Voice and video"))).push(ui::note(tr(
+        "Voice and video use UDP. The TLS bypass above cannot reach a blocked voice server; only a SOCKS5 proxy with UDP can.",
+    )));
 
     // Each service's state, short.
     let mut services = column![].spacing(4);
@@ -591,15 +587,6 @@ pub fn view<'a>(
                 ui::note(tr(
                     "Proxy mode never falls back to a direct connection. CONNECT proxies carry TCP only: voice, camera and screen sharing cannot join through them. SOCKS5 UDP requires a UDP-capable proxy and a working UDP route to that proxy. It does not carry media over TCP and does not encrypt the client-to-proxy transport. Passwords are saved in native credential storage."
                 )),
-                ui::note(if state.settings.mode == Mode::Proxy {
-                    tr(
-                        "Experimental preludes are disabled in Proxy mode. SOCKS5 UDP uses ordinary discovery.",
-                    )
-                } else {
-                    tr(
-                        "Separate opt-in for direct media routes. Tries up to three UDP flows before protocol selection. Effectiveness on filtered networks is unverified; proxy routing does not enable it.",
-                    )
-                }),
                 button(text(tr("Retry pending TLS check")).size(13))
                     .on_press(crate::Message::Network(Action::Retry))
                     .padding([6, 12])
@@ -872,10 +859,6 @@ pub fn preview() -> iced::Result {
                             state.state.packet_active = false;
                             state.context = state.context.without_prefix_factory();
                         }
-                    }
-                    Action::ExperimentalUdp(enabled) => {
-                        state.state.settings.experimental_udp = enabled;
-                        state.context = state.context.with_experimental_udp(enabled);
                     }
                     Action::ProxyKind(kind) => state.state.proxy_kind = Some(kind),
                     Action::ProxyHost(value) => state.state.proxy_host = value,

@@ -110,6 +110,10 @@ manual acceptance gates. SOCKS5 UDP has not been implemented in M93.
 
 ## M94: experimental direct UDP discovery preludes
 
+The app no longer offers or applies this opt-in (#223): on 2026-10-26 a blocked
+Windows route closed every join as `Network` after ~31 s with it on and joined
+normally with it off. The evidence below covers the retained library code only.
+
 Windows offline evidence, 2026-10-24:
 
 - All 178 media tests passed, including unchanged AEAD, DAVE/MLS, RTP and H.264/
