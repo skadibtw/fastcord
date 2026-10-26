@@ -19,6 +19,8 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use realfft::num_complex::Complex;
+
 #[cfg(test)]
 mod quality;
 /// Partitions whose gradient constraint is applied per step (more cost no gain: measured).
@@ -59,76 +61,54 @@ const MU_MAX: f32 = 0.9;
 /// windows.
 const SILENT_SKIP: usize = PARTITIONS + FFT.div_ceil(HOP);
 
+/// 512-point real transforms (SIMD through realfft/rustfft). Plans and
+/// scratch are allocated in `new`; transforms never allocate.
 struct Fft {
-    cos: [f32; FFT / 2],
-    sin: [f32; FFT / 2],
-    rev: [u16; FFT],
+    forward: std::sync::Arc<dyn realfft::RealToComplex<f32>>,
+    inverse: std::sync::Arc<dyn realfft::ComplexToReal<f32>>,
+    spectrum: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
 }
 
 impl Fft {
     fn new() -> Self {
-        let mut fft = Self {
-            cos: [0.0; FFT / 2],
-            sin: [0.0; FFT / 2],
-            rev: [0; FFT],
-        };
-        for k in 0..FFT / 2 {
-            let angle = -2.0 * std::f64::consts::PI * k as f64 / FFT as f64;
-            fft.cos[k] = angle.cos() as f32;
-            fft.sin[k] = angle.sin() as f32;
-        }
-        let shift = 16 - FFT.trailing_zeros();
-        for (i, slot) in fft.rev.iter_mut().enumerate() {
-            *slot = (i as u16).reverse_bits() >> shift;
-        }
-        fft
-    }
-
-    /// In-place radix-2 transform; the inverse is scaled by 1/N.
-    fn transform(&self, re: &mut [f32; FFT], im: &mut [f32; FFT], inverse: bool) {
-        for i in 0..FFT {
-            let j = self.rev[i] as usize;
-            if j > i {
-                re.swap(i, j);
-                im.swap(i, j);
-            }
-        }
-        let mut len = 2;
-        while len <= FFT {
-            let (half, step) = (len / 2, FFT / len);
-            for start in (0..FFT).step_by(len) {
-                for k in 0..half {
-                    let wr = self.cos[k * step];
-                    let wi = if inverse {
-                        -self.sin[k * step]
-                    } else {
-                        self.sin[k * step]
-                    };
-                    let (a, b) = (start + k, start + k + half);
-                    let tr = re[b] * wr - im[b] * wi;
-                    let ti = re[b] * wi + im[b] * wr;
-                    re[b] = re[a] - tr;
-                    im[b] = im[a] - ti;
-                    re[a] += tr;
-                    im[a] += ti;
-                }
-            }
-            len *= 2;
-        }
-        if inverse {
-            let scale = 1.0 / FFT as f32;
-            re.iter_mut().chain(im.iter_mut()).for_each(|v| *v *= scale);
+        let mut planner = realfft::RealFftPlanner::<f32>::new();
+        let forward = planner.plan_fft_forward(FFT);
+        let inverse = planner.plan_fft_inverse(FFT);
+        let scratch = forward.get_scratch_len().max(inverse.get_scratch_len());
+        Self {
+            forward,
+            inverse,
+            spectrum: vec![Complex::default(); BINS],
+            scratch: vec![Complex::default(); scratch],
         }
     }
-}
 
-/// Mirrors bins `0..BINS` into a full conjugate-symmetric spectrum.
-fn expand(re: &mut [f32; FFT], im: &mut [f32; FFT]) {
-    im[0] = 0.0;
-    im[BINS - 1] = 0.0;
-    for k in 1..BINS - 1 {
-        re[FFT - k] = re[k];
-        im[FFT - k] = -im[k];
+    /// Spectrum of `time` (which is used as scratch) into `re`/`im`.
+    fn forward(&mut self, time: &mut [f32; FFT], re: &mut [f32], im: &mut [f32]) {
+        // Lengths are fixed at construction, so this cannot fail.
+        let _ = self
+            .forward
+            .process_with_scratch(time, &mut self.spectrum, &mut self.scratch);
+        for (k, bin) in self.spectrum.iter().enumerate() {
+            re[k] = bin.re;
+            im[k] = bin.im;
+        }
+    }
+
+    /// Real signal of the half spectrum `re`/`im`, scaled by 1/N.
+    fn inverse(&mut self, re: &[f32], im: &[f32], time: &mut [f32; FFT]) {
+        for (k, bin) in self.spectrum.iter_mut().enumerate() {
+            *bin = Complex::new(re[k], im[k]);
+        }
+        // DC and Nyquist of a real signal have no imaginary part.
+        self.spectrum[0].im = 0.0;
+        self.spectrum[BINS - 1].im = 0.0;
+        let _ = self
+            .inverse
+            .process_with_scratch(&mut self.spectrum, time, &mut self.scratch);
+        let scale = 1.0 / FFT as f32;
+        time.iter_mut().for_each(|v| *v *= scale);
     }
 }
 
@@ -143,11 +123,18 @@ pub(crate) struct EchoCanceller {
     wi: Box<[f32]>,
     head: usize,
     next_constrained: usize,
-    re: Box<[f32; FFT]>,
-    im: Box<[f32; FFT]>,
+    time: Box<[f32; FFT]>,
     yr: [f32; BINS],
     yi: [f32; BINS],
+    /// Error spectrum of the current step.
+    er: [f32; BINS],
+    ei: [f32; BINS],
+    /// Running sum over partitions of |X|^2 per bin.
     power: [f32; BINS],
+    /// Per-bin step size `mu / (power + REGULARIZATION)`.
+    gain: [f32; BINS],
+    /// Inserts since `power` was last summed from scratch (bounds f32 drift).
+    power_age: usize,
     far: VecDeque<f32>,
     // Smoothed energies for the double-talk decision.
     s_near: f32,
@@ -185,11 +172,14 @@ impl EchoCanceller {
             wi: spectra(),
             head: 0,
             next_constrained: 0,
-            re: Box::new([0.0; FFT]),
-            im: Box::new([0.0; FFT]),
+            time: Box::new([0.0; FFT]),
             yr: [0.0; BINS],
             yi: [0.0; BINS],
+            er: [0.0; BINS],
+            ei: [0.0; BINS],
             power: [0.0; BINS],
+            gain: [0.0; BINS],
+            power_age: 0,
             far: VecDeque::with_capacity(FAR_LIMIT + FRAME),
             s_near: 0.0,
             s_echo: 0.0,
@@ -296,13 +286,20 @@ impl EchoCanceller {
         }
         self.window.copy_within(HOP.., 0);
         self.window[FFT - HOP..].copy_from_slice(far);
-        self.re.copy_from_slice(&self.window);
-        self.im.fill(0.0);
-        self.fft.transform(&mut self.re, &mut self.im, false);
+        self.time.copy_from_slice(&self.window);
         self.head = (self.head + PARTITIONS - 1) % PARTITIONS;
-        let newest = self.head * BINS;
-        self.xr[newest..newest + BINS].copy_from_slice(&self.re[..BINS]);
-        self.xi[newest..newest + BINS].copy_from_slice(&self.im[..BINS]);
+        let newest = self.head * BINS..(self.head + 1) * BINS;
+        // The slot being replaced is the partition that drops off the sum.
+        for k in 0..BINS {
+            let at = newest.start + k;
+            self.power[k] -= self.xr[at].powi(2) + self.xi[at].powi(2);
+        }
+        self.fft.forward(
+            &mut self.time,
+            &mut self.xr[newest.clone()],
+            &mut self.xi[newest.clone()],
+        );
+        self.update_power(newest.start);
 
         // Echo estimate: sum over partitions of W_p * X(t - p).
         self.yr.fill(0.0);
@@ -317,16 +314,13 @@ impl EchoCanceller {
                 self.yi[k] += xr[k] * wi[k] + xi[k] * wr[k];
             }
         }
-        self.re[..BINS].copy_from_slice(&self.yr);
-        self.im[..BINS].copy_from_slice(&self.yi);
-        expand(&mut self.re, &mut self.im);
-        self.fft.transform(&mut self.re, &mut self.im, true);
+        self.fft.inverse(&self.yr, &self.yi, &mut self.time);
 
         let (mut p_near, mut p_echo, mut p_residual, mut p_cross, mut p_error) =
             (0.0, 0.0, 0.0, 0.0, 0.0);
         let mut error = [0.0; HOP];
         for i in 0..HOP {
-            let echo = self.re[FFT - HOP + i];
+            let echo = self.time[FFT - HOP + i];
             error[i] = near[i] - echo;
             p_near += near[i] * near[i];
             p_echo += echo * echo;
@@ -390,46 +384,55 @@ impl EchoCanceller {
         }
     }
 
-    fn adapt(&mut self, error: &[f32; HOP], mu: f32) {
-        self.re[..FFT - HOP].fill(0.0);
-        self.re[FFT - HOP..].copy_from_slice(error);
-        self.im.fill(0.0);
-        self.fft.transform(&mut self.re, &mut self.im, false);
-
-        self.power.fill(0.0);
-        for slot in 0..PARTITIONS {
-            let x = slot * BINS;
+    /// Adds the spectrum just written at `newest` to `power` (the dropped
+    /// partition was subtracted before it was overwritten). Every `PARTITIONS`
+    /// inserts the sum is redone from scratch, which bounds rounding drift.
+    fn update_power(&mut self, newest: usize) {
+        self.power_age += 1;
+        if self.power_age >= PARTITIONS {
+            self.power_age = 0;
+            self.power.fill(0.0);
+            for slot in 0..PARTITIONS {
+                let x = slot * BINS;
+                for k in 0..BINS {
+                    self.power[k] += self.xr[x + k].powi(2) + self.xi[x + k].powi(2);
+                }
+            }
+        } else {
             for k in 0..BINS {
-                self.power[k] += self.xr[x + k].powi(2) + self.xi[x + k].powi(2);
+                let added = self.xr[newest + k].powi(2) + self.xi[newest + k].powi(2);
+                self.power[k] = (self.power[k] + added).max(0.0);
             }
         }
+    }
+
+    fn adapt(&mut self, error: &[f32; HOP], mu: f32) {
+        self.time[..FFT - HOP].fill(0.0);
+        self.time[FFT - HOP..].copy_from_slice(error);
+        self.fft.forward(&mut self.time, &mut self.er, &mut self.ei);
         // One division per bin, not per (partition, bin).
-        for power in &mut self.power {
-            *power = mu / (*power + REGULARIZATION);
+        for (gain, power) in self.gain.iter_mut().zip(&self.power) {
+            *gain = mu / (*power + REGULARIZATION);
         }
         for p in 0..PARTITIONS {
             let x = ((self.head + p) % PARTITIONS) * BINS;
             let w = p * BINS;
             for k in 0..BINS {
-                let gain = self.power[k];
+                let gain = self.gain[k];
                 let (xr, xi) = (self.xr[x + k], self.xi[x + k]);
-                self.wr[w + k] += gain * (xr * self.re[k] + xi * self.im[k]);
-                self.wi[w + k] += gain * (xr * self.im[k] - xi * self.re[k]);
+                self.wr[w + k] += gain * (xr * self.er[k] + xi * self.ei[k]);
+                self.wi[w + k] += gain * (xr * self.ei[k] - xi * self.er[k]);
             }
         }
         // Gradient constraint (keep each partition `HOP` taps long), a few partitions per step.
         for _ in 0..CONSTRAINED_PER_STEP {
-            let w = self.next_constrained * BINS;
+            let w = self.next_constrained * BINS..(self.next_constrained + 1) * BINS;
             self.next_constrained = (self.next_constrained + 1) % PARTITIONS;
-            self.re[..BINS].copy_from_slice(&self.wr[w..w + BINS]);
-            self.im[..BINS].copy_from_slice(&self.wi[w..w + BINS]);
-            expand(&mut self.re, &mut self.im);
-            self.fft.transform(&mut self.re, &mut self.im, true);
-            self.re[HOP..].fill(0.0);
-            self.im.fill(0.0);
-            self.fft.transform(&mut self.re, &mut self.im, false);
-            self.wr[w..w + BINS].copy_from_slice(&self.re[..BINS]);
-            self.wi[w..w + BINS].copy_from_slice(&self.im[..BINS]);
+            self.fft
+                .inverse(&self.wr[w.clone()], &self.wi[w.clone()], &mut self.time);
+            self.time[HOP..].fill(0.0);
+            self.fft
+                .forward(&mut self.time, &mut self.wr[w.clone()], &mut self.wi[w]);
         }
     }
 }
@@ -603,15 +606,33 @@ mod tests {
 
     #[test]
     fn fft_round_trips() {
-        let fft = Fft::new();
+        let mut fft = Fft::new();
         let mut noise = Noise(1);
-        let mut re = Box::new([0.0; FFT]);
-        re.iter_mut().for_each(|v| *v = noise.next());
-        let original = *re;
-        let mut im = Box::new([0.0; FFT]);
-        fft.transform(&mut re, &mut im, false);
-        fft.transform(&mut re, &mut im, true);
-        assert!(re.iter().zip(original).all(|(a, b)| (a - b).abs() < 1e-4));
+        let mut time = Box::new([0.0; FFT]);
+        time.iter_mut().for_each(|v| *v = noise.next());
+        let original = *time;
+        let (mut re, mut im) = ([0.0; BINS], [0.0; BINS]);
+        fft.forward(&mut time, &mut re, &mut im);
+        fft.inverse(&re, &im, &mut time);
+        assert!(time.iter().zip(original).all(|(a, b)| (a - b).abs() < 1e-4));
+    }
+
+    #[test]
+    fn the_running_reference_power_matches_a_full_sum() {
+        let mut aec = EchoCanceller::new();
+        let far = Noise(3).speech(48_000, 0.5);
+        // Not a multiple of PARTITIONS hops, so the last full resum is behind.
+        run(&mut aec, &far[..FRAME * 90], &far[..FRAME * 90]);
+        for k in 0..BINS {
+            let full: f32 = (0..PARTITIONS)
+                .map(|p| aec.xr[p * BINS + k].powi(2) + aec.xi[p * BINS + k].powi(2))
+                .sum();
+            assert!(
+                (aec.power[k] - full).abs() <= 1e-3 * full.max(1.0),
+                "bin {k}: running {} vs full {full}",
+                aec.power[k]
+            );
+        }
     }
 
     #[test]

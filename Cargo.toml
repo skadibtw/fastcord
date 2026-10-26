@@ -84,6 +84,8 @@ filetime = "0.2"
 rfd = { version = "0.15.2", default-features = false, features = ["tokio", "xdg-portal"] }
 rsa = { version = "0.9.10", default-features = false, features = ["std", "u64_digit"] }
 rubato = { version = "5", default-features = false }
+# Already in the graph through deep_filter; the echo canceller uses it directly.
+realfft = "3.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_repr = "0.1"
