@@ -116,8 +116,9 @@ impl App {
         let Some(gateway) = self.phase.gateway() else {
             return Task::none();
         };
-        let controls = gateway.controls.voice_controls();
-        let (stickers, sounds) = (controls.sticker_change, controls.sound_catalog_change);
+        let (stickers, sounds) = gateway
+            .controls
+            .voice_controls_with(|c| (c.sticker_change, c.sound_catalog_change));
         let tasks: Vec<_> = self
             .ui
             .assets
@@ -386,13 +387,15 @@ impl App {
         else {
             return None;
         };
-        let controls = gateway.controls.voice_controls();
+        let deafened = gateway
+            .controls
+            .voice_controls_with(|c| c.deafened || c.server_deafened);
         let in_call = gateway.controls.voice_audio_state() != gateway::VoiceAudioState::Idle;
         Some(soundboard::Env {
             client: &session.client,
             cache: gateway.attachments.as_ref(),
             output,
-            deafened: controls.deafened || controls.server_deafened,
+            deafened,
             voice: gateway.controls.voice_target().filter(|_| in_call),
         })
     }
@@ -421,21 +424,19 @@ impl App {
         let Some(gateway) = self.phase.gateway() else {
             return Task::none();
         };
-        let controls = gateway.controls.voice_controls();
+        let (cues, catalog_change) = gateway
+            .controls
+            .voice_controls_with(|c| (c.sound_cues.clone(), c.sound_catalog_change));
         self.ui.soundboard.sync_call(env.voice, env.deafened);
         let mut tasks = Vec::new();
-        for cue in &controls.sound_cues {
+        for cue in &cues {
             tasks.push(
                 self.ui
                     .soundboard
                     .update(soundboard::Event::Cue(*cue), &env),
             );
         }
-        if let Some(guild) = self
-            .ui
-            .soundboard
-            .new_catalog_change(controls.sound_catalog_change)
-        {
+        if let Some(guild) = self.ui.soundboard.new_catalog_change(catalog_change) {
             tasks.push(
                 self.ui
                     .soundboard

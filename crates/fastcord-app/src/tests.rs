@@ -56,6 +56,26 @@ fn authenticate(app: &mut App, persistence: Persistence) -> Arc<Session> {
 }
 
 #[test]
+fn updates_that_leave_the_timeline_alone_do_not_rescan_it() {
+    let mut app = login_app();
+    authenticate(&mut app, Persistence::MemoryOnly);
+    let _ = app.synchronize_emoji();
+    let scans = app.timeline_wants.scans;
+    assert_eq!(scans, 1);
+    for _ in 0..3 {
+        let _ = app.update(Message::Composer(composer::Event::Attach));
+        let _ = app.synchronize_emoji();
+    }
+    assert_eq!(app.timeline_wants.scans, scans);
+    // A new snapshot is scanned again.
+    if let Some(gateway) = app.phase.gateway_mut() {
+        gateway.timeline = Arc::new(timeline::Snapshot::default());
+    }
+    let _ = app.synchronize_emoji();
+    assert_eq!(app.timeline_wants.scans, scans + 1);
+}
+
+#[test]
 fn an_inactive_window_drops_decoded_animations() {
     let mut app = login_app();
     authenticate(&mut app, Persistence::MemoryOnly);

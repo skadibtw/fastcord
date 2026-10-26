@@ -1204,6 +1204,11 @@ impl NavigationBridge {
     pub fn voice_controls(&self) -> VoiceControls {
         self.voice_controls.borrow().clone()
     }
+    /// Reads the controls in place, with no deep clone (#156). Keep `read`
+    /// short and never call back into the bridge from it.
+    pub fn voice_controls_with<R>(&self, read: impl FnOnce(&VoiceControls) -> R) -> R {
+        read(&self.voice_controls.borrow())
+    }
     /// Closes the Gateway with code 1000 and waits up to `wait` for its task
     /// to finish, so a quit never leaves a session open server-side. Does
     /// nothing before the connection starts or after it ended.
@@ -4016,7 +4021,7 @@ impl GatewayPanel {
         let tiles = crate::call_layout::tiles(
             &self.controls.watched(),
             &self.controls.camera_tiles().snapshot(),
-            self.controls.voice_controls().camera.wanted,
+            self.controls.voice_controls_with(|c| c.camera.wanted),
         );
         self.call_view.prune(&crate::call_layout::ids(&tiles));
         self.composer.select(self.timeline.channel_id);

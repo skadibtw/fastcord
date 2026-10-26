@@ -7,6 +7,7 @@
 - Hovering the call's network icon shows the voice ping: the UDP round trip to the voice server in milliseconds, or "measuring…" until the first answer (#221). It is cleared when the call ends.
 
 ### Changed
+- Every update no longer deep-clones the voice controls five to nine times or rescans the timeline for avatars, sticker and embed pictures and invite codes: readers borrow the controls in place (`voice_controls_with`), and the timeline's wanted keys are rebuilt only when its snapshot changes, so a keystroke does neither (#156).
 - The H.264 code has one RBSP reader, one SPS parser and one PPS parser (`h264::BitReader`, `parse_sps`, `parse_pps`) shared by the VA-API decoder and the color/size checks, and one bit writer shared by the VA-API encoder and the test vectors; slice headers no longer copy each NAL unit to strip emulation-prevention bytes (#130). No behavior change.
 - Presence changes of server members who are not friends or direct-message recipients no longer rebuild the window snapshot and redraw it (#212); they are still held for profile cards. Emoji animation and typing were already fixed (#153, #155); stream presentation still redraws the whole window per frame (iced limit).
 - Paste image works on Linux (X11 and Wayland) and macOS as well as Windows, and a pasted image keeps its transparency (#146). The clipboard is read through `arboard` instead of hand-written Windows code; it is still read only when you ask.

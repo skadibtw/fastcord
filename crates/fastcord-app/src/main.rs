@@ -278,6 +278,8 @@ fn main() -> iced::Result {
 }
 
 struct App {
+    /// What the timeline rows alone ask for, kept until the snapshot changes (#156).
+    timeline_wants: TimelineWants,
     network: fastcord_net::NetworkContext,
     network_settings: network_ui::State,
     phase: Phase,
@@ -676,6 +678,7 @@ impl App {
         (
             Self {
                 phase: Phase::Starting,
+                timeline_wants: TimelineWants::default(),
                 network: network_ui::new_context(),
                 network_settings: network_ui::State::default(),
                 token: Arc::new(UserToken::new(String::new())),
@@ -836,6 +839,7 @@ impl App {
             own_user(gateway, session),
             &self.ui.invite,
             &self.ui.discover,
+            &mut self.timeline_wants,
         );
         let avatars = gateway
             .avatars
@@ -864,18 +868,20 @@ impl App {
                 && !gateway.emoji_picker.request.open;
             // Only the videos the layout draws are decoded; the rest are
             // suspended and, for cameras, no longer requested from the server.
-            let voice_controls = gateway.controls.voice_controls();
+            let (camera_wanted, speaking) = gateway.controls.voice_controls_with(|c| {
+                let speaking: Vec<Snowflake> = c
+                    .participants
+                    .iter()
+                    .filter(|participant| participant.speaking)
+                    .map(|participant| participant.user_id)
+                    .collect();
+                (c.camera.wanted, speaking)
+            });
             let tiles = call_layout::tiles(
                 &gateway.controls.watched(),
                 &gateway.controls.camera_tiles().snapshot(),
-                voice_controls.camera.wanted,
+                camera_wanted,
             );
-            let speaking: Vec<Snowflake> = voice_controls
-                .participants
-                .iter()
-                .filter(|participant| participant.speaking)
-                .map(|participant| participant.user_id)
-                .collect();
             let plan = gateway.call_view.plan(&call_layout::ids(&tiles), &speaking);
             for tile in &tiles {
                 if matches!(tile.id, call_layout::TileId::Stream(_)) {
@@ -1091,7 +1097,7 @@ impl App {
                 let in_call = self.call_active();
                 (
                     in_call,
-                    in_call && gateway.controls.voice_controls().self_muted,
+                    in_call && gateway.controls.voice_controls_with(|c| c.self_muted),
                     gateway.navigation.inbox.mentions,
                 )
             }
@@ -2149,17 +2155,19 @@ and a fourth"
         let Some(gateway) = self.phase.gateway() else {
             return;
         };
-        let controls = gateway.controls.voice_controls();
-        ui_sound::observe(ui_sound::Snap {
-            state: gateway.controls.voice_audio_state(),
-            self_muted: controls.self_muted,
-            deafened: controls.deafened,
-            push_to_mute: controls.push_to_mute_down,
-            ptt: (controls.effective_mode() == shortcuts::InputMode::PushToTalk)
-                .then_some(controls.ptt_down),
-            sharing: gateway.controls.share_view().active,
-            users: controls.participants.iter().map(|p| p.user_id).collect(),
-        });
+        let snap = gateway
+            .controls
+            .voice_controls_with(|controls| ui_sound::Snap {
+                state: gateway.controls.voice_audio_state(),
+                self_muted: controls.self_muted,
+                deafened: controls.deafened,
+                push_to_mute: controls.push_to_mute_down,
+                ptt: (controls.effective_mode() == shortcuts::InputMode::PushToTalk)
+                    .then_some(controls.ptt_down),
+                sharing: gateway.controls.share_view().active,
+                users: controls.participants.iter().map(|p| p.user_id).collect(),
+            });
+        ui_sound::observe(snap);
     }
 
     fn save_audio_preferences(&mut self) -> Task<Message> {
@@ -2361,6 +2369,65 @@ const EXPRESSIONS_SIZE: iced::Size = iced::Size::new(440.0, 470.0);
 /// Most embed pictures asked for at once.
 const MAX_WANTED_PICTURES: usize = 16;
 
+/// The part of `wanted_avatars` that depends only on the timeline snapshot:
+/// invite codes, authors with stickers (newest first) and embed pictures.
+/// Rebuilt when the `Arc` changes, not on every keystroke (#156).
+#[derive(Default)]
+struct TimelineWants {
+    snapshot: Option<Arc<timeline::Snapshot>>,
+    codes: Vec<String>,
+    authors: Vec<avatars::AvatarKey>,
+    pictures: Vec<avatars::AvatarKey>,
+    /// Times the timeline rows were scanned (tests).
+    #[cfg(test)]
+    scans: usize,
+}
+
+impl TimelineWants {
+    fn of(&mut self, snapshot: &Arc<timeline::Snapshot>) -> &Self {
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|kept| Arc::ptr_eq(kept, snapshot))
+        {
+            return self;
+        }
+        let rows = &snapshot.rows;
+        self.codes = invite::visible_codes(rows);
+        self.authors = rows
+            .iter()
+            .rev()
+            .flat_map(|row| {
+                let stickers = row.message.sticker_items.iter().filter_map(|sticker| {
+                    avatars::AvatarKey::sticker(sticker.id, sticker.format_type)
+                });
+                std::iter::once(avatars::AvatarKey::user(
+                    row.message.author.id,
+                    row.message.author.avatar.as_deref(),
+                ))
+                .chain(stickers)
+            })
+            .collect();
+        // Embed pictures of the newest rows, a few at a time so they never
+        // crowd out the avatars.
+        self.pictures = rows
+            .iter()
+            .rev()
+            .flat_map(|row| {
+                let forwarded = row.message.forwarded().map_or(&[][..], |s| &s.embeds[..]);
+                rich::embed_keys(&row.message.embeds).chain(rich::embed_keys(forwarded))
+            })
+            .take(MAX_WANTED_PICTURES)
+            .collect();
+        self.snapshot = Some(Arc::clone(snapshot));
+        #[cfg(test)]
+        {
+            self.scans += 1;
+        }
+        self
+    }
+}
+
 /// Avatars and icons the shown rows ask for: the user's own, the rail window,
 /// then the timeline authors and stickers newest first. Bounded.
 fn wanted_avatars(
@@ -2368,7 +2435,14 @@ fn wanted_avatars(
     user: &fastcord_model::User,
     invites: &invite::State,
     discover: &discover::State,
+    rows_wanted: &mut TimelineWants,
 ) -> Vec<avatars::AvatarKey> {
+    let TimelineWants {
+        codes,
+        authors,
+        pictures,
+        ..
+    } = rows_wanted.of(&gateway.timeline);
     let mut wanted = vec![avatars::AvatarKey::user(user.id, user.avatar.as_deref())];
     let guilds = gateway
         .navigation
@@ -2376,21 +2450,7 @@ fn wanted_avatars(
         .rows
         .iter()
         .filter_map(|guild| avatars::AvatarKey::guild(guild.id, guild.icon.as_deref()));
-    let invite_icons = invites
-        .cache
-        .icon_keys(&invite::visible_codes(&gateway.timeline.rows));
-    let authors = gateway.timeline.rows.iter().rev().flat_map(|row| {
-        let stickers = row
-            .message
-            .sticker_items
-            .iter()
-            .filter_map(|sticker| avatars::AvatarKey::sticker(sticker.id, sticker.format_type));
-        std::iter::once(avatars::AvatarKey::user(
-            row.message.author.id,
-            row.message.author.avatar.as_deref(),
-        ))
-        .chain(stickers)
-    });
+    let invite_icons = invites.cache.icon_keys(codes);
     let occupants = gateway
         .navigation
         .channels
@@ -2402,24 +2462,13 @@ fn wanted_avatars(
             }) => Some(avatars::AvatarKey::user(*user_id, avatar.as_deref())),
             _ => None,
         });
-    let controls = gateway.controls.voice_controls();
-    let callers = controls
-        .participants
-        .iter()
-        .map(|p| controls.avatar_key(p.user_id));
-    // Embed pictures of the newest rows, a few at a time so they never crowd
-    // out the avatars.
-    let pictures = gateway
-        .timeline
-        .rows
-        .iter()
-        .rev()
-        .flat_map(|row| {
-            let forwarded = row.message.forwarded().map_or(&[][..], |s| &s.embeds[..]);
-            rich::embed_keys(&row.message.embeds).chain(rich::embed_keys(forwarded))
-        })
-        .take(MAX_WANTED_PICTURES)
-        .collect::<Vec<_>>();
+    let callers: Vec<_> = gateway.controls.voice_controls_with(|controls| {
+        controls
+            .participants
+            .iter()
+            .map(|p| controls.avatar_key(p.user_id))
+            .collect()
+    });
     let room = avatars::MAX_WANTED - pictures.len();
     let mut seen: std::collections::HashSet<avatars::AvatarKey> = wanted.iter().cloned().collect();
     for key in guilds
@@ -2427,8 +2476,8 @@ fn wanted_avatars(
         .chain(discover.icon_keys())
         .chain(occupants)
         .chain(callers)
-        .chain(authors)
-        .chain(pictures)
+        .chain(authors.iter().cloned())
+        .chain(pictures.iter().cloned())
     {
         if wanted.len() == room && !matches!(key, avatars::AvatarKey::Embed { .. }) {
             continue;
