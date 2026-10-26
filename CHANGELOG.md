@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- A server icon or closed folder no longer shows an unread dot or mentions from channels you cannot open (#159). The total counts the same channels the sidebar and the inbox list, so a channel you lost access to cannot leave a badge nothing can clear.
 - A masked link can no longer show one host and open another (#161). The host in brackets after a link and the address that is opened now come from the same URL parse, done the way a browser reads it (a backslash counts as `/`), and links that carry a user name or password are not opened.
 - Messages from people you blocked or ignored no longer add to the mention count of the channel, the server icon or the tray (#162). Their notifications and mention-list entries were already hidden; the counters now follow the same rule.
 - A channel with many emoji no longer re-reads each message once per emoji on every update (#163): the check of which emoji are still on screen now parses each message once per update.

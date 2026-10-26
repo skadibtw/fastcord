@@ -575,6 +575,29 @@ fn read_cursors_mentions_and_mutes_follow_ready_messages_and_acks() {
     assert!(store.guild_unread(id(FIRST)).unread);
     assert_eq!(store.guild_unread(id(FIRST)).mentions, 3);
     check(&store);
+    // A channel the account can no longer open does not light the server: it
+    // could never be read (#159).
+    let hide = |deny: &str| {
+        serde_json::json!({
+            "id": GENERAL.to_string(), "type": 0, "guild_id": FIRST.to_string(),
+            "name": "general", "position": 0,
+            "permission_overwrites": [
+                {"id": FIRST.to_string(), "type": 0, "allow": "0", "deny": deny}
+            ],
+        })
+        .to_string()
+    };
+    // (The fixture account is an administrator, who sees everything.)
+    let no_roles = serde_json::json!({
+        "guild_id": FIRST.to_string(), "roles": [],
+        "user": {"id": ME.to_string(), "username": "me"},
+    });
+    store.apply(fixture("GUILD_MEMBER_UPDATE", &no_roles.to_string()));
+    assert_eq!(store.guild_unread(id(FIRST)).mentions, 3);
+    store.apply(fixture("CHANNEL_UPDATE", &hide("1024")));
+    assert_eq!(store.guild_unread(id(FIRST)), Unread::default());
+    store.apply(fixture("CHANNEL_UPDATE", &hide("0")));
+    assert_eq!(store.guild_unread(id(FIRST)).mentions, 3);
 
     // Another client reads it: the marker goes, mentions reset.
     let ack = event(Dispatch::MessageAck(crate::gateway::MessageAck {

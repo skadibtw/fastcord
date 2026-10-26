@@ -1522,6 +1522,21 @@ pub(crate) fn active_timeout(until: &str) -> bool {
     timeout_active(until, OffsetDateTime::now_utc())
 }
 
+/// The channels of `guild` the account can open: what the sidebar lists,
+/// categories excluded. The permission context is built once for the guild.
+pub(super) fn readable_channels<'a>(
+    store: &'a Store,
+    guild: &'a GuildEntry,
+) -> impl Iterator<Item = &'a Channel> + 'a {
+    let context = PermissionContext::new(store, guild);
+    guild.channels().filter(move |channel| {
+        let (Some(context), Some(kind)) = (&context, ChannelKind::from_model(channel.kind)) else {
+            return false;
+        };
+        context.permissions(guild, channel).enables(kind)
+    })
+}
+
 fn enabled_channel<'a>(
     store: &'a Store,
     guild: &'a GuildEntry,

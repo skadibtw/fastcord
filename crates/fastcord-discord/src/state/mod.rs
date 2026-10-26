@@ -897,10 +897,12 @@ impl Store {
         self.folders.clone()
     }
 
-    /// What a guild shows: its channels' unread flags and mention counts.
+    /// What a guild shows: the unread flags and mention counts of the channels
+    /// the account can open, the same ones the sidebar and the inbox list. A
+    /// hidden channel could never be read, so it never lights the icon (#159).
     pub fn guild_unread(&self, guild: Snowflake) -> Unread {
         self.guild(guild).map_or_else(Unread::default, |entry| {
-            entry.channels().fold(Unread::default(), |total, channel| {
+            navigation::readable_channels(self, entry).fold(Unread::default(), |total, channel| {
                 total.merge(self.read.unread(
                     channel.id,
                     Some(guild),
