@@ -642,7 +642,13 @@ impl Composer {
                 .take(MAX_UPLOAD_FILES)
                 .map(|attachment| EditableAttachment {
                     id: attachment.id,
-                    name: attachment.filename.chars().take(64).collect(),
+                    name: crate::attachment_ui::safe_attachment_filename(
+                        &attachment.filename,
+                        attachment.content_type.as_deref(),
+                    )
+                    .chars()
+                    .take(64)
+                    .collect(),
                     kept: true,
                 })
                 .collect(),

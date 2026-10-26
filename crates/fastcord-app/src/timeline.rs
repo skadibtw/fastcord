@@ -2325,7 +2325,13 @@ fn describe_attachment(attachment: &Attachment) -> String {
     }
     trf(
         "Attachment: {} ({})",
-        &[&attachment.filename, &details.join(", ")],
+        &[
+            &crate::attachment_ui::safe_attachment_filename(
+                &attachment.filename,
+                attachment.content_type.as_deref(),
+            ),
+            &details.join(", "),
+        ],
     )
 }
 

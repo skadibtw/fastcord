@@ -460,9 +460,12 @@ pub fn viewer_view(viewer: &AttachmentViewer) -> Element<'_, Message> {
         ))
     };
     let mut header = row![
-        text(&viewer.attachment.filename)
-            .size(16)
-            .width(Length::Fill),
+        text(safe_attachment_filename(
+            &viewer.attachment.filename,
+            viewer.attachment.content_type.as_deref(),
+        ))
+        .size(16)
+        .width(Length::Fill),
         button(tr("Download")).on_press(event(|channel_id, message_id, attachment_id| {
             timeline::Event::DownloadAttachment {
                 channel_id,
@@ -508,10 +511,14 @@ pub fn safe_attachment_filename(filename: &str, content_type: Option<&str>) -> S
     let mut safe: String = basename
         .chars()
         .filter(|character| {
-            !character.is_control() && !matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+            !character.is_control()
+                && !is_invisible_format(*character)
+                && !matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
         })
         .take(180)
         .collect();
+    // Windows drops trailing dots and spaces, which can hide the real extension.
+    safe.truncate(safe.trim_end_matches(['.', ' ']).len());
     if safe.is_empty() || safe == "." || safe == ".." {
         safe = "attachment".to_owned();
     }
@@ -522,6 +529,21 @@ pub fn safe_attachment_filename(filename: &str, content_type: Option<&str>) -> S
         safe.push_str(extension);
     }
     safe
+}
+
+/// Bidi controls and invisible format characters: they reorder or hide what
+/// a name shows, so `photo\u{202E}gnp.exe` reads as `photoexe.png` (#172).
+fn is_invisible_format(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
 }
 
 fn mime_extension(content_type: &str) -> Option<&'static str> {
@@ -571,6 +593,20 @@ mod tests {
             safe_attachment_filename("clip", Some("application/x-unknown")),
             "clip"
         );
+        // A right-to-left override would show this as "photoexe.png".
+        assert_eq!(
+            safe_attachment_filename("photo\u{202E}gnp.exe", None),
+            "photognp.exe"
+        );
+        assert_eq!(
+            safe_attachment_filename("a\u{2066}b\u{200B}c\u{FEFF}.txt", None),
+            "abc.txt"
+        );
+        assert_eq!(
+            safe_attachment_filename("report.exe. . ", None),
+            "report.exe"
+        );
+        assert_eq!(safe_attachment_filename(" . ", None), "attachment");
         assert_eq!(
             safe_attachment_filename(&"x".repeat(500), None)
                 .chars()
@@ -618,6 +654,8 @@ mod tests {
             // No extension: the content type supplies one.
             ("clip", Some("video/mp4")),
             ("../../dir\\evil/photo.jpg", None),
+            // Saved as "a.png" (trailing dots go, as Windows would drop them).
+            ("a.png.", None),
         ] {
             assert!(can_open(&attachment(name, content_type)), "{name}");
         }
@@ -629,7 +667,6 @@ mod tests {
             ("script.py", Some("text/plain")),
             ("help.chm", None),
             ("archive.zip", Some("application/zip")),
-            ("a.png.", None),
             ("a.exe ", None),
             ("a.pdf:x.exe", None),
             ("noextension", None),
