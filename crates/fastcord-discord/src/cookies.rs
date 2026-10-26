@@ -293,23 +293,36 @@ fn parse_cookie_date(text: &str) -> Option<u64> {
     let mut month = None;
     let mut year = None;
     let mut time = None;
+    // RFC 6265 5.1.1: the first 1-2 digit token is the day, the next 2-4
+    // digit one the year, so Cloudflare's `25-Oct-25` parses (#141).
     for token in text.split([' ', ',', '\t', '-']) {
-        if token.is_empty() {
-            continue;
-        }
+        let digits = (!token.is_empty() && token.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| token.parse::<u32>().ok())
+            .flatten();
         if let Some((hours, minutes, seconds)) = parse_cookie_time(token) {
             time = Some((hours, minutes, seconds));
+        } else if day.is_none()
+            && token.len() <= 2
+            && let Some(value) = digits
+        {
+            day = Some(value);
         } else if let Some(value) = parse_cookie_month(token) {
             month = Some(value);
-        } else if let Ok(value) = token.parse::<u32>() {
-            if (1..=31).contains(&value) {
-                day = Some(value);
-            } else if (1970..=9999).contains(&value) {
-                year = Some(value);
-            }
+        } else if year.is_none()
+            && (2..=4).contains(&token.len())
+            && let Some(value) = digits
+        {
+            year = Some(match value {
+                70..=99 => value + 1900,
+                0..=69 => value + 2000,
+                _ => value,
+            });
         }
     }
     let (day, month, year, (hours, minutes, seconds)) = (day?, month?, year?, time?);
+    if !(1..=31).contains(&day) || year < 1601 {
+        return None;
+    }
     let days = days_from_civil(year as i64, month, day as i64)?;
     Some(
         (days * 86_400 + i64::from(hours) * 3_600 + i64::from(minutes) * 60 + i64::from(seconds))
@@ -628,6 +641,17 @@ mod tests {
             parse_cookie_date("09-Jun-2021 10:18:14 GMT"),
             Some(1_623_233_894)
         );
+        // Cloudflare's two-digit years (#141).
+        assert_eq!(
+            parse_cookie_date("Wed, 09-Jun-21 10:18:14 GMT"),
+            Some(1_623_233_894)
+        );
+        assert_eq!(parse_cookie_date("Thu, 01-Jan-70 00:00:01 GMT"), Some(1));
+        assert_eq!(
+            parse_cookie_date("Sat, 01-Jan-00 00:00:00 GMT"),
+            Some(946_684_800)
+        );
+        assert_eq!(parse_cookie_date("Mon, 01 Jan 1600 00:00:00 GMT"), None);
         // An epoch date and a leap day.
         assert_eq!(parse_cookie_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
         assert_eq!(
