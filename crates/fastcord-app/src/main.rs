@@ -25,6 +25,7 @@ mod component_view;
 mod composer;
 mod desktop;
 mod discover;
+mod disk_index;
 mod drafts;
 mod emoji;
 mod emoji_picker;

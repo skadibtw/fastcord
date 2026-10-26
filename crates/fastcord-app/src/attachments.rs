@@ -52,7 +52,6 @@ const FETCH_SLOTS: usize = 4;
 /// holds up avatars, emoji and previews (#167).
 const DOWNLOAD_SLOTS: usize = 2;
 const DECODE_SLOTS: usize = 2;
-const MIN_CHARGE: u64 = 4096;
 const CACHE_FORMAT_VERSION: &str = "attachment-v2";
 /// Chromium's `Accept` for an image subresource (avatar, emoji, preview, embed).
 const IMAGE_ACCEPT: &str = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
@@ -319,11 +318,13 @@ impl AttachmentCache {
         let root = self.root.clone();
         let thumbs = self.thumbs.clone();
         tokio::task::spawn_blocking(move || {
-            let _lock = DISK_CACHE_LOCK.lock();
             let _ = fs::remove_dir_all(thumbs.as_path());
+            crate::disk_index::forget_dir(thumbs.as_path());
             // A just-cancelled download may still be closing its file.
             for attempt in 0..5 {
-                match fs::remove_dir_all(root.as_path()) {
+                let removed = fs::remove_dir_all(root.as_path());
+                crate::disk_index::forget_dir(root.as_path());
+                match removed {
                     Ok(()) => return Ok(()),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                     Err(_) if attempt < 4 => std::thread::sleep(Duration::from_millis(50)),
@@ -477,7 +478,6 @@ impl AttachmentCache {
         let temporary = temporary.to_owned();
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || {
-            let _lock = DISK_CACHE_LOCK.lock();
             if !active.load(Ordering::Acquire) {
                 return Err(AttachmentError::WorkerStopped);
             }
@@ -489,8 +489,17 @@ impl AttachmentCache {
                     .map_err(|_| AttachmentError::CacheUnavailable)?;
             }
             debug_assert!(size <= limit);
-            // No second scan: `reserve` already counted the whole body, and the
-            // stored file is at most that size (#168).
+            // No scan: `reserve` already made room for the whole body, so the
+            // ledger only swaps the partial's charge for the stored file's (#168).
+            let (victims, _) =
+                crate::disk_index::record(&destination, size, Some(&temporary), DISK_CACHE_LIMIT);
+            crate::disk_index::delete(victims);
+            if !active.load(Ordering::Acquire) {
+                // A purge ran meanwhile; leave nothing in the removed account.
+                let _ = fs::remove_file(&destination);
+                crate::disk_index::forget(&destination);
+                return Err(AttachmentError::WorkerStopped);
+            }
             Ok(destination)
         })
         .await
@@ -511,11 +520,11 @@ impl AttachmentCache {
         let active = self.active.clone();
         let prepared = self.prepared.clone();
         tokio::task::spawn_blocking(move || {
-            let _lock = DISK_CACHE_LOCK.lock();
             if !active.load(Ordering::Acquire) {
                 return Err(AttachmentError::WorkerStopped);
             }
             prepare_root(&root, &prepared)?;
+            crate::disk_index::ensure(root.parent().unwrap_or(&root))?;
             let path = root.join(name);
             match fs::metadata(&path) {
                 Ok(metadata) if metadata.len() <= limit => {
@@ -663,16 +672,19 @@ impl AttachmentCache {
         let active = self.active.clone();
         let prepared = self.prepared.clone();
         tokio::task::spawn_blocking(move || {
-            let _lock = DISK_CACHE_LOCK.lock();
             if !active.load(Ordering::Acquire) {
                 return Err(AttachmentError::WorkerStopped);
             }
             prepare_root(&root, &prepared)?;
-            trim_disk_to(
-                &root,
-                DISK_CACHE_LIMIT.saturating_sub(bytes.max(MIN_CHARGE)),
-                None,
-            )?;
+            crate::disk_index::ensure(root.parent().unwrap_or(&root))?;
+            // Charge the whole partial, evicting older files from the ledger;
+            // only the unlinks touch the disk (#168).
+            let (victims, fits) =
+                crate::disk_index::record(&temporary, bytes, None, DISK_CACHE_LIMIT);
+            crate::disk_index::delete(victims);
+            if !fits {
+                return Err(AttachmentError::CacheUnavailable);
+            }
             let cleanup = TemporaryFile(Some(temporary.clone()));
             let file = fs::OpenOptions::new()
                 .write(true)
@@ -945,7 +957,6 @@ impl AttachmentCache {
         let (dir, active, stored) = (self.thumbs.clone(), self.active.clone(), image.clone());
         // Best effort: a failed write only costs a decode next launch.
         let _ = tokio::task::spawn_blocking(move || {
-            let _lock = DISK_CACHE_LOCK.lock();
             if active.load(Ordering::Acquire) {
                 let _ = crate::thumbs::write(&dir, &thumb, &stored);
             }
@@ -1268,8 +1279,6 @@ impl DecodedLru {
     }
 }
 
-/// Serializes every disk-cache mutation (and purge) in this process.
-static DISK_CACHE_LOCK: Mutex<()> = Mutex::new(());
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const TEMPORARY_EXTENSION: &str = "tmp";
 
@@ -1297,6 +1306,7 @@ impl Drop for TemporaryFile {
 }
 
 fn remove_temporary(path: &Path) {
+    crate::disk_index::forget(path);
     // Windows can still be closing an aborted tokio file operation.
     for attempt in 0..5 {
         match fs::remove_file(path) {
@@ -1309,9 +1319,7 @@ fn remove_temporary(path: &Path) {
 }
 
 fn is_temporary(path: &Path) -> bool {
-    path.extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|extension| extension == TEMPORARY_EXTENSION)
+    crate::disk_index::is_temporary(path)
 }
 
 /// The `.part` file a download writes beside its destination. The name is
@@ -1326,59 +1334,8 @@ fn partial_path(destination: &Path) -> Result<PathBuf, AttachmentError> {
     Ok(parent.join(format!(".fastcord-download-{pid}-{sequence}.part")))
 }
 
-/// Evicts least-recently-used files, across every account's directory next to
-/// `root`, until at most `limit` bytes remain. Partial downloads count toward
-/// the total but are never evicted, and neither is `keep`.
-pub(crate) fn trim_disk_to(
-    root: &Path,
-    limit: u64,
-    keep: Option<&Path>,
-) -> Result<(), AttachmentError> {
-    let base = root.parent().unwrap_or(root);
-    let mut entries = Vec::new();
-    let mut total = 0u64;
-    for account in fs::read_dir(base).map_err(|_| AttachmentError::CacheUnavailable)? {
-        let account = account.map_err(|_| AttachmentError::CacheUnavailable)?;
-        if !account
-            .file_type()
-            .map_err(|_| AttachmentError::CacheUnavailable)?
-            .is_dir()
-        {
-            continue;
-        }
-        for entry in fs::read_dir(account.path()).map_err(|_| AttachmentError::CacheUnavailable)? {
-            let entry = entry.map_err(|_| AttachmentError::CacheUnavailable)?;
-            let metadata = entry
-                .metadata()
-                .map_err(|_| AttachmentError::CacheUnavailable)?;
-            if !metadata.is_file() {
-                continue;
-            }
-            let charged = metadata.len().max(MIN_CHARGE);
-            total = total.saturating_add(charged);
-            let path = entry.path();
-            if !is_temporary(&path) && keep != Some(path.as_path()) {
-                let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
-                entries.push((modified, charged, path));
-            }
-        }
-    }
-    entries.sort_by_key(|entry| entry.0);
-    for (_, size, path) in entries {
-        if total <= limit {
-            break;
-        }
-        if fs::remove_file(path).is_ok() {
-            total = total.saturating_sub(size);
-        }
-    }
-    if total > limit {
-        return Err(AttachmentError::CacheUnavailable);
-    }
-    Ok(())
-}
-
 fn touch(path: &Path) -> std::io::Result<()> {
+    crate::disk_index::touch(path);
     filetime::set_file_mtime(path, filetime::FileTime::now())
 }
 
@@ -2312,37 +2269,37 @@ mod tests {
         assert_eq!(cache.bytes, DECODED_CACHE_LIMIT);
     }
 
-    #[test]
-    fn disk_lru_evicts_oldest_across_accounts_and_keeps_partials_and_the_new_file() {
-        let base = scratch("lru");
-        let old_account = base.join("1");
-        let current_account = base.join("2");
-        fs::create_dir_all(&old_account).unwrap();
-        fs::create_dir_all(&current_account).unwrap();
-        let put = |dir: &Path, name: &str, seconds: i64, len: usize| {
-            let path = dir.join(name);
-            fs::write(&path, vec![0u8; len]).unwrap();
-            filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(seconds, 0))
-                .unwrap();
-            path
-        };
-        let oldest = put(&old_account, "oldest.png", 1, 10_000);
-        let old_partial = put(&old_account, "old.png-1-1.tmp", 1, 10_000);
-        let middle = put(&current_account, "middle.png", 2, 10_000);
-        let newest = put(&current_account, "newest.png", 3, 10_000);
-        let fresh = put(&current_account, "fresh.png", 0, 10_000);
-        // 50 000 bytes on disk, room for 30 000: the two least recently used
-        // evictable files go; a partial download and the file just stored stay.
-        trim_disk_to(&current_account, 30_000, Some(&fresh)).unwrap();
-        assert!(!oldest.exists() && !middle.exists());
-        assert!(old_partial.exists() && newest.exists() && fresh.exists());
-        // When only protected files remain over the limit, it is an error, not a loop.
-        assert_eq!(
-            trim_disk_to(&current_account, 1, Some(&fresh)),
-            Err(AttachmentError::CacheUnavailable)
-        );
-        assert!(!newest.exists());
-        let _ = fs::remove_dir_all(base);
+    #[tokio::test]
+    async fn a_miss_does_not_rescan_the_disk_and_the_budget_holds_after_a_restart() {
+        let root = scratch("ledger");
+        let cache = AttachmentCache::for_local_tests(ACCOUNT, root.clone());
+        let account_dir = root.join(ACCOUNT.0.to_string());
+        fs::create_dir_all(&account_dir).unwrap();
+        let old = account_dir.join("old.bin");
+        fs::write(&old, vec![0u8; 10_000]).unwrap();
+        filetime::set_file_mtime(&old, filetime::FileTime::from_unix_time(1, 0)).unwrap();
+        let (first, cleanup) = cache
+            .reserve(&cache.temporary_path("a"), 10_000)
+            .await
+            .unwrap();
+        // The first use scanned: the old file and the partial are counted.
+        assert_eq!(crate::disk_index::total(&root), 20_000);
+        // A file the ledger never saw proves the next reservation does not walk
+        // the directory (#168).
+        fs::write(account_dir.join("stranger.bin"), vec![0u8; 50_000]).unwrap();
+        let (second, cleanup_b) = cache
+            .reserve(&cache.temporary_path("b"), 10_000)
+            .await
+            .unwrap();
+        assert_eq!(crate::disk_index::total(&root), 30_000);
+        drop((first, second));
+        cleanup.remove().await;
+        cleanup_b.remove().await;
+        assert_eq!(crate::disk_index::total(&root), 10_000);
+        // Over the limit: the oldest ledger entry goes, the newest stays.
+        let victim = crate::disk_index::record(&account_dir.join("new.bin"), 10_000, None, 15_000);
+        assert_eq!(victim, (vec![old], true));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -2378,7 +2335,12 @@ mod tests {
             .unwrap();
         let total: u64 = files_in(&root, ACCOUNT)
             .iter()
-            .map(|file| fs::metadata(file).unwrap().len().max(MIN_CHARGE))
+            .map(|file| {
+                fs::metadata(file)
+                    .unwrap()
+                    .len()
+                    .max(crate::disk_index::MIN_CHARGE)
+            })
             .sum();
         assert!(total <= DISK_CACHE_LIMIT, "{total}");
         assert!(path.exists());
