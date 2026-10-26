@@ -3152,8 +3152,10 @@ impl Worker {
                 .await
                 .is_err()
         {
+            // A device that never finishes closing must not freeze the
+            // account: wait a bounded moment for the abort, then go on (#151).
             task.abort();
-            let _ = task.await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
             self.bridge.voice_audio.send_replace(VoiceAudioState::Idle);
         }
     }
@@ -3358,6 +3360,11 @@ impl Drop for Worker {
         }
         for (_, task) in self.stream_tasks.drain() {
             task.abort();
+        }
+        // Capture threads are joined when dropped: off the runtime thread,
+        // as `end_share` does.
+        if let Some(share) = self.share.take() {
+            std::thread::spawn(move || drop(share));
         }
     }
 }

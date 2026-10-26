@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- An audio device that hangs while closing (a dropped Bluetooth headset, a stalled driver) can no longer freeze the whole account when you leave or switch calls (#151). The client waits at most a few seconds for it, and closes devices and screen-capture threads off the network worker.
 - On large accounts, unread dots and mention counts no longer vanish when the client trims its memory (#152). Users nothing refers to are now released first, and as soon as a member, channel or server is removed; read state is the last thing dropped, and if it is, the badges update instead of silently going stale.
 - The channel list puts text channels (and forums) above voice and Stage channels in each category, each group by position, as Discord and the server settings do (#154). Servers that number voice and text positions separately were shown interleaved.
 - A timed-out moderator is no longer offered server, channel and role management that Discord would refuse (#157). Server-level permissions now drop everything but viewing and reading history during a timeout, as channel permissions already did; administrators and the owner are unaffected.

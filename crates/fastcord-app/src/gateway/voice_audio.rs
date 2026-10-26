@@ -662,7 +662,9 @@ async fn run_with(
     // Release the camera and the decoders, then the audio devices, before the next call
     // can open them, then say goodbye.
     video.finish().await;
-    drop(engine);
+    // Joining the owner thread can block on a stalled device: never on the
+    // async worker, and as an await the worker's abort can cut short (#151).
+    let _ = tokio::task::spawn_blocking(move || drop(engine)).await;
     drop(noise_status);
     let _ = media.end_speech();
     controls_tx.send_if_modified(|controls| replace(&mut controls.self_speaking, false));
