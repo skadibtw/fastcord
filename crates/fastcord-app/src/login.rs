@@ -85,7 +85,10 @@ impl LoginError {
             .controller()
             .service_status(fastcord_net::Role::Rest)
         {
-            let notice = format!("Could not reach Discord: {category} Login stopped; try again.");
+            let notice = trf(
+                "Could not reach Discord: {} Login stopped; try again.",
+                &[&tr(&category.to_string())],
+            );
             // A timeout or reset before TLS completes is how a filtering
             // network looks from here; say what can still get through.
             return if category.eligible_for_selection() {
@@ -105,7 +108,10 @@ impl fmt::Display for LoginError {
                 f.write_str(tr("Discord rejected this token. Login stopped; paste a valid alt-account token."))
             }
             Self::Rest(RestError::Retryable(RetryableFailure::Server(status))) => {
-                write!(f, "Discord returned HTTP {}. Login stopped; try again later.", status.as_u16())
+                f.write_str(&trf(
+                    "Discord returned HTTP {}. Login stopped; try again later.",
+                    &[&status.as_u16()],
+                ))
             }
             Self::Rest(RestError::Retryable(RetryableFailure::Network(failure))) => {
                 let reason = match failure {
@@ -114,7 +120,10 @@ impl fmt::Display for LoginError {
                     NetworkFailure::Body => "the response could not be read",
                     NetworkFailure::Other => "the request failed",
                 };
-                write!(f, "Could not reach Discord: {reason}. Login stopped; try again.")
+                f.write_str(&trf(
+                    "Could not reach Discord: {}. Login stopped; try again.",
+                    &[&tr(reason)],
+                ))
             }
             Self::Rest(error) => f.write_str(&trf("Login stopped: {}.", &[&tr(&error.to_string())])),
             Self::Store(error) => f.write_str(&trf("{} Unlock it to restore your saved login, or explicitly choose a memory-only session.", &[&tr(&error.to_string())])),

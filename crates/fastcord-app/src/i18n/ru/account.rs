@@ -713,6 +713,25 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ),
     ("Login stopped: {}.", "Вход остановлен: {}."),
     (
+        "Could not reach Discord: {} Login stopped; try again.",
+        "Не удалось связаться с Discord: {} Вход остановлен; повторите попытку.",
+    ),
+    (
+        "Could not reach Discord: {}. Login stopped; try again.",
+        "Не удалось связаться с Discord: {}. Вход остановлен; повторите попытку.",
+    ),
+    (
+        "Discord returned HTTP {}. Login stopped; try again later.",
+        "Discord вернул HTTP {}. Вход остановлен; повторите попытку позже.",
+    ),
+    ("the request timed out", "истекло время ожидания запроса"),
+    ("the connection failed", "не удалось установить соединение"),
+    (
+        "the response could not be read",
+        "не удалось прочитать ответ",
+    ),
+    ("the request failed", "запрос не выполнен"),
+    (
         "{} Unlock it to restore your saved login, or explicitly choose a memory-only session.",
         "{} Разблокируйте хранилище, чтобы восстановить сохранённый вход, или явно выберите сеанс только в памяти.",
     ),
