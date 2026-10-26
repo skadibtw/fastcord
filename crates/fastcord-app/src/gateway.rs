@@ -3889,8 +3889,11 @@ impl GatewayPanel {
             |key: &crate::attachments::AttachmentKey| is_attachment_in(timeline, key);
         self.attachment_views.retain(|key, _| still_loaded(key));
         self.attachment_workers.retain(|key, _| still_loaded(key));
+        // A Download the user started finishes (or fails visibly) wherever they
+        // scroll or go; it ends with the account or a purge. Open ends with its
+        // row (#167).
         self.attachment_action_workers
-            .retain(|(key, _), _| still_loaded(key));
+            .retain(|(key, action), _| *action == AttachmentAction::Download || still_loaded(key));
         let attachment_views = &self.attachment_views;
         self.attachment_ready_order.retain(|key| {
             still_loaded(key) && matches!(attachment_views.get(key), Some(AttachmentView::Ready(_)))
@@ -5090,6 +5093,10 @@ mod bridge_tests {
                 .attachment_action_workers
                 .insert((key, AttachmentAction::Open), handle());
         }
+        // A Download the user started outlives its row and the channel (#167).
+        panel
+            .attachment_action_workers
+            .insert((key(500, 8), AttachmentAction::Download), handle());
         panel.attachment_viewer = Some(crate::attachment_ui::AttachmentViewer::for_test(
             key(500, 8),
             attachment,
@@ -5107,7 +5114,12 @@ mod bridge_tests {
         assert_eq!(panel.attachment_views.len(), 1);
         assert!(panel.attachment_views.contains_key(&key(500, 7)));
         assert_eq!(panel.attachment_workers.len(), 1);
-        assert_eq!(panel.attachment_action_workers.len(), 1);
+        assert_eq!(panel.attachment_action_workers.len(), 2);
+        assert!(
+            panel
+                .attachment_action_workers
+                .contains_key(&(key(500, 8), AttachmentAction::Download))
+        );
         assert!(panel.is_attachment_loaded(&key(500, 7)));
         assert!(!panel.is_attachment_loaded(&key(500, 8)));
         assert!(panel.attachment_viewer.is_some());
@@ -5132,7 +5144,11 @@ mod bridge_tests {
         panel.consume();
         assert!(panel.attachment_views.is_empty());
         assert!(panel.attachment_workers.is_empty());
-        assert!(panel.attachment_action_workers.is_empty());
+        assert_eq!(
+            panel.attachment_action_workers.keys().collect::<Vec<_>>(),
+            [&(key(500, 8), AttachmentAction::Download)],
+            "only the download is still running"
+        );
         assert!(panel.attachment_viewer.is_none());
         assert!(panel.media.is_none());
     }

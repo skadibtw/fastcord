@@ -26,6 +26,8 @@ const READY_THUMBNAILS: usize = 4;
 /// Previews and actions in flight per account; the cache itself separately
 /// limits fetches to four and decodes to two.
 const WORKER_SLOTS: usize = 4;
+/// User downloads running at once; they do not take preview/Open slots.
+const DOWNLOAD_SLOTS: usize = 2;
 
 /// Refreshes expired CDN URLs through the authenticated REST client.
 pub struct RestRefresh(pub fastcord_discord::RestClient);
@@ -174,7 +176,20 @@ fn action_failure(error: &AttachmentError) -> &'static str {
 }
 
 fn busy(gateway: &GatewayPanel) -> bool {
-    gateway.attachment_workers.len() + gateway.attachment_action_workers.len() >= WORKER_SLOTS
+    let opens = gateway
+        .attachment_action_workers
+        .keys()
+        .filter(|(_, action)| *action != AttachmentAction::Download)
+        .count();
+    gateway.attachment_workers.len() + opens >= WORKER_SLOTS
+}
+
+fn downloads(gateway: &GatewayPanel) -> usize {
+    gateway
+        .attachment_action_workers
+        .keys()
+        .filter(|(_, action)| *action == AttachmentAction::Download)
+        .count()
 }
 
 /// Starts the inline preview of an attachment image (the "Load preview" click).
@@ -342,7 +357,13 @@ pub fn start_action(
     if gateway.timeline.channel_id != Some(channel) {
         return Task::none();
     }
-    if busy(gateway) {
+    if action == AttachmentAction::Download && downloads(gateway) >= DOWNLOAD_SLOTS {
+        gateway.attachment_notice = Some(tr(
+            "Two downloads are already running; try again when one finishes.",
+        ));
+        return Task::none();
+    }
+    if action != AttachmentAction::Download && busy(gateway) {
         gateway.attachment_notice = Some(tr("Attachment work is busy; try again shortly."));
         return Task::none();
     }

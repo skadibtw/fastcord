@@ -527,6 +527,10 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Работа с вложениями занята; повторите чуть позже.",
     ),
     (
+        "Two downloads are already running; try again when one finishes.",
+        "Уже идут две загрузки; повторите, когда одна из них закончится.",
+    ),
+    (
         "This attachment action is already in progress.",
         "Это действие с вложением уже выполняется.",
     ),

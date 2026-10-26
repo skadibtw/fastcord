@@ -48,6 +48,9 @@ pub const MAX_FILE_BYTES: u64 = DISK_CACHE_LIMIT / 4;
 const MAX_DECODE_ALLOC: u64 = MAX_IMAGE_PIXELS * 8 + 32 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const FETCH_SLOTS: usize = 4;
+/// User downloads to a chosen path have their own slots, so a long one never
+/// holds up avatars, emoji and previews (#167).
+const DOWNLOAD_SLOTS: usize = 2;
 const DECODE_SLOTS: usize = 2;
 const MIN_CHARGE: u64 = 4096;
 const CACHE_FORMAT_VERSION: &str = "attachment-v2";
@@ -103,6 +106,7 @@ pub struct AttachmentCache {
     http: fastcord_net::HttpClient,
     decoded: Arc<Mutex<DecodedLru>>,
     fetch_slots: Arc<tokio::sync::Semaphore>,
+    download_slots: Arc<tokio::sync::Semaphore>,
     decode_slots: Arc<tokio::sync::Semaphore>,
     active: Arc<AtomicBool>,
     prepared: Arc<AtomicBool>,
@@ -252,6 +256,7 @@ impl AttachmentCache {
             http,
             decoded: Arc::new(Mutex::new(DecodedLru::default())),
             fetch_slots: Arc::new(tokio::sync::Semaphore::new(FETCH_SLOTS)),
+            download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
             decode_slots: Arc::new(tokio::sync::Semaphore::new(DECODE_SLOTS)),
             active: Arc::new(AtomicBool::new(true)),
             prepared: Arc::new(AtomicBool::new(false)),
@@ -390,7 +395,7 @@ impl AttachmentCache {
     ) -> Result<(), AttachmentError> {
         self.check(key)?;
         let _permit = self
-            .fetch_slots
+            .download_slots
             .acquire()
             .await
             .map_err(|_| AttachmentError::WorkerStopped)?;

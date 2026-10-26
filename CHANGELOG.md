@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- A download you started keeps going when its message scrolls away or you switch channels, and ends with its usual result notice (#167). Before, it was silently cancelled and the partial file deleted. Up to two downloads run at once on their own connections, so a large one no longer holds up avatars, emoji and previews.
 - Avatars, server icons and stickers are no longer stored twice (#168). Their compressed original is decoded from memory and only the small sized copy is kept, so they stop taking space in the 256 MiB attachment cache. Each attachment download also scans the cache directory once instead of twice.
 - In a call, a camera turned on late no longer stays black because earlier streams used up the six video slots (#171). A stream that received nothing for 5 s is released (it stops getting reports and keyframe requests too), and a full table makes room by releasing the longest-quiet stream.
 - Attachment names can no longer disguise their type (#172). Bidi overrides and invisible format characters are removed, and trailing dots and spaces are trimmed, both in the saved file name and wherever the name is shown (message row, larger view, the edit list). Before, `photo` + right-to-left override + `gnp.exe` displayed as `photoexe.png` and saved as `photognp.exe`.
