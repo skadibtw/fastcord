@@ -13,7 +13,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::thread::JoinHandle;
 
 use tract_onnx::prelude::*;
 
@@ -63,11 +62,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A running segmentation worker. Dropping it stops and joins the thread and
-/// frees the model.
+/// A running segmentation worker. Dropping it tells the thread to stop and
+/// returns at once; the thread frees the model itself once its load or
+/// current inference ends, never holding up the capture thread (#132).
 pub struct Segmenter {
     shared: Arc<Shared>,
-    thread: Option<JoinHandle<()>>,
     /// The last mask sequence copied out.
     seen: u64,
 }
@@ -87,18 +86,13 @@ impl Segmenter {
             running: AtomicBool::new(false),
         });
         let worker = Arc::clone(&shared);
-        let thread = std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("camera-segmentation".to_owned())
-            .spawn(move || run(&worker))
-            .ok();
-        if thread.is_none() {
+            .spawn(move || run(&worker));
+        if started.is_err() {
             lock(&shared.outbox).failure = Some("the segmentation thread could not start".into());
         }
-        Self {
-            shared,
-            thread,
-            seen: 0,
-        }
+        Self { shared, seen: 0 }
     }
 
     /// Whether the model is loaded (tests and diagnostics).
@@ -159,11 +153,10 @@ impl Segmenter {
 
 impl Drop for Segmenter {
     fn drop(&mut self) {
+        // Not joined: loading the model can take seconds and cannot be cut
+        // short, and this runs on the capture thread.
         lock(&self.shared.inbox).stop = true;
         self.shared.wake.notify_one();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
     }
 }
 
@@ -395,8 +388,36 @@ mod tests {
         assert!(segmenter.is_running());
         assert!(mask.iter().any(|&m| m > 200) && mask.iter().any(|&m| m < 20));
         drop(segmenter);
-        // The thread is joined and the model dropped: nothing runs any more.
+        // The thread ends on its own and drops the model: nothing runs any more.
+        for _ in 0..4000 {
+            if Arc::strong_count(&shared) == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(!shared.running.load(Ordering::Acquire));
         assert_eq!(Arc::strong_count(&shared), 1);
+    }
+
+    #[test]
+    fn dropping_while_the_model_loads_does_not_wait_for_it() {
+        let segmenter = Segmenter::spawn();
+        let shared = Arc::clone(&segmenter.shared);
+        let started = std::time::Instant::now();
+        drop(segmenter);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "the capture thread waited {:?}",
+            started.elapsed()
+        );
+        // The load finishes on the worker, which then sees `stop` and ends.
+        for _ in 0..4000 {
+            if Arc::strong_count(&shared) == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(Arc::strong_count(&shared), 1);
+        assert!(!shared.running.load(Ordering::Acquire));
     }
 }
