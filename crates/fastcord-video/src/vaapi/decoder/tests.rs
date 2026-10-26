@@ -260,6 +260,10 @@ fn the_fixture_parameter_sets_parse_to_their_metadata() {
             num_ref_idx_l0_default_active_minus1: 0,
             pic_init_qp_minus26: 0,
             deblocking_filter_control_present_flag: true,
+            chroma_qp_index_offset: 0,
+            second_chroma_qp_index_offset: 0,
+            constrained_intra_pred_flag: false,
+            transform_8x8_mode_flag: false,
         }
     );
 }
@@ -628,6 +632,71 @@ fn the_dpb_ring_keeps_references_free_and_ordered() {
     // Clearing (an IDR started a new sequence) frees the whole ring.
     dpb.clear();
     assert_eq!(dpb.free_slot(), Some(0));
+}
+
+/// A PPS with the fields #122 found dropped, and optionally the extension.
+fn pps_with(
+    chroma_offset: i32,
+    constrained_intra: bool,
+    extension: Option<(bool, bool, i32)>,
+) -> Vec<u8> {
+    let mut bits = BitWriter::default();
+    bits.ue(0);
+    bits.ue(0);
+    bits.flag(true); // CABAC
+    bits.flag(false);
+    bits.ue(0);
+    bits.ue(0);
+    bits.ue(0);
+    bits.flag(false);
+    bits.bits(0, 2);
+    bits.se(0);
+    bits.se(0);
+    bits.se(chroma_offset);
+    bits.flag(true);
+    bits.flag(constrained_intra);
+    bits.flag(false);
+    if let Some((transform_8x8, scaling, second)) = extension {
+        bits.flag(transform_8x8);
+        bits.flag(scaling);
+        bits.se(second);
+    }
+    bits.trailing();
+    nal(0x68, &bits.finish())
+}
+
+#[test]
+fn pps_chroma_offsets_intra_and_8x8_transform_reach_the_driver_record() {
+    let sps = parse_sps_meta(&sps(77, 0, 0, 2, 0, 3, false, true, None)).unwrap();
+    // No extension: the second offset follows the first.
+    let plain = parse_pps_meta(&pps_with(-2, true, None)).unwrap();
+    assert_eq!(
+        (
+            plain.chroma_qp_index_offset,
+            plain.second_chroma_qp_index_offset
+        ),
+        (-2, -2)
+    );
+    assert!(plain.constrained_intra_pred_flag && !plain.transform_8x8_mode_flag);
+    let high = parse_pps_meta(&pps_with(-2, false, Some((true, false, 3)))).unwrap();
+    let current = picture(9, 41, VA_PICTURE_H264_SHORT_TERM_REFERENCE, 12, 12);
+    let record = picture_record(&sps, &high, current, &[], 41, true);
+    assert_eq!(record.chroma_qp_index_offset, -2);
+    assert_eq!(record.second_chroma_qp_index_offset, 3);
+    // SAFETY: a fresh union record; the bits constructor set these fields.
+    let pic = unsafe { record.pic_fields.bits };
+    assert_eq!(pic.transform_8x8_mode_flag(), 1);
+    assert_eq!(pic.constrained_intra_pred_flag(), 0);
+    let record = picture_record(&sps, &plain, current, &[], 41, true);
+    // SAFETY: as above.
+    let pic = unsafe { record.pic_fields.bits };
+    assert_eq!(pic.constrained_intra_pred_flag(), 1);
+    // Custom matrices cannot be expressed: refused, so OpenH264 takes over.
+    assert!(matches!(
+        parse_pps_meta(&pps_with(0, false, Some((true, true, 0)))),
+        Err(CodecError::Unsupported(_))
+    ));
+    assert_eq!(parse_pps_meta(&pps_with(13, false, None)), Err(MALFORMED));
 }
 
 #[test]

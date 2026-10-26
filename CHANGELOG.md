@@ -15,6 +15,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- On Linux with VA-API, High-profile video (phones, OBS, NVENC/AMF) and x264 streams with a chroma QP offset no longer decode into garbage or drifting colour (#122): the 8x8 transform flag, both chroma QP offsets and constrained intra prediction are now passed to the driver, and streams with custom scaling matrices, which the driver cannot be given, continue in OpenH264.
 - A crafted WebM attachment can no longer keep a CPU core busy for minutes when Play is clicked (#124): indexing stops after 1.6 million elements, reads the file through a window that survives the small seeks between elements (ordinary Opus-in-WebM files index much faster too), and refuses a timecode that would overflow.
 - On DNS64/464XLAT networks (mobile hotspots, cellular with Windows CLAT), voice and other IPv4-only Discord hosts are no longer refused as "The network destination was refused" (#125): synthesized `64:ff9b::` addresses are judged by the IPv4 address they carry.
 - On Linux with a VA-API graphics device, videos with B-frames (most phone and OBS recordings) and Go Live streams the hardware decoder cannot handle now play: at the first part the hardware path refuses, decoding moves to the bundled OpenH264 decoder and resumes at the next keyframe, instead of failing with "this video could not be decoded" (#126).

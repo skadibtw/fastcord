@@ -23,11 +23,10 @@
 //! partitioning, redundant pictures, frame_num gap recovery, memory
 //! management free of the short-term ring, or reference-list modification; at
 //! most five short-term references (the six-surface ring) and picture-order
-//! count types 0 and 2. Known rough edges, both quality-only for streams that
-//! use them: High-profile scaling lists that are not the spec defaults are
-//! answered with the flat default matrices, and `second_chroma_qp_index`
-//! offsets are not parsed (that field only exists behind the High-profile PPS
-//! extension).
+//! count types 0 and 2. Custom scaling matrices (SPS or PPS) are refused as
+//! `Unsupported`, since the driver record has no matrices; the platform
+//! decoder then continues in OpenH264. The PPS chroma offsets, constrained
+//! intra prediction and the High-profile 8x8 transform reach the driver.
 //!
 //! [`flush`]: VideoDecoder::flush
 
@@ -133,6 +132,15 @@ impl<'a> Rbsp<'a> {
         Ok((((1u64 << leading) - 1) + u64::from(self.bits(leading)?)) as u32)
     }
 
+    /// Whether syntax remains before the `rbsp_stop_one_bit` (H.264 7.2).
+    fn more_rbsp_data(&self) -> bool {
+        let Some(last) = self.data.iter().rposition(|&byte| byte != 0) else {
+            return false;
+        };
+        let stop = last * 8 + 7 - self.data[last].trailing_zeros() as usize;
+        self.pos < stop
+    }
+
     /// Signed Exp-Golomb.
     fn se(&mut self) -> Result<i32, CodecError> {
         let code = i64::from(self.ue()?);
@@ -144,24 +152,8 @@ impl<'a> Rbsp<'a> {
     }
 }
 
-/// Copies one scaling list's syntax elements past the reader (an SPS or PPS
-/// with scaling lists is accepted; the driver gets the spec default matrices).
-fn skip_scaling_list(bits: &mut Rbsp<'_>, size: usize) -> Result<(), CodecError> {
-    let (mut last, mut next) = (8i64, 8i64);
-    for _ in 0..size {
-        if next != 0 {
-            let delta = i64::from(bits.se()?);
-            if !(-128..=127).contains(&delta) {
-                return Err(MALFORMED);
-            }
-            next = (last + delta).rem_euclid(256);
-        }
-        if next != 0 {
-            last = next;
-        }
-    }
-    Ok(())
-}
+const SCALING_LISTS: CodecError =
+    CodecError::Unsupported("custom scaling matrices are not supported");
 
 /// The sequence parameters a stream needs, as parsed (the driver's record is
 /// built from these fields in [`picture_record`]).
@@ -235,12 +227,9 @@ fn parse_sps_meta(nal: &[u8]) -> Result<SpsMeta, CodecError> {
         let _bit_depth_chroma_minus8 = bits.ue()?;
         bits.flag()?; // qpprime_y_zero_transform_bypass_flag
         if bits.flag()? {
-            let lists = if chroma_format_idc == 3 { 12 } else { 8 };
-            for list in 0..lists {
-                if bits.flag()? {
-                    skip_scaling_list(&mut bits, if list < 6 { 16 } else { 64 })?;
-                }
-            }
+            // The driver record carries no matrices: decoding with the
+            // defaults would be silently wrong, so OpenH264 takes it (#122).
+            return Err(SCALING_LISTS);
         }
     }
     if chroma_format_idc != 1 {
@@ -325,9 +314,8 @@ fn parse_sps_meta(nal: &[u8]) -> Result<SpsMeta, CodecError> {
     })
 }
 
-/// The picture parameters a stream needs, as parsed. The High-profile PPS
-/// extension (transform/scaling lists, second chroma offset) stays unparsed:
-/// the driver record answers zeroed defaults there (see the module docs).
+/// The picture parameters a stream needs, as parsed, the High-profile
+/// extension included (custom scaling matrices are refused).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PpsMeta {
     id: u32,
@@ -337,6 +325,12 @@ struct PpsMeta {
     num_ref_idx_l0_default_active_minus1: u32,
     pic_init_qp_minus26: i32,
     deblocking_filter_control_present_flag: bool,
+    chroma_qp_index_offset: i8,
+    /// Equal to `chroma_qp_index_offset` when the PPS has no extension.
+    second_chroma_qp_index_offset: i8,
+    constrained_intra_pred_flag: bool,
+    /// From the High-profile extension; it changes the macroblock syntax.
+    transform_8x8_mode_flag: bool,
 }
 
 /// Parses a picture parameter set NAL unit (header included), for the parts
@@ -377,15 +371,30 @@ fn parse_pps_meta(nal: &[u8]) -> Result<PpsMeta, CodecError> {
         return Err(MALFORMED);
     }
     let _pic_init_qs_minus26 = bits.se()?;
-    let _chroma_qp_index_offset = bits.se()?;
+    let chroma_offset = |value: i32| i8::try_from(value).ok().filter(|v| (-12..=12).contains(v));
+    let chroma_qp_index_offset = chroma_offset(bits.se()?).ok_or(MALFORMED)?;
     let deblocking_filter_control_present_flag = bits.flag()?;
-    bits.flag()?; // constrained_intra_pred_flag: honored by the driver record
+    let constrained_intra_pred_flag = bits.flag()?;
     if bits.flag()? {
         return Err(CodecError::Unsupported(
             "redundant pictures are not supported",
         ));
     }
+    // The High-profile extension (#122).
+    let (mut transform_8x8_mode_flag, mut second_chroma_qp_index_offset) =
+        (false, chroma_qp_index_offset);
+    if bits.more_rbsp_data() {
+        transform_8x8_mode_flag = bits.flag()?;
+        if bits.flag()? {
+            return Err(SCALING_LISTS);
+        }
+        second_chroma_qp_index_offset = chroma_offset(bits.se()?).ok_or(MALFORMED)?;
+    }
     Ok(PpsMeta {
+        chroma_qp_index_offset,
+        second_chroma_qp_index_offset,
+        constrained_intra_pred_flag,
+        transform_8x8_mode_flag,
         id,
         sps_id,
         entropy_coding_mode_flag,
@@ -812,8 +821,8 @@ fn picture_record(
         slice_group_change_rate_minus1: 0,
         pic_init_qp_minus26: pps.pic_init_qp_minus26 as i8,
         pic_init_qs_minus26: 0,
-        chroma_qp_index_offset: 0,
-        second_chroma_qp_index_offset: 0,
+        chroma_qp_index_offset: pps.chroma_qp_index_offset,
+        second_chroma_qp_index_offset: pps.second_chroma_qp_index_offset,
         pic_fields: _VAPictureParameterBufferH264__bindgen_ty_2 {
             bits: _VAPictureParameterBufferH264__bindgen_ty_2__bindgen_ty_1 {
                 _bindgen_align: [],
@@ -822,9 +831,9 @@ fn picture_record(
                         u32::from(pps.entropy_coding_mode_flag),
                         0, // weighted_pred_flag: rejected with the PPS
                         0, // weighted_bipred_idc: rejected with the PPS
-                        0, // transform_8x8_mode_flag (see the module header)
+                        u32::from(pps.transform_8x8_mode_flag),
                         0, // field_pic_flag: frame coding only
-                        0, // constrained_intra_pred_flag
+                        u32::from(pps.constrained_intra_pred_flag),
                         0, // pic_order_present_flag: frame coding only
                         u32::from(pps.deblocking_filter_control_present_flag),
                         0, // redundant_pic_cnt_present_flag: rejected with the PPS
