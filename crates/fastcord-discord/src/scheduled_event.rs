@@ -7,8 +7,8 @@
 //! unverified against a live account (`docs/PROTOCOL.md`).
 
 use fastcord_model::{
-    EventKind, EventStatus, GuildScope, MAX_DESCRIPTION_CHARS, MAX_LOCATION_CHARS, MAX_NAME_CHARS,
-    MemberScope, Permissions, ScheduledEvent, Snowflake, guild_permissions,
+    EventKind, EventStatus, MAX_DESCRIPTION_CHARS, MAX_LOCATION_CHARS, MAX_NAME_CHARS, Permissions,
+    ScheduledEvent, Snowflake, guild_permissions,
 };
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -167,31 +167,8 @@ impl crate::state::Store {
     /// closed while the guild's roles or the account's member are not known.
     pub fn event_permissions(&self, guild_id: Snowflake) -> EventPermissions {
         let query = || {
-            let guild = self.guild(guild_id)?;
-            let me = self.current_user()?.id;
-            let owner = guild.owner_id()?;
-            let own = guild.member(me);
-            if me != owner
-                && (own.is_none_or(|m| !m.roles_known)
-                    || !guild.roles().iter().any(|r| r.id == guild_id)
-                    || own.is_some_and(|m| {
-                        m.communication_disabled_until
-                            .as_deref()
-                            .is_some_and(crate::state::navigation::active_timeout)
-                    }))
-            {
-                return None;
-            }
-            let scope = GuildScope {
-                id: guild_id,
-                owner_id: owner,
-                roles: guild.roles(),
-            };
-            let member = MemberScope {
-                user_id: me,
-                role_ids: own.map_or(&[][..], |m| m.roles.as_slice()),
-                timed_out: false,
-            };
+            let own = self.own_scope(guild_id)?;
+            let (scope, member) = (own.guild, own.member);
             let all = guild_permissions(scope, member);
             Some(EventPermissions {
                 manage: all.contains(Permissions::MANAGE_EVENTS),

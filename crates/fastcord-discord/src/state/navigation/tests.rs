@@ -3119,3 +3119,49 @@ fn an_unreported_tier_stays_unknown() {
     assert_eq!(found.tier, None);
     assert!(found.limits().is_none());
 }
+
+#[test]
+fn a_timed_out_moderator_gets_no_management_and_unknown_own_roles_fail_closed_everywhere() {
+    let (mut store, _) = setup(NAV_READY);
+    let manage = 68_608_u64 | 16 | 32 | (1 << 28) | (1 << 33); // + channels, guild, roles, events
+    apply(
+        &mut store,
+        "GUILD_ROLE_UPDATE",
+        &json!({"guild_id": "100", "role": {"id": "100", "name": "@everyone", "permissions": manage.to_string()}}).to_string(),
+    );
+    let member = |extra: Value| {
+        let mut v = json!({"guild_id": "100", "user": {"id": "1"}});
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        v.to_string()
+    };
+    let admin = guild_admin(&store, id(100)).unwrap();
+    assert!(admin.can_manage_guild && admin.can_manage_channels && admin.can_manage_roles);
+    assert!(store.event_permissions(id(100)).manage);
+
+    apply(
+        &mut store,
+        "GUILD_MEMBER_UPDATE",
+        &member(json!({"communication_disabled_until": "2999-01-01T00:00:00Z"})),
+    );
+    let admin = guild_admin(&store, id(100)).unwrap();
+    assert!(!admin.can_manage_guild && !admin.can_manage_channels && !admin.can_manage_roles);
+    assert!(!admin.grant_all);
+    assert!(!store.event_permissions(id(100)).manage);
+
+    apply(
+        &mut store,
+        "GUILD_MEMBER_UPDATE",
+        &member(json!({"communication_disabled_until": null, "roles": ["999"]})),
+    );
+    assert!(store.own_scope(id(100)).is_none());
+    assert_eq!(
+        store.event_permissions(id(100)),
+        crate::EventPermissions::default()
+    );
+    assert!(!store.member_permissions(id(100), id(1)).nickname);
+    let guild = store.guild(id(100)).unwrap();
+    assert_eq!(highest_role_position(guild, &[id(999)]), None);
+    assert_eq!(highest_role_position(guild, &[]), Some(0));
+}

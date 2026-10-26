@@ -138,36 +138,18 @@ impl crate::state::Store {
     pub fn member_permissions(&self, guild_id: Snowflake, user: Snowflake) -> MemberPermissions {
         let query = || {
             let guild = self.guild(guild_id)?;
-            let me = self.current_user()?.id;
-            let owner = guild.owner_id()?;
-            let own = guild.member(me);
-            if me != owner
-                && (own.is_none_or(|m| !m.roles_known)
-                    || !guild.roles().iter().any(|r| r.id == guild_id))
-            {
-                return None;
-            }
+            let own = self.own_scope(guild_id)?;
+            let (me, owner, scope, member) = (
+                own.member.user_id,
+                own.guild.owner_id,
+                own.guild,
+                own.member,
+            );
             // A timed-out moderator cannot perform communication actions.
-            if me != owner
-                && own.is_some_and(|m| {
-                    m.communication_disabled_until
-                        .as_deref()
-                        .is_some_and(crate::state::navigation::active_timeout)
-                })
-            {
+            if member.timed_out {
                 return None;
             }
-            let roles = own.map_or(&[][..], |m| m.roles.as_slice());
-            let scope = GuildScope {
-                id: guild_id,
-                owner_id: owner,
-                roles: guild.roles(),
-            };
-            let member = MemberScope {
-                user_id: me,
-                role_ids: roles,
-                timed_out: false,
-            };
+            let roles = member.role_ids;
             let base = guild_permissions(scope, member);
             if me == user {
                 return Some(MemberPermissions {
@@ -182,14 +164,8 @@ impl crate::state::Store {
             if !target.roles_known {
                 return None;
             }
-            let rank = |roles: &[Snowflake]| -> Option<i64> {
-                let mut highest = 0;
-                for id in roles {
-                    let role = guild.roles().iter().find(|r| r.id == *id)?;
-                    highest = highest.max(i64::from(role.position));
-                }
-                Some(highest)
-            };
+            let rank =
+                |roles: &[Snowflake]| crate::state::navigation::highest_role_position(guild, roles);
             if me != owner && rank(roles)? <= rank(&target.roles)? {
                 return None;
             }

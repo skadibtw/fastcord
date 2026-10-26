@@ -12,7 +12,9 @@ use fastcord_model::{
 
 use crate::{MAX_OVERWRITES, Placement};
 
-use super::{PermissionContext, Store, active_timeout, capped_name, clip_bytes};
+use super::{
+    PermissionContext, Store, active_timeout, capped_name, clip_bytes, highest_role_position,
+};
 
 /// Channels listed (Discord allows 500 per server).
 pub const MAX_ADMIN_CHANNELS: usize = 500;
@@ -280,17 +282,6 @@ fn same_overwrites(a: &[PermissionOverwrite], b: &[PermissionOverwrite]) -> bool
     a.len() == b.len() && a.iter().all(|o| b.contains(o))
 }
 
-/// The highest role position among `roles` (the `@everyone` role counts as 0).
-fn top_of(guild: &super::GuildEntry, roles: &[Snowflake]) -> i32 {
-    guild
-        .roles()
-        .iter()
-        .filter(|r| roles.contains(&r.id))
-        .map(|r| r.position)
-        .max()
-        .unwrap_or(0)
-}
-
 /// The management view of one held guild; `None` when it is unknown or the
 /// account's own roles are not yet established (no permission is guessed).
 pub fn guild_admin(store: &Store, guild_id: Snowflake) -> Option<GuildAdmin> {
@@ -424,7 +415,10 @@ pub fn guild_admin(store: &Store, guild_id: Snowflake) -> Option<GuildAdmin> {
     let top_position = if owner {
         i32::MAX
     } else {
-        guild.member(me).map_or(0, |m| top_of(guild, &m.roles))
+        guild
+            .member(me)
+            .and_then(|m| highest_role_position(guild, &m.roles))
+            .unwrap_or(0)
     };
     let mut roles: Vec<AdminRole> = guild
         .roles()
@@ -545,7 +539,9 @@ pub fn admin_member(store: &Store, admin: &GuildAdmin, user: Snowflake) -> Optio
         None
     } else if user == owner_id {
         Some(MEMBER_IS_OWNER)
-    } else if !admin.owner && top_of(guild, &member.roles) >= admin.top_position {
+    } else if !admin.owner
+        && highest_role_position(guild, &member.roles).is_none_or(|top| top >= admin.top_position)
+    {
         Some(MEMBER_ABOVE_YOU)
     } else {
         None

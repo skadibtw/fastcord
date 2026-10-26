@@ -1415,6 +1415,72 @@ fn private_name(store: &Store, channel: &Channel) -> String {
     capped_name(Some(&label), "Private conversation")
 }
 
+/// The account's own standing in one guild: the single place that decides
+/// whether it is known well enough to compute permissions (#157). A
+/// non-owner needs known roles, `@everyone` and every own role present.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OwnScope<'a> {
+    pub owner: bool,
+    pub guild: GuildScope<'a>,
+    /// `timed_out` is set from the member's timeout; the owner is never timed out.
+    pub member: MemberScope<'a>,
+    /// Membership screening is not accepted.
+    pub pending: bool,
+}
+
+impl<'a> OwnScope<'a> {
+    pub(crate) fn of(
+        store: &'a Store,
+        guild: &'a GuildEntry,
+        now: impl FnOnce() -> OffsetDateTime,
+    ) -> Option<Self> {
+        let user = store.current_user()?.id;
+        let owner_id = guild.owner_id()?;
+        let owner = user == owner_id;
+        let own = guild.member(user);
+        if !owner {
+            let own = own?;
+            let has = |id| guild.roles().binary_search_by_key(&id, |r| r.id).is_ok();
+            if !own.roles_known || !has(guild.id()) || !own.roles.iter().all(|id| has(*id)) {
+                return None;
+            }
+        }
+        Some(Self {
+            owner,
+            guild: GuildScope {
+                id: guild.id(),
+                owner_id,
+                roles: guild.roles(),
+            },
+            member: MemberScope {
+                user_id: user,
+                role_ids: own.map_or(&[][..], |m| m.roles.as_slice()),
+                timed_out: !owner
+                    && own
+                        .and_then(|m| m.communication_disabled_until.as_deref())
+                        .is_some_and(|until| timeout_active(until, now())),
+            },
+            pending: own.is_some_and(|m| m.pending == Some(true)),
+        })
+    }
+}
+
+impl Store {
+    /// The account's own scope in `guild_id`, `None` while anything needed is unknown.
+    pub(crate) fn own_scope(&self, guild_id: Snowflake) -> Option<OwnScope<'_>> {
+        OwnScope::of(self, self.guild(guild_id)?, OffsetDateTime::now_utc)
+    }
+}
+
+/// The highest role position among `roles` (`@everyone` counts as 0); `None`
+/// when a role is unknown, so callers fail closed.
+pub(crate) fn highest_role_position(guild: &GuildEntry, roles: &[Snowflake]) -> Option<i32> {
+    roles.iter().try_fold(0, |top, id| {
+        let role = guild.roles().iter().find(|r| r.id == *id)?;
+        Some(top.max(role.position))
+    })
+}
+
 enum PermissionContext<'a> {
     Owner,
     Member {
@@ -1435,41 +1501,15 @@ impl<'a> PermissionContext<'a> {
         guild: &'a GuildEntry,
         now: impl FnOnce() -> OffsetDateTime,
     ) -> Option<Self> {
-        let user = store.current_user()?.id;
-        let owner_id = guild.owner_id()?;
-        if user == owner_id {
-            return Some(Self::Owner);
-        }
-        let own = guild.member(user)?;
-        if !own.roles_known
-            || guild
-                .roles()
-                .binary_search_by_key(&guild.id(), |role| role.id)
-                .is_err()
-            || own.roles.iter().any(|id| {
-                guild
-                    .roles()
-                    .binary_search_by_key(id, |role| role.id)
-                    .is_err()
-            })
-        {
-            return None;
-        }
-        Some(Self::Member {
-            guild: GuildScope {
-                id: guild.id(),
-                owner_id,
-                roles: guild.roles(),
-            },
-            member: MemberScope {
-                user_id: user,
-                role_ids: &own.roles,
-                timed_out: own
-                    .communication_disabled_until
-                    .as_deref()
-                    .is_some_and(|until| timeout_active(until, now())),
-            },
-            pending: own.pending == Some(true),
+        let own = OwnScope::of(store, guild, now)?;
+        Some(if own.owner {
+            Self::Owner
+        } else {
+            Self::Member {
+                guild: own.guild,
+                member: own.member,
+                pending: own.pending,
+            }
         })
     }
 

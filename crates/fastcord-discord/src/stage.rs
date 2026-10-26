@@ -4,9 +4,7 @@
 //! an action is offered is judged here from the reducer's state and again
 //! immediately before sending, and Discord's own answer stays authoritative.
 use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route};
-use fastcord_model::{
-    ChannelKind, GuildScope, MemberScope, Permissions, Snowflake, channel_permissions,
-};
+use fastcord_model::{ChannelKind, Permissions, Snowflake, channel_permissions};
 use reqwest::Method;
 
 /// The longest Stage topic Discord accepts.
@@ -59,34 +57,8 @@ impl crate::state::Store {
             let channel = guild
                 .channel(channel)
                 .filter(|c| c.kind == ChannelKind::GuildStageVoice)?;
-            let me = self.current_user()?.id;
-            let owner = guild.owner_id()?;
-            let own = guild.member(me);
-            if me != owner
-                && (own.is_none_or(|m| !m.roles_known)
-                    || !guild.roles().iter().any(|r| r.id == guild_id))
-            {
-                return None;
-            }
-            if me != owner
-                && own.is_some_and(|m| {
-                    m.communication_disabled_until
-                        .as_deref()
-                        .is_some_and(crate::state::navigation::active_timeout)
-                })
-            {
-                return None;
-            }
-            let scope = GuildScope {
-                id: guild_id,
-                owner_id: owner,
-                roles: guild.roles(),
-            };
-            let member = MemberScope {
-                user_id: me,
-                role_ids: own.map_or(&[][..], |m| m.roles.as_slice()),
-                timed_out: false,
-            };
+            let own = self.own_scope(guild_id)?;
+            let (scope, member) = (own.guild, own.member);
             let all = channel_permissions(scope, member, &channel.permission_overwrites, false);
             let moderate = all.contains(Permissions::MUTE_MEMBERS);
             Some(StagePermissions {
