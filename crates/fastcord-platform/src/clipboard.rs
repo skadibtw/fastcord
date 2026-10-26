@@ -74,4 +74,3 @@ fn error(error: arboard::Error) -> ClipboardError {
         _ => ClipboardError::Unsupported,
     }
 }
-

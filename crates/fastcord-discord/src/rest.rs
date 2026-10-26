@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::attachment::{RefreshRequest, RefreshResponse, RefreshedAttachmentUrl};
-use crate::error::{ERROR_BODY_BYTE_BUDGET, PauseReason, Refusal, status_error};
+use crate::error::{PauseReason, Refusal, status_error};
 use crate::gateway::{ClientProperties, Identity};
 use crate::rate_limit::{RateLimiter, ResponseLimits};
 use crate::{
@@ -436,6 +436,31 @@ impl<C: Clock> RestClient<C> {
         Some(RestError::WritesPaused(reason))
     }
 
+    /// What a 4xx other than 429 means once its body is read: a challenge
+    /// stops every write, 40003/40062 pause them, else `error` (with Discord's
+    /// text when the request asked for it). Read with the 429 budget: a
+    /// captcha body with its rqdata/rqtoken blobs is well over 4 KiB (#145).
+    async fn client_error(
+        &self,
+        response: reqwest::Response,
+        error: RestError,
+        error_detail: bool,
+    ) -> RestError {
+        let status = response.status();
+        let Ok(body) = read_body(response, RATE_LIMIT_BODY_BYTE_BUDGET).await else {
+            return error;
+        };
+        if self.observe_refusal(status, &body) {
+            RestError::AccountVerificationRequired
+        } else if let Some(paused) = self.observe_slow_down(&body) {
+            paused
+        } else if error_detail {
+            RestError::Refused(Refusal::from_body(status, &body))
+        } else {
+            error
+        }
+    }
+
     fn observe_refusal(&self, status: StatusCode, body: &[u8]) -> bool {
         let value: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
         let challenge = status.is_client_error()
@@ -518,18 +543,13 @@ impl<C: Clock> RestClient<C> {
                 return Err(RestError::AuthenticationRequired);
             }
             let limits = ResponseLimits::from_headers(response.headers(), self.limiter.now());
-            if let Some(mut error) = error {
-                if status.is_client_error()
-                    && let Ok(body) = read_body(response, ERROR_BODY_BYTE_BUDGET).await
-                {
-                    if self.observe_refusal(status, &body) {
-                        error = RestError::AccountVerificationRequired;
-                    } else if let Some(paused) = self.observe_slow_down(&body) {
-                        error = paused;
-                    } else if request.error_detail {
-                        error = RestError::Refused(Refusal::from_body(status, &body));
-                    }
-                }
+            if let Some(error) = error {
+                let error = if status.is_client_error() {
+                    self.client_error(response, error, request.error_detail)
+                        .await
+                } else {
+                    error
+                };
                 reservation.complete(limits, None);
                 return Err(error);
             }
@@ -979,6 +999,38 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_large_captcha_body_still_stops_writes() {
+        let client = RestClient::new(
+            fastcord_net::NetworkContext::off(),
+            UserToken::new("offline-test-credential".to_owned()),
+            ClientProperties::bundled(HostOs::Linux, "en-US"),
+        )
+        .unwrap();
+        let blob = "r".repeat(6 * 1024);
+        let body = format!(
+            r#"{{"captcha_key":["captcha-required"],"captcha_sitekey":"k","captcha_rqdata":"{blob}"}}"#
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(body)
+                .unwrap(),
+        );
+        let error = client
+            .client_error(response, RestError::Http(StatusCode::BAD_REQUEST), true)
+            .await;
+        assert_eq!(error, RestError::AccountVerificationRequired);
+        let write = RestRequest::new(
+            Route::new(Method::POST, "/users/@me/channels").unwrap(),
+            Priority::UserWrite,
+        );
+        assert_eq!(
+            client.check_write(&write),
+            Err(RestError::AccountVerificationRequired)
+        );
     }
 
     #[tokio::test]

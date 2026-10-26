@@ -15,6 +15,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- A CAPTCHA or verification challenge with a long body (over 4 KiB, as real ones with their request tokens are) now stops all writes like a short one, instead of showing "REST request failed (400)" and letting the next write repeat it (#145). Error bodies are read up to 64 KiB, as rate-limit ones already were.
 - The sign-in requests made before a token exists (password login, QR ticket exchange, fingerprint, version check) share one cookie-and-size-limited transport (#147). The `/app` page fetch now sends the `discord.com` cookies it already kept, as a browser would, and none of them can read past its size limit.
 - Muting a category, or setting its notifications to "Only @mentions" or "Nothing", now applies to the channels inside it, and a thread follows its channel and that channel's category (#148). Their new messages no longer light the channel, the server icon or the tray, and "hide muted channels" hides them.
 - Pressing Reconnect after the client stopped reconnecting on its own no longer throws away your unsent drafts (#149): the text typed into each conversation carries over to the new connection. Messages still waiting in the outbox are not carried over yet.
