@@ -186,7 +186,9 @@ fn runtime() -> Result<&'static tokio::runtime::Handle, CaptureError> {
             Some(handle)
         })
         .as_ref()
-        .ok_or(CaptureError::Worker("the portal runtime could not be started"))
+        .ok_or(CaptureError::Worker(
+            "the portal runtime could not be started",
+        ))
 }
 
 fn portal_error(error: ashpd::Error) -> CaptureError {
