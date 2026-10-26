@@ -186,6 +186,16 @@ fn window_title() -> &'static str {
     }
 }
 
+/// Opens an http(s) link in the default browser on its own thread: starting a
+/// handler can take a while and must not stall the UI (#140). A refused or
+/// failed link opens nothing; the caller has nothing to show for it.
+fn open_link(url: &str) {
+    let url = url.to_owned();
+    std::thread::spawn(move || {
+        let _ = fastcord_platform::open_url(&url);
+    });
+}
+
 fn main() -> iced::Result {
     if std::env::args_os().any(|arg| arg == "--packet-helper") {
         let args: Vec<_> = std::env::args().collect();
@@ -3434,7 +3444,7 @@ and a fourth"
                                     Some(link.message),
                                 );
                             } else if let Some(url) = rich::link_target(&url) {
-                                let _ = fastcord_platform::open_url(url.as_str());
+                                open_link(url.as_str());
                             }
                         }
                         timeline::Event::Report {
@@ -4584,7 +4594,7 @@ and a fourth"
                 Task::batch([task, self.apps_event(apps::Event::OpenAuthorized)])
             }
             Some(account_panel::Action::OpenWeb) => {
-                let _ = fastcord_platform::open_url(account_panel::SETTINGS_URL);
+                open_link(account_panel::SETTINGS_URL);
                 task
             }
             None => task,
@@ -4937,7 +4947,7 @@ and a fourth"
         let task = task.map(Message::Apps);
         match action {
             Some(apps::Action::Open(url)) => {
-                let _ = fastcord_platform::open_url(&url);
+                open_link(&url);
                 task
             }
             Some(apps::Action::Copy(text)) => Task::batch([task, iced::clipboard::write(text)]),

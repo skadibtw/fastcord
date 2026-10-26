@@ -402,7 +402,7 @@ impl State {
                 return task;
             }
             Event::OpenWeb => {
-                let _ = fastcord_platform::open_url(WEB_FORM);
+                crate::open_link(WEB_FORM);
             }
             Event::CopyLink => {
                 if let Some(link) = self

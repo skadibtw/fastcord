@@ -15,6 +15,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- Opening a link or an attachment no longer pauses the window while the browser or viewer starts, and works for addresses and paths with commas (#140). Windows hands them to the shell directly (`ShellExecuteExW`) instead of `explorer.exe`, which split them on commas and never reported a failure; on Linux and macOS the `xdg-open`/`open` helper is reaped instead of left as a zombie process.
 - Cloudflare cookies (`__cf_bm`, `cf_clearance`) now expire when they should (#141). Their `Expires` dates use two-digit years (`25-Oct-25`), which were not understood, so the cookies were kept and sent until the app closed; dates are now read the way RFC 6265 and browsers do.
 - A 429 from Cloudflare (no Discord rate-limit headers) now pauses every request for its stated wait, not just the one route, so the client stops collecting more 429s on other routes and lengthening a temporary ban (#143). A stated wait over an hour is cut to an hour and the request reports "rate limited" instead of hanging silently for days.
 - On macOS, read-aloud and TTS messages can no longer control the speech engine (#144): `[[slnc 60000]]`, `[[volm 0]]` and other embedded `say` commands in someone's message are spoken as text instead of silencing or slowing everything queued after them. A `say` process that fails to take its text is now stopped and reaped.

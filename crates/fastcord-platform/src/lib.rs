@@ -72,25 +72,13 @@ pub fn open_local_file(path: &std::path::Path) -> Result<(), FileOpenError> {
         return Err(FileOpenError);
     }
     mark_downloaded(path).map_err(|_| FileOpenError)?;
-    #[cfg(target_os = "windows")]
-    let (program, args) = ("explorer.exe", vec![path.as_os_str()]);
-    #[cfg(target_os = "macos")]
-    let (program, args) = ("open", vec![path.as_os_str()]);
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let (program, args) = ("xdg-open", vec![path.as_os_str()]);
-    #[cfg(not(any(target_os = "windows", unix)))]
-    return Err(FileOpenError);
-
-    std::process::Command::new(program)
-        .args(args)
-        .spawn()
-        .map(|_| ())
-        .map_err(|_| FileOpenError)
+    launch(path.as_os_str())
 }
 
 /// Opens an `http(s)` link with the OS default browser. Anything else (other
 /// schemes, whitespace or control characters, no host) is refused, and the URL
-/// is one argument of a spawned program, never parsed by a shell.
+/// is handed over whole, never parsed by a shell. May block: call it off the UI
+/// thread.
 pub fn open_url(url: &str) -> Result<(), FileOpenError> {
     let rest = url
         .strip_prefix("https://")
@@ -103,20 +91,63 @@ pub fn open_url(url: &str) -> Result<(), FileOpenError> {
     {
         return Err(FileOpenError);
     }
-    #[cfg(target_os = "windows")]
-    let program = "explorer.exe";
+    launch(std::ffi::OsStr::new(url))
+}
+
+/// Hands a checked file or URL to the OS default handler (#140). Windows uses
+/// `ShellExecuteExW`, so nothing parses a command line (explorer.exe split
+/// arguments on commas) and a missing handler is an error.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn launch(target: &std::ffi::OsStr) -> Result<(), FileOpenError> {
+    use windows::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
+    };
+    use windows::Win32::UI::Shell::{
+        SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, PCWSTR, w};
+
+    // Some handlers are COM objects; an already-initialized thread reports
+    // a harmless error.
+    // SAFETY: plain apartment initialization of the calling thread.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+    let file = HSTRING::from(target);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: w!("open"),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` is initialized with its size and lives across the call;
+    // `file` outlives it.
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|_| FileOpenError)
+}
+
+/// Unix: `open`/`xdg-open`, reaped on its own thread so no zombie is left;
+/// some `xdg-open` fallbacks stay until the viewer exits, so never inline.
+#[cfg(unix)]
+fn launch(target: &std::ffi::OsStr) -> Result<(), FileOpenError> {
     #[cfg(target_os = "macos")]
     let program = "open";
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     let program = "xdg-open";
-    #[cfg(not(any(target_os = "windows", unix)))]
-    return Err(FileOpenError);
-
-    std::process::Command::new(program)
-        .arg(url)
+    let mut child = std::process::Command::new(program)
+        .arg(target)
         .spawn()
-        .map(|_| ())
-        .map_err(|_| FileOpenError)
+        .map_err(|_| FileOpenError)?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
+fn launch(_: &std::ffi::OsStr) -> Result<(), FileOpenError> {
+    Err(FileOpenError)
 }
 
 /// The only extensions `open_local_file` hands to the OS: the image, audio and
@@ -901,3 +932,4 @@ mod tests {
         result.unwrap();
     }
 }
+
