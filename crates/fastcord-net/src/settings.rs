@@ -63,6 +63,7 @@ enum SavedStrategy {
     PacketFake,
     PacketOverlap,
     RecordFragment,
+    SniFragment,
 }
 
 impl From<Strategy> for SavedStrategy {
@@ -76,6 +77,7 @@ impl From<Strategy> for SavedStrategy {
             Strategy::PacketFake => Self::PacketFake,
             Strategy::PacketOverlap => Self::PacketOverlap,
             Strategy::RecordFragment => Self::RecordFragment,
+            Strategy::SniFragment => Self::SniFragment,
         }
     }
 }
@@ -91,6 +93,7 @@ impl From<SavedStrategy> for Strategy {
             SavedStrategy::PacketFake => Self::PacketFake,
             SavedStrategy::PacketOverlap => Self::PacketOverlap,
             SavedStrategy::RecordFragment => Self::RecordFragment,
+            SavedStrategy::SniFragment => Self::SniFragment,
         }
     }
 }
@@ -369,6 +372,19 @@ mod tests {
         assert!(!settings.experimental_udp);
         let bytes = settings.encode(1000).unwrap();
         assert_eq!(Settings::decode(&bytes, 1000).unwrap(), settings);
+    }
+
+    #[test]
+    fn sni_fragment_hint_round_trips_under_the_new_catalog() {
+        let mut settings = Settings::default();
+        settings
+            .remember_hint(&"a".repeat(64), Role::Gateway, Strategy::SniFragment, 1000)
+            .unwrap();
+        let decoded = Settings::decode(&settings.encode(1000).unwrap(), 1000).unwrap();
+        assert_eq!(
+            decoded.profiles[0].hints[0].strategy(),
+            Strategy::SniFragment
+        );
     }
 
     #[test]

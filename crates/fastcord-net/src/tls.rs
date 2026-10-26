@@ -17,13 +17,15 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Sleep;
 
-pub const CATALOG_VERSION: u32 = 3;
+pub const CATALOG_VERSION: u32 = 4;
 pub const MAX_CLIENT_HELLO: usize = 32 * 1024;
 /// Records the first plaintext ClientHello is refragmented into by
-/// `Strategy::RecordFragment`. Three interior boundaries fit `steps`.
+/// `Strategy::RecordFragment`.
 const FRAGMENTS: usize = 4;
-/// `ShapedStream::plan_fragments` can shift at most one boundary per step.
-const _: () = assert!(FRAGMENTS - 1 < 4);
+/// Up to thirty one-byte SNI suffix records, plus prefix and suffix.
+const MAX_SNI_FRAGMENT_BYTES: usize = 30;
+const MAX_FRAGMENT_STEPS: usize = MAX_SNI_FRAGMENT_BYTES + 2;
+const SNI_WRITE_DELAY: Duration = Duration::from_millis(30);
 /// Raw staging (<64 KiB) plus temporary handshake assembly (32 KiB).
 pub const MAX_STAGING_BYTES: usize = 96 * 1024;
 // Leave slack for the tiny shared HRR flag and pending writer metadata.
@@ -51,23 +53,28 @@ pub enum Strategy {
     /// sees a parseable ClientHello, which is what defeats SNI blackholing on
     /// routes where TCP splitting and two-record splitting alone do not.
     RecordFragment,
+    /// Fragment the final thirty SNI bytes into one-byte records with 30 ms
+    /// between off-boundary writes, preserving all handshake bytes.
+    SniFragment,
 }
 
 impl Strategy {
-    pub const ORDER: [Self; 5] = [
+    pub const ORDER: [Self; 6] = [
         Self::Direct,
         Self::RecordFragment,
+        Self::SniFragment,
         Self::TlsRecordSplit,
         Self::WriteSplit,
         Self::Combined,
     ];
     #[cfg(test)]
-    pub const LEGACY: [Self; 5] = [
+    pub const LEGACY: [Self; 6] = [
         Self::Direct,
         Self::TlsRecordSplit,
         Self::WriteSplit,
         Self::Combined,
         Self::RecordFragment,
+        Self::SniFragment,
     ];
 
     const fn record_split(self) -> bool {
@@ -95,6 +102,7 @@ pub enum ParseError {
 pub struct ClientHello {
     pub split_at: usize,
     pub sni_mid: usize,
+    pub sni_end: usize,
     pub record_start: usize,
     pub record_end: usize,
     pub prefix_end: usize,
@@ -162,12 +170,13 @@ pub fn inspect_client_hello(records: &[u8]) -> Result<Inspection, ParseError> {
                 expected = Some(total);
             }
             if expected == Some(hello.len()) {
-                let (logical_split, middle) = sni_split(&hello)?;
+                let (logical_split, middle, sni_end) = sni_split(&hello)?;
                 let (record_start, split_at, record_end) =
                     locate(records, logical_split).ok_or(ParseError::InvalidRecord)?;
                 return Ok(Inspection::ClientHello(ClientHello {
                     split_at,
                     sni_mid: locate(records, middle).ok_or(ParseError::InvalidRecord)?.1,
+                    sni_end: locate(records, sni_end).ok_or(ParseError::InvalidRecord)?.1,
                     record_start,
                     record_end,
                     prefix_end: end,
@@ -192,7 +201,7 @@ fn locate(records: &[u8], mut logical_offset: usize) -> Option<(usize, usize, us
     }
 }
 
-fn sni_split(hello: &[u8]) -> Result<(usize, usize), ParseError> {
+fn sni_split(hello: &[u8]) -> Result<(usize, usize, usize), ParseError> {
     let invalid = ParseError::InvalidHandshake;
     // Handshake header, legacy_version and random.
     let mut offset = 4 + 2 + 32;
@@ -255,7 +264,11 @@ fn sni_split(hello: &[u8]) -> Result<(usize, usize), ParseError> {
                         .rposition(|b| *b == b'.')
                         .map_or(0, |i| i + 1);
                     let middle = (start + (end - start).div_ceil(2)).clamp(1, bytes.len());
-                    host = Some((offset + name + 1, offset + name + middle));
+                    host = Some((
+                        offset + name + 1,
+                        offset + name + middle,
+                        offset + name + length,
+                    ));
                 }
                 name += length;
             }
@@ -324,6 +337,44 @@ pub fn fragment_record(bytes: &mut Vec<u8>, hello: ClientHello) -> Result<Vec<us
         .record_start
         .checked_add(5)
         .ok_or(ParseError::InvalidRecord)?;
+    let payload = hello
+        .record_end
+        .checked_sub(header_end)
+        .ok_or(ParseError::InvalidRecord)?;
+    if payload < 2 * FRAGMENTS || hello.record_end > bytes.len() {
+        return Err(ParseError::InvalidRecord);
+    }
+    let cuts: Vec<_> = (1..FRAGMENTS)
+        .map(|index| header_end + payload * index / FRAGMENTS)
+        .collect();
+    fragment_record_at(bytes, hello, &cuts)
+}
+
+/// Only the structurally parsed hostname is split. The bounded suffix covers
+/// Discord's service domains even when a voice server adds a long prefix.
+fn fragment_sni_record(bytes: &mut Vec<u8>, hello: ClientHello) -> Result<Vec<usize>, ParseError> {
+    let start = hello
+        .split_at
+        .saturating_sub(1)
+        .max(hello.sni_end.saturating_sub(MAX_SNI_FRAGMENT_BYTES));
+    if hello.sni_end > hello.record_end || start >= hello.sni_end {
+        return Err(ParseError::InvalidSni);
+    }
+    let cuts: Vec<_> = (start..=hello.sni_end)
+        .filter(|cut| *cut > hello.record_start + 5 && *cut < hello.record_end)
+        .collect();
+    fragment_record_at(bytes, hello, &cuts)
+}
+
+fn fragment_record_at(
+    bytes: &mut Vec<u8>,
+    hello: ClientHello,
+    cuts: &[usize],
+) -> Result<Vec<usize>, ParseError> {
+    let header_end = hello
+        .record_start
+        .checked_add(5)
+        .ok_or(ParseError::InvalidRecord)?;
     let header: [u8; 5] = bytes
         .get(hello.record_start..header_end)
         .ok_or(ParseError::InvalidRecord)?
@@ -333,39 +384,34 @@ pub fn fragment_record(bytes: &mut Vec<u8>, hello: ClientHello) -> Result<Vec<us
     if header[0] != 22
         || Some(hello.record_end) != header_end.checked_add(original)
         || hello.record_end > bytes.len()
+        || cuts.is_empty()
+        || cuts.len() >= MAX_FRAGMENT_STEPS
+        || cuts[0] <= header_end
+        || cuts[cuts.len() - 1] >= hello.record_end
+        || cuts.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(ParseError::InvalidRecord);
     }
-    let payload = hello.record_end - header_end;
-    if payload < 2 * FRAGMENTS || bytes.len() + 5 * (FRAGMENTS - 1) > MAX_RAW {
+    if bytes.len() + 5 * cuts.len() > MAX_RAW {
         return Err(ParseError::StagingLimit);
     }
-    let mut cuts = [0; FRAGMENTS - 1];
-    for (index, cut) in cuts.iter_mut().enumerate() {
-        *cut = payload * (index + 1) / FRAGMENTS;
-    }
-    let inserted = cuts.map(|cut| header_end + cut);
-    // Backwards, so every earlier offset stays valid while the tail grows.
-    for position in inserted.iter().rev() {
+    // Validate every cut before mutating; transformed output can never roll back.
+    for position in cuts.iter().rev() {
         bytes.splice(*position..*position, [22, header[1], header[2], 0, 0]);
     }
-    let mut boundaries = Vec::with_capacity(FRAGMENTS);
-    let mut start = 0;
-    for (index, cut) in cuts.iter().copied().chain([payload]).enumerate() {
+    let mut boundaries = Vec::with_capacity(cuts.len() + 1);
+    let mut start = header_end;
+    for (index, cut) in cuts.iter().copied().chain([hello.record_end]).enumerate() {
         let head = if index == 0 {
             hello.record_start
         } else {
-            inserted[index - 1] + 5 * (index - 1)
+            cuts[index - 1] + 5 * (index - 1)
         };
         let length = u16::try_from(cut - start).map_err(|_| ParseError::InvalidRecord)?;
         bytes[head + 3..head + 5].copy_from_slice(&length.to_be_bytes());
         start = cut;
-        boundaries.push(head + 5 + length as usize);
+        boundaries.push(head + 5 + usize::from(length));
     }
-    debug_assert_eq!(
-        boundaries[FRAGMENTS - 1],
-        hello.record_end + 5 * (FRAGMENTS - 1)
-    );
     Ok(boundaries)
 }
 
@@ -522,7 +568,7 @@ pub struct ShapedStream<S> {
     bytes: Vec<u8>,
     end: usize,
     written: usize,
-    steps: [Step; 4],
+    steps: [Step; MAX_FRAGMENT_STEPS],
     step_count: usize,
     step_index: usize,
     control: Option<Arc<dyn PrefixControl>>,
@@ -553,7 +599,7 @@ impl<S> ShapedStream<S> {
             bytes: Vec::new(),
             end: 0,
             written: 0,
-            steps: [Step::default(); 4],
+            steps: [Step::default(); MAX_FRAGMENT_STEPS],
             step_count: 0,
             step_index: 0,
             control: None,
@@ -683,8 +729,16 @@ impl<S> ShapedStream<S> {
                     {
                         return self.unsupported();
                     }
-                    let fragments = if self.strategy == Strategy::RecordFragment {
-                        match fragment_record(&mut self.bytes, hello) {
+                    let fragments = if matches!(
+                        self.strategy,
+                        Strategy::RecordFragment | Strategy::SniFragment
+                    ) {
+                        let result = if self.strategy == Strategy::SniFragment {
+                            fragment_sni_record(&mut self.bytes, hello)
+                        } else {
+                            fragment_record(&mut self.bytes, hello)
+                        };
+                        match result {
                             Ok(boundaries) => Some(boundaries),
                             Err(_) => return self.unsupported(),
                         }
@@ -837,9 +891,15 @@ impl<S: AsyncWrite + Unpin> ShapedStream<S> {
                 };
                 if self.written == step.end {
                     if step.pause {
-                        let delay = self
-                            .delay
-                            .get_or_insert_with(|| Box::pin(tokio::time::sleep(WRITE_DELAY)));
+                        let delay = self.delay.get_or_insert_with(|| {
+                            Box::pin(tokio::time::sleep(
+                                if self.strategy == Strategy::SniFragment {
+                                    SNI_WRITE_DELAY
+                                } else {
+                                    WRITE_DELAY
+                                },
+                            ))
+                        });
                         std::task::ready!(delay.as_mut().poll(cx));
                         self.delay = None;
                     }

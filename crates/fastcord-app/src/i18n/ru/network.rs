@@ -109,8 +109,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Разбиение TLS работает по возможности: запись в TCP не гарантирует границ пакетов. У медиа по UDP свой путь подключения.",
     ),
     (
-        "Recovery can split the TLS ClientHello into several records whose writes never start on a record boundary. The handshake bytes, certificate verification and ALPN are unchanged. It is still best effort: TCP writes do not guarantee packet boundaries, and UDP media has a separate connection path.",
-        "Восстановление умеет делить TLS ClientHello на несколько записей так, чтобы каждая отправка начиналась не с границы записи. Байты рукопожатия, проверка сертификата и ALPN не меняются. Это по-прежнему работает по возможности: запись в TCP не гарантирует границ пакетов, а у медиа по UDP свой путь подключения.",
+        "Recovery can split the TLS ClientHello into several records, and as a next step cut the last 30 bytes of the server name into one-byte records 30 ms apart, so that no write starts on a record boundary. The handshake bytes, certificate verification and ALPN are unchanged. It is still best effort: TCP writes do not guarantee packet boundaries, and UDP media has a separate connection path.",
+        "Восстановление умеет делить TLS ClientHello на несколько записей, а следующим шагом резать последние 30 байт имени сервера на однобайтовые записи с паузой 30 мс, чтобы ни одна отправка не начиналась с границы записи. Байты рукопожатия, проверка сертификата и ALPN не меняются. Это по-прежнему работает по возможности: запись в TCP не гарантирует границ пакетов, а у медиа по UDP свой путь подключения.",
     ),
     (
         "Optional Windows helper requires UAC once per session. It handles only the public TLS handshake for fastcord connections. The client and account stay unprivileged. Starting it selects Auto.",

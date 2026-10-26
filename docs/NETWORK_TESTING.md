@@ -433,3 +433,78 @@ unavailable is now never selected, and recovery plans the ordinary catalog
 instead.
 
 
+## SNI-focused recovery follow-up (2026-10-26, #218)
+
+The existing debug `fastcord.exe --network-check` again failed: Off timed out,
+Auto's Direct, RecordFragment, TlsRecordSplit, WriteSplit and Combined TLS probes
+received no bytes. The TUN adapter was up during this run; it was not disabled
+or reconfigured. These measurements establish improvement on the unchanged
+reported route, not a new VPN-off acceptance claim.
+
+A credential-free socket harness compared the real rustls public ClientHello
+with Python's larger one. Uniform four-record fragmentation no longer reliably
+worked for the small rustls hello. A 32-record prototype with 30 ms spacing
+answered on one address but failed on four other DNS answers. Fragmenting the
+structurally located hostname itself into one-byte records answered on all five
+addresses; therefore no IP pin, DNS override or address-selection change was
+introduced. The temporary harness and public hello are not shipped.
+
+Catalog v4 adds SniFragment after Direct and RecordFragment. It fragments only
+the final at most 30 hostname bytes, with at most 32 nonempty records and 31
+asynchronous 30 ms delays, each write ending one byte before the next record
+header. All handshake bytes, SNI, ALPN and transcript remain identical. A name
+already spanning records is unsupported by this layout and passes unchanged
+before any transformation. Staging limits and the four transformation permits
+are unchanged; the fixed write plan now has at most 32 entries. Catalog changes
+expire old stored hints.
+
+One fresh production NetworkContext, Auto, no proxy or packet helper:
+
+| operation | measured result |
+|---|---|
+| first anonymous login-role API request | TlsTimeout, 8.0 s |
+| TLS campaign | Direct and RecordFragment timed out; SniFragment succeeded twice |
+| next login-role `GET /api/v9/gateway` | HTTP 200, 591 ms |
+| REST-role `GET /api/v9/gateway` | HTTP 200, 557 ms |
+| credential-free default CDN avatar | HTTP 200, 853 ms |
+| five separate Gateway TLS connections | all succeeded, 746–832 ms |
+
+The campaign reserved 8 of the unchanged 24 rolling dials; the later services
+used its confirmation without another campaign. The harness used production
+HTTP builders and connect_tls, sent no credential, Identify or user write, and
+did not access account storage. Gateway TLS is not authenticated READY or a
+voice/media acceptance test. UDP is unaffected.
+
+Offline validation covers exact reassembled bytes, every input write boundary,
+short writes, delay timing, cancellation/shutdown, one- and 253-byte names,
+refusal before mutation for staging overflow and a name crossing records,
+TLS 1.2/1.3 with ALPN/HRR/application bytes, the real opaque HTTP bridge, and
+confirmation/reuse within the unchanged campaign budget.
+
+The Network page's anonymous Check connection previously returned after the
+initial failure without starting its pending campaign; a second click or the
+advanced Retry pending TLS check was needed. It now waits for bounded recovery
+in Auto and, only after TLS confirmation, repeats this credential-free GET once.
+Off, proxy mode, helper selection, noneligible errors and account/write replay
+policies are unchanged. The debug --network-check now calls that same flow.
+
+Final executable acceptance used the separately built
+`C:/Users/user/.codex/worktrees/discord-route-218/fastcord/target/debug/fastcord.exe`
+with `--network-check`, before any settings, native credential access or
+single-instance handoff. Off returned TcpTimeout; Auto's first call to the same
+Check connection flow printed two successful SniFragment probes, then
+`Anonymous Discord API check passed (HTTP 200)`, ServiceReachable and 8 rolling
+dials. A preliminary executable built against the main checkout's shared target
+had selected the old catalog; it was discarded, and the final build uses its
+own target directory. No global network settings or running main client changed.
+
+Workspace tests and strict workspace Clippy passed; the final connection-check
+change was followed by app/net regression tests and strict Clippy in the isolated
+build directory. Formatting and the production network-boundary audit passed.
+The Windows app builds, with the existing bundled-libopus MSVC runtime linker
+warnings; no audio/linker change is included in this fix. Authenticated READY,
+voice UDP and a VPN-off run remain unverified for this follow-up.
+
+### Live check record (#218, 2026-10-27)
+
+`fastcord --network-check` (debug build, no account, no packet helper) with the `throne-tun` VPN adapter up: Off and Auto both returned anonymous gateway HTTP 200 with zero recovery dials. This does not exercise the SNI-fragment path; that needs the VPN off on the filtered route (maintainer run).

@@ -1072,12 +1072,16 @@ allowlists. Auto HTTP enters an authenticated ephemeral loopback CONNECT bridge;
 origin TLS, ALPN and HTTP/2 cross it unchanged. The bridge is neither a MITM nor a
 system proxy. There is no direct fallback if it fails. Off skips the bridge.
 
-Catalog v3 rewrites only plaintext ClientHello record/write boundaries; the
+Catalog v4 rewrites only plaintext ClientHello record/write boundaries; the
 handshake bytes (including SNI, ALPN and PSK binders) are identical, and at most
 two hellos including HRR are touched. RecordFragment rebuilds the record that
 carries the ClientHello start as four records of equal payload and writes them
 one fragment per write, each of the first three writes ending one byte before
-the next record boundary, so no segment begins on a record header. TlsRecordSplit
+the next record boundary. SniFragment splits the final at most 30 structurally
+parsed SNI bytes into one-byte records (at most 32 records including nonempty
+prefix/suffix), with the same off-boundary writes and 30 ms between writes. It
+preserves the entire handshake and refuses this layout before mutation if the
+hostname spans existing records. TlsRecordSplit
 keeps its two-record split after the first hostname byte at the structurally
 parsed SNI position. WriteSplit/Combined set NODELAY and wait 10 ms once per
 split; these are writes, not a claim about TCP segments. Protected TLS ends shaping. Limits, categorical

@@ -222,7 +222,7 @@ fn main() -> iced::Result {
     }
     #[cfg(debug_assertions)]
     if std::env::args_os().any(|arg| arg == "--network-check") {
-        network_ui::check(None);
+        network_ui::check();
         return Ok(());
     }
     #[cfg(debug_assertions)]

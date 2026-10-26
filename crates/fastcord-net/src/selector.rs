@@ -877,6 +877,50 @@ mod tests {
         assert_eq!(controller.strategy_for(&target()), None);
     }
 
+    #[tokio::test]
+    async fn sni_fragment_confirmation_fits_the_unchanged_campaign_budget() {
+        let controller = Controller::new();
+        let mut attempts = Vec::new();
+        let candidate = controller
+            .diagnose(target(), NetworkError::TlsTimeout, |request| {
+                attempts.push(request.strategy);
+                async move {
+                    ProbeOutcome {
+                        result: if request.strategy == Strategy::SniFragment {
+                            Ok(())
+                        } else {
+                            Err(NetworkError::TlsTimeout)
+                        },
+                        sent_bytes: 500,
+                        received_bytes: 3000,
+                    }
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.strategy, Strategy::SniFragment);
+        assert_eq!(
+            attempts,
+            [
+                Strategy::Direct,
+                Strategy::RecordFragment,
+                Strategy::SniFragment,
+                Strategy::SniFragment,
+            ]
+        );
+        assert_eq!(controller.budget_snapshot().rolling_dials, 8);
+        let rest = DiagnosticTarget::new(
+            "discord.com",
+            443,
+            Role::Rest,
+            AddressFamily::V4,
+            TlsProfile::Http,
+        )
+        .unwrap();
+        assert_eq!(controller.strategy_for(&rest), Some(Strategy::SniFragment));
+    }
+
     fn port_for(host: &str) -> u16 {
         if host.contains("discord.media") {
             8443

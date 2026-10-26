@@ -186,11 +186,32 @@ pub async fn packet_check(context: fastcord_net::NetworkContext) -> &'static str
         };
         #[cfg(debug_assertions)]
         eprintln!("Anonymous API check: packet={packet}; strategy={strategy:?}");
-        match client
+        let mut result = client
             .get("https://discord.com/api/v9/gateway")
             .send()
-            .await
+            .await;
+        // This explicit, credential-free GET may be checked once more after
+        // selection. A first click must not report failure without running
+        // the recovery it offered. Account validation/writes are never replayed.
+        if !packet
+            && context.mode() == Mode::Auto
+            && result
+                .as_ref()
+                .is_err_and(|error| error.category().eligible_for_selection())
         {
+            context.wait_for_recovery().await;
+            if context
+                .controller()
+                .service_status(fastcord_net::Role::Rest)
+                == fastcord_net::selector::ServiceStatus::TlsReachable
+            {
+                result = client
+                    .get("https://discord.com/api/v9/gateway")
+                    .send()
+                    .await;
+            }
+        }
+        match result {
             Ok(response) if response.status().as_u16() == 200 => {
                 return if packet && strategy == Strategy::PacketOverlap {
                     "Discord API HTTP 200: packet overlap 681 restored access. You can try signing in."
@@ -595,7 +616,7 @@ pub fn view<'a>(
                     "Auto checks only a required service after an eligible connection failure. TLS reachability does not establish that Discord or media works. Recovery is bounded; it never bypasses certificate verification."
                 )),
                 ui::note(tr(
-                    "Recovery can split the TLS ClientHello into several records whose writes never start on a record boundary. The handshake bytes, certificate verification and ALPN are unchanged. It is still best effort: TCP writes do not guarantee packet boundaries, and UDP media has a separate connection path."
+                    "Recovery can split the TLS ClientHello into several records, and as a next step cut the last 30 bytes of the server name into one-byte records 30 ms apart, so that no write starts on a record boundary. The handshake bytes, certificate verification and ALPN are unchanged. It is still best effort: TCP writes do not guarantee packet boundaries, and UDP media has a separate connection path."
                 )),
                 ui::note(tr(
                     "Optional Windows helper requires UAC once per session. It handles only the public TLS handshake for fastcord connections. The client and account stay unprivileged. Starting it selects Auto."
@@ -721,7 +742,7 @@ pub fn changes() -> impl iced::futures::Stream<Item = ()> {
 /// Credential-free reachability check under the actual fastcord executable's
 /// routing rules. It runs before settings, account restore and instance handoff.
 #[cfg(debug_assertions)]
-pub fn check(strategy: Option<fastcord_net::tls::Strategy>) {
+pub fn check() {
     let worker = std::thread::Builder::new()
         .name("fastcord-network-check".into())
         .spawn(move || {
@@ -733,72 +754,18 @@ pub fn check(strategy: Option<fastcord_net::tls::Strategy>) {
                 return;
             };
             runtime.block_on(async {
-                use fastcord_net::Role;
-                use std::time::Duration;
                 for mode in [Mode::Off, Mode::Auto] {
-                    if strategy.is_some() && mode == Mode::Off {
-                        continue;
-                    }
                     let context = new_context().with_mode(mode);
                     context.debug_probe_output(true);
-                    let client = context.http_builder(Role::Rest).and_then(|builder| {
-                        builder
-                            .connect_timeout(Duration::from_secs(8))
-                            .timeout(Duration::from_secs(12))
-                            .build()
-                    });
-                    let Ok(client) = client else {
-                        eprintln!("{mode:?}: HTTP client could not start.");
-                        continue;
-                    };
-                    match client
-                        .get("https://discord.com/api/v9/gateway")
-                        .send()
-                        .await
-                    {
-                        Ok(response) => println!(
-                            "{mode:?}: anonymous gateway HTTP {}",
-                            response.status().as_u16()
-                        ),
-                        Err(error) => println!(
-                            "{mode:?}: category={:?}; connect={}; timeout={}",
-                            error.category(),
-                            error.is_connect(),
-                            error.is_timeout()
-                        ),
-                    }
+                    // Exercise the same one-click flow as the Network page.
+                    println!("{mode:?}: {}", packet_check(context.clone()).await);
                     println!(
-                        "{mode:?}: service={:?}",
-                        context.controller().service_status(Role::Rest)
+                        "{mode:?}: service={:?}; budget={:?}",
+                        context
+                            .controller()
+                            .service_status(fastcord_net::Role::Rest),
+                        context.controller().budget_snapshot()
                     );
-                    if mode == Mode::Auto {
-                        if let Some(strategy) = strategy {
-                            context.debug_recover_with(strategy).await;
-                        } else {
-                            context.wait_for_recovery().await;
-                        }
-                        println!(
-                            "Auto after bounded TLS check: {:?}",
-                            context.controller().service_status(Role::Rest)
-                        );
-                        if context.controller().service_status(Role::Rest)
-                            == fastcord_net::selector::ServiceStatus::TlsReachable
-                        {
-                            match client
-                                .get("https://discord.com/api/v9/gateway")
-                                .send()
-                                .await
-                            {
-                                Ok(response) => println!(
-                                    "Recovered public gateway HTTP {}",
-                                    response.status().as_u16()
-                                ),
-                                Err(error) => {
-                                    println!("Recovered request failed: {:?}", error.category())
-                                }
-                            }
-                        }
-                    }
                 }
             });
         });

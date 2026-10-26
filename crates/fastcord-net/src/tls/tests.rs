@@ -327,57 +327,113 @@ async fn every_write_boundary_short_writes_and_exact_accepted_byte_accounting() 
 
 #[tokio::test(start_paused = true)]
 async fn record_fragment_keeps_writes_off_every_record_boundary() {
-    let original = handshake(b"gateway.discord.gg");
-    let bytes = record(&original);
-    let mut refragmented = bytes.clone();
-    let info = parsed(&refragmented);
-    let boundaries = fragment_record(&mut refragmented, info).unwrap();
-    assert_eq!(boundaries.len(), FRAGMENTS);
-    assert_eq!(reassemble(&refragmented), original);
-    assert_eq!(refragmented.len(), bytes.len() + 5 * (FRAGMENTS - 1));
-    for boundary in &boundaries[..FRAGMENTS - 1] {
-        assert_eq!(refragmented[*boundary..*boundary + 3], [22, 3, 3]);
+    for (strategy, count, delay) in [
+        (Strategy::RecordFragment, FRAGMENTS, WRITE_DELAY),
+        (
+            Strategy::SniFragment,
+            b"gateway.discord.gg".len() + 2,
+            SNI_WRITE_DELAY,
+        ),
+    ] {
+        let original = handshake(b"gateway.discord.gg");
+        let bytes = record(&original);
+        let mut refragmented = bytes.clone();
+        let info = parsed(&refragmented);
+        let boundaries = if strategy == Strategy::SniFragment {
+            fragment_sni_record(&mut refragmented, info)
+        } else {
+            fragment_record(&mut refragmented, info)
+        }
+        .unwrap();
+        assert_eq!(boundaries.len(), count);
+        assert_eq!(reassemble(&refragmented), original);
+        assert_eq!(refragmented.len(), bytes.len() + 5 * (count - 1));
+        for boundary in &boundaries[..count - 1] {
+            assert_eq!(refragmented[*boundary..*boundary + 3], [22, 3, 3]);
+        }
+        assert_eq!(boundaries[count - 1], refragmented.len());
+        let (io, output) = ShortIo::new(usize::MAX);
+        let mut stream = ShapedStream::new(io, strategy);
+        let started = tokio::time::Instant::now();
+        stream.write_all(&bytes).await.unwrap();
+        stream.flush().await.unwrap();
+        let output = output.lock().unwrap();
+        assert_eq!(reassemble(&output.bytes), original);
+        assert_eq!(output.bytes.len(), refragmented.len());
+        // One write per fragment, each starting one byte before a record boundary,
+        // so no segment beginning is a record header.
+        let interior: Vec<usize> = boundaries[..count - 1].iter().map(|b| b - 1).collect();
+        assert_eq!(output.writes.len(), count);
+        assert_eq!(output.writes[0], (started, 0));
+        for (index, start) in interior.iter().enumerate() {
+            assert_eq!(
+                output.writes[index + 1],
+                (started + delay * u32::try_from(index + 1).unwrap(), *start)
+            );
+            assert!(!boundaries.contains(start));
+        }
+        assert_eq!(stream.bytes.capacity(), 0);
     }
-    assert_eq!(boundaries[FRAGMENTS - 1], refragmented.len());
-    let (io, output) = ShortIo::new(usize::MAX);
-    let mut stream = ShapedStream::new(io, Strategy::RecordFragment);
-    let started = tokio::time::Instant::now();
-    stream.write_all(&bytes).await.unwrap();
-    stream.flush().await.unwrap();
-    let output = output.lock().unwrap();
-    assert_eq!(reassemble(&output.bytes), original);
-    assert_eq!(output.bytes.len(), refragmented.len());
-    // One write per fragment, each starting one byte before a record boundary,
-    // so no segment beginning is a record header.
-    let interior: Vec<usize> = boundaries[..FRAGMENTS - 1].iter().map(|b| b - 1).collect();
-    assert_eq!(output.writes.len(), FRAGMENTS);
-    assert_eq!(output.writes[0], (started, 0));
-    for (index, start) in interior.iter().enumerate() {
-        assert_eq!(
-            output.writes[index + 1],
-            (
-                started + WRITE_DELAY * u32::try_from(index + 1).unwrap(),
-                *start
-            )
-        );
-        assert!(!boundaries.contains(start));
+}
+
+#[test]
+fn sni_fragment_bounds_and_unsupported_layouts_preserve_the_original() {
+    for host in [b"x".as_slice(), b"gateway.discord.gg", &[b'a'; 253]] {
+        let original = handshake(host);
+        let mut bytes = record(&original);
+        let info = parsed(&bytes);
+        let boundaries = fragment_sni_record(&mut bytes, info).unwrap();
+        assert!(boundaries.len() <= MAX_FRAGMENT_STEPS);
+        assert_eq!(reassemble(&bytes), original);
+        assert!(bytes.len() <= record(&original).len() + 5 * (MAX_FRAGMENT_STEPS - 1));
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let length = u16_at(&bytes, offset + 3).unwrap();
+            assert!(length > 0);
+            offset += 5 + length;
+        }
     }
-    assert_eq!(stream.bytes.capacity(), 0);
+    let hello = handshake(b"gateway.discord.gg");
+    let whole = record(&hello);
+    let start = parsed(&whole).split_at - 1 - 5;
+    // A hostname spread across existing records cannot use this layout.
+    // Refusal happens before mutation, so the ordinary pass-through is safe.
+    let mut bytes = record(&hello[..start + 3]);
+    bytes.extend(record(&hello[start + 3..]));
+    let before = bytes.clone();
+    let info = parsed(&bytes);
+    assert_eq!(
+        fragment_sni_record(&mut bytes, info),
+        Err(ParseError::InvalidSni)
+    );
+    assert_eq!(bytes, before);
+    // Staging overflow is also refused before any byte is changed.
+    let mut bytes = whole;
+    let info = parsed(&bytes);
+    bytes.resize(MAX_RAW, 0);
+    let before = bytes.clone();
+    assert_eq!(
+        fragment_sni_record(&mut bytes, info),
+        Err(ParseError::StagingLimit)
+    );
+    assert_eq!(bytes, before);
 }
 
 #[tokio::test(start_paused = true)]
 async fn record_fragment_preserves_a_hello_that_already_spans_records() {
-    let original = handshake(b"gateway.discord.gg");
-    let mut bytes = record(&original[..20]);
-    bytes.extend(record(&original[20..]));
-    let (io, output) = ShortIo::new(4);
-    let mut stream = ShapedStream::new(io, Strategy::RecordFragment);
-    for chunk in bytes.chunks(5) {
-        stream.write_all(chunk).await.unwrap();
+    for strategy in [Strategy::RecordFragment, Strategy::SniFragment] {
+        let original = handshake(b"gateway.discord.gg");
+        let mut bytes = record(&original[..20]);
+        bytes.extend(record(&original[20..]));
+        let (io, output) = ShortIo::new(4);
+        let mut stream = ShapedStream::new(io, strategy);
+        for chunk in bytes.chunks(5) {
+            stream.write_all(chunk).await.unwrap();
+        }
+        stream.flush().await.unwrap();
+        assert_eq!(reassemble(&output.lock().unwrap().bytes), original);
+        assert_eq!(stream.bytes.capacity(), 0);
     }
-    stream.flush().await.unwrap();
-    assert_eq!(reassemble(&output.lock().unwrap().bytes), original);
-    assert_eq!(stream.bytes.capacity(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -545,21 +601,23 @@ async fn incomplete_flush_and_read_make_progress_without_replaying_a_prefix() {
 
 #[tokio::test(start_paused = true)]
 async fn cancellation_during_delay_resumes_once_and_shutdown_drains() {
-    let bytes = record(&handshake(b"example.test"));
-    let (io, output) = ShortIo::new(usize::MAX);
-    let mut stream = ShapedStream::new(io, Strategy::Combined);
-    stream.write_all(&bytes).await.unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(5), stream.flush())
-            .await
-            .is_err()
-    );
-    stream.shutdown().await.unwrap();
-    assert_eq!(
-        reassemble(&output.lock().unwrap().bytes),
-        handshake(b"example.test")
-    );
-    assert_eq!(stream.bytes.capacity(), 0);
+    for strategy in [Strategy::Combined, Strategy::SniFragment] {
+        let bytes = record(&handshake(b"example.test"));
+        let (io, output) = ShortIo::new(usize::MAX);
+        let mut stream = ShapedStream::new(io, strategy);
+        stream.write_all(&bytes).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), stream.flush())
+                .await
+                .is_err()
+        );
+        stream.shutdown().await.unwrap();
+        assert_eq!(
+            reassemble(&output.lock().unwrap().bytes),
+            handshake(b"example.test")
+        );
+        assert_eq!(stream.bytes.capacity(), 0);
+    }
 }
 
 #[tokio::test]
