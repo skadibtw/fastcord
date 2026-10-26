@@ -418,7 +418,17 @@ impl<'a> Renderer<'a> {
                             },
                             asset,
                         };
+                        // Ordinals count every emoji, hidden or not, so they
+                        // keep matching `emoji_assets`.
                         self.ordinal += 1;
+                        if self.spoiler_hidden(part) {
+                            // A hidden spoiler hides its emoji too: a grey,
+                            // clickable box in place of the image (#158).
+                            let mut spans = Vec::new();
+                            self.push_spans(&mut spans, part, token, size, heading, true);
+                            line = line.push(rich_text(spans).on_link_click(to_event).size(size));
+                            continue;
+                        }
                         line = line.push(emoji::sensed(
                             emoji::asset_view(asset, token, self.cx.emojis, emoji_size),
                             occurrence,
@@ -429,6 +439,14 @@ impl<'a> Renderer<'a> {
             }
         }
         line.width(Length::Fill).wrap().into()
+    }
+
+    /// The part is inside a spoiler the viewer has not uncovered.
+    fn spoiler_hidden(&self, part: &Part<'_>) -> bool {
+        let prefs = crate::chat_prefs::current();
+        part.spoiler.is_some_and(|id| {
+            prefs.spoiler_hidden(self.cx.revealed.contains(&(self.message.id, id)))
+        })
     }
 
     /// The styled iced spans for `shown` text of one parsed part.
@@ -504,10 +522,7 @@ impl<'a> Renderer<'a> {
             }
             _ => {}
         }
-        let prefs = crate::chat_prefs::current();
-        let hidden = part
-            .spoiler
-            .is_some_and(|id| prefs.spoiler_hidden(self.cx.revealed.contains(&(message.id, id))));
+        let hidden = self.spoiler_hidden(part);
         if let Some(id) = part.spoiler {
             if hidden {
                 item = item
@@ -817,6 +832,30 @@ let a;
 
     fn nodes(tree: &iced_renderer::core::widget::Tree) -> usize {
         1 + tree.children.iter().map(nodes).sum::<usize>()
+    }
+
+    #[test]
+    fn a_hidden_spoiler_hides_its_emoji_until_uncovered() {
+        let message = sample();
+        let names = Names::default();
+        let emojis = HashMap::new();
+        let pictures = HashMap::new();
+        let count = |revealed: &HashSet<(Snowflake, u16)>| {
+            let cx = Cx {
+                names: &names,
+                revealed,
+                emojis: &emojis,
+                pictures: &pictures,
+                now: 0,
+            };
+            let element = body("a ||\u{1F98A}|| b", &message, Snowflake(20), 1, cx).unwrap();
+            nodes(&iced_renderer::core::widget::Tree::new(&element))
+        };
+        let hidden = count(&HashSet::new());
+        let shown = count(&HashSet::from([(message.id, 0)]));
+        // Uncovered, the emoji is a sensed view (sensor + view); hidden, it is
+        // one spoiler text in its place.
+        assert!(hidden < shown, "hidden {hidden}, shown {shown}");
     }
 
     #[test]
