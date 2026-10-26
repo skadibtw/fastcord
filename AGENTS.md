@@ -56,15 +56,15 @@ model, net, discord, media, platform, audio, video <- app   (binary `fastcord`, 
 ## Development Commands
 ```sh
 cargo fmt --all
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
+cargo clippy --workspace --exclude fastcord-fake --all-targets --locked -- -D warnings   # the shipping feature set
+cargo test --workspace --exclude fastcord-fake --all-targets --locked
 cargo run -p fastcord-app
 cargo run -p fastcord-fake -- --chatter 20                                  # offline fake Discord (test-only)
 cargo run -p fastcord-app --features fake-discord -- --fake-discord 8765    # app against it, debug builds only
 cargo build --release -p fastcord-app
 gh workflow run release.yml        # release dry run, no publish
 ```
-On the maintainer's Windows box, agent shells may not have `cargo` on `PATH`; call `C:/Users/user/.cargo/bin/cargo.exe` directly. Building `fastcord-audio` compiles the bundled libopus with CMake; if `cmake` is not on `PATH`, set `CMAKE` to the Visual Studio Build Tools copy (`C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe`). Linux builds need `libasound2-dev` (ALSA headers for cpal).
+Plain `--workspace` includes `fastcord-fake`, whose dev-dependency turns `fastcord-discord/fake-discord` on for every crate in that invocation; exclude it to build what ships (CI checks the fake feature set in its own step). On the maintainer's Windows box, agent shells may not have `cargo` on `PATH`; call `C:/Users/user/.cargo/bin/cargo.exe` directly. Building `fastcord-audio` compiles the bundled libopus with CMake; if `cmake` is not on `PATH`, set `CMAKE` to the Visual Studio Build Tools copy (`C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe`). Linux builds need `libasound2-dev` (ALSA headers for cpal).
 
 ## Code Conventions & Common Patterns
 - Edition 2024, resolver 3, toolchain pinned to 1.99.0 (`rust-toolchain.toml`). Workspace lints: `unsafe_code = "deny"`, clippy `all` warn; CI denies warnings.
