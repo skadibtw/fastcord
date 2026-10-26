@@ -166,7 +166,22 @@ pub struct Sps {
     pub height: u32,
     /// VUI matrix/range/sample aspect, with documented defaults when absent.
     pub color: ColorDescription,
+    /// Luma samples cropped from the left and top of the coded picture.
+    pub crop_left: u32,
+    pub crop_top: u32,
+    pub log2_max_frame_num_minus4: u32,
+    /// 0, 1 or 2.
+    pub pic_order_cnt_type: u32,
+    /// Zero unless `pic_order_cnt_type` is 0.
+    pub log2_max_pic_order_cnt_lsb_minus4: u32,
+    pub max_num_ref_frames: u32,
+    pub gaps_in_frame_num_allowed: bool,
+    pub frame_mbs_only: bool,
+    pub direct_8x8_inference: bool,
+    /// An SPS scaling matrix is present (its lists are skipped, not kept).
+    pub has_scaling_matrix: bool,
 }
+
 /// Parses an SPS NAL unit (header included) through its VUI color/aspect fields.
 pub fn parse_sps(nal: &[u8]) -> Result<Sps, CodecError> {
     const MALFORMED: CodecError = CodecError::InvalidBitstream("malformed sequence parameter set");
@@ -180,6 +195,7 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, CodecError> {
     let id = bits.ue_max(31)?;
     let (mut chroma_format_idc, mut bit_depth_luma, mut bit_depth_chroma) = (1, 8, 8);
     let mut separate_colour_planes = false;
+    let mut has_scaling_matrix = false;
     if matches!(
         profile_idc,
         100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
@@ -191,7 +207,8 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, CodecError> {
         bit_depth_luma = 8 + bits.ue_max(6)?;
         bit_depth_chroma = 8 + bits.ue_max(6)?;
         bits.flag()?; // qpprime_y_zero_transform_bypass_flag
-        if bits.flag()? {
+        has_scaling_matrix = bits.flag()?;
+        if has_scaling_matrix {
             let lists = if chroma_format_idc == 3 { 12 } else { 8 };
             for list in 0..lists {
                 if bits.flag()? {
@@ -200,10 +217,12 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, CodecError> {
             }
         }
     }
-    bits.ue_max(12)?; // log2_max_frame_num_minus4
-    match bits.ue_max(2)? {
+    let log2_max_frame_num_minus4 = bits.ue_max(12)?;
+    let pic_order_cnt_type = bits.ue_max(2)?;
+    let mut log2_max_pic_order_cnt_lsb_minus4 = 0;
+    match pic_order_cnt_type {
         0 => {
-            bits.ue_max(12)?; // log2_max_pic_order_cnt_lsb_minus4
+            log2_max_pic_order_cnt_lsb_minus4 = bits.ue_max(12)?;
         }
         1 => {
             bits.flag()?; // delta_pic_order_always_zero_flag
@@ -215,19 +234,20 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, CodecError> {
         }
         _ => {}
     }
-    bits.ue_max(16)?; // max_num_ref_frames
-    bits.flag()?; // gaps_in_frame_num_value_allowed_flag
+    let max_num_ref_frames = bits.ue_max(16)?;
+    let gaps_in_frame_num_allowed = bits.flag()?;
     let width_mbs = u64::from(bits.ue()?) + 1;
     let height_map_units = u64::from(bits.ue()?) + 1;
     let frame_mbs_only = bits.flag()?;
     if !frame_mbs_only {
         bits.flag()?; // mb_adaptive_frame_field_flag
     }
-    bits.flag()?; // direct_8x8_inference_flag
+    let direct_8x8_inference = bits.flag()?;
     let field_factor = if frame_mbs_only { 1 } else { 2 };
     let coded_width = width_mbs * 16;
     let coded_height = height_map_units * 16 * field_factor;
     let (mut width, mut height) = (coded_width, coded_height);
+    let (mut crop_left, mut crop_top) = (0, 0);
     if bits.flag()? {
         // Crop units per ITU-T H.264 (7-19)..(7-22).
         let (unit_x, unit_y) = match (chroma_format_idc, separate_colour_planes) {
@@ -246,12 +266,16 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, CodecError> {
         }
         width -= crop_x;
         height -= crop_y;
+        crop_left = left * unit_x;
+        crop_top = top * unit_y;
     }
-    let (Ok(coded_width), Ok(coded_height), Ok(width), Ok(height)) = (
+    let (Ok(coded_width), Ok(coded_height), Ok(width), Ok(height), Ok(crop_left), Ok(crop_top)) = (
         u32::try_from(coded_width),
         u32::try_from(coded_height),
         u32::try_from(width),
         u32::try_from(height),
+        u32::try_from(crop_left),
+        u32::try_from(crop_top),
     ) else {
         return Err(CodecError::Unsupported("picture is larger than 4096x2304"));
     };
@@ -273,6 +297,101 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, CodecError> {
         width,
         height,
         color,
+        crop_left,
+        crop_top,
+        log2_max_frame_num_minus4,
+        pic_order_cnt_type,
+        log2_max_pic_order_cnt_lsb_minus4,
+        max_num_ref_frames,
+        gaps_in_frame_num_allowed,
+        frame_mbs_only,
+        direct_8x8_inference,
+        has_scaling_matrix,
+    })
+}
+
+/// Picture parameter set fields the VA-API host parser and slice headers
+/// need, through the High-profile extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pps {
+    pub id: u32,
+    pub sps_id: u32,
+    pub entropy_coding_mode_flag: bool,
+    pub bottom_field_pic_order_in_frame_present_flag: bool,
+    pub num_ref_idx_l0_default_active_minus1: u32,
+    pub num_ref_idx_l1_default_active_minus1: u32,
+    pub weighted_pred_flag: bool,
+    pub weighted_bipred_idc: u32,
+    pub pic_init_qp_minus26: i32,
+    pub chroma_qp_index_offset: i32,
+    pub deblocking_filter_control_present_flag: bool,
+    pub constrained_intra_pred_flag: bool,
+    pub redundant_pic_cnt_present_flag: bool,
+    pub transform_8x8_mode_flag: bool,
+    /// Equal to `chroma_qp_index_offset` when the PPS has no extension.
+    pub second_chroma_qp_index_offset: i32,
+    /// `pic_scaling_matrix_present_flag`; the lists and the second chroma
+    /// offset after it are not parsed (the offset keeps the default).
+    pub has_scaling_matrix: bool,
+}
+
+/// Parses a PPS NAL unit (header included). Slice groups (FMO) are refused as
+/// `Unsupported` because their map syntax is not walked.
+pub fn parse_pps(nal: &[u8]) -> Result<Pps, CodecError> {
+    const MALFORMED: CodecError = CodecError::InvalidBitstream("malformed parameter set");
+    if nal_unit_type(nal) != NAL_PPS {
+        return Err(MALFORMED);
+    }
+    let mut bits = BitReader::new(&nal[1..]);
+    let id = bits.ue()?;
+    let sps_id = bits.ue()?;
+    if id > 255 || sps_id > 31 {
+        return Err(MALFORMED);
+    }
+    let entropy_coding_mode_flag = bits.flag()?;
+    let bottom_field_pic_order_in_frame_present_flag = bits.flag()?;
+    if bits.ue()? != 0 {
+        return Err(CodecError::Unsupported("slice groups are not supported"));
+    }
+    let num_ref_idx_l0_default_active_minus1 = bits.ue()?;
+    let num_ref_idx_l1_default_active_minus1 = bits.ue()?;
+    if num_ref_idx_l0_default_active_minus1 > 31 || num_ref_idx_l1_default_active_minus1 > 31 {
+        return Err(MALFORMED);
+    }
+    let weighted_pred_flag = bits.flag()?;
+    let weighted_bipred_idc = bits.bits(2)?;
+    let pic_init_qp_minus26 = bits.se()?;
+    bits.se()?; // pic_init_qs_minus26
+    let chroma_qp_index_offset = bits.se()?;
+    let deblocking_filter_control_present_flag = bits.flag()?;
+    let constrained_intra_pred_flag = bits.flag()?;
+    let redundant_pic_cnt_present_flag = bits.flag()?;
+    let (mut transform_8x8_mode_flag, mut has_scaling_matrix) = (false, false);
+    let mut second_chroma_qp_index_offset = chroma_qp_index_offset;
+    if bits.more_rbsp_data() {
+        transform_8x8_mode_flag = bits.flag()?;
+        has_scaling_matrix = bits.flag()?;
+        if !has_scaling_matrix {
+            second_chroma_qp_index_offset = bits.se()?;
+        }
+    }
+    Ok(Pps {
+        id,
+        sps_id,
+        entropy_coding_mode_flag,
+        bottom_field_pic_order_in_frame_present_flag,
+        num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1,
+        weighted_pred_flag,
+        weighted_bipred_idc,
+        pic_init_qp_minus26,
+        chroma_qp_index_offset,
+        deblocking_filter_control_present_flag,
+        constrained_intra_pred_flag,
+        redundant_pic_cnt_present_flag,
+        transform_8x8_mode_flag,
+        second_chroma_qp_index_offset,
+        has_scaling_matrix,
     })
 }
 
@@ -401,6 +520,8 @@ pub(crate) struct BitReader<'a> {
     zeros: u8,
     current: u8,
     left: u8,
+    /// Emulation-prevention bytes dropped so far.
+    escapes: usize,
 }
 
 const TRUNCATED: CodecError = CodecError::InvalidBitstream("truncated NAL unit");
@@ -414,7 +535,28 @@ impl<'a> BitReader<'a> {
             zeros: 0,
             current: 0,
             left: 0,
+            escapes: 0,
         }
+    }
+
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    /// Bits consumed so far, emulation-prevention bytes not counted
+    /// (`slice_data_bit_offset` is relative to the RBSP).
+    pub(crate) fn position(&self) -> usize {
+        (self.pos - self.escapes) * 8 - usize::from(self.left)
+    }
+
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    /// Whether syntax remains before the `rbsp_stop_one_bit` (H.264 7.2).
+    pub(crate) fn more_rbsp_data(&self) -> bool {
+        let Some(last) = self.data.iter().rposition(|&byte| byte != 0) else {
+            return false;
+        };
+        let stop = last * 8 + 7 - self.data[last].trailing_zeros() as usize;
+        // Raw bit position, escapes included, to match the raw data; an
+        // escape byte about to be dropped is already behind the cursor.
+        let pending = self.left == 0 && self.zeros >= 2 && self.data.get(self.pos) == Some(&3);
+        (self.pos + usize::from(pending)) * 8 - usize::from(self.left) < stop
     }
 
     fn load(&mut self) -> Result<(), CodecError> {
@@ -423,6 +565,7 @@ impl<'a> BitReader<'a> {
         if self.zeros >= 2 && byte == 3 {
             byte = *self.data.get(self.pos).ok_or(TRUNCATED)?;
             self.pos += 1;
+            self.escapes += 1;
             self.zeros = 0;
         }
         self.zeros = if byte == 0 {
@@ -464,7 +607,7 @@ impl<'a> BitReader<'a> {
         Ok(((1u64 << leading) - 1 + u64::from(self.bits(leading)?)) as u32)
     }
 
-    fn ue_max(&mut self, max: u32) -> Result<u32, CodecError> {
+    pub(crate) fn ue_max(&mut self, max: u32) -> Result<u32, CodecError> {
         match self.ue()? {
             value if value <= max => Ok(value),
             _ => Err(CodecError::InvalidBitstream(
@@ -654,6 +797,16 @@ mod tests {
                 width: 128,
                 height: 96,
                 color: ColorDescription::default(),
+                crop_left: 0,
+                crop_top: 0,
+                log2_max_frame_num_minus4: 0,
+                pic_order_cnt_type: 2,
+                log2_max_pic_order_cnt_lsb_minus4: 0,
+                max_num_ref_frames: 1,
+                gaps_in_frame_num_allowed: false,
+                frame_mbs_only: true,
+                direct_8x8_inference: true,
+                has_scaling_matrix: false,
             }
         );
     }
@@ -883,6 +1036,92 @@ mod tests {
         }
         assert_eq!(reader.bits(24).unwrap(), 0);
         assert_eq!(reader.bits(8).unwrap(), 1);
+    }
+
+    #[test]
+    fn position_skips_escapes_and_more_rbsp_data_finds_the_stop_bit() {
+        // `00 00 03` loses its escape byte; a following escape is dropped too.
+        let mut reader = BitReader::new(&[0, 0, 3, 5, 0, 0, 3, 0x80]);
+        assert_eq!(reader.position(), 0);
+        assert_eq!(reader.bits(16).unwrap(), 0);
+        assert_eq!(reader.position(), 16);
+        assert_eq!(reader.bits(8).unwrap(), 5);
+        assert!(reader.more_rbsp_data());
+        assert_eq!(reader.bits(16).unwrap(), 0);
+        assert_eq!(reader.position(), 40);
+        assert!(!reader.more_rbsp_data(), "only the stop bit is left");
+        assert!(reader.flag().unwrap());
+        // A short zero run is not an escape.
+        let mut plain = BitReader::new(&[0, 0, 0, 4]);
+        assert_eq!(plain.bits(32).unwrap(), 4);
+        assert_eq!(plain.position(), 32);
+        assert!(!BitReader::new(&[0, 0]).more_rbsp_data());
+    }
+
+    #[test]
+    fn the_fixture_pps_parses_and_malformed_parameter_sets_never_panic() {
+        let pps = nal_units(FIXTURE)
+            .find(|nal| nal_unit_type(nal) == NAL_PPS)
+            .unwrap();
+        let parsed = parse_pps(pps).unwrap();
+        assert_eq!((parsed.id, parsed.sps_id), (0, 0));
+        assert!(!parsed.transform_8x8_mode_flag && !parsed.has_scaling_matrix);
+        assert_eq!(
+            parsed.second_chroma_qp_index_offset,
+            parsed.chroma_qp_index_offset
+        );
+        let sps = nal_units(FIXTURE)
+            .find(|nal| nal_unit_type(nal) == NAL_SPS)
+            .unwrap();
+        for nal in [sps, pps] {
+            for len in 0..nal.len() {
+                let _ = parse_sps(&nal[..len]);
+                let _ = parse_pps(&nal[..len]);
+            }
+            for fill in [0x00u8, 0xFF, 0x03, 0x55] {
+                let mut junk = vec![nal[0]];
+                junk.extend(std::iter::repeat_n(fill, 64));
+                let _ = parse_sps(&junk);
+                let _ = parse_pps(&junk);
+            }
+        }
+    }
+
+    #[test]
+    fn a_high_profile_pps_extension_reaches_the_parsed_fields() {
+        let mut bits = BitWriter::default();
+        bits.ue(3); // pic_parameter_set_id
+        bits.ue(2); // seq_parameter_set_id
+        bits.flag(true); // entropy_coding_mode_flag
+        bits.flag(false);
+        bits.ue(0); // slice groups
+        bits.ue(0);
+        bits.ue(0);
+        bits.flag(false);
+        bits.bits(0, 2);
+        bits.se(-2); // pic_init_qp_minus26
+        bits.se(0);
+        bits.se(4); // chroma_qp_index_offset
+        bits.flag(true);
+        bits.flag(true); // constrained_intra_pred_flag
+        bits.flag(false);
+        bits.flag(true); // transform_8x8_mode_flag
+        bits.flag(false); // pic_scaling_matrix_present_flag
+        bits.se(-3); // second_chroma_qp_index_offset
+        bits.trailing();
+        let mut nal = vec![0x68];
+        nal.extend(test_vectors::escape(&bits.finish()));
+        let pps = parse_pps(&nal).unwrap();
+        assert_eq!((pps.id, pps.sps_id, pps.pic_init_qp_minus26), (3, 2, -2));
+        assert!(pps.entropy_coding_mode_flag && pps.constrained_intra_pred_flag);
+        assert!(pps.transform_8x8_mode_flag && !pps.has_scaling_matrix);
+        assert_eq!(
+            (
+                pps.chroma_qp_index_offset,
+                pps.second_chroma_qp_index_offset
+            ),
+            (4, -3)
+        );
     }
 
     #[test]

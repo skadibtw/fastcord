@@ -39,7 +39,7 @@ use super::{
 };
 use crate::codec::{Backend, BackendKind, CodecError, DecodedFrame, VideoDecoder};
 use crate::frame::{ColorDescription, Nv12};
-use crate::h264::{self, ColorState};
+use crate::h264::{self, BitReader, ColorState};
 
 use super::bindings::*;
 
@@ -56,101 +56,9 @@ const SLICE_DATA_START_CODE: [u8; 3] = [0, 0, 1];
 /// `slice_data_offset` of that layout: the NAL header follows the prefix.
 const SLICE_DATA_NAL_OFFSET: u32 = 3;
 
-/// The High-profile `profile_idc` values with extended syntax (chroma format,
-/// bit depths, scaling lists and the PPS extension); 8-bit 4:2:0 streams among
-/// them resolve to [`VAProfile_VAProfileH264High`].
-const EXTENDED_PROFILES: [u8; 13] = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135];
-
 /// Maps a failure to unmap or read a surface onto the codec contract.
 const TRUNCATED: CodecError = CodecError::InvalidBitstream("truncated NAL unit");
 const MALFORMED: CodecError = CodecError::InvalidBitstream("malformed parameter set");
-
-/// Removes emulation-prevention bytes (`00 00 03` becomes `00 00`) from a
-/// coded NAL unit, yielding the RBSP a reader parses.
-fn strip_epb(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len());
-    let mut zeros = 0usize;
-    for &byte in data {
-        if zeros >= 2 && byte == 3 {
-            // The two zeros keep counting: an inserted escape byte pair
-            // (`00 00 03 00 00 03`) would otherwise hide the second one.
-            continue;
-        }
-        out.push(byte);
-        zeros = if byte == 0 { zeros + 1 } else { 0 };
-    }
-    out
-}
-
-/// MSB-first reader over an EPB-stripped RBSP that reports the consumed bit
-/// count (a slice header must tell the driver where its slice data starts,
-/// and the host parser needs the exact position).
-struct Rbsp<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Rbsp<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    /// Bits consumed so far, relative to the start of `data`.
-    fn position(&self) -> usize {
-        self.pos
-    }
-
-    fn flag(&mut self) -> Result<bool, CodecError> {
-        Ok(self.bit()? == 1)
-    }
-
-    fn bit(&mut self) -> Result<u32, CodecError> {
-        let byte = *self.data.get(self.pos / 8).ok_or(TRUNCATED)?;
-        let value = (byte >> (7 - (self.pos % 8))) & 1;
-        self.pos += 1;
-        Ok(u32::from(value))
-    }
-
-    /// Reads `count` (at most 32) bits.
-    fn bits(&mut self, count: u32) -> Result<u32, CodecError> {
-        let mut value = 0u64;
-        for _ in 0..count {
-            value = (value << 1) | u64::from(self.bit()?);
-        }
-        Ok(value as u32)
-    }
-
-    /// Unsigned Exp-Golomb.
-    fn ue(&mut self) -> Result<u32, CodecError> {
-        let mut leading = 0;
-        while self.bit()? == 0 {
-            leading += 1;
-            if leading > 31 {
-                return Err(CodecError::InvalidBitstream("Exp-Golomb value overflows"));
-            }
-        }
-        Ok((((1u64 << leading) - 1) + u64::from(self.bits(leading)?)) as u32)
-    }
-
-    /// Whether syntax remains before the `rbsp_stop_one_bit` (H.264 7.2).
-    fn more_rbsp_data(&self) -> bool {
-        let Some(last) = self.data.iter().rposition(|&byte| byte != 0) else {
-            return false;
-        };
-        let stop = last * 8 + 7 - self.data[last].trailing_zeros() as usize;
-        self.pos < stop
-    }
-
-    /// Signed Exp-Golomb.
-    fn se(&mut self) -> Result<i32, CodecError> {
-        let code = i64::from(self.ue()?);
-        Ok(if code % 2 == 1 {
-            ((code + 1) / 2) as i32
-        } else {
-            (-(code / 2)) as i32
-        })
-    }
-}
 
 const SCALING_LISTS: CodecError =
     CodecError::Unsupported("custom scaling matrices are not supported");
@@ -197,120 +105,59 @@ impl SpsMeta {
     }
 }
 
-/// Parses a sequence parameter set NAL unit (header included). Frame coding
-/// only, at most [`DPB_CAP`] references, picture-order count types 0 and 2,
-/// and no frame_num gap recovery: everything else than that is rejected the
-/// same way [`h264::check_decodable`] (via [`ColorState::inspect`]) vetted the
-/// access units that carried this SPS.
+/// Parses a sequence parameter set NAL unit (header included) with the shared
+/// [`h264::parse_sps`]. Frame coding only, at most [`DPB_CAP`] references,
+/// picture-order count types 0 and 2, and no frame_num gap recovery:
+/// everything else than that is rejected.
 fn parse_sps_meta(nal: &[u8]) -> Result<SpsMeta, CodecError> {
-    if h264::nal_unit_type(nal) != h264::NAL_SPS {
-        return Err(MALFORMED);
+    let sps = h264::parse_sps(nal)?;
+    if sps.has_scaling_matrix {
+        // The driver record carries no matrices: decoding with the defaults
+        // would be silently wrong, so OpenH264 takes it (#122).
+        return Err(SCALING_LISTS);
     }
-    let stripped = strip_epb(&nal[1..]);
-    let mut bits = Rbsp::new(&stripped);
-    let (profile_idc, constraint_flags, level_idc) = (
-        bits.bits(8)? as u8,
-        bits.bits(8)? as u8,
-        bits.bits(8)? as u8,
-    );
-    let id = bits.ue()?;
-    // Extended-syntax profiles carry chroma/bit-depth/scaling fields that
-    // separate the header from the fields below; walk them exactly as
-    // `h264::parse_sps` does (it has already vetted the values).
-    let mut chroma_format_idc = 1;
-    if EXTENDED_PROFILES.contains(&profile_idc) {
-        chroma_format_idc = bits.ue()?;
-        if chroma_format_idc == 3 {
-            bits.flag()?;
-        }
-        let _bit_depth_luma_minus8 = bits.ue()?;
-        let _bit_depth_chroma_minus8 = bits.ue()?;
-        bits.flag()?; // qpprime_y_zero_transform_bypass_flag
-        if bits.flag()? {
-            // The driver record carries no matrices: decoding with the
-            // defaults would be silently wrong, so OpenH264 takes it (#122).
-            return Err(SCALING_LISTS);
-        }
-    }
-    if chroma_format_idc != 1 {
+    if sps.chroma_format_idc != 1 || sps.bit_depth_luma != 8 || sps.bit_depth_chroma != 8 {
         return Err(CodecError::Unsupported(
             "only 8-bit 4:2:0 H.264 is supported",
         ));
     }
-    let log2_max_frame_num_minus4 = bits.ue()?;
-    if log2_max_frame_num_minus4 > 12 {
-        return Err(MALFORMED);
+    if sps.pic_order_cnt_type == 1 {
+        return Err(CodecError::Unsupported(
+            "picture-order-count type 1 streams are not supported",
+        ));
     }
-    let pic_order_cnt_type = bits.ue()?;
-    let log2_max_pic_order_cnt_lsb_minus4 = match pic_order_cnt_type {
-        0 => bits.ue()?,
-        1 => {
-            return Err(CodecError::Unsupported(
-                "picture-order-count type 1 streams are not supported",
-            ));
-        }
-        2 => 0,
-        _ => return Err(MALFORMED),
-    };
-    if pic_order_cnt_type == 0 && log2_max_pic_order_cnt_lsb_minus4 > 12 {
-        return Err(MALFORMED);
-    }
-    let num_ref_frames = bits.ue()?;
-    if num_ref_frames > DPB_CAP as u32 {
+    if sps.max_num_ref_frames > DPB_CAP as u32 {
         return Err(CodecError::Unsupported(
             "more than five reference pictures exceed this decoder's DPB",
         ));
     }
-    if bits.flag()? {
+    if sps.gaps_in_frame_num_allowed {
         return Err(CodecError::Unsupported(
             "frame_num gap recovery is not supported",
         ));
     }
-    let width_mbs = u64::from(bits.ue()?) + 1;
-    let height_map_units = u64::from(bits.ue()?) + 1;
-    if !bits.flag()? {
+    if !sps.frame_mbs_only {
         return Err(CodecError::Unsupported(
             "field-coded streams are not supported",
         ));
     }
-    let direct_8x8_inference_flag = bits.flag()?;
-    let (mut crop_left, mut crop_right, mut crop_top, mut crop_bottom) = (0u64, 0u64, 0u64, 0u64);
-    if bits.flag()? {
-        // Crop units per ITU-T H.264 (7-19)..(7-22) for 4:2:0 frame coding:
-        // two luma samples on every axis.
-        crop_left = u64::from(bits.ue()?);
-        crop_right = u64::from(bits.ue()?);
-        crop_top = u64::from(bits.ue()?);
-        crop_bottom = u64::from(bits.ue()?);
-    }
-    let coded_width = width_mbs * 16;
-    let coded_height = height_map_units * 16;
-    let (crop_x, crop_y) = ((crop_left + crop_right) * 2, (crop_top + crop_bottom) * 2);
-    if crop_x >= coded_width || crop_y >= coded_height {
-        return Err(MALFORMED);
-    }
-    let (Ok(coded_width), Ok(coded_height)) =
-        (u32::try_from(coded_width), u32::try_from(coded_height))
-    else {
-        return Err(CodecError::Unsupported("picture is larger than 4096x2304"));
-    };
-    crate::codec::check_dimensions(coded_width, coded_height)?;
+    crate::codec::check_dimensions(sps.coded_width, sps.coded_height)?;
     Ok(SpsMeta {
-        id,
-        profile_idc,
-        constraint_flags,
-        level_idc,
-        log2_max_frame_num_minus4,
-        pic_order_cnt_type,
-        log2_max_pic_order_cnt_lsb_minus4,
-        num_ref_frames,
-        direct_8x8_inference_flag,
-        coded_width,
-        coded_height,
-        display_x: (crop_left * 2) as u32,
-        display_y: (crop_top * 2) as u32,
-        display_width: (coded_width as u64 - crop_x) as u32,
-        display_height: (coded_height as u64 - crop_y) as u32,
+        id: sps.id,
+        profile_idc: sps.profile_idc,
+        constraint_flags: sps.constraint_flags,
+        level_idc: sps.level_idc,
+        log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
+        pic_order_cnt_type: sps.pic_order_cnt_type,
+        log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
+        num_ref_frames: sps.max_num_ref_frames,
+        direct_8x8_inference_flag: sps.direct_8x8_inference,
+        coded_width: sps.coded_width,
+        coded_height: sps.coded_height,
+        display_x: sps.crop_left,
+        display_y: sps.crop_top,
+        display_width: sps.width,
+        display_height: sps.height,
     })
 }
 
@@ -333,75 +180,49 @@ struct PpsMeta {
     transform_8x8_mode_flag: bool,
 }
 
-/// Parses a picture parameter set NAL unit (header included), for the parts
-/// the driver record and slice headers need.
+/// Parses a picture parameter set NAL unit (header included) with the shared
+/// [`h264::parse_pps`], for the parts the driver record and slice headers
+/// need; everything beyond the decoder's policy is rejected.
 fn parse_pps_meta(nal: &[u8]) -> Result<PpsMeta, CodecError> {
-    if h264::nal_unit_type(nal) != h264::NAL_PPS {
-        return Err(MALFORMED);
-    }
-    let stripped = strip_epb(&nal[1..]);
-    let mut bits = Rbsp::new(&stripped);
-    let id = bits.ue()?;
-    let sps_id = bits.ue()?;
-    if id > 255 || sps_id > 31 {
-        return Err(MALFORMED);
-    }
-    let entropy_coding_mode_flag = bits.flag()?;
-    let bottom_field_pic_order_in_frame_present_flag = bits.flag()?;
-    if bits.ue()? != 0 {
-        return Err(CodecError::Unsupported("slice groups are not supported"));
-    }
-    let num_ref_idx_l0_default_active_minus1 = bits.ue()?;
-    let num_ref_idx_l1_default_active_minus1 = bits.ue()?;
-    if num_ref_idx_l0_default_active_minus1 > 31 || num_ref_idx_l1_default_active_minus1 > 31 {
-        return Err(MALFORMED);
-    }
-    if bits.flag()? {
+    let pps = h264::parse_pps(nal)?;
+    if pps.weighted_pred_flag {
         return Err(CodecError::Unsupported(
             "weighted prediction is not supported",
         ));
     }
-    if bits.bits(2)? != 0 {
+    if pps.weighted_bipred_idc != 0 {
         return Err(CodecError::Unsupported(
             "weighted biprediction is not supported",
         ));
     }
-    let pic_init_qp_minus26 = bits.se()?;
-    if !(-26..=25).contains(&pic_init_qp_minus26) {
+    if !(-26..=25).contains(&pps.pic_init_qp_minus26) {
         return Err(MALFORMED);
     }
-    let _pic_init_qs_minus26 = bits.se()?;
     let chroma_offset = |value: i32| i8::try_from(value).ok().filter(|v| (-12..=12).contains(v));
-    let chroma_qp_index_offset = chroma_offset(bits.se()?).ok_or(MALFORMED)?;
-    let deblocking_filter_control_present_flag = bits.flag()?;
-    let constrained_intra_pred_flag = bits.flag()?;
-    if bits.flag()? {
+    let chroma_qp_index_offset = chroma_offset(pps.chroma_qp_index_offset).ok_or(MALFORMED)?;
+    if pps.redundant_pic_cnt_present_flag {
         return Err(CodecError::Unsupported(
             "redundant pictures are not supported",
         ));
     }
-    // The High-profile extension (#122).
-    let (mut transform_8x8_mode_flag, mut second_chroma_qp_index_offset) =
-        (false, chroma_qp_index_offset);
-    if bits.more_rbsp_data() {
-        transform_8x8_mode_flag = bits.flag()?;
-        if bits.flag()? {
-            return Err(SCALING_LISTS);
-        }
-        second_chroma_qp_index_offset = chroma_offset(bits.se()?).ok_or(MALFORMED)?;
+    if pps.has_scaling_matrix {
+        return Err(SCALING_LISTS);
     }
+    let second_chroma_qp_index_offset =
+        chroma_offset(pps.second_chroma_qp_index_offset).ok_or(MALFORMED)?;
     Ok(PpsMeta {
         chroma_qp_index_offset,
         second_chroma_qp_index_offset,
-        constrained_intra_pred_flag,
-        transform_8x8_mode_flag,
-        id,
-        sps_id,
-        entropy_coding_mode_flag,
-        bottom_field_pic_order_in_frame_present_flag,
-        num_ref_idx_l0_default_active_minus1,
-        pic_init_qp_minus26,
-        deblocking_filter_control_present_flag,
+        constrained_intra_pred_flag: pps.constrained_intra_pred_flag,
+        transform_8x8_mode_flag: pps.transform_8x8_mode_flag,
+        id: pps.id,
+        sps_id: pps.sps_id,
+        entropy_coding_mode_flag: pps.entropy_coding_mode_flag,
+        bottom_field_pic_order_in_frame_present_flag: pps
+            .bottom_field_pic_order_in_frame_present_flag,
+        num_ref_idx_l0_default_active_minus1: pps.num_ref_idx_l0_default_active_minus1,
+        pic_init_qp_minus26: pps.pic_init_qp_minus26,
+        deblocking_filter_control_present_flag: pps.deblocking_filter_control_present_flag,
     })
 }
 
@@ -446,8 +267,7 @@ fn parse_slice_header(
             "an IDR picture must be referenced",
         ));
     }
-    let stripped = strip_epb(&nal[1..]);
-    let mut bits = Rbsp::new(&stripped);
+    let mut bits = BitReader::new(&nal[1..]);
     let first_mb_in_slice = bits.ue()?;
     let raw_slice_type = bits.ue()?;
     if raw_slice_type > 9 {
@@ -974,8 +794,7 @@ impl ParameterCaches {
 
     /// Remembers a PPS NAL unit's bytes.
     fn remember_pps(&mut self, nal: &[u8]) {
-        let stripped = strip_epb(&nal[1..]);
-        let mut bits = Rbsp::new(&stripped);
+        let mut bits = BitReader::new(&nal[1..]);
         let id = bits.ue().unwrap_or(u32::MAX);
         if id < 256 {
             self.pps[id as usize] = Some(nal.to_owned());

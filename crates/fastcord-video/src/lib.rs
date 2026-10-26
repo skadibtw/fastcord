@@ -22,6 +22,8 @@ pub mod vaapi;
 // backends. Compiling it everywhere lets the identical round-trip tests run on
 // every OS in CI (SPEC §8.2; ADR 0001).
 pub mod av1;
+#[cfg(any(target_os = "linux", test))]
+mod bitwriter;
 pub mod codec;
 pub mod container;
 pub mod effect;

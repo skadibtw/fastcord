@@ -37,6 +37,7 @@ use super::{
     ConfigId, ContextId, Display, Image, NativeBuffer, Surfaces, Synchronized, backend, check,
     invalid_picture, picture, sync_surface,
 };
+use crate::bitwriter::{BitWriter, escape};
 use crate::codec::{Backend, BackendKind, CodecError, EncodedFrame, EncoderConfig, VideoEncoder};
 use crate::frame::Nv12;
 use crate::h264::{self, ParameterSets};
@@ -98,77 +99,6 @@ const LEVELS: [(u8, u64, u64, u32); 16] = [
     (51, 983040, 36864, 240_000_000),
     (52, 983040, 36864, 240_000_000),
 ];
-
-/// MSB-first RBSP writer (a module-local copy of `test_vectors::BitWriter`,
-/// which is compiled only in tests).
-#[derive(Default)]
-struct BitWriter {
-    bytes: Vec<u8>,
-    current: u8,
-    used: u8,
-}
-
-impl BitWriter {
-    fn flag(&mut self, value: bool) {
-        self.current = (self.current << 1) | u8::from(value);
-        self.used += 1;
-        if self.used == 8 {
-            self.bytes.push(self.current);
-            self.current = 0;
-            self.used = 0;
-        }
-    }
-
-    /// Writes the low `count` bits of `value`, most significant first.
-    fn bits(&mut self, value: u64, count: u32) {
-        for bit in (0..count).rev() {
-            self.flag((value >> bit) & 1 == 1);
-        }
-    }
-
-    /// Unsigned Exp-Golomb.
-    fn ue(&mut self, value: u32) {
-        let code = u64::from(value) + 1;
-        let length = 64 - code.leading_zeros();
-        self.bits(0, length - 1);
-        self.bits(code, length);
-    }
-
-    /// Signed Exp-Golomb.
-    fn se(&mut self, value: i32) {
-        let value = i64::from(value);
-        let code = if value > 0 { 2 * value - 1 } else { -2 * value };
-        self.ue(u32::try_from(code).expect("se value fits"));
-    }
-
-    /// rbsp_trailing_bits: a one bit, then zero bits to the byte boundary.
-    fn trailing(&mut self) {
-        self.flag(true);
-        while self.used != 0 {
-            self.flag(false);
-        }
-    }
-
-    fn finish(self) -> Vec<u8> {
-        assert_eq!(self.used, 0, "RBSP not byte aligned");
-        self.bytes
-    }
-}
-
-/// Inserts emulation-prevention bytes into an RBSP.
-fn escape(rbsp: &[u8]) -> Vec<u8> {
-    let mut escaped = Vec::with_capacity(rbsp.len() + rbsp.len() / 64);
-    let mut zeros = 0;
-    for &byte in rbsp {
-        if zeros >= 2 && byte <= 3 {
-            escaped.push(3);
-            zeros = 0;
-        }
-        escaped.push(byte);
-        zeros = if byte == 0 { zeros + 1 } else { 0 };
-    }
-    escaped
-}
 
 /// Appends one NAL unit (a start code, `header` and the escaped RBSP) to `out`.
 fn push_nal(out: &mut Vec<u8>, header: u8, rbsp: &[u8]) {
@@ -954,6 +884,16 @@ mod tests {
                 width: 1280,
                 height: 720,
                 color: ColorDescription::default(),
+                crop_left: 0,
+                crop_top: 0,
+                log2_max_frame_num_minus4: 4,
+                pic_order_cnt_type: 2,
+                log2_max_pic_order_cnt_lsb_minus4: 0,
+                max_num_ref_frames: 1,
+                gaps_in_frame_num_allowed: false,
+                frame_mbs_only: true,
+                direct_8x8_inference: true,
+                has_scaling_matrix: false,
             }
         );
     }

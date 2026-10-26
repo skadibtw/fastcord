@@ -61,11 +61,20 @@ fn sps(
     if pic_order_cnt_type == 0 {
         bits.ue(log2_max_pic_order_cnt_lsb_minus4);
     }
+    if pic_order_cnt_type == 1 {
+        bits.flag(false); // delta_pic_order_always_zero_flag
+        bits.se(0); // offset_for_non_ref_pic
+        bits.se(0); // offset_for_top_to_bottom_field
+        bits.ue(0); // num_ref_frames_in_pic_order_cnt_cycle
+    }
     bits.ue(num_ref_frames);
     bits.flag(gaps_in_frame_num_value_allowed);
     bits.ue(7); // pic_width_in_mbs_minus1: 128 coded pixels
     bits.ue(5); // pic_height_in_map_units_minus1: 96 coded pixels
     bits.flag(frame_mbs_only);
+    if !frame_mbs_only {
+        bits.flag(false); // mb_adaptive_frame_field_flag
+    }
     bits.flag(true); // direct_8x8_inference_flag
     match crop {
         Some([left, right, top, bottom]) => {
@@ -77,6 +86,7 @@ fn sps(
         }
         None => bits.flag(false),
     }
+    bits.flag(false); // vui_parameters_present_flag
     bits.trailing();
     nal(0x67, &bits.finish())
 }
@@ -209,19 +219,6 @@ fn parameter_caches(sps: &[u8], pps: &[u8]) -> ParameterCaches {
     parameters.remember_sps(sps).unwrap();
     parameters.remember_pps(pps);
     parameters
-}
-
-#[test]
-fn strips_emulation_prevention_bytes() {
-    // A plain NAL unit passes through untouched.
-    assert_eq!(strip_epb(&[1, 2, 3]), [1, 2, 3]);
-    // `00 00 03` is the inserted escape byte.
-    assert_eq!(strip_epb(&[0, 0, 3, 5]), [0, 0, 5]);
-    // The zero pair keeps counting, so an escape byte that immediately
-    // follows another one is dropped as well.
-    assert_eq!(strip_epb(&[0, 0, 3, 0, 0, 3, 7]), [0, 0, 0, 0, 7]);
-    // Shorter zero runs stay untouched.
-    assert_eq!(strip_epb(&[0, 0, 0, 4]), [0, 0, 0, 4]);
 }
 
 #[test]
