@@ -15,6 +15,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- A compressed WebSocket message that the server ends with a final deflate block (allowed by RFC 7692 and accepted by Chromium) no longer drops the connection as corrupt (#129).
 - Reconnecting the Gateway, voice and stream connections (and HTTPS proxy hops) without network recovery on now resumes the earlier TLS session instead of a full handshake each time (#131): the TLS settings are built once per process, so their session cache survives between connections. Recovery probes still never resume. Trusting the system's certificate store is not done yet.
 - Turning the camera background effect off right after turning it on no longer freezes the camera picture while the background model finishes loading (over a second here) (#132). The segmentation worker now stops on its own instead of being waited for on the camera thread; stopping the camera is no longer delayed by it either.
 - On Linux, screen sharing through the desktop portal no longer fails with "no xdg-desktop-portal" after the share picker has opened once, and the file dialogs no longer break after a share (#136). Every portal call now runs on one runtime that lives as long as the app (one parked thread), because the portal library keeps a single D-Bus connection that died with the throwaway runtime it was first made on.

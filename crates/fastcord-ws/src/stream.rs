@@ -540,9 +540,14 @@ pub(crate) fn inflate_raw(
         }
         out.extend_from_slice(&chunk[..produced]);
         match status {
-            // A live permessage-deflate connection never ends the deflate
-            // stream, even with `*_no_context_takeover`.
-            Status::StreamEnd => return Err(AdapterError::CorruptDeflate),
+            // RFC 7692 7.2.3.4 lets a sender flush with a BFINAL block: start
+            // a new stream for what follows, as Chromium does (#129).
+            Status::StreamEnd => {
+                inflate.reset(false);
+                if input.is_empty() {
+                    break;
+                }
+            }
             Status::Ok | Status::BufError => {
                 if input.is_empty() && produced < chunk.len() {
                     break;

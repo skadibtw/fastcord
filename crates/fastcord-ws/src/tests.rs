@@ -498,3 +498,25 @@ fn noise(len: usize) -> Vec<u8> {
         })
         .collect()
 }
+
+#[test]
+fn a_message_flushed_with_a_final_block_inflates() {
+    // RFC 7692 7.2.3.4: "Hello" in a BFINAL=1 block, then an empty stored
+    // block, then the suffix the receiver appends (#129).
+    let input = [
+        0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+    ];
+    let mut inflater = flate2::Decompress::new(false);
+    for _ in 0..2 {
+        let mut output = Vec::new();
+        crate::stream::inflate_raw(
+            &mut inflater,
+            &input,
+            &mut output,
+            &mut [0u8; 1024],
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(output, b"Hello");
+    }
+}
