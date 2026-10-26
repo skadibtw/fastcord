@@ -2,6 +2,7 @@
 //! attributed Twemoji PNGs. Only visible assets are decoded; handles share pixels.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastcord_model::{Emoji, Snowflake};
@@ -180,14 +181,13 @@ const PICKER_BYTES: usize = 2 * 1024 * 1024;
 const WORKERS: usize = 4;
 
 pub struct View {
-    frames: Vec<image::Handle>,
-    delays: Vec<Duration>,
-    cycle: Duration,
+    frames: Arc<[image::Handle]>,
+    delays: Arc<[Duration]>,
     bytes: usize,
-    frame: usize,
     /// Which budget admitted this view; fixed so each budget stays bounded.
     picker: bool,
-    due: Instant,
+    /// Every occurrence plays from here, so copies of one emoji stay in step.
+    start: Instant,
 }
 
 impl View {
@@ -198,31 +198,119 @@ impl View {
             .into_iter()
             .map(|frame| image::Handle::from_rgba(frame.width, frame.height, frame.rgba))
             .collect();
-        let due = Instant::now()
-            + animation
-                .delays
-                .first()
-                .copied()
-                .unwrap_or(Duration::from_secs(1));
-        let cycle = animation.delays.iter().sum();
         Self {
             frames,
-            delays: animation.delays,
-            cycle,
+            delays: animation.delays.into(),
             bytes,
-            frame: 0,
             picker: false,
-            due,
+            start: Instant::now(),
         }
     }
-    pub fn handle(&self) -> image::Handle {
-        // Reduced motion (or autoplay off) shows the first frame.
-        let frame = if crate::chat_prefs::current().animated() {
-            self.frame
-        } else {
-            0
+}
+
+/// The frame shown `elapsed` into the loop and how long it stays; `None`
+/// for a still image.
+fn frame_at(delays: &[Duration], elapsed: Duration) -> (usize, Option<Duration>) {
+    let cycle: Duration = delays.iter().sum();
+    if delays.len() < 2 || cycle.is_zero() {
+        return (0, None);
+    }
+    let mut at = Duration::from_nanos((elapsed.as_nanos() % cycle.as_nanos()) as u64);
+    for (index, delay) in delays.iter().enumerate() {
+        if at < *delay {
+            return (index, Some(*delay - at));
+        }
+        at -= *delay;
+    }
+    (0, Some(delays[0]))
+}
+
+/// Draws one emoji and animates it by itself: on each redraw it picks the
+/// due frame and asks for the next redraw when that frame ends. A frame
+/// change costs one redraw, with no message, `update` or `view` (#155).
+struct Animated {
+    frames: Arc<[image::Handle]>,
+    delays: Arc<[Duration]>,
+    start: Instant,
+    size: f32,
+}
+
+impl<M> iced::advanced::Widget<M, iced::Theme, iced::Renderer> for Animated {
+    fn size(&self) -> iced::Size<Length> {
+        iced::Size::new(Length::Fixed(self.size), Length::Fixed(self.size))
+    }
+
+    fn tag(&self) -> iced::advanced::widget::tree::Tag {
+        iced::advanced::widget::tree::Tag::of::<usize>()
+    }
+
+    fn state(&self) -> iced::advanced::widget::tree::State {
+        iced::advanced::widget::tree::State::new(0_usize)
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut iced::advanced::widget::Tree,
+        _renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        iced::advanced::layout::atomic(limits, self.size, self.size)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        _cursor: iced::mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, M>,
+        viewport: &iced::Rectangle,
+    ) {
+        let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event else {
+            return;
         };
-        self.frames[frame].clone()
+        // Reduced motion (or autoplay off) shows the first frame.
+        if !crate::chat_prefs::current().animated() {
+            *tree.state.downcast_mut::<usize>() = 0;
+            return;
+        }
+        let (frame, left) = frame_at(&self.delays, now.saturating_duration_since(self.start));
+        *tree.state.downcast_mut::<usize>() = frame;
+        // Off screen (overscan rows) it keeps its frame but wakes nothing.
+        if let Some(left) = left
+            && layout.bounds().intersects(viewport)
+        {
+            shell.request_redraw_at(*now + left);
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        _theme: &iced::Theme,
+        _style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        _cursor: iced::mouse::Cursor,
+        _viewport: &iced::Rectangle,
+    ) {
+        let Some(handle) = self.frames.get(*tree.state.downcast_ref::<usize>()) else {
+            return;
+        };
+        iced::widget::image::draw(
+            renderer,
+            layout,
+            handle,
+            None,
+            iced::border::Radius::default(),
+            iced::ContentFit::Contain,
+            image::FilterMethod::default(),
+            iced::Rotation::default(),
+            1.0,
+            1.0,
+        );
     }
 }
 
@@ -367,45 +455,11 @@ impl State {
         self.start(account, cache)
     }
 
+    #[cfg(test)]
     pub fn animating(&self) -> bool {
         self.active
             && crate::chat_prefs::current().animated()
             && self.views.values().any(|view| view.frames.len() > 1)
-    }
-
-    /// When the earliest visible animated frame is due, while animation runs.
-    pub fn next_due(&self) -> Option<Instant> {
-        if !self.animating() {
-            return None;
-        }
-        self.views
-            .values()
-            .filter(|view| view.frames.len() > 1)
-            .map(|view| view.due)
-            .min()
-    }
-
-    pub fn tick(&mut self, now: Instant) {
-        if !self.active {
-            return;
-        }
-        for view in self.views.values_mut() {
-            if view.frames.len() > 1 && now >= view.due {
-                let cycle = view.cycle;
-                let late = now.duration_since(view.due);
-                if late >= cycle {
-                    let cycles = late.as_nanos() / cycle.as_nanos();
-                    view.due += cycle * cycles.min(u128::from(u32::MAX)) as u32;
-                }
-                for _ in 0..view.frames.len() {
-                    if now < view.due {
-                        break;
-                    }
-                    view.frame = (view.frame + 1) % view.frames.len();
-                    view.due += view.delays[view.frame];
-                }
-            }
-        }
     }
 }
 
@@ -416,11 +470,12 @@ pub fn asset_view<'a, M: 'a>(
     size: f32,
 ) -> Element<'a, M> {
     if let Some(view) = views.get(&asset) {
-        image(view.handle())
-            .content_fit(iced::ContentFit::Contain)
-            .width(size)
-            .height(size)
-            .into()
+        Element::new(Animated {
+            frames: view.frames.clone(),
+            delays: view.delays.clone(),
+            start: view.start,
+            size,
+        })
     } else {
         text(fallback).size(size.min(16.0)).into()
     }
@@ -662,6 +717,22 @@ mod tests {
     }
 
     #[test]
+    fn the_frame_follows_elapsed_time_and_wakes_at_its_end() {
+        let delays = [Duration::from_millis(100), Duration::from_millis(50)];
+        let ms = Duration::from_millis;
+        assert_eq!(frame_at(&delays, ms(0)), (0, Some(ms(100))));
+        assert_eq!(frame_at(&delays, ms(99)), (0, Some(ms(1))));
+        assert_eq!(frame_at(&delays, ms(100)), (1, Some(ms(50))));
+        assert_eq!(frame_at(&delays, ms(170)), (0, Some(ms(80))), "loops");
+        assert_eq!(
+            frame_at(&delays[..1], ms(170)),
+            (0, None),
+            "a still image never wakes"
+        );
+        assert_eq!(frame_at(&[Duration::ZERO; 2], ms(5)), (0, None));
+    }
+
+    #[test]
     fn animations_share_occurrences_and_stop_when_hidden_or_inactive() {
         let asset = custom_asset(5);
         let mut state = State::default();
@@ -672,23 +743,6 @@ mod tests {
         let _ = state.synchronize(true, false, 1, None);
         state.views.insert(asset, View::from_decoded(animation(2)));
         assert!(state.animating());
-        let due = state.views[&asset].due;
-        assert_eq!(
-            state.next_due(),
-            Some(due),
-            "the wake-up is the frame's own due time"
-        );
-        state.tick(due);
-        assert_eq!(state.views[&asset].frame, 1);
-        assert!(
-            state.next_due().is_some_and(|next| next > due),
-            "a tick moves the wake-up to the next frame"
-        );
-        state.tick(due + Duration::from_millis(80));
-        assert_eq!(
-            state.views[&asset].frame, 1,
-            "late ticks keep elapsed frame timing"
-        );
         state.visibility(first, false);
         let _ = state.synchronize(true, false, 1, None);
         assert!(

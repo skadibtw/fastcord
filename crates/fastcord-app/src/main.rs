@@ -626,7 +626,6 @@ enum Message {
         u64,
         Result<attachments::DecodedAnimation, &'static str>,
     ),
-    EmojiTick(std::time::Instant),
     AvatarLoaded(u64, avatars::AvatarKey, Option<attachments::DecodedImage>),
     WindowActive(bool),
     VoiceInput(shortcuts::Event),
@@ -782,8 +781,7 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         let resynchronize = !matches!(
             message,
-            Message::EmojiTick(_)
-                | Message::EmojiLoaded(..)
+            Message::EmojiLoaded(..)
                 | Message::AvatarLoaded(..)
                 | Message::VideoReady(_)
                 | Message::MediaFrame(_)
@@ -977,7 +975,6 @@ impl App {
                 network_ui::updates,
             )
             .map(|()| Message::NetworkProgress),
-            self.animation_subscription(),
             self.video_subscription(),
             self.media_subscription(),
             self.soundboard_subscription(),
@@ -1335,23 +1332,6 @@ impl App {
     /// and fires once, when the earliest frame is due (at most 50 times a
     /// second): every message redraws the whole window, so a fixed 50 Hz timer
     /// redrew it even between frames.
-    fn animation_subscription(&self) -> iced::Subscription<Message> {
-        let Phase::Account { gateway, .. } = &self.phase else {
-            return iced::Subscription::none();
-        };
-        let Some(due) = gateway.emoji.next_due() else {
-            return iced::Subscription::none();
-        };
-        iced::Subscription::run_with(due, |due| {
-            let due = *due;
-            iced::futures::stream::once(async move {
-                let floor = std::time::Instant::now() + std::time::Duration::from_millis(20);
-                tokio::time::sleep_until(due.max(floor).into()).await;
-                Message::EmojiTick(std::time::Instant::now())
-            })
-        })
-    }
-
     // Keep specialized dispatch outside the large account-message frame.
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -3258,11 +3238,6 @@ and a fourth"
                     gateway
                         .controls
                         .timeline_intent(history::Intent::FirstUnread { channel, acked });
-                }
-            }
-            Message::EmojiTick(now) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
-                    gateway.emoji.tick(now);
                 }
             }
             Message::EmojiLoaded(generation, asset, ticket, result) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == generation) => {
@@ -7419,6 +7394,35 @@ mod tests {
     }
 
     #[test]
+    fn an_inactive_window_drops_decoded_animations() {
+        let mut app = login_app();
+        authenticate(&mut app, Persistence::MemoryOnly);
+        let Phase::Account { gateway, .. } = &mut app.phase else {
+            panic!("account");
+        };
+        let frame = attachments::DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: bytes::Bytes::from_static(&[255, 0, 0, 255]),
+        };
+        gateway.emoji.views.insert(
+            emoji::Asset::Custom {
+                id: Snowflake(12345),
+                animated: true,
+            },
+            emoji::View::from_decoded(attachments::DecodedAnimation {
+                frames: vec![frame.clone(), frame],
+                delays: vec![std::time::Duration::from_millis(20); 2],
+            }),
+        );
+        let _ = app.update(Message::WindowActive(false));
+        let Phase::Account { gateway, .. } = &app.phase else {
+            panic!("account");
+        };
+        assert!(gateway.emoji.views.is_empty());
+    }
+
+    #[test]
     fn tcp_proxy_explains_media_before_any_join_or_ring_intent() {
         let mut app = login_app();
         authenticate(&mut app, Persistence::MemoryOnly);
@@ -8268,68 +8272,6 @@ mod tests {
             parse_private_recipients(&"x".repeat(MAX_PRIVATE_RECIPIENT_INPUT_BYTES + 1), account)
                 .is_err()
         );
-    }
-
-    #[test]
-    fn animation_subscription_exists_only_for_visible_active_animated_assets() {
-        let mut app = login_app();
-        assert_eq!(app.animation_subscription().units(), 0, "idle: no timer");
-        authenticate(&mut app, Persistence::MemoryOnly);
-        let Phase::Account { gateway, .. } = &mut app.phase else {
-            panic!("account");
-        };
-        let asset = emoji::Asset::Custom {
-            id: Snowflake(12345),
-            animated: true,
-        };
-        gateway.emoji.visibility(
-            emoji::Occurrence {
-                asset,
-                origin: emoji::Origin::Timeline {
-                    channel: Snowflake(500),
-                    message: Snowflake(42),
-                    revision: 1,
-                    run: 0,
-                },
-            },
-            true,
-        );
-        let _ = gateway.emoji.synchronize(true, false, gateway.id, None);
-        assert_eq!(
-            app.animation_subscription().units(),
-            0,
-            "visible but not yet decoded: nothing to animate"
-        );
-        let Phase::Account { gateway, .. } = &mut app.phase else {
-            panic!("account");
-        };
-        let frame = attachments::DecodedImage {
-            width: 1,
-            height: 1,
-            rgba: bytes::Bytes::from_static(&[255, 0, 0, 255]),
-        };
-        gateway.emoji.views.insert(
-            asset,
-            emoji::View::from_decoded(attachments::DecodedAnimation {
-                frames: vec![frame.clone(), frame],
-                delays: vec![std::time::Duration::from_millis(20); 2],
-            }),
-        );
-        assert_ne!(
-            app.animation_subscription().units(),
-            0,
-            "a visible active animation has a timer"
-        );
-        let _ = app.update(Message::WindowActive(false));
-        assert_eq!(
-            app.animation_subscription().units(),
-            0,
-            "unfocused/minimized windows cancel animation"
-        );
-        let Phase::Account { gateway, .. } = &app.phase else {
-            panic!("account");
-        };
-        assert!(gateway.emoji.views.is_empty());
     }
 
     #[test]
