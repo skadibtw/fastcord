@@ -30,11 +30,12 @@ jobs:
         run: python3 scripts/check_network_boundary.py
       - name: AGENTS.md crate map matches the manifests
         run: python3 scripts/check_agents_map.py
-      - name: Generated files are current (licences, icon catalog)
+      - name: Generated files are current (licences, icon catalog, emoji index)
         run: |
           cargo fetch --locked
           python3 scripts/gen_third_party_licenses.py --check
           python3 assets/icons/generate.py --check-text
+          python3 -I assets/emoji/generate.py --check
 
   deny:
     runs-on: ubuntu-24.04

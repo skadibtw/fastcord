@@ -7,6 +7,8 @@ Twemoji code is MIT licensed; no Twemoji JavaScript is used.
 Unicode emoji 16.0 index derived from iamcal/emoji-data v16.0.0, MIT.
 Source commit: 2771d0b1b3af25c069086e68e38f901c3dda8bdf
 Source: https://github.com/iamcal/emoji-data/tree/v16.0.0
+The unmodified upstream emoji.json is kept in source/emoji-data-16.0.0.json (same SHA256, MIT, see EMOJI-DATA-LICENSE.txt);
+source/twemoji-17.0.3-files.txt lists the bundled PNG file stems. generate.py rebuilds crates/fastcord-app/src/emoji_index.rs from them (--check in CI).
 Index names, aliases, categories and variants are retained; vendor sheet metadata is removed.
 Upstream emoji.json SHA256: 1d602e65be88772bf8cc368ce16b855d719eeddbafe128d471b80203f494d29f
 Twemoji release archive SHA256: b07d2bdfffabc3918ac5f9a87d08b22164e70530522459153b59364b25422eb8

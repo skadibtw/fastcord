@@ -7,6 +7,7 @@
 - Hovering the call's network icon shows the voice ping: the UDP round trip to the voice server in milliseconds, or "measuring…" until the first answer (#221). It is cleared when the call ends.
 
 ### Changed
+- `assets/emoji/generate.py` regenerates `emoji_index.rs` from the pinned emoji-data v16.0.0 JSON and the Twemoji file list, byte for byte; `--check` runs in CI (#170).
 - The image disk caches keep an in-memory byte ledger, scanned once per process, instead of walking and sorting every cached file on each miss under one global lock; evictions, touches and inserts update the ledger and only the unlinks hit the disk. Avatars, icons and stickers keep one sized copy, not a compressed one as well (#168). Both caches stay byte-bounded, including after a restart.
 - Refactor: `fastcord-discord` `state/mod.rs` is split into `guild.rs` (entity and byte ledger), `reduce.rs` (dispatch and handlers) and `retention.rs` (budget shedding); no behavior change (#166).
 - Every update no longer deep-clones the voice controls five to nine times or rescans the timeline for avatars, sticker and embed pictures and invite codes: readers borrow the controls in place (`voice_controls_with`), and the timeline's wanted keys are rebuilt only when its snapshot changes, so a keystroke does neither (#156).
