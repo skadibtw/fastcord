@@ -1709,6 +1709,31 @@ fn private_calls_follow_create_update_voice_and_delete_and_reset_on_ready() {
 }
 
 #[test]
+fn an_ignored_author_raises_no_mention() {
+    let mut store = ready_with_read_state(1, 0);
+    let ignore = serde_json::json!({"id": NELLY.to_string(), "type": 0, "user_ignored": true});
+    store.apply(fixture("RELATIONSHIP_ADD", &ignore.to_string()));
+    store.apply(channel_message(GENERAL, 1_000_000, NELLY, &[ME]));
+    // The channel has a newer message (as in Discord), but no mention badge.
+    assert_eq!(
+        store
+            .unread(id(GENERAL), Some(id(FIRST)), Some(id(1_000_000)))
+            .mentions,
+        0
+    );
+    // Once no longer ignored, the same kind of message counts again.
+    let unignore = serde_json::json!({"id": NELLY.to_string(), "user_ignored": false});
+    store.apply(fixture("RELATIONSHIP_UPDATE", &unignore.to_string()));
+    store.apply(channel_message(GENERAL, 1_000_001, NELLY, &[ME]));
+    assert_eq!(
+        store
+            .unread(id(GENERAL), Some(id(FIRST)), Some(id(1_000_001)))
+            .mentions,
+        1
+    );
+}
+
+#[test]
 fn levels_and_suppressed_mentions_shape_what_counts_as_unread_or_a_mention() {
     let mut store = ready_with_read_state(1, 0);
     let message = |event: GatewayEvent| match event {

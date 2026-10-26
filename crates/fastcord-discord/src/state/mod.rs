@@ -966,6 +966,11 @@ impl Store {
             }
             return;
         }
+        // A blocked or ignored author's messages are withheld everywhere,
+        // badges included (#162).
+        if self.suppression(message.author.id).is_some() {
+            return;
+        }
         let mentioned = message.guild_id.is_none() || self.notifies_account(message);
         let moved = if mentioned {
             self.read.note_mention(channel, message.id)

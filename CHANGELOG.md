@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- Messages from people you blocked or ignored no longer add to the mention count of the channel, the server icon or the tray (#162). Their notifications and mention-list entries were already hidden; the counters now follow the same rule.
 - A channel with many emoji no longer re-reads each message once per emoji on every update (#163): the check of which emoji are still on screen now parses each message once per update.
 - Server icons and your own avatar no longer fall back to letter circles after browsing many channels, and pictures that failed while the network was coming up are tried again (#165). The picture store now evicts what left the screen first; a network, 429 or 5xx failure is retried after 30 s, and a definite failure is forgotten once its picture leaves the screen.
 - A download you started keeps going when its message scrolls away or you switch channels, and ends with its usual result notice (#167). Before, it was silently cancelled and the partial file deleted. Up to two downloads run at once on their own connections, so a large one no longer holds up avatars, emoji and previews.
