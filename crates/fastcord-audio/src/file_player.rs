@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -212,6 +213,14 @@ trait Sink {
     fn failed(&mut self) -> bool;
     /// Estimated time between handing a packet over and hearing it.
     fn latency_ms(&self) -> u64;
+    /// The speaker id the packets carry.
+    fn ssrc(&self) -> u32 {
+        SSRC
+    }
+    /// First packet sequence number; a shared mixer has seen other players on the id before.
+    fn sequence_base(&self) -> u64 {
+        0
+    }
     /// Paused or ended: release the output (no stream, no engine thread).
     fn suspend(&mut self) {}
     /// About to play again: reopen the output; false if it cannot be opened.
@@ -288,12 +297,7 @@ impl Sink for EngineSink {
         let Some(open) = &self.open else {
             return Offer::Closed;
         };
-        // The copy is one 20 ms packet; keeping the original lets a full queue be retried.
-        match open.remote.try_send(frame.clone()) {
-            Ok(()) => Offer::Sent,
-            Err(TrySendError::Full(_)) => Offer::Full,
-            Err(TrySendError::Closed(_)) => Offer::Closed,
-        }
+        send(&open.remote, frame)
     }
 
     fn gain(&mut self, gain: f32) -> bool {
@@ -336,6 +340,124 @@ impl Sink for EngineSink {
             }
         }
         false
+    }
+}
+
+/// A running output engine (the call's) that local sounds mix into instead of opening
+/// another stream on the same device.
+#[derive(Clone)]
+struct OutputShare {
+    device: DeviceChoice,
+    enabled: bool,
+    remote: tokio::sync::mpsc::Sender<RemoteFrame>,
+    controls: tokio::sync::mpsc::Sender<EngineControl>,
+}
+
+static SHARED: Mutex<Option<OutputShare>> = Mutex::new(None);
+/// Speaker ids for local sources in a shared engine (bit set = taken).
+const SLOTS: u8 = 8;
+static TAKEN: AtomicU8 = AtomicU8::new(0);
+static NEXT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Offers the engine behind `remote`/`controls`, playing on `device`, as the output that
+/// [`FilePlayer::start_source`] reuses for that device. `None` withdraws it.
+pub fn share_output(
+    output: Option<(
+        DeviceChoice,
+        bool,
+        tokio::sync::mpsc::Sender<RemoteFrame>,
+        tokio::sync::mpsc::Sender<EngineControl>,
+    )>,
+) {
+    if let Ok(mut slot) = SHARED.lock() {
+        *slot = output.map(|(device, enabled, remote, controls)| OutputShare {
+            device,
+            enabled,
+            remote,
+            controls,
+        });
+    }
+}
+
+/// Follows the shared engine's output on/off (deafen): while off, players open their own
+/// stream so a sound meant to be heard is not swallowed.
+pub fn set_shared_output_enabled(enabled: bool) {
+    if let Ok(mut slot) = SHARED.lock()
+        && let Some(share) = slot.as_mut()
+    {
+        share.enabled = enabled;
+    }
+}
+
+/// A player's slot in the shared engine; frees its speaker id on drop.
+struct SharedSink {
+    share: OutputShare,
+    slot: u8,
+    base: u64,
+}
+
+impl SharedSink {
+    fn open(output: &DeviceChoice) -> Option<Self> {
+        let share = SHARED
+            .lock()
+            .ok()?
+            .clone()
+            .filter(|share| share.enabled && &share.device == output)?;
+        let slot = (0..SLOTS)
+            .find(|slot| TAKEN.fetch_or(1 << slot, Ordering::AcqRel) & (1 << slot) == 0)?;
+        Some(Self {
+            share,
+            slot,
+            base: NEXT_SEQUENCE.fetch_add(1 << 24, Ordering::Relaxed) + (1 << 24),
+        })
+    }
+}
+
+impl Drop for SharedSink {
+    fn drop(&mut self) {
+        TAKEN.fetch_and(!(1 << self.slot), Ordering::AcqRel);
+    }
+}
+
+impl Sink for SharedSink {
+    fn offer(&mut self, frame: &RemoteFrame) -> Offer {
+        send(&self.share.remote, frame)
+    }
+
+    fn gain(&mut self, gain: f32) -> bool {
+        self.share
+            .controls
+            .try_send(EngineControl::RemoteGain {
+                ssrc: self.ssrc(),
+                gain,
+            })
+            .is_ok()
+    }
+
+    // The call engine reports its own failures; a closed queue ends this player.
+    fn failed(&mut self) -> bool {
+        false
+    }
+
+    fn latency_ms(&self) -> u64 {
+        LATENCY_MS
+    }
+
+    fn ssrc(&self) -> u32 {
+        SSRC + 1 + u32::from(self.slot)
+    }
+
+    fn sequence_base(&self) -> u64 {
+        self.base
+    }
+}
+
+fn send(remote: &tokio::sync::mpsc::Sender<RemoteFrame>, frame: &RemoteFrame) -> Offer {
+    // The copy is one 20 ms packet; keeping the original lets a full queue be retried.
+    match remote.try_send(frame.clone()) {
+        Ok(()) => Offer::Sent,
+        Err(TrySendError::Full(_)) => Offer::Full,
+        Err(TrySendError::Closed(_)) => Offer::Closed,
     }
 }
 
@@ -389,6 +511,10 @@ impl FilePlayer {
         let Some(output) = output else {
             return Ok(Self::spawn(source, NullSink));
         };
+        // During a call on this device the sound joins the call's mix: no second stream.
+        if let Some(sink) = SharedSink::open(&output) {
+            return Ok(Self::spawn(source, sink));
+        }
         let open = OpenEngine::start(&output)?;
         Ok(Self::spawn(
             source,
@@ -465,8 +591,9 @@ fn run(
     let mut next_due = Instant::now();
     let mut drain_until: Option<Instant> = None;
     let mut pending: Option<RemoteFrame> = None;
-    let mut sequence = 0u64;
-    let mut timestamp = 0u32;
+    let ssrc = sink.ssrc();
+    let mut sequence = sink.sequence_base();
+    let mut timestamp = (sequence as u32).wrapping_mul(FRAME_MS as u32 * 48);
     let (mut volume, mut muted, mut applied) = (1.0f32, false, None::<f32>);
     shared.set_state(PlayerState::Playing);
     let latency = sink.latency_ms();
@@ -570,7 +697,7 @@ fn run(
                 Some(frame) => frame,
                 None => match reader.next_packet() {
                     Ok(Some(packet)) => RemoteFrame {
-                        ssrc: SSRC,
+                        ssrc,
                         sequence,
                         timestamp,
                         packet,
@@ -957,5 +1084,30 @@ mod tests {
         wait_for(|| clock.snapshot().state == PlayerState::Ended);
         assert_eq!(clock.snapshot().position_ms, 300);
         assert!(clock.epoch() > before);
+    }
+
+    /// During a call a local sound is mixed into the call engine's queues: the test has no
+    /// audio device, so opening a second stream would fail the start.
+    #[test]
+    fn a_sound_during_a_call_joins_the_running_engine() {
+        let (remote, mut frames) = tokio::sync::mpsc::channel(64);
+        let (controls, mut gains) = tokio::sync::mpsc::channel(8);
+        share_output(Some((DeviceChoice::SystemDefault, true, remote, controls)));
+        let player = FilePlayer::start_source(Silence::new(100), Some(DeviceChoice::SystemDefault))
+            .expect("no second stream");
+        player.set_volume(0.5);
+        wait_for(|| player.snapshot().state == PlayerState::Ended);
+        let first = frames.try_recv().unwrap();
+        assert!(first.ssrc > SSRC && first.ssrc <= SSRC + u32::from(SLOTS));
+        assert!(matches!(
+            gains.try_recv(),
+            Ok(EngineControl::RemoteGain { ssrc, .. }) if ssrc == first.ssrc
+        ));
+        // Deafened: the sound must open its own stream (fails here: no device).
+        set_shared_output_enabled(false);
+        assert!(SharedSink::open(&DeviceChoice::SystemDefault).is_none());
+        drop(player);
+        share_output(None);
+        wait_for(|| TAKEN.load(Ordering::Acquire) == 0);
     }
 }

@@ -80,6 +80,30 @@ const METER_INTERVAL: Duration = Duration::from_millis(100);
 /// When the engine's control queue was full, the unsent controls are retried after this.
 const CONTROL_RETRY: Duration = Duration::from_millis(20);
 
+/// Withdraws the shared output when the call's audio task ends.
+struct OutputShare;
+
+impl Drop for OutputShare {
+    fn drop(&mut self) {
+        fastcord_audio::share_output(None);
+    }
+}
+
+fn publish_output(
+    remote: &Option<mpsc::Sender<fastcord_audio::RemoteFrame>>,
+    controls: &mpsc::Sender<EngineControl>,
+    current: &VoiceControls,
+) {
+    fastcord_audio::share_output(remote.as_ref().map(|remote| {
+        (
+            current.output_device.clone(),
+            current.output_enabled(),
+            remote.clone(),
+            controls.clone(),
+        )
+    }));
+}
+
 /// What the engine has been told, so the bounded control queue carries changes only
 /// (never one message per received packet) and a refused control is retried, not lost.
 struct EngineSync {
@@ -143,6 +167,7 @@ impl EngineSync {
                 .is_ok()
             {
                 self.output = Some(output);
+                fastcord_audio::set_shared_output_enabled(output);
             } else {
                 self.retry = true;
             }
@@ -443,6 +468,10 @@ async fn run_with(
     let noise_status = NoiseStatus(&controls_tx);
     let mut captured = channels.captured;
     let mut remote = channels.remote_audio;
+    // Interface sounds and soundboard clips mix into this engine instead of opening
+    // another stream on the same device; withdrawn on every way out of the call.
+    let engine_controls = channels.controls.clone();
+    let _share = OutputShare;
     let mut sync = EngineSync::new(channels.controls);
     let mut events = channels.events;
     let mut status = session.watch_status();
@@ -455,6 +484,7 @@ async fn run_with(
         sync.apply(&initial, hold.active);
         initial.capture_enabled_with(hold.active)
     };
+    publish_output(&remote, &engine_controls, &controls.borrow());
     let mut retry_at = sync.retry_deadline();
     // Level polling runs only while the audio dialog is open.
     let mut meter_at = controls.borrow().diagnostics_open.then(Instant::now);
@@ -617,7 +647,10 @@ async fn run_with(
                                 let _ = media.end_speech();
                                 release_push_to_talk(&controls_tx);
                             }
-                            fastcord_audio::Direction::Output => remote = None,
+                            fastcord_audio::Direction::Output => {
+                                remote = None;
+                                publish_output(&remote, &engine_controls, &controls.borrow());
+                            }
                         }
                     }
                     Some(fastcord_audio::EngineEvent::StreamReady { direction, captured: new_capture, remote_audio, .. }) => {
@@ -632,7 +665,10 @@ async fn run_with(
                                 release_push_to_talk(&controls_tx);
                                 captured = new_capture;
                             }
-                            fastcord_audio::Direction::Output => remote = remote_audio,
+                            fastcord_audio::Direction::Output => {
+                                remote = remote_audio;
+                                publish_output(&remote, &engine_controls, &controls.borrow());
+                            }
                         }
                     }
                     Some(fastcord_audio::EngineEvent::NoiseSuppressionChanged(noise)) => {

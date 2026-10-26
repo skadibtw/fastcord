@@ -301,6 +301,10 @@ pub fn observe(snap: Snap) {
         snap.deafened && snap.state == VoiceAudioState::Running,
         Ordering::Relaxed,
     );
+    // The deafen chime must not go through the call's output that is about to be switched off.
+    if snap.deafened {
+        fastcord_audio::set_shared_output_enabled(false);
+    }
     let sounds = WATCHER
         .lock()
         .map(|mut watcher| {

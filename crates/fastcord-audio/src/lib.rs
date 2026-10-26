@@ -52,7 +52,7 @@ pub use engine::{
 pub use error::AudioError;
 pub use file_player::{
     FilePlayer, PacketSource, PlayerClock, PlayerError, PlayerFailure, PlayerSnapshot, PlayerState,
-    Silence,
+    Silence, set_shared_output_enabled, share_output,
 };
 pub use level::{EchoDiagnostics, InputDiagnostics, InputGain, MAX_GAIN_DB, MIN_GAIN_DB};
 pub use mic_test::{MicTest, MicTestFailure, MicTestMode, MicTestPhase, MicTestSnapshot};
