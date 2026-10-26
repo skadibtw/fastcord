@@ -168,7 +168,7 @@ impl UrlRefresh for PublicEmoji {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttachmentError {
     InvalidUrl,
     Network,

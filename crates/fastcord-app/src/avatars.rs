@@ -12,7 +12,7 @@ use iced::{Element, Task};
 use sha2::{Digest, Sha256};
 
 use crate::Message;
-use crate::attachments::{AttachmentCache, DecodedImage};
+use crate::attachments::{AttachmentCache, AttachmentError, DecodedImage};
 
 pub const MAX_VIEWS: usize = 256;
 /// Decoded pixels the store holds, whatever the handle count.
@@ -21,6 +21,9 @@ pub const MAX_VIEW_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_WANTED: usize = 128;
 const MAX_FAILED: usize = 512;
 const WORKERS: usize = 4;
+/// A load that failed for a passing reason (network, 429/5xx, the cache)
+/// is tried again this long after, the next time the store runs.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 const CDN: &str = "https://cdn.discordapp.com";
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -138,20 +141,32 @@ impl AvatarKey {
         }
     }
 
-    async fn load(self, cache: AttachmentCache) -> Option<DecodedImage> {
+    async fn load(self, cache: AttachmentCache) -> Result<DecodedImage, AttachmentError> {
         let url = self.url();
         if let Self::Embed { hash, fit, .. } = &self {
             let fit = (u32::from(fit.0), u32::from(fit.1));
-            return cache.embed_image(hash, &url, fit).await.ok();
+            return cache.embed_image(hash, &url, fit).await;
         }
         let (kind, id, hash) = match &self {
             Self::User { id, hash } => (2, *id, hash.as_str()),
             Self::Guild { id, hash } => (3, *id, hash.as_str()),
             Self::Default(n) => (4, Snowflake(u64::from(*n)), "default"),
             Self::Sticker { id, .. } => (6, *id, "sticker"),
-            Self::Embed { .. } => return None,
+            Self::Embed { .. } => return Err(AttachmentError::InvalidUrl),
         };
-        cache.avatar(kind, id, hash, &url).await.ok()
+        cache.avatar(kind, id, hash, &url).await
+    }
+}
+
+/// Whether a failed load may succeed later without anything else changing.
+fn transient(error: &AttachmentError) -> bool {
+    match error {
+        AttachmentError::Network
+        | AttachmentError::CacheUnavailable
+        | AttachmentError::WorkerStopped
+        | AttachmentError::RefreshFailed => true,
+        AttachmentError::Http(status) => *status == 429 || *status >= 500,
+        _ => false,
     }
 }
 
@@ -162,6 +177,8 @@ pub struct State {
     bytes: usize,
     workers: HashMap<AvatarKey, Handle>,
     failed: HashSet<AvatarKey>,
+    /// Keys whose last load failed for a passing reason, and when to retry.
+    retry_at: HashMap<AvatarKey, std::time::Instant>,
     wanted: Vec<AvatarKey>,
 }
 
@@ -181,6 +198,17 @@ impl State {
         self.wanted = wanted;
         let wanted = &self.wanted;
         self.workers.retain(|key, _| wanted.contains(key));
+        // Failures are remembered only while their key is on screen, so a
+        // picture that comes back later is asked for again (#165).
+        self.failed.retain(|key| wanted.contains(key));
+        self.retry_at.retain(|key, _| wanted.contains(key));
+        // What is on screen is the most recently used: eviction takes what
+        // left the screen first.
+        let (mut kept, mut shown): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.order)
+            .into_iter()
+            .partition(|(key, _)| !wanted.contains(key));
+        kept.append(&mut shown);
+        self.order = kept;
         self.start(account, cache)
     }
 
@@ -189,6 +217,7 @@ impl State {
             return Task::none();
         };
         let mut tasks = Vec::new();
+        let now = std::time::Instant::now();
         for key in &self.wanted {
             if self.workers.len() == WORKERS {
                 break;
@@ -196,6 +225,7 @@ impl State {
             if self.views.contains_key(key)
                 || self.workers.contains_key(key)
                 || self.failed.contains(key)
+                || self.retry_at.get(key).is_some_and(|at| now < *at)
             {
                 continue;
             }
@@ -214,14 +244,15 @@ impl State {
         &mut self,
         account: u64,
         key: AvatarKey,
-        image: Option<DecodedImage>,
+        image: Result<DecodedImage, AttachmentError>,
         cache: Option<&AttachmentCache>,
     ) -> Task<Message> {
         if self.workers.remove(&key).is_none() || !self.wanted.contains(&key) {
             return Task::none();
         }
         match image {
-            Some(image) => {
+            Ok(image) => {
+                self.retry_at.remove(&key);
                 let size = image.rgba.len();
                 while self.views.len() >= MAX_VIEWS || self.bytes + size > MAX_VIEW_BYTES {
                     let Some((oldest, freed)) = self.order.pop_front() else {
@@ -237,7 +268,11 @@ impl State {
                     image::Handle::from_rgba(image.width, image.height, image.rgba),
                 );
             }
-            None => {
+            Err(error) if transient(&error) => {
+                self.retry_at
+                    .insert(key, std::time::Instant::now() + RETRY_AFTER);
+            }
+            Err(_) => {
                 if self.failed.len() >= MAX_FAILED {
                     self.failed.clear();
                 }
@@ -351,7 +386,7 @@ mod tests {
         let load = |state: &mut State, n: u64| {
             let handle = Task::<Message>::none().abortable().1;
             state.workers.insert(key(n), handle.abort_on_drop());
-            let _ = state.loaded(1, key(n), Some(decoded()), None);
+            let _ = state.loaded(1, key(n), Ok(decoded()), None);
         };
         for round in 0..3u64 {
             let wanted: Vec<_> = (round * 128..(round + 1) * 128).map(key).collect();
@@ -374,6 +409,51 @@ mod tests {
     }
 
     #[test]
+    fn what_stays_on_screen_is_never_evicted_and_passing_failures_are_retried() {
+        let mut state = State::default();
+        let key = |n: u64| AvatarKey::User {
+            id: Snowflake(n),
+            hash: "h".to_owned(),
+        };
+        let finish = |state: &mut State, n: u64, image: Result<DecodedImage, AttachmentError>| {
+            let handle = Task::<Message>::none().abortable().1;
+            state.workers.insert(key(n), handle.abort_on_drop());
+            let _ = state.loaded(1, key(n), image, None);
+        };
+        // Key 0 (say, the own avatar) is on screen the whole time while far
+        // more than MAX_VIEWS other pictures come and go around it.
+        for round in 0..4u64 {
+            let mut wanted = vec![key(0)];
+            wanted.extend((1 + round * 127..1 + (round + 1) * 127).map(key));
+            let _ = state.synchronize(wanted, 1, None);
+            if round == 0 {
+                finish(&mut state, 0, Ok(decoded()));
+            }
+            for n in 1 + round * 127..1 + (round + 1) * 127 {
+                finish(&mut state, n, Ok(decoded()));
+            }
+        }
+        assert_eq!(state.views.len(), MAX_VIEWS);
+        assert!(state.views.contains_key(&key(0)), "on screen: kept");
+        assert!(
+            !state.views.contains_key(&key(1)),
+            "left the screen: evicted"
+        );
+
+        // A network failure is not final: it waits, then may be tried again.
+        let _ = state.synchronize(vec![key(900), key(901)], 1, None);
+        finish(&mut state, 900, Err(AttachmentError::Network));
+        assert!(!state.failed.contains(&key(900)));
+        assert!(state.retry_at.contains_key(&key(900)));
+        // A 404 is final while the picture stays on screen ...
+        finish(&mut state, 901, Err(AttachmentError::Http(404)));
+        assert!(state.failed.contains(&key(901)));
+        // ... and forgotten once it leaves, so it is asked for when it returns.
+        let _ = state.synchronize(vec![key(2)], 1, None);
+        assert!(state.failed.is_empty() && state.retry_at.is_empty());
+    }
+
+    #[test]
     fn failures_keep_the_fallback_and_are_not_retried() {
         let mut state = State::default();
         let key = AvatarKey::Default(1);
@@ -382,7 +462,7 @@ mod tests {
             key.clone(),
             Task::<Message>::none().abortable().1.abort_on_drop(),
         );
-        let _ = state.loaded(1, key.clone(), None, None);
+        let _ = state.loaded(1, key.clone(), Err(AttachmentError::Http(404)), None);
         assert!(!state.views.contains_key(&key));
         assert!(state.failed.contains(&key));
     }
@@ -439,7 +519,7 @@ mod tests {
                 key(n),
                 Task::<Message>::none().abortable().1.abort_on_drop(),
             );
-            let _ = state.loaded(1, key(n), Some(big()), None);
+            let _ = state.loaded(1, key(n), Ok(big()), None);
         }
         assert!(state.bytes <= MAX_VIEW_BYTES && state.views.len() == 6);
         assert!(!state.views.contains_key(&key(0)) && state.views.contains_key(&key(9)));
@@ -448,7 +528,7 @@ mod tests {
             key(50),
             Task::<Message>::none().abortable().1.abort_on_drop(),
         );
-        let _ = state.loaded(1, key(50), None, None);
+        let _ = state.loaded(1, key(50), Err(AttachmentError::InvalidImage), None);
         assert!(!state.views.contains_key(&key(50)) && state.failed.contains(&key(50)));
     }
 }

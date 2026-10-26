@@ -626,7 +626,11 @@ enum Message {
         u64,
         Result<attachments::DecodedAnimation, &'static str>,
     ),
-    AvatarLoaded(u64, avatars::AvatarKey, Option<attachments::DecodedImage>),
+    AvatarLoaded(
+        u64,
+        avatars::AvatarKey,
+        Result<attachments::DecodedImage, attachments::AttachmentError>,
+    ),
     WindowActive(bool),
     VoiceInput(shortcuts::Event),
     ShortcutKey(shortcuts::KeyInput),
