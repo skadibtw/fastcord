@@ -855,19 +855,41 @@ impl Store {
     ) -> Unread {
         self.read.unread(
             channel,
-            guild,
+            self.is_muted(channel, guild),
             last_message,
             self.notify_level(channel, guild),
         )
     }
 
-    /// What a channel notifies about: its override, the server's level, or
+    /// The channel, its parent and (for a thread) the parent's category:
+    /// where a mute or notification level is inherited from (#148). Bounded,
+    /// so a parent cycle from the wire cannot loop.
+    fn lineage(
+        &self,
+        channel: Snowflake,
+        guild: Option<Snowflake>,
+    ) -> impl Iterator<Item = Snowflake> + '_ {
+        let entry = guild.and_then(|guild| self.guild(guild));
+        let mut next = Some(channel);
+        std::iter::from_fn(move || {
+            let id = next?;
+            next = entry
+                .and_then(|entry| entry.channel(id))
+                .and_then(|channel| channel.parent_id);
+            Some(id)
+        })
+        .take(3)
+    }
+
+    /// What a channel notifies about: its override, its category's (a
+    /// thread: its channel's, then that category's), the server's level, or
     /// the server's default (`default_message_notifications`).
     pub fn notify_level(&self, channel: Snowflake, guild: Option<Snowflake>) -> NotifyLevel {
         let default = guild
             .and_then(|guild| self.guild(guild))
             .and_then(|guild| NotifyLevel::from_wire(guild.settings().notifications.into()));
-        self.read.level(channel, guild, default)
+        self.read
+            .level(self.lineage(channel, guild), guild, default)
     }
 
     /// Whether the server itself is muted.
@@ -904,12 +926,7 @@ impl Store {
     pub fn guild_unread(&self, guild: Snowflake) -> Unread {
         self.guild(guild).map_or_else(Unread::default, |entry| {
             navigation::readable_channels(self, entry).fold(Unread::default(), |total, channel| {
-                total.merge(self.read.unread(
-                    channel.id,
-                    Some(guild),
-                    channel.last_message_id,
-                    self.notify_level(channel.id, Some(guild)),
-                ))
+                total.merge(self.unread(channel.id, Some(guild), channel.last_message_id))
             })
         })
     }
@@ -923,9 +940,10 @@ impl Store {
         }
     }
 
-    /// Whether the channel (or its guild) is muted by the account.
+    /// Whether the channel, its category (a thread: its channel or that
+    /// category) or its guild is muted by the account.
     pub fn is_muted(&self, channel: Snowflake, guild: Option<Snowflake>) -> bool {
-        self.read.is_muted(channel, guild)
+        self.read.is_muted(self.lineage(channel, guild), guild)
     }
 
     /// Whether the channel itself is muted (a muted guild does not count).
@@ -979,8 +997,8 @@ impl Store {
             self.read.note_mention(channel, message.id)
         } else {
             let level = self.notify_level(channel, message.guild_id);
-            self.read
-                .would_flag(channel, message.guild_id, message.id, level)
+            let muted = self.is_muted(channel, message.guild_id);
+            self.read.would_flag(channel, muted, message.id, level)
         };
         changes.read |= moved;
     }

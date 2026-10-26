@@ -104,16 +104,18 @@ impl ReadStates {
         changed
     }
 
-    /// What a channel notifies about: its own override, else the server's,
-    /// else the server's default (`guild_default`: Discord's 0 or 1).
+    /// What a channel notifies about: the nearest override in `lineage` (the
+    /// channel, then its parents), else the server's, else the server's
+    /// default (`guild_default`: Discord's 0 or 1).
     pub fn level(
         &self,
-        channel: Snowflake,
+        lineage: impl IntoIterator<Item = Snowflake>,
         guild: Option<Snowflake>,
         guild_default: Option<NotifyLevel>,
     ) -> NotifyLevel {
-        self.channel_levels
-            .get(&channel)
+        lineage
+            .into_iter()
+            .find_map(|channel| self.channel_levels.get(&channel))
             .or_else(|| guild.and_then(|guild| self.guild_levels.get(&guild)))
             .copied()
             .or(guild_default)
@@ -204,11 +206,11 @@ impl ReadStates {
     pub fn would_flag(
         &self,
         channel: Snowflake,
-        guild: Option<Snowflake>,
+        muted: bool,
         message: Snowflake,
         level: NotifyLevel,
     ) -> bool {
-        !self.is_muted(channel, guild)
+        !muted
             && level == NotifyLevel::All
             && self
                 .entries
@@ -220,8 +222,16 @@ impl ReadStates {
         self.entries.get(&channel).map(|entry| entry.acked)
     }
 
-    pub fn is_muted(&self, channel: Snowflake, guild: Option<Snowflake>) -> bool {
-        self.muted_channels.contains(&channel)
+    /// Whether any channel of `lineage` (the channel, then its parents) or
+    /// the guild is muted.
+    pub fn is_muted(
+        &self,
+        lineage: impl IntoIterator<Item = Snowflake>,
+        guild: Option<Snowflake>,
+    ) -> bool {
+        lineage
+            .into_iter()
+            .any(|channel| self.muted_channels.contains(&channel))
             || guild.is_some_and(|guild| self.muted_guilds.contains(&guild))
     }
 
@@ -233,7 +243,7 @@ impl ReadStates {
     pub fn unread(
         &self,
         channel: Snowflake,
-        guild: Option<Snowflake>,
+        muted: bool,
         last_message: Option<Snowflake>,
         level: NotifyLevel,
     ) -> Unread {
@@ -241,7 +251,7 @@ impl ReadStates {
             return Unread::default();
         };
         Unread {
-            unread: !self.is_muted(channel, guild)
+            unread: !muted
                 && level == NotifyLevel::All
                 && last_message.is_some_and(|last| last > entry.acked),
             // "Nothing" hides the badge too; mentions are still counted so a
@@ -316,7 +326,12 @@ mod tests {
         guild: Option<Snowflake>,
         last: Option<Snowflake>,
     ) -> Unread {
-        read.unread(channel, guild, last, NotifyLevel::All)
+        read.unread(
+            channel,
+            read.is_muted([channel], guild),
+            last,
+            NotifyLevel::All,
+        )
     }
 
     fn entry(
@@ -342,8 +357,8 @@ mod tests {
     fn levels_resolve_channel_then_server_then_default_and_hide_badges() {
         let mut read = states(50, 2);
         let default = Some(NotifyLevel::Mentions);
-        assert_eq!(read.level(A, Some(G), default), NotifyLevel::Mentions);
-        assert_eq!(read.level(A, Some(G), None), NotifyLevel::All);
+        assert_eq!(read.level([A], Some(G), default), NotifyLevel::Mentions);
+        assert_eq!(read.level([A], Some(G), None), NotifyLevel::All);
         assert!(read.update_levels(&entry(
             7,
             Some(NotifyLevel::All),
@@ -354,10 +369,10 @@ mod tests {
             Some(NotifyLevel::All),
             Some((100, NotifyLevel::Nothing))
         )));
-        assert_eq!(read.level(A, Some(G), default), NotifyLevel::Nothing);
+        assert_eq!(read.level([A], Some(G), default), NotifyLevel::Nothing);
         assert!(read.suppresses_everyone(G) && !read.suppresses_roles(G));
         let last = Some(Snowflake(60));
-        let unread = |level| read.unread(A, Some(G), last, level);
+        let unread = |level| read.unread(A, false, last, level);
         assert_eq!(
             unread(NotifyLevel::All),
             Unread {
@@ -373,13 +388,13 @@ mod tests {
             }
         );
         assert_eq!(unread(NotifyLevel::Nothing), Unread::default());
-        assert!(!read.would_flag(A, Some(G), Snowflake(60), NotifyLevel::Mentions));
+        assert!(!read.would_flag(A, false, Snowflake(60), NotifyLevel::Mentions));
         // Inheriting again clears the override; a new READY forgets everything.
         let mut inherit = entry(7, None, None);
         inherit.channel_levels = vec![(A, None)];
         inherit.suppress_everyone = false;
         assert!(read.update_levels(&inherit));
-        assert_eq!(read.level(A, Some(G), None), NotifyLevel::All);
+        assert_eq!(read.level([A], Some(G), None), NotifyLevel::All);
         read.update_levels(&entry(7, Some(NotifyLevel::Nothing), None));
         read.replace(Vec::new(), MuteSettings::default());
         assert_eq!(read.guild_level(G), None);

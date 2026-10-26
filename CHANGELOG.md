@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- Muting a category, or setting its notifications to "Only @mentions" or "Nothing", now applies to the channels inside it, and a thread follows its channel and that channel's category (#148). Their new messages no longer light the channel, the server icon or the tray, and "hide muted channels" hides them.
 - Pressing Reconnect after the client stopped reconnecting on its own no longer throws away your unsent drafts (#149): the text typed into each conversation carries over to the new connection. Messages still waiting in the outbox are not carried over yet.
 - An audio device that hangs while closing (a dropped Bluetooth headset, a stalled driver) can no longer freeze the whole account when you leave or switch calls (#151). The client waits at most a few seconds for it, and closes devices and screen-capture threads off the network worker.
 - On large accounts, unread dots and mention counts no longer vanish when the client trims its memory (#152). Users nothing refers to are now released first, and as soon as a member, channel or server is removed; read state is the last thing dropped, and if it is, the badges update instead of silently going stale.

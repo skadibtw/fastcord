@@ -1835,3 +1835,50 @@ fn levels_and_suppressed_mentions_shape_what_counts_as_unread_or_a_mention() {
     );
     assert_eq!(store.recount(), store.bytes());
 }
+
+#[test]
+fn a_category_mute_or_level_is_inherited_by_its_channels() {
+    const CATEGORY: u64 = 7_000;
+    let mut store = ready_with_read_state(1, 0);
+    let category = serde_json::json!({
+        "id": CATEGORY.to_string(), "type": 4, "guild_id": FIRST.to_string(),
+        "name": "off-topic", "position": 5, "permission_overwrites": [],
+    });
+    store.apply(fixture("CHANNEL_CREATE", &category.to_string()));
+    let general = serde_json::json!({
+        "id": GENERAL.to_string(), "type": 0, "guild_id": FIRST.to_string(),
+        "name": "general", "position": 0, "parent_id": CATEGORY.to_string(),
+        "permission_overwrites": [],
+    });
+    store.apply(fixture("CHANNEL_UPDATE", &general.to_string()));
+    let update = |muted, level| GatewayEvent::Dispatch {
+        sequence: 1,
+        event: Dispatch::UserGuildSettingsUpdate(Box::new(crate::gateway::GuildMuteUpdate {
+            guild_id: Some(id(FIRST)),
+            guild_muted: false,
+            channels: vec![(id(CATEGORY), muted)],
+            level: None,
+            suppress_everyone: false,
+            suppress_roles: false,
+            channel_levels: vec![(id(CATEGORY), level)],
+        })),
+    };
+    // Muted category: its child stays quiet and does not light the server.
+    store.apply(update(true, None));
+    assert!(store.is_muted(id(GENERAL), Some(id(FIRST))));
+    store.apply(channel_message(GENERAL, 1_000_000, NELLY, &[]));
+    assert!(!general_unread(&store).unread);
+    assert!(!store.guild_unread(id(FIRST)).unread);
+    // "Only @mentions" on the category applies to the child.
+    store.apply(update(false, Some(crate::gateway::NotifyLevel::Mentions)));
+    assert_eq!(
+        store.notify_level(id(GENERAL), Some(id(FIRST))),
+        crate::gateway::NotifyLevel::Mentions
+    );
+    store.apply(channel_message(GENERAL, 1_000_001, NELLY, &[]));
+    assert!(!general_unread(&store).unread);
+    // Inheriting again: the child is back to the server's level.
+    store.apply(update(false, None));
+    store.apply(channel_message(GENERAL, 1_000_002, NELLY, &[]));
+    assert!(general_unread(&store).unread);
+}
