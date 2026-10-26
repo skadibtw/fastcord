@@ -391,36 +391,24 @@ fn parse_connect(
     if headers.len() > HEADER_LIMIT || !headers.ends_with(b"\r\n\r\n") || headers.contains(&0) {
         return Err(NetworkError::InvalidTarget);
     }
-    let text = std::str::from_utf8(headers).map_err(|_| NetworkError::InvalidTarget)?;
-    let mut lines = text.split("\r\n");
-    let mut first = lines.next().ok_or(NetworkError::InvalidTarget)?.split(' ');
-    if first.next() != Some("CONNECT") {
+    let mut fields = [httparse::EMPTY_HEADER; 32];
+    let mut request = httparse::Request::new(&mut fields);
+    if !matches!(request.parse(headers), Ok(httparse::Status::Complete(_)))
+        || request.method != Some("CONNECT")
+        || request.version != Some(1)
+    {
         return Err(NetworkError::InvalidTarget);
     }
-    let authority = first.next().ok_or(NetworkError::InvalidTarget)?;
-    if first.next() != Some("HTTP/1.1") || first.next().is_some() {
-        return Err(NetworkError::InvalidTarget);
-    }
+    let authority = request.path.ok_or(NetworkError::InvalidTarget)?;
     let (host, port) = parse_authority(authority)?;
     let mut role = None;
     let mut attempt = None;
     let mut host_seen = false;
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with([' ', '\t']) {
-            return Err(NetworkError::InvalidTarget);
-        }
-        let (key, value) = line.split_once(':').ok_or(NetworkError::InvalidTarget)?;
-        if key.is_empty()
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err(NetworkError::InvalidTarget);
-        }
-        let value = value.trim_matches([' ', '\t']);
+    for header in request.headers.iter() {
+        let key = header.name;
+        let value = std::str::from_utf8(header.value)
+            .map_err(|_| NetworkError::InvalidTarget)?
+            .trim_matches([' ', '\t']);
         if key.eq_ignore_ascii_case("proxy-authorization") {
             if role.is_some() {
                 return Err(NetworkError::ProxyRefused);

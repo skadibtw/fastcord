@@ -18,6 +18,8 @@ license = "GPL-3.0-only"
 repository = "https://github.com/skadibtw/fastcord"
 
 [workspace.dependencies]
+# Already linked through hyper and tungstenite; parses the hand-made HTTP/1.1 heads (#133).
+httparse = "1.10"
 http = "1"
 tower = { version = "0.5", default-features = false }
 fastcord-net = { path = "crates/fastcord-net" }

@@ -317,40 +317,25 @@ async fn http_connect(
     }
 }
 
-fn validate_connect_response(headers: &[u8]) -> Result<(), NetworkError> {
-    let text = std::str::from_utf8(headers).map_err(|_| NetworkError::ProxyProtocol)?;
-    let mut lines = text.split("\r\n");
-    let first = lines.next().ok_or(NetworkError::ProxyProtocol)?;
-    let mut status = first.splitn(3, ' ');
-    if !matches!(status.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
+/// A complete CONNECT response head; `httparse` checks the status line, token
+/// names, values and folding, this the rules of a tunnel answer.
+fn validate_connect_response(head: &[u8]) -> Result<(), NetworkError> {
+    let mut fields = [httparse::EMPTY_HEADER; 64];
+    let mut response = httparse::Response::new(&mut fields);
+    if !matches!(response.parse(head), Ok(httparse::Status::Complete(_))) {
         return Err(NetworkError::ProxyProtocol);
     }
-    let status = status
-        .next()
-        .filter(|status| status.len() == 3)
-        .and_then(|status| status.parse::<u16>().ok())
-        .ok_or(NetworkError::ProxyProtocol)?;
+    let status = response.code.ok_or(NetworkError::ProxyProtocol)?;
     if status == 407 {
         return Err(NetworkError::ProxyAuthentication);
     }
     if !(200..=299).contains(&status) {
         return Err(NetworkError::ProxyRefused);
     }
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with([' ', '\t']) {
-            return Err(NetworkError::ProxyProtocol);
-        }
-        let (name, value) = line.split_once(':').ok_or(NetworkError::ProxyProtocol)?;
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            || value.chars().any(|ch| ch.is_control() && ch != '\t')
-            || name.eq_ignore_ascii_case("transfer-encoding")
-            || (name.eq_ignore_ascii_case("content-length") && value.trim() != "0")
+    for header in response.headers.iter() {
+        if header.name.eq_ignore_ascii_case("transfer-encoding")
+            || (header.name.eq_ignore_ascii_case("content-length")
+                && header.value.trim_ascii() != b"0")
         {
             return Err(NetworkError::ProxyProtocol);
         }

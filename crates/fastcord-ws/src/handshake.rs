@@ -21,6 +21,8 @@ use crate::stream::{CompressingStream, Limits};
 
 /// Anything larger than this is not a valid opening handshake response.
 const MAX_RESPONSE_HEADER_BYTES: usize = 16 * 1024;
+/// Most header fields a handshake response may carry.
+const MAX_RESPONSE_HEADERS: usize = 64;
 const READ_CHUNK_BYTES: usize = 4096;
 
 /// Categorical: no header text or endpoint ever reaches a display or a log.
@@ -159,7 +161,6 @@ where
     loop {
         if let Some(end) = find(&head, b"\r\n\r\n") {
             let tail = head.split_off(end + 4);
-            head.truncate(end);
             return Ok((head, tail));
         }
         if head.len() >= MAX_RESPONSE_HEADER_BYTES {
@@ -204,33 +205,26 @@ fn header_has_token(headers: &[(String, String)], name: &str, token: &str) -> bo
         .any(|value| value.trim().eq_ignore_ascii_case(token))
 }
 
+/// A complete response head, through the blank line. `httparse` checks the
+/// status line, token names and values and refuses obsolete line folding.
 fn parse_response(head: &[u8]) -> Result<Response, HandshakeError> {
-    let text = std::str::from_utf8(head).map_err(|_| HandshakeError::BadResponse)?;
-    let mut lines = text.split("\r\n");
-    let status_line = lines.next().ok_or(HandshakeError::BadResponse)?;
-    let mut parts = status_line.split_whitespace();
-    if parts.next() != Some("HTTP/1.1") {
+    let mut fields = [httparse::EMPTY_HEADER; MAX_RESPONSE_HEADERS];
+    let mut response = httparse::Response::new(&mut fields);
+    if !matches!(response.parse(head), Ok(httparse::Status::Complete(_)))
+        || response.version != Some(1)
+    {
         return Err(HandshakeError::BadResponse);
     }
-    let status = parts
-        .next()
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or(HandshakeError::BadResponse)?;
-    let mut headers = Vec::new();
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with(' ') || line.starts_with('\t') {
-            // Obsolete line folding is not accepted.
-            return Err(HandshakeError::BadResponse);
-        }
-        let (name, value) = line.split_once(':').ok_or(HandshakeError::BadResponse)?;
-        if name.is_empty() {
-            return Err(HandshakeError::BadResponse);
-        }
-        headers.push((name.to_ascii_lowercase(), value.trim().to_owned()));
-    }
+    let status = response.code.ok_or(HandshakeError::BadResponse)?;
+    let headers = response
+        .headers
+        .iter()
+        .map(|header| {
+            let value =
+                std::str::from_utf8(header.value).map_err(|_| HandshakeError::BadResponse)?;
+            Ok::<_, HandshakeError>((header.name.to_ascii_lowercase(), value.trim().to_owned()))
+        })
+        .collect::<Result<_, _>>()?;
     Ok(Response { status, headers })
 }
 
@@ -254,19 +248,19 @@ mod tests {
     #[test]
     fn malformed_responses_are_typed() {
         assert!(matches!(
-            parse_response(b"HTTP/2 101 Switching Protocols"),
+            parse_response(b"HTTP/2 101 Switching Protocols\r\n\r\n"),
             Err(HandshakeError::BadResponse)
         ));
         assert!(matches!(
-            parse_response(b"HTTP/1.1 101 Switching Protocols\r\nNoColon"),
+            parse_response(b"HTTP/1.1 101 Switching Protocols\r\nNoColon\r\n\r\n"),
             Err(HandshakeError::BadResponse)
         ));
         assert!(matches!(
-            parse_response(b"HTTP/1.1 101 Switching Protocols\r\n Folded: yes"),
+            parse_response(b"HTTP/1.1 101 Switching Protocols\r\nA: b\r\n Folded: yes\r\n\r\n"),
             Err(HandshakeError::BadResponse)
         ));
         let response = parse_response(
-            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: abc\r\n",
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: abc\r\n\r\n",
         )
         .unwrap();
         assert_eq!(response.status, 101);
