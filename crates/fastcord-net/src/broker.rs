@@ -41,9 +41,24 @@ struct Shared {
     attempts: Arc<crate::connect::Attempts>,
     recovering: Arc<Mutex<Option<crate::connect::Endpoint>>>,
     recovery_gate: Arc<tokio::sync::Mutex<()>>,
+    /// The campaign task this context started; aborted with the context.
+    campaign: Mutex<Option<tokio::task::AbortHandle>>,
     associations: Arc<Semaphore>,
     #[cfg(debug_assertions)]
     probe_output: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        if let Some(handle) = self
+            .campaign
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            handle.abort();
+        }
+    }
 }
 
 struct Demand {
@@ -148,6 +163,7 @@ impl NetworkContext {
             attempts: Arc::default(),
             recovering: Arc::default(),
             recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
+            campaign: Mutex::new(None),
             associations: Arc::new(Semaphore::new(crate::udp::MAX_ASSOCIATIONS)),
             #[cfg(debug_assertions)]
             probe_output: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -179,6 +195,7 @@ impl NetworkContext {
             attempts: self.0.attempts.clone(),
             recovering: self.0.recovering.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
+            campaign: Mutex::new(None),
             associations: self.0.associations.clone(),
             #[cfg(debug_assertions)]
             probe_output: self.0.probe_output.clone(),
@@ -406,14 +423,6 @@ impl NetworkContext {
                 pending.take();
             }
         }
-        let matches = |demand: &Demand| {
-            endpoint.is_none_or(|endpoint| {
-                endpoint.host.eq_ignore_ascii_case(&demand.host)
-                    && endpoint.port == demand.port
-                    && endpoint.role == demand.role
-                    && endpoint.profile == demand.profile
-            })
-        };
         let active_matches = || {
             endpoint.is_some_and(|endpoint| {
                 self.0
@@ -424,27 +433,124 @@ impl NetworkContext {
                     == Some(endpoint)
             })
         };
-        if endpoint.is_some()
-            && !self
-                .0
+        let has_pending = || {
+            self.0
                 .pending
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .as_ref()
-                .is_some_and(matches)
-            && !active_matches()
-        {
+                .is_some_and(|demand| demand_matches(endpoint, demand))
+        };
+        if endpoint.is_some() && !has_pending() && !active_matches() {
             return;
         }
-        let _gate = match self.0.recovery_gate.try_lock() {
+        // Waiting for the gate is waiting for the running campaign to finish:
+        // it is cancel-safe, so a caller's own deadline just drops this wait.
+        let gate = match self.0.recovery_gate.clone().try_lock_owned() {
             Ok(gate) => gate,
             Err(_) if endpoint.is_some() && !active_matches() => return,
-            Err(_) => self.0.recovery_gate.lock().await,
+            Err(_) => self.0.recovery_gate.clone().lock_owned().await,
         };
-        self.0.controller.wait_for_idle().await;
+        if !has_pending() {
+            return;
+        }
+        // The campaign is owned by the network, never by a caller's future: a
+        // caller's deadline (the Gateway's connect timeout) or cancellation
+        // must neither abort it nor leave `recovering` stuck. The task holds
+        // no reference to the context, which aborts it when dropped.
+        let env = CampaignEnv {
+            controller: self.0.controller.clone(),
+            pending: self.0.pending.clone(),
+            recovering: self.0.recovering.clone(),
+            transforms: self.0.transforms.clone(),
+            // A helper that is gone cannot be probed either: fall back to the
+            // ordinary catalog instead of planning a campaign around it.
+            factory: self
+                .0
+                .prefix_factory
+                .clone()
+                .filter(|factory| factory.available()),
+            #[cfg(debug_assertions)]
+            output: self.0.probe_output.clone(),
+        };
+        let endpoint = endpoint.cloned();
+        let task = tokio::spawn(async move {
+            let _gate = gate;
+            // Run the campaign one task deeper so a panic is observed here
+            // instead of vanishing with a dropped handle.
+            let inner = tokio::spawn(env.run(endpoint, forced));
+            let _abort = inner.abort_handle();
+            struct AbortOnDrop(tokio::task::AbortHandle);
+            impl Drop for AbortOnDrop {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
+            }
+            let _abort = AbortOnDrop(_abort);
+            if let Err(error) = inner.await
+                && error.is_panic()
+            {
+                eprintln!("fastcord-net: TLS recovery campaign panicked");
+            }
+        });
+        *self.0.campaign.lock().unwrap_or_else(|p| p.into_inner()) = Some(task.abort_handle());
+        // Wait for the campaign to end; the gate is held until it does.
+        drop(self.0.recovery_gate.lock().await);
+    }
+
+    pub(crate) fn strategy(
+        &self,
+        host: &str,
+        port: u16,
+        role: Role,
+        address: SocketAddr,
+        profile: TlsProfile,
+    ) -> Strategy {
+        if self.mode() != Mode::Auto {
+            return Strategy::Direct;
+        }
+        select_strategy(
+            self.controller(),
+            self.0.prefix_factory.as_deref(),
+            host,
+            port,
+            role,
+            address,
+            profile,
+        )
+    }
+}
+
+fn demand_matches(endpoint: Option<&crate::connect::Endpoint>, demand: &Demand) -> bool {
+    endpoint.is_none_or(|endpoint| {
+        endpoint.host.eq_ignore_ascii_case(&demand.host)
+            && endpoint.port == demand.port
+            && endpoint.role == demand.role
+            && endpoint.profile == demand.profile
+    })
+}
+
+/// Everything a recovery campaign needs, owned, so its task never keeps the
+/// `NetworkContext` alive.
+struct CampaignEnv {
+    controller: Controller,
+    pending: Arc<Mutex<Option<Demand>>>,
+    recovering: Arc<Mutex<Option<crate::connect::Endpoint>>>,
+    transforms: Arc<Semaphore>,
+    factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>,
+    #[cfg(debug_assertions)]
+    output: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CampaignEnv {
+    async fn run(self, endpoint: Option<crate::connect::Endpoint>, forced: Option<Strategy>) {
+        self.controller.wait_for_idle().await;
         let pending = {
-            let mut pending = self.0.pending.lock().unwrap_or_else(|p| p.into_inner());
-            if pending.as_ref().is_some_and(matches) {
+            let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            if pending
+                .as_ref()
+                .is_some_and(|demand| demand_matches(endpoint.as_ref(), demand))
+            {
                 pending.take()
             } else {
                 None
@@ -453,7 +559,7 @@ impl NetworkContext {
         let Some(pending) = pending else {
             return;
         };
-        if pending.generation != self.controller().generation() {
+        if pending.generation != self.controller.generation() {
             return;
         }
         // A concrete IP from the failed production flow is mandatory. No DNS
@@ -475,33 +581,29 @@ impl NetworkContext {
         ) else {
             return;
         };
-        *self.0.recovering.lock().unwrap_or_else(|p| p.into_inner()) =
+        *self.recovering.lock().unwrap_or_else(|p| p.into_inner()) =
             Some(crate::connect::Endpoint {
                 host: target.host.clone(),
                 port: target.port,
                 role: target.role,
                 profile: target.profile,
             });
-        let _scope = RecoveryScope(self.0.recovering.clone());
-        let transforms = self.0.transforms.clone();
-        // A helper that is gone cannot be probed either: fall back to the
-        // ordinary catalog instead of planning a campaign around it.
-        let factory = self
-            .0
-            .prefix_factory
-            .clone()
-            .filter(|factory| factory.available());
-        #[cfg(debug_assertions)]
-        let output = self.0.probe_output.clone();
+        let _scope = RecoveryScope(self.recovering.clone());
+        let Self {
+            controller,
+            transforms,
+            factory,
+            #[cfg(debug_assertions)]
+            output,
+            ..
+        } = self;
         let catalog = forced
             .or_else(|| factory.as_ref().map(|f| f.strategy()))
             .map(|strategy| [strategy]);
         let plan = catalog
             .as_ref()
             .map_or(Strategy::ORDER.as_slice(), |one| one.as_slice());
-        let _ = self
-            .0
-            .controller
+        let _ = controller
             .diagnose_plan(target, pending.failure, plan, move |request| {
                 let transforms = transforms.clone();
                 let factory = factory.clone();
@@ -526,28 +628,6 @@ impl NetworkContext {
                 }
             })
             .await;
-    }
-
-    pub(crate) fn strategy(
-        &self,
-        host: &str,
-        port: u16,
-        role: Role,
-        address: SocketAddr,
-        profile: TlsProfile,
-    ) -> Strategy {
-        if self.mode() != Mode::Auto {
-            return Strategy::Direct;
-        }
-        select_strategy(
-            self.controller(),
-            self.0.prefix_factory.as_deref(),
-            host,
-            port,
-            role,
-            address,
-            profile,
-        )
     }
 }
 
@@ -1225,6 +1305,109 @@ mod recovery_scope_tests {
         drop(gate);
         context.wait_for_endpoint(&active).await;
         assert!(context.0.recovering.lock().unwrap().is_none());
+    }
+    /// A campaign (here a never-finishing stand-in) that occupies the
+    /// controller; ours parks behind it without any dial.
+    fn occupy_controller(context: &NetworkContext) -> tokio::task::JoinHandle<()> {
+        let controller = context.controller().clone();
+        let target = DiagnosticTarget::new(
+            "gateway.discord.gg",
+            443,
+            Role::Gateway,
+            AddressFamily::V4,
+            TlsProfile::WebSocket,
+        )
+        .unwrap();
+        tokio::spawn(async move {
+            let _ = controller
+                .diagnose_plan(target, NetworkError::TlsReset, &[Strategy::Direct], |_| {
+                    std::future::pending::<ProbeOutcome>()
+                })
+                .await;
+        })
+    }
+    fn demand(context: &NetworkContext) {
+        context.record_failure(
+            "discord.com",
+            443,
+            Role::Rest,
+            TlsProfile::Http,
+            NetworkError::TlsReset,
+            Some("127.0.0.1:1".parse().unwrap()),
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_waiter_that_gives_up_does_not_cancel_the_campaign() {
+        let context = NetworkContext::new(Mode::Auto);
+        let blocker = occupy_controller(&context);
+        tokio::task::yield_now().await;
+        assert!(context.controller().budget_snapshot().campaign_active);
+        demand(&context);
+        let active = endpoint("discord.com", Role::Rest);
+        // The caller's own deadline (shorter than the stand-in campaign's
+        // probe limit) elapses.
+        assert!(
+            timeout(Duration::from_secs(1), context.wait_for_endpoint(&active))
+                .await
+                .is_err()
+        );
+        // The campaign still owns the gate and still has its demand.
+        assert!(context.0.recovery_gate.try_lock().is_err());
+        assert!(context.0.pending.lock().unwrap().is_some());
+        // An unrelated role proceeds at once.
+        timeout(
+            Duration::from_millis(1),
+            context.wait_for_endpoint(&endpoint("cdn.discordapp.com", Role::Cdn)),
+        )
+        .await
+        .unwrap();
+        blocker.abort();
+        let _ = blocker.await;
+        // A later waiter completes once the campaign ends; the demand is
+        // consumed and nothing is left stuck.
+        timeout(Duration::from_secs(120), context.wait_for_endpoint(&active))
+            .await
+            .unwrap();
+        assert!(context.0.pending.lock().unwrap().is_none());
+        assert!(context.0.recovering.lock().unwrap().is_none());
+        assert!(context.0.recovery_gate.try_lock().is_ok());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_recovery_does_not_run_the_campaign_in_its_caller() {
+        let context = NetworkContext::new(Mode::Auto);
+        let blocker = occupy_controller(&context);
+        tokio::task::yield_now().await;
+        demand(&context);
+        assert!(
+            timeout(Duration::from_secs(1), context.wait_for_recovery())
+                .await
+                .is_err()
+        );
+        assert!(context.0.recovery_gate.try_lock().is_err());
+        blocker.abort();
+        let _ = blocker.await;
+        timeout(Duration::from_secs(120), context.wait_for_recovery())
+            .await
+            .unwrap();
+        assert!(context.0.pending.lock().unwrap().is_none());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_context_aborts_its_campaign() {
+        let context = NetworkContext::new(Mode::Auto);
+        let blocker = occupy_controller(&context);
+        tokio::task::yield_now().await;
+        demand(&context);
+        let gate = context.0.recovery_gate.clone();
+        let _ = timeout(
+            Duration::from_secs(1),
+            context.wait_for_endpoint(&endpoint("discord.com", Role::Rest)),
+        )
+        .await;
+        assert!(gate.try_lock().is_err());
+        drop(context);
+        tokio::task::yield_now().await;
+        assert!(gate.try_lock().is_ok(), "the campaign outlived its context");
+        blocker.abort();
     }
     #[tokio::test]
     async fn network_changes_cannot_leave_a_stale_demand_blocking_other_endpoints() {
