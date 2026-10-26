@@ -62,6 +62,7 @@ enum SavedStrategy {
     MultiSplit,
     PacketFake,
     PacketOverlap,
+    RecordFragment,
 }
 
 impl From<Strategy> for SavedStrategy {
@@ -74,6 +75,7 @@ impl From<Strategy> for SavedStrategy {
             Strategy::MultiSplit => Self::MultiSplit,
             Strategy::PacketFake => Self::PacketFake,
             Strategy::PacketOverlap => Self::PacketOverlap,
+            Strategy::RecordFragment => Self::RecordFragment,
         }
     }
 }
@@ -88,6 +90,7 @@ impl From<SavedStrategy> for Strategy {
             SavedStrategy::MultiSplit => Self::MultiSplit,
             SavedStrategy::PacketFake => Self::PacketFake,
             SavedStrategy::PacketOverlap => Self::PacketOverlap,
+            SavedStrategy::RecordFragment => Self::RecordFragment,
         }
     }
 }

@@ -583,7 +583,7 @@ pub fn view<'a>(
                     "Auto checks only a required service after an eligible connection failure. TLS reachability does not establish that Discord or media works. Recovery is bounded; it never bypasses certificate verification."
                 )),
                 ui::note(tr(
-                    "TLS splitting is best effort. TCP writes do not guarantee packet boundaries. UDP media has a separate connection path."
+                    "Recovery can split the TLS ClientHello into several records whose writes never start on a record boundary. The handshake bytes, certificate verification and ALPN are unchanged. It is still best effort: TCP writes do not guarantee packet boundaries, and UDP media has a separate connection path."
                 )),
                 ui::note(tr(
                     "Optional Windows helper requires UAC once per session. It handles only the public TLS handshake for fastcord connections. The client and account stay unprivileged. Starting it selects Auto."

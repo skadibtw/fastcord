@@ -326,6 +326,61 @@ async fn every_write_boundary_short_writes_and_exact_accepted_byte_accounting() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn record_fragment_keeps_writes_off_every_record_boundary() {
+    let original = handshake(b"gateway.discord.gg");
+    let bytes = record(&original);
+    let mut refragmented = bytes.clone();
+    let info = parsed(&refragmented);
+    let boundaries = fragment_record(&mut refragmented, info).unwrap();
+    assert_eq!(boundaries.len(), FRAGMENTS);
+    assert_eq!(reassemble(&refragmented), original);
+    assert_eq!(refragmented.len(), bytes.len() + 5 * (FRAGMENTS - 1));
+    for boundary in &boundaries[..FRAGMENTS - 1] {
+        assert_eq!(refragmented[*boundary..*boundary + 3], [22, 3, 3]);
+    }
+    assert_eq!(boundaries[FRAGMENTS - 1], refragmented.len());
+    let (io, output) = ShortIo::new(usize::MAX);
+    let mut stream = ShapedStream::new(io, Strategy::RecordFragment);
+    let started = tokio::time::Instant::now();
+    stream.write_all(&bytes).await.unwrap();
+    stream.flush().await.unwrap();
+    let output = output.lock().unwrap();
+    assert_eq!(reassemble(&output.bytes), original);
+    assert_eq!(output.bytes.len(), refragmented.len());
+    // One write per fragment, each starting one byte before a record boundary,
+    // so no segment beginning is a record header.
+    let interior: Vec<usize> = boundaries[..FRAGMENTS - 1].iter().map(|b| b - 1).collect();
+    assert_eq!(output.writes.len(), FRAGMENTS);
+    assert_eq!(output.writes[0], (started, 0));
+    for (index, start) in interior.iter().enumerate() {
+        assert_eq!(
+            output.writes[index + 1],
+            (
+                started + WRITE_DELAY * u32::try_from(index + 1).unwrap(),
+                *start
+            )
+        );
+        assert!(!boundaries.contains(start));
+    }
+    assert_eq!(stream.bytes.capacity(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn record_fragment_preserves_a_hello_that_already_spans_records() {
+    let original = handshake(b"gateway.discord.gg");
+    let mut bytes = record(&original[..20]);
+    bytes.extend(record(&original[20..]));
+    let (io, output) = ShortIo::new(4);
+    let mut stream = ShapedStream::new(io, Strategy::RecordFragment);
+    for chunk in bytes.chunks(5) {
+        stream.write_all(chunk).await.unwrap();
+    }
+    stream.flush().await.unwrap();
+    assert_eq!(reassemble(&output.lock().unwrap().bytes), original);
+    assert_eq!(stream.bytes.capacity(), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn opaque_bridge_drains_only_complete_prefix_across_arbitrary_network_reads() {
     let original = handshake(b"gateway.discord.gg");
     let bytes = record(&original);

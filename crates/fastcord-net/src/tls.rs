@@ -17,8 +17,13 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Sleep;
 
-pub const CATALOG_VERSION: u32 = 2;
+pub const CATALOG_VERSION: u32 = 3;
 pub const MAX_CLIENT_HELLO: usize = 32 * 1024;
+/// Records the first plaintext ClientHello is refragmented into by
+/// `Strategy::RecordFragment`. Three interior boundaries fit `steps`.
+const FRAGMENTS: usize = 4;
+/// `ShapedStream::plan_fragments` can shift at most one boundary per step.
+const _: () = assert!(FRAGMENTS - 1 < 4);
 /// Raw staging (<64 KiB) plus temporary handshake assembly (32 KiB).
 pub const MAX_STAGING_BYTES: usize = 96 * 1024;
 // Leave slack for the tiny shared HRR flag and pending writer metadata.
@@ -40,22 +45,29 @@ pub enum Strategy {
     MultiSplit,
     PacketFake,
     PacketOverlap,
+    /// Legal TLS refragmentation of the plaintext ClientHello whose write
+    /// boundaries deliberately avoid every record boundary. A filter that
+    /// reassembles records from a segment starting on a record header never
+    /// sees a parseable ClientHello, which is what defeats SNI blackholing on
+    /// routes where TCP splitting and two-record splitting alone do not.
+    RecordFragment,
 }
 
 impl Strategy {
     pub const ORDER: [Self; 5] = [
         Self::Direct,
+        Self::RecordFragment,
         Self::TlsRecordSplit,
         Self::WriteSplit,
         Self::Combined,
-        Self::MultiSplit,
     ];
     #[cfg(test)]
-    pub const LEGACY: [Self; 4] = [
+    pub const LEGACY: [Self; 5] = [
         Self::Direct,
         Self::TlsRecordSplit,
         Self::WriteSplit,
         Self::Combined,
+        Self::RecordFragment,
     ];
 
     const fn record_split(self) -> bool {
@@ -298,6 +310,63 @@ pub fn split_record(bytes: &mut Vec<u8>, hello: ClientHello) -> Result<(), Parse
     }
     bytes.splice(hello.split_at..hello.split_at, continuation);
     Ok(())
+}
+
+/// Rewrites one plaintext record into `FRAGMENTS` records that carry exactly
+/// the same handshake bytes. The returned offsets are the new record boundaries,
+/// so the caller can keep its write boundaries one byte short of each of them.
+/// Handshake, SNI, ALPN and the transcript are untouched: only record headers
+/// and their lengths differ, and a peer reassembles the message as usual. The
+/// rewrite inserts `5 * (FRAGMENTS - 1)` bytes in place, so staging keeps its
+/// one bounded buffer instead of copying the hello twice.
+pub fn fragment_record(bytes: &mut Vec<u8>, hello: ClientHello) -> Result<Vec<usize>, ParseError> {
+    let header_end = hello
+        .record_start
+        .checked_add(5)
+        .ok_or(ParseError::InvalidRecord)?;
+    let header: [u8; 5] = bytes
+        .get(hello.record_start..header_end)
+        .ok_or(ParseError::InvalidRecord)?
+        .try_into()
+        .map_err(|_| ParseError::InvalidRecord)?;
+    let original = usize::from(u16::from_be_bytes([header[3], header[4]]));
+    if header[0] != 22
+        || Some(hello.record_end) != header_end.checked_add(original)
+        || hello.record_end > bytes.len()
+    {
+        return Err(ParseError::InvalidRecord);
+    }
+    let payload = hello.record_end - header_end;
+    if payload < 2 * FRAGMENTS || bytes.len() + 5 * (FRAGMENTS - 1) > MAX_RAW {
+        return Err(ParseError::StagingLimit);
+    }
+    let mut cuts = [0; FRAGMENTS - 1];
+    for (index, cut) in cuts.iter_mut().enumerate() {
+        *cut = payload * (index + 1) / FRAGMENTS;
+    }
+    let inserted = cuts.map(|cut| header_end + cut);
+    // Backwards, so every earlier offset stays valid while the tail grows.
+    for position in inserted.iter().rev() {
+        bytes.splice(*position..*position, [22, header[1], header[2], 0, 0]);
+    }
+    let mut boundaries = Vec::with_capacity(FRAGMENTS);
+    let mut start = 0;
+    for (index, cut) in cuts.iter().copied().chain([payload]).enumerate() {
+        let head = if index == 0 {
+            hello.record_start
+        } else {
+            inserted[index - 1] + 5 * (index - 1)
+        };
+        let length = u16::try_from(cut - start).map_err(|_| ParseError::InvalidRecord)?;
+        bytes[head + 3..head + 5].copy_from_slice(&length.to_be_bytes());
+        start = cut;
+        boundaries.push(head + 5 + length as usize);
+    }
+    debug_assert_eq!(
+        boundaries[FRAGMENTS - 1],
+        hello.record_end + 5 * (FRAGMENTS - 1)
+    );
+    Ok(boundaries)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -607,8 +676,19 @@ impl<S> ShapedStream<S> {
                     {
                         return self.unsupported();
                     }
+                    let fragments = if self.strategy == Strategy::RecordFragment {
+                        match fragment_record(&mut self.bytes, hello) {
+                            Ok(boundaries) => Some(boundaries),
+                            Err(_) => return self.unsupported(),
+                        }
+                    } else {
+                        None
+                    };
                     self.end = hello.prefix_end + self.bytes.len() - old_len;
-                    self.plan(hello)?;
+                    match fragments {
+                        Some(boundaries) => self.plan_fragments(&boundaries),
+                        None => self.plan(hello)?,
+                    }
                     self.transformed = true;
                     self.hellos += 1;
                     if self.hellos == 2 {
@@ -620,6 +700,20 @@ impl<S> ShapedStream<S> {
             _ => return self.unsupported(),
         }
         Ok(())
+    }
+
+    /// One write per fragment, each ending one byte before the next record
+    /// boundary. A segment that does not begin on a record header cannot be
+    /// parsed as a record stream by a filtering middlebox, and the bytes still
+    /// reassemble into the untouched handshake. The final write carries the
+    /// rest of the staged prefix, so no write ends on a record boundary.
+    fn plan_fragments(&mut self, boundaries: &[usize]) {
+        let interior = boundaries.len().saturating_sub(1).min(self.steps.len() - 1);
+        for (index, boundary) in boundaries[..interior].iter().enumerate() {
+            self.steps[index] = Step::new(boundary.saturating_sub(1), SendMode::Ordinary, true);
+        }
+        self.steps[interior] = Step::new(self.end, SendMode::Ordinary, false);
+        self.step_count = interior + 1;
     }
 
     fn plan(&mut self, hello: ClientHello) -> io::Result<()> {

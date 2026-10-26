@@ -334,3 +334,56 @@ The three review findings are covered by offline regressions in `fastcord-net`:
 These are deterministic/local correctness checks. They do not add live blocked-
 network, native Linux/macOS, resource-measurement or media interoperability
 acceptance evidence.
+
+## Unprivileged bypass on the reported route (2026-10-26, #218)
+
+The VPN (a TUN adapter) was switched off for this measurement, so every dial
+below used the ordinary Ethernet route and the workspace `fastcord-net` code.
+Diagnosis was done outside the client with a throwaway Python socket harness that
+sent hand-built ClientHellos; the production acceptance used the shipped code
+unchanged apart from the strategy described here.
+
+What the route does, measured repeatedly:
+
+- TCP to `162.159.136.232:443` (and `discord.com`, `gateway.discord.gg`,
+  `cdn.discordapp.com`) completes; the TLS handshake then receives nothing. The
+  same address with an SNI of `example.com` or `cloudflare.com` answers in 40-90 ms,
+  including in mixed case, so the filter matches the `discord.com` name in the
+  ClientHello rather than an address or port.
+- Neither a whole ClientHello (185-238 B and 1518-1536 B) nor TCP write splitting
+  at 1, the SNI or midsld restores an answer. Two-record splitting also fails: the
+  same hello as two records, each written as its own segment, stayed a black hole.
+- A refragmented ClientHello passes only when write boundaries avoid record
+  boundaries. Four records written one per segment: blocked, 0/9. The same four
+  records with each write ending one byte before the next record boundary:
+  answered, 9/9, in 50-90 ms. Three, four and five records and offsets of -1, +1,
+  -2, -5 and -10 bytes all pass; padding-free legal records only.
+- The winning layout holds for both the real `rustls` hello (`238 B`, no
+  post-quantum key share) and a `1536 B` one, so it does not depend on hello size,
+  extension order or a particular client fingerprint.
+
+Production acceptance with the shipped code (`fastcord-net` only, no helper, no
+driver, no administrator rights):
+
+1. A fresh `NetworkContext` in Auto with the anonymous API check: the first dial
+   ended `TlsTimeout` (4 s) and recorded the demand. The automatic campaign then
+   probed `Direct` (failed) and `RecordFragment` twice (both answered, 2.7 KiB
+   received), confirmed it, and the same request succeeded after 4.9 s.
+2. A subsequent `GET https://discord.com/api/v9/gateway` through the production
+   `http_builder(Role::Rest)` returned **HTTP 200** after the campaign, and the
+   status became `ServiceReachable`.
+3. The next dial reused the confirmed strategy and completed in **111 ms**,
+   without another probe.
+
+Offline coverage added with the strategy: the refragmented bytes reassemble to
+the original handshake, every interior boundary begins a record header, the four
+writes start at offsets `0, b1-1, b2-1, b3-1` with the documented 10 ms spacing,
+a hello that already spans records is preserved, and the existing real TLS
+1.2/1.3, ALPN, HRR and application-data suites run `RecordFragment` too.
+
+Not claimed: media. Voice and camera use UDP, which has its own path and is not
+shaped by this strategy; the packet helper still handles TCP TLS only. The
+fragment layout was verified on this one route; other filters may need a
+different one, which is why recovery keeps the rest of the catalog and the
+privileged helper.
+
