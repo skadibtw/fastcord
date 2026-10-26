@@ -355,6 +355,40 @@ enum Phase {
     Mfa(fastcord_discord::MfaChallenge),
 }
 
+impl Phase {
+    /// The signed-in account's session and panel. Borrows only the phase, so
+    /// a handler can hold them while it changes `App::ui` (#169).
+    fn account(&self) -> Option<(&Arc<Session>, &GatewayPanel)> {
+        match self {
+            Self::Account {
+                session, gateway, ..
+            } => Some((session, gateway)),
+            _ => None,
+        }
+    }
+
+    fn account_mut(&mut self) -> Option<(&Arc<Session>, &mut GatewayPanel)> {
+        match self {
+            Self::Account {
+                session, gateway, ..
+            } => Some((session, gateway)),
+            _ => None,
+        }
+    }
+
+    fn session(&self) -> Option<&Arc<Session>> {
+        self.account().map(|(session, _)| session)
+    }
+
+    fn gateway(&self) -> Option<&GatewayPanel> {
+        self.account().map(|(_, gateway)| gateway)
+    }
+
+    fn gateway_mut(&mut self) -> Option<&mut GatewayPanel> {
+        self.account_mut().map(|(_, gateway)| gateway)
+    }
+}
+
 // Every message containing a token uses the redacted wrapper; Debug cannot
 // expose text-input edits, worker results, or an authenticated session.
 /// The share picker's screens and windows, and the audio nodes to choose from.
@@ -738,7 +772,7 @@ impl App {
         if resynchronize {
             self.sync_tray();
         }
-        if let Phase::Account { gateway, .. } = &self.phase {
+        if let Some(gateway) = self.phase.gateway() {
             gateway.controls.quick_query(self.ui.switcher.wanted());
             self.ui.guild_admin.sync(&gateway.navigation);
             self.ui.automod.observe(&gateway.navigation.automod);
@@ -787,10 +821,7 @@ impl App {
     }
 
     fn synchronize_emoji(&mut self) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &mut self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account_mut() else {
             return Task::none();
         };
         gateway
@@ -819,7 +850,7 @@ impl App {
     }
 
     fn synchronize_video(&self) {
-        if let Phase::Account { gateway, .. } = &self.phase {
+        if let Some(gateway) = self.phase.gateway() {
             // Focus does not matter: a stream keeps playing in a window that is
             // visible but not focused, like the official client. Only a
             // minimized (zero-size) window or a covering view suspends video.
@@ -865,7 +896,7 @@ impl App {
     }
 
     fn video_subscription(&self) -> iced::Subscription<Message> {
-        let Phase::Account { gateway, .. } = &self.phase else {
+        let Some(gateway) = self.phase.gateway() else {
             return iced::Subscription::none();
         };
         let mut subscriptions = Vec::new();
@@ -1034,7 +1065,7 @@ impl App {
                 message,
             } => (guild, channel, message),
         };
-        let Phase::Account { gateway, .. } = &mut self.phase else {
+        let Some(gateway) = self.phase.gateway_mut() else {
             return Task::none();
         };
         self.ui.threads.close();
@@ -1108,7 +1139,7 @@ impl App {
     /// Releases every held hold-key at once (no release delay): bindings changed, the
     /// scope changed, or the listener went away.
     fn release_held_shortcuts(&mut self) {
-        if let Phase::Account { gateway, .. } = &self.phase {
+        if let Some(gateway) = self.phase.gateway() {
             gateway.controls.cancel_ptt();
             gateway.controls.set_push_to_mute(false);
         }
@@ -1120,7 +1151,7 @@ impl App {
         for action in actions {
             match action {
                 Do::Hold(kind, down) => {
-                    if let Phase::Account { gateway, .. } = &self.phase {
+                    if let Some(gateway) = self.phase.gateway() {
                         match kind {
                             Action::PushToTalk => gateway.controls.set_ptt(down),
                             Action::PushToMute => gateway.controls.set_push_to_mute(down),
@@ -1129,7 +1160,7 @@ impl App {
                     }
                 }
                 Do::Cancel(kind) => {
-                    if let Phase::Account { gateway, .. } = &self.phase {
+                    if let Some(gateway) = self.phase.gateway() {
                         match kind {
                             Action::PushToTalk => gateway.controls.cancel_ptt(),
                             Action::PushToMute => gateway.controls.set_push_to_mute(false),
@@ -1138,7 +1169,7 @@ impl App {
                     }
                 }
                 Do::Toggle(kind) => {
-                    if let Phase::Account { gateway, .. } = &self.phase
+                    if let Some(gateway) = self.phase.gateway()
                         && gateway.controls.voice_audio_state() == gateway::VoiceAudioState::Running
                     {
                         let controls = gateway.controls.voice_controls();
@@ -1196,7 +1227,7 @@ impl App {
             self.release_held_shortcuts();
         }
         self.shortcuts.rebuild(&self.audio_preferences.voice_input);
-        if let Phase::Account { gateway, .. } = &self.phase {
+        if let Some(gateway) = self.phase.gateway() {
             gateway
                 .controls
                 .set_voice_input(&self.audio_preferences.voice_input);
@@ -1209,7 +1240,7 @@ impl App {
 
     /// Frame notifications exist only while an attachment with video is on screen.
     fn media_frame_subscription(&self) -> iced::Subscription<Message> {
-        if let Phase::Account { gateway, .. } = &self.phase
+        if let Some(gateway) = self.phase.gateway()
             && let Some(session) = gateway
                 .media
                 .as_ref()
@@ -1712,7 +1743,7 @@ and a fourth"
                     // reconnect attempts (#139).
                     session.client.allow_manual_gateway_reconnect();
                     let task = self.enter_account(session, persistence);
-                    if let Phase::Account { gateway, .. } = &mut self.phase {
+                    if let Some(gateway) = self.phase.gateway_mut() {
                         gateway.composer = composer;
                     }
                     return task;
@@ -1814,7 +1845,7 @@ and a fourth"
                 return Task::batch(tasks);
             }
             Message::ServerSettings(guild, section) => {
-                let Phase::Account { gateway, .. } = &self.phase else {
+                let Some(gateway) = self.phase.gateway() else {
                     return Task::none();
                 };
                 let voice = section.channel().is_some_and(|channel| {
@@ -1862,9 +1893,7 @@ and a fourth"
             Message::NewDm(new_dm::Event::Create) => {
                 let recipients = self.ui.new_dm.recipients();
                 let _ = self.handle(Message::PrivateRecipients(recipients));
-                if let Phase::Account {
-                    session, gateway, ..
-                } = &self.phase
+                if let Some((session, gateway)) = self.phase.account()
                     && parse_private_recipients(&gateway.private.recipients, session.user.id)
                         .is_ok()
                 {
@@ -1877,7 +1906,7 @@ and a fourth"
                 self.ui.new_dm.update(event);
                 if opening {
                     self.close_menus();
-                    if let Phase::Account { gateway, .. } = &mut self.phase {
+                    if let Some(gateway) = self.phase.gateway_mut() {
                         gateway.private.notice = None;
                     }
                     return iced::widget::operation::focus("new-dm-search");
@@ -1912,7 +1941,7 @@ and a fourth"
                 return Task::batch([voices, self.handle(Message::RefreshAudioDevices)]);
             }
             Message::OpenAudioSettings | Message::RefreshAudioDevices => {
-                if let Phase::Account { gateway, .. } = &self.phase
+                if let Some(gateway) = self.phase.gateway()
                     && self.audio_settings.open
                 {
                     gateway.controls.set_diagnostics_open(true);
@@ -1938,12 +1967,12 @@ and a fourth"
                 }
                 if !closing.is_empty() {
                     let tasks: Vec<_> = closing.into_iter().map(|m| self.handle(m)).collect();
-                    if let Phase::Account { gateway, .. } = &self.phase {
+                    if let Some(gateway) = self.phase.gateway() {
                         gateway.controls.set_diagnostics_open(false);
                     }
                     return Task::batch(tasks);
                 }
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.set_diagnostics_open(false);
                 }
             }
@@ -1966,7 +1995,7 @@ and a fourth"
                 }
             }
             Message::SelectAudioDevice(direction, option) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway
                         .controls
                         .select_audio_device(direction, option.choice.clone());
@@ -1978,7 +2007,7 @@ and a fourth"
             }
             Message::NoiseSuppressionChanged(mode) => {
                 self.audio_preferences.noise_suppression = mode;
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.select_noise_suppression(mode);
                 }
                 if self.audio_saving.is_none() {
@@ -1987,7 +2016,7 @@ and a fourth"
             }
             Message::EchoCancellationChanged(enabled) => {
                 self.audio_preferences.echo_cancellation = enabled;
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.select_echo_cancellation(enabled);
                 }
                 if self.audio_saving.is_none() {
@@ -2006,12 +2035,12 @@ and a fourth"
             Message::StopSpeech => speech::stop(),
             Message::ToggleUnverifiedList => self.ui.unverified_open = !self.ui.unverified_open,
             Message::UnverifiedWrite(group, on) => {
-                if let Phase::Account { session, .. } = &self.phase {
+                if let Some(session) = self.phase.session() {
                     session.client.set_write_group(group, on);
                 }
             }
             Message::UnverifiedWriteAll(on) => {
-                if let Phase::Account { session, .. } = &self.phase {
+                if let Some(session) = self.phase.session() {
                     unverified::set_all(&session.client, on);
                 }
             }
@@ -2313,7 +2342,7 @@ and a fourth"
                             Message::AttachmentPurged(result.is_ok())
                         })
                     });
-                } else if let Phase::Account { gateway, .. } = &mut self.phase {
+                } else if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.status = status;
                 }
             }
@@ -2325,23 +2354,23 @@ and a fourth"
                 }
             }
             Message::AttachmentLoaded(generation, key, target, result) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == generation) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     attachment_ui::loaded(gateway, key, target, result);
                 }
             }
             Message::AttachmentActionFinished(generation, key, action, outcome) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == generation) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.attachment_action_workers.remove(&(key, action));
                     attachment_ui::finished(gateway, outcome);
                 }
             }
             Message::MediaReady(generation, key, result) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == generation) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     media_ui::ready(gateway, key, result);
                 }
             }
             Message::MediaFrame(id) => {
-                if let Phase::Account { gateway, .. } = &self.phase
+                if let Some(gateway) = self.phase.gateway()
                     && let Some(session) = gateway
                         .media
                         .as_ref()
@@ -2351,12 +2380,12 @@ and a fourth"
                 }
             }
             Message::MediaTick => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     media_ui::tick(gateway);
                 }
             }
             Message::CloseViewer => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.attachment_viewer = None;
                 }
             }
@@ -2365,7 +2394,7 @@ and a fourth"
                     Phase::Account { gateway, .. } => gateway.timeline.channel_id,
                     _ => None,
                 };
-                let status = if let Phase::Account { gateway, .. } = &mut self.phase
+                let status = if let Some(gateway) = self.phase.gateway_mut()
                     && gateway.id == id
                 {
                     gateway.consume()
@@ -2381,7 +2410,7 @@ and a fourth"
                         return status_task;
                     }
                 }
-                if let Phase::Account { gateway, .. } = &self.phase
+                if let Some(gateway) = self.phase.gateway()
                     && let Some(message) = self
                         .ui
                         .search
@@ -2395,17 +2424,14 @@ and a fourth"
                 if self.ui.search.take_jump_expired() || self.ui.inbox.take_expired() {
                     self.notice = Some("That message is in a channel you cannot open.".to_owned());
                 }
-                if let Phase::Account { gateway, .. } = &self.phase
+                if let Some(gateway) = self.phase.gateway()
                     && let Some((channel, target)) =
                         self.ui.inbox.take_pending(gateway.timeline.channel_id)
                 {
                     inbox_jump(&gateway.controls, channel, target);
                 }
                 let mut invite_task = Task::none();
-                if let Phase::Account {
-                    gateway, session, ..
-                } = &self.phase
-                {
+                if let Some((session, gateway)) = self.phase.account() {
                     self.ui.sticker.sync(gateway.timeline.channel_id);
                     self.ui.invite.cache.sync_guilds(&gateway.navigation);
                     invite_task = self
@@ -2441,7 +2467,7 @@ and a fourth"
                 // servers or direct messages to match what opened.
                 let mut refocus = Task::none();
                 if self.ui.nav_pending
-                    && let Phase::Account { gateway, .. } = &mut self.phase
+                    && let Some(gateway) = self.phase.gateway_mut()
                     && gateway.timeline.channel_id.is_some()
                     && gateway.timeline.channel_id != before
                 {
@@ -2460,7 +2486,7 @@ and a fourth"
             }
             Message::ShowDirects(on) => {
                 self.close_expressions();
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.directs = on;
                 }
             }
@@ -2517,10 +2543,7 @@ and a fourth"
                 }
             }
             Message::Status(event) => {
-                if let Phase::Account {
-                    session, gateway, ..
-                } = &self.phase
-                {
+                if let Some((session, gateway)) = self.phase.account() {
                     let own = gateway.navigation.presences.get(&session.user.id);
                     return self
                         .ui
@@ -2544,10 +2567,7 @@ and a fourth"
                 ) {
                     self.ui.member_menu.close();
                 }
-                if let Phase::Account {
-                    session, gateway, ..
-                } = &mut self.phase
-                {
+                if let Some((session, gateway)) = self.phase.account_mut() {
                     match event {
                         friends::Event::OpenDm(user) => {
                             self.ui.friends.close();
@@ -2600,7 +2620,7 @@ and a fourth"
                 self.ui.requests_open = false;
                 self.ui.member_menu.close();
                 self.ui.threads.close();
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.directs = false;
                     gateway.controls.select_guild(guild);
                     return iced::widget::operation::scroll_to(
@@ -2616,13 +2636,13 @@ and a fourth"
                 // included); it never touches the voice connection.
                 self.ui.threads.close();
                 self.ui.nav_pending = true;
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.controls.select_channel(guild, channel);
                 }
             }
             Message::JoinVoice(guild, channel) => {
                 // Joins the call only; the open chat stays as it is.
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     let join = gateway.navigation.selected_guild == Some(guild)
                         && gateway.navigation.channels.rows.iter().any(|row| {
                             row.id == channel
@@ -2655,10 +2675,7 @@ and a fourth"
                 }
             }
             Message::StartCall(channel) | Message::AcceptCall(channel) => {
-                if let Phase::Account {
-                    session, gateway, ..
-                } = &mut self.phase
-                {
+                if let Some((session, gateway)) = self.phase.account_mut() {
                     let busy = gateway.voice_call == Some(channel)
                         && gateway.controls.voice_audio_state() != gateway::VoiceAudioState::Idle;
                     if !busy {
@@ -2683,7 +2700,7 @@ and a fourth"
                 }
             }
             Message::DeclineCall(channel) => {
-                if let Phase::Account { session, .. } = &self.phase {
+                if let Some(session) = self.phase.session() {
                     return call_signal(session, channel, CallSignal::StopRinging);
                 }
             }
@@ -2699,10 +2716,7 @@ and a fourth"
                 }
                 self.ui.stage.reset();
                 let mut cancel = None;
-                if let Phase::Account {
-                    session, gateway, ..
-                } = &mut self.phase
-                {
+                if let Some((session, gateway)) = self.phase.account_mut() {
                     let call = gateway.voice_call.take();
                     if let Some(guild) = gateway.voice_guild.take().map(Some).or(call.map(|_| None))
                     {
@@ -2724,7 +2738,7 @@ and a fourth"
                         })
                         .map(|channel| call_signal(session, channel, CallSignal::StopRinging));
                 }
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     for session in gateway.controls.watched() {
                         if !gateway.controls.unwatch_stream(session.key.clone()) {
                             self.notice = Some(
@@ -2741,10 +2755,7 @@ and a fourth"
             Message::MemberMenu(event) => return self.member_menu_event(event),
             Message::ActivateParticipant(user) => {
                 self.ui.member_menu.close();
-                if let Phase::Account {
-                    gateway, session, ..
-                } = &mut self.phase
-                {
+                if let Some((session, gateway)) = self.phase.account_mut() {
                     if user == session.user.id {
                         return Task::none();
                     }
@@ -2765,7 +2776,7 @@ and a fourth"
                 }
             }
             Message::WatchStream(key) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     let controls = gateway.controls.voice_controls();
                     if gateway.controls.voice_audio_state() != gateway::VoiceAudioState::Running
                         || !controls.streams.iter().any(|offer| offer.key == key)
@@ -2798,7 +2809,7 @@ and a fourth"
                 }
             }
             Message::SetStreamVolume(key, percent) => {
-                if let Phase::Account { gateway, .. } = &self.phase
+                if let Some(gateway) = self.phase.gateway()
                     && let Some(session) = gateway.controls.watched_stream(&key)
                 {
                     session.set_audio(playback::AudioSettings {
@@ -2808,7 +2819,7 @@ and a fourth"
                 }
             }
             Message::MuteStream(key, muted) => {
-                if let Phase::Account { gateway, .. } = &self.phase
+                if let Some(gateway) = self.phase.gateway()
                     && let Some(session) = gateway.controls.watched_stream(&key)
                 {
                     session.set_audio(playback::AudioSettings {
@@ -2818,7 +2829,7 @@ and a fourth"
                 }
             }
             Message::UnwatchStream(key) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     if gateway.controls.unwatch_stream(key) {
                         self.notice = None;
                     } else {
@@ -2827,7 +2838,7 @@ and a fourth"
                 }
             }
             Message::OpenCall => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     if let Some((Some(guild), channel)) = gateway.controls.voice_target() {
                         self.ui.threads.close();
                         gateway.controls.select_channel(guild, channel);
@@ -2836,7 +2847,7 @@ and a fourth"
                 }
             }
             Message::ShowStream(open) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     let any = !gateway.controls.watched().is_empty()
                         || !gateway.controls.camera_tiles().snapshot().remote.is_empty()
                         || gateway.controls.voice_controls().camera.wanted;
@@ -2847,25 +2858,25 @@ and a fourth"
                 }
             }
             Message::SetCallMode(mode) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.call_view.mode = mode;
                     gateway.call_view.full = None;
                 }
             }
             Message::PinTile(id) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.call_view.toggle_pin(id);
                     gateway.call_view.full = None;
                 }
             }
             Message::FullTile(id) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.call_view.full = id;
                     gateway.call_view.open |= gateway.call_view.full.is_some();
                 }
             }
             Message::SetHidePeople(hide) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.call_view.hide_people = hide;
                 }
             }
@@ -2883,7 +2894,7 @@ and a fourth"
                 });
             }
             Message::OpenSharePicker => {
-                if let Phase::Account { gateway, .. } = &mut self.phase
+                if let Some(gateway) = self.phase.gateway_mut()
                     && !gateway.controls.share_view().active
                     && !gateway.share_picker.is_open()
                 {
@@ -2914,7 +2925,7 @@ and a fourth"
                 }
             }
             Message::ShareSources(result) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase
+                if let Some(gateway) = self.phase.gateway_mut()
                     && matches!(gateway.share_picker, gateway::SharePicker::Loading)
                 {
                     gateway.share_picker = match result {
@@ -2933,22 +2944,22 @@ and a fourth"
                 }
             }
             Message::ToggleShareAudio(on) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.share_audio = on;
                 }
             }
             Message::ChooseShareAudio(target) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.share_audio_target = Some(target);
                 }
             }
             Message::CloseSharePicker => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.share_picker = gateway::SharePicker::Closed;
                 }
             }
             Message::StartShare(id) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     let source = match &gateway.share_picker {
                         gateway::SharePicker::Listed(sources) => {
                             sources.iter().find(|source| source.id == id).cloned()
@@ -2985,14 +2996,14 @@ and a fourth"
                 }
             }
             Message::StopShare => {
-                if let Phase::Account { gateway, .. } = &self.phase
+                if let Some(gateway) = self.phase.gateway()
                     && !gateway.controls.stop_share()
                 {
                     self.notice = Some("Could not stop sharing; try again.".into());
                 }
             }
             Message::VideoReady(id) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     for session in gateway.controls.watched() {
                         session.consume(id);
                     }
@@ -3007,7 +3018,7 @@ and a fourth"
                 }
             }
             Message::ToggleCamera => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     // The only way the camera turns on: an explicit click, in a
                     // running call.
                     let on = !gateway.controls.voice_controls().camera.wanted;
@@ -3046,7 +3057,7 @@ and a fourth"
                 }
             }
             Message::SelectCamera(choice) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.select_camera(choice.id.clone());
                 }
                 self.audio_preferences.camera = audio_devices::CameraSelection {
@@ -3059,7 +3070,7 @@ and a fourth"
                 }
             }
             Message::SelectCameraEffect(effect) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.set_camera_effect(effect);
                 }
                 self.audio_preferences.camera.effect = effect;
@@ -3068,7 +3079,7 @@ and a fourth"
                 }
             }
             Message::SetMirrorPreview(mirror) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.set_camera_mirror(mirror);
                 }
                 self.audio_preferences.camera.mirror = mirror;
@@ -3077,19 +3088,19 @@ and a fourth"
                 }
             }
             Message::SetSelfMute(muted) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.set_self_muted(muted);
                 }
             }
             Message::SetDeafen(deafened) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.set_deafened(deafened);
                 }
             }
             // Both keyboard/drag changes and presets reach the same bounded writer.
             Message::SetParticipantVolume(user, percent)
             | Message::PresetParticipantVolume(user, percent) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.set_volume_percent(user, percent);
                     if let Some(writer) = &self.volume_writer
                         && !writer.set(user, percent)
@@ -3101,7 +3112,7 @@ and a fourth"
             }
             Message::CommitParticipantVolume(user) => {
                 if let Some(writer) = &self.volume_writer
-                    && let Phase::Account { gateway, .. } = &self.phase
+                    && let Some(gateway) = self.phase.gateway()
                 {
                     writer.set(user, gateway.controls.voice_controls().volume_percent(user));
                     writer.flush();
@@ -3117,14 +3128,14 @@ and a fourth"
                 self.ui.requests_open = false;
                 self.ui.threads.close();
                 self.ui.nav_pending = true;
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     self.ui.friends.close();
                     gateway.directs = true;
                     gateway.controls.select_private_channel(channel);
                 }
             }
             Message::PrivateRecipients(value) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     if value.len() <= MAX_PRIVATE_RECIPIENT_INPUT_BYTES {
                         gateway.private.recipients = value;
                         gateway.private.notice = None;
@@ -3135,10 +3146,7 @@ and a fourth"
                 }
             }
             Message::OpenPrivate => {
-                if let Phase::Account {
-                    session, gateway, ..
-                } = &mut self.phase
-                {
+                if let Some((session, gateway)) = self.phase.account_mut() {
                     match parse_private_recipients(&gateway.private.recipients, session.user.id) {
                         Ok(recipients) => {
                             gateway.private.notice =
@@ -3154,14 +3162,14 @@ and a fourth"
                 }
             }
             Message::GuildViewport(window) | Message::ChannelViewport(window) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway
                         .controls
                         .viewport(matches!(message, Message::GuildViewport(_)), window);
                 }
             }
             Message::PrivateViewport(window) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.private_viewport(window);
                 }
             }
@@ -3183,19 +3191,19 @@ and a fourth"
                 self.sync_viewing();
             }
             Message::MarkRead(guild, channel) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway.controls.mark_read(guild, channel);
                 }
             }
             Message::FirstUnread(channel, acked) => {
-                if let Phase::Account { gateway, .. } = &self.phase {
+                if let Some(gateway) = self.phase.gateway() {
                     gateway
                         .controls
                         .timeline_intent(history::Intent::FirstUnread { channel, acked });
                 }
             }
             Message::EmojiLoaded(generation, asset, ticket, result) if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == generation) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     return gateway.emoji.loaded(
                         generation,
                         asset,
@@ -3206,7 +3214,7 @@ and a fourth"
                 }
             }
             Message::AvatarLoaded(generation, key, image) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase
+                if let Some(gateway) = self.phase.gateway_mut()
                     && gateway.id == generation
                 {
                     return gateway.avatars.loaded(
@@ -3218,12 +3226,12 @@ and a fourth"
                 }
             }
             Message::EmojiVisibility(occurrence, visible) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.emoji_visibility(occurrence, visible);
                 }
             }
             Message::EmojiPicker(event) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     let reset_scroll = matches!(
                         event,
                         emoji_picker::Event::Toggle
@@ -3278,10 +3286,7 @@ and a fourth"
                 }
             }
             Message::Timeline(event) => {
-                if let Phase::Account {
-                    session, gateway, ..
-                } = &mut self.phase
-                {
+                if let Some((session, gateway)) = self.phase.account_mut() {
                     match event {
                         timeline::Event::CopyText {
                             channel_id,
@@ -3606,12 +3611,12 @@ and a fourth"
                 }
             }
             Message::FilesPicked(paths) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.composer.attach(paths);
                 }
             }
             Message::ImagePasted(result) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     match result {
                         Ok(path) => gateway.composer.attach_pasted(&path),
                         Err(reason) => gateway.composer.paste_failed(reason),
@@ -3622,7 +3627,7 @@ and a fourth"
                 return self.handle(Message::OpenMenu(Some(Menu::Composer)));
             }
             Message::Expressions(tab) => {
-                let Phase::Account { gateway, .. } = &self.phase else {
+                let Some(gateway) = self.phase.gateway() else {
                     return Task::none();
                 };
                 let open = self.expressions_tab(gateway);
@@ -3651,7 +3656,7 @@ and a fourth"
                     if self.expressions_tab(gateway).is_some_and(|tab| tab != Expressions::Emoji)) =>
             {
                 // The smiley closes the window whichever tab is shown.
-                let Phase::Account { gateway, .. } = &self.phase else {
+                let Some(gateway) = self.phase.gateway() else {
                     return Task::none();
                 };
                 let tab = self.expressions_tab(gateway);
@@ -3679,7 +3684,7 @@ and a fourth"
                 }
             }
             Message::FileDropped(path) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.composer.attach(vec![path]);
                 }
             }
@@ -3704,7 +3709,7 @@ and a fourth"
                 }
             }
             Message::Composer(event) => {
-                if let Phase::Account { gateway, .. } = &mut self.phase {
+                if let Some(gateway) = self.phase.gateway_mut() {
                     // A clicked completion leaves the focus on its button; take it back.
                     let refocus = matches!(
                         event,
@@ -4310,7 +4315,7 @@ and a fourth"
     fn close_expressions(&mut self) {
         self.ui.gif.close();
         self.ui.sticker.close();
-        if let Phase::Account { gateway, .. } = &mut self.phase {
+        if let Some(gateway) = self.phase.gateway_mut() {
             gateway.emoji_picker.close();
         }
     }
@@ -4318,12 +4323,7 @@ and a fourth"
     /// What closes the dialog on top, if one is open (the inner `None`: it
     /// waits for a request and cannot be closed now).
     fn dialog_close(&self) -> Option<Option<Message>> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
-            return None;
-        };
+        let (session, gateway) = self.phase.account()?;
         let navigation = &gateway.navigation;
         if self.ui.onboarding.is_open() {
             Some(Some(Message::Onboarding(onboarding::Event::Close)))
@@ -4430,17 +4430,12 @@ and a fourth"
             }
         }
         self.volume_notice = None;
-        if let Phase::Account { gateway, .. } = &mut self.phase {
+        if let Some(gateway) = self.phase.gateway_mut() {
             // Drafts live in memory only; logout forgets them at once.
             gateway.composer.clear();
         }
         self.ui.reset();
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
-            return None;
-        };
+        let (session, gateway) = self.phase.account()?;
         session.client.stop_authenticated_work();
         Some((session.user.id, gateway.attachments.clone()))
     }
@@ -4464,12 +4459,12 @@ and a fourth"
     }
 
     fn account_event(&mut self, event: account_panel::Event) -> Task<Message> {
-        let Phase::Account { session, .. } = &self.phase else {
+        let Some(session) = self.phase.session() else {
             return Task::none();
         };
         let rejected = account_panel::State::is_rejected(&event);
         let (task, action) = self.ui.account_panel.update(event, &session.client);
-        if rejected && let Phase::Account { gateway, .. } = &self.phase {
+        if rejected && let Some(gateway) = self.phase.gateway() {
             let id = gateway.id;
             return self.handle(Message::Gateway(
                 id,
@@ -4577,7 +4572,7 @@ and a fourth"
 
     /// Plays the interface sound for what changed in the call since the last look.
     fn observe_ui_sound(&self) {
-        let Phase::Account { gateway, .. } = &self.phase else {
+        let Some(gateway) = self.phase.gateway() else {
             return;
         };
         let controls = gateway.controls.voice_controls();
@@ -4649,7 +4644,7 @@ and a fourth"
     /// What the timeline shows counts as read only while the window is active
     /// and drawn.
     fn sync_viewing(&self) {
-        if let Phase::Account { gateway, .. } = &self.phase {
+        if let Some(gateway) = self.phase.gateway() {
             gateway
                 .controls
                 .set_viewing(self.window_active && self.window_drawable);
@@ -4670,10 +4665,7 @@ and a fourth"
     }
 
     fn forum_event(&mut self, event: forum::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let (task, opened) =
@@ -4689,10 +4681,7 @@ and a fourth"
     }
 
     fn threads_event(&mut self, event: threads::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         match event {
@@ -4738,10 +4727,7 @@ and a fourth"
     }
 
     fn gif_event(&mut self, event: gif::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &mut self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account_mut() else {
             return Task::none();
         };
         if let gif::Event::Pick(index) = event {
@@ -4763,10 +4749,7 @@ and a fourth"
     }
 
     fn assets_event(&mut self, event: assets::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = assets::State::is_rejected(&event);
@@ -4789,7 +4772,7 @@ and a fourth"
 
     /// Lists stickers and sounds again when Discord reports a change.
     fn assets_follow(&mut self) -> Task<Message> {
-        let Phase::Account { gateway, .. } = &self.phase else {
+        let Some(gateway) = self.phase.gateway() else {
             return Task::none();
         };
         let controls = gateway.controls.voice_controls();
@@ -4805,10 +4788,7 @@ and a fourth"
     }
 
     fn apps_event(&mut self, event: apps::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = apps::State::is_rejected(&event);
@@ -4835,10 +4815,7 @@ and a fourth"
     }
 
     fn announce_event(&mut self, event: announce::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = announce::State::is_rejected(&event);
@@ -4859,10 +4836,7 @@ and a fourth"
     }
 
     fn forward_event(&mut self, event: forward::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let candidates = forward_candidates(gateway);
@@ -4882,10 +4856,7 @@ and a fourth"
 
     /// The draft changed: a leading slash loads the command list.
     fn slash_typed(&mut self) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let Some(channel) = gateway.timeline.channel_id else {
@@ -4907,10 +4878,7 @@ and a fourth"
     }
 
     fn slash_event(&mut self, event: slash::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &mut self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account_mut() else {
             return Task::none();
         };
         let Some(channel) = gateway.timeline.channel_id else {
@@ -4942,10 +4910,7 @@ and a fourth"
     }
 
     fn poll_event(&mut self, event: poll_create::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let Some(channel) = gateway.timeline.channel_id else {
@@ -4965,7 +4930,7 @@ and a fourth"
     /// text-free message with one file, so its upload, progress, cancel, retry and ambiguity
     /// handling are those of any attachment.
     fn voice_event(&mut self, event: voice_record::Event) -> Task<Message> {
-        let Phase::Account { gateway, .. } = &self.phase else {
+        let Some(gateway) = self.phase.gateway() else {
             return Task::none();
         };
         let Some(channel) = gateway.timeline.channel_id else {
@@ -5047,7 +5012,7 @@ and a fourth"
         };
         if let Some((gain, save)) = changed {
             self.audio_preferences.input_gain = gain;
-            if let Phase::Account { gateway, .. } = &self.phase {
+            if let Some(gateway) = self.phase.gateway() {
                 gateway.controls.select_input_gain(gain);
             }
             self.mic_panel.set_gain(gain);
@@ -5112,7 +5077,7 @@ and a fourth"
         let Some(env) = Self::soundboard_env(&self.phase, output) else {
             return Task::none();
         };
-        let Phase::Account { gateway, .. } = &self.phase else {
+        let Some(gateway) = self.phase.gateway() else {
             return Task::none();
         };
         let controls = gateway.controls.voice_controls();
@@ -5147,10 +5112,7 @@ and a fourth"
 
     fn stage_event(&mut self, event: stage::Event) -> Task<Message> {
         use stage::Event;
-        let Phase::Account {
-            gateway, session, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let stage = gateway.controls.voice_controls().stage;
@@ -5211,7 +5173,7 @@ and a fourth"
         };
         let rejected = soundboard::State::is_rejected(&event);
         let task = self.ui.soundboard.update(event, &env);
-        if rejected && let Phase::Account { gateway, .. } = &self.phase {
+        if rejected && let Some(gateway) = self.phase.gateway() {
             // Discord rejected the login: stop the account like any other 401.
             let id = gateway.id;
             return self.handle(Message::Gateway(
@@ -5224,10 +5186,7 @@ and a fourth"
     }
 
     fn sticker_event(&mut self, event: sticker::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let Some(channel) = gateway.timeline.channel_id else {
@@ -5253,10 +5212,7 @@ and a fourth"
     }
 
     fn group_event(&mut self, event: group_dm::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = group_dm::State::is_rejected(&event);
@@ -5276,10 +5232,7 @@ and a fourth"
     }
 
     fn onboarding_event(&mut self, event: onboarding::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         match event {
@@ -5309,10 +5262,7 @@ and a fourth"
     }
 
     fn events_event(&mut self, event: scheduled_events::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         if let scheduled_events::Event::Join(guild, channel) = event {
@@ -5341,12 +5291,12 @@ and a fourth"
     }
 
     fn discover_event(&mut self, event: discover::Event) -> Task<Message> {
-        let Phase::Account { session, .. } = &self.phase else {
+        let Some(session) = self.phase.session() else {
             return Task::none();
         };
         let rejected = discover::State::is_rejected(&event);
         let task = self.ui.discover.update(event, &session.client);
-        if rejected && let Phase::Account { gateway, .. } = &self.phase {
+        if rejected && let Some(gateway) = self.phase.gateway() {
             let id = gateway.id;
             return self.handle(Message::Gateway(
                 id,
@@ -5357,10 +5307,7 @@ and a fourth"
     }
 
     fn invite_event(&mut self, event: invite::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = invite::State::is_rejected(&event);
@@ -5381,10 +5328,7 @@ and a fourth"
     }
 
     fn community_event(&mut self, event: community::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = community::State::is_rejected(&event);
@@ -5403,10 +5347,7 @@ and a fourth"
     }
 
     fn guild_admin_event(&mut self, event: guild_admin::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         match event {
@@ -5490,10 +5431,7 @@ and a fourth"
     }
 
     fn moderation_event(&mut self, event: moderation::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = moderation::State::is_rejected(&event);
@@ -5512,10 +5450,7 @@ and a fourth"
     }
 
     fn automod_event(&mut self, event: automod::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = automod::State::is_rejected(&event);
@@ -5534,10 +5469,7 @@ and a fourth"
     }
 
     fn identity_event(&mut self, event: profile_edit::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = profile_edit::State::is_rejected(&event);
@@ -5560,7 +5492,7 @@ and a fourth"
 
     fn member_menu_event(&mut self, event: member_menu::Event) -> Task<Message> {
         use member_menu::Event;
-        let Phase::Account { gateway, .. } = &self.phase else {
+        let Some(gateway) = self.phase.gateway() else {
             return Task::none();
         };
         match event {
@@ -5654,10 +5586,7 @@ and a fourth"
 
     fn begin_member_action(&mut self, action: fastcord_discord::MemberAction) -> Task<Message> {
         use fastcord_discord::MemberAction;
-        let Phase::Account {
-            gateway, session, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let Some(target) = &self.ui.member_menu.target else {
@@ -5706,10 +5635,7 @@ and a fourth"
     }
 
     fn report_event(&mut self, event: report::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         // Ignore and Block after a report are their own requests.
@@ -5769,10 +5695,7 @@ and a fourth"
     }
 
     fn safety_event(&mut self, event: safety::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = safety::State::is_rejected(&event);
@@ -5800,7 +5723,7 @@ and a fourth"
             self.ui.switcher.close();
             return self.open_link(link);
         }
-        let Phase::Account { gateway, .. } = &mut self.phase else {
+        let Some(gateway) = self.phase.gateway_mut() else {
             return Task::none();
         };
         match self.ui.switcher.update(event, &gateway.navigation.quick) {
@@ -5839,7 +5762,7 @@ and a fourth"
             if let Some(close) = self.dialog_close() {
                 return close.map_or_else(Task::none, |close| self.handle(close));
             }
-            if let Phase::Account { gateway, .. } = &self.phase
+            if let Some(gateway) = self.phase.gateway()
                 && self.expressions_tab(gateway).is_some()
             {
                 self.close_expressions();
@@ -5852,7 +5775,7 @@ and a fourth"
                 return self.handle(Message::Settings(settings::Event::Close));
             }
         }
-        let Phase::Account { gateway, .. } = &mut self.phase else {
+        let Some(gateway) = self.phase.gateway_mut() else {
             return Task::none();
         };
         let composer = || iced::widget::operation::focus(composer::EDITOR_ID);
@@ -5949,10 +5872,7 @@ and a fourth"
     /// A click on a folder, category or the hide-muted choice: kept locally for
     /// this account and applied by the next navigation snapshot.
     fn organize_event(&mut self, event: organize::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         self.audio_preferences
@@ -5970,10 +5890,7 @@ and a fourth"
         if let notify_settings::Event::HideMuted(guild) = event {
             return self.organize_event(organize::Event::HideMuted(guild));
         }
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rejected = matches!(
@@ -5995,10 +5912,7 @@ and a fourth"
     }
 
     fn inbox_event(&mut self, event: inbox::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let rows = &gateway.navigation.inbox.rows;
@@ -6046,10 +5960,7 @@ and a fourth"
     }
 
     fn pins_event(&mut self, event: pins::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         let Some(channel) = gateway.timeline.channel_id else {
@@ -6073,10 +5984,7 @@ and a fourth"
     }
 
     fn search_event(&mut self, event: search::Event) -> Task<Message> {
-        let Phase::Account {
-            session, gateway, ..
-        } = &self.phase
-        else {
+        let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
         if let search::Event::Jump(index) = event {
@@ -6237,11 +6145,11 @@ and a fourth"
 
     fn view_body(&self) -> Element<'_, Message> {
         if self.compact_call
-            && let Phase::Account { gateway, .. } = &self.phase
+            && let Some(gateway) = self.phase.gateway()
         {
             return desktop::compact_view(&gateway.controls.voice_controls());
         }
-        if let Phase::Account { gateway, .. } = &self.phase
+        if let Some(gateway) = self.phase.gateway()
             && let Some((guild, section)) = self.server_page()
         {
             return self.server_screen(gateway, guild, section);
@@ -7302,7 +7210,7 @@ mod tests {
         let _ = app.handle(Message::SetParticipantVolume(Snowflake(99), 67));
         let _ = app.handle(Message::PresetParticipantVolume(Snowflake(98), 6));
         let _ = app.handle(Message::SetParticipantVolume(Snowflake(99), 62));
-        if let Phase::Account { gateway, .. } = &app.phase {
+        if let Some(gateway) = app.phase.gateway() {
             assert_eq!(
                 gateway
                     .controls
@@ -7342,7 +7250,7 @@ mod tests {
     fn an_inactive_window_drops_decoded_animations() {
         let mut app = login_app();
         authenticate(&mut app, Persistence::MemoryOnly);
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         let frame = attachments::DecodedImage {
@@ -7361,7 +7269,7 @@ mod tests {
             }),
         );
         let _ = app.update(Message::WindowActive(false));
-        let Phase::Account { gateway, .. } = &app.phase else {
+        let Some(gateway) = app.phase.gateway() else {
             panic!("account");
         };
         assert!(gateway.emoji.views.is_empty());
@@ -7380,7 +7288,7 @@ mod tests {
             drop(app.update(message));
             assert!(app.network_settings.open);
             assert!(app.network_settings.notice.unwrap().contains("TCP only"));
-            let Phase::Account { gateway, .. } = &app.phase else {
+            let Some(gateway) = app.phase.gateway() else {
                 panic!("account expected")
             };
             assert_eq!(
@@ -7418,7 +7326,7 @@ mod tests {
             .unwrap();
         drop(app.update(Message::StartCall(Snowflake(3))));
         assert!(!app.network_settings.open);
-        let Phase::Account { gateway, .. } = &app.phase else {
+        let Some(gateway) = app.phase.gateway() else {
             panic!("account expected")
         };
         assert_eq!(gateway.voice_call, Some(Snowflake(3)));
@@ -7485,14 +7393,14 @@ mod tests {
         assert!(app.audio_saving.is_none());
 
         authenticate(&mut app, Persistence::MemoryOnly);
-        let Phase::Account { gateway, .. } = &app.phase else {
+        let Some(gateway) = app.phase.gateway() else {
             panic!("not logged in");
         };
         let restored = gateway.controls.voice_controls();
         assert_eq!(restored.noise_suppression, HighQuality);
         let _ = app.update(Message::NoiseSuppressionChanged(Light));
         let _ = app.update(Message::NoiseSuppressionChanged(Light));
-        let Phase::Account { gateway, .. } = &app.phase else {
+        let Some(gateway) = app.phase.gateway() else {
             panic!("not logged in");
         };
         let changed = gateway.controls.voice_controls();
@@ -7523,7 +7431,7 @@ mod tests {
             automatic: true,
         };
         assert_eq!(app.audio_preferences.input_gain, wanted);
-        let Phase::Account { gateway, .. } = &app.phase else {
+        let Some(gateway) = app.phase.gateway() else {
             panic!("not logged in");
         };
         assert_eq!(gateway.controls.voice_controls().input_gain, wanted);
@@ -7543,7 +7451,7 @@ mod tests {
             fastcord_audio::DeviceKey::from_persisted("saved-headset").unwrap(),
         );
         authenticate(&mut app, Persistence::MemoryOnly);
-        let Phase::Account { gateway, .. } = &app.phase else {
+        let Some(gateway) = app.phase.gateway() else {
             panic!("not logged in")
         };
         let restored = gateway.controls.voice_controls();
@@ -7875,14 +7783,14 @@ mod tests {
         ));
         assert!(gateway_status(&app).1.describe().contains("Ten connection"));
         // A draft in another conversation is kept across the reconnect.
-        if let Phase::Account { gateway, .. } = &mut app.phase {
+        if let Some(gateway) = app.phase.gateway_mut() {
             gateway.composer.select(Some(Snowflake(41)));
             assert!(gateway.composer.restore("half-written"));
             gateway.composer.select(Some(Snowflake(42)));
             assert!(gateway.composer.has_draft(Snowflake(41)));
         }
         drop(app.update(Message::ReconnectGateway));
-        let Phase::Account { gateway, .. } = &app.phase else {
+        let Some(gateway) = app.phase.gateway() else {
             panic!("account");
         };
         assert!(gateway.composer.has_draft(Snowflake(41)), "draft survives");
@@ -8122,7 +8030,7 @@ mod tests {
             content: "b".into(),
             mention_author: false,
         };
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         gateway.composer.select(Some(channel));
@@ -8184,7 +8092,7 @@ mod tests {
             unread: false,
             mentions: 0,
         };
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         gateway.navigation = Arc::new(NavigationSnapshot {
@@ -8201,7 +8109,7 @@ mod tests {
             let _ = app.update(Message::Switcher(switcher::Event::Pick(index)));
             assert!(!app.ui.switcher.is_open());
             assert!(app.ui.nav_pending, "focus returns once the chat is open");
-            let Phase::Account { gateway, .. } = &app.phase else {
+            let Some(gateway) = app.phase.gateway() else {
                 panic!("account");
             };
             assert_eq!(gateway.directs, directs);
@@ -8255,12 +8163,12 @@ mod tests {
     fn a_snapshot_carrying_the_last_status_still_looks_up_visible_invites() {
         let mut app = login_app();
         authenticate(&mut app, Persistence::MemoryOnly);
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         let (_, worker) = iced::Task::<()>::none().abortable();
         let id = gateway.id;
-        **gateway = GatewayPanel::new(id, worker, gateway::NavigationBridge::new());
+        *gateway = GatewayPanel::new(id, worker, gateway::NavigationBridge::new());
         let message: fastcord_model::Message = serde_json::from_value(serde_json::json!({
             "id": "42",
             "channel_id": "500",
@@ -8282,7 +8190,7 @@ mod tests {
             Some(GatewayStatus::SigningIn),
         );
         let _ = app.update(Message::Navigation(id));
-        let Phase::Account { gateway, .. } = &app.phase else {
+        let Some(gateway) = app.phase.gateway() else {
             panic!("the status must not end the account");
         };
         assert_eq!(gateway.status, GatewayStatus::SigningIn);
@@ -8299,7 +8207,7 @@ mod tests {
         authenticate(&mut app, Persistence::MemoryOnly);
         let channel = Snowflake(500);
         let thumbs = emoji_picker::Choice::Unicode(emoji::unicode("\u{1f44d}").unwrap());
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         // The account's own worker is not running in tests, so its command queue
@@ -8307,7 +8215,7 @@ mod tests {
         let bridge = gateway::NavigationBridge::new();
         let mut commands = bridge.take_commands().unwrap();
         let (_, worker) = iced::Task::<()>::none().abortable();
-        **gateway = GatewayPanel::new(gateway.id, worker, bridge);
+        *gateway = GatewayPanel::new(gateway.id, worker, bridge);
         gateway.timeline = Arc::new(timeline::Snapshot {
             channel_id: Some(channel),
             can_send: true,
@@ -8335,7 +8243,7 @@ mod tests {
             channel_id: channel,
             message_id: Snowflake(42),
         }));
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         assert!(gateway.emoji_picker.request.open);
@@ -8343,7 +8251,7 @@ mod tests {
         let _ = app.update(Message::EmojiPicker(emoji_picker::Event::Select(
             thumbs.clone(),
         )));
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         assert!(!gateway.emoji_picker.request.open);
@@ -8359,14 +8267,14 @@ mod tests {
 
         // The composer's button still inserts text.
         let _ = app.update(Message::EmojiPicker(emoji_picker::Event::Toggle));
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         assert!(gateway.emoji_picker.request.open);
         assert_eq!(gateway.emoji_picker.reaction(), None);
         gateway.emoji_snapshot = page(gateway);
         let _ = app.update(Message::EmojiPicker(emoji_picker::Event::Select(thumbs)));
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         assert!(gateway.composer.submission(true, 0).is_some(), "text");
@@ -8386,7 +8294,7 @@ mod tests {
             attachment: Snowflake(4),
         };
         let set = |app: &mut App, phase, state| {
-            let Phase::Account { gateway, .. } = &mut app.phase else {
+            let Some(gateway) = app.phase.gateway_mut() else {
                 panic!("account");
             };
             let mut media = media_ui::MediaSession::for_test(key);
@@ -8411,11 +8319,11 @@ mod tests {
         authenticate(&mut app, Persistence::MemoryOnly);
         let bridge = gateway::NavigationBridge::new();
         let _commands = bridge.take_commands().unwrap();
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         let (_, worker) = iced::Task::<()>::none().abortable();
-        **gateway = GatewayPanel::new(gateway.id, worker, bridge.clone());
+        *gateway = GatewayPanel::new(gateway.id, worker, bridge.clone());
         assert!(bridge.watch_stream("guild:41:127:99").is_ok());
         let watched = bridge.watched().pop().unwrap();
         assert_eq!(app.video_subscription().units(), 0);
@@ -8453,11 +8361,11 @@ mod tests {
         authenticate(&mut app, Persistence::MemoryOnly);
         let bridge = gateway::NavigationBridge::new();
         let _commands = bridge.take_commands().unwrap();
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("account");
         };
         let (_, worker) = iced::Task::<()>::none().abortable();
-        **gateway = GatewayPanel::new(gateway.id, worker, bridge.clone());
+        *gateway = GatewayPanel::new(gateway.id, worker, bridge.clone());
         let keys: Vec<String> = (1..=4).map(|n| format!("guild:41:127:{n}")).collect();
         for key in &keys {
             assert!(bridge.watch_stream(key.clone()).is_ok());
@@ -8524,7 +8432,7 @@ mod tests {
         };
         let mut app = login_app();
         authenticate(&mut app, Persistence::MemoryOnly);
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("not logged in");
         };
         gateway.navigation = Arc::new(NavigationSnapshot {
@@ -8573,7 +8481,7 @@ mod tests {
         let (guild, voice) = (Snowflake(10), Snowflake(11));
         let mut app = login_app();
         authenticate(&mut app, Persistence::MemoryOnly);
-        let Phase::Account { gateway, .. } = &mut app.phase else {
+        let Some(gateway) = app.phase.gateway_mut() else {
             panic!("not logged in");
         };
         gateway.navigation = Arc::new(NavigationSnapshot {
