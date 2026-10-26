@@ -3,10 +3,12 @@
 //! owns a hidden message-only window; a later launch finds that window, hands
 //! its command-line argument over with `WM_COPYDATA`, and tells the caller to
 //! exit. The window thread blocks in `GetMessageW`, so the guard costs no idle
-//! CPU. Linux and macOS use a Unix socket in the per-user runtime directory
-//! instead: the first process listens on it (a thread blocked in `accept`), a
-//! later launch connects and writes its argument. Where neither exists,
-//! [`acquire`] reports a primary instance without a guard.
+//! CPU. Linux and macOS hold an exclusive `flock` on a lock file in a private
+//! per-user directory instead (the kernel drops it with a crashed process, so
+//! staleness is never guessed); the holder listens on a Unix socket beside it
+//! (a thread blocked in `accept`), a later launch connects and writes its
+//! argument. Where no guard can be set up, [`acquire`] reports a primary
+//! instance without one rather than exiting silently.
 
 #[cfg(windows)]
 use std::thread::JoinHandle;
@@ -60,6 +62,9 @@ pub struct Instance {
     /// The socket file, removed when the guard is dropped.
     #[cfg(unix)]
     socket: Option<std::path::PathBuf>,
+    /// The locked file: whoever holds it is the primary (#138).
+    #[cfg(unix)]
+    _lock: Option<std::fs::File>,
 }
 
 pub enum Start {
@@ -266,7 +271,7 @@ mod sys {
 
 #[cfg(unix)]
 mod sys {
-    use std::io::{ErrorKind, Read, Write};
+    use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -277,53 +282,103 @@ mod sys {
 
     /// How long a connected launch may take to write its argument.
     const READ_WAIT: Duration = Duration::from_secs(1);
+    /// How long a second launch waits for the lock holder's socket to appear.
+    const BIND_WAIT: Duration = Duration::from_secs(2);
 
-    /// The socket in the per-user runtime directory (`XDG_RUNTIME_DIR` on
-    /// Linux, the per-user `TMPDIR` on macOS; both are private to the user),
-    /// falling back to the home directory.
+    /// The socket in a directory only this user can reach: `XDG_RUNTIME_DIR`
+    /// on Linux, the per-user `TMPDIR` on macOS, else `~/.cache/fastcord`
+    /// (made 0700). Never a shared directory such as `/tmp` (#138).
     fn socket_path() -> Option<PathBuf> {
-        ["XDG_RUNTIME_DIR", "TMPDIR", "HOME"]
-            .into_iter()
-            .filter_map(std::env::var_os)
-            .map(PathBuf::from)
-            .find(|dir| dir.is_absolute() && dir.is_dir())
-            .map(|dir| dir.join(".fastcord-instance.sock"))
+        let runtime = if cfg!(target_os = "macos") {
+            "TMPDIR"
+        } else {
+            "XDG_RUNTIME_DIR"
+        };
+        let dir = match std::env::var_os(runtime).map(PathBuf::from) {
+            Some(dir) if dir.is_absolute() && dir.is_dir() => dir,
+            _ => private_cache()?,
+        };
+        Some(dir.join(".fastcord-instance.sock"))
+    }
+
+    fn private_cache() -> Option<PathBuf> {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        let owner = std::fs::metadata(&home).ok()?.uid();
+        let dir = home.join(".cache").join("fastcord");
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir);
+        let meta = std::fs::symlink_metadata(&dir).ok()?;
+        (meta.is_dir() && meta.uid() == owner && meta.mode() & 0o077 == 0).then_some(dir)
     }
 
     pub fn acquire(arg: Option<&str>, sink: Sink) -> Start {
         match socket_path() {
             Some(path) => acquire_at(&path, arg, sink),
-            // Nowhere to put the socket; refuse to run a session nothing guards.
-            None => Start::Secondary,
+            // Nowhere private to put a guard: run, rather than exit silently.
+            None => Start::Primary(Instance {
+                socket: None,
+                _lock: None,
+            }),
         }
     }
 
     pub(super) fn acquire_at(path: &Path, arg: Option<&str>, sink: Sink) -> Start {
-        // Two tries: a socket left by a crashed process refuses the connection
-        // and is replaced once; losing a bind race means another launch won.
-        for _ in 0..2 {
-            if let Ok(stream) = UnixStream::connect(path) {
-                forward(stream, arg);
+        use std::os::unix::fs::OpenOptionsExt;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path.with_extension("lock"));
+        let Ok(lock) = lock else {
+            // The private directory refused the file: run unguarded rather
+            // than exit with no window.
+            return Start::Primary(Instance {
+                socket: None,
+                _lock: None,
+            });
+        };
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                // The holder may not have bound its socket yet.
+                let deadline = std::time::Instant::now() + BIND_WAIT;
+                loop {
+                    if let Ok(stream) = UnixStream::connect(path) {
+                        forward(stream, arg);
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
                 return Start::Secondary;
             }
-            match UnixListener::bind(path) {
-                Ok(listener) => {
-                    let spawned = std::thread::Builder::new()
-                        .name("fastcord-instance".into())
-                        .spawn(move || serve(listener, sink));
-                    return Start::Primary(Instance {
-                        socket: spawned.is_ok().then(|| path.to_owned()),
-                    });
-                }
-                Err(error) if error.kind() == ErrorKind::AddrInUse => {
-                    if UnixStream::connect(path).is_err() {
-                        let _ = std::fs::remove_file(path);
-                    }
-                }
-                Err(_) => break,
+            Err(std::fs::TryLockError::Error(_)) => {
+                return Start::Primary(Instance {
+                    socket: None,
+                    _lock: None,
+                });
             }
         }
-        Start::Secondary
+        // Holding the lock, any socket file is a dead one's.
+        let _ = std::fs::remove_file(path);
+        let socket = UnixListener::bind(path).ok().and_then(|listener| {
+            std::thread::Builder::new()
+                .name("fastcord-instance".into())
+                .spawn(move || serve(listener, sink))
+                .ok()
+                .map(|_| path.to_owned())
+        });
+        Start::Primary(Instance {
+            socket,
+            _lock: Some(lock),
+        })
     }
 
     /// Writes `arg` to the primary. A failure is not retried: the caller exits
@@ -412,6 +467,8 @@ mod tests {
         let path = dir.join("i.sock");
         // A socket file nobody listens on, as a crashed process leaves it.
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        // Holding the lock decides, not the socket: while it is held, even a
+        // missing socket makes a launch secondary (#138).
 
         let (tx, rx) = mpsc::channel();
         let Start::Primary(guard) = sys::acquire_at(
@@ -438,6 +495,16 @@ mod tests {
         assert_eq!(rx.recv_timeout(wait), Ok(Forwarded::Raise));
         drop(guard);
         assert!(!path.exists(), "the guard removes its socket");
+        // The lock went with the guard: the next launch is the primary.
+        let Start::Primary(next) = sys::acquire_at(&path, None, Box::new(ignore)) else {
+            panic!("a released lock must make a new primary");
+        };
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            sys::acquire_at(&path, None, Box::new(ignore)),
+            Start::Secondary
+        ));
+        drop(next);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
