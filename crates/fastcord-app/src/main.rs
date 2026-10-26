@@ -4,6 +4,7 @@
 compile_error!("fake-discord is a debug-only test mode");
 
 mod account_panel;
+mod account_ui;
 mod accounts;
 mod announce;
 mod apps;
@@ -285,7 +286,6 @@ struct App {
     store: Option<NativeCredentialStore>,
     saved_accounts: Vec<Snowflake>,
     account_index: accounts::Index,
-    account_panel: account_panel::State,
     qr_attempts: u64,
     password_login: String,
     password: Arc<UserToken>,
@@ -297,12 +297,6 @@ struct App {
     /// The settings page shown while the settings screen is open.
     settings_section: settings::Section,
     mic_menu: bool,
-    menu: Option<Menu>,
-    new_dm: new_dm::State,
-    /// Message requests replace the conversation in direct messages.
-    requests_open: bool,
-    /// The unverified-writes list in the chat settings is expanded.
-    unverified_open: bool,
     /// Installed speech voices, listed when the chat settings open.
     speech_voices: Vec<fastcord_platform::speech::Voice>,
     audio_saving: Option<audio_devices::Preferences>,
@@ -328,47 +322,10 @@ struct App {
     pending_link: Option<desktop::DeepLink>,
     /// The window was put in full screen by the call view's button.
     window_fullscreen: bool,
-    /// The per-person volume sliders are open.
-    voice_details: bool,
-    search: search::State,
-    pins: pins::State,
-    inbox: inbox::State,
-    notify_settings: notify_settings::State,
-    group: group_dm::State,
-    invite: invite::State,
-    guild_admin: guild_admin::State,
-    announce: announce::State,
-    moderation: moderation::State,
-    apps: apps::State,
-    community: community::State,
-    assets: assets::State,
-    automod: automod::State,
-    discover: discover::State,
-    onboarding: onboarding::State,
-    events: scheduled_events::State,
-    identity: profile_edit::State,
-    safety: safety::State,
-    report: report::State,
-    gif: gif::State,
-    sticker: sticker::State,
-    soundboard: soundboard::State,
-    stage: stage::State,
-    forward: forward::State,
-    poll: poll_create::State,
-    slash: slash::State,
-    voice: voice_record::State,
     /// Microphone gain, level meter and checks in the audio settings.
     mic_panel: mic_panel::State,
-    friends: friends::State,
-    member_menu: member_menu::State,
-    status: status::State,
-    threads: threads::State,
-    /// The quick switcher and the shortcuts help.
-    switcher: switcher::State,
-    /// A keyboard or switcher navigation is on its way: when the open
-    /// conversation changes, focus returns to the composer.
-    nav_pending: bool,
-    forum: forum::State,
+    /// Panels, dialogs and menus of the signed-in account.
+    ui: account_ui::AccountUi,
 }
 
 #[derive(Debug)]
@@ -692,7 +649,6 @@ impl App {
                 store: None,
                 saved_accounts: Vec::new(),
                 account_index: accounts::Index::default(),
-                account_panel: account_panel::State::default(),
                 qr_attempts: 0,
                 password_login: String::new(),
                 password: Arc::new(UserToken::new(String::new())),
@@ -703,10 +659,6 @@ impl App {
                 audio_settings: audio_devices::Settings::default(),
                 settings_section: settings::Section::Voice,
                 mic_menu: false,
-                menu: None,
-                new_dm: new_dm::State::default(),
-                requests_open: false,
-                unverified_open: false,
                 speech_voices: Vec::new(),
                 audio_saving: None,
                 volume_writer: None,
@@ -728,42 +680,8 @@ impl App {
                 .then(fastcord_platform::autostart::is_enabled),
                 pending_link: desktop::take_startup(),
                 window_fullscreen: false,
-                voice_details: false,
-                search: search::State::default(),
-                pins: pins::State::default(),
-                inbox: inbox::State::default(),
-                notify_settings: notify_settings::State::default(),
-                group: group_dm::State::default(),
-                invite: invite::State::default(),
-                guild_admin: guild_admin::State::default(),
-                announce: announce::State::default(),
-                moderation: moderation::State::default(),
-                apps: apps::State::default(),
-                community: community::State::default(),
-                assets: assets::State::default(),
-                automod: automod::State::default(),
-                discover: discover::State::default(),
-                onboarding: onboarding::State::default(),
-                events: scheduled_events::State::default(),
-                identity: profile_edit::State::default(),
-                safety: safety::State::default(),
-                report: report::State::default(),
-                gif: gif::State::default(),
-                sticker: sticker::State::default(),
-                soundboard: soundboard::State::default(),
-                stage: stage::State::default(),
-                forward: forward::State::default(),
-                poll: poll_create::State::default(),
-                slash: slash::State::default(),
-                voice: voice_record::State::default(),
                 mic_panel: mic_panel::State::default(),
-                friends: friends::State::default(),
-                member_menu: member_menu::State::default(),
-                status: status::State::default(),
-                threads: threads::State::default(),
-                switcher: switcher::State::default(),
-                nav_pending: false,
-                forum: forum::State::default(),
+                ui: account_ui::AccountUi::default(),
             },
             Task::perform(
                 async {
@@ -801,9 +719,9 @@ impl App {
                 | Message::MediaFrame(_)
         );
         if !matches!(self.phase, Phase::Account { .. }) {
-            self.friends.purge();
-            self.member_menu.reset();
-            self.status.purge();
+            self.ui.friends.purge();
+            self.ui.member_menu.reset();
+            self.ui.status.purge();
             // Narration ends with the session (logout, account switch).
             speech::stop();
         }
@@ -821,31 +739,32 @@ impl App {
             self.sync_tray();
         }
         if let Phase::Account { gateway, .. } = &self.phase {
-            gateway.controls.quick_query(self.switcher.wanted());
-            self.guild_admin.sync(&gateway.navigation);
-            self.automod.observe(&gateway.navigation.automod);
+            gateway.controls.quick_query(self.ui.switcher.wanted());
+            self.ui.guild_admin.sync(&gateway.navigation);
+            self.ui.automod.observe(&gateway.navigation.automod);
             gateway.controls.admin_guild(
-                self.guild_admin
+                self.ui
+                    .guild_admin
                     .wanted()
-                    .or(self.announce.wanted_guild())
-                    .or(self.moderation.wanted())
-                    .or(self.apps.wanted_guild())
-                    .or(self.community.wanted())
-                    .or(self.automod.wanted())
+                    .or(self.ui.announce.wanted_guild())
+                    .or(self.ui.moderation.wanted())
+                    .or(self.ui.apps.wanted_guild())
+                    .or(self.ui.community.wanted())
+                    .or(self.ui.automod.wanted())
                     // The settings screen's list needs the server's permissions.
-                    .or(self.assets.guild)
-                    .or(match self.menu {
+                    .or(self.ui.assets.guild)
+                    .or(match self.ui.menu {
                         Some(Menu::Server(guild)) => Some(guild),
                         _ => None,
                     }),
             );
             gateway
                 .controls
-                .follow_source(self.announce.wanted_follow());
-            gateway.controls.assets_guild(self.assets.wanted());
+                .follow_source(self.ui.announce.wanted_follow());
+            gateway.controls.assets_guild(self.ui.assets.wanted());
             gateway
                 .controls
-                .admin_member(self.guild_admin.wanted_member());
+                .admin_member(self.ui.guild_admin.wanted_member());
         }
         // Window full screen belongs to the call view: without it there is no
         // button to leave it, so it ends with the view.
@@ -880,8 +799,8 @@ impl App {
         let wanted = wanted_avatars(
             gateway,
             own_user(gateway, session),
-            &self.invite,
-            &self.discover,
+            &self.ui.invite,
+            &self.ui.discover,
         );
         let avatars = gateway
             .avatars
@@ -1043,7 +962,7 @@ impl App {
             .map(Message::Shortcut),
             _ => None,
         })];
-        if self.switcher.is_open() {
+        if self.ui.switcher.is_open() {
             parts.push(iced::event::listen_with(|event, _, _| match event {
                 iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                     key,
@@ -1118,15 +1037,15 @@ impl App {
         let Phase::Account { gateway, .. } = &mut self.phase else {
             return Task::none();
         };
-        self.threads.close();
-        self.friends.close();
-        if self.inbox.is_open() {
-            self.inbox.clear();
-            gateway.controls.inbox_rows(self.inbox.rows_wanted());
+        self.ui.threads.close();
+        self.ui.friends.close();
+        if self.ui.inbox.is_open() {
+            self.ui.inbox.clear();
+            gateway.controls.inbox_rows(self.ui.inbox.rows_wanted());
         }
         gateway.directs = guild.is_none();
-        jump_to(&mut self.search, gateway, guild, channel, message);
-        self.nav_pending = true;
+        jump_to(&mut self.ui.search, gateway, guild, channel, message);
+        self.ui.nav_pending = true;
         Task::none()
     }
 
@@ -1304,7 +1223,7 @@ impl App {
 
     /// The timer exists only while a voice message is being recorded or previewed.
     fn voice_subscription(&self) -> iced::Subscription<Message> {
-        if self.voice.ticking() {
+        if self.ui.voice.ticking() {
             iced::time::every(std::time::Duration::from_millis(100))
                 .map(|_| Message::Voice(voice_record::Event::Tick))
         } else {
@@ -1324,7 +1243,7 @@ impl App {
 
     /// The 250 ms timer exists only while a soundboard sound is loading or playing.
     fn soundboard_subscription(&self) -> iced::Subscription<Message> {
-        if self.soundboard.busy() {
+        if self.ui.soundboard.busy() {
             iced::time::every(std::time::Duration::from_millis(250))
                 .map(|_| Message::Soundboard(soundboard::Event::Tick))
         } else {
@@ -1658,7 +1577,7 @@ and a fourth"
                 }
                 notify::set_enabled(!preferences.notifications_off);
                 notify::set_previews(!preferences.notification_previews_off);
-                self.soundboard.set_prefs(preferences.soundboard.clone());
+                self.ui.soundboard.set_prefs(preferences.soundboard.clone());
                 self.audio_preferences = preferences;
                 chat_prefs::apply(self.audio_preferences.chat);
                 organize::publish(&self.audio_preferences.organize);
@@ -1877,14 +1796,14 @@ and a fourth"
                 if let Phase::Account { .. } = &self.phase {
                     // The account pages are the existing panels, kept open
                     // while their page is shown.
-                    if section == settings::Section::Profile && !self.identity.is_open() {
+                    if section == settings::Section::Profile && !self.ui.identity.is_open() {
                         tasks.push(self.handle(Message::Identity(profile_edit::Event::Toggle)));
                     }
-                    if section == settings::Section::Accounts && !self.account_panel.is_open() {
+                    if section == settings::Section::Accounts && !self.ui.account_panel.is_open() {
                         tasks.push(self.handle(Message::Account(account_panel::Event::Toggle)));
                     }
                     if section == settings::Section::Privacy {
-                        if !self.safety.is_open() {
+                        if !self.ui.safety.is_open() {
                             tasks.push(self.handle(Message::Safety(safety::Event::Toggle)));
                         }
                         tasks.push(
@@ -1938,10 +1857,10 @@ and a fourth"
             }
             Message::OpenMenu(menu) => {
                 self.close_menus();
-                self.menu = menu;
+                self.ui.menu = menu;
             }
             Message::NewDm(new_dm::Event::Create) => {
-                let recipients = self.new_dm.recipients();
+                let recipients = self.ui.new_dm.recipients();
                 let _ = self.handle(Message::PrivateRecipients(recipients));
                 if let Phase::Account {
                     session, gateway, ..
@@ -1949,13 +1868,13 @@ and a fourth"
                     && parse_private_recipients(&gateway.private.recipients, session.user.id)
                         .is_ok()
                 {
-                    self.new_dm.update(new_dm::Event::Close);
+                    self.ui.new_dm.update(new_dm::Event::Close);
                 }
                 return self.handle(Message::OpenPrivate);
             }
             Message::NewDm(event) => {
                 let opening = matches!(event, new_dm::Event::Open);
-                self.new_dm.update(event);
+                self.ui.new_dm.update(event);
                 if opening {
                     self.close_menus();
                     if let Phase::Account { gateway, .. } = &mut self.phase {
@@ -1965,10 +1884,10 @@ and a fourth"
                 }
             }
             Message::ShowRequests => {
-                self.friends.close();
-                self.requests_open = true;
+                self.ui.friends.close();
+                self.ui.requests_open = true;
                 let mut tasks = vec![self.handle(Message::ShowDirects(true))];
-                if !self.safety.is_open() {
+                if !self.ui.safety.is_open() {
                     tasks.push(self.handle(Message::Safety(safety::Event::Toggle)));
                 }
                 tasks.push(self.handle(Message::Safety(safety::Event::Tab(safety::Tab::Requests))));
@@ -2008,13 +1927,13 @@ and a fourth"
                 self.network_settings.open = false;
                 self.mic_panel.close();
                 let mut closing = Vec::new();
-                if self.identity.is_open() {
+                if self.ui.identity.is_open() {
                     closing.push(Message::Identity(profile_edit::Event::Toggle));
                 }
-                if self.account_panel.is_open() {
+                if self.ui.account_panel.is_open() {
                     closing.push(Message::Account(account_panel::Event::Toggle));
                 }
-                if self.safety.is_open() {
+                if self.ui.safety.is_open() {
                     closing.push(Message::Safety(safety::Event::Close));
                 }
                 if !closing.is_empty() {
@@ -2085,7 +2004,7 @@ and a fourth"
             }
             Message::SpeechTest => speech::speak("This is how messages will sound.".to_owned()),
             Message::StopSpeech => speech::stop(),
-            Message::ToggleUnverifiedList => self.unverified_open = !self.unverified_open,
+            Message::ToggleUnverifiedList => self.ui.unverified_open = !self.ui.unverified_open,
             Message::UnverifiedWrite(group, on) => {
                 if let Phase::Account { session, .. } = &self.phase {
                     session.client.set_write_group(group, on);
@@ -2463,20 +2382,22 @@ and a fourth"
                     }
                 }
                 if let Phase::Account { gateway, .. } = &self.phase
-                    && let Some(message) =
-                        self.search.take_pending_jump(gateway.timeline.channel_id)
+                    && let Some(message) = self
+                        .ui
+                        .search
+                        .take_pending_jump(gateway.timeline.channel_id)
                     && let Some(channel) = gateway.timeline.channel_id
                 {
                     gateway
                         .controls
                         .timeline_intent(history::Intent::JumpTo { channel, message });
                 }
-                if self.search.take_jump_expired() || self.inbox.take_expired() {
+                if self.ui.search.take_jump_expired() || self.ui.inbox.take_expired() {
                     self.notice = Some("That message is in a channel you cannot open.".to_owned());
                 }
                 if let Phase::Account { gateway, .. } = &self.phase
                     && let Some((channel, target)) =
-                        self.inbox.take_pending(gateway.timeline.channel_id)
+                        self.ui.inbox.take_pending(gateway.timeline.channel_id)
                 {
                     inbox_jump(&gateway.controls, channel, target);
                 }
@@ -2485,43 +2406,46 @@ and a fourth"
                     gateway, session, ..
                 } = &self.phase
                 {
-                    self.sticker.sync(gateway.timeline.channel_id);
-                    self.invite.cache.sync_guilds(&gateway.navigation);
+                    self.ui.sticker.sync(gateway.timeline.channel_id);
+                    self.ui.invite.cache.sync_guilds(&gateway.navigation);
                     invite_task = self
+                        .ui
                         .invite
                         .pump(&gateway.timeline.rows, &session.client)
                         .map(Message::Invite);
-                    self.forward.sync(gateway.timeline.channel_id);
-                    self.announce.sync(gateway.timeline.channel_id);
-                    self.group.sync(
+                    self.ui.forward.sync(gateway.timeline.channel_id);
+                    self.ui.announce.sync(gateway.timeline.channel_id);
+                    self.ui.group.sync(
                         gateway
                             .navigation
                             .private_selection
                             .as_ref()
                             .map(|selection| selection.channel_id),
                     );
-                    self.identity.sync(&gateway.navigation);
-                    self.safety.sync(&gateway.navigation);
-                    self.report
-                        .sync(self.report.watched().and_then(|(channel, message)| {
+                    self.ui.identity.sync(&gateway.navigation);
+                    self.ui.safety.sync(&gateway.navigation);
+                    self.ui
+                        .report
+                        .sync(self.ui.report.watched().and_then(|(channel, message)| {
                             timeline::is_retained(&gateway.timeline, channel, message)
                         }));
-                    self.poll.sync(gateway.timeline.channel_id);
-                    self.slash.sync(gateway.timeline.channel_id);
-                    self.slash
+                    self.ui.poll.sync(gateway.timeline.channel_id);
+                    self.ui.slash.sync(gateway.timeline.channel_id);
+                    self.ui
+                        .slash
                         .modal_shown(gateway.timeline.interaction.modal.as_ref());
-                    self.voice.sync(gateway.timeline.channel_id);
+                    self.ui.voice.sync(gateway.timeline.channel_id);
                 }
                 // A navigation the user started (keys, switcher, sidebar) has
                 // landed: the composer takes focus back, and the sidebar shows
                 // servers or direct messages to match what opened.
                 let mut refocus = Task::none();
-                if self.nav_pending
+                if self.ui.nav_pending
                     && let Phase::Account { gateway, .. } = &mut self.phase
                     && gateway.timeline.channel_id.is_some()
                     && gateway.timeline.channel_id != before
                 {
-                    self.nav_pending = false;
+                    self.ui.nav_pending = false;
                     gateway.directs = gateway.navigation.private_selection.is_some();
                     refocus = iced::widget::operation::focus(composer::EDITOR_ID);
                 }
@@ -2541,8 +2465,8 @@ and a fourth"
                 }
             }
             Message::ToggleVoiceDetails => {
-                self.voice_details = !self.voice_details;
-                if !self.voice_details
+                self.ui.voice_details = !self.ui.voice_details;
+                if !self.ui.voice_details
                     && let Some(writer) = &self.volume_writer
                 {
                     writer.flush();
@@ -2563,7 +2487,7 @@ and a fourth"
             Message::Assets(event) => return self.assets_event(event),
             Message::GuildAdmin(event) => {
                 if matches!(event, guild_admin::Event::MemberRoles(..)) {
-                    self.member_menu.close();
+                    self.ui.member_menu.close();
                 }
                 return self.guild_admin_event(event);
             }
@@ -2586,7 +2510,7 @@ and a fourth"
             Message::VoiceRecordingToggled(on) => {
                 self.audio_preferences.voice_recording = on;
                 if !on {
-                    self.voice.reset();
+                    self.ui.voice.reset();
                 }
                 if self.audio_saving.is_none() {
                     return self.save_audio_preferences();
@@ -2599,6 +2523,7 @@ and a fourth"
                 {
                     let own = gateway.navigation.presences.get(&session.user.id);
                     return self
+                        .ui
                         .status
                         .update(event, own, &session.client)
                         .map(Message::Status);
@@ -2607,7 +2532,7 @@ and a fourth"
             Message::Threads(event) => return self.threads_event(event),
             Message::Forum(event) => return self.forum_event(event),
             Message::Friends(event) => {
-                self.requests_open = false;
+                self.ui.requests_open = false;
                 if matches!(event, friends::Event::Open) {
                     self.close_expressions();
                 }
@@ -2617,7 +2542,7 @@ and a fourth"
                         | friends::Event::OpenDm(_)
                         | friends::Event::Report(_)
                 ) {
-                    self.member_menu.close();
+                    self.ui.member_menu.close();
                 }
                 if let Phase::Account {
                     session, gateway, ..
@@ -2625,7 +2550,7 @@ and a fourth"
                 {
                     match event {
                         friends::Event::OpenDm(user) => {
-                            self.friends.close();
+                            self.ui.friends.close();
                             gateway.directs = true;
                             gateway.private.notice = Some(
                                 if gateway.controls.open_private_channel(vec![user]) {
@@ -2644,9 +2569,11 @@ and a fourth"
                             );
                             subject.person = Some((user.id, user.display_name().to_owned()));
                             let _ = self
+                                .ui
                                 .friends
                                 .update(friends::Event::CloseProfile, &session.client);
                             return self
+                                .ui
                                 .report
                                 .begin(subject, &session.client)
                                 .map(Message::Report);
@@ -2656,6 +2583,7 @@ and a fourth"
                                 gateway.directs = true;
                             }
                             return self
+                                .ui
                                 .friends
                                 .update_for(
                                     event,
@@ -2669,9 +2597,9 @@ and a fourth"
             }
             Message::SelectGuild(guild) => {
                 self.close_expressions();
-                self.requests_open = false;
-                self.member_menu.close();
-                self.threads.close();
+                self.ui.requests_open = false;
+                self.ui.member_menu.close();
+                self.ui.threads.close();
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.directs = false;
                     gateway.controls.select_guild(guild);
@@ -2683,11 +2611,11 @@ and a fourth"
             }
             Message::SelectChannel(guild, channel) => {
                 self.close_expressions();
-                self.member_menu.close();
+                self.ui.member_menu.close();
                 // Opens a channel's messages (a voice or Stage channel's chat
                 // included); it never touches the voice connection.
-                self.threads.close();
-                self.nav_pending = true;
+                self.ui.threads.close();
+                self.ui.nav_pending = true;
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     gateway.controls.select_channel(guild, channel);
                 }
@@ -2710,7 +2638,7 @@ and a fourth"
                         .iter()
                         .any(|row| row.id == channel && !row.permissions.use_vad);
                     if join {
-                        self.stage.reset();
+                        self.ui.stage.reset();
                         gateway.controls.set_vad_forbidden(vad_forbidden);
                         gateway.voice_guild = Some(guild);
                         gateway.voice_call = None;
@@ -2769,7 +2697,7 @@ and a fourth"
                 if let Some(writer) = &self.volume_writer {
                     writer.flush();
                 }
-                self.stage.reset();
+                self.ui.stage.reset();
                 let mut cancel = None;
                 if let Phase::Account {
                     session, gateway, ..
@@ -2812,7 +2740,7 @@ and a fourth"
             }
             Message::MemberMenu(event) => return self.member_menu_event(event),
             Message::ActivateParticipant(user) => {
-                self.member_menu.close();
+                self.ui.member_menu.close();
                 if let Phase::Account {
                     gateway, session, ..
                 } = &mut self.phase
@@ -2901,7 +2829,7 @@ and a fourth"
             Message::OpenCall => {
                 if let Phase::Account { gateway, .. } = &mut self.phase {
                     if let Some((Some(guild), channel)) = gateway.controls.voice_target() {
-                        self.threads.close();
+                        self.ui.threads.close();
                         gateway.controls.select_channel(guild, channel);
                     }
                     gateway.call_view.open = gateway.voice_guild.or(gateway.voice_call).is_some();
@@ -3186,11 +3114,11 @@ and a fourth"
             }
             Message::SelectPrivateChannel(channel) => {
                 self.close_expressions();
-                self.requests_open = false;
-                self.threads.close();
-                self.nav_pending = true;
+                self.ui.requests_open = false;
+                self.ui.threads.close();
+                self.ui.nav_pending = true;
                 if let Phase::Account { gateway, .. } = &mut self.phase {
-                    self.friends.close();
+                    self.ui.friends.close();
                     gateway.directs = true;
                     gateway.controls.select_private_channel(channel);
                 }
@@ -3439,7 +3367,7 @@ and a fourth"
                                 // Only a channel the account can open is selected;
                                 // otherwise the wait ends with a notice.
                                 jump_to(
-                                    &mut self.search,
+                                    &mut self.ui.search,
                                     gateway,
                                     link.guild,
                                     link.channel,
@@ -3480,12 +3408,14 @@ and a fourth"
                             subject.person =
                                 Some((found.author.id, found.author.display_name().to_owned()));
                             return self
+                                .ui
                                 .report
                                 .begin(subject, &session.client)
                                 .map(Message::Report);
                         }
                         timeline::Event::OpenProfile(user) => {
                             return self
+                                .ui
                                 .friends
                                 .update(friends::Event::Profile(user), &session.client)
                                 .map(Message::Friends);
@@ -3505,6 +3435,7 @@ and a fourth"
                                         .unwrap_or_default()
                                         .to_owned();
                                 return self
+                                    .ui
                                     .threads
                                     .update(
                                         threads::Event::Start(
@@ -3522,7 +3453,7 @@ and a fourth"
                         // from here; the archive list brings it in.
                         timeline::Event::OpenThread(thread) => {
                             if let Some(guild) = gateway.navigation.selected_guild {
-                                self.threads.close();
+                                self.ui.threads.close();
                                 gateway.controls.select_channel(guild, thread);
                             }
                         }
@@ -3846,7 +3777,8 @@ and a fourth"
                     let _ = voice_settings::purge(account);
                     return self.save_account_index();
                 }
-                self.account_panel
+                self.ui
+                    .account_panel
                     .fail("The native store could not remove that saved login.");
             }
             Message::AccountIndexSaved => {}
@@ -3901,7 +3833,7 @@ and a fourth"
             .iter()
             .find(|row| row.id == channel)
             .map(|row| row.permissions)?;
-        let open = self.soundboard.is_open();
+        let open = self.ui.soundboard.is_open();
         let event = if open {
             soundboard::Event::Close
         } else {
@@ -4141,34 +4073,35 @@ and a fourth"
     /// panel that is one.
     fn server_page(&self) -> Option<(Snowflake, server_settings::Section)> {
         use server_settings::Section;
-        self.guild_admin
+        self.ui
+            .guild_admin
             .page()
-            .or_else(|| self.assets.guild.map(|g| (g, Section::Expressions)))
-            .or_else(|| self.community.page().map(|g| (g, Section::Community)))
-            .or_else(|| self.automod.page().map(|g| (g, Section::AutoMod)))
-            .or_else(|| self.apps.page())
-            .or_else(|| self.moderation.page())
+            .or_else(|| self.ui.assets.guild.map(|g| (g, Section::Expressions)))
+            .or_else(|| self.ui.community.page().map(|g| (g, Section::Community)))
+            .or_else(|| self.ui.automod.page().map(|g| (g, Section::AutoMod)))
+            .or_else(|| self.ui.apps.page())
+            .or_else(|| self.ui.moderation.page())
     }
 
     /// Closes every panel that is a settings page.
     fn close_server_pages(&mut self) -> Task<Message> {
         let mut closing = Vec::new();
-        if self.guild_admin.page().is_some() {
+        if self.ui.guild_admin.page().is_some() {
             closing.push(Message::GuildAdmin(guild_admin::Event::Close));
         }
-        if self.assets.guild.is_some() {
+        if self.ui.assets.guild.is_some() {
             closing.push(Message::Assets(assets::Event::Close));
         }
-        if self.community.page().is_some() {
+        if self.ui.community.page().is_some() {
             closing.push(Message::Community(community::Event::Close));
         }
-        if self.automod.page().is_some() {
+        if self.ui.automod.page().is_some() {
             closing.push(Message::AutoMod(automod::Event::Close));
         }
-        if self.apps.page().is_some() {
+        if self.ui.apps.page().is_some() {
             closing.push(Message::Apps(apps::Event::Close));
         }
-        if self.moderation.page().is_some() {
+        if self.ui.moderation.page().is_some() {
             closing.push(Message::Moderation(moderation::Event::Close));
         }
         Task::batch(
@@ -4191,18 +4124,18 @@ and a fourth"
         let empty = || -> Element<'a, Message> { text("").into() };
         let content: Element<'a, Message> = match section {
             Section::Overview | Section::Roles | Section::Channel(_) => {
-                guild_admin::view(&self.guild_admin, navigation)
+                guild_admin::view(&self.ui.guild_admin, navigation)
                     .map_or_else(empty, |panel| panel.map(Message::GuildAdmin))
             }
-            Section::Expressions => assets::view(&self.assets, navigation)
+            Section::Expressions => assets::view(&self.ui.assets, navigation)
                 .map_or_else(empty, |panel| panel.map(Message::Assets)),
-            Section::Community => community::view(&self.community, navigation)
+            Section::Community => community::view(&self.ui.community, navigation)
                 .map_or_else(empty, |panel| panel.map(Message::Community)),
-            Section::AutoMod => automod::view(&self.automod, navigation)
+            Section::AutoMod => automod::view(&self.ui.automod, navigation)
                 .map_or_else(empty, |panel| panel.map(Message::AutoMod)),
-            Section::Integrations | Section::Webhooks(_) => apps::view(&self.apps, navigation)
+            Section::Integrations | Section::Webhooks(_) => apps::view(&self.ui.apps, navigation)
                 .map_or_else(empty, |panel| panel.map(Message::Apps)),
-            Section::Bans | Section::Audit => moderation::view(&self.moderation, navigation)
+            Section::Bans | Section::Audit => moderation::view(&self.ui.moderation, navigation)
                 .map_or_else(empty, |panel| panel.map(Message::Moderation)),
         };
         let admin = navigation.admin.as_ref().filter(|admin| admin.id == guild);
@@ -4238,12 +4171,12 @@ and a fourth"
     fn expressions_tab(&self, gateway: &GatewayPanel) -> Option<Expressions> {
         if gateway.emoji_picker.request.open {
             Some(Expressions::Emoji)
-        } else if self.gif.open {
+        } else if self.ui.gif.open {
             Some(Expressions::Gif)
         } else if gateway
             .timeline
             .channel_id
-            .is_some_and(|channel| self.sticker.is_open_for(channel))
+            .is_some_and(|channel| self.ui.sticker.is_open_for(channel))
         {
             Some(Expressions::Sticker)
         } else {
@@ -4261,9 +4194,9 @@ and a fourth"
                 &gateway.emoji_snapshot,
                 &gateway.emoji.views,
             ),
-            Expressions::Gif => gif::view(&self.gif)
+            Expressions::Gif => gif::view(&self.ui.gif)
                 .map_or_else(|| text("").into(), |panel| panel.map(Message::Gif)),
-            Expressions::Sticker => sticker::view(&self.sticker)
+            Expressions::Sticker => sticker::view(&self.ui.sticker)
                 .map_or_else(|| text("").into(), |panel| panel.map(Message::Sticker)),
         };
         let full = gateway.emoji_picker.reaction().is_none()
@@ -4375,8 +4308,8 @@ and a fourth"
     /// The emoji, GIF and sticker window belongs to the conversation it was
     /// opened for; going elsewhere closes it.
     fn close_expressions(&mut self) {
-        self.gif.close();
-        self.sticker.close();
+        self.ui.gif.close();
+        self.ui.sticker.close();
         if let Phase::Account { gateway, .. } = &mut self.phase {
             gateway.emoji_picker.close();
         }
@@ -4392,25 +4325,25 @@ and a fourth"
             return None;
         };
         let navigation = &gateway.navigation;
-        if self.onboarding.is_open() {
+        if self.ui.onboarding.is_open() {
             Some(Some(Message::Onboarding(onboarding::Event::Close)))
-        } else if self.events.is_open_for(navigation.selected_guild) {
+        } else if self.ui.events.is_open_for(navigation.selected_guild) {
             Some(Some(Message::Events(scheduled_events::Event::Close)))
-        } else if self.guild_admin.is_dialog() {
+        } else if self.ui.guild_admin.is_dialog() {
             Some(Some(Message::GuildAdmin(guild_admin::Event::Close)))
-        } else if announce::view(&self.announce, navigation).is_some() {
+        } else if announce::view(&self.ui.announce, navigation).is_some() {
             Some(Some(Message::Announce(announce::Event::Close)))
-        } else if self.server_page().is_none() && apps::view(&self.apps, navigation).is_some() {
+        } else if self.server_page().is_none() && apps::view(&self.ui.apps, navigation).is_some() {
             Some(Some(Message::Apps(apps::Event::Close)))
-        } else if self.invite.is_dialog() {
-            Some(self.invite.dismiss().map(Message::Invite))
-        } else if discover::view(&self.discover, navigation, &gateway.avatars.views).is_some() {
+        } else if self.ui.invite.is_dialog() {
+            Some(self.ui.invite.dismiss().map(Message::Invite))
+        } else if discover::view(&self.ui.discover, navigation, &gateway.avatars.views).is_some() {
             Some(Some(Message::Discover(discover::Event::Toggle)))
-        } else if group_dm::view(&self.group, navigation, session.user.id).is_some() {
+        } else if group_dm::view(&self.ui.group, navigation, session.user.id).is_some() {
             Some(Some(Message::Group(group_dm::Event::Close)))
-        } else if report::view(&self.report, navigation).is_some() {
+        } else if report::view(&self.ui.report, navigation).is_some() {
             Some(Some(Message::Report(report::Event::Close)))
-        } else if self.forward.is_open() {
+        } else if self.ui.forward.is_open() {
             Some(Some(Message::Forward(forward::Event::Close)))
         } else {
             None
@@ -4418,9 +4351,9 @@ and a fourth"
     }
 
     fn close_menus(&mut self) {
-        self.status.open = false;
+        self.ui.status.open = false;
         self.mic_menu = false;
-        self.menu = None;
+        self.ui.menu = None;
     }
 
     fn can_login(&self) -> bool {
@@ -4497,43 +4430,11 @@ and a fourth"
             }
         }
         self.volume_notice = None;
-        self.switcher = switcher::State::default();
-        self.nav_pending = false;
-        // The switch lives in the account's client, which is dropped with it.
-        self.unverified_open = false;
         if let Phase::Account { gateway, .. } = &mut self.phase {
             // Drafts live in memory only; logout forgets them at once.
             gateway.composer.clear();
         }
-        self.pins = pins::State::default();
-        self.inbox.clear();
-        self.notify_settings.clear();
-        self.group.clear();
-        self.invite.clear();
-        self.guild_admin.clear();
-        self.announce.clear();
-        self.moderation.clear();
-        self.apps.clear();
-        self.community.clear();
-        self.assets.clear();
-        self.automod.clear();
-        self.discover.clear();
-        self.onboarding.clear();
-        self.events.clear();
-        self.identity.clear();
-        self.safety.clear();
-        self.account_panel.clear();
-        self.report.clear();
-        self.gif = gif::State::default();
-        self.sticker = sticker::State::default();
-        self.soundboard.reset();
-        self.stage.reset();
-        self.forward = forward::State::default();
-        self.poll = poll_create::State::default();
-        self.slash.reset();
-        self.voice.reset();
-        self.threads.drop_all();
-        self.forum.drop_all();
+        self.ui.reset();
         let Phase::Account {
             session, gateway, ..
         } = &self.phase
@@ -4567,7 +4468,7 @@ and a fourth"
             return Task::none();
         };
         let rejected = account_panel::State::is_rejected(&event);
-        let (task, action) = self.account_panel.update(event, &session.client);
+        let (task, action) = self.ui.account_panel.update(event, &session.client);
         if rejected && let Phase::Account { gateway, .. } = &self.phase {
             let id = gateway.id;
             return self.handle(Message::Gateway(
@@ -4733,37 +4634,7 @@ and a fourth"
             &session.client.identity().properties().browser_user_agent,
         )
         .ok();
-        self.search = search::State::default();
-        self.pins = pins::State::default();
-        self.inbox.clear();
-        self.notify_settings.clear();
-        self.group.clear();
-        self.invite.clear();
-        self.guild_admin.clear();
-        self.announce.clear();
-        self.moderation.clear();
-        self.apps.clear();
-        self.community.clear();
-        self.assets.clear();
-        self.automod.clear();
-        self.discover.clear();
-        self.onboarding.clear();
-        self.events.clear();
-        self.identity.clear();
-        self.safety.clear();
-        self.account_panel.clear();
-        self.report.clear();
-        self.gif = gif::State::default();
-        self.sticker = sticker::State::default();
-        self.forward = forward::State::default();
-        self.poll = poll_create::State::default();
-        self.slash.reset();
-        self.voice.reset();
-        self.threads.drop_all();
-        self.forum.drop_all();
-        self.friends.reset();
-        self.member_menu.reset();
-        self.status.reset();
+        self.ui.reset();
         self.phase = Phase::Account {
             session,
             persistence,
@@ -4806,7 +4677,8 @@ and a fourth"
             return Task::none();
         };
         let (task, opened) =
-            self.forum
+            self.ui
+                .forum
                 .update(event, &session.client, gateway.navigation.forum.as_ref());
         if let Some(thread) = opened
             && let Some(guild) = thread.guild_id
@@ -4825,8 +4697,8 @@ and a fourth"
         };
         match event {
             threads::Event::OpenArchived(index) => {
-                if let Some((guild, thread)) = self.threads.archived_thread(index) {
-                    self.threads.close();
+                if let Some((guild, thread)) = self.ui.threads.archived_thread(index) {
+                    self.ui.threads.close();
                     gateway.controls.open_thread(guild, thread);
                 }
                 Task::none()
@@ -4845,18 +4717,20 @@ and a fourth"
                                 && locked.is_none_or(|l| l != t.locked)
                         })
                 });
-                self.threads
+                self.ui
+                    .threads
                     .set_state((thread, archived, locked), allowed, &session.client)
                     .map(Message::Threads)
             }
             threads::Event::Created(Ok(thread)) => {
-                self.threads.close();
+                self.ui.threads.close();
                 if let Some(guild) = thread.guild_id {
                     gateway.controls.open_thread(guild, *thread);
                 }
                 Task::none()
             }
             event => self
+                .ui
                 .threads
                 .update(event, &session.client)
                 .map(Message::Threads),
@@ -4871,18 +4745,19 @@ and a fourth"
             return Task::none();
         };
         if let gif::Event::Pick(index) = event {
-            if let Some(url) = self.gif.url(index).map(str::to_owned)
+            if let Some(url) = self.ui.gif.url(index).map(str::to_owned)
                 && gateway.composer.insert_emoji(&url)
             {
-                self.gif.close();
+                self.ui.gif.close();
                 return iced::widget::operation::focus(composer::EDITOR_ID);
             }
             return Task::none();
         }
-        if matches!(event, gif::Event::Toggle) && !self.gif.open && !gateway.timeline.can_send {
+        if matches!(event, gif::Event::Toggle) && !self.ui.gif.open && !gateway.timeline.can_send {
             return Task::none();
         }
-        self.gif
+        self.ui
+            .gif
             .update(event, &session.client, gateway.attachments.as_ref())
             .map(Message::Gif)
     }
@@ -4901,7 +4776,7 @@ and a fourth"
             cache: gateway.attachments.as_ref(),
             output: self.audio_preferences.output.choice.clone(),
         };
-        let task = self.assets.update(event, &env);
+        let task = self.ui.assets.update(event, &env);
         if rejected {
             let id = gateway.id;
             return self.handle(Message::Gateway(
@@ -4920,6 +4795,7 @@ and a fourth"
         let controls = gateway.controls.voice_controls();
         let (stickers, sounds) = (controls.sticker_change, controls.sound_catalog_change);
         let tasks: Vec<_> = self
+            .ui
             .assets
             .new_changes(stickers, sounds)
             .into_iter()
@@ -4937,6 +4813,7 @@ and a fourth"
         };
         let rejected = apps::State::is_rejected(&event);
         let (task, action) = self
+            .ui
             .apps
             .update(event, &gateway.navigation, &session.client);
         if rejected {
@@ -4965,7 +4842,7 @@ and a fourth"
             return Task::none();
         };
         let rejected = announce::State::is_rejected(&event);
-        let task = self.announce.update(
+        let task = self.ui.announce.update(
             event,
             &gateway.navigation,
             &gateway.timeline,
@@ -4989,7 +4866,8 @@ and a fourth"
             return Task::none();
         };
         let candidates = forward_candidates(gateway);
-        self.forward
+        self.ui
+            .forward
             .update(event, &candidates, &session.client)
             .map(Message::Forward)
     }
@@ -5022,7 +4900,8 @@ and a fourth"
             interaction: &gateway.timeline.interaction,
             now: std::time::Instant::now(),
         };
-        self.slash
+        self.ui
+            .slash
             .typed(gateway.composer.slash_query().is_some(), &env)
             .map(Message::Slash)
     }
@@ -5047,7 +4926,7 @@ and a fourth"
             now: std::time::Instant::now(),
         };
         let rejected = slash::State::is_rejected(&event);
-        let (task, used) = self.slash.update(event, &env);
+        let (task, used) = self.ui.slash.update(event, &env);
         if used {
             gateway.composer.clear_text();
         }
@@ -5076,7 +4955,8 @@ and a fourth"
             channel,
             can_send: gateway.timeline.can_send,
         };
-        self.poll
+        self.ui
+            .poll
             .update(event, context, &session.client)
             .map(Message::Poll)
     }
@@ -5092,7 +4972,7 @@ and a fourth"
             return Task::none();
         };
         let context = self.voice_context(gateway, channel);
-        let (task, file) = self.voice.update(event, &context);
+        let (task, file) = self.ui.voice.update(event, &context);
         if let Some(file) = file {
             if gateway.controls.send_message_with_files(
                 channel,
@@ -5101,7 +4981,7 @@ and a fourth"
                 false,
                 None,
             ) {
-                self.voice.sent();
+                self.ui.voice.sent();
             } else {
                 self.notice = Some("The message could not be queued. Try again.".to_owned());
             }
@@ -5213,7 +5093,7 @@ and a fourth"
 
     /// Saves the soundboard choices when an update changed them.
     fn save_soundboard_prefs(&mut self) -> Task<Message> {
-        match self.soundboard.take_dirty_prefs() {
+        match self.ui.soundboard.take_dirty_prefs() {
             Some(prefs) => {
                 self.audio_preferences.soundboard = prefs;
                 if self.audio_saving.is_none() {
@@ -5236,17 +5116,23 @@ and a fourth"
             return Task::none();
         };
         let controls = gateway.controls.voice_controls();
-        self.soundboard.sync_call(env.voice, env.deafened);
+        self.ui.soundboard.sync_call(env.voice, env.deafened);
         let mut tasks = Vec::new();
         for cue in &controls.sound_cues {
-            tasks.push(self.soundboard.update(soundboard::Event::Cue(*cue), &env));
+            tasks.push(
+                self.ui
+                    .soundboard
+                    .update(soundboard::Event::Cue(*cue), &env),
+            );
         }
         if let Some(guild) = self
+            .ui
             .soundboard
             .new_catalog_change(controls.sound_catalog_change)
         {
             tasks.push(
-                self.soundboard
+                self.ui
+                    .soundboard
                     .update(soundboard::Event::CatalogChanged(guild), &env),
             );
         }
@@ -5270,7 +5156,7 @@ and a fourth"
         let stage = gateway.controls.voice_controls().stage;
         let action = match event {
             Event::Done(serial, result) => {
-                self.stage.finish(serial, result);
+                self.ui.stage.finish(serial, result);
                 return Task::none();
             }
             Event::OpenTopic(editing) => {
@@ -5279,11 +5165,11 @@ and a fourth"
                 } else {
                     String::new()
                 };
-                self.stage.topic = Some((editing, draft));
+                self.ui.stage.topic = Some((editing, draft));
                 return Task::none();
             }
             Event::Topic(value) => {
-                if let Some((_, draft)) = &mut self.stage.topic {
+                if let Some((_, draft)) = &mut self.ui.stage.topic {
                     *draft = value
                         .chars()
                         .take(fastcord_discord::MAX_TOPIC_CHARS)
@@ -5292,23 +5178,23 @@ and a fourth"
                 return Task::none();
             }
             Event::CloseTopic => {
-                self.stage.topic = None;
+                self.ui.stage.topic = None;
                 return Task::none();
             }
-            Event::SubmitTopic => match self.stage.submission() {
+            Event::SubmitTopic => match self.ui.stage.submission() {
                 Some(action) => action,
                 None => return Task::none(),
             },
             Event::Do(action) => action,
         };
-        self.member_menu.close();
+        self.ui.member_menu.close();
         let (Some(guild), Some(channel)) = (stage.guild, stage.channel) else {
             return Task::none();
         };
         if session.client.writes_restricted() {
             return Task::none();
         }
-        let Some(serial) = self.stage.begin() else {
+        let Some(serial) = self.ui.stage.begin() else {
             return Task::none();
         };
         let bridge = gateway.controls.clone();
@@ -5324,7 +5210,7 @@ and a fourth"
             return Task::none();
         };
         let rejected = soundboard::State::is_rejected(&event);
-        let task = self.soundboard.update(event, &env);
+        let task = self.ui.soundboard.update(event, &env);
         if rejected && let Phase::Account { gateway, .. } = &self.phase {
             // Discord rejected the login: stop the account like any other 401.
             let id = gateway.id;
@@ -5355,7 +5241,8 @@ and a fourth"
             channel,
             can_send: gateway.timeline.can_send,
         };
-        self.sticker
+        self.ui
+            .sticker
             .update(
                 event,
                 context,
@@ -5373,9 +5260,10 @@ and a fourth"
             return Task::none();
         };
         let rejected = group_dm::State::is_rejected(&event);
-        let task = self
-            .group
-            .update(event, &gateway.navigation, session.user.id, &session.client);
+        let task =
+            self.ui
+                .group
+                .update(event, &gateway.navigation, session.user.id, &session.client);
         if rejected {
             // Discord rejected the login: stop the account like any other 401.
             let id = gateway.id;
@@ -5407,6 +5295,7 @@ and a fourth"
         }
         let rejected = onboarding::State::is_rejected(&event);
         let task = self
+            .ui
             .onboarding
             .update(event, &gateway.navigation, &session.client);
         if rejected {
@@ -5435,7 +5324,7 @@ and a fourth"
             return Task::none();
         }
         let rejected = scheduled_events::State::is_rejected(&event);
-        let task = self.events.update(
+        let task = self.ui.events.update(
             event,
             &gateway.navigation,
             &session.client,
@@ -5456,7 +5345,7 @@ and a fourth"
             return Task::none();
         };
         let rejected = discover::State::is_rejected(&event);
-        let task = self.discover.update(event, &session.client);
+        let task = self.ui.discover.update(event, &session.client);
         if rejected && let Phase::Account { gateway, .. } = &self.phase {
             let id = gateway.id;
             return self.handle(Message::Gateway(
@@ -5475,7 +5364,7 @@ and a fourth"
             return Task::none();
         };
         let rejected = invite::State::is_rejected(&event);
-        let task = self.invite.update(
+        let task = self.ui.invite.update(
             event,
             &gateway.navigation,
             &gateway.timeline.rows,
@@ -5500,7 +5389,8 @@ and a fourth"
         };
         let rejected = community::State::is_rejected(&event);
         let task =
-            self.community
+            self.ui
+                .community
                 .update(event, &gateway.navigation, &session.client, session.user.id);
         if rejected {
             let id = gateway.id;
@@ -5523,7 +5413,7 @@ and a fourth"
             // The rail's right click opens the same menu as the server's name.
             guild_admin::Event::Menu(guild) => {
                 self.close_menus();
-                self.menu = Some(Menu::Server(guild));
+                self.ui.menu = Some(Menu::Server(guild));
                 return Task::none();
             }
             guild_admin::Event::Apps(guild) => {
@@ -5537,6 +5427,7 @@ and a fourth"
         if let guild_admin::Event::Assets(guild) = event {
             // The menu hands over to the emoji, sticker and sound panel.
             let _ = self
+                .ui
                 .guild_admin
                 .update(event, &gateway.navigation, &session.client);
             return self.assets_event(assets::Event::Open(guild));
@@ -5547,7 +5438,7 @@ and a fourth"
         }
         if let guild_admin::Event::Community(guild) = event {
             // The settings hand over to the community setup panel.
-            let _ = self.guild_admin.update(
+            let _ = self.ui.guild_admin.update(
                 guild_admin::Event::Close,
                 &gateway.navigation,
                 &session.client,
@@ -5557,6 +5448,7 @@ and a fourth"
         if let guild_admin::Event::Leave(guild) = event {
             // The menu hands over to the leave confirmation of the invite module.
             let _ = self
+                .ui
                 .guild_admin
                 .update(event, &gateway.navigation, &session.client);
             return self.invite_event(invite::Event::AskLeave(guild));
@@ -5564,6 +5456,7 @@ and a fourth"
         if let guild_admin::Event::AutoMod(guild) = event {
             // The menu hands over to the AutoMod panel.
             let _ = self
+                .ui
                 .guild_admin
                 .update(event, &gateway.navigation, &session.client);
             return self.automod_event(automod::Event::Open(guild));
@@ -5572,6 +5465,7 @@ and a fourth"
             // The menu hands over to the moderation panels.
             let audit = matches!(event, guild_admin::Event::Audit(_));
             let _ = self
+                .ui
                 .guild_admin
                 .update(event, &gateway.navigation, &session.client);
             return self.moderation_event(if audit {
@@ -5582,6 +5476,7 @@ and a fourth"
         }
         let rejected = guild_admin::State::is_rejected(&event);
         let task = self
+            .ui
             .guild_admin
             .update(event, &gateway.navigation, &session.client);
         if rejected {
@@ -5603,6 +5498,7 @@ and a fourth"
         };
         let rejected = moderation::State::is_rejected(&event);
         let task = self
+            .ui
             .moderation
             .update(event, &gateway.navigation, &session.client);
         if rejected {
@@ -5624,6 +5520,7 @@ and a fourth"
         };
         let rejected = automod::State::is_rejected(&event);
         let task = self
+            .ui
             .automod
             .update(event, &gateway.navigation, &session.client);
         if rejected {
@@ -5644,7 +5541,7 @@ and a fourth"
             return Task::none();
         };
         let rejected = profile_edit::State::is_rejected(&event);
-        let task = self.identity.update(
+        let task = self.ui.identity.update(
             event,
             &gateway.navigation,
             own_user(gateway, session),
@@ -5668,7 +5565,7 @@ and a fourth"
         };
         match event {
             Event::Open(user, point) => {
-                self.member_menu.target = Some(member_menu::Target {
+                self.ui.member_menu.target = Some(member_menu::Target {
                     user,
                     point,
                     guild: (!gateway.directs)
@@ -5680,22 +5577,22 @@ and a fourth"
                     nick: String::new(),
                     ban_window: 0,
                 });
-                self.member_menu.notice = None;
+                self.ui.member_menu.notice = None;
             }
             Event::Close => {
-                self.member_menu.close();
+                self.ui.member_menu.close();
                 if let Some(writer) = &self.volume_writer {
                     writer.flush();
                 }
             }
             Event::Done(serial, result) => {
-                self.member_menu.done(
+                self.ui.member_menu.done(
                     serial,
                     result.map_or_else(moderation::failure, |()| "Done.".into()),
                 );
             }
             Event::Sub(sub) => {
-                if let Some(target) = &mut self.member_menu.target {
+                if let Some(target) = &mut self.ui.member_menu.target {
                     target.sub = sub;
                     target.confirm = None;
                     if sub == Some(member_menu::Sub::Nick) {
@@ -5710,12 +5607,12 @@ and a fourth"
                 }
             }
             Event::Reason(text) => {
-                if let Some(target) = &mut self.member_menu.target {
+                if let Some(target) = &mut self.ui.member_menu.target {
                     target.reason = fastcord_discord::cut_reason(text);
                 }
             }
             Event::Nick(text) => {
-                if let Some(target) = &mut self.member_menu.target {
+                if let Some(target) = &mut self.ui.member_menu.target {
                     target.nick = text
                         .chars()
                         .take(fastcord_discord::MAX_NICK_CHARS)
@@ -5723,15 +5620,15 @@ and a fourth"
                 }
             }
             Event::BanWindow(seconds) => {
-                if let Some(target) = &mut self.member_menu.target {
+                if let Some(target) = &mut self.ui.member_menu.target {
                     target.ban_window = seconds;
                 }
             }
             Event::Select(action) => {
-                if self.member_menu.pending.is_some() {
+                if self.ui.member_menu.pending.is_some() {
                     return Task::none();
                 }
-                let Some(target) = &mut self.member_menu.target else {
+                let Some(target) = &mut self.ui.member_menu.target else {
                     return Task::none();
                 };
                 if action.needs_confirm() {
@@ -5742,6 +5639,7 @@ and a fourth"
             }
             Event::Confirm => {
                 if let Some(action) = self
+                    .ui
                     .member_menu
                     .target
                     .as_ref()
@@ -5762,7 +5660,7 @@ and a fourth"
         else {
             return Task::none();
         };
-        let Some(target) = &self.member_menu.target else {
+        let Some(target) = &self.ui.member_menu.target else {
             return Task::none();
         };
         let Some(guild) = target
@@ -5771,7 +5669,7 @@ and a fourth"
         else {
             return Task::none();
         };
-        if self.member_menu.pending.is_some() || session.client.writes_restricted() {
+        if self.ui.member_menu.pending.is_some() || session.client.writes_restricted() {
             return Task::none();
         }
         let own = gateway
@@ -5794,13 +5692,13 @@ and a fourth"
                 _ => !own,
             };
         if !allowed {
-            self.member_menu.notice =
+            self.ui.member_menu.notice =
                 Some("This action is no longer available for this member.".into());
             return Task::none();
         }
         let reason = Some(target.reason.trim().to_owned()).filter(|r| !r.is_empty());
         let (bridge, user) = (gateway.controls.clone(), target.user.id);
-        let serial = self.member_menu.begin(user);
+        let serial = self.ui.member_menu.begin(user);
         Task::perform(
             async move { bridge.moderate(guild, user, action, reason).await },
             move |result| Message::MemberMenu(member_menu::Event::Done(serial, result)),
@@ -5833,24 +5731,28 @@ and a fourth"
                 &gateway.navigation.selected_guild_name,
             );
             return self
+                .ui
                 .report
                 .begin(subject, &session.client)
                 .map(Message::Report);
         }
         // The review is judged against what the timeline holds right now.
-        self.report
-            .sync(self.report.watched().and_then(|(channel, message)| {
+        self.ui
+            .report
+            .sync(self.ui.report.watched().and_then(|(channel, message)| {
                 timeline::is_retained(&gateway.timeline, channel, message)
             }));
         let rejected = report::State::is_rejected(&event);
         let mut task = self
+            .ui
             .report
             .update(event, &session.client)
             .map(Message::Report);
         if let Some((action, user)) = follow {
             task = Task::batch([
                 task,
-                self.friends
+                self.ui
+                    .friends
                     .update(friends::Event::Act(user, action), &session.client)
                     .map(Message::Friends),
             ]);
@@ -5875,6 +5777,7 @@ and a fourth"
         };
         let rejected = safety::State::is_rejected(&event);
         let task = self
+            .ui
             .safety
             .update(event, &gateway.navigation, &session.client);
         if rejected {
@@ -5892,28 +5795,28 @@ and a fourth"
     fn switcher_event(&mut self, event: switcher::Event) -> Task<Message> {
         // Enter on a pasted Discord link opens it instead of a search result.
         if matches!(event, switcher::Event::Submit)
-            && let Some(link) = self.switcher.wanted().and_then(desktop::parse)
+            && let Some(link) = self.ui.switcher.wanted().and_then(desktop::parse)
         {
-            self.switcher.close();
+            self.ui.switcher.close();
             return self.open_link(link);
         }
         let Phase::Account { gateway, .. } = &mut self.phase else {
             return Task::none();
         };
-        match self.switcher.update(event, &gateway.navigation.quick) {
+        match self.ui.switcher.update(event, &gateway.navigation.quick) {
             switcher::Action::None => Task::none(),
             switcher::Action::Open(entry) => {
                 // Exactly a sidebar click: the conversation opens (a voice
                 // channel's chat, never its call) and its draft comes back.
-                self.threads.close();
-                self.friends.close();
-                if self.inbox.is_open() {
-                    self.inbox.clear();
-                    gateway.controls.inbox_rows(self.inbox.rows_wanted());
+                self.ui.threads.close();
+                self.ui.friends.close();
+                if self.ui.inbox.is_open() {
+                    self.ui.inbox.clear();
+                    gateway.controls.inbox_rows(self.ui.inbox.rows_wanted());
                 }
                 gateway.directs = entry.guild.is_none();
                 gateway.controls.open_channel(entry.channel);
-                self.nav_pending = true;
+                self.ui.nav_pending = true;
                 iced::widget::operation::focus(composer::EDITOR_ID)
             }
         }
@@ -5925,12 +5828,12 @@ and a fourth"
         if let Shortcut::Escape { .. } = shortcut {
             // Whatever is on top closes first: a popover, a dialog, the
             // expressions window, a settings screen, then the side panels.
-            if self.status.open || self.mic_menu || self.menu.is_some() {
+            if self.ui.status.open || self.mic_menu || self.ui.menu.is_some() {
                 self.close_menus();
                 return Task::none();
             }
-            if self.new_dm.open {
-                self.new_dm.update(new_dm::Event::Close);
+            if self.ui.new_dm.open {
+                self.ui.new_dm.update(new_dm::Event::Close);
                 return Task::none();
             }
             if let Some(close) = self.dialog_close() {
@@ -5959,64 +5862,65 @@ and a fourth"
         }
         match shortcut {
             Shortcut::Switcher => {
-                self.switcher.toggle();
-                if self.switcher.is_open() {
+                self.ui.switcher.toggle();
+                if self.ui.switcher.is_open() {
                     iced::widget::operation::focus(switcher::INPUT_ID)
                 } else {
                     composer()
                 }
             }
             Shortcut::Help => {
-                self.switcher.toggle_help();
+                self.ui.switcher.toggle_help();
                 composer()
             }
             Shortcut::Move(delta) => {
-                if self.switcher.is_open() {
-                    self.switcher
+                if self.ui.switcher.is_open() {
+                    self.ui
+                        .switcher
                         .update(switcher::Event::Move(delta), &gateway.navigation.quick);
                 }
                 Task::none()
             }
             Shortcut::Step(step) => {
-                if self.switcher.is_open() || self.switcher.help_open() {
+                if self.ui.switcher.is_open() || self.ui.switcher.help_open() {
                     return Task::none();
                 }
-                self.threads.close();
-                self.friends.close();
-                if self.inbox.is_open() {
-                    self.inbox.clear();
-                    gateway.controls.inbox_rows(self.inbox.rows_wanted());
+                self.ui.threads.close();
+                self.ui.friends.close();
+                if self.ui.inbox.is_open() {
+                    self.ui.inbox.clear();
+                    gateway.controls.inbox_rows(self.ui.inbox.rows_wanted());
                 }
                 if step.scope == fastcord_discord::state::navigation::StepScope::Server {
                     gateway.directs = false;
                 }
                 gateway.controls.step(step);
-                self.nav_pending = true;
+                self.ui.nav_pending = true;
                 Task::none()
             }
             Shortcut::Escape { captured } => {
                 // Then the side panels, the topmost first.
-                if self.inbox.is_open() {
+                if self.ui.inbox.is_open() {
                     return Task::done(Message::Inbox(inbox::Event::Toggle));
                 }
-                if self.notify_settings.is_open() {
+                if self.ui.notify_settings.is_open() {
                     return Task::done(Message::NotifySettings(notify_settings::Event::Toggle));
                 }
-                if self.search.open {
+                if self.ui.search.open {
                     return Task::done(Message::Search(search::Event::Toggle));
                 }
                 if gateway
                     .timeline
                     .channel_id
-                    .is_some_and(|channel| self.pins.shows(channel))
+                    .is_some_and(|channel| self.ui.pins.shows(channel))
                 {
                     return Task::done(Message::Pins(pins::Event::Toggle));
                 }
-                if self.member_menu.target.is_some() {
-                    self.member_menu.close();
+                if self.ui.member_menu.target.is_some() {
+                    self.ui.member_menu.close();
                     return Task::none();
                 }
-                if self.switcher.close() {
+                if self.ui.switcher.close() {
                     return composer();
                 }
                 if gateway.attachment_viewer.take().is_some() {
@@ -6076,9 +5980,11 @@ and a fourth"
             &event,
             notify_settings::Event::Done(Err(RestError::AuthenticationRequired))
         );
-        let task =
-            self.notify_settings
-                .update(event, &gateway.navigation.notifications, &session.client);
+        let task = self.ui.notify_settings.update(
+            event,
+            &gateway.navigation.notifications,
+            &session.client,
+        );
         if rejected {
             return self.handle(Message::Gateway(
                 gateway.id,
@@ -6114,17 +6020,18 @@ and a fourth"
             inbox::Event::Loaded(_, Err(RestError::AuthenticationRequired))
                 | inbox::Event::Muted(_, Err(RestError::AuthenticationRequired))
         );
-        let (task, action) = self
-            .inbox
-            .update(event, &gateway.navigation.inbox, &session.client);
-        gateway.controls.inbox_rows(self.inbox.rows_wanted());
+        let (task, action) =
+            self.ui
+                .inbox
+                .update(event, &gateway.navigation.inbox, &session.client);
+        gateway.controls.inbox_rows(self.ui.inbox.rows_wanted());
         if let inbox::Action::Open(channel, target) = action {
             if gateway.timeline.channel_id == Some(channel) {
                 inbox_jump(&gateway.controls, channel, target);
             } else {
                 // Only a conversation the account can open is selected;
                 // otherwise the wait ends with a notice.
-                self.inbox.set_pending(channel, target);
+                self.ui.inbox.set_pending(channel, target);
                 gateway.controls.open_channel(channel);
             }
         }
@@ -6149,8 +6056,8 @@ and a fourth"
             return Task::none();
         };
         if let pins::Event::Jump(index) = event {
-            if self.pins.shows(channel)
-                && let Some(pin) = self.pins.pin(index)
+            if self.ui.pins.shows(channel)
+                && let Some(pin) = self.ui.pins.pin(index)
             {
                 gateway.controls.timeline_intent(history::Intent::JumpTo {
                     channel,
@@ -6159,7 +6066,8 @@ and a fourth"
             }
             return Task::none();
         }
-        self.pins
+        self.ui
+            .pins
             .update(event, &session.client, channel)
             .map(Message::Pins)
     }
@@ -6172,14 +6080,14 @@ and a fourth"
             return Task::none();
         };
         if let search::Event::Jump(index) = event {
-            if let Some(hit) = self.search.hit(index).cloned() {
+            if let Some(hit) = self.ui.search.hit(index).cloned() {
                 if gateway.timeline.channel_id == Some(hit.channel) {
                     gateway.controls.timeline_intent(history::Intent::JumpTo {
                         channel: hit.channel,
                         message: hit.message,
                     });
                 } else {
-                    self.search.set_pending_jump(hit.channel, hit.message);
+                    self.ui.search.set_pending_jump(hit.channel, hit.message);
                     match hit.guild {
                         Some(guild) => gateway.controls.select_channel(guild, hit.channel),
                         None => gateway.controls.select_private_channel(hit.channel),
@@ -6197,7 +6105,7 @@ and a fourth"
             guild,
             channel,
         };
-        self.search.update(event, &context).map(Message::Search)
+        self.ui.search.update(event, &context).map(Message::Search)
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -6231,20 +6139,20 @@ and a fourth"
         let missing = || -> Element<'_, Message> { ui::note(i18n::tr("Not available yet.")) };
         let content: Element<'_, Message> = match (section, account) {
             (settings::Section::Profile, Some((session, _, gateway))) => profile_edit::view(
-                &self.identity,
+                &self.ui.identity,
                 &gateway.navigation,
                 own_user(gateway, session),
             )
             .map_or_else(missing, |panel| panel.map(Message::Identity)),
             (settings::Section::Accounts, Some((session, persistence, _))) => account_panel::view(
-                &self.account_panel,
+                &self.ui.account_panel,
                 &self.account_index,
                 session.user.id,
                 *persistence == Persistence::Saved,
             )
             .map_or_else(missing, |panel| panel.map(Message::Account)),
             (settings::Section::Privacy, Some((_, _, gateway))) => {
-                safety::view(&self.safety, &gateway.navigation)
+                safety::view(&self.ui.safety, &gateway.navigation)
                     .map_or_else(missing, |panel| panel.map(Message::Safety))
             }
             (settings::Section::Chat, _) => chat_prefs::view(
@@ -6273,7 +6181,7 @@ and a fourth"
                 audio_devices::experimental(&self.audio_preferences),
                 unverified::view(
                     account.map(|(session, _, _)| &session.client),
-                    self.unverified_open,
+                    self.ui.unverified_open,
                 ),
                 audio_devices::diagnostics(
                     controls.as_ref().and_then(|c| c.audio_stats),
@@ -6348,7 +6256,7 @@ and a fourth"
             let voice_controls = gateway.controls.voice_controls();
             let search_bar: Element<'_, Message> = match Self::search_target(gateway) {
                 Some((guild, _)) => {
-                    search::view(&self.search, guild.is_some()).map(Message::Search)
+                    search::view(&self.ui.search, guild.is_some()).map(Message::Search)
                 }
                 None => text("").size(1).into(),
             };
@@ -6418,13 +6326,13 @@ and a fourth"
                         }
                     }),
                     soundboard: self.soundboard_toggle(gateway),
-                    settings_open: self.voice_details,
+                    settings_open: self.ui.voice_details,
                     can_leave: gateway.voice_guild.or(gateway.voice_call).is_some(),
                     share_text: share.text.clone(),
                     ping_ms: voice_controls.voice_ping_ms,
                 })
             });
-            let voice_settings: Option<Element<'_, Message>> = (in_voice && self.voice_details)
+            let voice_settings: Option<Element<'_, Message>> = (in_voice && self.ui.voice_details)
                 .then(|| {
                     let saved = &self.audio_preferences.camera;
                     let camera = &voice_controls.camera;
@@ -6509,7 +6417,7 @@ and a fourth"
             say(self.notice.clone().unwrap_or_default(), false);
             say(gateway.attachment_notice.unwrap_or("").to_owned(), false);
             // Closed, search is a tool in the conversation header.
-            let has_search = self.search.open && !search_bar_is_empty(gateway);
+            let has_search = self.ui.search.open && !search_bar_is_empty(gateway);
             let mut banner_column = column![].spacing(2);
             for (label, role) in [
                 ("Voice calls", fastcord_net::Role::Voice),
@@ -6545,15 +6453,15 @@ and a fourth"
                 banner_column = banner_column.push(search_bar);
             }
             if let Some(channel) = gateway.timeline.channel_id
-                && self.pins.shows(channel)
+                && self.ui.pins.shows(channel)
             {
-                banner_column = banner_column.push(pins::view(&self.pins).map(Message::Pins));
+                banner_column = banner_column.push(pins::view(&self.ui.pins).map(Message::Pins));
             }
-            if let Some(panel) = soundboard::view(&self.soundboard) {
+            if let Some(panel) = soundboard::view(&self.ui.soundboard) {
                 banner_column = banner_column.push(panel.map(Message::Soundboard));
             }
             if let Some(panel) = stage::banner(
-                &self.stage,
+                &self.ui.stage,
                 &voice_controls,
                 session.client.writes_restricted(),
             ) {
@@ -6561,7 +6469,7 @@ and a fourth"
             }
             if let Some(channel) = gateway.timeline.channel_id
                 && let Some(panel) = slash::view(
-                    &self.slash,
+                    &self.ui.slash,
                     gateway
                         .composer
                         .slash_query()
@@ -6575,14 +6483,14 @@ and a fourth"
                 banner_column = banner_column.push(panel.map(Message::Slash));
             }
             if let Some(channel) = gateway.timeline.channel_id
-                && self.poll.is_open_for(channel)
-                && let Some(panel) = poll_create::view(&self.poll)
+                && self.ui.poll.is_open_for(channel)
+                && let Some(panel) = poll_create::view(&self.ui.poll)
             {
                 banner_column = banner_column.push(panel.map(Message::Poll));
             }
             if let Some(channel) = gateway.timeline.channel_id
                 && let Some(panel) =
-                    voice_record::view(&self.voice, &self.voice_context(gateway, channel))
+                    voice_record::view(&self.ui.voice, &self.voice_context(gateway, channel))
             {
                 banner_column = banner_column.push(panel.map(Message::Voice));
             }
@@ -6590,74 +6498,82 @@ and a fourth"
             // lines and notices stay above the conversation.
             let mut dialogs: Vec<(Element<'_, Message>, Option<Message>)> = Vec::new();
             if let Some(panel) =
-                onboarding::view(&self.onboarding, &gateway.navigation, &gateway.revealed)
+                onboarding::view(&self.ui.onboarding, &gateway.navigation, &gateway.revealed)
             {
                 let panel = panel.map(Message::Onboarding);
-                if self.onboarding.is_open() {
+                if self.ui.onboarding.is_open() {
                     dialogs.push((panel, Some(Message::Onboarding(onboarding::Event::Close))));
                 } else {
                     banner_column = banner_column.push(panel);
                 }
             }
-            if let Some(panel) = scheduled_events::view(&self.events, &gateway.navigation) {
+            if let Some(panel) = scheduled_events::view(&self.ui.events, &gateway.navigation) {
                 let panel = panel.map(Message::Events);
-                if self.events.is_open_for(gateway.navigation.selected_guild) {
+                if self
+                    .ui
+                    .events
+                    .is_open_for(gateway.navigation.selected_guild)
+                {
                     dialogs.push((panel, Some(Message::Events(scheduled_events::Event::Close))));
                 } else {
                     banner_column = banner_column.push(panel);
                 }
             }
-            if let Some(panel) = guild_admin::view(&self.guild_admin, &gateway.navigation) {
+            if let Some(panel) = guild_admin::view(&self.ui.guild_admin, &gateway.navigation) {
                 let panel = panel.map(Message::GuildAdmin);
-                if self.guild_admin.is_dialog() {
+                if self.ui.guild_admin.is_dialog() {
                     dialogs.push((panel, Some(Message::GuildAdmin(guild_admin::Event::Close))));
                 } else {
                     banner_column = banner_column.push(panel);
                 }
             }
-            if let Some(panel) = announce::view(&self.announce, &gateway.navigation) {
+            if let Some(panel) = announce::view(&self.ui.announce, &gateway.navigation) {
                 dialogs.push((
                     panel.map(Message::Announce),
                     Some(Message::Announce(announce::Event::Close)),
                 ));
             }
-            if let Some(panel) = apps::view(&self.apps, &gateway.navigation) {
+            if let Some(panel) = apps::view(&self.ui.apps, &gateway.navigation) {
                 // The account's authorized apps; server pages are a screen.
                 dialogs.push((
                     panel.map(Message::Apps),
                     Some(Message::Apps(apps::Event::Close)),
                 ));
             }
-            if let Some(panel) = invite::view(&self.invite, localtime::now()) {
+            if let Some(panel) = invite::view(&self.ui.invite, localtime::now()) {
                 let panel = panel.map(Message::Invite);
-                if self.invite.is_dialog() {
-                    dialogs.push((panel, self.invite.dismiss().map(Message::Invite)));
+                if self.ui.invite.is_dialog() {
+                    dialogs.push((panel, self.ui.invite.dismiss().map(Message::Invite)));
                 } else {
                     banner_column = banner_column.push(panel);
                 }
             }
-            if let Some(panel) =
-                discover::view(&self.discover, &gateway.navigation, &gateway.avatars.views)
-            {
+            if let Some(panel) = discover::view(
+                &self.ui.discover,
+                &gateway.navigation,
+                &gateway.avatars.views,
+            ) {
                 dialogs.push((
                     panel.map(Message::Discover),
                     Some(Message::Discover(discover::Event::Toggle)),
                 ));
             }
-            if let Some(panel) = group_dm::view(&self.group, &gateway.navigation, session.user.id) {
+            if let Some(panel) =
+                group_dm::view(&self.ui.group, &gateway.navigation, session.user.id)
+            {
                 dialogs.push((
                     panel.map(Message::Group),
                     Some(Message::Group(group_dm::Event::Close)),
                 ));
             }
-            if let Some(panel) = report::view(&self.report, &gateway.navigation) {
+            if let Some(panel) = report::view(&self.ui.report, &gateway.navigation) {
                 dialogs.push((
                     panel.map(Message::Report),
                     Some(Message::Report(report::Event::Close)),
                 ));
             }
-            if self.forward.is_open()
-                && let Some(panel) = forward::view(&self.forward, &forward_candidates(gateway))
+            if self.ui.forward.is_open()
+                && let Some(panel) = forward::view(&self.ui.forward, &forward_candidates(gateway))
             {
                 dialogs.push((
                     panel.map(Message::Forward),
@@ -6669,7 +6585,7 @@ and a fourth"
                 .into_iter()
                 .next()
                 .map(|(panel, close)| ui::modal_maybe(ui::sheet(panel, 640.0), close));
-            if let Some(panel) = threads::view(&self.threads) {
+            if let Some(panel) = threads::view(&self.ui.threads) {
                 banner_column = banner_column.push(panel.map(Message::Threads));
             }
             for (line, danger) in notes {
@@ -6727,13 +6643,13 @@ and a fourth"
             let me = own_user(gateway, session);
             let display = me.display_name().to_owned();
             let own = gateway.navigation.presences.get(&session.user.id);
-            let own_status = self.status.status(own);
+            let own_status = self.ui.status.status(own);
             let mut foot = column![];
             if let Some(settings) = voice_settings {
                 foot = foot.push(settings);
             }
             if let Some(panel) = stage::own(
-                &self.stage,
+                &self.ui.stage,
                 &voice_controls,
                 session.client.writes_restricted(),
             ) {
@@ -6758,7 +6674,8 @@ and a fourth"
                         row![
                             status::dot(own_status),
                             text(
-                                self.status
+                                self.ui
+                                    .status
                                     .custom(own)
                                     .or(own_status.map(status::label))
                                     .unwrap_or(i18n::tr("Set status"))
@@ -6779,7 +6696,7 @@ and a fourth"
             .on_press(Message::Status(status::Event::ToggleMenu))
             .width(Length::Fill)
             .padding([2, 4])
-            .style(style::row_button(self.status.open, false));
+            .style(style::row_button(self.ui.status.open, false));
             let action = |icon, on_press, active, danger, tip: &str| icons::Action {
                 icon,
                 on_press,
@@ -6852,7 +6769,7 @@ and a fourth"
                 .style(style::footer),
             );
             // The menu behind the name: status, profile, accounts, log out.
-            let account_menu: Option<Element<'_, Message>> = self.status.open.then(|| {
+            let account_menu: Option<Element<'_, Message>> = self.ui.status.open.then(|| {
                 let pick = |message| Message::MenuPick(Box::new(message));
                 ui::popover(
                     ui::menu_card(
@@ -6869,7 +6786,8 @@ and a fourth"
                             .spacing(10)
                             .align_y(iced::alignment::Vertical::Center)
                             .padding(6),
-                            self.status
+                            self.ui
+                                .status
                                 .menu(
                                     own,
                                     if *persistence == Persistence::Saved {
@@ -6943,7 +6861,7 @@ and a fourth"
                 &gateway.composer,
                 {
                     let mut interaction = gateway.interaction();
-                    interaction.publishing = self.announce.publishing();
+                    interaction.publishing = self.ui.announce.publishing();
                     interaction
                 },
                 timeline::Attachments {
@@ -6953,7 +6871,7 @@ and a fourth"
                     emojis: &gateway.emoji.views,
                     avatars: &gateway.avatars.views,
                     revealed: &gateway.revealed,
-                    invites: &self.invite.cache,
+                    invites: &self.ui.invite.cache,
                     members: if gateway.directs {
                         &NO_MEMBERS
                     } else {
@@ -6969,31 +6887,31 @@ and a fourth"
                     wide: self.wide(),
                     forum: gateway.navigation.forum.as_ref().map(|forum| {
                         forum::view(
-                            &self.forum,
+                            &self.ui.forum,
                             forum,
-                            self.threads.forum_archive(forum.channel),
+                            self.ui.threads.forum_archive(forum.channel),
                             session.user.id,
                             localtime::now(),
                         )
                     }),
-                    inbox: self.notify_settings.is_open().then(|| {
+                    inbox: self.ui.notify_settings.is_open().then(|| {
                         notify_settings::view(
-                            &self.notify_settings,
+                            &self.ui.notify_settings,
                             &gateway.navigation.notifications,
                             gateway.directs,
                         )
                         .map(Message::NotifySettings)
                     }),
-                    friends: if self.requests_open && self.safety.is_open() {
-                        safety::view(&self.safety, &gateway.navigation)
+                    friends: if self.ui.requests_open && self.ui.safety.is_open() {
+                        safety::view(&self.ui.safety, &gateway.navigation)
                             .map(|panel| container(panel.map(Message::Safety)).padding(16).into())
                     } else {
                         None
                     }
                     .or_else(|| {
-                        self.friends.open.then(|| {
+                        self.ui.friends.open.then(|| {
                             friends::view(
-                                &self.friends,
+                                &self.ui.friends,
                                 &gateway.navigation.relationships,
                                 &gateway.navigation.presences,
                             )
@@ -7005,11 +6923,11 @@ and a fourth"
             .height(Length::Fill);
             // A profile popup covers whatever is under it.
             let account: Element<'_, Message> = match friends::profile_view(
-                &self.friends,
+                &self.ui.friends,
                 &gateway.navigation.relationships,
                 session.user.id,
                 friends::MemberContext::of(
-                    self.friends.profile_user(),
+                    self.ui.friends.profile_user(),
                     &gateway.navigation,
                     gateway.directs,
                 ),
@@ -7059,7 +6977,7 @@ and a fourth"
                 None => account,
             };
             let screen = match member_menu::view(
-                &self.member_menu,
+                &self.ui.member_menu,
                 &gateway.navigation,
                 voice_controls.clone(),
                 session.client.writes_restricted(),
@@ -7068,17 +6986,17 @@ and a fourth"
                 Some(menu) => iced::widget::stack![screen, menu].into(),
                 None => screen,
             };
-            let menu = match self.menu {
+            let menu = match self.ui.menu {
                 Some(Menu::Server(guild)) => Some(self.server_menu(gateway, guild)),
                 Some(Menu::Conversation) => Some(self.conversation_menu(gateway)),
                 Some(Menu::Composer) => Some(self.composer_menu(gateway)),
                 None => None,
             };
             // The inbox floats beside the rail; the conversation stays put.
-            let inbox_panel: Option<Element<'_, Message>> = self.inbox.is_open().then(|| {
+            let inbox_panel: Option<Element<'_, Message>> = self.ui.inbox.is_open().then(|| {
                 ui::popover(
                     container(
-                        inbox::view(&self.inbox, &gateway.navigation.inbox).map(Message::Inbox),
+                        inbox::view(&self.ui.inbox, &gateway.navigation.inbox).map(Message::Inbox),
                     )
                     .max_height(640)
                     .into(),
@@ -7092,7 +7010,7 @@ and a fourth"
                 .or(inbox_panel)
                 .or_else(|| {
                     new_dm::view(
-                        &self.new_dm,
+                        &self.ui.new_dm,
                         &gateway.navigation.relationships,
                         gateway.private.notice.as_deref(),
                     )
@@ -7104,14 +7022,14 @@ and a fourth"
                 Some(dialog) => iced::widget::stack![screen, dialog].into(),
                 None => screen,
             };
-            let overlay: Option<Element<'_, Message>> = if self.switcher.is_open() {
+            let overlay: Option<Element<'_, Message>> = if self.ui.switcher.is_open() {
                 Some(
-                    switcher::view(&self.switcher, &gateway.navigation.quick, |channel| {
+                    switcher::view(&self.ui.switcher, &gateway.navigation.quick, |channel| {
                         gateway.composer.has_draft(channel)
                     })
                     .map(Message::Switcher),
                 )
-            } else if self.switcher.help_open() {
+            } else if self.ui.switcher.help_open() {
                 Some(switcher::help_view().map(Message::Switcher))
             } else {
                 None
@@ -8039,7 +7957,7 @@ mod tests {
         let (id, _) = gateway_status(&app);
         let task = app.update(Message::NotifySettings(notify_settings::Event::Toggle));
         assert_eq!(task.units(), 0);
-        assert!(app.notify_settings.is_open());
+        assert!(app.ui.notify_settings.is_open());
         let _ = app.update(Message::Gateway(
             id,
             GatewayStatus::Stopped(fastcord_discord::gateway::StopReason::ActionRequired(
@@ -8048,7 +7966,7 @@ mod tests {
         ));
         client.authentication_required().await;
         assert!(matches!(app.phase, Phase::Login));
-        assert!(!app.notify_settings.is_open());
+        assert!(!app.ui.notify_settings.is_open());
         assert!(
             app.notice
                 .as_deref()
@@ -8068,9 +7986,9 @@ mod tests {
         assert!(!session.client.write_group_enabled(WriteGroup::Typing));
         drop(session);
         let _ = app.update(Message::ToggleUnverifiedList);
-        assert!(app.unverified_open);
+        assert!(app.ui.unverified_open);
         let _ = app.update(Message::Logout);
-        assert!(!app.unverified_open);
+        assert!(!app.ui.unverified_open);
         let _ = app.update(Message::Deleted(Ok(())));
         // The next sign-in has a new client with the defaults, not the old switch.
         let next = authenticate(&mut app, Persistence::MemoryOnly);
@@ -8146,7 +8064,7 @@ mod tests {
         let _ = app.update(Message::SwitchAccount(Snowflake(43)));
         assert!(matches!(app.phase, Phase::Account { .. }));
         let _ = app.update(Message::Account(account_panel::Event::Toggle));
-        assert!(app.account_panel.is_open());
+        assert!(app.ui.account_panel.is_open());
 
         let _ = app.update(Message::SwitchAccount(other));
         // The old gateway and voice are gone, panels cleared, and the token
@@ -8155,7 +8073,7 @@ mod tests {
         assert!(
             matches!(app.phase, Phase::Authenticating { saved_account: Some(a) } if a == other)
         );
-        assert!(!app.account_panel.is_open());
+        assert!(!app.ui.account_panel.is_open());
         let _ = app.update(Message::Gateway(id, GatewayStatus::Resuming));
         assert!(matches!(app.phase, Phase::Authenticating { .. }));
         // Unlike logout, the old account's saved login stays.
@@ -8169,6 +8087,27 @@ mod tests {
         app.saved_accounts.push(Snowflake(42));
         let _ = app.update(Message::SwitchAccount(Snowflake(42)));
         assert!(matches!(app.phase, Phase::Account { .. }));
+    }
+
+    #[test]
+    fn leaving_or_reentering_an_account_resets_every_panel_of_it() {
+        // Before #169 two hand-written lists disagreed: the new-DM selection
+        // and the open menu survived a switch, search hits a logout.
+        let mut app = login_app();
+        let session = authenticate(&mut app, Persistence::Saved);
+        app.ui.new_dm.update(new_dm::Event::Open);
+        app.ui.new_dm.update(new_dm::Event::Toggle(Snowflake(7)));
+        app.ui.menu = Some(Menu::Conversation);
+        app.ui.requests_open = true;
+        assert_eq!(app.ui.new_dm.recipients(), "7");
+        assert!(app.teardown_account().is_some());
+        assert_eq!(app.ui.new_dm.recipients(), "");
+        assert_eq!(app.ui.menu, None);
+        assert!(!app.ui.requests_open);
+        // Entering an account (a switch, or Reconnect) starts clean as well.
+        app.ui.voice_details = true;
+        let _ = app.enter_account(session, Persistence::Saved);
+        assert!(!app.ui.voice_details);
     }
 
     #[test]
@@ -8189,12 +8128,12 @@ mod tests {
         gateway.composer.select(Some(channel));
         assert!(gateway.composer.restore_send("", &[], Some(reply)));
         let _ = app.update(Message::Shortcut(Shortcut::Switcher));
-        assert!(app.switcher.is_open());
+        assert!(app.ui.switcher.is_open());
         let _ = app.update(Message::Shortcut(Shortcut::Help));
-        assert!(app.switcher.help_open() && !app.switcher.is_open());
+        assert!(app.ui.switcher.help_open() && !app.ui.switcher.is_open());
         // Escape closes the overlay first and leaves the reply alone.
         let _ = app.update(Message::Shortcut(Shortcut::Escape { captured: false }));
-        assert!(!app.switcher.help_open());
+        assert!(!app.ui.switcher.help_open());
         let replying = |app: &App| matches!(&app.phase, Phase::Account { gateway, .. } if gateway.composer.replying().is_some());
         assert!(replying(&app));
         // A focused composer already handled its own Escape.
@@ -8204,7 +8143,7 @@ mod tests {
         assert!(!replying(&app));
         // Plain arrows do nothing while the switcher is closed.
         let _ = app.update(Message::Shortcut(Shortcut::Move(1)));
-        assert!(!app.switcher.is_open());
+        assert!(!app.ui.switcher.is_open());
     }
 
     #[test]
@@ -8257,11 +8196,11 @@ mod tests {
         });
         for (index, directs) in [(0, false), (1, true)] {
             let _ = app.update(Message::Shortcut(switcher::Shortcut::Switcher));
-            assert!(app.switcher.is_open());
-            app.nav_pending = false;
+            assert!(app.ui.switcher.is_open());
+            app.ui.nav_pending = false;
             let _ = app.update(Message::Switcher(switcher::Event::Pick(index)));
-            assert!(!app.switcher.is_open());
-            assert!(app.nav_pending, "focus returns once the chat is open");
+            assert!(!app.ui.switcher.is_open());
+            assert!(app.ui.nav_pending, "focus returns once the chat is open");
             let Phase::Account { gateway, .. } = &app.phase else {
                 panic!("account");
             };
@@ -8348,7 +8287,7 @@ mod tests {
         };
         assert_eq!(gateway.status, GatewayStatus::SigningIn);
         assert_eq!(
-            app.invite.cache.get("abc123").map(|entry| &entry.card),
+            app.ui.invite.cache.get("abc123").map(|entry| &entry.card),
             Some(&invite::Card::Loading),
             "the invite is looked up"
         );

@@ -78,6 +78,15 @@ fn describe(error: RestError) -> &'static str {
 }
 
 impl State {
+    /// Empties the panel for another account; the serial moves on, so an
+    /// answer to a request of the previous one is never taken (#169).
+    pub fn clear(&mut self) {
+        *self = Self {
+            serial: self.serial.wrapping_add(1),
+            ..Self::default()
+        };
+    }
+
     /// The URL of result `index`, if it is still listed.
     pub fn url(&self, index: usize) -> Option<&str> {
         self.results.get(index).map(|r| r.url.as_str())

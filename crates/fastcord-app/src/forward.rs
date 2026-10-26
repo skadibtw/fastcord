@@ -125,6 +125,15 @@ struct Plan {
 }
 
 impl State {
+    /// Empties the panel for another account; the serial moves on, so an
+    /// answer to a request of the previous one is never taken (#169).
+    pub fn clear(&mut self) {
+        *self = Self {
+            serial: self.serial.wrapping_add(1),
+            ..Self::default()
+        };
+    }
+
     pub fn is_open(&self) -> bool {
         self.open.is_some()
     }

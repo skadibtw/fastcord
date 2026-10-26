@@ -172,6 +172,15 @@ fn describe(error: RestError) -> &'static str {
 }
 
 impl State {
+    /// Empties the panel for another account; the serial moves on, so an
+    /// answer to a request of the previous one is never taken (#169).
+    pub fn clear(&mut self) {
+        *self = Self {
+            serial: self.serial.wrapping_add(1),
+            ..Self::default()
+        };
+    }
+
     pub fn hit(&self, index: usize) -> Option<&Hit> {
         self.hits.get(index)
     }
@@ -613,5 +622,15 @@ mod tests {
         assert!(state.take_jump_expired());
         assert!(!state.take_jump_expired(), "said once");
         assert_eq!(state.take_pending_jump(Some(Snowflake(600))), None);
+    }
+
+    #[test]
+    fn clearing_for_another_account_never_reuses_a_serial() {
+        let mut state = State::default();
+        state.cancel();
+        let old = state.serial;
+        state.clear();
+        assert_ne!(state.serial, old);
+        assert_ne!(state.serial, 0, "an answer for serial 0 could still arrive");
     }
 }

@@ -118,6 +118,15 @@ fn describe(error: RestError) -> &'static str {
 }
 
 impl State {
+    /// Empties the panel for another account; the serial moves on, so an
+    /// answer to a request of the previous one is never taken (#169).
+    pub fn clear(&mut self) {
+        *self = Self {
+            serial: self.serial.wrapping_add(1),
+            ..Self::default()
+        };
+    }
+
     /// Whether the panel is open on `channel`.
     pub fn shows(&self, channel: Snowflake) -> bool {
         self.open && self.channel == Some(channel)

@@ -105,6 +105,15 @@ fn describe_send(error: SendError) -> &'static str {
 }
 
 impl State {
+    /// Empties the panel for another account; the serial moves on, so an
+    /// answer to a request of the previous one is never taken (#169).
+    pub fn clear(&mut self) {
+        *self = Self {
+            serial: self.serial.wrapping_add(1),
+            ..Self::default()
+        };
+    }
+
     /// Closes the panel unless it belongs to `channel`.
     pub fn sync(&mut self, channel: Option<Snowflake>) {
         if self.open.is_some_and(|open| Some(open.channel) != channel) {
