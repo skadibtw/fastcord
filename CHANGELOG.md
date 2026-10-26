@@ -14,6 +14,7 @@
 - The last message no longer touches the message box: a fixed 14 px gap stays between them with reactions, embeds and a multi-line draft.
 
 ### Fixed
+- The voice log names why end-to-end decryption refused incoming audio (#215): during a key transition, from a sender outside our group, unencrypted, or no key of the sender's epoch (or a replayed packet). All four were one "keys out of step" line, so a call that kept dropping audio could not say which one it was.
 - The voice log no longer counts the end of every sentence as a playback underrun (#217). When nobody is speaking the mixer stops on purpose and the device buffer drains; that drain was logged as a dropout, so a normal conversation showed 5-15 "underruns" a minute. Only a buffer that runs dry while audio is still coming is counted now.
 - A failed "Check connection" names the route it took instead of always saying packet recovery did not help (#218): with recovery Off it says the direct route failed and suggests Automatic, in Automatic without the helper it says the helper is not running, and through a proxy it says so.
 - The network page no longer offers "Experimental UDP discovery (unverified)", and a saved `experimental_udp: true` is ignored (#223). With it on, a call on a filtered route spent its discovery budget on junk datagrams and closed after about 30 s although a plain join worked. The Voice and video section now says that the TLS bypass cannot reach a blocked voice server and that only a SOCKS5 proxy with UDP can.

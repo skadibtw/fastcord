@@ -34,7 +34,7 @@ use super::transport::{Network, Signaling, UdpLink, voice_url};
 use super::wire::{self, op};
 use super::{CloseReason, Counters, MediaCommand, ReceivedAudio, VoiceEvent, VoiceStatus};
 use crate::crypto::{CryptoError, RTCP_CLEAR_LEN, TransportCipher, TransportKey, TransportMode};
-use crate::dave::DaveSession;
+use crate::dave::{DaveError, DaveSession};
 use crate::rtcp::{self, Compound, ReportBlocks, RtcpPacket, SenderInfo};
 use crate::rtp::{OPUS_FRAME_TICKS, OPUS_PAYLOAD_TYPE, RtpHeader, RtpSender, SequenceTracker};
 use crate::session::VoiceCredentials;
@@ -1195,8 +1195,17 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         };
         let payload = match dave.decrypt_opus(owner.user_id.0, &audio.payload) {
             Ok(payload) => payload,
-            Err(_) => {
-                Counters::add(&self.ch.counters.audio_rejected_by_dave, 1);
+            Err(error) => {
+                let counters = &self.ch.counters;
+                Counters::add(
+                    match error {
+                        DaveError::NotReady => &counters.audio_dave_not_ready,
+                        DaveError::UnknownSender => &counters.audio_dave_unknown_sender,
+                        DaveError::PlaintextBypass => &counters.audio_dave_unencrypted,
+                        _ => &counters.audio_rejected_by_dave,
+                    },
+                    1,
+                );
                 return;
             }
         };

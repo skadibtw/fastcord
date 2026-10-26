@@ -1219,7 +1219,10 @@ async fn received_media_requires_dave_decryption_after_ssrc_attribution() {
     // This packet opens with the transport cipher and is refused at the DAVE
     // gate, which is the counter this test exists for.
     let stats = harness.session.stats();
-    assert_eq!(stats.audio_rejected_by_dave, 1);
+    // The session exists but is not receive-ready yet: its own counter, not
+    // the "keys out of step" one (#215).
+    assert_eq!(stats.audio_dave_not_ready, 1);
+    assert_eq!(stats.audio_rejected_by_dave, 0);
     assert_eq!(stats.rejected_authentication, 0);
 
     udp.send(server_rtp(&mut sender, 556, 2, b"unannounced"));

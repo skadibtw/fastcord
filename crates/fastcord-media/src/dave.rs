@@ -28,6 +28,8 @@ pub(crate) enum DaveError {
     NotReady,
     NotMember,
     PlaintextBypass,
+    /// The sender has no decryptor: not in the group we hold.
+    UnknownSender,
 }
 
 impl fmt::Display for DaveError {
@@ -41,6 +43,7 @@ impl fmt::Display for DaveError {
             Self::NotReady => "DAVE media keys are not ready",
             Self::NotMember => "local user is not in the DAVE group",
             Self::PlaintextBypass => "DAVE refused an unencrypted media frame",
+            Self::UnknownSender => "the sender is not in the DAVE group",
         })
     }
 }
@@ -350,10 +353,18 @@ impl DaveSession {
         if packet == OPUS_SILENCE {
             return Ok(OPUS_SILENCE.to_vec());
         }
+        use davey::errors::{DecryptError, DecryptorDecryptError};
         let frame = self
             .engine
             .decrypt(user_id, MediaType::AUDIO, packet)
-            .map_err(|_| DaveError::Engine)?;
+            .map_err(|error| match error {
+                DecryptError::NoDecryptorForUser => DaveError::UnknownSender,
+                DecryptError::DecryptionFailed(
+                    DecryptorDecryptError::UnencryptedWhenPassthroughDisabled,
+                ) => DaveError::PlaintextBypass,
+                // No key of the sender's epoch, or a replayed nonce.
+                DecryptError::DecryptionFailed(_) => DaveError::Engine,
+            })?;
         if frame == packet {
             return Err(DaveError::PlaintextBypass);
         }
@@ -622,7 +633,20 @@ mod tests {
             OPUS_SILENCE,
             "the unencrypted silence frame is protocol traffic, not a bypass"
         );
-        assert!(receiver.decrypt_opus(sender_id, clear).is_err());
+        // Each refusal names its reason, so a voice log can tell them apart (#215).
+        assert_eq!(
+            receiver.decrypt_opus(sender_id, clear),
+            Err(DaveError::PlaintextBypass)
+        );
+        assert_eq!(
+            receiver.decrypt_opus(sender_id, encrypted.as_ref()),
+            Err(DaveError::Engine),
+            "a replayed nonce"
+        );
+        assert_eq!(
+            receiver.decrypt_opus(sender_id ^ 1, encrypted.as_ref()),
+            Err(DaveError::UnknownSender)
+        );
     }
 
     const H264_FIXTURE: &[u8] = include_bytes!("../../../fixtures/video/ipcm-128x96.h264");

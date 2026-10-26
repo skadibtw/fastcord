@@ -1318,7 +1318,22 @@ fn anomaly_lines(
     grew(
         transport.audio_rejected_by_dave,
         t.audio_rejected_by_dave,
-        "inbound: audio that failed end-to-end decryption (keys out of step) in the last second",
+        "inbound: audio that failed end-to-end decryption (no key of the sender's epoch, or a replayed nonce) in the last second",
+    );
+    grew(
+        transport.audio_dave_not_ready,
+        t.audio_dave_not_ready,
+        "inbound: audio dropped during an end-to-end key transition in the last second",
+    );
+    grew(
+        transport.audio_dave_unknown_sender,
+        t.audio_dave_unknown_sender,
+        "inbound: audio from a sender outside our end-to-end group in the last second",
+    );
+    grew(
+        transport.audio_dave_unencrypted,
+        t.audio_dave_unencrypted,
+        "inbound: audio that arrived without end-to-end encryption in the last second",
     );
     grew(
         transport.rejected_authentication,
@@ -1387,7 +1402,14 @@ mod anomaly_tests {
         };
         let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &refused);
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("keys out of step") && lines[0].ends_with(": 9"));
+        assert!(lines[0].contains("sender's epoch") && lines[0].ends_with(": 9"));
+        let outside = fastcord_media::gateway::TransportStats {
+            audio_dave_unknown_sender: 3,
+            ..transport
+        };
+        let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &outside);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("outside our end-to-end group") && lines[0].ends_with(": 3"));
 
         // "No session at all" and "the session rejected the packet" are
         // different problems and must not look the same in the log.
