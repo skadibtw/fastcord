@@ -29,6 +29,7 @@ use iced::{Element, Length, Task};
 
 use crate::avatars::{self, AvatarKey};
 use crate::i18n::{tr, trf, trn};
+use crate::panel_kit::auth_rejected;
 use crate::timeline;
 
 /// Cached invite codes.
@@ -962,15 +963,15 @@ impl State {
 
     /// A 401 on any membership request stops the account like everywhere else.
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Resolved(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Joined(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Left(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Created(_, Err(RestError::AuthenticationRequired))
-                | Event::Listed(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Revoked(_, _, Err(RestError::AuthenticationRequired))
-        )
+        match event {
+            Event::Resolved(_, _, r) => auth_rejected(r),
+            Event::Joined(_, _, r) => auth_rejected(r),
+            Event::Left(_, _, r) => auth_rejected(r),
+            Event::Created(_, r) => auth_rejected(r),
+            Event::Listed(_, _, r) => auth_rejected(r),
+            Event::Revoked(_, _, r) => auth_rejected(r),
+            _ => false,
+        }
     }
 }
 

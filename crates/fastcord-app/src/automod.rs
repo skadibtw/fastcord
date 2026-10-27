@@ -16,6 +16,7 @@
 //! roles and channels in the reducer's `GuildAdmin` read model.
 
 use crate::i18n::{tr, trf, trn};
+use crate::panel_kit::{Confirm, Gate, auth_rejected};
 use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::{AdminKind, GuildAdmin, NavigationSnapshot};
 use fastcord_discord::{
@@ -121,16 +122,15 @@ struct Panel {
     loaded: bool,
     loading: bool,
     error: Option<String>,
-    notice: Option<String>,
-    busy: Option<Op>,
-    confirm: Option<Snowflake>,
+    confirm: Confirm<Snowflake>,
     editor: Option<Editor>,
 }
 
 #[derive(Default)]
 pub struct State {
     panel: Option<Panel>,
-    serial: u64,
+    /// Serial of the loads; busy is the write in flight.
+    gate: Gate<Op>,
     /// The newest Gateway rule change already applied.
     seen: u64,
 }
@@ -158,22 +158,25 @@ impl Panel {
         if let Some(at) = self.rules.iter().position(|r| r.id == id) {
             self.bytes -= self.rules.remove(at).bytes();
         }
-        if self.confirm == Some(id) {
-            self.confirm = None;
+        if self.confirm.is(id) {
+            self.confirm.cancel();
         }
     }
 
-    fn apply(&mut self, change: &AutoModChange) {
+    /// Applies one Gateway change; the notice to show, if the open editor's
+    /// rule was deleted.
+    fn apply(&mut self, change: &AutoModChange) -> Option<&'static str> {
         match change {
             AutoModChange::Upsert(rule) => self.upsert((**rule).clone()),
             AutoModChange::Delete { id, .. } => {
                 self.remove(*id);
                 if self.editor.as_ref().is_some_and(|e| e.id == Some(*id)) {
                     self.editor = None;
-                    self.notice = Some(tr("That rule was deleted.").to_owned());
+                    return Some("That rule was deleted.");
                 }
             }
         }
+        None
     }
 }
 
@@ -291,7 +294,7 @@ impl State {
 
     pub fn clear(&mut self) {
         self.panel = None;
-        self.serial = self.serial.wrapping_add(1);
+        self.gate.reset();
     }
 
     /// The server the panel needs the roles and channels read model of.
@@ -300,16 +303,15 @@ impl State {
     }
 
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Loaded(_, Err(RestError::AuthenticationRequired))
-                | Event::Deleted(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Done(
-                    _,
-                    _,
-                    Err(AutoModRequestError::Rest(RestError::AuthenticationRequired))
-                )
-        )
+        match event {
+            Event::Loaded(_, r) => auth_rejected(r),
+            Event::Deleted(_, _, r) => auth_rejected(r),
+            Event::Done(_, _, r) => matches!(
+                r,
+                Err(AutoModRequestError::Rest(RestError::AuthenticationRequired))
+            ),
+            _ => false,
+        }
     }
 
     /// Applies the Gateway's rule changes the panel has not seen yet.
@@ -319,8 +321,11 @@ impl State {
         };
         if panel.loaded {
             for (seq, change) in &feed.items {
-                if *seq > self.seen && change.guild() == panel.guild {
-                    panel.apply(change);
+                if *seq > self.seen
+                    && change.guild() == panel.guild
+                    && let Some(note) = panel.apply(change)
+                {
+                    self.gate.say(tr(note));
                 }
             }
         }
@@ -333,8 +338,7 @@ impl State {
         };
         panel.loading = true;
         panel.error = None;
-        self.serial = self.serial.wrapping_add(1);
-        let (serial, guild, client) = (self.serial, panel.guild, client.clone());
+        let (serial, guild, client) = (self.gate.bump(), panel.guild, client.clone());
         Task::perform(
             async move { client.list_automod_rules(guild).await },
             move |result| Event::Loaded(serial, result),
@@ -360,11 +364,10 @@ impl State {
                     loaded: false,
                     loading: false,
                     error: None,
-                    notice: None,
-                    busy: None,
-                    confirm: None,
+                    confirm: Confirm::default(),
                     editor: None,
                 });
+                self.gate.reset();
                 return self.load(client);
             }
             Event::Close => self.clear(),
@@ -372,12 +375,12 @@ impl State {
                 if self
                     .panel
                     .as_ref()
-                    .is_some_and(|p| !p.loading && p.busy.is_none())
+                    .is_some_and(|p| !p.loading && !self.gate.is_busy())
                 {
                     return self.load(client);
                 }
             }
-            Event::Loaded(serial, result) if serial == self.serial => {
+            Event::Loaded(serial, result) if self.gate.is_current(serial) => {
                 let Some(panel) = &mut self.panel else {
                     return Task::none();
                 };
@@ -398,39 +401,39 @@ impl State {
                 }
             }
             Event::New(trigger) => {
-                if let Some(panel) = self.panel.as_mut().filter(|p| p.busy.is_none())
+                if let Some(panel) = self.panel.as_mut().filter(|_| !self.gate.is_busy())
                     && CREATABLE.contains(&trigger)
                     && panel.loaded
                 {
                     panel.editor = Some(Editor::new(panel.guild, trigger));
-                    panel.notice = None;
+                    self.gate.notice = None;
                 }
             }
             Event::Edit(id) => {
-                if let Some(panel) = self.panel.as_mut().filter(|p| p.busy.is_none())
+                if let Some(panel) = self.panel.as_mut().filter(|_| !self.gate.is_busy())
                     && let Some(rule) = panel.rules.iter().find(|r| r.id == id)
                 {
                     panel.editor = Some(Editor::of(rule));
-                    panel.notice = None;
-                    panel.confirm = None;
+                    self.gate.notice = None;
+                    panel.confirm.cancel();
                 }
             }
             Event::CancelEdit => {
-                if let Some(panel) = self.panel.as_mut().filter(|p| p.busy.is_none()) {
+                if let Some(panel) = self.panel.as_mut().filter(|_| !self.gate.is_busy()) {
                     panel.editor = None;
                 }
             }
             Event::AskDelete(id) => {
-                if let Some(panel) = self.panel.as_mut().filter(|p| p.busy.is_none())
+                if let Some(panel) = self.panel.as_mut().filter(|_| !self.gate.is_busy())
                     && panel.rules.iter().any(|r| r.id == id)
                 {
-                    panel.confirm = Some(id);
-                    panel.notice = None;
+                    panel.confirm.ask(id);
+                    self.gate.notice = None;
                 }
             }
             Event::CancelDelete => {
                 if let Some(panel) = &mut self.panel {
-                    panel.confirm = None;
+                    panel.confirm.cancel();
                 }
             }
             Event::ConfirmDelete => {
@@ -440,16 +443,15 @@ impl State {
                 let Some(id) = panel.confirm.take() else {
                     return Task::none();
                 };
-                if panel.busy.is_some() || !panel.rules.iter().any(|r| r.id == id) {
+                if self.gate.is_busy() || !panel.rules.iter().any(|r| r.id == id) {
                     return Task::none();
                 }
                 if !may_manage(admin, panel.guild) {
-                    panel.notice = Some(tr(NEED).to_owned());
+                    self.gate.say(tr(NEED));
                     return Task::none();
                 }
-                panel.busy = Some(Op::Delete(id));
-                panel.notice = None;
-                let (serial, guild, client) = (self.serial, panel.guild, client.clone());
+                let (serial, guild, client) =
+                    (self.gate.begin(Op::Delete(id)), panel.guild, client.clone());
                 return Task::perform(
                     async move { client.delete_automod_rule(guild, id).await },
                     move |result| Event::Deleted(serial, id, result),
@@ -459,7 +461,7 @@ impl State {
                 let Some(panel) = &mut self.panel else {
                     return Task::none();
                 };
-                if panel.busy.is_some() || panel.loading {
+                if self.gate.is_busy() || panel.loading {
                     return Task::none();
                 }
                 let Some(original) = panel.rules.iter().find(|r| r.id == id).cloned() else {
@@ -481,54 +483,50 @@ impl State {
                     .id
                     .and_then(|id| panel.rules.iter().find(|r| r.id == id).cloned());
                 if editor.id.is_some() && original.is_none() {
-                    panel.notice = Some(tr("That rule no longer exists.").to_owned());
+                    self.gate.say(tr("That rule no longer exists."));
                     return Task::none();
                 }
                 return self.send(Op::Save, original, edited, admin, client);
             }
-            Event::Done(serial, op, result) if serial == self.serial => {
+            Event::Done(serial, op, result) if self.gate.is_current(serial) => {
                 let Some(panel) = &mut self.panel else {
                     return Task::none();
                 };
-                if panel.busy == Some(op) {
-                    panel.busy = None;
-                }
+                self.gate.accept(serial);
                 let mut reload = false;
                 match result {
                     Ok(rule) => {
                         if op == Op::Save {
                             panel.editor = None;
                         }
-                        panel.notice = Some(tr("Done.").to_owned());
+                        self.gate.say(tr("Done."));
                         match rule {
                             Some(rule) => panel.upsert(rule),
                             // Discord accepted it but the answer was unreadable.
                             None => reload = true,
                         }
                     }
-                    Err(error) => panel.notice = Some(failure(error)),
+                    Err(error) => self.gate.say(failure(error)),
                 }
                 if reload {
                     return self.load(client);
                 }
             }
-            Event::Deleted(serial, id, result) if serial == self.serial => {
+            Event::Deleted(serial, id, result) if self.gate.is_current(serial) => {
                 let Some(panel) = &mut self.panel else {
                     return Task::none();
                 };
-                if panel.busy == Some(Op::Delete(id)) {
-                    panel.busy = None;
-                }
+                self.gate.accept(serial);
                 match result {
                     Ok(()) => {
                         panel.remove(id);
-                        panel.notice = Some(tr("Deleted.").to_owned());
+                        self.gate.say(tr("Deleted."));
                     }
                     Err(RestError::ResourceGone) => {
                         panel.remove(id);
-                        panel.notice = Some(tr("That rule was already gone.").to_owned());
+                        self.gate.say(tr("That rule was already gone."));
                     }
-                    Err(error) => panel.notice = Some(failure(AutoModRequestError::Rest(error))),
+                    Err(error) => self.gate.say(failure(AutoModRequestError::Rest(error))),
                 }
             }
             // Stale answers (a closed or replaced panel) change nothing.
@@ -550,16 +548,14 @@ impl State {
         let Some(panel) = &mut self.panel else {
             return Task::none();
         };
-        if panel.busy.is_some() || !panel.loaded {
+        if self.gate.is_busy() || !panel.loaded {
             return Task::none();
         }
         if !may_manage(admin, panel.guild) {
-            panel.notice = Some(tr(NEED).to_owned());
+            self.gate.say(tr(NEED));
             return Task::none();
         }
-        panel.busy = Some(op);
-        panel.notice = None;
-        let (serial, guild, client) = (self.serial, panel.guild, client.clone());
+        let (serial, guild, client) = (self.gate.begin(op), panel.guild, client.clone());
         let existing = panel.rules.clone();
         Task::perform(
             async move {
@@ -580,7 +576,7 @@ impl State {
         let Some(editor) = &mut panel.editor else {
             return;
         };
-        if panel.busy.is_some() {
+        if self.gate.is_busy() {
             return;
         }
         let trigger = editor.draft.trigger;
@@ -605,9 +601,9 @@ impl State {
             }
             Event::Add(list) => {
                 if let Err(reason) = editor.add(list) {
-                    panel.notice = Some(reason);
+                    self.gate.say(reason);
                 } else {
-                    panel.notice = None;
+                    self.gate.notice = None;
                 }
             }
             Event::Remove(list, at) => {
@@ -776,10 +772,11 @@ fn exemptions_line(rule: &AutoModRule, admin: Option<&GuildAdmin>) -> Option<Str
 
 fn rule_row<'a>(
     panel: &'a Panel,
+    gate: &Gate<Op>,
     rule: &'a AutoModRule,
     admin: Option<&GuildAdmin>,
 ) -> Element<'a, Event> {
-    let idle = panel.busy.is_none() && !panel.loading && panel.editor.is_none();
+    let idle = !gate.is_busy() && !panel.loading && panel.editor.is_none();
     let mut info = column![
         text(rule.name.clone()).size(13),
         small(trigger_line(rule)),
@@ -789,7 +786,7 @@ fn rule_row<'a>(
     if let Some(line) = exemptions_line(rule, admin) {
         info = info.push(small(line));
     }
-    let control: Element<'_, Event> = if panel.confirm == Some(rule.id) {
+    let control: Element<'_, Event> = if panel.confirm.is(rule.id) {
         row![
             text(tr("Delete this rule?")).size(12).style(text::danger),
             button(text(tr("Confirm")).size(12))
@@ -859,7 +856,7 @@ fn entries<'a>(
 }
 
 fn editor_view<'a>(
-    panel: &'a Panel,
+    gate: &Gate<Op>,
     editor: &'a Editor,
     admin: Option<&'a GuildAdmin>,
 ) -> Element<'a, Event> {
@@ -1075,9 +1072,9 @@ fn editor_view<'a>(
     form.push(
         row![
             primary_button(text(tr("Save rule")).size(13))
-                .on_press_maybe(panel.busy.is_none().then_some(Event::Save)),
+                .on_press_maybe((!gate.is_busy()).then_some(Event::Save)),
             button(text(tr("Cancel")).size(13))
-                .on_press_maybe(panel.busy.is_none().then_some(Event::CancelEdit)),
+                .on_press_maybe((!gate.is_busy()).then_some(Event::CancelEdit)),
         ]
         .spacing(8),
     )
@@ -1091,7 +1088,7 @@ pub fn view<'a>(
     let panel = state.panel.as_ref()?;
     let admin = navigation.admin.as_ref().filter(|a| a.id == panel.guild);
     let can = may_manage(admin, panel.guild);
-    let idle = panel.busy.is_none() && !panel.loading;
+    let idle = !state.gate.is_busy() && !panel.loading;
     let mut news = row![small(tr("New rule"))]
         .spacing(6)
         .align_y(iced::Alignment::Center);
@@ -1120,18 +1117,24 @@ pub fn view<'a>(
         view = view.push(small(tr("No AutoMod rules.")));
     }
     if let Some(editor) = &panel.editor {
-        view = view.push(editor_view(panel, editor, admin));
+        view = view.push(editor_view(&state.gate, editor, admin));
     } else {
-        let rows = column(panel.rules.iter().map(|rule| rule_row(panel, rule, admin))).spacing(6);
+        let rows = column(
+            panel
+                .rules
+                .iter()
+                .map(|rule| rule_row(panel, &state.gate, rule, admin)),
+        )
+        .spacing(6);
         view = view.push(scrollable(rows).height(Length::Shrink));
     }
     if panel.loading {
         view = view.push(small(tr("Loading\u{2026}")));
     }
-    if panel.busy.is_some() {
+    if state.gate.is_busy() {
         view = view.push(small(tr("Waiting for Discord\u{2026}")));
     }
-    for line in [&panel.error, &panel.notice].into_iter().flatten() {
+    for line in [&panel.error, &state.gate.notice].into_iter().flatten() {
         view = view.push(text(line.clone()).size(12));
     }
     Some(container(view).padding([6, 0]).into())
@@ -1204,7 +1207,7 @@ mod tests {
     fn loaded() -> (State, NavigationSnapshot) {
         let (mut state, nav) = (State::default(), navigation(true));
         let _ = state.update(Event::Open(G), &nav, &client());
-        let serial = state.serial;
+        let serial = state.gate.serial();
         let rules = vec![rule(1, TRIGGER_KEYWORD), rule(2, TRIGGER_MENTION)];
         let _ = state.update(Event::Loaded(serial, Ok(rules)), &nav, &client());
         (state, nav)
@@ -1232,10 +1235,10 @@ mod tests {
         // The permission is lost while the panel is open: nothing is sent.
         let none = navigation(false);
         let _ = state.update(Event::Toggle(Snowflake(1)), &none, &client());
-        assert!(panel(&state).busy.is_none() && panel(&state).notice.is_some());
+        assert!(!state.gate.is_busy() && state.gate.notice.is_some());
         let _ = state.update(Event::AskDelete(Snowflake(1)), &nav, &client());
         let _ = state.update(Event::ConfirmDelete, &none, &client());
-        assert!(panel(&state).busy.is_none());
+        assert!(!state.gate.is_busy());
         assert_eq!(panel(&state).rules.len(), 2);
     }
 
@@ -1243,18 +1246,21 @@ mod tests {
     async fn a_delete_needs_confirm_is_sent_once_and_the_row_goes_only_on_the_answer() {
         let (mut state, nav) = loaded();
         let _ = state.update(Event::ConfirmDelete, &nav, &client());
-        assert!(panel(&state).busy.is_none(), "no Confirm, no request");
+        assert!(!state.gate.is_busy(), "no Confirm, no request");
         let _ = state.update(Event::AskDelete(Snowflake(9)), &nav, &client());
-        assert!(panel(&state).confirm.is_none(), "not a listed rule");
+        assert!(
+            panel(&state).confirm.pending().is_none(),
+            "not a listed rule"
+        );
         let _ = state.update(Event::AskDelete(Snowflake(1)), &nav, &client());
         let _ = state.update(Event::ConfirmDelete, &nav, &client());
-        assert_eq!(panel(&state).busy, Some(Op::Delete(Snowflake(1))));
+        assert_eq!(state.gate.busy(), Some(Op::Delete(Snowflake(1))));
         // Nothing else is sent while it waits.
         let _ = state.update(Event::Toggle(Snowflake(2)), &nav, &client());
         let _ = state.update(Event::AskDelete(Snowflake(2)), &nav, &client());
-        assert_eq!(panel(&state).busy, Some(Op::Delete(Snowflake(1))));
-        assert!(panel(&state).confirm.is_none());
-        let serial = state.serial;
+        assert_eq!(state.gate.busy(), Some(Op::Delete(Snowflake(1))));
+        assert!(panel(&state).confirm.pending().is_none());
+        let serial = state.gate.serial();
         let timeout = RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout));
         let _ = state.update(
             Event::Deleted(serial, Snowflake(1), Err(timeout)),
@@ -1263,7 +1269,8 @@ mod tests {
         );
         assert_eq!(panel(&state).rules.len(), 2);
         assert!(
-            panel(&state)
+            state
+                .gate
                 .notice
                 .as_ref()
                 .unwrap()
@@ -1291,8 +1298,8 @@ mod tests {
         assert!(panel(&state).editor.is_some());
         // An empty name is Discord's limit, said without a request.
         let _ = state.update(Event::Save, &nav, &client());
-        assert_eq!(panel(&state).busy, Some(Op::Save));
-        let serial = state.serial;
+        assert_eq!(state.gate.busy(), Some(Op::Save));
+        let serial = state.gate.serial();
         let _ = state.update(
             Event::Done(
                 serial,
@@ -1303,7 +1310,7 @@ mod tests {
             &client(),
         );
         assert_eq!(
-            panel(&state).notice.as_deref(),
+            state.gate.notice.as_deref(),
             Some("A rule name has 1 to 100 characters.")
         );
         assert!(
@@ -1314,7 +1321,7 @@ mod tests {
         let _ = state.update(Event::Save, &nav, &client());
         // A second click while it waits changes nothing.
         let _ = state.update(Event::Save, &nav, &client());
-        assert_eq!(panel(&state).busy, Some(Op::Save));
+        assert_eq!(state.gate.busy(), Some(Op::Save));
         let mut made = rule(7, TRIGGER_SPAM);
         made.name = "Spam".into();
         let _ = state.update(
@@ -1322,7 +1329,7 @@ mod tests {
             &nav,
             &client(),
         );
-        assert!(panel(&state).busy.is_none() && panel(&state).editor.is_none());
+        assert!(!state.gate.is_busy() && panel(&state).editor.is_none());
         assert_eq!(panel(&state).rules.len(), 3);
         // The Gateway's echo of the same rule changes nothing.
         let mut feed = AutoModFeed::default();
@@ -1335,7 +1342,7 @@ mod tests {
     async fn refusals_are_shown_as_discord_said_them() {
         let (mut state, nav) = loaded();
         let _ = state.update(Event::Toggle(Snowflake(1)), &nav, &client());
-        let serial = state.serial;
+        let serial = state.gate.serial();
         let say = |state: &mut State, error: RestError| {
             let _ = state.update(
                 Event::Done(
@@ -1346,7 +1353,7 @@ mod tests {
                 &nav,
                 &client(),
             );
-            state.panel.as_ref().unwrap().notice.clone().unwrap()
+            state.gate.notice.clone().unwrap()
         };
         let text = say(
             &mut state,
@@ -1357,7 +1364,7 @@ mod tests {
         assert!(say(&mut state, refused(404, None, "")).contains("no longer exists"));
         assert!(say(&mut state, refused(429, None, "")).contains("rate limiting"));
         assert!(say(&mut state, refused(403, Some(60003), "")).contains("two-factor"));
-        assert!(panel(&state).busy.is_none());
+        assert!(!state.gate.is_busy());
         assert_eq!(panel(&state).rules.len(), 2, "a failure changes nothing");
     }
 
@@ -1375,7 +1382,7 @@ mod tests {
         type_in(&mut state, Field::Keyword, &"k".repeat(61));
         let _ = state.update(Event::Add(List::Keywords), &nav, &client());
         assert_eq!(held(&state).len(), 3);
-        assert!(panel(&state).notice.is_some());
+        assert!(state.gate.notice.is_some());
         // Patterns are taken whole, at most ten.
         for n in 0..11 {
             type_in(&mut state, Field::Regex, &format!("a,{n}"));
@@ -1475,13 +1482,13 @@ mod tests {
     #[tokio::test]
     async fn stale_answers_and_a_rejected_login_are_handled() {
         let (mut state, nav) = loaded();
-        let serial = state.serial;
+        let serial = state.gate.serial();
         let _ = state.update(Event::Loaded(serial - 1, Ok(Vec::new())), &nav, &client());
         assert_eq!(panel(&state).rules.len(), 2);
         let _ = state.update(Event::Reload, &nav, &client());
         assert!(panel(&state).loading);
         let _ = state.update(
-            Event::Loaded(state.serial, Err(RestError::PermissionDenied)),
+            Event::Loaded(state.gate.serial(), Err(RestError::PermissionDenied)),
             &nav,
             &client(),
         );

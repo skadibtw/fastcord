@@ -25,6 +25,7 @@ use iced::{Element, Length, Task};
 
 use crate::emoji::{Asset, View};
 use crate::i18n::{tr, trf};
+use crate::panel_kit::auth_rejected;
 use crate::{rich, timeline};
 
 /// Guilds whose accepted rules are remembered (until the Gateway answers).
@@ -225,14 +226,14 @@ impl State {
 
     /// A 401 stops the account like every other request.
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Rules(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Accepted(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Questions(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Submitted(_, _, Err(RestError::AuthenticationRequired))
-                | Event::GuideLoaded(_, _, Err(RestError::AuthenticationRequired))
-        )
+        match event {
+            Event::Rules(_, _, r) => auth_rejected(r),
+            Event::Accepted(_, _, r) => auth_rejected(r),
+            Event::Questions(_, _, r) => auth_rejected(r),
+            Event::Submitted(_, _, r) => auth_rejected(r),
+            Event::GuideLoaded(_, _, r) => auth_rejected(r),
+            _ => false,
+        }
     }
 
     fn outcome(&self, guild: Snowflake) -> Option<Outcome> {

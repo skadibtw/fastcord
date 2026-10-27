@@ -12,6 +12,7 @@
 //! options and subcommand groups are not offered.
 
 use crate::i18n::{tr, trf};
+use crate::panel_kit::auth_rejected;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -165,10 +166,10 @@ impl State {
     }
 
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Index(_, _, Err(RestError::AuthenticationRequired))
-        )
+        match event {
+            Event::Index(_, _, r) => auth_rejected(r),
+            _ => false,
+        }
     }
 
     fn fresh(&self, scope: IndexScope, now: Instant) -> Option<&Arc<CommandIndex>> {

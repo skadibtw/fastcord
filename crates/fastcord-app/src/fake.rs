@@ -57,6 +57,8 @@ pub const PANELS: &[&str] = &[
     "accounts",
     "server-settings",
     "roles",
+    "bans",
+    "automod",
     "group",
     "long-draft",
     "create-channel",

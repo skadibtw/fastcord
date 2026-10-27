@@ -81,6 +81,13 @@ impl<A: Copy + PartialEq> Gate<A> {
         self.notice = Some(text.into());
     }
 
+    /// A new generation for a reload that keeps `busy` and the notice: the
+    /// answers of every earlier request are stale. Returns the new stamp.
+    pub fn bump(&mut self) -> u64 {
+        self.serial = self.serial.wrapping_add(1);
+        self.serial
+    }
+
     /// Closing or switching account: drops busy and notice and invalidates
     /// every answer still on its way.
     pub fn reset(&mut self) {
@@ -100,7 +107,7 @@ impl<T> Default for Confirm<T> {
     }
 }
 
-impl<T: Copy + PartialEq> Confirm<T> {
+impl<T: Clone + PartialEq> Confirm<T> {
     pub fn ask(&mut self, t: T) {
         self.0 = Some(t);
     }
@@ -110,11 +117,15 @@ impl<T: Copy + PartialEq> Confirm<T> {
     }
 
     pub fn pending(&self) -> Option<T> {
-        self.0
+        self.0.clone()
+    }
+
+    pub fn get(&self) -> Option<&T> {
+        self.0.as_ref()
     }
 
     pub fn is(&self, t: T) -> bool {
-        self.0 == Some(t)
+        self.0.as_ref() == Some(&t)
     }
 
     pub fn take(&mut self) -> Option<T> {
@@ -180,6 +191,25 @@ mod tests {
         gate.accept(s);
         gate.notice = None;
         assert!(!gate.refuse_if_busy() && gate.notice.is_none());
+    }
+
+    #[test]
+    fn a_restamp_keeps_busy_and_the_notice_but_drops_old_answers() {
+        let mut gate = Gate::<u8>::default();
+        let old = gate.begin(1);
+        gate.say("kept");
+        let new = gate.bump();
+        assert_ne!(old, new);
+        assert!(gate.is_busy() && gate.notice.is_some());
+        assert!(!gate.is_current(old) && gate.is_current(new));
+    }
+
+    #[test]
+    fn confirm_holds_a_non_copy_value() {
+        let mut c = Confirm::<String>::default();
+        c.ask("a".into());
+        assert!(c.is("a".into()) && c.get().map(String::as_str) == Some("a"));
+        assert_eq!(c.take().as_deref(), Some("a"));
     }
 
     #[test]

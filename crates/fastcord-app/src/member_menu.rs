@@ -1,6 +1,7 @@
 //! Participant interaction and a bounded context menu. Opening it is local;
 //! profile reads and server mutations require their own explicit action.
 use crate::i18n::{tr, trf};
+use crate::panel_kit::{Confirm, Gate};
 use crate::ui::button;
 use crate::{Message, friends, gateway::VoiceControls, style};
 use fastcord_discord::state::navigation::NavigationSnapshot;
@@ -44,7 +45,7 @@ pub struct Target {
     pub user: User,
     pub point: Point,
     pub guild: Option<Snowflake>,
-    pub confirm: Option<MemberAction>,
+    pub confirm: Confirm<MemberAction>,
     pub sub: Option<Sub>,
     pub reason: String,
     pub nick: String,
@@ -55,42 +56,38 @@ pub struct Target {
 pub struct State {
     pub target: Option<Target>,
     /// The running request and the member it is for.
-    pub pending: Option<(u64, Snowflake)>,
-    pub serial: u64,
-    pub notice: Option<String>,
+    pub gate: Gate<Snowflake>,
 }
 
 impl State {
     pub fn close(&mut self) {
         self.target = None;
-        self.notice = None;
+        self.gate.notice = None;
     }
     pub fn reset(&mut self) {
-        self.close();
-        self.pending = None;
-        self.serial = self.serial.wrapping_add(1);
+        self.target = None;
+        self.gate.reset();
     }
 
     /// Starts a request for `user`; its result arrives as `Done(serial, ..)`.
     pub fn begin(&mut self, user: Snowflake) -> u64 {
-        self.serial = self.serial.wrapping_add(1);
-        self.pending = Some((self.serial, user));
-        self.notice = None;
-        self.serial
+        self.gate.begin(user)
     }
 
     /// A request finished. Its text goes only to the menu of the member it was
     /// for: another member's open menu keeps its input and shows nothing.
     pub fn done(&mut self, serial: u64, text: String) {
-        let Some((_, user)) = self.pending.filter(|(pending, _)| *pending == serial) else {
+        let Some(user) = self.gate.busy() else {
             return;
         };
-        self.pending = None;
+        if !self.gate.accept(serial) {
+            return;
+        }
         if let Some(target) = self.target.as_mut().filter(|t| t.user.id == user) {
-            target.confirm = None;
+            target.confirm.cancel();
             target.sub = None;
             target.reason.clear();
-            self.notice = Some(text);
+            self.gate.say(text);
         }
     }
 }
@@ -217,10 +214,10 @@ pub fn view<'a>(
                 restricted,
                 own,
             );
-            if state.pending.is_some() {
+            if state.gate.is_busy() {
                 card = card.push(text(tr("Working…")).size(12));
             }
-            if let Some(notice) = &state.notice {
+            if let Some(notice) = &state.gate.notice {
                 card = card.push(text(notice.as_str()).size(12));
             }
             card = card.push(action(
@@ -284,7 +281,7 @@ fn server_section<'a>(
     own: bool,
 ) -> iced::widget::Column<'a, Message> {
     use fastcord_discord::{BAN_DELETE, TIMEOUTS};
-    let idle = !restricted && state.pending.is_none();
+    let idle = !restricted && !state.gate.is_busy();
     let send = |kind: MemberAction| idle.then_some(Message::MemberMenu(Event::Select(kind)));
     let open = |sub: Sub| Some(Message::MemberMenu(Event::Sub(Some(sub))));
     let name = target.user.display_name().to_owned();
@@ -348,10 +345,7 @@ fn server_section<'a>(
     for element in rows {
         card = card.push(element);
     }
-    let mut needs_reason = target
-        .confirm
-        .as_ref()
-        .is_some_and(MemberAction::takes_reason);
+    let mut needs_reason = target.confirm.get().is_some_and(MemberAction::takes_reason);
     match target.sub {
         Some(Sub::Timeout) => {
             card = card.push(text(tr("Time out for")).size(12));
@@ -418,7 +412,7 @@ fn server_section<'a>(
                 .size(12),
         );
     }
-    if let Some(confirm) = &target.confirm {
+    if let Some(confirm) = target.confirm.get() {
         let detail = match confirm {
             MemberAction::Ban(0) => tr(" Message history will be kept.").to_owned(),
             MemberAction::Ban(seconds) => BAN_DELETE
@@ -595,7 +589,7 @@ mod tests {
             },
             point: Point::ORIGIN,
             guild: None,
-            confirm: None,
+            confirm: Confirm::default(),
             sub: None,
             reason: format!("reason for {id}"),
             nick: String::new(),
@@ -613,15 +607,15 @@ mod tests {
         // Another member's menu opens while the request runs.
         state.target = Some(target(2));
         state.done(serial, "Done.".into());
-        assert_eq!(state.pending, None);
-        assert_eq!(state.notice, None, "B's menu must not say A's result");
+        assert_eq!(state.gate.busy(), None);
+        assert_eq!(state.gate.notice, None, "B's menu must not say A's result");
         assert_eq!(state.target.as_ref().unwrap().reason, "reason for 2");
 
         let serial = state.begin(Snowflake(2));
         state.done(serial.wrapping_add(1), "stale".into());
-        assert!(state.pending.is_some(), "a stale serial changes nothing");
+        assert!(state.gate.is_busy(), "a stale serial changes nothing");
         state.done(serial, "Done.".into());
-        assert_eq!(state.notice.as_deref(), Some("Done."));
+        assert_eq!(state.gate.notice.as_deref(), Some("Done."));
         assert!(state.target.as_ref().unwrap().reason.is_empty());
     }
 }

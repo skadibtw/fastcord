@@ -13,6 +13,7 @@ use iced::{Element, Length, Task};
 
 use crate::avatars::{self, AvatarKey};
 use crate::i18n::{tr, trf};
+use crate::panel_kit::auth_rejected;
 
 /// Pages kept, so at most `MAX_PAGES * DISCOVERY_PAGE` servers.
 pub const MAX_PAGES: usize = 4;
@@ -99,10 +100,10 @@ impl State {
 
     /// A 401 stops the account like every other request.
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Page(_, _, Err(RestError::AuthenticationRequired))
-        )
+        match event {
+            Event::Page(_, _, r) => auth_rejected(r),
+            _ => false,
+        }
     }
 
     /// Icons of the listed servers, while the list is open.

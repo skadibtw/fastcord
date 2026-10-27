@@ -26,6 +26,7 @@ use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 use crate::gateway::NavigationBridge;
 use crate::i18n::{tr, trf};
 use crate::localtime;
+use crate::panel_kit::auth_rejected;
 
 /// An event this close to starting (or running) shows the banner.
 const SOON_MS: u64 = 15 * 60 * 1000;
@@ -307,11 +308,11 @@ impl State {
 
     /// A 401 stops the account like every other request.
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Loaded(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Done(_, Err(RestError::AuthenticationRequired))
-        )
+        match event {
+            Event::Loaded(_, _, r) => auth_rejected(r),
+            Event::Done(_, r) => auth_rejected(r),
+            _ => false,
+        }
     }
 
     fn fetch(&mut self, guild: Snowflake, client: &RestClient) -> Task<Event> {

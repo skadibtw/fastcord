@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use crate::attachments::AttachmentCache;
 use crate::gateway::SoundCue;
 use crate::i18n::{tr, trf};
+use crate::panel_kit::auth_rejected;
 
 /// Sounds from other participants playing at once.
 pub const MAX_REMOTE: usize = 3;
@@ -432,11 +433,11 @@ impl State {
 
     /// Whether the rejected request means the login is no longer accepted (401).
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Listed(_, Err(RestError::AuthenticationRequired))
-                | Event::Sent(_, _, Err(RestError::AuthenticationRequired))
-        )
+        match event {
+            Event::Listed(_, r) => auth_rejected(r),
+            Event::Sent(_, _, r) => auth_rejected(r),
+            _ => false,
+        }
     }
 
     pub fn update(&mut self, event: Event, env: &Env) -> Task<Event> {

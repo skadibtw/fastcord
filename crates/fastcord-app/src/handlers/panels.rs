@@ -798,13 +798,13 @@ impl App {
                     guild: (!gateway.directs)
                         .then_some(gateway.navigation.selected_guild)
                         .flatten(),
-                    confirm: None,
+                    confirm: Default::default(),
                     sub: None,
                     reason: String::new(),
                     nick: String::new(),
                     ban_window: 0,
                 });
-                self.ui.member_menu.notice = None;
+                self.ui.member_menu.gate.notice = None;
             }
             Event::Close => {
                 self.ui.member_menu.close();
@@ -821,7 +821,7 @@ impl App {
             Event::Sub(sub) => {
                 if let Some(target) = &mut self.ui.member_menu.target {
                     target.sub = sub;
-                    target.confirm = None;
+                    target.confirm.cancel();
                     if sub == Some(member_menu::Sub::Nick) {
                         // Start from the nickname the member shows now.
                         target.nick = gateway
@@ -852,14 +852,14 @@ impl App {
                 }
             }
             Event::Select(action) => {
-                if self.ui.member_menu.pending.is_some() {
+                if self.ui.member_menu.gate.is_busy() {
                     return Task::none();
                 }
                 let Some(target) = &mut self.ui.member_menu.target else {
                     return Task::none();
                 };
                 if action.needs_confirm() {
-                    target.confirm = Some(action);
+                    target.confirm.ask(action);
                     return Task::none();
                 }
                 return self.begin_member_action(action);
@@ -870,7 +870,7 @@ impl App {
                     .member_menu
                     .target
                     .as_ref()
-                    .and_then(|target| target.confirm.clone())
+                    .and_then(|target| target.confirm.pending())
                 {
                     return self.begin_member_action(action);
                 }
@@ -896,7 +896,7 @@ impl App {
         else {
             return Task::none();
         };
-        if self.ui.member_menu.pending.is_some() || session.client.writes_restricted() {
+        if self.ui.member_menu.gate.is_busy() || session.client.writes_restricted() {
             return Task::none();
         }
         let own = gateway
@@ -919,8 +919,10 @@ impl App {
                 _ => !own,
             };
         if !allowed {
-            self.ui.member_menu.notice =
-                Some("This action is no longer available for this member.".into());
+            self.ui
+                .member_menu
+                .gate
+                .say("This action is no longer available for this member.");
             return Task::none();
         }
         let reason = Some(target.reason.trim().to_owned()).filter(|r| !r.is_empty());

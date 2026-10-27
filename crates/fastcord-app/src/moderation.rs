@@ -14,6 +14,7 @@
 //! changes only when Discord answers. Nothing here moderates automatically.
 
 use crate::i18n::{tr, trf};
+use crate::panel_kit::{Confirm, Gate, auth_rejected};
 use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::{GuildAdmin, NavigationSnapshot};
 use fastcord_discord::{
@@ -74,10 +75,7 @@ struct BanList {
     has_more: bool,
     loading: bool,
     error: Option<String>,
-    confirm: Option<Snowflake>,
-    /// The unban in flight.
-    busy: Option<Snowflake>,
-    notice: Option<String>,
+    confirm: Confirm<Snowflake>,
 }
 
 #[derive(Debug)]
@@ -114,7 +112,8 @@ enum Panel {
 #[derive(Default)]
 pub struct State {
     panel: Option<Panel>,
-    serial: u64,
+    /// Serial of the loads; busy is the unban in flight.
+    gate: Gate<Snowflake>,
 }
 
 fn entry_bytes(ban: &BanEntry) -> usize {
@@ -138,7 +137,7 @@ impl State {
 
     pub fn clear(&mut self) {
         self.panel = None;
-        self.serial = self.serial.wrapping_add(1);
+        self.gate.reset();
     }
 
     /// The server the panel needs the permission read model of.
@@ -151,12 +150,12 @@ impl State {
 
     /// Whether Discord rejected the login (the account must stop).
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::BansDone(_, Err(RestError::AuthenticationRequired))
-                | Event::AuditDone(_, Err(RestError::AuthenticationRequired))
-                | Event::Unbanned(_, _, Err(RestError::AuthenticationRequired))
-        )
+        match event {
+            Event::BansDone(_, r) => auth_rejected(r),
+            Event::AuditDone(_, r) => auth_rejected(r),
+            Event::Unbanned(_, _, r) => auth_rejected(r),
+            _ => false,
+        }
     }
 
     fn load_bans(&mut self, client: &RestClient, after: Option<Snowflake>) -> Task<Event> {
@@ -165,8 +164,7 @@ impl State {
         };
         list.loading = true;
         list.error = None;
-        self.serial = self.serial.wrapping_add(1);
-        let (serial, guild, client) = (self.serial, list.guild, client.clone());
+        let (serial, guild, client) = (self.gate.bump(), list.guild, client.clone());
         Task::perform(
             async move { client.list_bans(guild, after).await },
             move |r| Event::BansDone(serial, r),
@@ -180,8 +178,7 @@ impl State {
         log.loading = true;
         log.error = None;
         let query = log.query(before);
-        self.serial = self.serial.wrapping_add(1);
-        let (serial, guild, client) = (self.serial, log.guild, client.clone());
+        let (serial, guild, client) = (self.gate.bump(), log.guild, client.clone());
         Task::perform(
             async move { client.audit_log(guild, query).await },
             move |r| Event::AuditDone(serial, r),
@@ -207,10 +204,9 @@ impl State {
                     has_more: false,
                     loading: false,
                     error: None,
-                    confirm: None,
-                    busy: None,
-                    notice: None,
+                    confirm: Confirm::default(),
                 }));
+                self.gate.reset();
                 return self.load_bans(client, None);
             }
             Event::Audit(guild) => {
@@ -227,13 +223,14 @@ impl State {
                     loading: false,
                     error: None,
                 }));
+                self.gate.reset();
                 return self.load_audit(client, None);
             }
             Event::Close => self.clear(),
             Event::MoreBans => {
                 let after = match &self.panel {
                     Some(Panel::Bans(list))
-                        if list.has_more && !list.loading && list.busy.is_none() =>
+                        if list.has_more && !list.loading && !self.gate.is_busy() =>
                     {
                         list.bans.last().map(|b| b.user)
                     }
@@ -243,7 +240,7 @@ impl State {
                     return self.load_bans(client, after);
                 }
             }
-            Event::BansDone(serial, result) if serial == self.serial => {
+            Event::BansDone(serial, result) if self.gate.is_current(serial) => {
                 let Some(Panel::Bans(list)) = &mut self.panel else {
                     return Task::none();
                 };
@@ -255,7 +252,7 @@ impl State {
                             let cost = entry_bytes(&ban);
                             if list.bans.len() >= MAX_BANS || list.bytes + cost > MAX_BANS_BYTES {
                                 list.has_more = false;
-                                list.notice = Some(trf(
+                                self.gate.say(trf(
                                     "Showing the first {} bans; the rest are not listed.",
                                     &[&list.bans.len()],
                                 ));
@@ -272,16 +269,16 @@ impl State {
             }
             Event::AskUnban(user) => {
                 if let Some(Panel::Bans(list)) = &mut self.panel
-                    && list.busy.is_none()
+                    && !self.gate.is_busy()
                     && list.bans.iter().any(|b| b.user == user)
                 {
-                    list.confirm = Some(user);
-                    list.notice = None;
+                    list.confirm.ask(user);
+                    self.gate.notice = None;
                 }
             }
             Event::CancelUnban => {
                 if let Some(Panel::Bans(list)) = &mut self.panel {
-                    list.confirm = None;
+                    list.confirm.cancel();
                 }
             }
             Event::ConfirmUnban => {
@@ -292,42 +289,38 @@ impl State {
                     return Task::none();
                 };
                 // Checked again against the current read model, then sent once.
-                if list.busy.is_some() || !allowed(admin, list.guild, Permissions::BAN_MEMBERS) {
-                    list.notice = Some(failure(RestError::PermissionDenied));
+                if self.gate.is_busy() || !allowed(admin, list.guild, Permissions::BAN_MEMBERS) {
+                    self.gate.say(failure(RestError::PermissionDenied));
                     return Task::none();
                 }
-                list.busy = Some(user);
-                list.notice = None;
-                let (serial, guild, client) = (self.serial, list.guild, client.clone());
+                let (serial, guild, client) = (self.gate.begin(user), list.guild, client.clone());
                 return Task::perform(async move { client.unban(guild, user).await }, move |r| {
                     Event::Unbanned(serial, user, r)
                 });
             }
-            Event::Unbanned(serial, user, result) if serial == self.serial => {
+            Event::Unbanned(serial, user, result) if self.gate.is_current(serial) => {
                 let Some(Panel::Bans(list)) = &mut self.panel else {
                     return Task::none();
                 };
-                if list.busy == Some(user) {
-                    list.busy = None;
-                }
+                self.gate.accept(serial);
                 match result {
                     Ok(()) => {
                         if let Some(at) = list.bans.iter().position(|b| b.user == user) {
                             list.bytes -= entry_bytes(&list.bans.remove(at));
                         }
-                        list.notice = Some(tr("Unbanned.").to_owned());
+                        self.gate.say(tr("Unbanned."));
                     }
                     Err(RestError::ResourceGone) => {
                         // Not banned any more: what the click asked for.
                         if let Some(at) = list.bans.iter().position(|b| b.user == user) {
                             list.bytes -= entry_bytes(&list.bans.remove(at));
                         }
-                        list.notice = Some(tr("That user was not banned.").to_owned());
+                        self.gate.say(tr("That user was not banned."));
                     }
-                    Err(error) => list.notice = Some(failure(error)),
+                    Err(error) => self.gate.say(failure(error)),
                 }
             }
-            Event::AuditDone(serial, result) if serial == self.serial => {
+            Event::AuditDone(serial, result) if self.gate.is_current(serial) => {
                 let Some(Panel::Audit(log)) = &mut self.panel else {
                     return Task::none();
                 };
@@ -400,7 +393,11 @@ fn small<'a>(label: impl Into<String>) -> iced::widget::Text<'a> {
     text(label.into()).size(12).color(crate::style::muted())
 }
 
-fn bans_view<'a>(list: &'a BanList, admin: Option<&GuildAdmin>) -> Element<'a, Event> {
+fn bans_view<'a>(
+    list: &'a BanList,
+    gate: &'a Gate<Snowflake>,
+    admin: Option<&GuildAdmin>,
+) -> Element<'a, Event> {
     let can = allowed(admin, list.guild, Permissions::BAN_MEMBERS);
     let mut rows = column![].spacing(4);
     for ban in &list.bans {
@@ -414,11 +411,11 @@ fn bans_view<'a>(list: &'a BanList, admin: Option<&GuildAdmin>) -> Element<'a, E
             || tr("No reason given").to_owned(),
             |reason| trf("Reason: {}", &[&reason]),
         )));
-        let control: Element<'_, Event> = if list.confirm == Some(ban.user) {
+        let control: Element<'_, Event> = if list.confirm.is(ban.user) {
             row![
                 text(tr("Unban this user?")).size(12).style(text::danger),
                 button(text(tr("Confirm")).size(12))
-                    .on_press_maybe((can && list.busy.is_none()).then_some(Event::ConfirmUnban))
+                    .on_press_maybe((can && !gate.is_busy()).then_some(Event::ConfirmUnban))
                     .style(button::danger),
                 button(text(tr("Cancel")).size(12)).on_press(Event::CancelUnban),
             ]
@@ -428,8 +425,7 @@ fn bans_view<'a>(list: &'a BanList, admin: Option<&GuildAdmin>) -> Element<'a, E
         } else {
             button(text(tr("Unban")).size(12))
                 .on_press_maybe(
-                    (can && list.busy.is_none() && !list.loading)
-                        .then_some(Event::AskUnban(ban.user)),
+                    (can && !gate.is_busy() && !list.loading).then_some(Event::AskUnban(ban.user)),
                 )
                 .into()
         };
@@ -450,16 +446,16 @@ fn bans_view<'a>(list: &'a BanList, admin: Option<&GuildAdmin>) -> Element<'a, E
     if list.loading {
         panel = panel.push(small(tr("Loading\u{2026}")));
     }
-    if list.busy.is_some() {
+    if gate.is_busy() {
         panel = panel.push(small(tr("Waiting for Discord\u{2026}")));
     }
     if list.has_more && !list.loading {
         panel = panel.push(
             button(text(tr("Load more")).size(12))
-                .on_press_maybe((list.busy.is_none()).then_some(Event::MoreBans)),
+                .on_press_maybe((!gate.is_busy()).then_some(Event::MoreBans)),
         );
     }
-    for line in [&list.error, &list.notice].into_iter().flatten() {
+    for line in [&list.error, &gate.notice].into_iter().flatten() {
         panel = panel.push(text(line.clone()).size(12));
     }
     panel.into()
@@ -576,7 +572,7 @@ pub fn view<'a>(
 ) -> Option<Element<'a, Event>> {
     let admin = navigation.admin.as_ref();
     let panel = match state.panel.as_ref()? {
-        Panel::Bans(list) => bans_view(list, admin),
+        Panel::Bans(list) => bans_view(list, &state.gate, admin),
         Panel::Audit(log) => audit_view(log, admin),
     };
     Some(container(panel).padding([6, 0]).into())
@@ -702,7 +698,7 @@ mod tests {
     async fn ban_pages_are_deduplicated_bounded_and_stale_answers_dropped() {
         let (mut state, nav) = (State::default(), navigation(Permissions::BAN_MEMBERS));
         let _ = state.update(Event::Bans(G), &nav, &client());
-        let serial = state.serial;
+        let serial = state.gate.serial();
         let _ = state.update(
             Event::BansDone(serial, Ok(page(1..4, true))),
             &nav,
@@ -711,7 +707,7 @@ mod tests {
         assert_eq!((bans(&state).bans.len(), bans(&state).has_more), (3, true));
         // A replayed page adds nothing.
         let _ = state.update(Event::MoreBans, &nav, &client());
-        let serial = state.serial;
+        let serial = state.gate.serial();
         let _ = state.update(
             Event::BansDone(serial, Ok(page(2..6, false))),
             &nav,
@@ -727,18 +723,18 @@ mod tests {
         assert_eq!(bans(&state).bans.len(), 5);
         // The list stops at its cap.
         let _ = state.update(Event::Bans(G), &nav, &client());
-        let serial = state.serial;
+        let serial = state.gate.serial();
         let big = page(1..(MAX_BANS as u64 + 20), true);
         let _ = state.update(Event::BansDone(serial, Ok(big)), &nav, &client());
         assert_eq!(bans(&state).bans.len(), MAX_BANS);
-        assert!(!bans(&state).has_more && bans(&state).notice.is_some());
+        assert!(!bans(&state).has_more && state.gate.notice.is_some());
     }
 
     #[tokio::test]
     async fn an_unban_needs_confirm_is_sent_once_and_updates_only_on_the_answer() {
         let (mut state, nav) = (State::default(), navigation(Permissions::BAN_MEMBERS));
         let _ = state.update(Event::Bans(G), &nav, &client());
-        let serial = state.serial;
+        let serial = state.gate.serial();
         let _ = state.update(
             Event::BansDone(serial, Ok(page(1..3, false))),
             &nav,
@@ -746,9 +742,12 @@ mod tests {
         );
         // No Confirm, no request.
         let _ = state.update(Event::ConfirmUnban, &nav, &client());
-        assert!(bans(&state).busy.is_none());
+        assert!(!state.gate.is_busy());
         let _ = state.update(Event::AskUnban(Snowflake(9)), &nav, &client());
-        assert!(bans(&state).confirm.is_none(), "not a listed user");
+        assert!(
+            bans(&state).confirm.pending().is_none(),
+            "not a listed user"
+        );
         let _ = state.update(Event::AskUnban(Snowflake(1)), &nav, &client());
         // The permission is checked again when Confirm is pressed.
         let _ = state.update(
@@ -756,14 +755,14 @@ mod tests {
             &navigation(Permissions::NONE),
             &client(),
         );
-        assert!(bans(&state).busy.is_none() && bans(&state).notice.is_some());
+        assert!(!state.gate.is_busy() && state.gate.notice.is_some());
         let _ = state.update(Event::AskUnban(Snowflake(1)), &nav, &client());
         let _ = state.update(Event::ConfirmUnban, &nav, &client());
-        assert_eq!(bans(&state).busy, Some(Snowflake(1)));
+        assert_eq!(state.gate.busy(), Some(Snowflake(1)));
         // A second ask is refused while one is in flight; the row stays.
         let _ = state.update(Event::AskUnban(Snowflake(2)), &nav, &client());
-        assert!(bans(&state).confirm.is_none() && bans(&state).bans.len() == 2);
-        let serial = state.serial;
+        assert!(bans(&state).confirm.pending().is_none() && bans(&state).bans.len() == 2);
+        let serial = state.gate.serial();
         let retryable = RestError::Retryable(fastcord_discord::RetryableFailure::Network(
             fastcord_discord::NetworkFailure::Timeout,
         ));
@@ -774,7 +773,8 @@ mod tests {
         );
         assert_eq!(bans(&state).bans.len(), 2);
         assert!(
-            bans(&state)
+            state
+                .gate
                 .notice
                 .as_ref()
                 .unwrap()
@@ -809,7 +809,7 @@ mod tests {
         let (mut state, nav) = (State::default(), navigation(Permissions::VIEW_AUDIT_LOG));
         let _ = state.update(Event::Audit(G), &nav, &client());
         for n in 0..5u64 {
-            let serial = state.serial;
+            let serial = state.gate.serial();
             let page = AuditPage {
                 entries: vec![entry(1_000 - n * 10)],
                 has_more: true,
@@ -831,7 +831,7 @@ mod tests {
             "a held page needs no request"
         );
         // A stale answer is dropped.
-        let serial = state.serial;
+        let serial = state.gate.serial();
         let _ = state.update(
             Event::AuditDone(
                 serial - 1,
@@ -850,7 +850,7 @@ mod tests {
     async fn filters_restart_the_log_and_the_user_filter_keeps_digits() {
         let (mut state, nav) = (State::default(), navigation(Permissions::VIEW_AUDIT_LOG));
         let _ = state.update(Event::Audit(G), &nav, &client());
-        let serial = state.serial;
+        let serial = state.gate.serial();
         let _ = state.update(
             Event::AuditDone(
                 serial,

@@ -1624,6 +1624,10 @@ impl App {
                     Message::GuildAdmin(guild_admin::Event::Settings(Snowflake(5001)))
                 }
                 "roles" => Message::GuildAdmin(guild_admin::Event::Roles(Snowflake(5001))),
+                "bans" => Message::ServerSettings(Snowflake(5001), server_settings::Section::Bans),
+                "automod" => {
+                    Message::ServerSettings(Snowflake(5001), server_settings::Section::AutoMod)
+                }
                 "group" => Message::Group(group_dm::Event::Toggle),
                 "create-channel" => {
                     Message::GuildAdmin(guild_admin::Event::CreateChannel(Snowflake(5001), None))

@@ -5,6 +5,7 @@
 //! refusal is shown with Discord's own reason.
 use crate::gateway::{StageControls, VoiceControls};
 use crate::i18n::{tr, trf};
+use crate::panel_kit::Gate;
 use crate::ui::{button, primary_button};
 use crate::{Message, style};
 use fastcord_discord::state::navigation::StageSeat;
@@ -34,9 +35,7 @@ pub enum Event {
 
 #[derive(Debug, Default)]
 pub struct State {
-    pub pending: Option<u64>,
-    pub serial: u64,
-    pub notice: Option<String>,
+    pub gate: Gate,
     /// The topic field: (editing a live session, text).
     pub topic: Option<(bool, String)>,
 }
@@ -45,10 +44,8 @@ impl State {
     /// A new account, a left call or another Stage: nothing carries over, and a
     /// late answer to an older request is ignored.
     pub fn reset(&mut self) {
-        *self = Self {
-            serial: self.serial.wrapping_add(1),
-            ..Self::default()
-        };
+        self.gate.reset();
+        self.topic = None;
     }
 
     /// The action a topic submission stands for.
@@ -64,23 +61,19 @@ impl State {
 
     /// Begins one write; `None` while another is still unanswered.
     pub fn begin(&mut self) -> Option<u64> {
-        if self.pending.is_some() {
+        if self.gate.is_busy() {
             return None;
         }
-        self.serial = self.serial.wrapping_add(1);
-        self.pending = Some(self.serial);
-        self.notice = None;
-        Some(self.serial)
+        Some(self.gate.begin(()))
     }
 
     pub fn finish(&mut self, serial: u64, result: Result<(), RestError>) {
-        if self.pending != Some(serial) {
+        if !self.gate.is_busy() || !self.gate.accept(serial) {
             return;
         }
-        self.pending = None;
         match result {
             Ok(()) => self.topic = None,
-            Err(error) => self.notice = Some(failure(error)),
+            Err(error) => self.gate.say(failure(error)),
         }
     }
 }
@@ -120,7 +113,7 @@ pub fn own<'a>(
     if !stage.active {
         return None;
     }
-    let free = !restricted && state.pending.is_none();
+    let free = !restricted && !state.gate.is_busy();
     let permissions = stage.permissions;
     let (role, buttons): (&str, Element<'a, Message>) = if !stage.suppressed {
         (
@@ -166,7 +159,7 @@ pub fn own<'a>(
                 .color(crate::style::muted()),
         );
     }
-    if let Some(notice) = &state.notice {
+    if let Some(notice) = &state.gate.notice {
         content = content.push(text(tr(notice).to_owned()).size(11).style(text::danger));
     }
     Some(
@@ -196,7 +189,7 @@ pub fn banner<'a>(
     if !stage.active {
         return None;
     }
-    let free = !restricted && state.pending.is_none();
+    let free = !restricted && !state.gate.is_busy();
     let manage = stage.permissions.manage;
     let live = stage.topic.is_some();
     let heading = match &stage.topic {
@@ -283,7 +276,7 @@ pub fn banner<'a>(
             );
         }
     }
-    if let Some(notice) = &state.notice {
+    if let Some(notice) = &state.gate.notice {
         content = content.push(text(tr(notice.as_str())).size(12).style(text::danger));
     }
     content = content.push(space::vertical().height(0));
@@ -306,15 +299,22 @@ mod tests {
         let first = state.begin().unwrap();
         assert!(state.begin().is_none(), "the first is still unanswered");
         state.finish(first + 1, Ok(()));
-        assert_eq!(state.pending, Some(first), "an answer to another request");
+        assert!(state.gate.is_busy(), "an answer to another request");
         state.finish(first, Err(RestError::PermissionDenied));
-        assert!(state.pending.is_none());
-        assert!(state.notice.as_deref().unwrap().contains("not allowed"));
+        assert!(!state.gate.is_busy());
+        assert!(
+            state
+                .gate
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("not allowed")
+        );
         // A new account or Stage forgets the request, so its late answer is dropped.
         let second = state.begin().unwrap();
         state.reset();
         state.finish(second, Err(RestError::PermissionDenied));
-        assert!(state.notice.is_none() && state.pending.is_none());
+        assert!(state.gate.notice.is_none() && !state.gate.is_busy());
     }
 
     #[test]
