@@ -29,6 +29,7 @@ fastcord-platform = { path = "crates/fastcord-platform" }
 fastcord-media = { path = "crates/fastcord-media" }
 fastcord-audio = { path = "crates/fastcord-audio" }
 fastcord-video = { path = "crates/fastcord-video" }
+fastcord-app = { path = "crates/fastcord-app" }
 fastcord-bypass = { path = "crates/fastcord-bypass" }
 fastcord-ws = { path = "crates/fastcord-ws" }
 cc = "1"

@@ -2048,6 +2048,7 @@ dependencies = [
 name = "fastcord-fake"
 version = "0.1.0-alpha.7"
 dependencies = [
+ "fastcord-app",
  "fastcord-discord",
  "fastcord-model",
  "fastcord-net",

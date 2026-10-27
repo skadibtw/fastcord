@@ -24,6 +24,7 @@ tokio = { workspace = true, features = ["io-util"] }
 tokio-tungstenite.workspace = true
 
 [dev-dependencies]
+fastcord-app.workspace = true
 fastcord-discord = { workspace = true, features = ["fake-discord"] }
 fastcord-model.workspace = true
 fastcord-platform = { workspace = true, features = ["test-support"] }
