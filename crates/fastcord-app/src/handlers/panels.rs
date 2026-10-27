@@ -450,7 +450,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let stage = gateway.controls.voice_controls().stage;
+        let stage = gateway.controls.voice_controls_with(|c| c.stage.clone());
         let action = match event {
             Event::Done(serial, result) => {
                 self.ui.stage.finish(serial, result);

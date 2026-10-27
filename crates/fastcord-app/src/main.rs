@@ -2418,6 +2418,7 @@ const MAX_WANTED_PICTURES: usize = 16;
 struct TimelineWants {
     snapshot: Option<Arc<timeline::Snapshot>>,
     codes: Vec<String>,
+    scanner: invite::CodeCache,
     authors: Vec<avatars::AvatarKey>,
     pictures: Vec<avatars::AvatarKey>,
     /// Times the timeline rows were scanned (tests).
@@ -2435,7 +2436,7 @@ impl TimelineWants {
             return self;
         }
         let rows = &snapshot.rows;
-        self.codes = invite::visible_codes(rows);
+        self.codes = invite::visible_codes(rows, &mut self.scanner);
         self.authors = rows
             .iter()
             .rev()

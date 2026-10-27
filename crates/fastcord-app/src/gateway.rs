@@ -810,6 +810,22 @@ pub enum StreamIntent {
     Ping(String),
 }
 
+/// Copy-on-write edits of the shared controls: readers hold an `Arc`, so a
+/// change clones the struct only while one is still held (#156).
+pub(crate) trait EditControls {
+    fn modify(&self, edit: impl FnOnce(&mut VoiceControls));
+    fn modify_if(&self, edit: impl FnOnce(&mut VoiceControls) -> bool) -> bool;
+}
+
+impl EditControls for watch::Sender<Arc<VoiceControls>> {
+    fn modify(&self, edit: impl FnOnce(&mut VoiceControls)) {
+        self.send_modify(|controls| edit(Arc::make_mut(controls)));
+    }
+    fn modify_if(&self, edit: impl FnOnce(&mut VoiceControls) -> bool) -> bool {
+        self.send_if_modified(|controls| edit(Arc::make_mut(controls)))
+    }
+}
+
 /// Stores `value` and says whether it differed, for `watch::Sender::send_if_modified`.
 fn replace_if_changed<T: PartialEq>(slot: &mut T, value: T) -> bool {
     if *slot == value {
@@ -997,7 +1013,7 @@ pub struct NavigationBridge {
     requests: watch::Sender<Request>,
     voice_requests: watch::Sender<Option<VoiceStateRequest>>,
     voice_audio: watch::Sender<VoiceAudioState>,
-    voice_controls: watch::Sender<VoiceControls>,
+    voice_controls: watch::Sender<Arc<VoiceControls>>,
     account_id: Arc<Mutex<Option<Snowflake>>>,
     /// Closes the live Gateway cleanly on Quit; set when the connection starts.
     closer: Arc<Mutex<Option<fastcord_discord::gateway::GatewayCloser>>>,
@@ -1107,7 +1123,7 @@ impl NavigationBridge {
         let (requests, _) = watch::channel(Request::default());
         let (voice_requests, _) = watch::channel(None);
         let (voice_audio, _) = watch::channel(VoiceAudioState::Idle);
-        let (voice_controls, _) = watch::channel(VoiceControls::default());
+        let (voice_controls, _) = watch::channel(Arc::new(VoiceControls::default()));
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
         Self {
             requests,
@@ -1134,7 +1150,7 @@ impl NavigationBridge {
 
     /// The user turned the camera on or off. This is the only way it turns on.
     pub fn set_camera(&self, on: bool) {
-        self.voice_controls.send_if_modified(|controls| {
+        self.voice_controls.modify_if(|controls| {
             let camera = &mut controls.camera;
             if camera.wanted == on {
                 return false;
@@ -1153,7 +1169,7 @@ impl NavigationBridge {
     /// on: the device, the background effect and the self-view mirror. A
     /// running camera is not restarted by this.
     pub fn prepare_camera(&self, device: Option<String>, effect: Effect, mirror: bool) {
-        self.voice_controls.send_if_modified(|controls| {
+        self.voice_controls.modify_if(|controls| {
             let camera = &mut controls.camera;
             if camera.wanted {
                 return false;
@@ -1172,7 +1188,7 @@ impl NavigationBridge {
     /// Changes the background effect of the camera, on or off, without
     /// restarting it.
     pub fn set_camera_effect(&self, effect: Effect) {
-        self.voice_controls.send_if_modified(|controls| {
+        self.voice_controls.modify_if(|controls| {
             let changed = controls.camera.effect != effect;
             controls.camera.effect = effect;
             changed
@@ -1181,7 +1197,7 @@ impl NavigationBridge {
 
     /// Mirrors (or not) the local self-view; the sent picture is never mirrored.
     pub fn set_camera_mirror(&self, mirror: bool) {
-        self.voice_controls.send_if_modified(|controls| {
+        self.voice_controls.modify_if(|controls| {
             let changed = controls.camera.mirror != mirror;
             controls.camera.mirror = mirror;
             changed
@@ -1191,7 +1207,7 @@ impl NavigationBridge {
     /// Chooses the camera by its stable ID (`None`: the first one). A running
     /// camera is released and the new one opened.
     pub fn select_camera(&self, device: Option<String>) {
-        self.voice_controls.send_modify(|controls| {
+        self.voice_controls.modify(|controls| {
             controls.camera.device = device;
             controls.camera.generation = controls.camera.generation.wrapping_add(1);
         });
@@ -1201,8 +1217,8 @@ impl NavigationBridge {
     pub fn voice_audio_state(&self) -> VoiceAudioState {
         *self.voice_audio.borrow()
     }
-    pub fn voice_controls(&self) -> VoiceControls {
-        self.voice_controls.borrow().clone()
+    pub fn voice_controls(&self) -> Arc<VoiceControls> {
+        Arc::clone(&self.voice_controls.borrow())
     }
     /// Reads the controls in place, with no deep clone (#156). Keep `read`
     /// short and never call back into the bridge from it.
@@ -1229,11 +1245,11 @@ impl NavigationBridge {
 
     pub fn set_self_muted(&self, self_muted: bool) {
         self.voice_controls
-            .send_modify(|controls| controls.self_muted = self_muted);
+            .modify(|controls| controls.self_muted = self_muted);
     }
 
     pub fn set_voice_input(&self, settings: &crate::shortcuts::Settings) {
-        self.voice_controls.send_modify(|controls| {
+        self.voice_controls.modify(|controls| {
             controls.input_mode = settings.mode;
             controls.ptt_release_ms = settings.release_ms;
             controls.sensitivity = settings.sensitivity;
@@ -1242,36 +1258,35 @@ impl NavigationBridge {
 
     pub fn set_vad_forbidden(&self, forbidden: bool) {
         self.voice_controls
-            .send_modify(|controls| controls.vad_forbidden = forbidden);
+            .modify(|controls| controls.vad_forbidden = forbidden);
     }
 
     pub fn set_ptt(&self, down: bool) {
         self.voice_controls
-            .send_if_modified(|controls| std::mem::replace(&mut controls.ptt_down, down) != down);
+            .modify_if(|controls| std::mem::replace(&mut controls.ptt_down, down) != down);
     }
 
     /// Releases push-to-talk immediately, without its release delay.
     pub fn cancel_ptt(&self) {
-        self.voice_controls.send_modify(|controls| {
+        self.voice_controls.modify(|controls| {
             controls.ptt_down = false;
             controls.ptt_cancel = controls.ptt_cancel.wrapping_add(1);
         });
     }
 
     pub fn set_push_to_mute(&self, down: bool) {
-        self.voice_controls.send_if_modified(|controls| {
-            std::mem::replace(&mut controls.push_to_mute_down, down) != down
-        });
+        self.voice_controls
+            .modify_if(|controls| std::mem::replace(&mut controls.push_to_mute_down, down) != down);
     }
 
     pub fn set_deafened(&self, deafened: bool) {
         self.voice_controls
-            .send_modify(|controls| controls.deafened = deafened);
+            .modify(|controls| controls.deafened = deafened);
     }
 
     pub fn set_volume_percent(&self, user_id: Snowflake, percent: u16) -> bool {
         let percent = percent.min(200);
-        self.voice_controls.send_modify(|controls| {
+        self.voice_controls.modify(|controls| {
             if let Some(index) = controls.volumes.iter().position(|v| v.user_id == user_id) {
                 controls.volumes.remove(index);
             } else if controls.volumes.len() == 256 {
@@ -1291,7 +1306,7 @@ impl NavigationBridge {
                 percent: volume.percent.min(200),
             })
             .collect();
-        self.voice_controls.send_modify(|controls| {
+        self.voice_controls.modify(|controls| {
             let mut merged: Vec<_> = volumes
                 .into_iter()
                 .filter(|saved| {
@@ -1309,7 +1324,7 @@ impl NavigationBridge {
     }
 
     pub fn set_audio_devices(&self, preferences: &crate::audio_devices::Preferences) {
-        self.voice_controls.send_modify(|controls| {
+        self.voice_controls.modify(|controls| {
             controls.input_device = preferences.input.choice.clone();
             controls.output_device = preferences.output.choice.clone();
             controls.noise_suppression = preferences.noise_suppression;
@@ -1321,19 +1336,19 @@ impl NavigationBridge {
 
     pub fn select_echo_cancellation(&self, enabled: bool) {
         self.voice_controls
-            .send_modify(|controls| controls.echo_cancellation_off = !enabled);
+            .modify(|controls| controls.echo_cancellation_off = !enabled);
     }
 
     pub fn select_input_gain(&self, gain: fastcord_audio::InputGain) {
         self.voice_controls
-            .send_if_modified(|controls| replace_if_changed(&mut controls.input_gain, gain));
+            .modify_if(|controls| replace_if_changed(&mut controls.input_gain, gain));
     }
 
     /// The audio dialog opened or closed; the running call measures the microphone level only
     /// while it is open.
     pub fn set_diagnostics_open(&self, open: bool) {
         self.voice_controls
-            .send_if_modified(|controls| replace_if_changed(&mut controls.diagnostics_open, open));
+            .modify_if(|controls| replace_if_changed(&mut controls.diagnostics_open, open));
     }
 
     pub fn select_audio_device(
@@ -1341,7 +1356,7 @@ impl NavigationBridge {
         direction: fastcord_audio::Direction,
         choice: fastcord_audio::DeviceChoice,
     ) {
-        self.voice_controls.send_modify(|controls| match direction {
+        self.voice_controls.modify(|controls| match direction {
             fastcord_audio::Direction::Input => {
                 controls.input_device = choice;
                 controls.input_generation = controls.input_generation.wrapping_add(1);
@@ -1354,7 +1369,7 @@ impl NavigationBridge {
     }
 
     pub fn select_noise_suppression(&self, mode: fastcord_audio::NoiseSuppression) {
-        self.voice_controls.send_modify(|controls| {
+        self.voice_controls.modify(|controls| {
             controls.noise_suppression = mode;
             controls.noise_generation = controls.noise_generation.wrapping_add(1);
         });
@@ -2086,7 +2101,7 @@ struct Worker {
     requests: watch::Receiver<Request>,
     voice_requests: watch::Receiver<Option<VoiceStateRequest>>,
     voice_audio: watch::Receiver<VoiceAudioState>,
-    voice_controls: watch::Receiver<VoiceControls>,
+    voice_controls: watch::Receiver<Arc<VoiceControls>>,
     commands: mpsc::Receiver<Command>,
     voice_flags: (bool, bool, bool),
     revision: u64,
@@ -2761,9 +2776,9 @@ impl Worker {
                 Some(guild.channel(channel)?.bitrate)
             })
             .unwrap_or(0);
-        self.bridge.voice_controls.send_if_modified(|controls| {
-            replace_if_changed(&mut controls.channel_bitrate, bitrate)
-        });
+        self.bridge
+            .voice_controls
+            .modify_if(|controls| replace_if_changed(&mut controls.channel_bitrate, bitrate));
     }
 
     /// Looks up who is in the call (and who streams) in the state store. The
@@ -2801,7 +2816,7 @@ impl Worker {
                 }
             }
         }
-        self.bridge.voice_controls.send_if_modified(|controls| {
+        self.bridge.voice_controls.modify_if(|controls| {
             let changed = controls.names != names || controls.avatars != avatars;
             if changed {
                 controls.names = names;
@@ -2928,7 +2943,7 @@ impl Worker {
                 Some(guild.activities(channel).map(str::to_owned).collect())
             })
             .unwrap_or_default();
-        self.bridge.voice_controls.send_if_modified(|controls| {
+        self.bridge.voice_controls.modify_if(|controls| {
             let changed = controls.stage != stage || controls.activities != activities;
             if changed {
                 controls.stage = stage;
@@ -2962,7 +2977,7 @@ impl Worker {
                     .unwrap_or_else(|e| e.into_inner())
                     == Some(update.state.user_id)
                 {
-                    self.bridge.voice_controls.send_modify(|controls| {
+                    self.bridge.voice_controls.modify(|controls| {
                         controls.server_muted = update.state.mute;
                         controls.server_deafened = update.state.deaf;
                         // Moves between audience and speakers take effect at once;
@@ -2987,7 +3002,7 @@ impl Worker {
                     .borrow()
                     .is_some_and(|request| request.channel_id == Some(play.channel_id));
                 if in_call && self.tracker.store.suppression(play.user_id).is_none() {
-                    self.bridge.voice_controls.send_modify(|controls| {
+                    self.bridge.voice_controls.modify(|controls| {
                         controls.sound_seq = controls.sound_seq.wrapping_add(1);
                         if controls.sound_cues.len() >= SOUND_CUES {
                             controls.sound_cues.remove(0);
@@ -3002,13 +3017,13 @@ impl Worker {
                 }
             }
             Dispatch::SoundboardChanged(guild) => {
-                self.bridge.voice_controls.send_modify(|controls| {
+                self.bridge.voice_controls.modify(|controls| {
                     controls.sound_seq = controls.sound_seq.wrapping_add(1);
                     controls.sound_catalog_change = Some((*guild, controls.sound_seq));
                 });
             }
             Dispatch::StickersChanged(guild) => {
-                self.bridge.voice_controls.send_modify(|controls| {
+                self.bridge.voice_controls.modify(|controls| {
                     controls.sound_seq = controls.sound_seq.wrapping_add(1);
                     controls.sticker_change = Some((*guild, controls.sound_seq));
                 });
@@ -3408,7 +3423,7 @@ impl Worker {
             })
             .unwrap_or_default();
         self.refresh_stage();
-        self.bridge.voice_controls.send_if_modified(|controls| {
+        self.bridge.voice_controls.modify_if(|controls| {
             if controls.streams.as_ref() == offers.as_slice() {
                 false
             } else {
@@ -6255,7 +6270,7 @@ mod tests {
         };
         bridge.set_audio_devices(&preferences);
         bridge.set_self_muted(true);
-        bridge.voice_controls.send_modify(|controls| {
+        bridge.voice_controls.modify(|controls| {
             controls.noise_status = Some(fastcord_audio::NoiseSuppressionStatus {
                 error: Some(fastcord_audio::DenoiseError::ModelLoad),
                 ..fastcord_audio::NoiseSuppressionStatus::default()
@@ -6315,7 +6330,7 @@ mod tests {
     fn the_own_stage_seat_follows_the_servers_voice_state_at_once() {
         let mut worker = worker();
         *worker.bridge.account_id.lock().unwrap() = Some(Snowflake(1));
-        worker.bridge.voice_controls.send_modify(|controls| {
+        worker.bridge.voice_controls.modify(|controls| {
             controls.stage = StageControls {
                 active: true,
                 suppressed: true,
@@ -6431,7 +6446,7 @@ mod tests {
             scope.spawn(|| {
                 start.wait();
                 for _ in 0..200_000 {
-                    bridge.voice_controls.send_modify(|controls| {
+                    bridge.voice_controls.modify(|controls| {
                         controls.server_muted = true;
                         controls.server_deafened = true;
                     });

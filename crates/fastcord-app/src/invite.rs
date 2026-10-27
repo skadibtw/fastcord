@@ -218,22 +218,51 @@ impl Cache {
     }
 }
 
+/// Codes found per message, so a changed timeline snapshot rescans only the
+/// rows that are new or edited (#156). Holds at most the rows of one scan.
+#[derive(Debug, Default)]
+pub struct CodeCache {
+    /// Message id -> (edited timestamp, content length, codes).
+    rows: std::collections::HashMap<Snowflake, (Option<String>, usize, Vec<String>)>,
+    /// Message bodies scanned (tests).
+    #[cfg(test)]
+    pub scans: usize,
+}
+
 /// Invite codes of the built timeline rows, newest message first.
-pub fn visible_codes(rows: &[timeline::Row]) -> Vec<String> {
+pub fn visible_codes(rows: &[timeline::Row], cache: &mut CodeCache) -> Vec<String> {
     let mut codes: Vec<String> = Vec::new();
+    let mut kept = std::collections::HashMap::new();
     for row in rows.iter().rev() {
         if row.hidden.is_some() {
             continue;
         }
-        for code in extract_codes(&row.message.content) {
-            if !codes.contains(&code) {
-                codes.push(code);
+        let message = &row.message;
+        let (edited, len, found) = match cache.rows.remove(&message.id) {
+            Some(hit) if hit.0 == message.edited_timestamp && hit.1 == message.content.len() => hit,
+            _ => {
+                #[cfg(test)]
+                {
+                    cache.scans += 1;
+                }
+                (
+                    message.edited_timestamp.clone(),
+                    message.content.len(),
+                    extract_codes(&message.content),
+                )
+            }
+        };
+        for code in &found {
+            if !codes.contains(code) {
+                codes.push(code.clone());
             }
         }
+        kept.insert(message.id, (edited, len, found));
         if codes.len() >= MAX_WANTED {
             break;
         }
     }
+    cache.rows = kept;
     codes
 }
 
@@ -613,6 +642,8 @@ pub fn remaining(expiry: Expiry, now: i64) -> String {
 
 #[derive(Debug, Default)]
 pub struct State {
+    /// Codes per message for `pump`.
+    scanned: CodeCache,
     pub cache: Cache,
     leave: Option<Leave>,
     creating: Option<Creating>,
@@ -667,7 +698,7 @@ impl State {
     /// Looks up the visible codes that need it. Called when the timeline or
     /// the open channel changes and after each answer.
     pub fn pump(&mut self, rows: &[timeline::Row], client: &RestClient) -> Task<Event> {
-        let codes = visible_codes(rows);
+        let codes = visible_codes(rows, &mut self.scanned);
         let start = self.cache.want(&codes, Instant::now());
         let tasks: Vec<_> = start
             .into_iter()
@@ -1230,8 +1261,41 @@ pub fn view(state: &State, now: i64) -> Option<Element<'_, Event>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text_row(id: u64, content: &str, edited: Option<&str>) -> timeline::Row {
+        let message = serde_json::from_value(serde_json::json!({
+            "id": id.to_string(),
+            "channel_id": "500",
+            "author": {"id": "2", "username": "alt"},
+            "content": content,
+            "edited_timestamp": edited,
+            "timestamp": "2026-10-07T12:00:00.000000+00:00",
+        }))
+        .expect("valid message");
+        timeline::Row::new(Arc::new(message), 1)
+    }
+
+    #[test]
+    fn unchanged_rows_are_not_rescanned_for_codes() {
+        let mut cache = CodeCache::default();
+        let mut rows = vec![
+            text_row(1, "join discord.gg/aaa", None),
+            text_row(2, "hello", None),
+        ];
+        assert_eq!(visible_codes(&rows, &mut cache), ["aaa"]);
+        assert_eq!(cache.scans, 2);
+        // A new snapshot with one more row scans only that row.
+        rows.push(text_row(3, "also discord.gg/bbb", None));
+        assert_eq!(visible_codes(&rows, &mut cache), ["bbb", "aaa"]);
+        assert_eq!(cache.scans, 3);
+        // An edited body is scanned again.
+        rows[0] = text_row(1, "join discord.gg/ccc", Some("2026-10-07T12:05:00+00:00"));
+        assert_eq!(visible_codes(&rows, &mut cache), ["bbb", "ccc"]);
+        assert_eq!(cache.scans, 4);
+    }
     use fastcord_discord::Refusal;
     use fastcord_discord::StatusCode;
+    use std::sync::Arc;
 
     fn invite(guild: u64) -> Invite {
         Invite {

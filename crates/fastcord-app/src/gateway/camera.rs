@@ -13,6 +13,7 @@
 //! is off again at the start of every call. A tile that is not on screen has
 //! no decoder work and its stream is not requested from the server.
 
+use super::EditControls;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -398,7 +399,7 @@ struct Remote {
 pub(super) struct CallVideo {
     media: MediaSender,
     tiles: Arc<CameraTiles>,
-    controls: watch::Sender<VoiceControls>,
+    controls: watch::Sender<Arc<VoiceControls>>,
     decoders: HashMap<Snowflake, Remote>,
     running: Option<Running>,
     /// The server accepted H.264 from us on this connection.
@@ -411,11 +412,11 @@ impl CallVideo {
     pub(super) fn new(
         media: MediaSender,
         tiles: Arc<CameraTiles>,
-        controls: watch::Sender<VoiceControls>,
+        controls: watch::Sender<Arc<VoiceControls>>,
     ) -> Self {
         let (progress, progress_rx) = watch::channel(CameraProgress::default());
         // A call never inherits a camera that was left on.
-        controls.send_if_modified(|controls| {
+        controls.modify_if(|controls| {
             let before = controls.camera.clone();
             controls.camera.wanted = false;
             controls.camera.status = CameraStatus::Off;
@@ -444,7 +445,7 @@ impl CallVideo {
     }
 
     fn publish(&self, update: impl FnOnce(&mut CameraControls)) {
-        self.controls.send_if_modified(|controls| {
+        self.controls.modify_if(|controls| {
             let before = controls.camera.clone();
             update(&mut controls.camera);
             controls.camera != before
@@ -968,7 +969,7 @@ mod tests {
     fn call_video() -> (
         CallVideo,
         fastcord_media::VoiceSession,
-        watch::Receiver<VoiceControls>,
+        watch::Receiver<Arc<VoiceControls>>,
     ) {
         use fastcord_media::{Generation, VoiceCredentials, connect_with_video};
         use fastcord_model::VoiceToken;
@@ -988,7 +989,7 @@ mod tests {
             call_options(),
         )
         .unwrap();
-        let (controls, observer) = watch::channel(VoiceControls::default());
+        let (controls, observer) = watch::channel(Arc::new(VoiceControls::default()));
         let video = CallVideo::new(session.media(), Arc::default(), controls);
         (video, session, observer)
     }

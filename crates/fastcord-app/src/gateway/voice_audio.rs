@@ -1,3 +1,4 @@
+use super::EditControls;
 use super::camera::{self, CallVideo, CameraTiles};
 use super::{VoiceControls, VoiceParticipant};
 use fastcord_audio::{
@@ -41,8 +42,8 @@ pub(super) async fn run(
     credentials: VoiceCredentials,
     cancel_rx: oneshot::Receiver<()>,
     state: watch::Sender<VoiceAudioState>,
-    controls: watch::Receiver<VoiceControls>,
-    controls_tx: watch::Sender<VoiceControls>,
+    controls: watch::Receiver<Arc<VoiceControls>>,
+    controls_tx: watch::Sender<Arc<VoiceControls>>,
     tiles: Arc<CameraTiles>,
 ) {
     let initial = controls.borrow().clone();
@@ -57,8 +58,8 @@ pub(super) async fn run(
         tiles,
         move || {
             AudioEngine::start(EngineConfig {
-                input: Some(initial.input_device),
-                output: Some(initial.output_device),
+                input: Some(initial.input_device.clone()),
+                output: Some(initial.output_device.clone()),
                 noise_suppression: initial.noise_suppression,
                 echo_cancellation: !initial.echo_cancellation_off,
                 capture_enabled,
@@ -364,17 +365,17 @@ impl PttHold {
 
 /// Publishes the running engine's noise-suppression state for the settings dialog and
 /// withdraws it when the engine stops, however the call ends.
-struct NoiseStatus<'a>(&'a watch::Sender<VoiceControls>);
+struct NoiseStatus<'a>(&'a watch::Sender<Arc<VoiceControls>>);
 
 impl NoiseStatus<'_> {
     fn publish(&self, status: NoiseSuppressionStatus) {
         self.0
-            .send_modify(|controls| controls.noise_status = Some(status));
+            .modify(|controls| controls.noise_status = Some(status));
     }
 
     /// Publishes the microphone level, only when it changed.
     fn publish_level(&self, diagnostics: Option<fastcord_audio::InputDiagnostics>) {
-        self.0.send_if_modified(|controls| {
+        self.0.modify_if(|controls| {
             super::replace_if_changed(&mut controls.input_diagnostics, diagnostics)
         });
     }
@@ -382,9 +383,8 @@ impl NoiseStatus<'_> {
     /// Publishes the voice ping, only when the rounded value changed.
     fn publish_ping(&self, rtt: Duration) {
         let ms = u32::try_from(rtt.as_micros().saturating_add(500) / 1000).unwrap_or(u32::MAX);
-        self.0.send_if_modified(|controls| {
-            super::replace_if_changed(&mut controls.voice_ping_ms, Some(ms))
-        });
+        self.0
+            .modify_if(|controls| super::replace_if_changed(&mut controls.voice_ping_ms, Some(ms)));
     }
 
     /// Publishes the engine counters the dialog shows, only when one of them changed.
@@ -395,7 +395,7 @@ impl NoiseStatus<'_> {
         stats: fastcord_audio::EngineStats,
         transport: Option<fastcord_media::gateway::TransportStats>,
     ) {
-        self.0.send_if_modified(|controls| {
+        self.0.modify_if(|controls| {
             let shown = transport.is_some();
             let key = |s: &fastcord_audio::EngineStats| {
                 (
@@ -423,7 +423,7 @@ impl NoiseStatus<'_> {
 
 impl Drop for NoiseStatus<'_> {
     fn drop(&mut self) {
-        self.0.send_modify(|controls| {
+        self.0.modify(|controls| {
             controls.noise_status = None;
             controls.audio_stats = None;
             controls.transport_stats = None;
@@ -436,8 +436,8 @@ async fn run_with(
     connection: (fastcord_net::NetworkContext, VoiceCredentials),
     mut cancel_rx: oneshot::Receiver<()>,
     state: watch::Sender<VoiceAudioState>,
-    mut controls: watch::Receiver<VoiceControls>,
-    controls_tx: watch::Sender<VoiceControls>,
+    mut controls: watch::Receiver<Arc<VoiceControls>>,
+    controls_tx: watch::Sender<Arc<VoiceControls>>,
     tiles: Arc<CameraTiles>,
     start_engine: impl FnOnce() -> EngineStart + Send + 'static,
 ) {
@@ -494,7 +494,7 @@ async fn run_with(
     let mut release_at = HashMap::<Snowflake, Instant>::new();
     loop {
         let speaking_now = speech_end_at.is_some();
-        controls_tx.send_if_modified(|controls| {
+        controls_tx.modify_if(|controls| {
             replace(&mut controls.self_speaking, speaking_now) != speaking_now
         });
         let release_deadline = release_at.values().copied().min();
@@ -636,7 +636,7 @@ async fn run_with(
             event = events.recv() => {
                 match event {
                     Some(fastcord_audio::EngineEvent::StreamFailed { direction, kind }) => {
-                        controls_tx.send_modify(|controls| match direction {
+                        controls_tx.modify(|controls| match direction {
                             fastcord_audio::Direction::Input => controls.input_error = Some(kind),
                             fastcord_audio::Direction::Output => controls.output_error = Some(kind),
                         });
@@ -654,7 +654,7 @@ async fn run_with(
                         }
                     }
                     Some(fastcord_audio::EngineEvent::StreamReady { direction, captured: new_capture, remote_audio, .. }) => {
-                        controls_tx.send_modify(|controls| match direction {
+                        controls_tx.modify(|controls| match direction {
                             fastcord_audio::Direction::Input => controls.input_error = None,
                             fastcord_audio::Direction::Output => controls.output_error = None,
                         });
@@ -695,7 +695,7 @@ async fn run_with(
     publish_participants(&controls_tx, &participants);
     // No key state outlives the call: the next one starts with nothing held.
     release_push_to_talk(&controls_tx);
-    controls_tx.send_modify(|controls| controls.push_to_mute_down = false);
+    controls_tx.modify(|controls| controls.push_to_mute_down = false);
 
     // Release the camera and the decoders, then the audio devices, before the next call
     // can open them, then say goodbye.
@@ -705,7 +705,7 @@ async fn run_with(
     let _ = tokio::task::spawn_blocking(move || drop(engine)).await;
     drop(noise_status);
     let _ = media.end_speech();
-    controls_tx.send_if_modified(|controls| replace(&mut controls.self_speaking, false));
+    controls_tx.modify_if(|controls| replace(&mut controls.self_speaking, false));
     crate::voice_log::note("call: left");
     session.leave().await;
     // A failed engine stays visible (the worker then leaves the Gateway voice state too).
@@ -802,20 +802,20 @@ fn apply_voice_event(
 /// Publishes the participant list. Only the participants field is written, in place, so a
 /// concurrent mute, deafen, volume, or server-restriction change is never overwritten.
 pub(super) fn publish_participants(
-    controls: &watch::Sender<VoiceControls>,
+    controls: &watch::Sender<Arc<VoiceControls>>,
     participants: &HashMap<Snowflake, VoiceParticipant>,
 ) {
     let mut next: Vec<_> = participants.values().copied().collect();
     next.sort_by_key(|participant| participant.user_id.0);
     if controls.borrow().participants != next {
-        controls.send_modify(|controls| controls.participants = next);
+        controls.modify(|controls| controls.participants = next);
     }
 }
 
 /// Drops a held push-to-talk at once (device lost or replaced, call over). The key has
 /// to be released and pressed again before it transmits.
-fn release_push_to_talk(controls: &watch::Sender<VoiceControls>) {
-    controls.send_modify(|controls| {
+fn release_push_to_talk(controls: &watch::Sender<Arc<VoiceControls>>) {
+    controls.modify(|controls| {
         controls.ptt_down = false;
         controls.ptt_cancel = controls.ptt_cancel.wrapping_add(1);
     });
@@ -861,7 +861,7 @@ mod tests {
     async fn an_engine_that_cannot_start_ends_the_call_and_reports_it() {
         let (state, observer) = watch::channel(VoiceAudioState::Idle);
         let (_cancel, cancel_rx) = oneshot::channel();
-        let (controls_tx, controls) = watch::channel(VoiceControls::default());
+        let (controls_tx, controls) = watch::channel(Arc::new(VoiceControls::default()));
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
             run_with(
@@ -881,7 +881,7 @@ mod tests {
 
     #[test]
     fn the_noise_status_is_withdrawn_when_the_engine_stops() {
-        let (controls_tx, controls) = watch::channel(VoiceControls::default());
+        let (controls_tx, controls) = watch::channel(Arc::new(VoiceControls::default()));
         assert_eq!(controls.borrow().noise_status, None);
         let status = NoiseSuppressionStatus {
             active: NoiseSuppression::HighQuality,

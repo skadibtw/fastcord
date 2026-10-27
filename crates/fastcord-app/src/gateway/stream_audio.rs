@@ -30,7 +30,7 @@ pub(super) async fn run(
     visibility: watch::Receiver<bool>,
     sink: Sink,
     status: StatusSink,
-    controls: watch::Receiver<VoiceControls>,
+    controls: watch::Receiver<Arc<VoiceControls>>,
     presentation: Arc<crate::playback::Session>,
 ) {
     let (network, credentials) = connection;
@@ -99,7 +99,7 @@ async fn pump(
     mut visibility: watch::Receiver<bool>,
     sink: Sink,
     status: StatusSink,
-    mut controls: watch::Receiver<VoiceControls>,
+    mut controls: watch::Receiver<Arc<VoiceControls>>,
     presentation: Arc<crate::playback::Session>,
 ) {
     let mut playback = Playback::default();

@@ -12,6 +12,7 @@ use iced::widget::{
 };
 use iced::{Element, Length, Point};
 use iced_renderer::core::{self, layout, mouse, overlay, renderer, widget};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -110,7 +111,7 @@ fn action(
 pub fn view<'a>(
     state: &'a State,
     navigation: &'a NavigationSnapshot,
-    voice: VoiceControls,
+    voice: Arc<VoiceControls>,
     restricted: bool,
     volume_notice: Option<&'a str>,
 ) -> Option<Element<'a, Message>> {
