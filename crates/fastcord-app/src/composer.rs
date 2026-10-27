@@ -723,6 +723,16 @@ impl Composer {
         self.notice = Some(BUSY);
     }
 
+    #[cfg(test)]
+    pub fn notice(&self) -> Option<&'static str> {
+        self.notice
+    }
+
+    /// Retry needs a live worker, which only Reconnect brings back.
+    pub fn needs_reconnect(&mut self) {
+        self.notice = Some(RECONNECT_FIRST);
+    }
+
     /// The worker accepted the draft: empty the editor.
     pub fn sent(&mut self) {
         self.content = Content::new();
@@ -853,7 +863,11 @@ pub fn update(
         Event::CancelEdit => composer.cancel_edit(),
         Event::Retry(id) => {
             if !bridge.retry_send(id) {
-                composer.notice = Some(BUSY);
+                if bridge.stopped() {
+                    composer.needs_reconnect();
+                } else {
+                    composer.notice = Some(BUSY);
+                }
             }
         }
         Event::Discard(id) => {
@@ -891,6 +905,7 @@ fn typing_line(names: &[String]) -> Option<String> {
 }
 
 const BUSY: &str = "That is not possible right now (busy or disconnected); try again.";
+const RECONNECT_FIRST: &str = "The connection is stopped. Press Reconnect first, then retry.";
 const EDIT_DISCARDED: &str =
     "Editing was cancelled because you switched conversations; nothing was saved.";
 const EMPTY_EDIT: &str = "A message needs some text. Use Delete to remove it instead.";

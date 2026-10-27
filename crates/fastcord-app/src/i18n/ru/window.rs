@@ -479,6 +479,10 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Сейчас это невозможно (занято или нет соединения) — повторите попытку.",
     ),
     (
+        "The connection is stopped. Press Reconnect first, then retry.",
+        "Соединение остановлено. Сначала нажмите «Переподключиться», затем повторите.",
+    ),
+    (
         "Editing was cancelled because you switched conversations; nothing was saved.",
         "Изменение отменено: вы перешли в другую беседу. Ничего не сохранено.",
     ),

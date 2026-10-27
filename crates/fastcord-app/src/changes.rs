@@ -252,6 +252,10 @@ impl Changes {
         Some(request)
     }
 
+    pub fn holds(&self, channel: Snowflake, message: Snowflake) -> bool {
+        self.position(channel, message).is_some()
+    }
+
     /// Drops a failed change at the user's request (or because it is moot).
     pub fn dismiss(&mut self, channel: Snowflake, message: Snowflake) -> bool {
         match self.position(channel, message) {

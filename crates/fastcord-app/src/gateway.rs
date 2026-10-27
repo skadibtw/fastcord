@@ -1726,6 +1726,24 @@ impl NavigationBridge {
 
     pub fn discard_send(&self, id: OpId) -> bool {
         self.commands.try_send(Command::Discard(id)).is_ok()
+            || self.with_carried(|carried| carried.discard_send(id))
+    }
+
+    /// The worker stopped on a limit and its unconfirmed work waits for
+    /// Reconnect in the bridge (#149).
+    pub fn stopped(&self) -> bool {
+        self.commands.is_closed()
+    }
+
+    /// Runs `f` on the work a stopped worker left; false when there is none.
+    fn with_carried(&self, f: impl FnOnce(&mut Carried) -> bool) -> bool {
+        self.stopped()
+            && self
+                .carried
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+                .is_some_and(f)
     }
 
     /// Queues new text for one of the user's messages. Returns whether it was
@@ -1776,6 +1794,7 @@ impl NavigationBridge {
         self.commands
             .try_send(Command::DismissChange { channel, message })
             .is_ok()
+            || self.with_carried(|carried| carried.dismiss_change(channel, message))
     }
 
     /// Queues a click on a reaction chip. Returns whether it was accepted.
@@ -4306,9 +4325,48 @@ impl GatewayPanel {
             _ => true,
         };
         if !queued {
-            self.composer.refused();
+            if self.controls.stopped() {
+                self.composer.needs_reconnect();
+            } else {
+                self.composer.refused();
+            }
         }
+        self.prune_stopped();
         false
+    }
+
+    /// While the Gateway is stopped no worker refreshes the snapshot: drop the
+    /// unsent rows and failed changes the user discarded from what is shown.
+    pub fn prune_stopped(&mut self) {
+        let carried = self
+            .controls
+            .carried
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(carried) = carried.as_ref().filter(|_| self.controls.stopped()) else {
+            return;
+        };
+        let stale = self
+            .timeline
+            .outbox
+            .iter()
+            .any(|item| !carried.holds_send(item.id))
+            || self.timeline.rows.iter().any(|row| {
+                row.change
+                    .as_ref()
+                    .is_some_and(|_| !carried.holds_change(row.message.channel_id, row.message.id))
+            });
+        if !stale {
+            return;
+        }
+        let timeline = Arc::make_mut(&mut self.timeline);
+        timeline.outbox.retain(|item| carried.holds_send(item.id));
+        for row in &mut timeline.rows {
+            if row.change.is_some() && !carried.holds_change(row.message.channel_id, row.message.id)
+            {
+                row.change = None;
+            }
+        }
     }
 }
 
@@ -5561,6 +5619,85 @@ mod tests {
             crate::outbox::OutboxState::Sending
         ));
         assert_eq!(next.outbox_slots.used(), 1);
+    }
+
+    /// A stopped worker with one queued send turned into a carried failed row.
+    async fn stopped_with_one_send() -> (
+        Worker,
+        Vec<crate::outbox::OutboxItem>,
+        fastcord_discord::Nonce,
+    ) {
+        let mut worker = worker();
+        // As in production: the history releases the bridge's slots.
+        worker.tracker.history = History::new(worker.bridge.outbox_slots.clone());
+        assert!(
+            worker
+                .bridge
+                .send_message(Snowflake(500), "unsent".to_owned(), false, None)
+        );
+        worker.answer_in_flight().await;
+        let items = worker.tracker.history.outbox_items();
+        let nonce = worker.tracker.history.nonce_of(items[0].id);
+        worker.deposit_carried();
+        (worker, items, nonce.expect("the send has a nonce"))
+    }
+
+    #[tokio::test]
+    async fn discard_while_stopped_removes_the_row_and_frees_the_slot() {
+        let (worker, items, _) = stopped_with_one_send().await;
+        let id = items[0].id;
+        let bridge = worker.bridge.clone();
+        let (_, handle) = iced::Task::<()>::none().abortable();
+        let mut panel = GatewayPanel::new(1, handle, bridge.clone());
+        let mut shown = (*panel.timeline).clone();
+        shown.outbox = items;
+        panel.timeline = Arc::new(shown);
+        assert_eq!(bridge.outbox_slots.used(), 1);
+        assert!(bridge.stopped());
+        assert!(bridge.discard_send(id));
+        assert_eq!(bridge.outbox_slots.used(), 0);
+        panel.prune_stopped();
+        assert!(panel.timeline.outbox.is_empty(), "the row is gone");
+        assert!(!bridge.discard_send(id), "only once");
+
+        let mut next = NavigationBridge::new();
+        next.inherit(&bridge);
+        assert!(next.new_history().outbox_items().is_empty());
+        assert_eq!(next.outbox_slots.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn retry_while_stopped_hints_and_keeps_the_row_then_reuses_the_nonce() {
+        let (worker, items, nonce) = stopped_with_one_send().await;
+        let id = items[0].id;
+        let bridge = worker.bridge.clone();
+        let mut composer = crate::composer::Composer::default();
+        let snapshot = timeline::Snapshot::default();
+        crate::composer::update(
+            &mut composer,
+            crate::composer::Event::Retry(id),
+            &snapshot,
+            &bridge,
+        );
+        assert!(
+            composer
+                .notice()
+                .is_some_and(|text| text.contains("Reconnect first")),
+            "{:?}",
+            composer.notice()
+        );
+        assert_eq!(bridge.outbox_slots.used(), 1, "the row is kept");
+
+        let mut next = NavigationBridge::new();
+        next.inherit(&bridge);
+        let mut history = next.new_history();
+        assert_eq!(history.outbox_items().len(), 1);
+        history.retry_send(&worker.rest, id);
+        assert_eq!(
+            history.nonce_of(id),
+            Some(nonce),
+            "same nonce after Reconnect"
+        );
     }
 
     #[tokio::test]

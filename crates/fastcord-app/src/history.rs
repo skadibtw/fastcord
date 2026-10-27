@@ -256,6 +256,25 @@ pub struct Carried {
     changes: Changes,
 }
 
+impl Carried {
+    /// The user's discard while the Gateway is stopped: no worker is needed.
+    pub fn discard_send(&mut self, id: OpId) -> bool {
+        self.outbox.discard(id)
+    }
+
+    pub fn dismiss_change(&mut self, channel: Snowflake, message: Snowflake) -> bool {
+        self.changes.dismiss(channel, message)
+    }
+
+    pub fn holds_send(&self, id: OpId) -> bool {
+        self.outbox.channel_of(id).is_some()
+    }
+
+    pub fn holds_change(&self, channel: Snowflake, message: Snowflake) -> bool {
+        self.changes.holds(channel, message)
+    }
+}
+
 #[derive(Default)]
 pub struct History {
     store: MessageStore,
@@ -390,6 +409,11 @@ impl History {
     #[cfg(test)]
     pub fn outbox_items(&self) -> Vec<crate::outbox::OutboxItem> {
         self.outbox.items()
+    }
+
+    #[cfg(test)]
+    pub fn nonce_of(&self, id: OpId) -> Option<fastcord_discord::Nonce> {
+        self.outbox.nonce_of(id)
     }
 
     pub fn restore(&mut self, carried: Carried) {

@@ -590,6 +590,7 @@ impl App {
                         &gateway.timeline,
                         &gateway.controls,
                     );
+                    gateway.prune_stopped();
                     if let Some(channel) = typing {
                         gateway.controls.typing(channel);
                     }
