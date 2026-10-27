@@ -80,6 +80,12 @@ Windows offline evidence, 2026-10-24:
 - A shared-factory fixture exercises all nine HTTP roles and four WS roles:
   exactly 13 CONNECT requests reach the configured proxy, origin-token/private-
   bridge credentials never enter upstream proxy headers, and probe dials stay zero.
+- Trust (#131): production configs verify with the OS trust store
+  (`rustls-platform-verifier`, ring provider; embedded webpki roots only if it
+  cannot start). Offline tests: an untrusted self-signed server is rejected and
+  the ClientHello extension set, cipher suites and length equal the
+  embedded-roots config's. Manual: with an enterprise root installed in the OS,
+  an HTTPS proxy signed by it connects.
 - Actual HTTPS-proxy TLS rejects an untrusted proxy certificate. Trusted local
   fixture TLS carries separately verified origin TLS and h2 ALPN. Real reqwest
   HTTP/2, uploaded PUT bytes and a non-followed 302 cross the private bridge and

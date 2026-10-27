@@ -783,13 +783,23 @@ pub(crate) fn tls_config(
 }
 
 fn build_tls_config(profile: TlsProfile, probe: bool) -> Result<Arc<ClientConfig>, NetworkError> {
-    let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let mut config =
-        ClientConfig::builder_with_provider(Arc::new(crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(|_| NetworkError::TlsProtocolRejected)?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+    let provider = Arc::new(crypto::ring::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|_| NetworkError::TlsProtocolRejected)?;
+    // The OS trust store (enterprise roots, inspecting proxies, revocation)
+    // verifies the chain; only the verifier changes, never the ClientHello.
+    // If the platform verifier cannot start, the embedded Mozilla roots keep
+    // working exactly as before (#131).
+    let builder = match rustls_platform_verifier::Verifier::new(provider) {
+        Ok(verifier) => builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier)),
+        Err(_) => builder.with_root_certificates(RootCertStore::from_iter(
+            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+        )),
+    };
+    let mut config = builder.with_no_client_auth();
     if profile == TlsProfile::Http {
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     }

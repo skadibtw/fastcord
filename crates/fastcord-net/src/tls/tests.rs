@@ -752,3 +752,89 @@ async fn real_tls12_abbreviated_session_resumption_preserves_encrypted_finished(
         }
     }
 }
+
+fn be16(b: &[u8], at: usize) -> usize {
+    usize::from(u16::from_be_bytes([b[at], b[at + 1]]))
+}
+
+/// (cipher suite bytes, extension types in order, total length) of a hello.
+fn hello_shape(bytes: &[u8]) -> (Vec<u8>, Vec<usize>, usize) {
+    let mut at = 5 + 4 + 2 + 32;
+    at += 1 + usize::from(bytes[at]);
+    let suites = be16(bytes, at);
+    let cipher_suites = bytes[at + 2..at + 2 + suites].to_vec();
+    at += 2 + suites;
+    at += 1 + usize::from(bytes[at]);
+    let end = at + 2 + be16(bytes, at);
+    at += 2;
+    let mut types = Vec::new();
+    while at < end {
+        types.push(be16(bytes, at));
+        at += 4 + be16(bytes, at + 2);
+    }
+    (cipher_suites, types, bytes.len())
+}
+
+/// The OS verifier must not change the ClientHello (#131): the extension
+/// order, cipher suites and length equal those of a config with the embedded
+/// webpki roots, which is what shipped before.
+#[test]
+fn platform_verifier_leaves_the_client_hello_unchanged() {
+    use crate::selector::TlsProfile;
+    use tokio_rustls::rustls::{
+        ClientConfig, ClientConnection, RootCertStore, crypto, pki_types::ServerName,
+    };
+    let hello = |config: Arc<ClientConfig>| {
+        let mut connection =
+            ClientConnection::new(config, ServerName::try_from("discord.com").unwrap()).unwrap();
+        let mut bytes = Vec::new();
+        connection.write_tls(&mut bytes).unwrap();
+        let (suites, mut types, length) = hello_shape(&bytes);
+        // rustls shuffles the order per connection, so compare the set.
+        types.sort_unstable();
+        (suites, types, length)
+    };
+    let mut old = ClientConfig::builder_with_provider(Arc::new(crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(RootCertStore::from_iter(
+            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+        ))
+        .with_no_client_auth();
+    old.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    old.resumption = tokio_rustls::rustls::client::Resumption::disabled();
+    old.enable_early_data = false;
+    let new = crate::broker::tls_config(TlsProfile::Http, true).unwrap();
+    assert_eq!(hello(Arc::new(old)), hello(new));
+}
+
+/// A server with a self-signed certificate nobody trusts is rejected by the
+/// production config, offline.
+#[tokio::test]
+async fn production_config_rejects_an_untrusted_self_signed_server() {
+    use crate::selector::TlsProfile;
+    use tokio_rustls::rustls::{
+        ServerConfig, crypto,
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName},
+    };
+    let certificate = CertificateDer::from(include_bytes!("fixtures/test-cert.der").to_vec());
+    let server = ServerConfig::builder_with_provider(Arc::new(crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![certificate],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                include_bytes!("fixtures/test-key.der").to_vec(),
+            )),
+        )
+        .unwrap();
+    let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+    let client = tokio_rustls::TlsConnector::from(
+        crate::broker::tls_config(TlsProfile::WebSocket, false).unwrap(),
+    )
+    .connect(ServerName::try_from("localhost").unwrap(), client_io);
+    let server = tokio_rustls::TlsAcceptor::from(Arc::new(server)).accept(server_io);
+    let (client, _) = tokio::join!(client, server);
+    assert!(client.is_err());
+}

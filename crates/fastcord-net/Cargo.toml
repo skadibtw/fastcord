@@ -19,6 +19,7 @@ serde_json.workspace = true
 sha2.workspace = true
 socket2.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
+rustls-platform-verifier.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
 zeroize.workspace = true

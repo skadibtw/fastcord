@@ -113,6 +113,8 @@ wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 webpki-roots = "1"
+# OS trust store for TLS verification in fastcord-net (#131); rustls 0.23 + the ring provider.
+rustls-platform-verifier = "0.7"
 windows = "0.62"
 uuid = { version = "1", features = ["std", "v4"] }
 windows-core = "0.62"
