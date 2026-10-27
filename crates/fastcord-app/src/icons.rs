@@ -5,10 +5,12 @@ mod catalog;
 pub use catalog::Icon;
 
 use crate::ui::button;
+#[cfg(any(test, debug_assertions))]
+use iced::Length;
 use iced::mouse;
 use iced::widget::canvas::{self, Canvas};
 use iced::widget::{container, row, text, tooltip};
-use iced::{Color, Element, Length, Renderer, Theme};
+use iced::{Color, Element, Renderer, Theme};
 
 use crate::style;
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.8 — 2026-10-27
+
 ### Added
 - The fake Discord serves the email/password login (`POST /auth/login`, `/auth/mfa/totp`, `GET /experiments`; scenarios token, MFA, CAPTCHA, wrong password, new-location refusal, 429) and `PasswordAuth` works against it in the debug-only fake mode; `tests/password_login.rs` covers each scenario through to an in-memory credential store, and the request log now also redacts tickets, TOTP codes and CAPTCHA headers (#112). Release builds are unchanged.
 - Debug builds print redraw statistics (`view`, `update` and video-draw counts per 5 s) when `FASTCORD_UI_STATS=1` (#212). No user data.
