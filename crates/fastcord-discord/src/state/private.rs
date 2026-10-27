@@ -1,6 +1,7 @@
 //! The direct-message and group-DM table: ledgered inserts, removals and the
 //! recipient events that change it.
 
+use super::removal::Removed;
 use super::*;
 
 impl Store {
@@ -93,15 +94,18 @@ impl Store {
         user_id: Snowflake,
         changes: &mut Changes,
     ) {
-        if self.current_user == Some(user_id) {
-            if self.take_private_channel(channel_id, changes) {
-                self.sweep_users();
+        let me = self.current_user == Some(user_id);
+        let what = if me && self.private_channels.contains_key(&channel_id) {
+            Removed::Channel {
+                guild: None,
+                id: channel_id,
             }
-        } else if let Some(channel) = self.private_channels.get_mut(&channel_id) {
-            let before = channel.recipient_ids.len();
-            channel.recipient_ids.retain(|&id| id != user_id);
-            changes.private_channels |= before != channel.recipient_ids.len();
-            self.sweep_users();
-        }
+        } else {
+            Removed::Recipient {
+                channel: channel_id,
+                user: user_id,
+            }
+        };
+        self.on_removed(what, changes);
     }
 }

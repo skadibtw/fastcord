@@ -41,6 +41,9 @@ mod reduce;
 #[cfg(test)]
 mod regressions;
 mod relationships;
+mod removal;
+#[cfg(test)]
+mod removal_tests;
 mod retention;
 #[cfg(test)]
 mod safety_tests;

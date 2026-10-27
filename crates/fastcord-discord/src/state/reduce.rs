@@ -1,6 +1,7 @@
 //! The reducer: `Store::apply`, the `Dispatch` match and the per-event
 //! handlers that mutate the entity tables through the ledgered helpers.
 
+use super::removal::Removed;
 use super::*;
 
 impl Store {
@@ -32,15 +33,6 @@ impl Store {
 
     pub(super) fn dispatch(&mut self, event: Dispatch) -> Changes {
         let mut changes = Changes::default();
-        // Only these can make a user unreferenced; pruning scans the store.
-        let unreferences = matches!(
-            event,
-            Dispatch::RelationshipRemove(_)
-                | Dispatch::ChannelDelete(_)
-                | Dispatch::ChannelRecipientRemove(_)
-                | Dispatch::GuildDelete(_)
-                | Dispatch::GuildMemberRemove(_)
-        );
         match event {
             Dispatch::Ready(ready) => self.ready(*ready, &mut changes),
             Dispatch::ReadySupplemental(supplemental) => {
@@ -85,7 +77,7 @@ impl Store {
                 changes.relationships = self.relationships.update(update);
             }
             Dispatch::RelationshipRemove(id) => {
-                changes.relationships = self.relationships.remove(id);
+                self.on_removed(Removed::Relationship(id), &mut changes);
             }
             Dispatch::UserSettingsUpdate(update) => {
                 if std::sync::Arc::make_mut(&mut self.privacy).apply(&update) {
@@ -136,13 +128,18 @@ impl Store {
                 }
             }
             Dispatch::GuildDelete(deleted) => {
-                self.remove_guild(deleted.id);
+                self.on_removed(
+                    Removed::Guild {
+                        id: deleted.id,
+                        gone: !deleted.unavailable,
+                    },
+                    &mut changes,
+                );
                 if deleted.unavailable {
                     self.unavailable.insert(deleted.id);
                 } else {
                     self.unavailable.remove(&deleted.id);
                 }
-                changes.guilds.insert(deleted.id);
             }
             Dispatch::ChannelCreate(channel) | Dispatch::ChannelUpdate(channel) => {
                 self.channel_upsert(*channel, &mut changes);
@@ -151,10 +148,11 @@ impl Store {
             Dispatch::CallUpdate(update) => changes.calls = self.calls.update(update),
             Dispatch::CallDelete(delete) => changes.calls = self.calls.delete(delete.channel_id),
             Dispatch::ChannelDelete(channel) => {
-                changes.calls = self.calls.delete(channel.id);
-                self.read.forget(channel.id);
-                changes.read = true;
-                self.channel_remove(&channel, &mut changes);
+                let what = Removed::Channel {
+                    guild: channel.guild_id,
+                    id: channel.id,
+                };
+                self.on_removed(what, &mut changes);
             }
             Dispatch::ThreadListSync(sync) => {
                 let guild = sync.guild_id;
@@ -208,13 +206,11 @@ impl Store {
                 }
             }
             Dispatch::GuildMemberRemove(removed) => {
-                let known = self.with_guild(removed.guild_id, |entry| {
-                    entry.take_member(removed.user_id);
-                    entry.member_count = entry.member_count.saturating_sub(1);
-                });
-                if known.is_some() {
-                    changes.guilds.insert(removed.guild_id);
-                }
+                let what = Removed::Member {
+                    guild: removed.guild_id,
+                    user: removed.user_id,
+                };
+                self.on_removed(what, &mut changes);
             }
             Dispatch::GuildRoleCreate(event) | Dispatch::GuildRoleUpdate(event) => {
                 self.role_upsert(*event, &mut changes);
@@ -243,15 +239,6 @@ impl Store {
             | Dispatch::AutoModeration(_)
             // Typing is transient and lives outside the store.
             | Dispatch::TypingStart(_) => {}
-        }
-        // A removal frees its users at once, so they never build up the
-        // pressure that would cost read state later (#152).
-        if unreferences {
-            let references = self.user_references();
-            self.sweep_users_with(&references);
-            if self.prune_presences_with(references) {
-                changes.presence = true;
-            }
         }
         self.refresh_list_key(&mut changes);
         changes
@@ -551,21 +538,25 @@ impl Store {
         }
     }
 
-    pub(super) fn channel_remove(&mut self, channel: &Channel, changes: &mut Changes) {
-        if self.focus.channel == Some(channel.id) {
+    pub(super) fn channel_remove(
+        &mut self,
+        guild: Option<Snowflake>,
+        id: Snowflake,
+        changes: &mut Changes,
+    ) {
+        if self.focus.channel == Some(id) {
             self.focus.list_id = None;
         }
-        match channel.guild_id {
+        match guild {
             Some(guild) => {
                 let removed = self.with_guild(guild, |entry| {
                     let Ok(at) = entry
                         .channels
-                        .binary_search_by_key(&channel.id, |channel| channel.id)
+                        .binary_search_by_key(&id, |channel| channel.id)
                     else {
                         return false;
                     };
                     entry.channels.remove(at);
-                    let id = channel.id;
                     entry
                         .channels
                         .retain(|c| !(c.kind.is_thread() && c.parent_id == Some(id)));
@@ -580,7 +571,7 @@ impl Store {
                 }
             }
             None => {
-                self.take_private_channel(channel.id, changes);
+                self.take_private_channel(id, changes);
             }
         }
     }

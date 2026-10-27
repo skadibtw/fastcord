@@ -272,6 +272,14 @@ impl ReadStates {
         self.channel_levels.remove(&channel);
     }
 
+    /// Forgets a server the account left: its mute, level and suppressions.
+    pub fn forget_guild(&mut self, guild: Snowflake) {
+        self.muted_guilds.remove(&guild);
+        self.guild_levels.remove(&guild);
+        self.suppress_everyone.remove(&guild);
+        self.suppress_roles.remove(&guild);
+    }
+
     pub fn bytes(&self) -> usize {
         table_bytes::<Snowflake, Entry>(self.entries.capacity())
             + table_bytes::<Snowflake, ()>(self.muted_guilds.capacity())
