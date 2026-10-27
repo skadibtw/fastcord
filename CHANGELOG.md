@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.9 — 2026-10-27
+
 ### Fixed
 - Discord Auto connections omit TLS SNI with normal certificate verification and bounded handshake fallback. Startup now times out visibly if READY never arrives; the call turns green only after UDP and DAVE are ready (#218).
 - Auto voice discovery tries up to three distinct local ports within one bounded join. The explicitly started Windows packet helper adds scoped zapret2 QUIC fakes and original-preserving IPv4 discovery fragmentation; encrypted media remains untouched. Windows archives include the upstream MIT notice and provenance (#218).
