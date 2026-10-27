@@ -614,14 +614,14 @@ pub(crate) fn video_state(audio_ssrc: u32, layer: Option<(&Layer, bool)>) -> Str
 }
 
 /// Opcode 15 from a viewer: the quality (0 turns a stream off, 100 is the
-/// best layer) wanted for each listed primary SSRC; every other stream is
-/// off.
+/// best layer) wanted for each listed primary SSRC; everything else, the
+/// participants' audio included, stays on (`"any": 0` silenced stream audio).
 pub(crate) fn media_sink_wants(wants: &[(u32, u8)]) -> String {
     let mut map = serde_json::Map::new();
     for &(ssrc, quality) in wants {
         map.insert(ssrc.to_string(), serde_json::Value::from(quality));
     }
-    map.insert("any".to_owned(), serde_json::Value::from(0));
+    map.insert("any".to_owned(), serde_json::Value::from(100));
     frame(op::MEDIA_SINK_WANTS, &map)
 }
 
@@ -896,12 +896,12 @@ mod tests {
             }})
         );
         assert_eq!(
-            value(&media_sink_wants(&[(8964, 100)])),
-            json!({"op": 15, "d": {"8964": 100, "any": 0}})
+            value(&media_sink_wants(&[(8964, 100), (8966, 0)])),
+            json!({"op": 15, "d": {"8964": 100, "8966": 0, "any": 100}})
         );
         assert_eq!(
             value(&media_sink_wants(&[])),
-            json!({"op": 15, "d": {"any": 0}})
+            json!({"op": 15, "d": {"any": 100}})
         );
     }
 

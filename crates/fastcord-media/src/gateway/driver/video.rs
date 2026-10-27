@@ -228,28 +228,36 @@ impl VideoState {
             .clamp(Duration::from_millis(30), Duration::from_millis(100))
     }
 
-    /// The streams to ask the server for: the best active layer of each wanted
-    /// user who streams, or none while the viewer does not want video.
+    /// The quality of every announced video stream: 100 for the best active
+    /// layer of each wanted user (the lowest for a thumbnail), 0 for every
+    /// other layer and every stream while the viewer does not want video.
+    /// Unlisted SSRCs, audio among them, stay on through `"any": 100`.
     fn desired_wants(&self) -> Vec<(u32, u8)> {
         let users = match &self.interest {
-            VideoInterest::Off => return Vec::new(),
+            VideoInterest::Off => Some(&[][..]),
             VideoInterest::All => None,
-            VideoInterest::Users(users) => Some(users),
+            VideoInterest::Users(users) => Some(&users[..]),
         };
-        let mut wants: Vec<(u32, u8)> = self
-            .remote
-            .iter()
-            .filter(|(user, _)| users.is_none_or(|users| users.contains(user)))
-            .filter_map(|(user, streams)| {
+        let mut wants = Vec::new();
+        for (user, streams) in &self.remote {
+            let chosen = if users.is_none_or(|users| users.contains(user)) {
                 let active = streams.iter().filter(|stream| stream.active);
                 if self.thumbnails.contains(user) {
                     active.min_by_key(|stream| stream.quality)
                 } else {
                     active.max_by_key(|stream| stream.quality)
                 }
-                .map(|stream| (stream.ssrc, 100))
-            })
-            .collect();
+                .map(|stream| stream.ssrc)
+            } else {
+                None
+            };
+            wants.extend(streams.iter().map(|stream| {
+                (
+                    stream.ssrc,
+                    if chosen == Some(stream.ssrc) { 100 } else { 0 },
+                )
+            }));
+        }
         wants.sort_unstable();
         wants
     }

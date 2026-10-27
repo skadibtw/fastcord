@@ -273,7 +273,7 @@ impl Viewer {
         );
         assert_eq!(
             self.ws.recv_op(15).await,
-            json!({"op": 15, "d": {"5000": 100, "any": 0}})
+            json!({"op": 15, "d": {"5000": 100, "any": 100}})
         );
     }
 
@@ -635,20 +635,24 @@ async fn wants_follow_the_viewer_the_best_layer_and_a_leaving_streamer() {
             active: true
         }
     );
-    // The best active layer only; the rest stay off.
+    // The best active layer only; the other layers are turned off by name,
+    // while `any` keeps the streamer's audio flowing.
     assert_eq!(
         rig.ws.recv_op(15).await,
-        json!({"op": 15, "d": {"6002": 100, "any": 0}})
+        json!({"op": 15, "d": {"6000": 0, "6002": 100, "6004": 0, "any": 100}})
     );
     let media = rig.harness.session.media();
     media.set_video_wanted(false);
-    assert_eq!(rig.ws.recv_op(15).await, json!({"op": 15, "d": {"any": 0}}));
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"6000": 0, "6002": 0, "6004": 0, "any": 100}})
+    );
     media.set_video_wanted(true);
     assert_eq!(
         rig.ws.recv_op(15).await,
-        json!({"op": 15, "d": {"6002": 100, "any": 0}})
+        json!({"op": 15, "d": {"6000": 0, "6002": 100, "6004": 0, "any": 100}})
     );
-    // The streamer stops: nothing is wanted, and its state is forgotten.
+    // The streamer stops: its state is forgotten, nothing is listed.
     rig.announce(json!([])).await;
     assert_eq!(
         rig.harness.event().await,
@@ -658,19 +662,25 @@ async fn wants_follow_the_viewer_the_best_layer_and_a_leaving_streamer() {
             active: false
         }
     );
-    assert_eq!(rig.ws.recv_op(15).await, json!({"op": 15, "d": {"any": 0}}));
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"any": 100}})
+    );
     // A streamer that leaves is dropped the same way.
     rig.announce(json!([{"ssrc": 6_000, "rtx_ssrc": 6_001, "quality": 100, "active": true}]))
         .await;
     rig.harness.event().await;
     assert_eq!(
         rig.ws.recv_op(15).await,
-        json!({"op": 15, "d": {"6000": 100, "any": 0}})
+        json!({"op": 15, "d": {"6000": 100, "any": 100}})
     );
     rig.ws
         .send(json!({"op": 13, "d": {"user_id": ALICE.0.to_string()}}))
         .await;
-    assert_eq!(rig.ws.recv_op(15).await, json!({"op": 15, "d": {"any": 0}}));
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"any": 100}})
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1463,22 +1473,33 @@ async fn a_call_connection_asks_the_server_only_for_the_cameras_on_screen() {
             }}))
             .await;
     }
-    // Announcements alone ask for nothing: no tile is showing yet.
-    assert!(rig.ws.1.is_empty());
+    // No tile is showing yet: each announced camera is turned off by name,
+    // and `any` keeps everyone's voice flowing.
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"6000": 0, "any": 100}})
+    );
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"6000": 0, "6100": 0, "any": 100}})
+    );
     let media = rig.harness.session.media();
     media.set_video_users(&[bob]);
     assert_eq!(
         rig.ws.recv_op(15).await,
-        json!({"op": 15, "d": {"6100": 100, "any": 0}})
+        json!({"op": 15, "d": {"6000": 0, "6100": 100, "any": 100}})
     );
     media.set_video_users(&[bob, ALICE]);
     assert_eq!(
         rig.ws.recv_op(15).await,
-        json!({"op": 15, "d": {"6000": 100, "6100": 100, "any": 0}})
+        json!({"op": 15, "d": {"6000": 100, "6100": 100, "any": 100}})
     );
-    // Hidden tiles cost nothing: the server is told to forward nothing.
+    // Hidden tiles cost nothing: every camera is off again.
     media.set_video_users(&[]);
-    assert_eq!(rig.ws.recv_op(15).await, json!({"op": 15, "d": {"any": 0}}));
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"6000": 0, "6100": 0, "any": 100}})
+    );
     // Wanting a user who streams nothing asks for nothing new.
     media.set_video_users(&[Snowflake(5)]);
     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1507,23 +1528,30 @@ async fn a_small_tile_asks_for_the_lowest_layer_and_a_single_layer_is_unaffected
                          "quality": 100, "active": true}]
         }}))
         .await;
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"7000": 0, "7100": 0, "any": 100}})
+    );
+    assert_eq!(
+        rig.ws.recv_op(15).await,
+        json!({"op": 15, "d": {"6000": 0, "7000": 0, "7100": 0, "any": 100}})
+    );
     let media = rig.harness.session.media();
     media.set_video_users(&[bob, ALICE]);
     assert_eq!(
         rig.ws.recv_op(15).await,
-        json!({"op": 15, "d": {"6000": 100, "7100": 100, "any": 0}})
+        json!({"op": 15, "d": {"6000": 100, "7000": 0, "7100": 100, "any": 100}})
     );
     // Bob's tile shrinks: his lower layer replaces the best one; ALICE has only one.
     media.set_video_thumbnails(&[bob, ALICE]);
     assert_eq!(
         rig.ws.recv_op(15).await,
-        json!({"op": 15, "d": {"6000": 100, "7000": 100, "any": 0}})
+        json!({"op": 15, "d": {"6000": 100, "7000": 100, "7100": 0, "any": 100}})
     );
     // Large again: the best layer returns.
     media.set_video_thumbnails(&[]);
     assert_eq!(
         rig.ws.recv_op(15).await,
-        json!({"op": 15, "d": {"6000": 100, "7100": 100, "any": 0}})
+        json!({"op": 15, "d": {"6000": 100, "7000": 0, "7100": 100, "any": 100}})
     );
 }
