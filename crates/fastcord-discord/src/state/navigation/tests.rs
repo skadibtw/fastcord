@@ -3,6 +3,7 @@ use fastcord_model::{
     EventStatus, Guild, GuildMember, PermissionOverwrite, Role, ScheduledEvent, User,
 };
 use serde_json::{Value, json};
+use time::format_description::well_known::Rfc3339;
 
 use super::*;
 use crate::gateway::{

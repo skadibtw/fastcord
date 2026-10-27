@@ -35,6 +35,7 @@ mod list_id;
 mod member_list;
 pub mod navigation;
 mod presences;
+mod private;
 mod read;
 mod reduce;
 #[cfg(test)]
@@ -242,14 +243,6 @@ impl Store {
         self.unavailable.iter().copied()
     }
 
-    pub fn private_channel(&self, id: Snowflake) -> Option<&Channel> {
-        self.private_channels.get(&id)
-    }
-
-    pub fn private_channels(&self) -> impl Iterator<Item = &Channel> {
-        self.private_channels.values()
-    }
-
     /// Estimated bytes held.
     pub fn bytes(&self) -> usize {
         self.allocation_overhead()
@@ -305,7 +298,6 @@ impl Store {
         self.presences.len()
     }
 
-    /// Whether anything on screen or in a list still refers to this user.
     /// Whether the navigation snapshot draws this user's presence.
     fn presence_drawn(&self, id: Snowflake) -> bool {
         self.current_user == Some(id)
@@ -316,6 +308,7 @@ impl Store {
                 .any(|channel| channel.recipient_ids.contains(&id))
     }
 
+    /// Whether anything on screen or in a list still refers to this user.
     fn presence_wanted(&self, id: Snowflake) -> bool {
         self.current_user == Some(id)
             || self.relationships.kind(id).is_some()

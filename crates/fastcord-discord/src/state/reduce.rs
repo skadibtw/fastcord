@@ -58,14 +58,7 @@ impl Store {
                             changes.guilds.insert(guild);
                         }
                     }
-                    None => {
-                        if let Some(channel) = self.private_channels.get_mut(&message.channel_id)
-                            && channel.last_message_id < Some(message.id)
-                        {
-                            channel.last_message_id = Some(message.id);
-                            changes.private_channels = true;
-                        }
-                    }
+                    None => self.private_message(&message, &mut changes),
                 }
             }
             Dispatch::MessageAck(ack) => {
@@ -197,44 +190,10 @@ impl Store {
                 }
             }
             Dispatch::ChannelRecipientAdd(event) => {
-                if self.current_user != Some(event.user.id)
-                    && self
-                        .private_channels
-                        .get(&event.channel_id)
-                        .is_some_and(|c| c.recipient_ids.len() < MAX_GROUP_MEMBERS)
-                {
-                    let user_id = event.user.id;
-                    let user_changed = self.users.get(&user_id) != Some(&event.user);
-                    if user_changed {
-                        self.put_user(event.user);
-                    }
-                    let (added, cost_delta) = {
-                        let channel = self.private_channels.get_mut(&event.channel_id).unwrap();
-                        let before = channel_bytes(channel);
-                        let added = !channel.recipient_ids.contains(&user_id);
-                        if added {
-                            channel.recipient_ids.push(user_id);
-                        }
-                        (added, channel_bytes(channel) - before)
-                    };
-                    self.private_bytes += cost_delta;
-                    changes.private_channels |= user_changed || added;
-                }
+                self.recipient_add(event.channel_id, event.user, &mut changes);
             }
             Dispatch::ChannelRecipientRemove(event) => {
-                if self.current_user == Some(event.user_id) {
-                    if let Some(channel) = self.private_channels.remove(&event.channel_id) {
-                        self.private_bytes -= channel_bytes(&channel);
-                        compact_map(&mut self.private_channels);
-                        changes.private_channels = true;
-                        self.sweep_users();
-                    }
-                } else if let Some(channel) = self.private_channels.get_mut(&event.channel_id) {
-                    let before = channel.recipient_ids.len();
-                    channel.recipient_ids.retain(|&id| id != event.user_id);
-                    changes.private_channels |= before != channel.recipient_ids.len();
-                    self.sweep_users();
-                }
+                self.recipient_remove(event.channel_id, event.user_id, &mut changes);
             }
             Dispatch::PassiveUpdate(update) => self.passive_update(*update, &mut changes),
             Dispatch::MemberListUpdate(update) => self.member_list_update(*update, &mut changes),
@@ -573,29 +532,6 @@ impl Store {
         channel
     }
 
-    pub(super) fn put_private_channel(&mut self, channel: Channel) {
-        let mut channel = self.normalize_channel(channel);
-        if let Some(old) = self.private_channels.get(&channel.id) {
-            channel.last_message_id = newest(old.last_message_id, channel.last_message_id);
-            // An update that carries no participants (a partial CHANNEL_UPDATE)
-            // must not empty the member list; removals arrive as their own event.
-            if channel.recipient_ids.is_empty() {
-                channel.recipient_ids = old.recipient_ids.clone();
-            }
-            channel.owner_id = channel.owner_id.or(old.owner_id);
-            // A request stays a request until Discord says otherwise: an update
-            // that omits the flags must not quietly accept it.
-            channel.is_message_request = channel.is_message_request.or(old.is_message_request);
-            channel.is_spam = channel.is_spam.or(old.is_spam);
-        }
-        let cost = channel_bytes(&channel);
-        let old = self.private_channels.insert(channel.id, channel);
-        self.private_bytes += cost;
-        if let Some(old) = old {
-            self.private_bytes -= channel_bytes(&old);
-        }
-    }
-
     pub(super) fn channel_upsert(&mut self, channel: Channel, changes: &mut Changes) {
         if self.focus.channel == Some(channel.id) {
             self.focus.list_id = None;
@@ -644,11 +580,7 @@ impl Store {
                 }
             }
             None => {
-                if let Some(old) = self.private_channels.remove(&channel.id) {
-                    self.private_bytes -= channel_bytes(&old);
-                    compact_map(&mut self.private_channels);
-                    changes.private_channels = true;
-                }
+                self.take_private_channel(channel.id, changes);
             }
         }
     }
