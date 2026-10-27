@@ -88,8 +88,18 @@ impl App {
                         self.window_hidden = true;
                         self.window_drawable = false;
                         self.sync_viewing();
-                        return iced::window::latest()
-                            .and_then(|id| iced::window::set_mode(id, iced::window::Mode::Hidden));
+                        // Player windows would go on decoding and drawing for
+                        // nobody: hiding to the tray stops watching (the
+                        // windows follow at the next update).
+                        if let Some(gateway) = self.phase.gateway() {
+                            for session in gateway.controls.watched() {
+                                gateway.controls.unwatch_stream(session.key.clone());
+                            }
+                        }
+                        return iced::window::set_mode(
+                            self.main_window,
+                            iced::window::Mode::Hidden,
+                        );
                     }
                     desktop::CloseAction::Quit => return self.handle(Message::Quit),
                 }
@@ -192,18 +202,17 @@ impl App {
                 if self.call_active() {
                     self.compact_call = true;
                     let leave_fullscreen = std::mem::take(&mut self.window_fullscreen);
-                    return iced::window::latest().and_then(move |id| {
-                        if leave_fullscreen {
-                            iced::window::set_mode(id, iced::window::Mode::Windowed)
-                        } else {
-                            Task::none()
-                        }
-                        .chain(iced::window::set_level(
-                            id,
-                            iced::window::Level::AlwaysOnTop,
-                        ))
-                        .chain(iced::window::resize(id, desktop::COMPACT_SIZE))
-                    });
+                    let id = self.main_window;
+                    return if leave_fullscreen {
+                        iced::window::set_mode(id, iced::window::Mode::Windowed)
+                    } else {
+                        Task::none()
+                    }
+                    .chain(iced::window::set_level(
+                        id,
+                        iced::window::Level::AlwaysOnTop,
+                    ))
+                    .chain(iced::window::resize(id, desktop::COMPACT_SIZE));
                 }
             }
             Message::ShortcutKey(input) => {
@@ -236,16 +245,14 @@ impl App {
             }
             Message::SetWindowFullscreen(on) => {
                 self.window_fullscreen = on;
-                return iced::window::latest().and_then(move |id| {
-                    iced::window::set_mode(
-                        id,
-                        if on {
-                            iced::window::Mode::Fullscreen
-                        } else {
-                            iced::window::Mode::Windowed
-                        },
-                    )
-                });
+                return iced::window::set_mode(
+                    self.main_window,
+                    if on {
+                        iced::window::Mode::Fullscreen
+                    } else {
+                        iced::window::Mode::Windowed
+                    },
+                );
             }
             Message::WindowActive(active) => {
                 self.window_active = active;
@@ -255,6 +262,29 @@ impl App {
                     let scope = self.audio_preferences.voice_input.scope;
                     let released = self.shortcuts.window_lost_focus(scope);
                     return self.apply_shortcuts(released);
+                }
+            }
+            Message::Window(id, event) if id == self.main_window => {
+                return self.handle(match event {
+                    WindowEvent::Resized(size) => Message::WindowSize(size),
+                    WindowEvent::FileDropped(path) => Message::FileDropped(path),
+                    WindowEvent::CloseRequested => Message::CloseRequested,
+                    WindowEvent::Active(active) => return self.window_focus(id, active),
+                    WindowEvent::Closed => return self.window_focus(id, false),
+                });
+            }
+            // A player window focused counts as the app being active.
+            Message::Window(id, WindowEvent::Active(active)) => {
+                return self.window_focus(id, active);
+            }
+            Message::Window(id, WindowEvent::CloseRequested | WindowEvent::Closed) => {
+                let focus = self.window_focus(id, false);
+                return Task::batch([focus, self.player_closed(id)]);
+            }
+            // Chat and navigation chords belong to the main window only.
+            Message::WindowShortcut(id, shortcut) => {
+                if id == self.main_window {
+                    return self.handle(Message::Shortcut(shortcut));
                 }
             }
             Message::WindowSize(size) => {
@@ -267,5 +297,19 @@ impl App {
             _ => {}
         }
         Task::none()
+    }
+
+    /// Records which of the app's windows has focus; the app is active while
+    /// any has.
+    pub(crate) fn window_focus(&mut self, id: iced::window::Id, active: bool) -> Task<Message> {
+        self.focused.retain(|focused| *focused != id);
+        if active {
+            self.focused.push(id);
+        }
+        let any = !self.focused.is_empty();
+        if any == self.window_active {
+            return Task::none();
+        }
+        self.handle(Message::WindowActive(any))
     }
 }

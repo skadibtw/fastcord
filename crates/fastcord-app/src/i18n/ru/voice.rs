@@ -318,6 +318,7 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Ожидание ключевого кадра видео…",
     ),
     ("Watching · {}", "Просмотр · {}"),
+    ("Watching in a separate window", "Просмотр в отдельном окне"),
     ("Video stopped: {}", "Видео остановлено: {}"),
     ("The stream ended.", "Трансляция завершена."),
     ("Waiting for stream audio", "Ожидание звука трансляции"),

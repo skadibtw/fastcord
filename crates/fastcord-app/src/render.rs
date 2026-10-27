@@ -9,6 +9,7 @@
 mod software;
 
 use iced::application::{Application, BootFn, UpdateFn, ViewFn};
+use iced::daemon::ViewFn as DaemonViewFn;
 use iced::{Element, Program, Theme};
 use iced_renderer::core::{self, layout, mouse, overlay, renderer, text, widget};
 use iced_renderer::graphics::{self, compositor};
@@ -74,6 +75,21 @@ where
     Message: Send + 'static,
 {
     iced::application(boot, update, NativeView(view))
+}
+
+/// [`application`] for several windows: `view` is asked for each window by id,
+/// and the process runs until `iced::exit()`. The caller opens every window,
+/// the first one from `boot`.
+pub fn daemon<State, Message>(
+    boot: impl BootFn<State, Message>,
+    update: impl UpdateFn<State, Message>,
+    view: impl for<'a> DaemonViewFn<'a, State, Message, Theme, iced::Renderer>,
+) -> iced::daemon::Daemon<impl Program<State = State, Message = Message, Theme = Theme>>
+where
+    State: 'static,
+    Message: Send + 'static,
+{
+    iced::daemon(boot, update, NativeView(view))
 }
 
 fn gpu_settings(settings: graphics::Settings) -> gpu::Settings {
@@ -428,6 +444,21 @@ impl renderer::Headless for NativeRenderer {
 }
 
 struct NativeView<V>(V);
+
+impl<'a, State, Message, V> DaemonViewFn<'a, State, Message, Theme, NativeRenderer>
+    for NativeView<V>
+where
+    Message: 'a,
+    V: DaemonViewFn<'a, State, Message, Theme, iced::Renderer>,
+{
+    fn view(
+        &self,
+        state: &'a State,
+        window: iced::window::Id,
+    ) -> core::Element<'a, Message, Theme, NativeRenderer> {
+        core::Element::new(NativeWidget(self.0.view(state, window)))
+    }
+}
 
 impl<'a, State, Message, V> ViewFn<'a, State, Message, Theme, NativeRenderer> for NativeView<V>
 where

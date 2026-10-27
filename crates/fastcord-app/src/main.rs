@@ -67,6 +67,7 @@ mod password;
 mod paste;
 mod pins;
 mod playback;
+mod player;
 mod poll_create;
 mod polls;
 mod profile_edit;
@@ -265,23 +266,33 @@ fn main() -> iced::Result {
     };
     desktop::set_forwarded(requests);
     desktop::set_startup(arg);
-    render::application(App::boot, App::update, App::view)
-        .title(window_title())
-        .theme(App::theme)
-        .scale_factor(App::scale_factor)
+    // A daemon, not an application: a watched stream gets a window of its own
+    // (`player`), so its pictures never redraw the main window. `boot` opens
+    // the main window and `Message::Exit` ends the process.
+    render::daemon(App::boot, App::update, App::window_view)
+        .title(App::window_title)
+        .theme(App::window_theme)
+        .scale_factor(App::window_scale)
         .subscription(App::subscription)
-        .window(iced::window::Settings {
-            size: iced::Size::new(1080.0, 640.0),
-            icon: icons::window_icon(),
-            // Close requests go through `Message::CloseRequested`: hide to the
-            // tray or leave any call and quit.
-            exit_on_close_request: false,
-            ..iced::window::Settings::default()
-        })
         .run()
 }
 
+fn main_window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: iced::Size::new(1080.0, 640.0),
+        icon: icons::window_icon(),
+        // Close requests go through `Message::CloseRequested`: hide to the
+        // tray or leave any call and quit.
+        exit_on_close_request: false,
+        ..iced::window::Settings::default()
+    }
+}
+
 struct App {
+    /// The main window; `iced::window::latest()` could be a player window.
+    main_window: iced::window::Id,
+    /// One window per watched stream, reconciled after every update (`player`).
+    players: Vec<player::Player>,
     /// What the timeline rows alone ask for, kept until the snapshot changes (#156).
     timeline_wants: TimelineWants,
     network: fastcord_net::NetworkContext,
@@ -315,6 +326,8 @@ struct App {
     camera_list: gateway::CameraList,
     shortcuts: shortcuts::Runtime,
     window_active: bool,
+    /// Windows of the app that currently have focus (main and players).
+    focused: Vec<iced::window::Id>,
     window_drawable: bool,
     /// The tray icon is up (or why it is not). Closing hides to it only when it is.
     tray: Result<(), String>,
@@ -398,6 +411,16 @@ impl Phase {
     fn gateway_mut(&mut self) -> Option<&mut GatewayPanel> {
         self.account_mut().map(|(_, gateway)| gateway)
     }
+}
+
+/// What a window reports.
+#[derive(Clone, Debug)]
+enum WindowEvent {
+    Resized(iced::Size),
+    FileDropped(std::path::PathBuf),
+    CloseRequested,
+    Active(bool),
+    Closed,
 }
 
 // Every message containing a token uses the redacted wrapper; Debug cannot
@@ -633,6 +656,8 @@ enum Message {
     Threads(threads::Event),
     Switcher(switcher::Event),
     Shortcut(switcher::Shortcut),
+    /// A chord heard in a window; only the main window's is acted on.
+    WindowShortcut(iced::window::Id, switcher::Shortcut),
     Forum(forum::Event),
     EmojiPicker(emoji_picker::Event),
     EmojiVisibility(emoji::Occurrence, bool),
@@ -670,6 +695,9 @@ enum Message {
     /// Enter or leave compact call mode (small, always on top).
     ToggleCompact,
     WindowSize(iced::Size),
+    /// An event of one window: the main window's become the messages above,
+    /// a player window's close ends that watch.
+    Window(iced::window::Id, WindowEvent),
     /// Direct messages (true) or a server's channels in the sidebar.
     ShowDirects(bool),
     /// Show or hide the per-person volume sliders.
@@ -687,8 +715,11 @@ enum Message {
 }
 impl App {
     fn boot() -> (Self, Task<Message>) {
+        let (main_window, open_main) = iced::window::open(main_window_settings());
         (
             Self {
+                main_window,
+                players: Vec::new(),
                 phase: Phase::Starting,
                 timeline_wants: TimelineWants::default(),
                 network: network_ui::new_context(),
@@ -718,6 +749,7 @@ impl App {
                 camera_list: gateway::CameraList::default(),
                 shortcuts: shortcuts::Runtime::default(),
                 window_active: true,
+                focused: Vec::new(),
                 window_drawable: true,
                 tray: Err(if fake_mode() {
                     "The tray icon is off in fake mode.".to_owned()
@@ -735,6 +767,7 @@ impl App {
                 ui: account_ui::AccountUi::default(),
             },
             Task::batch([
+                open_main.discard(),
                 if cfg!(any(windows, target_os = "linux", target_os = "macos")) && !fake_mode() {
                     desktop::autostart_task(None)
                 } else {
@@ -759,16 +792,21 @@ impl App {
         )
     }
 
-    fn theme(&self) -> iced::Theme {
+    fn window_theme(&self, _window: iced::window::Id) -> iced::Theme {
         style::theme()
     }
 
-    /// The one place the text-size preference is applied: the whole interface scales.
-    fn scale_factor(&self) -> f32 {
+    /// The one place the text-size preference is applied: every window scales.
+    fn window_scale(&self, _window: iced::window::Id) -> f32 {
         self.audio_preferences.chat.scale_factor()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_main(message);
+        Task::batch([task, self.sync_players()])
+    }
+
+    fn update_main(&mut self, message: Message) -> Task<Message> {
         ui_stats::update();
         let resynchronize = !matches!(
             message,
@@ -833,8 +871,7 @@ impl App {
             self.window_fullscreen = false;
             task = Task::batch([
                 task,
-                iced::window::latest()
-                    .and_then(|id| iced::window::set_mode(id, iced::window::Mode::Windowed)),
+                iced::window::set_mode(self.main_window, iced::window::Mode::Windowed),
             ]);
         }
         if resynchronize {
@@ -901,12 +938,7 @@ impl App {
                 camera_wanted,
             );
             let plan = gateway.call_view.plan(&call_layout::ids(&tiles), &speaking);
-            for tile in &tiles {
-                if matches!(tile.id, call_layout::TileId::Stream(_)) {
-                    tile.session
-                        .set_visible(unobstructed && plan.contains(&tile.id));
-                }
-            }
+            // Watched streams are not set here: their player window owns them.
             gateway
                 .controls
                 .camera_tiles()
@@ -943,19 +975,24 @@ impl App {
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
-        let activity = iced::event::listen_with(|event, _, _| match event {
+        let activity = iced::event::listen_with(|event, _, id| match event {
             iced::Event::Window(iced::window::Event::Resized(size)) => {
-                Some(Message::WindowSize(size))
+                Some(Message::Window(id, WindowEvent::Resized(size)))
             }
             iced::Event::Window(iced::window::Event::FileDropped(path)) => {
-                Some(Message::FileDropped(path))
+                Some(Message::Window(id, WindowEvent::FileDropped(path)))
             }
             iced::Event::Window(iced::window::Event::CloseRequested) => {
-                Some(Message::CloseRequested)
+                Some(Message::Window(id, WindowEvent::CloseRequested))
             }
-            iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowActive(true)),
-            iced::Event::Window(iced::window::Event::Unfocused | iced::window::Event::Closed) => {
-                Some(Message::WindowActive(false))
+            iced::Event::Window(iced::window::Event::Focused) => {
+                Some(Message::Window(id, WindowEvent::Active(true)))
+            }
+            iced::Event::Window(iced::window::Event::Unfocused) => {
+                Some(Message::Window(id, WindowEvent::Active(false)))
+            }
+            iced::Event::Window(iced::window::Event::Closed) => {
+                Some(Message::Window(id, WindowEvent::Closed))
             }
             _ => None,
         });
@@ -995,17 +1032,20 @@ impl App {
             if !self.audio_settings.open {
                 return iced::Subscription::none();
             }
-            return iced::event::listen_with(|event, status, _| match event {
+            return iced::event::listen_with(|event, status, id| match event {
                 iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                     key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                     ..
-                }) => Some(Message::Shortcut(switcher::Shortcut::Escape {
-                    captured: matches!(status, iced::event::Status::Captured),
-                })),
+                }) => Some(Message::WindowShortcut(
+                    id,
+                    switcher::Shortcut::Escape {
+                        captured: matches!(status, iced::event::Status::Captured),
+                    },
+                )),
                 _ => None,
             });
         }
-        let mut parts = vec![iced::event::listen_with(|event, status, _| match event {
+        let mut parts = vec![iced::event::listen_with(|event, status, id| match event {
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key,
                 physical_key,
@@ -1018,11 +1058,11 @@ impl App {
                 matches!(status, iced::event::Status::Captured),
             )
             .filter(|shortcut| !matches!(shortcut, switcher::Shortcut::Move(_)))
-            .map(Message::Shortcut),
+            .map(|shortcut| Message::WindowShortcut(id, shortcut)),
             _ => None,
         })];
         if self.ui.switcher.is_open() {
-            parts.push(iced::event::listen_with(|event, _, _| match event {
+            parts.push(iced::event::listen_with(|event, _, id| match event {
                 iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                     key,
                     physical_key,
@@ -1030,7 +1070,7 @@ impl App {
                     ..
                 }) => switcher::shortcut(&key, &physical_key, modifiers, false)
                     .filter(|shortcut| matches!(shortcut, switcher::Shortcut::Move(_)))
-                    .map(Message::Shortcut),
+                    .map(|shortcut| Message::WindowShortcut(id, shortcut)),
                 _ => None,
             }));
         }
@@ -1061,25 +1101,23 @@ impl App {
         let was_hidden = std::mem::take(&mut self.window_hidden);
         self.window_drawable = true;
         self.sync_viewing();
-        iced::window::latest().and_then(move |id| {
-            if was_hidden {
-                iced::window::set_mode(id, iced::window::Mode::Windowed)
-            } else {
-                Task::none()
-            }
-            .chain(iced::window::minimize(id, false))
-            .chain(iced::window::gain_focus(id))
-        })
+        let id = self.main_window;
+        if was_hidden {
+            iced::window::set_mode(id, iced::window::Mode::Windowed)
+        } else {
+            Task::none()
+        }
+        .chain(iced::window::minimize(id, false))
+        .chain(iced::window::gain_focus(id))
     }
 
     /// Leaves compact call mode: normal stacking and the remembered size.
     fn end_compact(&mut self) -> Task<Message> {
         self.compact_call = false;
         let size = self.window_size;
-        iced::window::latest().and_then(move |id| {
-            iced::window::set_level(id, iced::window::Level::Normal)
-                .chain(iced::window::resize(id, size))
-        })
+        let id = self.main_window;
+        iced::window::set_level(id, iced::window::Level::Normal)
+            .chain(iced::window::resize(id, size))
     }
 
     /// Opens a link from the command line, a second launch or the switcher; called
@@ -1524,15 +1562,24 @@ impl App {
                 self.pending_link = desktop::parse(&text);
                 Task::none()
             }
-            fake::Step::Size(width, height) => iced::window::latest()
-                .and_then(move |id| iced::window::resize(id, iced::Size::new(width, height))),
+            fake::Step::Size(width, height) => {
+                iced::window::resize(self.main_window, iced::Size::new(width, height))
+            }
             fake::Step::Snap(path) => {
                 // A watcher may copy the screen itself: overlays drawn by the
                 // compositor are missing from the window's own pixels.
                 eprintln!("script: snap {}", path.display());
-                iced::window::latest()
-                    .and_then(iced::window::screenshot)
-                    .map(move |shot| Message::FakeShot(path.clone(), shot))
+                // The player window when one is open (the script's `stream`
+                // step), otherwise the main window.
+                let id = self.players.first().map_or(self.main_window, |p| p.window);
+                iced::window::screenshot(id).map(move |shot| Message::FakeShot(path.clone(), shot))
+            }
+            fake::Step::Stream(seconds) => {
+                if let Some(gateway) = self.phase.gateway() {
+                    let session = gateway.controls.fake_watch("guild:1:2:3");
+                    fake::feed(session, seconds);
+                }
+                Task::none()
             }
             fake::Step::Toggle(panel) => self.handle(match panel {
                 "search" => Message::Search(search::Event::Toggle),
@@ -1643,6 +1690,8 @@ and a fourth"
             | Message::GlobalShortcut(..)
             | Message::SetWindowFullscreen(..)
             | Message::WindowActive(..)
+            | Message::Window(..)
+            | Message::WindowShortcut(..)
             | Message::WindowSize(..)) => self.desktop_message(message),
             message @ (Message::Settings(..)
             | Message::ServerSettings(..)

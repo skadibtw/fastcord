@@ -10,7 +10,8 @@
 //! launch would), `size <width> <height>`, `toggle <panel>` (open or close one
 //! of [`PANELS`] as its button would), `join <guild> <channel>` (join a voice
 //! channel; the fake answers no voice, so it stays connecting), `snap <name>` (the window's own pixels
-//! to `<name>.png` beside the script) and `quit`.
+//! to `<name>.png` beside the script; the player window's while one is open),
+//! `stream <seconds>` (a synthetic watched stream, see [`Step::Stream`]) and `quit`.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -72,8 +73,11 @@ pub enum Step {
     Toggle(&'static str),
     /// A voice channel of a server.
     Join(u64, u64),
-    /// Where the window's pixels go.
+    /// Where the window's pixels go (the player window's while one is open).
     Snap(PathBuf),
+    /// Watch a synthetic stream for this many seconds: a player window opens
+    /// and 1280x720 pictures arrive at 30 fps (no voice exists offline).
+    Stream(f32),
     Quit,
 }
 
@@ -125,6 +129,13 @@ fn parse_script(text: &str, dir: &std::path::Path) -> Vec<(Duration, Step)> {
                 Some((guild, channel)) => Step::Join(guild, channel),
                 None => {
                     eprintln!("script: bad join: {line}");
+                    continue;
+                }
+            },
+            "stream" => match rest.parse::<f32>() {
+                Ok(seconds) if (0.0..=600.0).contains(&seconds) => Step::Stream(seconds),
+                _ => {
+                    eprintln!("script: bad stream: {line}");
                     continue;
                 }
             },
@@ -243,6 +254,45 @@ pub fn banner<'a, Message: 'a>() -> Option<Element<'a, Message>> {
         })
         .into(),
     )
+}
+
+/// Feeds a synthetic 1280x720 NV12 picture at 30 fps into `session` for
+/// `seconds` on a thread of its own, the way the stream decoder's sink does.
+pub fn feed(session: std::sync::Arc<crate::playback::Session>, seconds: f32) {
+    use fastcord_video::DecodedFrame;
+    use fastcord_video::frame::{ColorDescription, Nv12};
+    std::thread::spawn(move || {
+        let (width, height) = (1280usize, 720usize);
+        let mut sink = session.sink();
+        let mut picture = vec![128u8; width * height * 3 / 2];
+        let started = std::time::Instant::now();
+        let mut n = 0u32;
+        while started.elapsed().as_secs_f32() < seconds
+            && session.active.load(std::sync::atomic::Ordering::Acquire)
+        {
+            for row in 0..height {
+                for x in 0..width {
+                    picture[row * width + x] = ((x as u32 + n * 6) / 5 % 256) as u8;
+                }
+            }
+            for pair in picture[width * height..].as_chunks_mut::<2>().0 {
+                pair[0] = (n * 3 % 256) as u8;
+                pair[1] = 255 - (n * 2 % 256) as u8;
+            }
+            if let Ok(image) = Nv12::packed(width as u32, height as u32, &picture) {
+                sink(
+                    0,
+                    DecodedFrame {
+                        image,
+                        color: ColorDescription::default(),
+                        timestamp: started.elapsed(),
+                    },
+                );
+            }
+            n += 1;
+            std::thread::sleep(std::time::Duration::from_millis(33));
+        }
+    });
 }
 
 #[cfg(test)]

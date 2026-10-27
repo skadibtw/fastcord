@@ -111,10 +111,21 @@ fn tile<'a>(
                 .style(style::action_button(true)),
         );
     }
+    // A stream's picture is in its player window; drawing it here would
+    // redraw the whole main window per frame (#212).
+    let picture: Element<'a, Message> = if matches!(id, TileId::Stream(_)) {
+        container(
+            text(tr("Watching in a separate window"))
+                .size(13)
+                .color(crate::style::muted()),
+        )
+        .center(Length::Fill)
+        .into()
+    } else {
+        playback::view::<Message>(tile.session.clone())
+    };
     let mut content = column![
-        container(playback::view::<Message>(tile.session.clone()))
-            .width(Length::Fill)
-            .height(Length::Fill),
+        container(picture).width(Length::Fill).height(Length::Fill),
         controls
     ]
     .spacing(3);
@@ -151,7 +162,10 @@ fn voice_user(voice: &VoiceControls, user: Snowflake) -> fastcord_model::User {
     }
 }
 
-fn stream_audio_controls<'a>(key: &str, session: &playback::Session) -> Element<'a, Message> {
+pub(crate) fn stream_audio_controls<'a>(
+    key: &str,
+    session: &playback::Session,
+) -> Element<'a, Message> {
     let audio = session.audio_settings();
     let mute_key = key.to_owned();
     let volume_key = key.to_owned();

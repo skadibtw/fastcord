@@ -1,6 +1,6 @@
 //! Debug-only redraw statistics (#212): with `FASTCORD_UI_STATS=1`, one line
-//! per five seconds (written when a view or update runs, so a silent window
-//! prints nothing) with the `view` and `update` counts. Counts only; no user
+//! per five seconds (written when a view, update or video draw runs, so a silent window
+//! prints nothing) with the `view`, `update` and video-draw counts. Counts only; no user
 //! data. Release builds compile it to nothing.
 
 #[cfg(debug_assertions)]
@@ -11,6 +11,7 @@ mod imp {
 
     static VIEWS: AtomicU64 = AtomicU64::new(0);
     static UPDATES: AtomicU64 = AtomicU64::new(0);
+    static DRAWS: AtomicU64 = AtomicU64::new(0);
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
     fn enabled() -> bool {
@@ -33,10 +34,19 @@ mod imp {
         if now.duration_since(since) >= Duration::from_secs(5) {
             *last = Some(now);
             eprintln!(
-                "ui-stats: {} views, {} updates in 5 s",
+                "ui-stats: {} views, {} updates, {} video draws in 5 s",
                 VIEWS.swap(0, Ordering::Relaxed),
-                UPDATES.swap(0, Ordering::Relaxed)
+                UPDATES.swap(0, Ordering::Relaxed),
+                DRAWS.swap(0, Ordering::Relaxed)
             );
+        }
+    }
+
+    /// One draw of a video widget (any window).
+    pub fn video_draw() {
+        if enabled() {
+            DRAWS.fetch_add(1, Ordering::Relaxed);
+            report();
         }
     }
 
@@ -49,8 +59,10 @@ mod imp {
 }
 
 #[cfg(debug_assertions)]
-pub use imp::{update, view};
+pub use imp::{update, video_draw, view};
 #[cfg(not(debug_assertions))]
 pub fn view() {}
 #[cfg(not(debug_assertions))]
 pub fn update() {}
+#[cfg(not(debug_assertions))]
+pub fn video_draw() {}

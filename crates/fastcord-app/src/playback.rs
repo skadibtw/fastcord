@@ -13,6 +13,7 @@ use crate::i18n::{tr, trf};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use fastcord_video::DecodedFrame;
 use fastcord_video::frame::{FrameLease, FramePool, LeaseError};
@@ -74,6 +75,11 @@ pub struct Session {
     pub key: String,
     pub visible: Arc<AtomicBool>,
     pub active: Arc<AtomicBool>,
+    /// Shown in a window of its own whose widget polls the lease ([`view_polled`]):
+    /// pictures then wake no one, so they never reach the main window's update.
+    own_window: AtomicBool,
+    /// Pictures pushed so far; the polling widget compares it to tell a new one.
+    pushed: AtomicU64,
     visibility: watch::Sender<bool>,
     audio: watch::Sender<AudioSettings>,
     audio_status: Mutex<String>,
@@ -98,6 +104,8 @@ impl Session {
             key,
             visible: Arc::new(AtomicBool::new(false)),
             active: Arc::new(AtomicBool::new(true)),
+            own_window: AtomicBool::new(false),
+            pushed: AtomicU64::new(0),
             visibility,
             audio: watch::channel(AudioSettings::default()).0,
             audio_status: Mutex::new(tr("Waiting for stream audio").into()),
@@ -203,8 +211,23 @@ impl Session {
             latest.frame = Some(frame);
             latest.pressure = false;
             latest.frame_error = None;
-            self.notify(&mut latest);
+            self.pushed.fetch_add(1, Ordering::Release);
+            // A picture in its own window is found by that window's polling;
+            // a message here would redraw every window of the application.
+            if !self.own_window.load(Ordering::Acquire) {
+                self.notify(&mut latest);
+            }
         }
+    }
+
+    /// Marks this watch as presented by [`view_polled`] in its own window.
+    pub fn set_own_window(&self, own: bool) {
+        self.own_window.store(own, Ordering::Release);
+    }
+
+    /// Pictures pushed so far.
+    pub fn pushed(&self) -> u64 {
+        self.pushed.load(Ordering::Acquire)
     }
 
     fn pressure(&self) {
@@ -317,16 +340,54 @@ pub fn fit(bounds: Rectangle, width: u32, height: u32, aspect: (u32, u32)) -> Re
 }
 
 pub fn view<'a, Message: 'a>(session: Arc<Session>) -> Element<'a, Message> {
-    Element::new(Video { session })
+    Element::new(Video {
+        session,
+        polled: false,
+    })
+}
+
+/// The video of a stream in a window of its own. iced redraws every window for
+/// each message, so this widget is not woken by pictures: it asks its own window
+/// for a redraw every [`POLL`] while pictures arrive (every [`IDLE_POLL`] after
+/// a second without one) and draws the latest lease. Pair it with
+/// [`Session::set_own_window`].
+pub fn view_polled<'a, Message: 'a>(session: Arc<Session>) -> Element<'a, Message> {
+    Element::new(Video {
+        session,
+        polled: true,
+    })
+}
+
+/// Redraw interval of a polled video while pictures arrive (60 Hz).
+const POLL: Duration = Duration::from_millis(16);
+/// Redraw interval after [`QUIET`] without a picture.
+const IDLE_POLL: Duration = Duration::from_millis(250);
+const QUIET: Duration = Duration::from_secs(1);
+
+struct Poll {
+    seen: u64,
+    changed: Instant,
 }
 
 struct Video {
     session: Arc<Session>,
+    polled: bool,
 }
 
 impl<Message, Theme> Widget<Message, Theme, iced::Renderer> for Video {
     fn size(&self) -> Size<Length> {
         Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn tag(&self) -> widget::tree::Tag {
+        widget::tree::Tag::of::<Poll>()
+    }
+
+    fn state(&self) -> widget::tree::State {
+        widget::tree::State::new(Poll {
+            seen: 0,
+            changed: Instant::now(),
+        })
     }
 
     fn layout(
@@ -336,6 +397,38 @@ impl<Message, Theme> Widget<Message, Theme, iced::Renderer> for Video {
         limits: &layout::Limits,
     ) -> layout::Node {
         layout::atomic(limits, Length::Fill, Length::Fill)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut widget::Tree,
+        event: &iced::Event,
+        _layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
+        let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event else {
+            return;
+        };
+        if !self.polled || !self.session.visible.load(Ordering::Acquire) {
+            return;
+        }
+        let poll = tree.state.downcast_mut::<Poll>();
+        let pushed = self.session.pushed();
+        if poll.seen != pushed {
+            poll.seen = pushed;
+            poll.changed = *now;
+        }
+        shell.request_redraw_at(
+            *now + if now.duration_since(poll.changed) < QUIET {
+                POLL
+            } else {
+                IDLE_POLL
+            },
+        );
     }
 
     fn draw(
@@ -349,6 +442,7 @@ impl<Message, Theme> Widget<Message, Theme, iced::Renderer> for Video {
         viewport: &Rectangle,
     ) {
         use iced::advanced::Renderer as _;
+        crate::ui_stats::video_draw();
         let bounds = layout.bounds();
         renderer.fill_quad(
             renderer::Quad {
@@ -510,6 +604,24 @@ mod tests {
         assert!(session.latest.lock().notified);
         session.status(Status::Failed("fixture failure".into()));
         assert!(session.frame().is_none());
+    }
+
+    #[test]
+    fn pictures_in_their_own_window_wake_no_one_but_are_counted() {
+        let session = Session::new("guild:1:2:3".into());
+        let mut pool = FramePool::new(FrameFormat::Nv12);
+        session.set_visible(true);
+        session.consume(session.id);
+        session.set_own_window(true);
+        session.push(frame(&mut pool, 1));
+        session.push(frame(&mut pool, 2));
+        assert_eq!(session.pushed(), 2);
+        assert_eq!(session.frame().unwrap().pixels()[0], 2);
+        // No message to the application: the window's own widget polls.
+        assert!(!session.latest.lock().notified);
+        // Status changes still do.
+        session.status(Status::Playing("fixture".into()));
+        assert!(session.latest.lock().notified);
     }
 
     #[test]

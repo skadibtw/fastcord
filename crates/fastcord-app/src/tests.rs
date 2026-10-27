@@ -1162,7 +1162,7 @@ fn media_subscription_ticks_only_while_audio_is_playing() {
 }
 
 #[test]
-fn video_subscription_tracks_pane_focus_resize_occlusion_and_unwatch() {
+fn a_watched_stream_plays_in_its_own_window_whatever_the_main_window_does() {
     use std::sync::atomic::Ordering;
     let mut app = login_app();
     authenticate(&mut app, Persistence::MemoryOnly);
@@ -1175,27 +1175,48 @@ fn video_subscription_tracks_pane_focus_resize_occlusion_and_unwatch() {
     *gateway = GatewayPanel::new(gateway.id, worker, bridge.clone());
     assert!(bridge.watch_stream("guild:41:127:99").is_ok());
     let watched = bridge.watched().pop().unwrap();
+    // The window opens at the next update, which is when the picture is wanted.
+    assert!(app.players.is_empty());
     assert_eq!(app.video_subscription().units(), 0);
-    let _ = app.update(Message::ShowStream(true));
-    assert_eq!(app.video_subscription().units(), 1);
-    // Losing focus keeps the stream playing, like the official client.
-    let _ = app.update(Message::WindowActive(false));
+    let _ = app.update(Message::WindowActive(true));
+    assert_eq!(app.players.len(), 1);
     assert_eq!(app.video_subscription().units(), 1);
     assert!(watched.visible.load(Ordering::Acquire));
-    let _ = app.update(Message::WindowActive(true));
-    assert_eq!(app.video_subscription().units(), 1);
-    let _ = app.update(Message::ShowStream(false));
-    assert_eq!(app.video_subscription().units(), 0);
-    let _ = app.update(Message::ShowStream(true));
+    // Focus, the call view, a covering settings screen and a minimized main
+    // window do not matter: the picture is not in the main window.
+    for message in [
+        Message::WindowActive(false),
+        Message::ShowStream(true),
+        Message::OpenAudioSettings,
+        Message::CloseAudioSettings,
+        Message::WindowSize(iced::Size::ZERO),
+        Message::ShowStream(false),
+    ] {
+        let _ = app.update(message);
+        assert_eq!(app.players.len(), 1);
+        assert_eq!(app.video_subscription().units(), 1);
+        assert!(watched.visible.load(Ordering::Acquire));
+    }
+    // Focus in a player window keeps the app active; chords there are ignored.
+    let window = app.players[0].window;
+    let _ = app.update(Message::Window(app.main_window, WindowEvent::Active(false)));
+    assert!(!app.window_active);
+    let _ = app.update(Message::Window(window, WindowEvent::Active(true)));
+    assert!(app.window_active);
+    let _ = app.update(Message::Window(window, WindowEvent::Active(false)));
+    assert!(!app.window_active);
     let _ = app.update(Message::OpenAudioSettings);
-    assert_eq!(app.video_subscription().units(), 0);
-    let _ = app.update(Message::CloseAudioSettings);
-    assert_eq!(app.video_subscription().units(), 1);
-    let _ = app.update(Message::WindowSize(iced::Size::ZERO));
-    assert_eq!(app.video_subscription().units(), 0);
-    let _ = app.update(Message::WindowSize(iced::Size::new(640.0, 480.0)));
-    assert_eq!(app.video_subscription().units(), 1);
-    let _ = app.update(Message::UnwatchStream("guild:41:127:99".into()));
+    let escape = switcher::Shortcut::Escape { captured: false };
+    let _ = app.update(Message::WindowShortcut(window, escape));
+    assert!(
+        app.audio_settings.open,
+        "chords in a player window are ignored"
+    );
+    let _ = app.update(Message::WindowShortcut(app.main_window, escape));
+    assert!(!app.audio_settings.open);
+    // Closing the window stops watching.
+    let _ = app.update(Message::Window(window, WindowEvent::CloseRequested));
+    assert!(app.players.is_empty());
     assert_eq!(app.video_subscription().units(), 0);
     assert!(bridge.watched().is_empty());
     assert!(!watched.active.load(Ordering::Acquire));
@@ -1203,8 +1224,7 @@ fn video_subscription_tracks_pane_focus_resize_occlusion_and_unwatch() {
 }
 
 #[test]
-fn several_watched_streams_are_decoded_only_while_the_layout_draws_them() {
-    use crate::call_layout::{Mode, TileId};
+fn each_watched_stream_has_a_window_that_ends_with_the_watch() {
     use std::sync::atomic::Ordering;
     let mut app = login_app();
     authenticate(&mut app, Persistence::MemoryOnly);
@@ -1226,32 +1246,48 @@ fn several_watched_streams_are_decoded_only_while_the_layout_draws_them() {
             .filter(|session| session.visible.load(Ordering::Acquire))
             .count()
     };
-    // Watching alone draws nothing: the call view is closed.
     let _ = app.update(Message::WindowActive(true));
-    assert_eq!((visible(&bridge), app.video_subscription().units()), (0, 0));
-    let _ = app.update(Message::ShowStream(true));
-    assert_eq!((visible(&bridge), app.video_subscription().units()), (4, 4));
-    // Focus: still all four (one large, three small); a full view draws one.
-    let _ = app.update(Message::SetCallMode(Mode::Focus));
-    assert_eq!(visible(&bridge), 4);
-    let _ = app.update(Message::FullTile(Some(TileId::Stream(keys[2].clone()))));
-    assert_eq!((visible(&bridge), app.video_subscription().units()), (1, 1));
-    assert!(bridge.watched()[2].visible.load(Ordering::Acquire));
-    let _ = app.update(Message::FullTile(None));
-    assert_eq!(visible(&bridge), 4);
-    // Minimizing and covering stop every decoder; one stream can leave alone.
-    let _ = app.update(Message::WindowSize(iced::Size::ZERO));
-    assert_eq!(visible(&bridge), 0);
-    let _ = app.update(Message::WindowSize(iced::Size::new(640.0, 480.0)));
+    assert_eq!(
+        (
+            app.players.len(),
+            visible(&bridge),
+            app.video_subscription().units()
+        ),
+        (4, 4, 4)
+    );
+    // One stream can leave alone; its window goes with it.
     let _ = app.update(Message::UnwatchStream(keys[0].clone()));
-    assert_eq!((bridge.watched().len(), visible(&bridge)), (3, 3));
-    // Closing the call view hides all; the sessions stay connected.
-    let _ = app.update(Message::ShowStream(false));
-    assert_eq!((bridge.watched().len(), visible(&bridge)), (3, 0));
-    for key in &keys[1..] {
-        let _ = app.update(Message::UnwatchStream(key.clone()));
-    }
+    assert_eq!((app.players.len(), bridge.watched().len()), (3, 3));
+    // Hiding the main window to the tray stops watching: no hidden playback.
+    app.tray = Ok(());
+    app.audio_preferences.close_to_tray = true;
+    let _ = app.update(Message::CloseRequested);
+    assert!(app.players.is_empty());
     assert!(bridge.watched().is_empty());
+    // Leaving the call (or moving, switching account, logging out) empties the
+    // list, and the windows follow at the next update.
+    bridge.stop_playback();
+    let _ = app.update(Message::WindowActive(true));
+    assert!(app.players.is_empty());
+    assert!(bridge.watched().is_empty());
+}
+
+#[test]
+fn logout_closes_player_windows() {
+    let mut app = login_app();
+    authenticate(&mut app, Persistence::MemoryOnly);
+    let bridge = gateway::NavigationBridge::new();
+    let _commands = bridge.take_commands().unwrap();
+    let Some(gateway) = app.phase.gateway_mut() else {
+        panic!("account");
+    };
+    let (_, worker) = iced::Task::<()>::none().abortable();
+    *gateway = GatewayPanel::new(gateway.id, worker, bridge.clone());
+    assert!(bridge.watch_stream("guild:41:127:1").is_ok());
+    let _ = app.update(Message::WindowActive(true));
+    assert_eq!(app.players.len(), 1);
+    let _ = app.update(Message::Logout);
+    assert!(app.players.is_empty());
 }
 
 #[test]

@@ -1437,6 +1437,16 @@ impl NavigationBridge {
         }
     }
 
+    /// Fake mode's seam: a watched stream with no voice connection behind it,
+    /// whose pictures a script feeds through [`crate::playback::Session::sink`].
+    #[cfg(feature = "fake-discord")]
+    pub fn fake_watch(&self, stream_key: &str) -> Arc<crate::playback::Session> {
+        let session = crate::playback::Session::new(stream_key.to_owned());
+        session.status(crate::playback::Status::Playing("synthetic".into()));
+        self.watched.lock().push(session.clone());
+        session
+    }
+
     /// Stops watching (or ends an owned stream) through opcode 19.
     pub fn unwatch_stream(&self, stream_key: impl Into<String>) -> bool {
         let stream_key = stream_key.into();
