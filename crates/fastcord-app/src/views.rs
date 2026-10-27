@@ -173,6 +173,7 @@ impl App {
             );
             let in_voice = voice_audio != gateway::VoiceAudioState::Idle;
             let running = voice_audio == gateway::VoiceAudioState::Running;
+            let controls_available = voice_audio.controls_available();
             let bold = iced::Font {
                 weight: iced::font::Weight::Bold,
                 ..iced::Font::DEFAULT
@@ -610,10 +611,10 @@ impl App {
                 icons::Icon::Mic {
                     muted: voice_controls.self_muted,
                 },
-                running.then_some(Message::SetSelfMute(!voice_controls.self_muted)),
+                controls_available.then_some(Message::SetSelfMute(!voice_controls.self_muted)),
                 !voice_controls.self_muted,
                 voice_controls.self_muted,
-                if !running {
+                if !controls_available {
                     i18n::tr("Microphone (available in a call)")
                 } else if voice_controls.self_muted {
                     i18n::tr("Turn microphone on")
@@ -635,10 +636,10 @@ impl App {
                 icons::Icon::Headphones {
                     deafened: voice_controls.deafened,
                 },
-                running.then_some(Message::SetDeafen(!voice_controls.deafened)),
+                controls_available.then_some(Message::SetDeafen(!voice_controls.deafened)),
                 !voice_controls.deafened,
                 voice_controls.deafened,
-                if !running {
+                if !controls_available {
                     i18n::tr("Sound (available in a call)")
                 } else if voice_controls.deafened {
                     i18n::tr("Turn sound on")

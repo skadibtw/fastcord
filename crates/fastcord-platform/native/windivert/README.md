@@ -9,8 +9,9 @@ unprivileged. This is not a system-wide zapret installation.
 WinDivert is distributed here under **LGPL version 3** (the upstream alternative
 is GPL version 2). `LICENSE` includes LGPLv3 and its incorporated GPLv3 text.
 `WinDivert-2.2.2-source.zip` contains the matching upstream source and build
-scripts. No source or payload from zapret is linked into fastcord. Strategy
-references are documented in `docs/NETWORK_TESTING.md` in the fastcord repository.
+scripts. UDP recovery data and profiles from zapret2 have their own MIT notice
+and provenance in the adjacent `zapret2/` directory. Strategy references are
+documented in `docs/NETWORK_TESTING.md` in the fastcord repository.
 
 The helper dynamically loads the library from this directory beside a release
 executable, or this source directory in debug builds. Full paths and SHA-256

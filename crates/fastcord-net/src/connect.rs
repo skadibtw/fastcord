@@ -13,6 +13,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower::{Layer, Service};
 
 use crate::selector::TlsProfile;
+use crate::settings::Mode;
 use crate::{NetworkContext, NetworkError, Role};
 
 type BoxError = Box<dyn Error + Send + Sync>;
@@ -38,6 +39,7 @@ pub(crate) struct Attempt {
     pub id: u64,
     pub role: Role,
     generation: u64,
+    mode: Mode,
     state: Mutex<State>,
 }
 
@@ -51,7 +53,7 @@ impl Attempt {
                     .to_ascii_lowercase(),
                 port,
                 role: self.role,
-                profile: TlsProfile::Http,
+                profile: crate::broker::http_profile(self.mode, self.role),
             });
         }
     }
@@ -112,6 +114,7 @@ impl Attempts {
         self: &Arc<Self>,
         role: Role,
         generation: u64,
+        mode: Mode,
     ) -> Result<Registration, NetworkError> {
         let permit = self
             .slots
@@ -127,6 +130,7 @@ impl Attempts {
             id,
             role,
             generation,
+            mode,
             state: Mutex::default(),
         });
         self.entries
@@ -208,7 +212,11 @@ where
                 Ok(config
                     .context
                     .attempts()
-                    .register(config.role, config.context.controller().generation())
+                    .register(
+                        config.role,
+                        config.context.controller().generation(),
+                        config.context.mode(),
+                    )
                     .await?)
             })
             .await?;
@@ -391,17 +399,43 @@ mod tests {
     #[tokio::test]
     async fn ipv6_url_brackets_do_not_change_the_connect_authority_binding() {
         let registry = Arc::new(Attempts::default());
-        let registered = registry.register(Role::Cdn, 0).await.unwrap();
+        let registered = registry.register(Role::Cdn, 0, Mode::Off).await.unwrap();
         registered.attempt.target("[2606:4700::1]", 443);
         assert!(registered.attempt.matches("2606:4700::1", 443));
         assert!(!registered.attempt.matches("2606:4700::2", 443));
         assert!(!registered.attempt.matches("2606:4700::1", 444));
     }
+
+    #[tokio::test]
+    async fn connector_receipts_keep_the_http_sni_policy_of_their_context() {
+        let registry = Arc::new(Attempts::default());
+        for (mode, role, profile) in [
+            (Mode::Auto, Role::Rest, TlsProfile::HttpWithoutSni),
+            (Mode::Auto, Role::Cdn, TlsProfile::Http),
+            (Mode::Proxy, Role::Rest, TlsProfile::Http),
+            (Mode::Off, Role::Rest, TlsProfile::Http),
+        ] {
+            let receipt = registry.register(role, 0, mode).await.unwrap();
+            receipt.attempt.target("discord.com", 443);
+            assert_eq!(
+                receipt
+                    .attempt
+                    .state
+                    .lock()
+                    .unwrap()
+                    .target
+                    .as_ref()
+                    .unwrap()
+                    .profile,
+                profile
+            );
+        }
+    }
     #[tokio::test]
     async fn simultaneous_attempts_to_one_endpoint_keep_their_own_failure_and_address() {
         let registry = Arc::new(Attempts::default());
-        let a = registry.register(Role::Rest, 0).await.unwrap();
-        let b = registry.register(Role::Rest, 0).await.unwrap();
+        let a = registry.register(Role::Rest, 0, Mode::Off).await.unwrap();
+        let b = registry.register(Role::Rest, 0, Mode::Off).await.unwrap();
         for attempt in [&a.attempt, &b.attempt] {
             attempt.target("discord.com", 443);
         }
@@ -431,7 +465,7 @@ mod tests {
         let stale = a.attempt.clone();
         drop(a);
         assert!(registry.get(old, Role::Rest).is_none());
-        let next = registry.register(Role::Rest, 0).await.unwrap();
+        let next = registry.register(Role::Rest, 0, Mode::Off).await.unwrap();
         assert_ne!(old, next.attempt.id);
         stale.failed(NetworkError::TcpReset);
         assert_eq!(next.attempt.state.lock().unwrap().failure, None);
@@ -441,9 +475,9 @@ mod tests {
         let registry = Arc::new(Attempts::default());
         let mut held = Vec::new();
         for _ in 0..LIMIT {
-            held.push(registry.register(Role::Cdn, 0).await.unwrap());
+            held.push(registry.register(Role::Cdn, 0, Mode::Off).await.unwrap());
         }
-        let waiting = registry.register(Role::Cdn, 0);
+        let waiting = registry.register(Role::Cdn, 0, Mode::Off);
         tokio::pin!(waiting);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), &mut waiting)

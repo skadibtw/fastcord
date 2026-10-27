@@ -424,20 +424,35 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
             style::YELLOW,
             tr("Connecting to voice. Click to open the call"),
         ),
+        VoiceAudioState::WaitingForKeys => (
+            tr("Waiting for voice keys…"),
+            style::YELLOW,
+            tr("Voice transport connected; waiting for encryption keys. Click to open the call"),
+        ),
         VoiceAudioState::EngineFailed => (
             tr("Audio failed"),
             style::RED,
             tr("The audio devices could not be opened. Click to open the call"),
         ),
-        _ => (
+        VoiceAudioState::Running => (
             tr("Voice connected"),
             style::GREEN,
             tr("Connected. Click to open the call"),
         ),
+        VoiceAudioState::Idle => (
+            tr("Disconnected"),
+            style::RED,
+            tr("Call ended. Click to open the call"),
+        ),
     };
     // The voice server's UDP round trip, not the Gateway's.
     let tip = match (bar.state, bar.ping_ms) {
-        (VoiceAudioState::Connecting | VoiceAudioState::EngineFailed, _) => tip.to_owned(),
+        (
+            VoiceAudioState::Connecting
+            | VoiceAudioState::WaitingForKeys
+            | VoiceAudioState::EngineFailed,
+            _,
+        ) => tip.to_owned(),
         (_, ping) => format!(
             "{tip}
 {}",

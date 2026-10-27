@@ -41,6 +41,8 @@ pub enum ReconnectReason {
     HeartbeatTimeout,
     /// HELLO never arrived.
     HelloTimeout,
+    /// Identify/Resume was sent, but READY/RESUMED never arrived.
+    ReadyTimeout,
     /// A frame or the compression stream could not be decoded; the zlib
     /// dictionary cannot be trusted any more, so the connection is replaced.
     Protocol,

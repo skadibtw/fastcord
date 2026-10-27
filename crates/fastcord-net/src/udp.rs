@@ -26,8 +26,18 @@ pub const OUTER_IPV6_PAYLOAD: usize = 1452;
 // or cleared on each packet; eight association permits cap it at 512 KiB.
 const RECEIVE_CAPACITY: usize = 65_536;
 
+/// Canonical Discord IP-discovery request; it contains no account secret.
+pub fn is_discovery_request(packet: &[u8]) -> bool {
+    packet.len() == 74 && packet[..4] == [0, 1, 0, 70] && packet[8..].iter().all(|byte| *byte == 0)
+}
+
 pub enum DatagramSocket {
     Direct(UdpSocket),
+    Packet {
+        socket: UdpSocket,
+        server: SocketAddr,
+        factory: Arc<dyn crate::tls::FakePrefixFactory>,
+    },
     Socks5(Association),
 }
 
@@ -46,7 +56,7 @@ impl DatagramSocket {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         match self {
-            Self::Direct(socket) => socket.local_addr(),
+            Self::Direct(socket) | Self::Packet { socket, .. } => socket.local_addr(),
             Self::Socks5(association) => association.socket.local_addr(),
         }
     }
@@ -55,7 +65,7 @@ impl DatagramSocket {
     /// SOCKS5's address header is included in the relay's accounting.
     pub fn max_payload(&self) -> usize {
         match self {
-            Self::Direct(socket) => {
+            Self::Direct(socket) | Self::Packet { socket, .. } => {
                 if socket.local_addr().is_ok_and(|address| address.is_ipv6()) {
                     OUTER_IPV6_PAYLOAD
                 } else {
@@ -71,16 +81,53 @@ impl DatagramSocket {
             // Preserve the pre-existing direct socket semantics. The direct
             // max_payload value is a packetization recommendation; the relay
             // cap below is enforced before its encapsulation is allocated.
-            Self::Direct(socket) => socket.send_to(datagram, to).await,
+            Self::Direct(socket) | Self::Packet { socket, .. } => {
+                socket.send_to(datagram, to).await
+            }
             Self::Socks5(association) => association.send_to(datagram, to).await,
         }
+    }
+
+    /// Only a canonical, token-free IP-discovery request may cross the
+    /// elevated packet boundary. RTP, RTCP and keys use ordinary send_to.
+    pub async fn send_discovery(
+        &self,
+        request: &[u8],
+        to: SocketAddr,
+        variant: u8,
+    ) -> io::Result<usize> {
+        let Self::Packet {
+            socket,
+            server,
+            factory,
+        } = self
+        else {
+            return self.send_to(request, to).await;
+        };
+        if *server != to || !(1..=3).contains(&variant) || !is_discovery_request(request) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        if !factory.available() {
+            return Err(io::ErrorKind::ConnectionAborted.into());
+        }
+        let socket: std::net::UdpSocket = socket2::SockRef::from(socket).try_clone()?.into();
+        factory
+            .start_udp_discovery(
+                socket,
+                to,
+                request
+                    .try_into()
+                    .map_err(|_| io::ErrorKind::InvalidInput)?,
+                variant,
+            )?
+            .await
     }
 
     /// Invalid relay/source/header datagrams are discarded. Only the exact
     /// media endpoint bound to this association can reach the voice driver.
     pub async fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         match self {
-            Self::Direct(socket) => socket.recv_from(buffer).await,
+            Self::Direct(socket) | Self::Packet { socket, .. } => socket.recv_from(buffer).await,
             Self::Socks5(association) => association.recv_from(buffer).await,
         }
     }

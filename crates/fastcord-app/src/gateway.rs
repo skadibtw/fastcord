@@ -292,6 +292,7 @@ pub enum GatewayStatus {
     Connecting {
         attempt: u32,
     },
+    WaitingForHello,
     SigningIn,
     Resuming,
     Ready(Counts),
@@ -318,6 +319,7 @@ impl GatewayStatus {
             Self::Connecting { attempt } => {
                 trf("Connecting to Discord… (attempt {})", &[&(attempt + 1)])
             }
+            Self::WaitingForHello => tr("Connected; waiting for Discord’s greeting…").to_owned(),
             Self::SigningIn => tr("Connected; signing in…").to_owned(),
             Self::Resuming => tr("Connected; resuming your session…").to_owned(),
             Self::Ready(counts) => {
@@ -356,6 +358,7 @@ fn describe_reason(reason: ReconnectReason) -> &'static str {
         ReconnectReason::ServerRequested => "Discord asked to reconnect",
         ReconnectReason::HeartbeatTimeout => "Discord stopped responding",
         ReconnectReason::HelloTimeout => "Discord did not greet the connection",
+        ReconnectReason::ReadyTimeout => "Discord did not finish starting the session",
         ReconnectReason::Protocol => "unreadable data",
         ReconnectReason::InvalidSession { .. } => "session expired",
         ReconnectReason::Closed(_) => "closed by Discord",
@@ -419,9 +422,8 @@ impl Tracker {
         match event {
             GatewayEvent::State(state) => Some(match state {
                 ConnectionState::Connecting { attempt } => GatewayStatus::Connecting { attempt },
-                ConnectionState::AwaitHello | ConnectionState::Identifying => {
-                    GatewayStatus::SigningIn
-                }
+                ConnectionState::AwaitHello => GatewayStatus::WaitingForHello,
+                ConnectionState::Identifying => GatewayStatus::SigningIn,
                 ConnectionState::Resuming => GatewayStatus::Resuming,
                 ConnectionState::Ready => GatewayStatus::Ready(self.counts()),
                 ConnectionState::Reconnecting {
@@ -1383,10 +1385,7 @@ impl NavigationBridge {
     /// Returns whether the request was queued.
     pub fn request_voice_state(&self, request: VoiceStateRequest) -> bool {
         if let Some(channel) = request.channel_id
-            && matches!(
-                *self.voice_audio.borrow(),
-                VoiceAudioState::Connecting | VoiceAudioState::Running
-            )
+            && self.voice_audio.borrow().controls_available()
             && self.voice_requests.borrow().is_some_and(|current| {
                 current.guild_id == request.guild_id && current.channel_id == Some(channel)
             })
@@ -2870,10 +2869,8 @@ impl Worker {
             return;
         }
         self.voice_flags = flags;
-        if matches!(
-            *self.voice_audio.borrow(),
-            VoiceAudioState::Connecting | VoiceAudioState::Running
-        ) && let Some(request) = *self.voice_requests.borrow()
+        if self.voice_audio.borrow().controls_available()
+            && let Some(request) = *self.voice_requests.borrow()
             && let Some(channel) = request.channel_id
         {
             gateway.voice_state().request(
@@ -6091,12 +6088,14 @@ mod tests {
             })),
             Some(GatewayStatus::Connecting { attempt: 0 })
         );
-        for state in [ConnectionState::AwaitHello, ConnectionState::Identifying] {
-            assert_eq!(
-                tracker.apply(GatewayEvent::State(state)),
-                Some(GatewayStatus::SigningIn)
-            );
-        }
+        assert_eq!(
+            tracker.apply(GatewayEvent::State(ConnectionState::AwaitHello)),
+            Some(GatewayStatus::WaitingForHello)
+        );
+        assert_eq!(
+            tracker.apply(GatewayEvent::State(ConnectionState::Identifying)),
+            Some(GatewayStatus::SigningIn)
+        );
         // READY itself is not a status change; the Ready state that follows is.
         assert_eq!(tracker.apply(ready_event(3, 1, 2)), None);
         let status = tracker

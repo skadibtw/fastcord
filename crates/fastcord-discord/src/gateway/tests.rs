@@ -1160,6 +1160,61 @@ async fn missing_hello_replaces_the_connection() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn heartbeat_acks_do_not_leave_an_identify_waiting_for_ready_forever() {
+    let transport = FakeTransport::new();
+    let mut server = transport.accept().await;
+    let mut gateway = start(&transport, 0.5);
+    server.hello(1000).await;
+    assert_eq!(server.recv().await["op"], 2);
+    skip_connection_states(&mut gateway).await;
+    let started = Instant::now();
+    let acked = Arc::new(AtomicUsize::new(0));
+    let count = acked.clone();
+    let replies = tokio::spawn(async move {
+        while let Some(Ok(Message::Text(text))) = server.socket.next().await {
+            let frame: Value = serde_json::from_str(text.as_str()).unwrap();
+            assert_eq!(frame["op"], 1);
+            server.ack().await;
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let (attempt, _, reason) = expect_reconnecting(&mut gateway).await;
+    assert_eq!(reason, ReconnectReason::ReadyTimeout);
+    assert_eq!(attempt, 1);
+    assert_eq!(transport.retries.failures(), 1);
+    assert!(acked.load(Ordering::Relaxed) >= 20);
+    assert_eq!(Instant::now() - started, Duration::from_secs(30));
+    replies.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resume_also_has_a_deadline_even_while_heartbeats_are_acked() {
+    let (mut gateway, transport, mut first) = ready(0.5).await;
+    let mut second = transport.accept().await;
+    first.send_json(json!({"op": 7, "d": null})).await;
+    expect_reconnecting(&mut gateway).await;
+    second.hello(1000).await;
+    assert_eq!(second.recv().await["op"], 6);
+    expect_state(&mut gateway, ConnectionState::Connecting { attempt: 1 }).await;
+    expect_state(&mut gateway, ConnectionState::AwaitHello).await;
+    expect_state(&mut gateway, ConnectionState::Resuming).await;
+    let acked = Arc::new(AtomicUsize::new(0));
+    let count = acked.clone();
+    let replies = tokio::spawn(async move {
+        while let Some(Ok(Message::Text(text))) = second.socket.next().await {
+            let frame: Value = serde_json::from_str(text.as_str()).unwrap();
+            assert_eq!(frame["op"], 1);
+            second.ack().await;
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let (_, _, reason) = expect_reconnecting(&mut gateway).await;
+    assert_eq!(reason, ReconnectReason::ReadyTimeout);
+    assert!(acked.load(Ordering::Relaxed) >= 20);
+    replies.abort();
+}
+
+#[tokio::test(start_paused = true)]
 async fn hostile_heartbeat_interval_is_clamped() {
     let transport = FakeTransport::new();
     let mut server = transport.accept().await;

@@ -1,7 +1,6 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-#[cfg(debug_assertions)]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -44,6 +43,7 @@ struct Shared {
     /// The campaign task this context started; aborted with the context.
     campaign: Mutex<Option<tokio::task::AbortHandle>>,
     associations: Arc<Semaphore>,
+    gateway_cursor: Arc<AtomicUsize>,
     #[cfg(debug_assertions)]
     probe_output: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -165,6 +165,7 @@ impl NetworkContext {
             recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
             campaign: Mutex::new(None),
             associations: Arc::new(Semaphore::new(crate::udp::MAX_ASSOCIATIONS)),
+            gateway_cursor: Arc::new(AtomicUsize::new(0)),
             #[cfg(debug_assertions)]
             probe_output: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }))
@@ -197,6 +198,7 @@ impl NetworkContext {
             recovery_gate: self.0.recovery_gate.clone(),
             campaign: Mutex::new(None),
             associations: self.0.associations.clone(),
+            gateway_cursor: self.0.gateway_cursor.clone(),
             #[cfg(debug_assertions)]
             probe_output: self.0.probe_output.clone(),
         }))
@@ -265,10 +267,19 @@ impl NetworkContext {
         self.0
             .prefix_factory
             .as_ref()
+            .filter(|factory| factory.available())
             .ok_or(io::ErrorKind::Unsupported)?
             .select_strategy(strategy)?;
         self.controller().network_changed();
         Ok(())
+    }
+    pub fn packet_helper_available(&self) -> bool {
+        self.mode() == Mode::Auto
+            && self
+                .0
+                .prefix_factory
+                .as_ref()
+                .is_some_and(|factory| factory.available())
     }
     pub fn media_supported(&self) -> bool {
         self.mode() != Mode::Proxy
@@ -354,7 +365,8 @@ impl NetworkContext {
         } else {
             (Ipv6Addr::LOCALHOST, 0).into()
         };
-        UdpSocket::bind(local).await.map(DatagramSocket::Direct)
+        let socket = UdpSocket::bind(local).await?;
+        Ok(DatagramSocket::Direct(socket))
     }
 
     pub(crate) fn bridge_proxy(&self, role: Role) -> Result<reqwest::Proxy, NetworkError> {
@@ -600,9 +612,13 @@ impl CampaignEnv {
         let catalog = forced
             .or_else(|| factory.as_ref().map(|f| f.strategy()))
             .map(|strategy| [strategy]);
-        let plan = catalog
-            .as_ref()
-            .map_or(Strategy::ORDER.as_slice(), |one| one.as_slice());
+        let plan = if target.profile.omits_sni() {
+            [Strategy::Direct].as_slice()
+        } else {
+            catalog
+                .as_ref()
+                .map_or(Strategy::ORDER.as_slice(), |one| one.as_slice())
+        };
         let _ = controller
             .diagnose_plan(target, pending.failure, plan, move |request| {
                 let transforms = transforms.clone();
@@ -640,6 +656,9 @@ pub(crate) fn select_strategy(
     address: SocketAddr,
     profile: TlsProfile,
 ) -> Strategy {
+    if profile.omits_sni() {
+        return Strategy::Direct;
+    }
     if !probe_authorized(role, host) {
         return Strategy::Direct;
     }
@@ -671,27 +690,34 @@ impl SocketBroker {
         role: Role,
     ) -> Result<TlsStream, NetworkError> {
         authorize(role, host, port)?;
+        let profile = websocket_profile(self.0.mode(), role);
         self.0
             .wait_for_endpoint(&crate::connect::Endpoint {
                 host: host.to_ascii_lowercase(),
                 port,
                 role,
-                profile: TlsProfile::WebSocket,
+                profile,
             })
             .await;
         let mut failed_address = None;
-        let result = self
-            .connect_tls_once(host, port, role, &mut failed_address)
+        let mut result = self
+            .connect_tls_once(host, port, role, profile, false, &mut failed_address)
             .await;
+        // Auto's no-SNI session profile first uses TLS 1.2. If that TLS
+        // handshake is unavailable, one fresh pre-application connection may
+        // negotiate the normal versions. Nothing authenticated is replayed.
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| retry_default_versions(profile, *error))
+        {
+            result = self
+                .connect_tls_once(host, port, role, profile, true, &mut failed_address)
+                .await;
+        }
         if let Err(error) = result.as_ref() {
-            self.0.record_failure(
-                host,
-                port,
-                role,
-                TlsProfile::WebSocket,
-                *error,
-                failed_address,
-            );
+            self.0
+                .record_failure(host, port, role, profile, *error, failed_address);
         }
         // A transport change never replays the user's request or the Gateway
         // attempt. Its owner retains failure accounting and nonzero backoff.
@@ -703,6 +729,8 @@ impl SocketBroker {
         host: &str,
         port: u16,
         role: Role,
+        profile: TlsProfile,
+        default_versions: bool,
         failed_address: &mut Option<SocketAddr>,
     ) -> Result<TlsStream, NetworkError> {
         let (io, strategy, control) = if self.0.mode() == Mode::Proxy {
@@ -716,11 +744,16 @@ impl SocketBroker {
                 None,
             )
         } else {
-            let (tcp, address) = dial_public(host, port, failed_address).await?;
+            let rotate_gateway = self.0.mode() == Mode::Auto && role == Role::Gateway;
+            let offset = if rotate_gateway {
+                self.0.0.gateway_cursor.fetch_add(1, Ordering::Relaxed)
+            } else {
+                0
+            };
+            let (tcp, address) =
+                dial_public_offset(host, port, failed_address, offset, rotate_gateway).await?;
             *failed_address = Some(address);
-            let strategy = self
-                .0
-                .strategy(host, port, role, address, TlsProfile::WebSocket);
+            let strategy = self.0.strategy(host, port, role, address, profile);
             let native = NativeIo::new(tcp).with_factory(self.0.prefix_factory());
             let control = native.control();
             (Box::new(native) as BoxedIo, strategy, Some(control))
@@ -731,7 +764,11 @@ impl SocketBroker {
         } else {
             stream
         };
-        let config = tls_config(TlsProfile::WebSocket, self.0.mode() == Mode::Auto)?;
+        let config = if default_versions {
+            cached_tls_config(profile, self.0.mode() == Mode::Auto, false)?
+        } else {
+            tls_config(profile, self.0.mode() == Mode::Auto)?
+        };
         let name =
             ServerName::try_from(host.to_owned()).map_err(|_| NetworkError::InvalidTarget)?;
         timeout(
@@ -762,7 +799,43 @@ impl SocketBroker {
         } else {
             (Ipv6Addr::UNSPECIFIED, 0).into()
         };
-        UdpSocket::bind(local).await.map(DatagramSocket::Direct)
+        let socket = UdpSocket::bind(local).await?;
+        if self.0.mode() == Mode::Auto
+            && let Some(factory) = self.0.prefix_factory()
+            && factory.available()
+            && factory.supports_udp_discovery()
+        {
+            return Ok(DatagramSocket::Packet {
+                socket,
+                server,
+                factory,
+            });
+        }
+        Ok(DatagramSocket::Direct(socket))
+    }
+}
+
+fn retry_default_versions(profile: TlsProfile, error: NetworkError) -> bool {
+    profile == TlsProfile::DiscordWebSocketWithoutSni
+        && matches!(
+            error,
+            NetworkError::TlsTimeout | NetworkError::TlsReset | NetworkError::TlsProtocolRejected
+        )
+}
+
+fn websocket_profile(mode: Mode, role: Role) -> TlsProfile {
+    if mode == Mode::Auto && matches!(role, Role::Gateway | Role::Voice | Role::Stream) {
+        TlsProfile::DiscordWebSocketWithoutSni
+    } else {
+        TlsProfile::WebSocket
+    }
+}
+
+pub(crate) fn http_profile(mode: Mode, role: Role) -> TlsProfile {
+    if mode == Mode::Auto && matches!(role, Role::Rest | Role::Login | Role::Profile) {
+        TlsProfile::HttpWithoutSni
+    } else {
+        TlsProfile::Http
     }
 }
 
@@ -774,35 +847,72 @@ pub(crate) fn tls_config(
     profile: TlsProfile,
     probe: bool,
 ) -> Result<Arc<ClientConfig>, NetworkError> {
-    type Slot = std::sync::OnceLock<Result<Arc<ClientConfig>, NetworkError>>;
-    static CONFIGS: [Slot; 4] = [const { Slot::new() }; 4];
-    let index = usize::from(profile == TlsProfile::WebSocket) * 2 + usize::from(probe);
+    cached_tls_config(profile, probe, true)
+}
+
+fn cached_tls_config(
+    profile: TlsProfile,
+    probe: bool,
+    prefer_tls12: bool,
+) -> Result<Arc<ClientConfig>, NetworkError> {
+    type Slot = OnceLock<Result<Arc<ClientConfig>, NetworkError>>;
+    static CONFIGS: [Slot; 16] = [const { Slot::new() }; 16];
+    let profile_index = match profile {
+        TlsProfile::Http => 0,
+        TlsProfile::HttpWithoutSni => 1,
+        TlsProfile::WebSocket => 2,
+        TlsProfile::DiscordWebSocketWithoutSni => 3,
+    };
+    let index = profile_index * 4 + usize::from(probe) * 2 + usize::from(prefer_tls12);
     CONFIGS[index]
-        .get_or_init(|| build_tls_config(profile, probe))
+        .get_or_init(|| build_tls_config(profile, probe, prefer_tls12, None))
         .clone()
 }
 
-fn build_tls_config(profile: TlsProfile, probe: bool) -> Result<Arc<ClientConfig>, NetworkError> {
+#[cfg(test)]
+fn tls_config_with_roots(
+    profile: TlsProfile,
+    probe: bool,
+    roots: RootCertStore,
+    prefer_tls12: bool,
+) -> Result<Arc<ClientConfig>, NetworkError> {
+    build_tls_config(profile, probe, prefer_tls12, Some(roots))
+}
+
+fn build_tls_config(
+    profile: TlsProfile,
+    probe: bool,
+    prefer_tls12: bool,
+    roots: Option<RootCertStore>,
+) -> Result<Arc<ClientConfig>, NetworkError> {
     let provider = Arc::new(crypto::ring::default_provider());
-    let builder = ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(|_| NetworkError::TlsProtocolRejected)?;
-    // The OS trust store (enterprise roots, inspecting proxies, revocation)
-    // verifies the chain; only the verifier changes, never the ClientHello.
-    // If the platform verifier cannot start, the embedded Mozilla roots keep
-    // working exactly as before (#131).
-    let builder = match rustls_platform_verifier::Verifier::new(provider) {
-        Ok(verifier) => builder
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(verifier)),
-        Err(_) => builder.with_root_certificates(RootCertStore::from_iter(
-            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-        )),
+    let builder = ClientConfig::builder_with_provider(provider.clone());
+    let only_tls12 = prefer_tls12 && profile == TlsProfile::DiscordWebSocketWithoutSni;
+    let builder = if only_tls12 {
+        builder.with_protocol_versions(&[&tokio_rustls::rustls::version::TLS12])
+    } else {
+        builder.with_safe_default_protocol_versions()
+    }
+    .map_err(|_| NetworkError::TlsProtocolRejected)?;
+    let builder = if let Some(roots) = roots {
+        builder.with_root_certificates(roots)
+    } else {
+        match rustls_platform_verifier::Verifier::new(provider) {
+            Ok(verifier) => builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(verifier)),
+            Err(_) => builder.with_root_certificates(RootCertStore::from_iter(
+                webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+            )),
+        }
     };
     let mut config = builder.with_no_client_auth();
-    if profile == TlsProfile::Http {
+    if matches!(profile, TlsProfile::Http | TlsProfile::HttpWithoutSni) {
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     }
+    // This changes only the ClientHello extension. The original ServerName
+    // still goes to rustls::connect and its ordinary WebPKI verifier.
+    config.enable_sni = !profile.omits_sni();
     if probe {
         config.resumption = tokio_rustls::rustls::client::Resumption::disabled();
         config.enable_early_data = false;
@@ -934,8 +1044,28 @@ pub(crate) async fn dial_public(
     port: u16,
     failed_address: &mut Option<SocketAddr>,
 ) -> Result<(TcpStream, SocketAddr), NetworkError> {
-    let addresses = resolve_public(host, port).await?;
+    dial_public_offset(host, port, failed_address, 0, false).await
+}
+
+async fn dial_public_offset(
+    host: &str,
+    port: u16,
+    failed_address: &mut Option<SocketAddr>,
+    offset: usize,
+    rotate_gateway: bool,
+) -> Result<(TcpStream, SocketAddr), NetworkError> {
+    let mut addresses = resolve_public(host, port).await?;
+    if rotate_gateway {
+        addresses.sort_unstable();
+    }
+    rotate_addresses(&mut addresses, offset);
     crate::dial::connect(&addresses, Duration::from_secs(3), failed_address).await
+}
+
+fn rotate_addresses(addresses: &mut [SocketAddr], offset: usize) {
+    if !addresses.is_empty() {
+        addresses.rotate_left(offset % addresses.len());
+    }
 }
 
 pub(crate) fn tcp_error(error: &io::Error) -> NetworkError {
@@ -1056,6 +1186,208 @@ mod tests {
         assert!(first.alpn_protocols.is_empty());
     }
 
+    #[test]
+    fn gateway_rotation_uses_only_current_dns_answers_and_wraps() {
+        let original: Vec<SocketAddr> = ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"]
+            .into_iter()
+            .map(|address| address.parse().unwrap())
+            .collect();
+        for (offset, first) in [(0, 0), (1, 1), (2, 2), (3, 0)] {
+            let mut answers = original.clone();
+            rotate_addresses(&mut answers, offset);
+            assert_eq!(answers[0], original[first]);
+            assert!(answers.iter().all(|address| original.contains(address)));
+        }
+        rotate_addresses(&mut [], 100);
+    }
+
+    #[test]
+    fn only_no_sni_session_tls_failures_can_retry_default_versions() {
+        for error in [
+            NetworkError::TlsTimeout,
+            NetworkError::TlsReset,
+            NetworkError::TlsProtocolRejected,
+        ] {
+            assert!(retry_default_versions(
+                TlsProfile::DiscordWebSocketWithoutSni,
+                error
+            ));
+            assert!(!retry_default_versions(TlsProfile::WebSocket, error));
+        }
+        for error in [
+            NetworkError::CertificateRejected,
+            NetworkError::Dns,
+            NetworkError::NoRoute,
+        ] {
+            assert!(!retry_default_versions(
+                TlsProfile::DiscordWebSocketWithoutSni,
+                error
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn session_profile_prefers_tls12_and_default_versions_can_reach_tls13_only_peers() {
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use tokio_rustls::rustls::{ServerConfig, version};
+        let certificate =
+            CertificateDer::from(include_bytes!("tls/fixtures/test-cert.der").to_vec());
+        for (prefer_tls12, server_version, accepted) in [
+            (true, &version::TLS12, true),
+            (true, &version::TLS13, false),
+            (false, &version::TLS13, true),
+        ] {
+            let mut roots = RootCertStore::empty();
+            roots.add(certificate.clone()).unwrap();
+            let client = tls_config_with_roots(
+                TlsProfile::DiscordWebSocketWithoutSni,
+                true,
+                roots,
+                prefer_tls12,
+            )
+            .unwrap();
+            let server =
+                ServerConfig::builder_with_provider(Arc::new(crypto::ring::default_provider()))
+                    .with_protocol_versions(&[server_version])
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![certificate.clone()],
+                        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                            include_bytes!("tls/fixtures/test-key.der").to_vec(),
+                        )),
+                    )
+                    .unwrap();
+            let (client_io, server_io) = tokio::io::duplex(8192);
+            let (client_result, _) = timeout(Duration::from_secs(3), async {
+                tokio::join!(
+                    TlsConnector::from(client)
+                        .connect(ServerName::try_from("localhost").unwrap(), client_io),
+                    tokio_rustls::TlsAcceptor::from(Arc::new(server)).accept(server_io),
+                )
+            })
+            .await
+            .unwrap();
+            assert_eq!(client_result.is_ok(), accepted);
+            if let Ok(stream) = client_result {
+                assert_eq!(
+                    stream.get_ref().1.protocol_version(),
+                    Some(server_version.version)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_automatic_discord_session_websockets_omit_sni() {
+        for mode in [Mode::Off, Mode::Auto, Mode::Proxy] {
+            for role in Role::ALL {
+                let profile = websocket_profile(mode, role);
+                let config = tls_config(profile, mode == Mode::Auto).unwrap();
+                assert_eq!(
+                    config.enable_sni,
+                    !(mode == Mode::Auto
+                        && matches!(role, Role::Gateway | Role::Voice | Role::Stream))
+                );
+                assert!(config.alpn_protocols.is_empty());
+            }
+        }
+        assert!(tls_config(TlsProfile::Http, true).unwrap().enable_sni);
+    }
+
+    #[test]
+    fn automatic_discord_http_omits_sni_without_disabling_http2() {
+        for mode in [Mode::Off, Mode::Auto, Mode::Proxy] {
+            for role in Role::ALL {
+                let profile = http_profile(mode, role);
+                let config = tls_config(profile, mode == Mode::Auto).unwrap();
+                assert_eq!(
+                    config.enable_sni,
+                    !(mode == Mode::Auto
+                        && matches!(role, Role::Rest | Role::Login | Role::Profile))
+                );
+                assert_eq!(
+                    config.alpn_protocols,
+                    [b"h2".to_vec(), b"http/1.1".to_vec()]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gateway_without_sni_still_checks_the_certificate_and_dns_name() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_rustls::rustls::ServerConfig;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        let certificate =
+            CertificateDer::from(include_bytes!("tls/fixtures/test-cert.der").to_vec());
+        for (trusted, host, accepted) in [
+            (true, "localhost", true),
+            (true, "gateway.discord.gg", false),
+            (false, "localhost", false),
+        ] {
+            let mut roots = RootCertStore::empty();
+            if trusted {
+                roots.add(certificate.clone()).unwrap();
+            }
+            let client =
+                tls_config_with_roots(TlsProfile::DiscordWebSocketWithoutSni, true, roots, true)
+                    .unwrap();
+            let server =
+                ServerConfig::builder_with_provider(Arc::new(crypto::ring::default_provider()))
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![certificate.clone()],
+                        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                            include_bytes!("tls/fixtures/test-key.der").to_vec(),
+                        )),
+                    )
+                    .unwrap();
+            // Room for the server's post-handshake tickets while the client
+            // sends its first record sequence; neither peer reads during its
+            // own write_all in this fixture.
+            let (client_io, server_io) = tokio::io::duplex(8192);
+            let client_side = async {
+                let result = TlsConnector::from(client)
+                    .connect(ServerName::try_from(host).unwrap(), client_io)
+                    .await;
+                if accepted {
+                    let mut stream = result.unwrap();
+                    // Identify-sized plaintext must survive TLS transport intact.
+                    stream.write_all(&[b'x'; 1536]).await.unwrap();
+                    stream.flush().await.unwrap();
+                    let mut data = [0; 5];
+                    stream.read_exact(&mut data).await.unwrap();
+                    assert_eq!(&data, b"hello");
+                } else {
+                    let error = result.expect_err("invalid certificate was accepted");
+                    assert_eq!(tls_error(&error), NetworkError::CertificateRejected);
+                }
+            };
+            let server_side = async {
+                if let Ok(mut stream) = tokio_rustls::TlsAcceptor::from(Arc::new(server))
+                    .accept(server_io)
+                    .await
+                {
+                    assert!(accepted);
+                    assert_eq!(stream.get_ref().1.server_name(), None);
+                    let mut input = [0; 1536];
+                    stream.read_exact(&mut input).await.unwrap();
+                    assert_eq!(input, [b'x'; 1536]);
+                    stream.write_all(b"hello").await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+            };
+            timeout(Duration::from_secs(3), async {
+                tokio::join!(client_side, server_side);
+            })
+            .await
+            .unwrap();
+        }
+    }
+
     struct DeadFactory;
     impl crate::tls::FakePrefixFactory for DeadFactory {
         fn available(&self) -> bool {
@@ -1112,6 +1444,20 @@ mod tests {
                 Role::Rest,
                 address,
                 TlsProfile::Http
+            ),
+            Strategy::Direct
+        );
+        // A no-SNI hello has no hostname for packet or record shaping. Even
+        // an available helper is unnecessary for this profile.
+        assert_eq!(
+            select_strategy(
+                &controller,
+                Some(&AliveFactory(DeadFactory)),
+                "gateway.discord.gg",
+                443,
+                Role::Gateway,
+                address,
+                TlsProfile::DiscordWebSocketWithoutSni,
             ),
             Strategy::Direct
         );

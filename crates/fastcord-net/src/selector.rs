@@ -18,7 +18,7 @@ use crate::tls::Strategy;
 use crate::{NetworkError, Role};
 
 pub const CATALOG_VERSION: u32 = crate::tls::CATALOG_VERSION;
-pub const TLS_PROFILE_VERSION: u32 = 2;
+pub const TLS_PROFILE_VERSION: u32 = 3;
 pub const MAX_TLS_PROBES: u8 = 6;
 pub const MAX_CAMPAIGN_DIALS: u8 = 12;
 pub const MAX_ROLLING_DIALS: usize = 24;
@@ -56,7 +56,20 @@ pub enum AddressFamily {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TlsProfile {
     Http,
+    HttpWithoutSni,
     WebSocket,
+    /// Auto's main/voice/stream WebSockets: omit SNI while still verifying the
+    /// certificate against the requested DNS name. No record/packet shaping.
+    DiscordWebSocketWithoutSni,
+}
+
+impl TlsProfile {
+    pub(crate) const fn omits_sni(self) -> bool {
+        matches!(
+            self,
+            Self::HttpWithoutSni | Self::DiscordWebSocketWithoutSni
+        )
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -456,7 +469,9 @@ impl Controller {
             .confirmations
             .iter()
             .filter(|candidate| {
-                candidate.target.family == target.family && fresh(candidate, preference_lifetime())
+                candidate.target.family == target.family
+                    && candidate.target.profile.omits_sni() == target.profile.omits_sni()
+                    && fresh(candidate, preference_lifetime())
             })
             .max_by_key(|candidate| candidate.verified_at_ms)
             .map(|candidate| candidate.strategy)
@@ -875,6 +890,52 @@ mod tests {
         assert_eq!(controller.strategy_for(&ipv6), None);
         controller.network_changed();
         assert_eq!(controller.strategy_for(&target()), None);
+    }
+
+    #[tokio::test]
+    async fn no_sni_confirmations_do_not_change_sni_service_preferences() {
+        for (source_profile, other_profile) in [
+            (TlsProfile::DiscordWebSocketWithoutSni, TlsProfile::Http),
+            (TlsProfile::Http, TlsProfile::DiscordWebSocketWithoutSni),
+            (TlsProfile::HttpWithoutSni, TlsProfile::Http),
+            (TlsProfile::Http, TlsProfile::HttpWithoutSni),
+        ] {
+            let controller = Controller::new();
+            let mut source = target();
+            source.profile = source_profile;
+            let mut probes = 0;
+            let candidate = controller
+                .diagnose_plan(
+                    source.clone(),
+                    NetworkError::TlsTimeout,
+                    &[Strategy::Direct],
+                    |_| {
+                        probes += 1;
+                        async {
+                            ProbeOutcome {
+                                result: Ok(()),
+                                sent_bytes: 300,
+                                received_bytes: 1000,
+                            }
+                        }
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(probes, 2);
+            assert_eq!(candidate.strategy, Strategy::Direct);
+            assert_eq!(controller.strategy_for(&source), Some(Strategy::Direct));
+            let other = DiagnosticTarget::new(
+                "discord.com",
+                443,
+                Role::Rest,
+                AddressFamily::V4,
+                other_profile,
+            )
+            .unwrap();
+            assert_eq!(controller.strategy_for(&other), None);
+        }
     }
 
     #[tokio::test]

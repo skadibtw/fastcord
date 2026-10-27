@@ -1,8 +1,14 @@
-//! Optional, explicitly elevated WinDivert prototype. Capture is narrowed by
-//! destination and all 256 ClientHello-random bits; no broad port/host filter.
+//! Optional, explicitly elevated WinDivert recovery. TLS capture is narrowed
+//! by destination and all 256 ClientHello-random bits; UDP capture by the exact
+//! canonical discovery and call SSRC. No broad port/host filter.
 #![allow(unsafe_code)]
 
+mod udp;
+pub(super) use udp::serve as serve_udp;
+
 use std::ffi::{CString, c_void};
+#[cfg(debug_assertions)]
+use std::io::Write;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -182,6 +188,10 @@ pub(super) fn serve(
     strategy: fastcord_net::tls::Strategy,
     armed: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<usize> {
+    timed(|state| recover(state, peer, original, fake, strategy, armed))
+}
+
+fn timed(run: impl FnOnce(&State) -> io::Result<usize>) -> io::Result<usize> {
     let api = API.get_or_init(load).clone().map_err(io::Error::other)?;
     let state = Arc::new(State {
         api,
@@ -203,7 +213,7 @@ pub(super) fn serve(
                 timer.cancel();
             }
         })?;
-    let result = recover(&state, peer, original, fake, strategy, armed);
+    let result = run(&state);
     *state.done.lock().unwrap_or_else(|p| p.into_inner()) = true;
     state.wake.notify_all();
     let _ = watchdog.join();
@@ -298,7 +308,7 @@ fn recover(
         ));
     }
     #[cfg(debug_assertions)]
-    println!("Scoped packet filter armed.");
+    let _ = writeln!(std::io::stderr(), "Scoped packet filter armed.");
     {
         let mut active = state.handle.lock().unwrap_or_else(|p| p.into_inner());
         *active = Some(handle);
@@ -353,7 +363,10 @@ fn recover(
         let physical = unsafe { GetIfEntry2(&mut row) }.is_ok()
             && row.InterfaceAndOperStatusFlags._bitfield & 1 != 0;
         #[cfg(debug_assertions)]
-        println!("Matching ClientHello captured; physical egress={physical}");
+        let _ = writeln!(
+            std::io::stderr(),
+            "Matching ClientHello captured; physical egress={physical}"
+        );
         if !physical {
             state.send(raw, &address, false)?;
             continue;

@@ -1,11 +1,20 @@
 //! Voice, video, audio settings, shortcuts, desktop integration and connection state.
 
 pub const ENTRIES: &[(&str, &str)] = &[
+    ("Waiting for voice keys…", "Ожидание ключей голоса…"),
+    (
+        "Voice transport connected; waiting for encryption keys. Click to open the call",
+        "Голосовой транспорт подключён; ожидаются ключи шифрования. Нажмите, чтобы открыть звонок",
+    ),
     // Connection state (gateway.rs).
     ("Connecting to Discord…", "Подключение к Discord…"),
     (
         "Connecting to Discord… (attempt {})",
         "Подключение к Discord… (попытка {})",
+    ),
+    (
+        "Connected; waiting for Discord’s greeting…",
+        "Соединение установлено, ожидается ответ шлюза Discord…",
     ),
     ("Connected; signing in…", "Соединение установлено, вход…"),
     (
@@ -34,6 +43,10 @@ pub const ENTRIES: &[(&str, &str)] = &[
     (
         "Discord did not greet the connection",
         "Discord не ответил на подключение",
+    ),
+    (
+        "Discord did not finish starting the session",
+        "Discord не завершил запуск сеанса",
     ),
     ("unreadable data", "нечитаемые данные"),
     ("session expired", "сеанс истёк"),

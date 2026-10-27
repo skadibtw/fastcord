@@ -80,12 +80,6 @@ Windows offline evidence, 2026-10-24:
 - A shared-factory fixture exercises all nine HTTP roles and four WS roles:
   exactly 13 CONNECT requests reach the configured proxy, origin-token/private-
   bridge credentials never enter upstream proxy headers, and probe dials stay zero.
-- Trust (#131): production configs verify with the OS trust store
-  (`rustls-platform-verifier`, ring provider; embedded webpki roots only if it
-  cannot start). Offline tests: an untrusted self-signed server is rejected and
-  the ClientHello extension set, cipher suites and length equal the
-  embedded-roots config's. Manual: with an enterprise root installed in the OS,
-  an HTTPS proxy signed by it connects.
 - Actual HTTPS-proxy TLS rejects an untrusted proxy certificate. Trusted local
   fixture TLS carries separately verified origin TLS and h2 ALPN. Real reqwest
   HTTP/2, uploaded PUT bytes and a non-followed 302 cross the private bridge and
@@ -467,7 +461,7 @@ One fresh production NetworkContext, Auto, no proxy or packet helper:
 | next login-role `GET /api/v9/gateway` | HTTP 200, 591 ms |
 | REST-role `GET /api/v9/gateway` | HTTP 200, 557 ms |
 | credential-free default CDN avatar | HTTP 200, 853 ms |
-| five separate Gateway TLS connections | all succeeded, 746�832 ms |
+| five separate Gateway TLS connections | all succeeded, 746–832 ms |
 
 The campaign reserved 8 of the unchanged 24 rolling dials; the later services
 used its confirmation without another campaign. The harness used production
@@ -504,6 +498,313 @@ build directory. Formatting and the production network-boundary audit passed.
 The Windows app builds, with the existing bundled-libopus MSVC runtime linker
 warnings; no audio/linker change is included in this fix. Authenticated READY,
 voice UDP and a VPN-off run remain unverified for this follow-up.
+
+## Gateway greeting follow-up (2026-10-26, #218)
+
+The alt-account app accepted login but stayed empty. A single-connection
+diagnostic reached a verified HTTP 101 Upgrade, then timed out waiting for
+HELLO; it never sent a Gateway Identify. This distinguishes API/TLS reachability
+from a usable Gateway. Raw TLS reads and the upstream WebSocket client reproduced
+the missing frame. Existing unprivileged byedpi presets, SNI fragmentation plus
+those presets, Ethernet source binding, smaller receive buffers, delayed TCP
+writes after TLS and TLS 1.2 did not restore a greeting in these trials.
+
+With SNI disabled in rustls, while retaining the original DNS ServerName and
+the ordinary certificate verifier, all five current Gateway A records returned
+a valid opcode-10 HELLO with zlib-stream through fastcord-ws. No IP is pinned.
+The final production NetworkContext in Auto then received two consecutive valid
+HELLOs and recovered the anonymous REST GET to HTTP 200 in the same process.
+These checks ran from the exact excluded fastcord.exe path, without account
+storage, Identify, proxy, helper or UAC. The user left Throne enabled and stated
+that fastcord is excluded from it; no VPN-off claim is made.
+
+The WIP TLS profile v3 applies DiscordWebSocketWithoutSni to Auto's main,
+voice and stream WebSockets, and HttpWithoutSni to REST/login/profile HTTP.
+HTTP retains h2/http/1.1 ALPN. These profiles use Direct, without record shaping
+or a packet helper. Off/Proxy, CDN/upload and remote-auth retain SNI. The profile and its bounded TLS-only probes use the same
+configuration; cross-service shape preferences cannot cross the SNI policy.
+Offline real-rustls tests verify an absent wire SNI, successful application
+bytes, rejection of a trusted certificate for the wrong DNS name and rejection
+of an untrusted chain. There is no certificate exception or DNS substitution.
+
+Startup also has a separate 30-second READY/RESUMED deadline, unaffected by
+heartbeat ACKs and using the existing retry/Identify limits. The UI distinguishes
+waiting for HELLO from sending Identify, and keeps failure/reconnect banners
+visible on Friends and message-request panels. Deterministic paused-clock
+Identify/Resume tests cover the startup bound. App/discord/net regression tests,
+strict Clippy and the production constructor audit pass. Windows builds retain
+the existing bundled-libopus runtime linker warnings.
+
+Authenticated READY and voice/media acceptance are recorded separately below
+when exercised; the anonymous greeting alone does not establish either.
+
+### Current acceptance result: NOT complete
+
+The authorized alt was explicitly identified by the user before the final
+checks. A bounded standalone diagnostic used its existing native credential
+entry only in memory, verified the returned current-user ID, and printed no
+credential, account ID, response body or protected payload. Three isolated
+one-Identify tests received READY: bundled properties, minimal properties and
+native OS/locale/installation properties with bundled versions. Live and bundled
+public versions were identical (host 1.0.9265, native 96160, web 649389), so a
+version mismatch was not established. Anonymous no-SNI WebSockets also returned
+Pong and a protocol response after a >1 KiB outbound frame. A five-request
+HTTP/2 trial returned four complete HTTP 200 responses, then one timeout; this
+is not a sustained-transport acceptance claim.
+
+The GUI still repeatedly receives HELLO and sends Identify without reaching
+READY. One earlier GUI session reached READY/RESUMED, but later runs did not
+reproduce it reliably. Capping outbound TLS records at 512 bytes and moving
+socket reads ahead of UI watch notifications did not fix it; both experiments
+were reverted. The original read/control ordering remains. This difference
+between the standalone SDK and GUI startup is unresolved.
+
+Voice logging showed only audio-device startup followed by repeated voice
+WebSocket connecting and Network closure, not UDP discovery or a connected
+media transport. The former green call bar was therefore false evidence; it
+now requires the media driver's Connected state. Live UDP discovery, ping,
+AEAD/DAVE media and bidirectional audio/share are NOT accepted. No new UDP
+bypass is shipped or enabled. The previously disabled zero-prelude experiment
+remains disabled. Synthetic QUIC/STUN candidates exist only in ignored local
+diagnostic artifacts, not the application or acceptance evidence.
+
+The recorded investigation reached the project's 20-Identify/24-hour limit
+(1 + 4 + 3 + 6 + 3 GUI attempts and three one-attempt SDK checks). All live GUI
+processes were closed; no further authenticated test, quota reset or driver
+recreation is used to evade it. The working-tree changes remain uncommitted
+because GUI/UDP acceptance is incomplete. No UAC, driver, external proxy or VPN
+configuration change was performed.
+
+The debug-only --login-check now exercises Auto directly from its existing
+bounded private stdin input; it never starts the packet helper or asks for
+UAC. It still prints categorical validation/READY results only. Do not put a
+token in command arguments, files, chat, fixtures or output.
+
+Final offline verification after reverting the unsuccessful experiments and
+cleaning only the app/discord/net Cargo artifacts: strict Clippy passed;
+app 860, discord 688, media 185 and net 102 tests passed (1,835 total, 14 existing
+ignored gates). Formatting, diff whitespace and the production constructor
+audit passed. The normal GUI executable was rebuilt with incremental compilation
+disabled. Its credential-free --network-check returned Off: TcpTimeout and
+Auto: HTTP 200 / ServiceReachable with zero TLS-probe dials, before account
+storage or instance setup. No additional authenticated attempt was made.
+
+Mute/deafen controls remain usable while a call is Connecting, so correcting
+the green status does not prevent muting before the media keys become ready.
+The standalone native-credential diagnostic executable was removed; its source
+and categorical reports remain only in ignored local test artifacts. The
+remaining blocker is GUI startup compared with the working isolated SDK path;
+there is no evidence yet to label a new UDP prelude as an effective bypass.
+
+### Credential-free recheck (2026-10-26, evening)
+
+The unchanged final debug executable was checked again at the user's request.
+`--network-check` returned Off: TcpTimeout and Auto: HTTP 200 /
+ServiceReachable, with zero TLS-probe dials. Its separate `--network-preview`
+window was then switched to Automatic and Check connection was clicked; the
+window displayed "Anonymous Discord API check passed (HTTP 200)" and no packet
+helper. This preview starts before account restoration and does not access
+credentials. No authenticated Gateway, voice connection or new Identify was
+started because the recorded 20-Identify rolling window has not expired. These
+results confirm anonymous API reachability only; GUI sign-in and UDP remain
+unaccepted.
+
+### Explicitly authorized alt-account recheck (2026-10-26, 19:59–20:03 MSK)
+
+The user explicitly overrode the local rolling-Identify testing restriction
+and requested a live test on the previously approved alt. The account shown in
+the GUI was mochi. No source limit or ledger was changed. The unchanged final
+debug executable sent one main-Gateway Identify and received READY; server
+navigation, channels and a loaded message history were visible. The main
+Gateway remained connected throughout this approximately four-minute test,
+without a reconnect or a second main-Gateway Identify. This supersedes the
+earlier result that GUI startup could not be reproduced, but does not establish
+reliable repeated sign-in or long-session acceptance.
+
+The first voice target reached voice Identify and discovery but closed with
+UdpUnreachable. A second target, empty before the test join, received a valid
+UDP discovery response and Session Description: the log advanced through
+Discovering, Negotiating and waiting for end-to-end keys. The microphone was
+muted during the second test. It never reached Connected; the voice driver
+reconnected approximately every 35 seconds and repeated the same stages. The
+categorical log does not establish the cause of those reconnects, nor whether
+waiting for a group while alone explains the pending DAVE state. No bidirectional
+media or effective UDP-bypass payload is accepted from this result.
+
+The test left voice and closed its process at the end. Reports contain frame
+sizes and categorical states only; no tokens, keys, endpoints or message bodies
+were logged. There was no helper, UAC, external proxy or VPN configuration change.
+The live findings narrow the remaining problem to unreliable voice/media;
+the built-in UDP bypass remains unfinished.
+
+### Isolated same-executable recheck (2026-10-26)
+
+With the user's continued authorization, two bounded tests ran inside the same
+debug executable excluded from the VPN. Each validated the approved saved alt
+in memory and made one Gateway Identify, with no credentials in output. The
+ordinary app identity reached HELLO but timed out waiting for READY; the bundled
+identity reached HELLO but the connection ended with a network failure. Neither
+test joined a channel or reached the voice transport. The comparison therefore
+does not establish that changing identity fixes startup, and it provides no new
+evidence about UDP or DAVE. The temporary test entry point was removed after
+the runs. No proxy, UAC, helper, or VPN configuration change was used.
+
+### TLS version and voice recheck (2026-10-27)
+
+Further bounded checks showed that, after Identify, a heartbeat ACK arrived and
+part of the large Gateway response was read, but the remaining bytes never
+arrived before the connection closed. Disabling zlib-stream, disabling the
+WebSocket compression offer, sending an early heartbeat, using a shorter
+Identify and choosing another DNS answer did not complete READY. A physical
+source address and per-socket interface selection also did not complete it.
+These observations do not identify the network device responsible.
+
+With the same Auto no-SNI profile restricted to TLS 1.2, one authorized mochi
+GUI session received READY. In an initially empty guild voice channel it
+completed voice WebSocket negotiation, UDP discovery and Session Description,
+sent a DAVE key package, received the external sender and continued exchanging
+heartbeats. The microphone was muted. The session remained in the key-waiting
+state while alone; no bidirectional audio or blocked-UDP bypass was verified.
+This is one live success, not a reliability measurement. The experimental
+QUIC prelude was enabled only in the diagnostic build, but this call's initial
+direct discovery succeeded, so that prelude was not exercised.
+
+**Correction:** the user subsequently identified that this session was routed
+through their VPN profile. Therefore the READY and voice result above, including
+the later DAVE group and audio packets, is not evidence of direct blocked-network
+recovery. A new test must bind all app TCP and UDP traffic to the physical
+interface to distinguish it from the VPN route.
+
+The production Auto session profile now tries TLS 1.2 with the same hostname
+and certificate verification, and may retry once with default TLS versions
+only after an eligible pre-application handshake failure. Local TLS fixtures
+cover TLS 1.2, a TLS 1.3-only peer, hostname verification and retry categories.
+The temporary socket/interface, compression and packet-candidate experiments
+are not production settings. No VPN, system route, driver or proxy was changed.
+
+### Physical-interface retest (2026-10-27)
+
+The diagnostic executable bound its TCP sockets to the physical IPv4 address
+and interface while the VPN remained enabled. A later audit found that its
+UDP test hook was installed in the loopback-only constructor instead of the
+production UDP constructor. Therefore every voice observation in this section
+may have used the VPN and is not evidence of direct UDP. The test did not
+change the system route. On one run the Gateway
+reached READY after rotating through three current DNS answers; ordinary UDP
+discovery succeeded immediately and voice reached Session Description, but
+the UDP path subsequently failed its liveness check while the client waited
+for DAVE keys. No direct media exchange was demonstrated in that run.
+
+On the next run the Gateway reached READY on the first answer, but voice
+discovery failed after the ordinary round and both experimental QUIC-prelude
+rounds. The second participant joined while discovery was in progress. These
+observations do not establish an effective UDP bypass or bidirectional voice,
+and do not establish why the physical path stopped responding. The fake QUIC
+candidate's success must not be inferred from the earlier direct round.
+
+A third physical-interface TCP run reached READY after three DNS candidates. Its
+ordinary UDP discovery succeeded, and after the user joined the voice channel
+the DAVE group reached Connected. The user reported no audible connection;
+the client then detected UDP liveness failure. A later rejoin failed all UDP
+discovery rounds even with the QUIC prelude repeated before each request. That
+diagnostic-only variation has not demonstrated an effective bypass. The diagnostic
+campaign also exposed a client bug: after a selected media path died, its
+experimental discovery budget prevented the ordinary direct reconnection. The
+driver now switches to the existing direct-only reconnect policy in that case;
+this fix does not prove that the blocked path can be recovered.
+
+A corrected later run applied the physical interface and source address in the
+production UDP socket constructor. Windows listed each of the three voice UDP
+sockets on that physical IPv4 address, and interface selection succeeded for
+each socket. Gateway reached READY, but none of the direct or two QUIC-prelude
+discovery rounds received a valid response. Independent credential-free UDP
+checks on this interface also timed out for a public STUN server and a public
+DNS resolver; a DNS request to the LAN gateway also timed out, but the gateway
+was not established to provide DNS. These observations do not identify the
+device or policy dropping the datagrams and do not prove that all UDP is
+blocked. No live direct voice success is claimed.
+
+Repeating the QUIC prelude before every discovery retry on a later run with
+the corrected physical UDP binding also produced UdpUnreachable. This variant
+was diagnostic-only and has been removed. The user could not disable their
+VPN without interrupting this session, so these tests do not distinguish the
+VPN's system policy from an upstream network restriction.
+As a control, the same UDP DNS query received a response through the system's
+default route while the VPN was enabled; the STUN query still timed out there.
+This confirms that the DNS test server was responsive on the default route,
+but does not locate the cause of the Ethernet-bound timeout.
+
+### Route-correlated GUI voice check (2026-10-27, afternoon)
+
+The user explicitly delegated GUI operation to GPT-6.1 Terra while the primary
+agent changed and tested the code. Throne's actual connection IDs were matched
+between its fastcord process records and outbound categories, with only those
+categories exposed in the report. Earlier entries included direct traffic,
+whereas the first new run used the SOCKS outbound. The user then selected a
+direct-routing profile; the next test's TCP and UDP entries were confirmed as
+outbound/direct. No VPN configuration was changed by the agents.
+
+The GUI initially failed before media startup because its selected WH-1000XM6
+output was disconnected. Choosing the system-default output resolved that
+separate failure. With the approved mochi alt muted, direct ZDRT only discovery
+failed all three flows even with a 50 ms asynchronous gap after QUIC preludes.
+The initially empty 0_0 channel succeeded on ordinary discovery. After several
+UDP liveness recoveries it established DAVE with the user present, and the
+connection then remained up for several minutes. A voice-WebSocket heartbeat
+failure resumed without replacing the live UDP transport. Throne's associated
+UDP outbound was direct; the counters reached 4,486 received audio RTP packets
+and 1,137 sent after a short, explicitly authorized microphone test. The GUI
+reported about 49 ms ping. The user was not listening during that microphone
+test, so human audibility was not accepted from it. The bounded diagnostic
+process was stopped by its ten-minute test deadline.
+
+These results establish direct media exchange on one channel, not effective
+QUIC preludes or reachability of every Discord voice server. Ordinary Auto
+port recovery is being checked separately from the opt-in prelude experiment.
+
+### zapret2 packet-helper extension (2026-10-27, WIP)
+
+The official zapret2 v1.0.6 archive was fetched and its SHA-256 checked against
+the GitHub release digest. Its MIT notice and unmodified 1200-byte Google QUIC
+fixture are pinned under fastcord-platform/native/zapret2. The existing pinned
+WinDivert helper now accepts only canonical public Discord UDP discovery,
+matches its SSRC and endpoint, skips virtual copies and applies six raw fakes
+at physical egress, optionally followed by exact-preserving IPv4 fragmentation.
+It does not capture RTP/RTCP or accept arbitrary payloads. The standard account
+client remains unprivileged; the user explicitly starts the helper with UAC.
+
+Offline tests cover request/protocol validation, normal RTP bypassing the
+factory, absence of implicit elevation and proxy fallback, caller cancellation,
+first-three-request bounds, and exact UDP reassembly/header checksums including
+an independent RFC 1071 vector. These tests do not establish live effectiveness.
+
+The user reported audible voice in a manual session at 17:24. Route-correlated
+Throne logs showed SOCKS output for that session's TCP and UDP, so this is not
+accepted as direct packet-bypass evidence. The UDP RPC ended with BrokenPipe;
+the helper previously exited on any per-request capture error. It now returns
+the complete operation status and keeps the channel available for subsequent
+flows. A timeout-then-success protocol regression test covers this behavior;
+malformed input still terminates the request. Hidden-child diagnostic writes
+are also best effort, so a missing console cannot panic the helper.
+
+After the user selected direct again, the corrected build was restarted. Its
+parent log confirmed a successfully applied PacketFake TCP operation. Direct
+voice was subsequently checked in the same worktree executable built at 17:35.
+The user relaunched it from Explorer at 17:51, started the helper, and used the
+approved mochi alt. Terra observed the server and channels loaded, followed by
+the green voice-connected state in [ZDRT x CHRV]. Throne connection records at
+17:53 and 17:55 correlated fastcord TCP and UDP with outbound/direct. At 17:55
+the user explicitly confirmed hearing the other participants and being heard.
+The running parent and helper were both present; the call was left running.
+
+This establishes human-confirmed bidirectional voice on that direct route with
+the integrated helper enabled. The Explorer launch did not retain the previous
+stderr redirection or opt-in media counters, so this call does not identify the
+successful UDP variant or prove that raw fakes, rather than ordinary discovery
+and port recovery, were necessary. VPN remained enabled for other applications;
+direct egress is supported by the matched Throne outbound records, not an
+OS-interface inference. Other voice endpoints, reconnect stability, screen
+sharing and a sustained thirty-minute call remain separate acceptance checks.
 
 ### Live check record (#218, 2026-10-27)
 

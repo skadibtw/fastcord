@@ -1,13 +1,14 @@
-//! One local, PID-authenticated pipe. Only public TLS hellos cross this boundary.
+//! One local, PID-authenticated pipe. Only public TLS hellos and token-free
+//! Discord IP-discovery requests cross this boundary.
 //! The ordinary process owns all sockets, credentials and TLS verification.
 #![allow(unsafe_code)]
 
 use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -109,6 +110,7 @@ impl Pipe {
 /// periodic work, network listeners, credential access or account restoration.
 pub struct PacketHelper {
     pipe: Mutex<Option<Pipe>>,
+    alive: AtomicBool,
     _process: OwnedHandle,
     active: AtomicUsize,
     strategy: AtomicUsize,
@@ -120,14 +122,78 @@ impl std::fmt::Debug for PacketHelper {
     }
 }
 impl PacketHelper {
+    fn request_udp(
+        &self,
+        socket: &UdpSocket,
+        peer: SocketAddr,
+        request: &[u8; 74],
+        variant: u8,
+        canceled: &AtomicBool,
+    ) -> io::Result<usize> {
+        if canceled.load(Ordering::Acquire) {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let mut locked = self.pipe.lock().unwrap_or_else(|p| p.into_inner());
+        if canceled.load(Ordering::Acquire) {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let mut clean_reply = false;
+        let result = (|| {
+            let pipe = locked.as_ref().ok_or_else(error)?;
+            let header = encode_udp(peer, variant)?;
+            pipe.write(&header)?;
+            pipe.write(request)?;
+            let mut armed = [0];
+            pipe.read(&mut armed, 5000)?;
+            if armed != [1] {
+                if armed != [0] {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                let mut code = [0; 4];
+                pipe.read(&mut code, 5000)?;
+                clean_reply = true;
+                return Err(io::Error::from_raw_os_error(i32::from_le_bytes(code)));
+            }
+            if canceled.load(Ordering::Acquire) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            if socket.send_to(request, peer)? != request.len() {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            let mut result = [0; 5];
+            pipe.read(&mut result, 5000)?;
+            if result[0] > 1 {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            clean_reply = true;
+            if result[0] != 1 {
+                return Err(io::Error::from_raw_os_error(i32::from_le_bytes(
+                    result[1..].try_into().map_err(|_| error())?,
+                )));
+            }
+            #[cfg(debug_assertions)]
+            eprintln!("Packet helper applied UDP variant={variant}.");
+            Ok(request.len())
+        })();
+        if result.is_err() && !clean_reply {
+            #[cfg(debug_assertions)]
+            if let Err(error) = &result {
+                eprintln!(
+                    "UDP packet helper failed: kind={:?}; OS={:?}",
+                    error.kind(),
+                    error.raw_os_error()
+                );
+            }
+            self.alive.store(false, Ordering::Release);
+            locked.take();
+        }
+        result
+    }
     /// False once the elevated child or its pipe is gone. The transport then
     /// stops selecting the packet strategy instead of failing every dial with
     /// it for the rest of the process.
     pub fn available(&self) -> bool {
-        self.pipe
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_some()
+        self.alive.load(Ordering::Acquire)
     }
 
     /// Blocking UI-worker operation. Windows presents UAC to the human.
@@ -191,6 +257,7 @@ impl PacketHelper {
         }
         Ok(Arc::new(Self {
             pipe: Mutex::new(Some(pipe)),
+            alive: AtomicBool::new(true),
             _process: process,
             active: AtomicUsize::new(0),
             strategy: AtomicUsize::new(0),
@@ -232,6 +299,7 @@ impl PacketHelper {
             Ok(original.len())
         })();
         if result.is_err() {
+            self.alive.store(false, Ordering::Release);
             #[cfg(debug_assertions)]
             if let Err(e) = &result {
                 eprintln!(
@@ -271,7 +339,75 @@ impl Drop for Pending {
         }
     }
 }
+
+struct PendingUdp {
+    rx: oneshot::Receiver<io::Result<usize>>,
+    canceled: Arc<AtomicBool>,
+    finished: bool,
+}
+impl std::future::Future for PendingUdp {
+    type Output = io::Result<usize>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.rx).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => {
+                self.finished = true;
+                Poll::Ready(result.unwrap_or_else(|_| Err(error())))
+            }
+        }
+    }
+}
+impl Drop for PendingUdp {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.canceled.store(true, Ordering::Release);
+        }
+    }
+}
 impl fastcord_net::tls::FakePrefixFactory for PacketFactory {
+    fn supports_udp_discovery(&self) -> bool {
+        true
+    }
+
+    fn start_udp_discovery(
+        &self,
+        socket: UdpSocket,
+        server: SocketAddr,
+        request: [u8; 74],
+        variant: u8,
+    ) -> io::Result<fastcord_net::tls::PrefixFuture> {
+        encode_udp(server, variant)?;
+        if !fastcord_net::udp::is_discovery_request(&request) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.0
+            .active
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < 4).then_some(n + 1)
+            })
+            .map_err(|_| io::ErrorKind::WouldBlock)?;
+        let owner = self.0.clone();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_canceled = canceled.clone();
+        let (tx, rx) = oneshot::channel();
+        if let Err(error) = std::thread::Builder::new()
+            .name("fastcord-udp-packet-rpc".into())
+            .spawn(move || {
+                let result =
+                    owner.request_udp(&socket, server, &request, variant, &worker_canceled);
+                owner.active.fetch_sub(1, Ordering::Relaxed);
+                let _ = tx.send(result);
+            })
+        {
+            self.0.active.fetch_sub(1, Ordering::Relaxed);
+            return Err(error);
+        }
+        Ok(Box::pin(PendingUdp {
+            rx,
+            canceled,
+            finished: false,
+        }))
+    }
     fn available(&self) -> bool {
         self.0.available()
     }
@@ -326,6 +462,53 @@ impl fastcord_net::tls::FakePrefixFactory for PacketFactory {
             finished: false,
         }))
     }
+}
+
+fn encode_udp(peer: SocketAddr, variant: u8) -> io::Result<[u8; 27]> {
+    if peer.port() == 0
+        || !fastcord_net::is_public_destination(peer.ip())
+        || !(1..=3).contains(&variant)
+    {
+        return Err(error());
+    }
+    let mut header = [0; 27];
+    header[..4].copy_from_slice(b"FCU1");
+    match peer.ip() {
+        IpAddr::V4(ip) => {
+            header[4] = 4;
+            header[5..9].copy_from_slice(&ip.octets());
+        }
+        IpAddr::V6(ip) => {
+            header[4] = 6;
+            header[5..21].copy_from_slice(&ip.octets());
+        }
+    }
+    header[21..23].copy_from_slice(&peer.port().to_be_bytes());
+    header[23..25].copy_from_slice(&74u16.to_be_bytes());
+    header[25..27].copy_from_slice(&u16::from(variant).to_be_bytes());
+    Ok(header)
+}
+
+fn decode_udp(header: &[u8; 27]) -> io::Result<(SocketAddr, u8)> {
+    if &header[..4] != b"FCU1" {
+        return Err(error());
+    }
+    let ip = match header[4] {
+        4 if header[9..21] == [0; 12] => IpAddr::V4(Ipv4Addr::from(
+            <[u8; 4]>::try_from(&header[5..9]).map_err(|_| error())?,
+        )),
+        6 => IpAddr::V6(Ipv6Addr::from(
+            <[u8; 16]>::try_from(&header[5..21]).map_err(|_| error())?,
+        )),
+        _ => return Err(error()),
+    };
+    let peer = SocketAddr::new(ip, u16::from_be_bytes([header[21], header[22]]));
+    let variant =
+        u8::try_from(u16::from_be_bytes([header[25], header[26]])).map_err(|_| error())?;
+    if encode_udp(peer, variant)? != *header {
+        return Err(error());
+    }
+    Ok((peer, variant))
 }
 
 fn encode(
@@ -406,6 +589,42 @@ fn validate(original: &[u8], fake: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+trait DiscoveryPipe {
+    fn read_request(&self, bytes: &mut [u8]) -> io::Result<()>;
+    fn write_reply(&self, bytes: &[u8]) -> io::Result<()>;
+}
+impl DiscoveryPipe for Pipe {
+    fn read_request(&self, bytes: &mut [u8]) -> io::Result<()> {
+        self.read(bytes, 5000)
+    }
+    fn write_reply(&self, bytes: &[u8]) -> io::Result<()> {
+        self.write(bytes)
+    }
+}
+
+fn serve_udp_request(
+    pipe: &impl DiscoveryPipe,
+    header: &[u8; 27],
+    recover: impl FnOnce(
+        SocketAddr,
+        &[u8; 74],
+        u8,
+        &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<usize>,
+) -> io::Result<()> {
+    let (peer, variant) = decode_udp(header)?;
+    let mut request = [0; 74];
+    pipe.read_request(&mut request)?;
+    if !fastcord_net::udp::is_discovery_request(&request) {
+        return Err(error());
+    }
+    let mut armed = || pipe.write_reply(&[1]);
+    let result = recover(peer, &request, variant, &mut armed);
+    // A capture timeout is an operation result. Keeping the pipe open lets the
+    // caller consume its complete reply and the next flow reuse the helper.
+    pipe.write_reply(&status(&result))
+}
+
 /// Must run before normal application setup, even on malformed arguments.
 pub fn entry(suffix: &str, parent: u32) -> io::Result<()> {
     let prefix = format!("{parent}-");
@@ -466,6 +685,12 @@ pub fn entry(suffix: &str, parent: u32) -> io::Result<()> {
     loop {
         let mut header = [0; 27];
         pipe.read(&mut header, INFINITE)?;
+        if &header[..4] == b"FCU1" {
+            serve_udp_request(&pipe, &header, |peer, request, variant, armed| {
+                super::packet::serve_udp(peer, request, variant, armed)
+            })?;
+            continue;
+        }
         let (peer, a, b, strategy) = decode(&header)?;
         let mut original = vec![0; a];
         let mut fake = vec![0; b];
@@ -493,6 +718,98 @@ use std::os::windows::ffi::OsStringExt;
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct FakeDiscoveryPipe {
+        input: std::cell::RefCell<std::io::Cursor<Vec<u8>>>,
+        output: std::cell::RefCell<Vec<u8>>,
+    }
+    impl DiscoveryPipe for FakeDiscoveryPipe {
+        fn read_request(&self, bytes: &mut [u8]) -> io::Result<()> {
+            std::io::Read::read_exact(&mut *self.input.borrow_mut(), bytes)
+        }
+        fn write_reply(&self, bytes: &[u8]) -> io::Result<()> {
+            self.output.borrow_mut().extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+    #[test]
+    fn a_udp_capture_timeout_keeps_the_protocol_ready_for_the_next_request() {
+        let header = encode_udp("162.159.128.233:50000".parse().unwrap(), 1).unwrap();
+        let mut request = [0; 74];
+        request[..4].copy_from_slice(&[0, 1, 0, 70]);
+        let pipe = FakeDiscoveryPipe {
+            input: std::cell::RefCell::new(std::io::Cursor::new([request, request].concat())),
+            output: std::cell::RefCell::new(Vec::new()),
+        };
+        serve_udp_request(&pipe, &header, |_, _, _, armed| {
+            armed()?;
+            Err(io::ErrorKind::TimedOut.into())
+        })
+        .unwrap();
+        serve_udp_request(&pipe, &header, |_, _, _, armed| {
+            armed()?;
+            Ok(74)
+        })
+        .unwrap();
+        let failed: io::Result<usize> = Err(io::ErrorKind::TimedOut.into());
+        let expected = [&[1][..], &status(&failed), &[1][..], &status(&Ok(74))].concat();
+        assert_eq!(*pipe.output.borrow(), expected);
+    }
+    #[test]
+    fn malformed_udp_body_never_arms_a_packet_filter() {
+        let header = encode_udp("162.159.128.233:50000".parse().unwrap(), 1).unwrap();
+        let pipe = FakeDiscoveryPipe {
+            input: std::cell::RefCell::new(std::io::Cursor::new(vec![0x80; 74])),
+            output: std::cell::RefCell::new(Vec::new()),
+        };
+        let called = std::cell::Cell::new(false);
+        assert!(
+            serve_udp_request(&pipe, &header, |_, _, _, _| {
+                called.set(true);
+                Ok(74)
+            })
+            .is_err()
+        );
+        assert!(!called.get());
+        assert!(pipe.output.borrow().is_empty());
+    }
+    #[test]
+    fn udp_protocol_accepts_only_public_bounded_discovery_profiles() {
+        for peer in ["162.159.128.233:50000", "[2606:4700::1111]:19305"] {
+            let peer = peer.parse().unwrap();
+            for variant in 1..=3 {
+                let header = encode_udp(peer, variant).unwrap();
+                assert_eq!(decode_udp(&header).unwrap(), (peer, variant));
+                assert!(decode(&header).is_err());
+                for index in [0, 4, 23, 24, 25, 26] {
+                    let mut bad = header;
+                    bad[index] = 255;
+                    assert!(decode_udp(&bad).is_err());
+                }
+            }
+        }
+        for peer in [
+            "127.0.0.1:50000",
+            "10.0.0.1:50000",
+            "162.159.128.233:0",
+            "[::1]:19305",
+        ] {
+            assert!(encode_udp(peer.parse().unwrap(), 1).is_err());
+        }
+        for variant in [0, 4, 255] {
+            assert!(encode_udp("162.159.128.233:50000".parse().unwrap(), variant).is_err());
+        }
+    }
+    #[test]
+    fn canceled_udp_work_cannot_send_a_late_discovery() {
+        let (_tx, rx) = oneshot::channel();
+        let canceled = Arc::new(AtomicBool::new(false));
+        drop(PendingUdp {
+            rx,
+            canceled: canceled.clone(),
+            finished: false,
+        });
+        assert!(canceled.load(Ordering::Acquire));
+    }
     #[test]
     fn protocol_refuses_oversize_private_and_wrong_port() {
         let public: SocketAddr = "162.159.128.233:443".parse().unwrap();

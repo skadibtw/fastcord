@@ -18,6 +18,36 @@ use crate::video::VideoCodec;
 const DAVE_PROTOCOL_VERSION: u16 = 1;
 const OPUS_SILENCE: &[u8] = &[0xF8, 0xFF, 0xFE];
 
+// MLS vectors use at most four length bytes. Reject the reserved eight-byte
+// encoding before tls_codec, whose debug build asserts on that network input.
+fn take_mls_vector(input: &mut &[u8]) -> Option<()> {
+    let first = *input.first()?;
+    let length_bytes = match first >> 6 {
+        0 => 1,
+        1 => 2,
+        2 => 4,
+        _ => return None,
+    };
+    let prefix = input.get(..length_bytes)?;
+    let mut length = usize::from(first & 0x3f);
+    for byte in &prefix[1..] {
+        length = (length << 8) | usize::from(*byte);
+    }
+    if (length_bytes == 2 && length < 64) || (length_bytes == 4 && length < 16_384) {
+        return None;
+    }
+    *input = input.get(length_bytes.checked_add(length)?..)?;
+    Some(())
+}
+
+fn valid_external_sender(mut input: &[u8]) -> bool {
+    if take_mls_vector(&mut input).is_none() || !input.starts_with(&[0, 1]) {
+        return false;
+    }
+    input = &input[2..];
+    take_mls_vector(&mut input).is_some() && input.is_empty()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DaveError {
     UnsupportedProtocolVersion,
@@ -127,7 +157,7 @@ impl DaveSession {
     }
 
     pub(crate) fn set_external_sender(&mut self, sender: &[u8]) -> Result<(), DaveError> {
-        if sender.is_empty() {
+        if !valid_external_sender(sender) {
             return Err(DaveError::InvalidInput);
         }
         if self.external_sender.as_deref() == Some(sender) {
@@ -555,6 +585,27 @@ mod tests {
     use tls_codec::{DeserializeBytes, Serialize, VLBytes};
 
     const SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256;
+
+    #[test]
+    fn external_sender_rejects_reserved_and_truncated_vector_lengths() {
+        let mut session = DaveSession::new(1, 1, 2).unwrap();
+        for first in 0xc0..=0xff {
+            assert_eq!(
+                session.set_external_sender(&[first]),
+                Err(DaveError::InvalidInput)
+            );
+            assert_eq!(
+                session.set_external_sender(&[0, 0, 1, first]),
+                Err(DaveError::InvalidInput)
+            );
+        }
+        for bytes in [&[][..], &[0x40][..], &[0x80, 0, 0][..], &[0, 0, 1][..]] {
+            assert_eq!(
+                session.set_external_sender(bytes),
+                Err(DaveError::InvalidInput)
+            );
+        }
+    }
 
     fn key_package(session: &mut DaveSession, provider: &OpenMlsRustCrypto) -> KeyPackage {
         KeyPackageIn::tls_deserialize_exact_bytes(&session.create_key_package().unwrap())

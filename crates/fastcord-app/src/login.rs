@@ -72,7 +72,7 @@ pub enum LoginError {
     WorkerStopped,
 }
 
-const BLOCKED_HINT: &str = "This network may be blocking Discord. Open Network recovery and start the packet helper (Windows, administrator approval), or use a proxy or VPN.";
+const BLOCKED_HINT: &str = "This network may be blocking Discord. Open Network recovery, choose Automatic and check the connection, then try signing in again.";
 
 impl LoginError {
     /// Only typed categories enter the login notice; raw transport errors may
@@ -240,10 +240,22 @@ pub async fn validate(
         client_properties(&network).await,
     )
     .map_err(LoginError::Rest)?;
-    let user: User = client
-        .get("/users/@me", Priority::UserRead)
-        .await
-        .map_err(LoginError::Rest)?;
+    let mut result = client.get::<User>("/users/@me", Priority::UserRead).await;
+    // Login owns this one idempotent read. A cold Auto context must finish
+    // its bounded TLS recovery without requiring a separate anonymous Check
+    // click. Never retry a refusal/challenge or an account write here.
+    if network.mode() == fastcord_net::settings::Mode::Auto
+        && matches!(
+            result,
+            Err(RestError::Retryable(RetryableFailure::Network(_)))
+        )
+        && matches!(network.controller().service_status(fastcord_net::Role::Rest),
+            fastcord_net::selector::ServiceStatus::Failed(error) if error.eligible_for_selection())
+    {
+        network.wait_for_recovery().await;
+        result = client.get::<User>("/users/@me", Priority::UserRead).await;
+    }
+    let user = result.map_err(LoginError::Rest)?;
     check_account(&user, expected_account)?;
     Ok(Arc::new(Session {
         user,

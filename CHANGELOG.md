@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+- Discord Auto connections omit TLS SNI with normal certificate verification and bounded handshake fallback. Startup now times out visibly if READY never arrives; the call turns green only after UDP and DAVE are ready (#218).
+- Auto voice discovery tries up to three distinct local ports within one bounded join. The explicitly started Windows packet helper adds scoped zapret2 QUIC fakes and original-preserving IPv4 discovery fragmentation; encrypted media remains untouched. Windows archives include the upstream MIT notice and provenance (#218).
+- Voice retains an early DAVE external-sender package until Session Description and validates its encoding. Helper operation timeouts no longer terminate its private control channel (#218).
+- The approved alt completed human-confirmed bidirectional voice with direct TCP and UDP egress and the helper enabled. Individual UDP strategy effectiveness, other endpoints and sustained-call acceptance remain separate checks; see NETWORK_TESTING (#218).
+
 ## 0.1.0-alpha.8 — 2026-10-27
 
 ### Added

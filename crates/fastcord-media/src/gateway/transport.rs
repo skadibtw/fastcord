@@ -95,6 +95,15 @@ pub(crate) trait UdpLink: Send + Sync + 'static {
         to: SocketAddr,
     ) -> impl Future<Output = io::Result<()>> + Send;
 
+    fn send_discovery(
+        &self,
+        datagram: &[u8],
+        to: SocketAddr,
+        _variant: u8,
+    ) -> impl Future<Output = io::Result<()>> + Send {
+        self.send_to(datagram, to)
+    }
+
     /// Cancel-safe: dropping the future loses no datagram.
     fn recv_from(
         &self,
@@ -106,6 +115,9 @@ pub(crate) trait Network: Send + Sync + 'static {
     type Udp: UdpLink;
 
     fn experimental_udp(&self) -> bool {
+        false
+    }
+    fn udp_port_recovery(&self) -> bool {
         false
     }
     fn relay_configured(&self) -> bool {
@@ -206,7 +218,18 @@ async fn connect_tls(
     let tls = network
         .connect_tls(&host, port, role)
         .await
-        .map_err(|_| ConnectError)?;
+        .map_err(|error| {
+            #[cfg(debug_assertions)]
+            if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                eprintln!("Media WebSocket TLS: role={role:?} error={error:?}");
+            }
+            let _ = error;
+            ConnectError
+        })?;
+    #[cfg(debug_assertions)]
+    if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+        eprintln!("Media WebSocket TLS: role={role:?} verified");
+    }
     let socket = timeout(
         CONNECT_TIMEOUT,
         fastcord_ws::connect(
@@ -239,6 +262,9 @@ impl Network for LiveNetwork {
     fn experimental_udp(&self) -> bool {
         self.0.experimental_udp()
     }
+    fn udp_port_recovery(&self) -> bool {
+        self.0.mode() == fastcord_net::settings::Mode::Auto
+    }
     fn relay_configured(&self) -> bool {
         self.0.mode() == fastcord_net::settings::Mode::Proxy && self.0.media_supported()
     }
@@ -248,6 +274,11 @@ impl Network for LiveNetwork {
     }
 }
 impl UdpLink for fastcord_net::DatagramSocket {
+    async fn send_discovery(&self, datagram: &[u8], to: SocketAddr, variant: u8) -> io::Result<()> {
+        fastcord_net::DatagramSocket::send_discovery(self, datagram, to, variant)
+            .await
+            .map(|_| ())
+    }
     fn is_relay(&self) -> bool {
         self.is_relay()
     }
@@ -272,6 +303,20 @@ impl UdpLink for fastcord_net::DatagramSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_port_recovery_does_not_enable_laboratory_preludes() {
+        use fastcord_net::settings::Mode;
+        for (mode, expected) in [
+            (Mode::Off, false),
+            (Mode::Auto, false),
+            (Mode::Proxy, false),
+        ] {
+            let network = LiveNetwork(fastcord_net::NetworkContext::new(mode));
+            assert_eq!(network.experimental_udp(), expected);
+            assert_eq!(network.udp_port_recovery(), mode == Mode::Auto);
+        }
+    }
 
     #[test]
     fn the_voice_handshake_carries_the_profile_once_it_is_set() {

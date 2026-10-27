@@ -1,6 +1,10 @@
 //! The network page, its notices and the network layer's errors.
 
 pub const ENTRIES: &[(&str, &str)] = &[
+    (
+        "The packet helper stopped. Sign out and restart it to retry packet recovery.",
+        "Пакетный помощник остановился. Выйдите из аккаунта и запустите его снова, чтобы повторить восстановление.",
+    ),
     ("Network", "Сеть"),
     ("Network settings", "Настройки сети"),
     ("API", "API"),
@@ -42,8 +46,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Прокси никогда не обходится. Для голоса и видео нужен SOCKS5 с UDP. Пароль хранится в системном хранилище учётных данных.",
     ),
     (
-        "Voice and video use UDP. The TLS bypass above cannot reach a blocked voice server; only a SOCKS5 proxy with UDP can.",
-        "Голос и видео идут по UDP. Обход TLS выше не достанет заблокированный голосовой сервер; поможет только SOCKS5-прокси с UDP.",
+        "Voice and video use UDP. Automatic mode retries when a voice server does not answer; some networks may still block voice.",
+        "Голос и видео идут по UDP. Автоматический режим повторяет подключение, если голосовой сервер не отвечает; в некоторых сетях голос всё ещё может блокироваться.",
     ),
     (
         "Changes apply to the next connection.",
@@ -113,8 +117,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Восстановление умеет делить TLS ClientHello на несколько записей, а следующим шагом резать последние 30 байт имени сервера на однобайтовые записи с паузой 30 мс, чтобы ни одна отправка не начиналась с границы записи. Байты рукопожатия, проверка сертификата и ALPN не меняются. Это по-прежнему работает по возможности: запись в TCP не гарантирует границ пакетов, а у медиа по UDP свой путь подключения.",
     ),
     (
-        "Optional Windows helper requires UAC once per session. It handles only the public TLS handshake for fastcord connections. The client and account stay unprivileged. Starting it selects Auto.",
-        "Необязательный помощник Windows один раз за сеанс запрашивает UAC. Он обрабатывает только открытое TLS-рукопожатие подключений fastcord; клиент и аккаунт остаются без повышенных прав. Запуск включает автоматический режим.",
+        "Optional Windows helper requires UAC once per session. It handles public TLS handshakes and voice-server discovery for fastcord. The client and account stay unprivileged. Starting it selects Auto.",
+        "Необязательный помощник Windows один раз за сеанс запрашивает UAC. Он обрабатывает открытые TLS-рукопожатия и подключение к голосовому серверу fastcord; клиент и аккаунт остаются без повышенных прав. Запуск включает автоматический режим.",
     ),
     (
         "Proxy mode never falls back to a direct connection. CONNECT proxies carry TCP only: voice, camera and screen sharing cannot join through them. SOCKS5 UDP requires a UDP-capable proxy and a working UDP route to that proxy. It does not carry media over TCP and does not encrypt the client-to-proxy transport. Passwords are saved in native credential storage.",

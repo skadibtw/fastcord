@@ -137,7 +137,15 @@ pub fn view<'a>(
     let rail = rail(snapshot, directs, inbox.is_some(), attachments.avatars);
     let sidebar = sidebar(snapshot, directs, footer, attachments.avatars, speaking);
     let main = match inbox.or(friends.filter(|_| directs)) {
-        Some(friends) => friends,
+        Some(panel) => {
+            // Startup failures must remain visible on Friends and message
+            // requests too, even before the account has any conversations.
+            let mut body = column![].height(Length::Fill);
+            if let Some(banner) = banner {
+                body = body.push(container(banner).padding([4, 16]));
+            }
+            body.push(panel).into()
+        }
         None => main_pane(
             snapshot,
             history,

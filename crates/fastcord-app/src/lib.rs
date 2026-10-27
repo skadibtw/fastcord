@@ -1241,7 +1241,7 @@ impl App {
                 }
                 Do::Toggle(kind) => {
                     if let Some(gateway) = self.phase.gateway()
-                        && gateway.controls.voice_audio_state() == gateway::VoiceAudioState::Running
+                        && gateway.controls.voice_audio_state().controls_available()
                     {
                         let controls = gateway.controls.voice_controls();
                         follow.push(match kind {

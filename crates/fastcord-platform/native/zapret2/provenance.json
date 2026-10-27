@@ -1,0 +1,13 @@
+{
+  "project": "zapret2",
+  "version": "1.0.6",
+  "commit": "221d7dff24bfec0cd5ac0a5070b8acef2008af3d",
+  "source_archive": "https://github.com/bol-van/zapret2/releases/download/v1.0.6/zapret2-v1.0.6.zip",
+  "archive_sha256": "e141b51b60c895fe9548f4d644365461dcad8155e068d284a9aae1724504237d",
+  "license": "MIT",
+  "files": {
+    "LICENSE": "d089978dd77d53cb6aa5dff51cfdbff617e52dd44af1ac44a6df02c6644f17d5",
+    "quic_initial_www_google_com.bin": "f4589c57749f956bb30538197a521d7005f8b0a8723b4707e72405e51ddac50a"
+  },
+  "strategy_reference": "docs/manual.en.md: fake repeats=6 and send:ipfrag with original payload preserved"
+}

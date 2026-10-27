@@ -53,6 +53,7 @@ use super::wire::{self, Envelope, Hello, op};
 use crate::UserToken;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(20);
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// A connection that stayed Ready this long counts as healthy: the next
@@ -555,6 +556,7 @@ async fn connection<T: Transport, J: JitterSource>(
     let mut budget = SendBudget::new();
     // HELLO deadline until HELLO arrives, then the next heartbeat.
     let mut timer = Instant::now() + HELLO_TIMEOUT;
+    let mut startup_deadline = None;
     outbox.push(GatewayEvent::State(ConnectionState::AwaitHello), STATE_COST);
 
     let end: End = loop {
@@ -572,6 +574,9 @@ async fn connection<T: Transport, J: JitterSource>(
         tokio::select! {
             biased;
             reason = interrupt.as_mut() => break Err(reason.into()),
+            () = sleep_until(startup_deadline.unwrap_or(timer)), if startup_deadline.is_some() => {
+                break Ok((ReconnectReason::ReadyTimeout, true));
+            }
             () = sleep_until(timer) => {
                 if !conn.hello_seen {
                     break Ok((ReconnectReason::HelloTimeout, true));
@@ -588,6 +593,10 @@ async fn connection<T: Transport, J: JitterSource>(
                 let seq = session.as_ref().and_then(|s| s.seq);
                 if !send(&mut socket, &wire::heartbeat(seq)).await {
                     break Ok((ReconnectReason::Network, true));
+                }
+                #[cfg(debug_assertions)]
+                if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                    eprintln!("Gateway heartbeat sent");
                 }
             }
             delivered = outbox.deliver_one(), if !outbox.is_empty() => {
@@ -664,12 +673,29 @@ async fn connection<T: Transport, J: JitterSource>(
                     }
                 }
             }
+
             received = socket.next(), if outbox.len() < OUTBOX_LIMIT => {
                 let message = match received {
                     None => break Ok((ReconnectReason::Closed(None), true)),
-                    Some(Err(error)) => break error_end(&error),
+                    Some(Err(error)) => {
+                        #[cfg(debug_assertions)]
+                        if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                            let category = match &error {
+                                WsError::Io(io) => format!("io:{:?}", io.kind()),
+                                WsError::Protocol(_) => "protocol".to_owned(),
+                                WsError::Tls(_) => "tls".to_owned(),
+                                _ => "other".to_owned(),
+                            };
+                            eprintln!("Gateway socket error: {category}");
+                        }
+                        break error_end(&error)
+                    },
                     Some(Ok(message)) => message,
                 };
+                #[cfg(debug_assertions)]
+                if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                    eprintln!("Gateway frame received: bytes={}", message.len());
+                }
                 let complete = match message {
                     Message::Binary(bytes) => match inflater.push_compressed(&bytes) {
                         Ok(complete) => complete,
@@ -700,6 +726,11 @@ async fn connection<T: Transport, J: JitterSource>(
                 match action {
                     Action::Nothing => {}
                     Action::Ready => {
+                        #[cfg(debug_assertions)]
+                        if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                            eprintln!("Gateway: READY");
+                        }
+                        startup_deadline = None;
                         if let Some(installation) = conn.installation.take() {
                             properties.set_installation_id(&installation);
                         }
@@ -713,6 +744,11 @@ async fn connection<T: Transport, J: JitterSource>(
                         stream_due = stream_pending.as_ref().map(|_| now);
                     }
                     Action::Resumed => {
+                        #[cfg(debug_assertions)]
+                        if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                            eprintln!("Gateway: RESUMED");
+                        }
+                        startup_deadline = None;
                         let now = Instant::now();
                         subscriber.resume(now);
                         // The resumed session kept its accepted state.
@@ -722,6 +758,10 @@ async fn connection<T: Transport, J: JitterSource>(
                         stream_due = stream_pending.as_ref().map(|_| now);
                     }
                     Action::Hello(interval) => {
+                        #[cfg(debug_assertions)]
+                        if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                            eprintln!("Gateway: HELLO");
+                        }
                         // The WebSocket upgrade plus a valid HELLO establish
                         // service reachability; TLS success alone does not.
                         transport.note_service_reachable();
@@ -754,6 +794,11 @@ async fn connection<T: Transport, J: JitterSource>(
                         if !send(&mut socket, &payload).await {
                             break Ok((ReconnectReason::Network, true));
                         }
+                        #[cfg(debug_assertions)]
+                        if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                            eprintln!("Gateway startup sent: bytes={}", payload.len());
+                        }
+                        startup_deadline = Some(Instant::now() + READY_TIMEOUT);
                     }
                     Action::HeartbeatRequested => {
                         let now = Instant::now();
@@ -774,6 +819,12 @@ async fn connection<T: Transport, J: JitterSource>(
         }
     };
 
+    #[cfg(debug_assertions)]
+    if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some()
+        && let Ok((reason, _)) = &end
+    {
+        eprintln!("Gateway ended: {reason:?}");
+    }
     if matches!(
         end,
         Err(Terminal::Shutdown | Terminal::AuthenticationRequired)

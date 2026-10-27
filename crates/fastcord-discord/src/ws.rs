@@ -120,14 +120,34 @@ async fn connect_inner(
     let tls = network
         .connect_tls(host, uri.port_u16().unwrap_or(443), role)
         .await
-        .map_err(|_| ConnectError)?;
-    handshake(Box::new(tls) as fastcord_net::BoxedIo, request, config)
-        .await
-        .inspect_err(|_| {
-            network
-                .controller()
-                .note_failure(role, fastcord_net::NetworkError::WebSocketUpgrade);
-        })
+        .map_err(|error| {
+            #[cfg(debug_assertions)]
+            if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                eprintln!(
+                    "WebSocket TLS: role={role:?} mode={:?} error={error:?}",
+                    network.mode()
+                );
+            }
+            let _ = error;
+            ConnectError
+        })?;
+    #[cfg(debug_assertions)]
+    if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "WebSocket TLS: role={role:?} mode={:?} verified",
+            network.mode()
+        );
+    }
+    let tls: fastcord_net::BoxedIo = Box::new(tls);
+    handshake(tls, request, config).await.inspect_err(|_| {
+        #[cfg(debug_assertions)]
+        if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+            eprintln!("WebSocket Upgrade: role={role:?} failed");
+        }
+        network
+            .controller()
+            .note_failure(role, fastcord_net::NetworkError::WebSocketUpgrade);
+    })
 }
 
 #[cfg(test)]

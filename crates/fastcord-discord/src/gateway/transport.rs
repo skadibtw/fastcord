@@ -134,7 +134,14 @@ impl Transport for LiveTransport {
                 Err(DiscoverError::AuthenticationRequired)
             }
             Err(RestError::PermissionDenied) => Err(DiscoverError::Forbidden),
-            Err(_) => Err(DiscoverError::Failed),
+            Err(error) => {
+                #[cfg(debug_assertions)]
+                if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                    eprintln!("Gateway discovery failed: {error}");
+                }
+                let _ = error;
+                Err(DiscoverError::Failed)
+            }
         }
     }
 

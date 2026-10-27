@@ -702,6 +702,11 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Подключаемся к голосу. Нажмите, чтобы открыть звонок",
     ),
     ("Audio failed", "Ошибка звука"),
+    ("Disconnected", "Соединение закрыто"),
+    (
+        "Call ended. Click to open the call",
+        "Звонок завершён. Нажмите, чтобы открыть его",
+    ),
     (
         "The audio devices could not be opened. Click to open the call",
         "Не удалось открыть аудиоустройства. Нажмите, чтобы открыть звонок",

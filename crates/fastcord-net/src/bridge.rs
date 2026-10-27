@@ -14,7 +14,9 @@ use zeroize::Zeroizing;
 
 use crate::broker::{BoxedIo, FailureReporter, authorize, dial_public};
 use crate::proxy::ProxyCredentials;
-use crate::selector::{Controller, TlsProfile};
+use crate::selector::Controller;
+#[cfg(test)]
+use crate::selector::TlsProfile;
 use crate::tls::{ShapedStream, Strategy};
 use crate::{NetworkContext, NetworkError, Role};
 
@@ -30,6 +32,7 @@ const HALF_CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 struct Upstream {
+    mode: crate::settings::Mode,
     factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>,
     controller: Controller,
     transforms: Arc<Semaphore>,
@@ -89,6 +92,7 @@ impl Bridge {
                 .collect(),
         );
         let upstream = Upstream {
+            mode: context.mode(),
             factory: context.prefix_factory(),
             controller: context.controller().clone(),
             transforms: context.transforms(),
@@ -258,7 +262,7 @@ async fn tunnel(
                     &host,
                     port,
                     role,
-                    TlsProfile::Http,
+                    crate::broker::http_profile(upstream.mode, role),
                     error,
                     failed_address,
                 );
@@ -280,7 +284,7 @@ async fn tunnel(
             port,
             role,
             address,
-            TlsProfile::Http,
+            crate::broker::http_profile(upstream.mode, role),
         )
     } else {
         Strategy::Direct

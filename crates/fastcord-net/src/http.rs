@@ -10,7 +10,7 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Body, IntoUrl, Method, Request, Response};
 
-use crate::broker::{authorize, resolve_public, tls_config};
+use crate::broker::{authorize, http_profile, resolve_public, tls_config};
 use crate::selector::TlsProfile;
 use crate::settings::Mode;
 use crate::{NetworkContext, NetworkError, Role};
@@ -40,7 +40,15 @@ impl HttpBuilder {
             // Each idle pooled connection holds a bridge tunnel slot (#127).
             .pool_idle_timeout(std::time::Duration::from_secs(30))
             .use_preconfigured_tls(
-                (*tls_config(TlsProfile::Http, context.mode() == Mode::Auto)?).clone(),
+                (*tls_config(
+                    if local {
+                        TlsProfile::Http
+                    } else {
+                        http_profile(context.mode(), role)
+                    },
+                    context.mode() == Mode::Auto,
+                )?)
+                .clone(),
             );
         let connector = if !local && context.mode() != Mode::Off {
             if context.mode() == Mode::Proxy && context.proxy_config().is_none() {
@@ -215,7 +223,7 @@ impl HttpClient {
                         .to_ascii_lowercase(),
                     port,
                     role: self.role,
-                    profile: TlsProfile::Http,
+                    profile: http_profile(self.context.mode(), self.role),
                 })
                 .await;
         }

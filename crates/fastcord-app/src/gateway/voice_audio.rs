@@ -23,12 +23,24 @@ pub enum VoiceAudioState {
     /// No call, or the call ended normally.
     #[default]
     Idle,
-    /// A join or move has been requested and is waiting for voice credentials.
+    /// A join/move is waiting for signaling or UDP discovery.
     Connecting,
+    /// The voice transport is ready; encrypted media waits for DAVE keys.
+    WaitingForKeys,
     /// The audio engine is running and carrying the call.
     Running,
     /// The engine could not open the selected audio devices; the call was left.
     EngineFailed,
+}
+
+impl VoiceAudioState {
+    /// Local mute/deafen can be set before signaling and keys are ready.
+    pub(crate) const fn controls_available(self) -> bool {
+        matches!(
+            self,
+            Self::Connecting | Self::WaitingForKeys | Self::Running
+        )
+    }
 }
 
 type EngineStart = Result<(AudioEngine, EngineChannels), AudioError>;
@@ -451,14 +463,27 @@ async fn run_with(
     let started = tokio::task::spawn_blocking(start_engine).await;
     let (engine, channels) = match started {
         Ok(Ok(running)) => running,
-        Ok(Err(_)) | Err(_) => {
+        Ok(Err(_error)) => {
+            #[cfg(debug_assertions)]
+            if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                eprintln!("Voice audio start failed: {_error}");
+            }
+            state.send_replace(VoiceAudioState::EngineFailed);
+            let _ = media.end_speech();
+            session.leave().await;
+            return;
+        }
+        Err(_error) => {
+            #[cfg(debug_assertions)]
+            if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                eprintln!("Voice audio start task failed: panic={}", _error.is_panic());
+            }
             state.send_replace(VoiceAudioState::EngineFailed);
             let _ = media.end_speech();
             session.leave().await;
             return;
         }
     };
-    state.send_replace(VoiceAudioState::Running);
     crate::voice_log::note("call: audio engine running");
     let mut anomalies = Anomalies::default();
     // Every call starts with the camera off; only the user's click turns it on.
@@ -475,6 +500,7 @@ async fn run_with(
     let mut sync = EngineSync::new(channels.controls);
     let mut events = channels.events;
     let mut status = session.watch_status();
+    state.send_replace(media_audio_state(*status.borrow_and_update()));
     let mut hold = PttHold::default();
     let mut speech_end_at: Option<Instant> = None;
     let mut capture_enabled = {
@@ -685,6 +711,7 @@ async fn run_with(
                 if changed.is_err() { break; }
                 let now = *status.borrow_and_update();
                 crate::voice_log::note(&format!("connection: {}", describe_status(&now)));
+                state.send_replace(media_audio_state(now));
                 if matches!(now, VoiceStatus::Closed(_)) { break; }
             }
             _ = &mut cancel_rx => break,
@@ -714,6 +741,15 @@ async fn run_with(
     } else {
         VoiceAudioState::Idle
     });
+}
+
+fn media_audio_state(status: VoiceStatus) -> VoiceAudioState {
+    match status {
+        VoiceStatus::Connected { .. } => VoiceAudioState::Running,
+        VoiceStatus::Rekeying { .. } => VoiceAudioState::WaitingForKeys,
+        VoiceStatus::Closed(_) => VoiceAudioState::Idle,
+        _ => VoiceAudioState::Connecting,
+    }
 }
 
 /// Treats a received audio packet as speaking activity. Returns whether the published
@@ -842,6 +878,43 @@ mod tests {
     use fastcord_model::{Snowflake, VoiceToken};
 
     use super::*;
+
+    #[test]
+    fn the_call_is_not_connected_until_udp_and_media_keys_are_ready() {
+        for status in [
+            VoiceStatus::Connecting,
+            VoiceStatus::Identifying,
+            VoiceStatus::Discovering,
+            VoiceStatus::DiscoveringExperimental { variant: 2 },
+            VoiceStatus::Negotiating,
+            VoiceStatus::Resuming { attempt: 1 },
+        ] {
+            assert_eq!(media_audio_state(status), VoiceAudioState::Connecting);
+            assert!(media_audio_state(status).controls_available());
+        }
+        assert!(!VoiceAudioState::Idle.controls_available());
+        assert!(!VoiceAudioState::EngineFailed.controls_available());
+        assert_eq!(
+            media_audio_state(VoiceStatus::Rekeying {
+                transition_id: None
+            }),
+            VoiceAudioState::WaitingForKeys
+        );
+        assert!(VoiceAudioState::WaitingForKeys.controls_available());
+        assert_eq!(
+            media_audio_state(VoiceStatus::Connected {
+                mode: fastcord_media::crypto::TransportMode::Aes256GcmRtpSize,
+                ssrc: 1,
+            }),
+            VoiceAudioState::Running
+        );
+        assert_eq!(
+            media_audio_state(VoiceStatus::Closed(
+                fastcord_media::CloseReason::UdpUnreachable,
+            )),
+            VoiceAudioState::Idle
+        );
+    }
 
     fn credentials() -> VoiceCredentials {
         VoiceCredentials {

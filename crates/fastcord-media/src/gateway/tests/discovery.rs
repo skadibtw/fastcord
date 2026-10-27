@@ -12,6 +12,7 @@ struct PortAudit {
     bound: Vec<u16>,
     held: Vec<u16>,
     sent: Vec<(Instant, u16, Vec<u8>)>,
+    assisted: Vec<(u16, u8)>,
 }
 
 #[derive(Clone)]
@@ -21,6 +22,8 @@ struct AuditedNetwork {
     audit: Arc<Mutex<PortAudit>>,
     stall_prelude: bool,
     stall_bind: bool,
+    experimental: bool,
+    port_recovery: bool,
 }
 
 struct AuditedLink {
@@ -37,6 +40,10 @@ impl Drop for AuditedLink {
 }
 
 impl UdpLink for AuditedLink {
+    async fn send_discovery(&self, datagram: &[u8], to: SocketAddr, variant: u8) -> io::Result<()> {
+        self.audit.lock().assisted.push((self.port, variant));
+        self.send_to(datagram, to).await
+    }
     fn local_port(&self) -> Option<u16> {
         Some(self.port)
     }
@@ -61,7 +68,11 @@ impl Network for AuditedNetwork {
     type Udp = AuditedLink;
 
     fn experimental_udp(&self) -> bool {
-        true
+        self.experimental
+    }
+
+    fn udp_port_recovery(&self) -> bool {
+        self.port_recovery
     }
 
     async fn bind(&self, server: SocketAddr) -> io::Result<AuditedLink> {
@@ -109,6 +120,15 @@ fn audited_with(
     stall_prelude: bool,
     stall_bind: bool,
 ) -> (Harness, FakeSignaling, Arc<Mutex<PortAudit>>) {
+    audited_policy(stall_prelude, stall_bind, true, false)
+}
+
+fn audited_policy(
+    stall_prelude: bool,
+    stall_bind: bool,
+    experimental: bool,
+    port_recovery: bool,
+) -> (Harness, FakeSignaling, Arc<Mutex<PortAudit>>) {
     let signaling = FakeSignaling::default();
     let (peers_tx, peers) = mpsc::unbounded_channel();
     let binds = Arc::new(Mutex::new(Vec::new()));
@@ -119,6 +139,8 @@ fn audited_with(
         audit: audit.clone(),
         stall_prelude,
         stall_bind,
+        experimental,
+        port_recovery,
     };
     let session = start(
         signaling.clone(),
@@ -152,7 +174,10 @@ async fn read_round_start(udp: &mut Udp, preludes: usize) -> Vec<u8> {
     for _ in 0..preludes {
         let prelude = udp.recv().await;
         assert_eq!(prelude.len(), PRELUDE_BYTES);
-        assert!(prelude.iter().all(|byte| *byte == 0));
+        assert_eq!(
+            prelude.as_slice(),
+            &include_bytes!("../../../../../fixtures/voice/udp-quic-v2.bin")[..]
+        );
     }
     let discovery = udp.recv().await;
     assert_discovery(&discovery);
@@ -180,6 +205,99 @@ fn assert_campaign_caps(audit: &PortAudit) {
         .sum::<usize>();
     assert!(discovery <= 15, "discovery budget was replenished");
     assert!(prelude_bytes <= 10_800, "prelude budget was replenished");
+    assert!(
+        audit.assisted.len() <= 9,
+        "packet helper budget was replenished"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn port_recovery_uses_fresh_flows_without_preludes_or_extra_identifies() {
+    let (mut harness, signaling, audit) = audited_policy(false, false, false, true);
+    let mut ws = signaling.accept().await;
+    begin(&mut ws, QUIET_HEARTBEAT_MS).await;
+    let mut old_flows = Vec::new();
+    for _ in 0..2 {
+        let mut udp = harness.udp().await;
+        let first = read_round_start(&mut udp, 0).await;
+        finish_unanswered_round(&mut udp, &first).await;
+        old_flows.push(udp);
+    }
+    let mut current = harness.udp().await;
+    let first = read_round_start(&mut current, 0).await;
+    current.answer_discovery(&first);
+    ws.recv_op(1).await;
+    assert_eq!(harness.session.status(), VoiceStatus::Negotiating);
+    assert_eq!(signaling.urls().len(), 1);
+    {
+        let audit = audit.lock();
+        assert_eq!(audit.bound, [40_000, 40_001, 40_002]);
+        assert_eq!(audit.held.len(), 3);
+        assert_eq!(audit.sent.len(), 11);
+        assert_eq!(
+            audit.assisted.iter().map(|(_, v)| *v).collect::<Vec<_>>(),
+            [1, 1, 1, 2, 2, 2, 3]
+        );
+        assert!(
+            audit
+                .sent
+                .iter()
+                .all(|(_, _, packet)| packet.len() == DISCOVERY_LEN)
+        );
+        for pair in audit.sent.windows(2) {
+            assert_eq!(pair[1].0 - pair[0].0, Duration::from_secs(1));
+        }
+    }
+    harness.session.leave().await;
+}
+
+async fn check_selected_path_recovery(experimental: bool, port_recovery: bool) {
+    let (mut harness, signaling, audit) = audited_policy(false, false, experimental, port_recovery);
+    let mut ws = signaling.accept().await;
+    let mut second = signaling.accept().await;
+    let (mut udp, _) = negotiate(&mut harness, &mut ws, &BOTH_MODES).await;
+    ws.send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let _fixture = install_test_dave_group(&harness, &mut ws).await;
+    let ping = loop {
+        let packet = udp.recv_any().await;
+        if is_ping(&packet) {
+            break packet;
+        }
+    };
+    let mut answer = ping;
+    answer[..4].copy_from_slice(&crate::udp::PING_RESPONSE.to_be_bytes());
+    udp.send(answer);
+    second.hello(QUIET_HEARTBEAT_MS).await;
+    timeout(Duration::from_secs(60), second.recv_op(0))
+        .await
+        .expect("silent experimental connection did not re-identify");
+    second.send(ready(&BOTH_MODES)).await;
+    let mut replacement = timeout(Duration::from_secs(5), harness.udp())
+        .await
+        .expect("silent experimental connection did not bind a new socket");
+    let discovery = timeout(Duration::from_secs(5), replacement.recv())
+        .await
+        .expect("replacement did not send discovery");
+    assert_discovery(&discovery);
+    replacement.answer_discovery(&discovery);
+    timeout(Duration::from_secs(5), second.recv_op(1))
+        .await
+        .expect("replacement did not select the new transport");
+    assert!(
+        audit
+            .lock()
+            .sent
+            .iter()
+            .all(|(_, _, packet)| packet.len() != PRELUDE_BYTES)
+    );
+    harness.session.leave().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn selected_paths_can_reconnect_without_refilling_preludes() {
+    check_selected_path_recovery(true, false).await;
+    check_selected_path_recovery(false, true).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -200,7 +318,7 @@ async fn three_variants_use_fifteen_spaced_requests_and_one_prelude_per_fresh_fl
         );
         assert_eq!(
             Instant::now() - started,
-            Duration::from_secs(index as u64 * 5)
+            Duration::from_secs(index as u64 * 5) + Duration::from_millis(index as u64 * 50)
         );
         assert!(
             old_flows.iter().all(|old: &Udp| !old.to_client.is_closed()),
@@ -210,7 +328,7 @@ async fn three_variants_use_fifteen_spaced_requests_and_one_prelude_per_fresh_fl
         old_flows.push(udp);
     }
     assert_eq!(harness.closed().await, CloseReason::UdpUnreachable);
-    assert_eq!(Instant::now() - started, Duration::from_secs(15));
+    assert_eq!(Instant::now() - started, Duration::from_millis(15_100));
     assert_eq!(
         signaling.urls().len(),
         1,
@@ -231,7 +349,23 @@ async fn three_variants_use_fifteen_spaced_requests_and_one_prelude_per_fresh_fl
         .collect::<Vec<_>>();
     assert_eq!(discoveries.len(), 15);
     for pair in discoveries.windows(2) {
-        assert_eq!(pair[1].0 - pair[0].0, Duration::from_secs(1));
+        let expected = if pair[0].1 == pair[1].1 {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(1050)
+        };
+        assert_eq!(pair[1].0 - pair[0].0, expected);
+    }
+    for port in [40_001, 40_002] {
+        let prelude_at = audit
+            .sent
+            .iter()
+            .filter(|(_, p, packet)| *p == port && packet.len() == PRELUDE_BYTES)
+            .map(|(at, _, _)| *at)
+            .max()
+            .unwrap();
+        let discovery_at = discoveries.iter().find(|(_, p, _)| *p == port).unwrap().0;
+        assert_eq!(discovery_at - prelude_at, Duration::from_millis(50));
     }
     assert_eq!(
         audit

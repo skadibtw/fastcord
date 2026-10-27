@@ -20,6 +20,11 @@ archive, provenance and rebuild instructions. Keep this folder beside the
 executable. The client remains unprivileged; only an explicitly started helper
 requests UAC. Other release platforms do not bundle or load WinDivert.
 
+The adjacent `zapret2/` directory contains the MIT-licensed UDP profile data,
+complete upstream notice and pinned provenance. The 1200-byte packet is
+embedded in the helper; standalone winws2 and Cygwin/Lua binaries are not
+included. Keep the license/provenance directory in distributed Windows archives.
+
 Application artwork is committed in `assets/icons/` (sources and regeneration
 instructions in its README). Windows builds embed a multi-size ICO with the
 Windows SDK resource compiler; set `RC` if the SDK is installed outside the

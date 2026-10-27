@@ -521,6 +521,20 @@ pub trait PrefixControl: Send + Sync {
 
 pub type PrefixFuture = Pin<Box<dyn Future<Output = io::Result<usize>> + Send>>;
 pub trait FakePrefixFactory: Send + Sync {
+    /// Whether this explicitly started packet helper can recover token-free
+    /// Discord UDP discovery. Proxy media never enters this boundary.
+    fn supports_udp_discovery(&self) -> bool {
+        false
+    }
+    fn start_udp_discovery(
+        &self,
+        _socket: std::net::UdpSocket,
+        _server: std::net::SocketAddr,
+        _request: [u8; 74],
+        _variant: u8,
+    ) -> io::Result<PrefixFuture> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
     /// False once the privilege boundary behind this factory is gone (a helper
     /// that exited, a pipe that closed). Selection then stops choosing its
     /// strategy instead of failing every dial with it for the rest of the

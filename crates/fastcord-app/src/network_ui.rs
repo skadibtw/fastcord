@@ -37,16 +37,9 @@ pub fn check_login() {
         return;
     };
     runtime.block_on(async {
-        let route = match start_packet().await {
-            Ok(route) => route,
-            Err(_) => {
-                println!("Login check: packet helper unavailable.");
-                return;
-            }
-        };
-        let context = new_context()
-            .with_mode(Mode::Auto)
-            .with_prefix_factory(route.0);
+        // This diagnostic exercises the built-in route. It must never open
+        // UAC or start the separately requested optional packet helper.
+        let context = new_context().with_mode(Mode::Auto);
         let validated = tokio::time::timeout(
             Duration::from_secs(40),
             crate::login::validate(context.clone(), token, None),
@@ -213,13 +206,10 @@ pub async fn packet_check(context: fastcord_net::NetworkContext) -> &'static str
         }
         match result {
             Ok(response) if response.status().as_u16() == 200 => {
-                return if packet && strategy == Strategy::PacketOverlap {
-                    "Discord API HTTP 200: packet overlap 681 restored access. You can try signing in."
-                } else if packet {
-                    "Discord API HTTP 200: packet fake + disorder restored access. You can try signing in."
-                } else {
-                    "Anonymous Discord API check passed (HTTP 200). You can try signing in."
-                };
+                // A response confirms the service, not which optional
+                // transport component caused it (SNI-less profiles may not
+                // need the enabled helper at all).
+                return "Anonymous Discord API check passed (HTTP 200). You can try signing in.";
             }
             Ok(_) => {
                 return "Discord returned an HTTP response; the anonymous API check did not return 200.";
@@ -339,8 +329,8 @@ pub fn configure(
     } else {
         context.with_mode(loaded.settings.mode)
     };
-    // The saved experimental UDP flag is ignored: its preludes only cost a
-    // filtered call its discovery budget (#223).
+    // The saved experimental UDP flag remains disabled until a candidate is
+    // validated on a filtered path.
     Ok(context)
 }
 
@@ -414,7 +404,7 @@ pub fn view<'a>(
         column![
             text(path_text(
                 state.settings.mode,
-                state.packet_active,
+                state.packet_active && context.packet_helper_available(),
                 state.proxy_kind
             ))
             .size(14),
@@ -475,7 +465,9 @@ pub fn view<'a>(
             .spacing(6)
             .wrap(),
         );
-        body = body.push(ui::note(if state.packet_active {
+        body = body.push(ui::note(if state.packet_active && !context.packet_helper_available() {
+            tr("The packet helper stopped. Sign out and restart it to retry packet recovery.")
+        } else if state.packet_active {
             tr("The packet helper is on for this session.")
         } else {
             tr(
@@ -570,7 +562,7 @@ pub fn view<'a>(
 
     // Media.
     body = body.push(section(tr("Voice and video"))).push(ui::note(tr(
-        "Voice and video use UDP. The TLS bypass above cannot reach a blocked voice server; only a SOCKS5 proxy with UDP can.",
+        "Voice and video use UDP. Automatic mode retries when a voice server does not answer; some networks may still block voice.",
     )));
 
     // Each service's state, short.
@@ -619,7 +611,7 @@ pub fn view<'a>(
                     "Recovery can split the TLS ClientHello into several records, and as a next step cut the last 30 bytes of the server name into one-byte records 30 ms apart, so that no write starts on a record boundary. The handshake bytes, certificate verification and ALPN are unchanged. It is still best effort: TCP writes do not guarantee packet boundaries, and UDP media has a separate connection path."
                 )),
                 ui::note(tr(
-                    "Optional Windows helper requires UAC once per session. It handles only the public TLS handshake for fastcord connections. The client and account stay unprivileged. Starting it selects Auto."
+                    "Optional Windows helper requires UAC once per session. It handles public TLS handshakes and voice-server discovery for fastcord. The client and account stay unprivileged. Starting it selects Auto."
                 )),
                 ui::note(tr(
                     "Proxy mode never falls back to a direct connection. CONNECT proxies carry TCP only: voice, camera and screen sharing cannot join through them. SOCKS5 UDP requires a UDP-capable proxy and a working UDP route to that proxy. It does not carry media over TCP and does not encrypt the client-to-proxy transport. Passwords are saved in native credential storage."

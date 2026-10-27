@@ -20,6 +20,17 @@ bundled native codecs and models: libopus (voice), the microphone noise-suppress
 (ADR 0001), the bundled OpenH264 H.264 codec and the runtime-linked libva (ADR 0001), the camera
 background model (ADR 0010), and the davey/OpenMLS end-to-end encryption crates.
 
+## zapret2 UDP recovery data and profile
+
+The optional Windows packet helper embeds the unmodified 1200-byte
+`quic_initial_www_google_com.bin` from zapret2 v1.0.6, commit
+`221d7dff24bfec0cd5ac0a5070b8acef2008af3d`, copyright (c) 2016-2026 bol-van,
+distributed under the MIT license. Its complete notice, hashes and provenance
+are included in the archive's `zapret2/` directory. The profiles follow
+upstream's six-repeat UDP fake and original-preserving IPv4 fragmentation
+strategies. The standalone winws2/Cygwin/Lua runtime is not shipped; the helper
+uses the WinDivert distribution described above.
+
 ## nnnoiseless and RNNoise (Light mode)
 
 nnnoiseless 0.5.2, https://github.com/jneem/nnnoiseless, is a Rust port of Xiph.Org's RNNoise,

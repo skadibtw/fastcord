@@ -80,6 +80,16 @@ const MAX_DAVE_AUDIO_FRAME: usize = super::MAX_OPUS_FRAME + 64;
 /// Seconds from 1900 (NTP) to 1970 (Unix).
 const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
 
+// Opt-in control-plane diagnostics: never format frames, credentials or keys.
+macro_rules! network_diagnostic {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 pub(crate) struct Options {
     pub(crate) aes_accelerated: bool,
     /// Nonce of the first sealed packet; tests start near the end.
@@ -279,6 +289,9 @@ struct Driver<S, N: Network> {
     dave_stuck: bool,
     dave_recoveries: u8,
     dave_recovered_at: Option<Instant>,
+    /// Opcode 25 may arrive before Session Description creates the DAVE engine.
+    /// At most one bounded server package is retained until then.
+    pending_external_sender: Option<Vec<u8>>,
 }
 
 pub(crate) async fn run<S: Signaling, N: Network>(
@@ -296,6 +309,7 @@ pub(crate) async fn run<S: Signaling, N: Network>(
         .map(|video| VideoState::new(video, wanted));
     let local_user_id = credentials.user_id.0;
     let experimental_udp = network.experimental_udp();
+    let udp_port_recovery = network.udp_port_recovery();
     let mut driver = Driver {
         signaling,
         network: Arc::new(network),
@@ -306,7 +320,7 @@ pub(crate) async fn run<S: Signaling, N: Network>(
         udp: None,
         udp_work: None,
         held_udp: Arc::new(Mutex::new(Vec::with_capacity(3))),
-        discovery: discovery::Campaign::new(experimental_udp),
+        discovery: discovery::Campaign::new(experimental_udp).with_port_recovery(udp_port_recovery),
         media: None,
         dave: None,
         expected_users: vec![local_user_id],
@@ -327,6 +341,7 @@ pub(crate) async fn run<S: Signaling, N: Network>(
         dave_stuck: false,
         dave_recoveries: 0,
         dave_recovered_at: None,
+        pending_external_sender: None,
     };
     let reason = driver.drive().await;
     // Sockets and keys go before anyone hears that the connection is closed.
@@ -412,8 +427,12 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let held = self.held_udp.clone();
         let relay = self.network.relay_configured();
         self.udp_work = Some(Box::pin(async move {
-            let Ok(link) = network.bind(server).await else {
-                return UdpResult::Failed { relay };
+            let link = match network.bind(server).await {
+                Ok(link) => link,
+                Err(_error) => {
+                    network_diagnostic!("Media UDP bind failed: {:?}", _error.kind());
+                    return UdpResult::Failed { relay };
+                }
             };
             let link = Arc::new(link);
             let mut held = held.lock().unwrap_or_else(|p| p.into_inner());
@@ -484,11 +503,25 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         let link = udp.link.clone();
         let server = udp.server;
         let request = udp::discovery_request(udp.ssrc);
+        let variant = self.discovery.variant;
+        let assist = !matches!(conn.phase, Phase::Discovering { attempts: 3.. });
         self.udp_work = Some(Box::pin(async move {
             for _ in 0..preludes {
-                let _ = link.send_to(discovery::PRELUDE, server).await;
+                if let Err(_error) = link.send_to(discovery::PRELUDE, server).await {
+                    network_diagnostic!("Media UDP prelude send failed: {:?}", _error.kind());
+                }
             }
-            let _ = link.send_to(&request, server).await;
+            if preludes > 0 {
+                sleep(discovery::PRELUDE_GAP).await;
+            }
+            let result = if assist {
+                link.send_discovery(&request, server, variant).await
+            } else {
+                link.send_to(&request, server).await
+            };
+            if let Err(_error) = result {
+                network_diagnostic!("Media UDP discovery send failed: {:?}", _error.kind());
+            }
             UdpResult::Sent
         }));
         let attempts = match conn.phase {
@@ -544,11 +577,15 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 continue;
             };
             let end = self.connection(socket, resume).await;
+            network_diagnostic!(
+                "Media connection ended: retry={} resume={resume}",
+                matches!(end, End::Retry { .. })
+            );
             // Select Protocol is a one-way boundary for this user join. Before
             // Session Description there is no valid media Resume state; do
-            // not Identify again to obtain a new experimental flow.
+            // not Identify again merely to refill the discovery campaign.
             if matches!(end, End::Retry { .. })
-                && self.discovery.experimental
+                && self.discovery.rotate_ports
                 && self.discovery.selected
                 && self.media.is_none()
             {
@@ -564,9 +601,9 @@ impl<S: Signaling, N: Network> Driver<S, N> {
 
     /// Forgets everything tied to one voice session, including DAVE/MLS keys.
     fn reset_session(&mut self) {
-        // With the experiment off retain the original direct-only signaling
-        // retry policy. An opt-in campaign never gets a new budget here.
-        if !self.discovery.experimental {
+        // Outside bounded port recovery retain the original direct signaling
+        // retry policy. A discovery campaign never gets a new budget here.
+        if !self.discovery.rotate_ports {
             self.discovery = discovery::Campaign::new(false);
             self.held_udp
                 .lock()
@@ -578,6 +615,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         self.udp_heard = false;
         self.media = None;
         self.dave = None;
+        self.pending_external_sender = None;
         self.expected_users.clear();
         self.expected_users.push(self.credentials.user_id.0);
         self.ssrcs.clear();
@@ -773,6 +811,11 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         }
     }
     async fn send_binary(conn: &Conn, socket: &mut S::Socket, frame: Vec<u8>) -> Result<(), End> {
+        network_diagnostic!(
+            "Media binary sent: op={:?} bytes={}",
+            frame.first(),
+            frame.len()
+        );
         match timeout(SEND_TIMEOUT, socket.send(Message::Binary(frame.into()))).await {
             Ok(Ok(())) => Ok(()),
             _ => Err(conn.retry()),
@@ -788,6 +831,11 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         match message {
             Some(Ok(Message::Text(text))) => self.on_text(conn, socket, text.as_str()).await,
             Some(Ok(Message::Binary(bytes))) => {
+                network_diagnostic!(
+                    "Media binary received: op={:?} bytes={}",
+                    bytes.get(2),
+                    bytes.len()
+                );
                 if bytes.len() > MAX_DAVE_MESSAGE {
                     Counters::add(&self.ch.counters.rejected_malformed, 1);
                     return Err(End::Close(CloseReason::DaveUnavailable));
@@ -798,7 +846,10 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 self.on_binary(conn, socket, binary.message).await
             }
             Some(Ok(Message::Close(frame))) => Err(match frame {
-                Some(frame) => close_code(frame.code.into(), conn),
+                Some(frame) => {
+                    network_diagnostic!("Media WebSocket closed: code={}", u16::from(frame.code));
+                    close_code(frame.code.into(), conn)
+                }
                 None => conn.retry(),
             }),
             Some(Ok(_)) => Ok(()),
@@ -819,6 +870,11 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         if let Some(seq) = envelope.seq {
             self.seq_ack = Some(seq);
         }
+        network_diagnostic!(
+            "Media JSON received: op={} phase={:?}",
+            envelope.op,
+            conn.phase
+        );
         let now = Instant::now();
         let protocol = || End::Close(CloseReason::Protocol(None));
         match envelope.op {
@@ -895,6 +951,10 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     ),
                 }
                 .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                if let Some(sender) = self.pending_external_sender.take() {
+                    dave.set_external_sender(&sender)
+                        .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+                }
                 let key_package = dave
                     .create_key_package()
                     .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
@@ -1092,6 +1152,17 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         if matches!(message, wire::ServerBinary::Unknown) {
             return Ok(());
         }
+        if let wire::ServerBinary::ExternalSender(sender) = message {
+            if let Some(dave) = self.dave.as_mut() {
+                dave.set_external_sender(sender)
+                    .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
+            } else {
+                // Binary messages have already passed MAX_DAVE_MESSAGE. A new
+                // package replaces the previous one, never growing the queue.
+                self.pending_external_sender = Some(sender.to_vec());
+            }
+            return Ok(());
+        }
         if conn.phase != Phase::Connected || self.media.is_none() {
             return Err(End::Close(CloseReason::Protocol(None)));
         }
@@ -1099,13 +1170,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             return Err(End::Close(CloseReason::DaveUnavailable));
         }
         match message {
-            wire::ServerBinary::ExternalSender(sender) => {
-                self.dave
-                    .as_mut()
-                    .ok_or(End::Close(CloseReason::DaveUnavailable))?
-                    .set_external_sender(sender)
-                    .map_err(|_| End::Close(CloseReason::DaveUnavailable))?;
-            }
+            wire::ServerBinary::ExternalSender(_) => {}
             wire::ServerBinary::Proposals { operation, payload } => {
                 let commit_welcome = self
                     .dave
@@ -1634,6 +1699,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         if conn.heartbeat_at.is_some_and(|at| at <= now) {
             if conn.awaiting_ack.is_some() {
                 // The previous heartbeat was never acknowledged: zombie.
+                network_diagnostic!("Media heartbeat ACK deadline expired");
                 return Err(conn.retry());
             }
             conn.heartbeat_at = Some(now + conn.heartbeat_interval);
@@ -1644,6 +1710,30 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             // The previous ping was not answered and no authenticated RTP came
             // in since: one more silent interval.
             let received = self.ch.counters.rtp_received.load(Ordering::Relaxed);
+            network_diagnostic!(
+                "Media UDP health: received={} sent={} unanswered={} heard={}",
+                received,
+                self.ch.counters.rtp_sent.load(Ordering::Relaxed),
+                conn.silent_pings,
+                self.udp_heard
+            );
+            network_diagnostic!(
+                "Media UDP drops: source={} malformed={} auth={} dave={} unknown={}",
+                self.ch.counters.rejected_source.load(Ordering::Relaxed),
+                self.ch.counters.rejected_malformed.load(Ordering::Relaxed),
+                self.ch
+                    .counters
+                    .rejected_authentication
+                    .load(Ordering::Relaxed),
+                self.ch
+                    .counters
+                    .audio_rejected_by_dave
+                    .load(Ordering::Relaxed),
+                self.ch
+                    .counters
+                    .dropped_unknown_ssrc
+                    .load(Ordering::Relaxed)
+            );
             if received != conn.rtp_mark {
                 self.udp_heard = true;
             }
@@ -1658,11 +1748,18 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 && conn.phase == Phase::Connected
                 && self.media.is_some()
             {
+                network_diagnostic!("Media UDP liveness expired");
                 if self.udp.as_ref().is_some_and(|udp| udp.link.is_relay()) {
                     return Err(End::Close(CloseReason::UdpRelayClosed));
                 }
                 // A dead path (roaming, a dropped NAT mapping) does not come
                 // back on the same socket: Identify again with a fresh one.
+                // A selected discovery campaign cannot be reused. Resume
+                // the existing direct-only reconnect policy instead of ending
+                // the call or replenishing the prelude budget.
+                if self.discovery.rotate_ports {
+                    self.discovery = discovery::Campaign::new(false);
+                }
                 self.media = None;
                 return Err(End::Retry { progressed: true });
             }

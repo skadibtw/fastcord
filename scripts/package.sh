@@ -35,6 +35,8 @@ case "$target" in
     cp "${bin_dir}/fastcord.exe" "${out}/${name}.exe"
     mkdir -p "$stage/windivert"
     cp crates/fastcord-platform/native/windivert/{WinDivert.dll,WinDivert64.sys,LICENSE,provenance.json,WinDivert-2.2.2-source.zip,README.md} "$stage/windivert/"
+    mkdir -p "$stage/zapret2"
+    cp crates/fastcord-platform/native/zapret2/{LICENSE,provenance.json,README.md,quic_initial_www_google_com.bin} "$stage/zapret2/"
     zip_out="$(cd "$out" && (pwd -W 2>/dev/null || pwd))/${name}.zip"
     (cd "$(dirname "$stage")" && 7z a -tzip -bso0 "$zip_out" "$name")
     ;;

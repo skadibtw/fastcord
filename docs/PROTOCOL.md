@@ -480,6 +480,7 @@ Implemented in `fastcord-media` (depends on `fastcord-model` only). Evidence: pa
 - READY (op 2) → UDP socket to `ip:port`, IP discovery, then Select Protocol (op 1): `{"protocol": "udp", "data": {"address", "port", "mode"}, "codecs": [{"name": "opus", "type": "audio", "priority": 1000, "payload_type": 120}]}`, plus one `video` entry per video offer when the connection offers video (below). Mode: `aead_aes256_gcm_rtpsize` when offered and the CPU has AES+CLMUL (PMULL on ARM), otherwise `aead_xchacha20_poly1305_rtpsize`; deprecated modes are never chosen, and READY without either stops (`NoSupportedMode`).
 - Session Description (op 4) must name the selected mode, `opus`, DAVE version 1, and a 32-byte `secret_key` (decoded straight into a zeroizing array); its `video_codec`, when present, names the codec this connection should send. Local media then waits for DAVE keys (milestone 18), so nothing leaves before the MLS transition executes.
 - **Stuck receive keys (#215).** 50 consecutive inbound audio packets refused by the installed DAVE session for lack of a key of the sender's epoch, with no packet decrypting in between (a refusal of another kind, a success, or the not-yet-ready state resets the run), make the driver send opcode 31 (Invalid Commit/Welcome) with the pending transition id (`0` when none is pending) followed by a fresh key package (binary opcode 26), exactly like the recovery after a commit or Welcome that fails to apply, and `Rekeying` is reported until a Welcome/Commit arrives. At most 3 times per connection and 10 s apart; `TransportStats::dave_stuck_recoveries` counts them. **Unverified**: that Discord answers an opcode 31 sent without a failed Commit/Welcome by re-adding the member, and that transition id `0` is acceptable there; the DAVE specification defines opcode 31 only for a failed Commit/Welcome. Not detected: one sender out of step while others still decrypt. The cause on the reporter's call (which epoch the senders hold) is not established.
+  - The DAVE external-sender package (binary op 25) may arrive before Session Description. Retain at most one bounded package and validate it before applying it to the new DAVE session; a fresh Identify clears the retained package.
 - Resume (op 7) `{server_id, session_id, token, seq_ack}` once media is established; RESUMED (op 9) keeps the UDP socket, SSRC, key, and nonce counter. A socket lost before Session Description identifies again with a fresh UDP socket. Five consecutive failed attempts (backoff 1–16 s) end with `Network`.
 - Close codes: 4006/4009 `SessionInvalid`, 4004 `AuthenticationFailed`, 4011 `ServerNotFound`, 4014/4022 `Disconnected`, 4017 `E2eeRequired`, 4021 `RateLimited` — none reconnect; 4013/4015 resume; other 4xxx are protocol errors.
 - Received: Speaking (op 5) and Video (op 12) map SSRCs to users, Clients Connect (op 11) and Client Disconnect (op 13, forgets the user's SSRCs) are surfaced; Session Update (op 14) and Media Sink Wants (op 15) are used by connections that offer video (below); client flags/platform are ignored.
@@ -1072,6 +1073,16 @@ allowlists. Auto HTTP enters an authenticated ephemeral loopback CONNECT bridge;
 origin TLS, ALPN and HTTP/2 cross it unchanged. The bridge is neither a MITM nor a
 system proxy. There is no direct fallback if it fails. Off skips the bridge.
 
+TLS profile v3 omits SNI for Auto's main Gateway and its validated resume
+hosts, voice and stream WebSockets, and REST/login/profile HTTP (retaining
+h2/http/1.1 ALPN). The actual requested DNS ServerName still goes to rustls for ordinary
+certificate chain, signature and hostname verification. The HTTP Host/Upgrade,
+zlib-stream and authentication payloads are unchanged. This dedicated profile
+uses Direct only; its TLS-only confirmation never supplies a preference to the
+SNI-bearing HTTP/other WebSocket profiles. No helper, proxy, driver or elevated
+process is needed. Off/Proxy, CDN/upload and remote-auth still send SNI. The
+following record transformations apply to SNI-bearing profiles only.
+
 Catalog v4 rewrites only plaintext ClientHello record/write boundaries; the
 handshake bytes (including SNI, ALPN and PSK binders) are identical, and at most
 two hellos including HRR are touched. RecordFragment rebuilds the record that
@@ -1113,21 +1124,26 @@ replayed. M93 sends no UDP ASSOCIATE and refuses proxy media joins explicitly.
 
 ## Experimental UDP discovery preludes (M94)
 
-**Not reachable from the app since #223.** The settings flag is still stored
-and loaded for compatibility but no longer applied, and the network page has no
-control for it: on a filtered route the prelude flows only spent the join's
-discovery budget and closed calls that a plain retry could still start. The
-laboratory code below stays in `fastcord-media` for its fixtures.
+Production Auto discovery uses up to three distinct local UDP sockets before
+Select Protocol, retaining old sockets so their ports cannot be reused during
+the join. Each flow sends at most five ordinary discovery requests at one-second
+spacing, within a shared fifteen-request/sixteen-second join budget. It sends no
+synthetic datagrams and makes no extra voice Identify for this rotation. Off and
+Proxy retain their original discovery behavior. If a previously established
+path later fails its liveness check, the ordinary bounded direct reconnect
+policy can obtain a new socket; that recovery never refills the prelude budget.
 
-Only an explicit experimental opt-in changes discovery. The first flow sends
+The application does not enable this unverified experiment; the old settings
+flag is ignored, and Proxy never emits direct preludes. An explicitly enabled
+laboratory campaign's first flow sends
 ordinary 74-byte Discord discovery requests. If it does not answer, the next
-fresh bound flow sends three 1200-byte zero datagrams once, then ordinary
+fresh bound flow sends three 1200-byte QUIC Initial datagrams once, then ordinary
 discovery; the final fresh flow sends six once, then discovery. Preludes are
 never per-retry and never sent after Select Protocol. They contain no token,
 DAVE key, account data or copied packet. No TTL/Hop Limit/raw-packet technique is
-used. Zeros are an invalid-discovery/STUN/RTP laboratory candidate, not a known
-working arbitrary payload. The fixture is original work; no zapret payload or
-third-party license is involved.
+used. The original deterministic QUIC candidate is not yet proven effective on
+a filtered UDP path. Its generator and fixture are in `fixtures/voice/`; no
+third-party packet is included.
 
 Each round has at most five discovery requests at existing one-second spacing;
 the user join has three sockets, fifteen requests, 10,800 prelude payload bytes
@@ -1169,6 +1185,37 @@ require live validation. Eight shared associations each use one reused bounded
 CONNECT has no UDP capability; SOCKS5 UDP cannot work if UDP to the proxy is
 blocked. Experimental direct preludes are disabled on all proxy routes.
 
+
+### Optional Windows UDP packet recovery (#218, WIP)
+
+The already PID-authenticated local helper pipe accepts a separate `FCU1`
+27-byte header: magic (4), IP family (1), numeric address padded to 16 bytes,
+destination port (big-endian u16), request length (74, big-endian u16), and
+profile (1..3, big-endian u16). Exactly one canonical 74-byte Discord discovery
+request follows. Its header must be `00010046`, and all bytes after the SSRC
+must be zero. No arbitrary blob, hostname, URL, token, key or protected datagram
+can be submitted with this message. Private/zero-port destinations are refused.
+The existing armed/result handshake is retained: the unprivileged process
+sends the original request only after the exact filter is armed.
+
+Capture matches destination, port, size, discovery magic and the call SSRC.
+Virtual-interface copies pass unchanged. At physical egress, the helper emits
+six unmodified zapret2 v1.0.6 QUIC fakes with that packet's endpoints, followed
+by original discovery (profile 1) or IPv4 fragments at UDP offsets 8/16
+(profiles 2/3). UDP checksum is completed on the whole original before splitting;
+fragment headers have independent IPv4 checksums. IPv6 currently uses the
+unfragmented fake profile. Reassembly yields exactly the original UDP bytes.
+RTP/RTCP never match this filter and use the ordinary transport.
+
+Only the first three discovery requests on each of up to three flows may use
+the helper: nine RPCs / 54 fakes / 64,800 fake payload bytes per join, within
+the existing fifteen-request/sixteen-second discovery budget. The filter's
+watchdog is four seconds, its kernel queue remains 32 packets/128 KiB/100 ms,
+and all callers share the existing four-job/one-pipe bound. Cancelled queued
+work is checked before sending a real request. Proxy UDP never calls the
+packet factory; missing or stopped helpers cannot start elevation implicitly.
+These are protocol and offline preservation guarantees, not a live bypass
+acceptance claim. See NETWORK_TESTING.md.
 
 ### Private CONNECT attempt correlation (2026-10-25)
 

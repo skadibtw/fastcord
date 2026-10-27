@@ -7,6 +7,151 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use zeroize::Zeroizing;
 
+#[derive(Default)]
+struct PacketAudit {
+    calls: std::sync::Mutex<Vec<(SocketAddr, u8, [u8; 74])>>,
+    unavailable: std::sync::atomic::AtomicBool,
+}
+impl crate::tls::FakePrefixFactory for PacketAudit {
+    fn available(&self) -> bool {
+        !self.unavailable.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn supports_udp_discovery(&self) -> bool {
+        true
+    }
+    fn start(
+        &self,
+        _: std::net::TcpStream,
+        _: Vec<u8>,
+        _: Vec<u8>,
+        _: crate::tls::Strategy,
+    ) -> io::Result<crate::tls::PrefixFuture> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    fn start_udp_discovery(
+        &self,
+        socket: std::net::UdpSocket,
+        server: SocketAddr,
+        request: [u8; 74],
+        variant: u8,
+    ) -> io::Result<crate::tls::PrefixFuture> {
+        self.calls.lock().unwrap().push((server, variant, request));
+        Ok(Box::pin(async move { socket.send_to(&request, server) }))
+    }
+}
+fn discovery_request() -> [u8; 74] {
+    let mut request = [0; 74];
+    request[..8].copy_from_slice(&[0, 1, 0, 70, 0x12, 0x34, 0x56, 0x78]);
+    request
+}
+
+#[tokio::test]
+async fn only_canonical_discovery_reaches_the_packet_factory() {
+    let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server = receiver.local_addr().unwrap();
+    let factory = Arc::new(PacketAudit::default());
+    let socket = DatagramSocket::Packet {
+        socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+        server,
+        factory: factory.clone(),
+    };
+    let request = discovery_request();
+    assert_eq!(
+        socket.send_discovery(&request, server, 2).await.unwrap(),
+        74
+    );
+    let mut buffer = [0; 128];
+    let n = timeout(Duration::from_secs(1), receiver.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    assert_eq!(&buffer[..n], &request);
+    let rtp = [0x80, 0x78, 0, 1, 0, 0, 0, 1];
+    socket.send_to(&rtp, server).await.unwrap();
+    let n = timeout(Duration::from_secs(1), receiver.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    assert_eq!(&buffer[..n], &rtp);
+    for n in 0..74 {
+        assert!(
+            socket
+                .send_discovery(&request[..n], server, 1)
+                .await
+                .is_err()
+        );
+    }
+    for variant in [0, 4, 255] {
+        assert!(
+            socket
+                .send_discovery(&request, server, variant)
+                .await
+                .is_err()
+        );
+    }
+    let mut modified = request;
+    modified[8] = 1;
+    assert!(socket.send_discovery(&modified, server, 1).await.is_err());
+    assert!(
+        socket
+            .send_discovery(&request, "127.0.0.1:1".parse().unwrap(), 1)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        factory.calls.lock().unwrap().as_slice(),
+        &[(server, 2, request)]
+    );
+    factory
+        .unavailable
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        socket
+            .send_discovery(&request, server, 1)
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::ConnectionAborted
+    );
+    assert_eq!(factory.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn packet_udp_binding_is_explicit_auto_only_and_never_implicitly_elevates() {
+    use crate::settings::Mode;
+    let factory = Arc::new(PacketAudit::default());
+    let context = NetworkContext::new(Mode::Auto).with_prefix_factory(factory.clone());
+    assert!(matches!(
+        context.bind_udp(media()).await.unwrap(),
+        DatagramSocket::Packet { .. }
+    ));
+    assert!(matches!(
+        context
+            .with_mode(Mode::Off)
+            .bind_udp(media())
+            .await
+            .unwrap(),
+        DatagramSocket::Direct(_)
+    ));
+    assert!(matches!(
+        NetworkContext::new(Mode::Auto)
+            .bind_udp(media())
+            .await
+            .unwrap(),
+        DatagramSocket::Direct(_)
+    ));
+    factory
+        .unavailable
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(matches!(
+        context.bind_udp(media()).await.unwrap(),
+        DatagramSocket::Direct(_)
+    ));
+    assert!(factory.calls.lock().unwrap().is_empty());
+}
+
 fn media() -> SocketAddr {
     "1.1.1.1:50001".parse().unwrap()
 }

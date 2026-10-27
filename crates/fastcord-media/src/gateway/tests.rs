@@ -472,6 +472,60 @@ fn session_description(mode: &str) -> Value {
     }})
 }
 
+#[tokio::test(start_paused = true)]
+async fn external_sender_before_udp_negotiation_is_applied_after_session_description() {
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    let signer = SignatureKeyPair::new(
+        Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256.signature_algorithm(),
+    )
+    .unwrap();
+    let sender = ExternalSender::new(
+        signer.public().into(),
+        BasicCredential::new(b"voice-gateway".to_vec()).into(),
+    );
+    let mut frame = vec![0, 1, 25];
+    frame.extend_from_slice(&sender.tls_serialize_detached().unwrap());
+    ws.0.send(Message::binary(frame)).await.unwrap();
+    ws.hello(QUIET_HEARTBEAT_MS).await;
+    ws.recv_op(0).await;
+    ws.send(ready(&BOTH_MODES)).await;
+    let mut udp = harness.udp().await;
+    let discovery = udp.recv().await;
+    udp.answer_discovery(&discovery);
+    ws.recv_op(1).await;
+    ws.send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let Message::Binary(package) = ws.0.next().await.unwrap().unwrap() else {
+        panic!("expected DAVE key package");
+    };
+    assert_eq!(package[0], 26);
+    assert!(matches!(
+        harness.session.status(),
+        VoiceStatus::Rekeying { .. }
+    ));
+    harness.session.leave().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn malformed_early_external_sender_is_rejected_when_dave_starts() {
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    ws.hello(QUIET_HEARTBEAT_MS).await;
+    ws.recv_op(0).await;
+    ws.0.send(Message::binary(vec![0, 1, 25, 0xff]))
+        .await
+        .unwrap();
+    ws.send(ready(&BOTH_MODES)).await;
+    let mut udp = harness.udp().await;
+    let discovery = udp.recv().await;
+    udp.answer_discovery(&discovery);
+    ws.recv_op(1).await;
+    ws.send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    assert_eq!(harness.closed().await, CloseReason::DaveUnavailable);
+}
+
 /// HELLO, Identify, READY, IP discovery, and Select Protocol; returns the
 /// Select Protocol payload with the UDP side ready for Session Description.
 async fn negotiate(harness: &mut Harness, ws: &mut Ws, modes: &[&str]) -> (Udp, Value) {
