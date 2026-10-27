@@ -516,6 +516,45 @@ async fn a_lost_packet_is_nacked_and_repaired_by_rtx_and_an_unrepairable_loss_re
 }
 
 #[tokio::test(start_paused = true)]
+async fn frames_held_behind_a_repaired_loss_all_reach_the_consumer() {
+    let mut rig = start_viewer().await;
+    rig.announce_stream().await;
+    let [keyframe, delta, _] = access_units();
+    rig.send_frame(keyframe, false);
+    assert_eq!(next_video(&mut rig.harness).await.data, keyframe);
+
+    // A packet of the first delta is lost; the deltas of the next 200 ms at
+    // 60 fps arrive complete and wait behind it.
+    let held = crate::video::receive::FRAME_DEADLINE.as_millis() as usize * 60 / 1000;
+    let first = rig.forward(delta, false);
+    let lost = first[4].clone();
+    for packet in first
+        .iter()
+        .filter(|packet| packet.sequence != lost.sequence)
+    {
+        rig.udp.send(packet.datagram.clone());
+    }
+    for _ in 0..held {
+        rig.send_frame(delta, false);
+    }
+    rig.rtcp_until(|feedback| !feedback.nacks.is_empty()).await;
+    assert_no_video(&mut rig.harness).await;
+
+    // The repair releases them all at once, before the consumer runs.
+    let repair = rig.rtx_of(&lost);
+    rig.udp.send(repair);
+    for _ in 0..=held {
+        let frame = next_video(&mut rig.harness).await;
+        assert!(!frame.keyframe);
+        assert_eq!(frame.data, delta);
+    }
+    let stats = rig.harness.session.stats();
+    assert_eq!(stats.video_frames_dropped, 0, "{stats:?}");
+    assert_eq!(stats.dropped_queue_full, 0, "{stats:?}");
+    assert_eq!(stats.keyframe_requests_sent, 0, "{stats:?}");
+}
+
+#[tokio::test(start_paused = true)]
 async fn receiver_reports_carry_loss_and_the_sender_report_echo() {
     let mut rig = start_viewer().await;
     rig.announce_stream().await;

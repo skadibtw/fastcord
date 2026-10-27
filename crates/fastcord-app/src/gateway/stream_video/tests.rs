@@ -472,7 +472,7 @@ fn queued_frames_behind_a_failure_are_dropped_up_to_the_next_keyframe() {
     decoder.push(video(SSRC, 3, false, vec![4]));
     decoder.push(video(SSRC, 4, true, vec![5]));
     decoder.push(video(SSRC, 5, false, vec![6]));
-    assert_eq!(decoder.shared.lock().frames.len(), MAX_QUEUED_FRAMES);
+    assert_eq!(decoder.shared.lock().frames.len(), 4);
     control.release();
     wait_for(&decoder, |stats| stats.frames_processed == 4);
     let stats = decoder.finish();

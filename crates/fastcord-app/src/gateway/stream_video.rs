@@ -30,8 +30,9 @@ use fastcord_media::{MediaSendError, MediaSender};
 use fastcord_video::{CodecError, DecodedFrame, VideoDecoder};
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
-/// Frames waiting for the decoder: at 30 fps about 130 ms of delay at most.
-const MAX_QUEUED_FRAMES: usize = 4;
+/// Frames waiting for the decoder: the burst a repaired loss releases at once
+/// must fit, or the repair turns into a drop and a keyframe request.
+const MAX_QUEUED_FRAMES: usize = fastcord_media::gateway::WATCH_VIDEO_QUEUE_FRAMES;
 /// Bytes waiting for the decoder (a frame is at most 2 MiB, so three of them).
 pub(crate) const MAX_QUEUED_BYTES: usize = 6 << 20;
 /// Keyframes that failed to decode, in a row, that are answered with a request.

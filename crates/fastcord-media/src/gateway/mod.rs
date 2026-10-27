@@ -51,10 +51,17 @@ pub const MAX_OPUS_FRAME: usize = 1275;
 /// Received audio packets waiting for the consumer, each at most
 /// [`MAX_OPUS_FRAME`] bytes of payload; newer packets are dropped when full.
 pub const AUDIO_QUEUE_PACKETS: usize = 64;
-/// Whole video frames waiting in either direction. A frame is at most
-/// [`MAX_FRAME_BYTES`], so each queue holds at most 6 MiB; what does not fit is
+/// Whole video frames waiting to be sent. A frame is at most
+/// [`MAX_FRAME_BYTES`], so the queue holds at most 6 MiB; what does not fit is
 /// dropped, and the stream restarts at its next keyframe.
 pub const VIDEO_QUEUE_FRAMES: usize = 3;
+/// Received frames waiting for a stream viewer's consumer. A repaired loss
+/// releases every complete frame held behind it in one go, faster than any
+/// consumer runs: up to the 200 ms incomplete-frame deadline of them at
+/// 60 fps (12) plus the repaired one. A smaller queue turned each
+/// such repair into a drop and a keyframe request. Their bytes came out of
+/// the receive buffer, so one burst holds at most its 4 MiB.
+pub const WATCH_VIDEO_QUEUE_FRAMES: usize = 13;
 /// Received video frames waiting for the consumer on a call connection, which
 /// carries up to [`MAX_INTEREST_USERS`] cameras at once (at most 16 MiB).
 pub const CALL_VIDEO_QUEUE_FRAMES: usize = 8;
@@ -602,7 +609,7 @@ fn start<S: transport::Signaling, N: transport::Network>(
     let (video_out_tx, video) = mpsc::channel(if call_video {
         CALL_VIDEO_QUEUE_FRAMES
     } else {
-        VIDEO_QUEUE_FRAMES
+        WATCH_VIDEO_QUEUE_FRAMES
     });
     let (video_in_tx, video_in_rx) = mpsc::channel(VIDEO_QUEUE_FRAMES);
     // A viewer connection exists because the user chose to watch: it wants the
