@@ -281,14 +281,9 @@ impl AttachmentCache {
         account: Snowflake,
         user_agent: &str,
     ) -> Result<Self, AttachmentError> {
-        let base = cache_base().ok_or(AttachmentError::CacheUnavailable)?;
-        Self::new(
-            network,
-            account,
-            base.join(crate::audio_devices::app_dir_name())
-                .join("attachments"),
-            user_agent,
-        )
+        let base = fastcord_platform::paths::cache_dir(crate::audio_devices::app_dir_name())
+            .ok_or(AttachmentError::CacheUnavailable)?;
+        Self::new(network, account, base.join("attachments"), user_agent)
     }
 
     fn ensure_active(&self) -> Result<(), AttachmentError> {
@@ -1335,23 +1330,6 @@ fn safe_extension(filename: &str) -> String {
         })
         .map(str::to_ascii_lowercase)
         .unwrap_or_else(|| "bin".to_owned())
-}
-
-fn cache_base() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Caches"))
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-    }
 }
 
 #[cfg(test)]

@@ -76,6 +76,28 @@ fn updates_that_leave_the_timeline_alone_do_not_rescan_it() {
 }
 
 #[test]
+fn autostart_shows_the_result_when_it_arrives_and_ignores_toggles_meanwhile() {
+    let mut app = login_app();
+    assert_eq!(app.autostart, None);
+    let _ = app.update(Message::AutostartDone(Ok(false)));
+    assert_eq!(app.autostart, Some(false));
+    let _ = app.update(Message::AutostartToggled(true));
+    assert!(app.autostart_busy);
+    assert_eq!(
+        app.autostart,
+        Some(false),
+        "the old value stays until the write ends"
+    );
+    let _ = app.update(Message::AutostartToggled(false));
+    let _ = app.update(Message::AutostartDone(Err("denied".to_owned())));
+    assert!(!app.autostart_busy);
+    assert_eq!(app.autostart, Some(false));
+    assert_eq!(app.notice.as_deref(), Some("denied"));
+    let _ = app.update(Message::AutostartDone(Ok(true)));
+    assert_eq!(app.autostart, Some(true));
+}
+
+#[test]
 fn an_inactive_window_drops_decoded_animations() {
     let mut app = login_app();
     authenticate(&mut app, Persistence::MemoryOnly);

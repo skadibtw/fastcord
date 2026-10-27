@@ -327,6 +327,8 @@ struct App {
     /// The Windows start-at-sign-in setting as read from the registry; `None`
     /// where it does not exist.
     autostart: Option<bool>,
+    /// An autostart read or write is running on a blocking thread; toggles wait.
+    autostart_busy: bool,
     /// A link from the command line or a second launch, opened once signed in.
     pending_link: Option<desktop::DeepLink>,
     /// The window was put in full screen by the call view's button.
@@ -663,6 +665,8 @@ enum Message {
     ReconnectGateway,
     CloseToTrayToggled(bool),
     AutostartToggled(bool),
+    /// The autostart read or write finished: the setting now, or why it failed.
+    AutostartDone(Result<bool, String>),
     /// Enter or leave compact call mode (small, always on top).
     ToggleCompact,
     WindowSize(iced::Size),
@@ -723,29 +727,35 @@ impl App {
                 window_hidden: false,
                 compact_call: false,
                 window_size: iced::Size::new(1080.0, 640.0),
-                autostart: (cfg!(any(windows, target_os = "linux", target_os = "macos"))
-                    && !fake_mode())
-                .then(fastcord_platform::autostart::is_enabled),
+                autostart: None,
+                autostart_busy: false,
                 pending_link: desktop::take_startup(),
                 window_fullscreen: false,
                 mic_panel: mic_panel::State::default(),
                 ui: account_ui::AccountUi::default(),
             },
-            Task::perform(
-                async {
-                    paste::purge_stale();
-                    voice_record::purge_stale();
-                    let preferences = audio_devices::load().await;
-                    (
-                        preferences,
-                        network_ui::load().await,
-                        login::initialize_store().await,
-                    )
+            Task::batch([
+                if cfg!(any(windows, target_os = "linux", target_os = "macos")) && !fake_mode() {
+                    desktop::autostart_task(None)
+                } else {
+                    Task::none()
                 },
-                |(preferences, network, store)| {
-                    Message::Initialized(preferences, Box::new(network), store)
-                },
-            ),
+                Task::perform(
+                    async {
+                        paste::purge_stale();
+                        voice_record::purge_stale();
+                        let preferences = audio_devices::load().await;
+                        (
+                            preferences,
+                            network_ui::load().await,
+                            login::initialize_store().await,
+                        )
+                    },
+                    |(preferences, network, store)| {
+                        Message::Initialized(preferences, Box::new(network), store)
+                    },
+                ),
+            ]),
         )
     }
 
@@ -1627,6 +1637,7 @@ and a fourth"
             | Message::ReconnectGateway
             | Message::CloseToTrayToggled(..)
             | Message::AutostartToggled(..)
+            | Message::AutostartDone(..)
             | Message::ToggleCompact
             | Message::ShortcutKey(..)
             | Message::GlobalShortcut(..)

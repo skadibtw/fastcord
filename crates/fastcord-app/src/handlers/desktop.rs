@@ -172,10 +172,19 @@ impl App {
                     return self.save_audio_preferences();
                 }
             }
-            Message::AutostartToggled(on) => match fastcord_platform::autostart::set(on) {
-                Ok(()) => self.autostart = Some(on),
-                Err(error) => self.notice = Some(error.to_string()),
-            },
+            Message::AutostartToggled(on) => {
+                if !self.autostart_busy {
+                    self.autostart_busy = true;
+                    return desktop::autostart_task(Some(on));
+                }
+            }
+            Message::AutostartDone(result) => {
+                self.autostart_busy = false;
+                match result {
+                    Ok(on) => self.autostart = Some(on),
+                    Err(error) => self.notice = Some(error),
+                }
+            }
             Message::ToggleCompact => {
                 if self.compact_call {
                     return self.end_compact();

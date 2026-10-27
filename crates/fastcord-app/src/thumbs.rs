@@ -6,7 +6,6 @@
 //! the least recently used file. Lives next to the attachment cache, per account.
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::disk_index;
 
@@ -19,7 +18,6 @@ const MAGIC: &[u8; 4] = b"FCT1";
 const HEADER: usize = 12;
 /// A hit older than this has its recency refreshed (one metadata write).
 const TOUCH_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
-static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
 /// File name for one rendition; `hash` is reduced to name-safe characters.
 pub fn name(kind: u8, id: u64, hash: &str, fit: (u32, u32)) -> String {
@@ -88,17 +86,8 @@ pub fn write(dir: &Path, name: &str, image: &DecodedImage) -> Result<(), Attachm
     data.extend_from_slice(&image.height.to_le_bytes());
     data.extend_from_slice(&image.rgba);
     let destination = dir.join(name);
-    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = dir.join(format!("{}-{sequence}.tmp", std::process::id()));
-    fs::write(&temporary, &data).map_err(|_| AttachmentError::CacheUnavailable)?;
-    if fs::rename(&temporary, &destination).is_err() {
-        // Windows cannot rename over an existing file.
-        let _ = fs::remove_file(&destination);
-        if fs::rename(&temporary, &destination).is_err() {
-            let _ = fs::remove_file(&temporary);
-            return Err(AttachmentError::CacheUnavailable);
-        }
-    }
+    fastcord_platform::paths::write_atomic(&destination, &data)
+        .map_err(|_| AttachmentError::CacheUnavailable)?;
     let (victims, _) = disk_index::record(&destination, data.len() as u64, None, THUMB_CACHE_LIMIT);
     disk_index::delete(victims);
     Ok(())

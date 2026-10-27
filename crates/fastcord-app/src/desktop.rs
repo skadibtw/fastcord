@@ -333,6 +333,24 @@ pub fn compact_view(voice: &VoiceControls) -> Element<'static, Message> {
     .into()
 }
 
+/// Reads (`None`) or writes the start-at-sign-in setting on a blocking thread
+/// (registry, desktop entry or launch agent) and answers with the setting now.
+pub(crate) fn autostart_task(set: Option<bool>) -> iced::Task<Message> {
+    iced::Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || match set {
+                Some(on) => fastcord_platform::autostart::set(on)
+                    .map(|()| on)
+                    .map_err(|error| error.to_string()),
+                None => Ok(fastcord_platform::autostart::is_enabled()),
+            })
+            .await
+            .unwrap_or_else(|_| Err("The autostart task stopped.".to_owned()))
+        },
+        Message::AutostartDone,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

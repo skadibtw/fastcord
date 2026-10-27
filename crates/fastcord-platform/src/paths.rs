@@ -12,6 +12,21 @@ pub fn config_dir(app: &str) -> Option<PathBuf> {
     config_dir_from(|name| std::env::var_os(name), app)
 }
 
+/// `<cache root>/<app>`: `%LOCALAPPDATA%`, `~/Library/Caches`, or
+/// `$XDG_CACHE_HOME` / `~/.cache`.
+pub fn cache_dir(app: &str) -> Option<PathBuf> {
+    cache_dir_from(|name| std::env::var_os(name), app)
+}
+
+/// The XDG spec: a relative base directory is invalid and ignored.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn xdg(var: &impl Fn(&str) -> Option<OsString>, name: &str, fallback: &str) -> Option<PathBuf> {
+    var(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| var("HOME").map(|home| PathBuf::from(home).join(fallback)))
+}
+
 fn config_dir_from(var: impl Fn(&str) -> Option<OsString>, app: &str) -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     let root = var("APPDATA").map(PathBuf::from)?;
@@ -20,9 +35,17 @@ fn config_dir_from(var: impl Fn(&str) -> Option<OsString>, app: &str) -> Option<
         .map(PathBuf::from)?
         .join("Library/Application Support");
     #[cfg(all(unix, not(target_os = "macos")))]
-    let root = var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| var("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    let root = xdg(&var, "XDG_CONFIG_HOME", ".config")?;
+    Some(root.join(app))
+}
+
+fn cache_dir_from(var: impl Fn(&str) -> Option<OsString>, app: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let root = var("LOCALAPPDATA").map(PathBuf::from)?;
+    #[cfg(target_os = "macos")]
+    let root = var("HOME").map(PathBuf::from)?.join("Library/Caches");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let root = xdg(&var, "XDG_CACHE_HOME", ".cache")?;
     Some(root.join(app))
 }
 
@@ -79,6 +102,50 @@ mod tests {
         let dir = config_dir_from(env(&[("APPDATA", roaming)]), "fastcord");
         assert_eq!(dir, Some(PathBuf::from(roaming).join("fastcord")));
         assert_eq!(config_dir_from(env(&[("HOME", "C:\\h")]), "fastcord"), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_cache_uses_local_appdata() {
+        let local = r"C:\Users\u\AppData\Local";
+        let dir = cache_dir_from(env(&[("LOCALAPPDATA", local)]), "fastcord");
+        assert_eq!(dir, Some(PathBuf::from(local).join("fastcord")));
+        assert_eq!(
+            cache_dir_from(env(&[("APPDATA", r"C:\a")]), "fastcord"),
+            None
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_cache_uses_library_caches() {
+        let dir = cache_dir_from(env(&[("HOME", "/Users/u")]), "fastcord");
+        assert_eq!(dir, Some(PathBuf::from("/Users/u/Library/Caches/fastcord")));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_cache_prefers_xdg_then_home_and_ignores_relative() {
+        let both = env(&[("XDG_CACHE_HOME", "/x"), ("HOME", "/h")]);
+        assert_eq!(
+            cache_dir_from(both, "fastcord"),
+            Some(PathBuf::from("/x/fastcord"))
+        );
+        assert_eq!(
+            cache_dir_from(env(&[("HOME", "/h")]), "fastcord"),
+            Some(PathBuf::from("/h/.cache/fastcord"))
+        );
+        let relative = env(&[("XDG_CACHE_HOME", "rel"), ("HOME", "/h")]);
+        assert_eq!(
+            cache_dir_from(relative, "fastcord"),
+            Some(PathBuf::from("/h/.cache/fastcord"))
+        );
+        let relative = env(&[("XDG_CONFIG_HOME", "rel"), ("HOME", "/h")]);
+        assert_eq!(
+            config_dir_from(relative, "fastcord"),
+            Some(PathBuf::from("/h/.config/fastcord"))
+        );
+        assert_eq!(cache_dir_from(env(&[]), "fastcord"), None);
     }
 
     #[cfg(target_os = "macos")]
