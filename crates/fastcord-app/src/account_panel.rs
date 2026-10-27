@@ -22,6 +22,7 @@ use iced::{Element, Length, Task};
 
 use crate::accounts::Index;
 use crate::i18n::{tr, trf};
+use crate::panel_kit::Gate;
 
 /// Where password, MFA, passkeys and recovery are changed.
 pub const SETTINGS_URL: &str = "https://discord.com/settings/account";
@@ -66,10 +67,9 @@ pub struct State {
     overview: Option<SecurityOverview>,
     loading: bool,
     pending: Option<Pending>,
-    /// A logout request is in flight.
-    busy: bool,
-    notice: Option<String>,
-    generation: u64,
+    /// Busy while a logout request is in flight; the serial stamps the list
+    /// loads too.
+    life: Gate,
 }
 
 fn describe(error: RestError) -> String {
@@ -97,8 +97,10 @@ fn describe(error: RestError) -> String {
 impl State {
     /// Logout or account change.
     pub fn clear(&mut self) {
+        let mut life = std::mem::take(&mut self.life);
+        life.reset();
         *self = Self {
-            generation: self.generation.wrapping_add(1),
+            life,
             ..Self::default()
         };
     }
@@ -108,7 +110,7 @@ impl State {
     }
 
     pub fn fail(&mut self, notice: &str) {
-        self.notice = Some(notice.to_owned());
+        self.life.notice = Some(notice.to_owned());
     }
 
     fn load(&mut self, client: &RestClient) -> Task<Event> {
@@ -116,8 +118,8 @@ impl State {
             return Task::none();
         }
         self.loading = true;
-        self.notice = None;
-        let generation = self.generation;
+        self.life.notice = None;
+        let generation = self.life.serial();
         let (sessions, overview) = (client.clone(), client.clone());
         Task::batch([
             Task::perform(
@@ -132,18 +134,19 @@ impl State {
     }
 
     fn finish_logout(&mut self, hash: &str, result: Result<(), RestError>) {
-        if !self.busy {
+        if !self.life.is_busy() {
             return;
         }
-        self.busy = false;
+        let serial = self.life.serial();
+        self.life.accept(serial);
         match result {
             Ok(()) => {
                 if let Some(list) = &mut self.sessions {
                     list.retain(|session| session.id_hash != hash);
                 }
-                self.notice = Some(tr("That session was logged out.").to_owned());
+                self.life.notice = Some(tr("That session was logged out.").to_owned());
             }
-            Err(error) => self.notice = Some(describe(error)),
+            Err(error) => self.life.notice = Some(describe(error)),
         }
     }
 
@@ -160,23 +163,21 @@ impl State {
                 self.pending = None;
                 return (self.load(client), None);
             }
-            Event::Sessions(generation, result) if generation == self.generation => {
+            Event::Sessions(generation, result) if self.life.is_current(generation) => {
                 self.loading = false;
                 match result {
                     Ok(list) => self.sessions = Some(list),
-                    Err(error) => self.notice = Some(describe(error)),
+                    Err(error) => self.life.notice = Some(describe(error)),
                 }
             }
-            Event::Overview(generation, Ok(overview)) if generation == self.generation => {
+            Event::Overview(generation, Ok(overview)) if self.life.is_current(generation) => {
                 self.overview = Some(overview);
             }
-            Event::Ask(pending) if !self.busy => self.pending = Some(pending),
+            Event::Ask(pending) if !self.life.is_busy() => self.pending = Some(pending),
             Event::Cancel => self.pending = None,
-            Event::Confirm if !self.busy => match self.pending.take() {
+            Event::Confirm if !self.life.is_busy() => match self.pending.take() {
                 Some(Pending::Logout(hash)) => {
-                    self.busy = true;
-                    self.notice = None;
-                    let generation = self.generation;
+                    let generation = self.life.begin(());
                     let client = client.clone();
                     let sent = hash.clone();
                     return (
@@ -190,7 +191,7 @@ impl State {
                 Some(Pending::Remove(id)) => return (Task::none(), Some(Action::Remove(id))),
                 None => {}
             },
-            Event::LoggedOut(generation, hash, result) if generation == self.generation => {
+            Event::LoggedOut(generation, hash, result) if self.life.is_current(generation) => {
                 self.finish_logout(&hash, result);
             }
             Event::Switch(id) => return (Task::none(), Some(Action::Switch(id))),
@@ -271,9 +272,9 @@ pub fn view<'a>(
                 .push(text(tr("Active")).size(12).color(crate::style::muted()))
                 .push(button(text(tr("Log out of fastcord")).size(12)).on_press(Event::Logout));
         } else {
-            line =
-                line.push(button(text(tr("Switch")).size(12)).on_press_maybe(
-                    (can_switch && !state.busy).then_some(Event::Switch(entry.id)),
+            line = line
+                .push(button(text(tr("Switch")).size(12)).on_press_maybe(
+                    (can_switch && !state.life.is_busy()).then_some(Event::Switch(entry.id)),
                 ))
                 .push(
                     button(text(tr("Remove")).size(12))
@@ -328,7 +329,8 @@ pub fn view<'a>(
             row![
                 text(session_line(session)).size(12).width(Length::Fill),
                 button(text(tr("Log out")).size(12)).on_press_maybe(
-                    (!state.busy).then(|| Event::Ask(Pending::Logout(session.id_hash.clone()))),
+                    (!state.life.is_busy())
+                        .then(|| Event::Ask(Pending::Logout(session.id_hash.clone()))),
                 ),
             ]
             .spacing(8),
@@ -357,13 +359,13 @@ pub fn view<'a>(
             row![
                 text(question).size(13).width(Length::Fill),
                 button(text(tr("Confirm")).size(12))
-                    .on_press_maybe((!state.busy).then_some(Event::Confirm)),
+                    .on_press_maybe((!state.life.is_busy()).then_some(Event::Confirm)),
                 button(text(tr("Cancel")).size(12)).on_press(Event::Cancel),
             ]
             .spacing(8),
         );
     }
-    if let Some(notice) = &state.notice {
+    if let Some(notice) = &state.life.notice {
         body = body.push(text(notice.clone()).size(12).style(text::danger));
     }
     // A page of the settings screen: it has the title, the cross and the
@@ -426,23 +428,23 @@ mod tests {
         let mut state = listed();
         // Confirm with nothing asked sends nothing.
         let _ = state.update(Event::Confirm, &client);
-        assert!(!state.busy);
+        assert!(!state.life.is_busy());
         // Asking is not sending.
         let _ = state.update(Event::Ask(Pending::Logout("a".into())), &client);
-        assert!(!state.busy && state.pending.is_some());
+        assert!(!state.life.is_busy() && state.pending.is_some());
         // Cancel drops the question.
         let _ = state.update(Event::Cancel, &client);
         assert!(state.pending.is_none());
         let _ = state.update(Event::Ask(Pending::Logout("a".into())), &client);
         let _ = state.update(Event::Confirm, &client);
-        assert!(state.busy && state.pending.is_none());
+        assert!(state.life.is_busy() && state.pending.is_none());
         // While in flight nothing new can be asked or confirmed.
         let _ = state.update(Event::Ask(Pending::Logout("b".into())), &client);
         assert!(state.pending.is_none());
         let _ = state.update(Event::Confirm, &client);
-        let generation = state.generation;
+        let generation = state.life.serial();
         let _ = state.update(Event::LoggedOut(generation, "a".into(), Ok(())), &client);
-        assert!(!state.busy);
+        assert!(!state.life.is_busy());
         let hashes: Vec<_> = state
             .sessions
             .iter()
@@ -453,14 +455,27 @@ mod tests {
     }
 
     #[test]
+    fn a_logout_answer_after_clear_is_ignored() {
+        let client = client();
+        let mut state = listed();
+        let _ = state.update(Event::Ask(Pending::Logout("a".into())), &client);
+        let _ = state.update(Event::Confirm, &client);
+        let stale = state.life.serial();
+        state.clear();
+        assert!(!state.life.is_busy());
+        let _ = state.update(Event::LoggedOut(stale, "a".into(), Ok(())), &client);
+        assert!(state.life.notice.is_none() && state.sessions.is_none());
+    }
+
+    #[test]
     fn an_mfa_demand_is_shown_with_discords_reason_and_not_retried() {
         let client = client();
         for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
             let mut state = listed();
             let _ = state.update(Event::Ask(Pending::Logout("a".into())), &client);
             let _ = state.update(Event::Confirm, &client);
-            assert!(state.busy);
-            let generation = state.generation;
+            assert!(state.life.is_busy());
+            let generation = state.life.serial();
             let refused = Err(mfa_refusal(status));
             let event = Event::LoggedOut(generation, "a".into(), refused);
             // Not a revoked token: the account is not stopped.
@@ -468,10 +483,10 @@ mod tests {
             let (task, action) = state.update(event, &client);
             assert!(action.is_none());
             drop(task);
-            assert!(!state.busy, "no request stays in flight");
+            assert!(!state.life.is_busy(), "no request stays in flight");
             assert!(state.pending.is_none(), "nothing is queued to retry");
             assert_eq!(state.sessions.as_ref().unwrap().len(), 2);
-            let notice = state.notice.as_deref().unwrap();
+            let notice = state.life.notice.as_deref().unwrap();
             assert!(
                 notice.contains("Multi-factor authentication required"),
                 "{notice}"
@@ -481,7 +496,7 @@ mod tests {
                 "{notice}"
             );
             // A late duplicate answer changes nothing.
-            let generation = state.generation;
+            let generation = state.life.serial();
             let _ = state.update(Event::LoggedOut(generation, "a".into(), Ok(())), &client);
             assert_eq!(state.sessions.as_ref().unwrap().len(), 2);
         }
@@ -493,10 +508,17 @@ mod tests {
     #[test]
     fn an_ambiguous_failure_says_it_may_have_been_applied() {
         let mut state = listed();
-        state.busy = true;
+        state.life.begin(());
         let error = RestError::Retryable(RetryableFailure::Server(StatusCode::BAD_GATEWAY));
         state.finish_logout("a", Err(error));
-        assert!(state.notice.as_deref().unwrap().contains("may have been"));
+        assert!(
+            state
+                .life
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("may have been")
+        );
         assert_eq!(state.sessions.as_ref().unwrap().len(), 2);
     }
 
@@ -509,7 +531,7 @@ mod tests {
         let _ = state.update(Event::Ask(Pending::Remove(Snowflake(6))), &client);
         let (_, action) = state.update(Event::Confirm, &client);
         assert_eq!(action, Some(Action::Remove(Snowflake(6))));
-        let before = state.generation;
+        let before = state.life.serial();
         state.clear();
         let _ = state.update(Event::Sessions(before, Ok(vec![session("z")])), &client);
         assert!(state.sessions.is_none());

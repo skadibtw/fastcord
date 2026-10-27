@@ -21,7 +21,7 @@ use iced::widget::{column, container, row, scrollable, space, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::i18n::{tr, trf};
-use crate::panel_kit::{Confirm as Pending, Gate, WAIT, auth_rejected};
+use crate::panel_kit::{Confirm as Pending, Gate, WAIT, auth_rejected, pick_image};
 
 /// Friends listed as candidates to add.
 const MAX_CANDIDATES: usize = 100;
@@ -253,20 +253,7 @@ impl State {
                     self.start(Action::Icon);
                     let serial = self.life.serial();
                     return Task::perform(
-                        async {
-                            let Some(file) = rfd::AsyncFileDialog::new()
-                                .set_title(tr("Group icon"))
-                                .add_filter(tr("Image"), &["png", "jpg", "jpeg", "gif"])
-                                .pick_file()
-                                .await
-                            else {
-                                return Ok(None);
-                            };
-                            let path = file.path().to_owned();
-                            tokio::task::spawn_blocking(move || read_icon(&path).map(Some))
-                                .await
-                                .unwrap_or(Err("The image could not be read."))
-                        },
+                        pick_image(tr("Group icon"), &["png", "jpg", "jpeg", "gif"], read_icon),
                         move |result| Event::IconPicked(serial, result),
                     );
                 }

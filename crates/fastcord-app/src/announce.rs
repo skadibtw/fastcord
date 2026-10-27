@@ -22,6 +22,7 @@ use iced::widget::{column, container, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 
 use crate::i18n::tr;
+use crate::panel_kit::{Gate, auth_rejected};
 use crate::timeline::{self, Publish};
 
 /// What the account may publish in `channel`, from the reducer's selection.
@@ -90,9 +91,7 @@ pub struct State {
     /// The message whose publishing waits for the Confirm: channel, message.
     publishing: Option<(Snowflake, Snowflake)>,
     panel: Option<Panel>,
-    busy: Option<Busy>,
-    notice: Option<String>,
-    serial: u64,
+    life: Gate<Busy>,
 }
 
 const SENT: &str = "Sent. The message shows Published when Discord confirms.";
@@ -135,20 +134,22 @@ fn publish_block(
 
 impl State {
     pub fn clear(&mut self) {
+        let mut life = std::mem::take(&mut self.life);
+        life.reset();
         *self = Self {
-            serial: self.serial.wrapping_add(1),
+            life,
             ..Self::default()
         };
     }
 
     pub fn is_rejected(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::Published(_, Err(RestError::AuthenticationRequired))
-                | Event::Followed(_, Err(RestError::AuthenticationRequired))
-                | Event::Loaded(_, _, Err(RestError::AuthenticationRequired))
-                | Event::Removed(_, _, Err(RestError::AuthenticationRequired))
-        )
+        match event {
+            Event::Published(_, r) | Event::Followed(_, r) | Event::Removed(_, _, r) => {
+                auth_rejected(r)
+            }
+            Event::Loaded(_, _, r) => auth_rejected(r),
+            _ => false,
+        }
     }
 
     /// The row whose publishing waits for the Confirm.
@@ -187,8 +188,7 @@ impl State {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Event> + Send + 'static,
     {
-        self.busy = Some(busy);
-        self.notice = None;
+        self.life.begin(busy);
         Task::perform(run(), |event| event)
     }
 
@@ -199,12 +199,11 @@ impl State {
         snapshot: &timeline::Snapshot,
         client: &RestClient,
     ) -> Task<Event> {
-        let serial = self.serial;
+        let serial = self.life.serial();
         let client = client.clone();
         match event {
-            Event::Published(s, result) if s == serial => {
-                self.busy = None;
-                self.notice = Some(match result {
+            Event::Published(s, result) if self.life.accept(s) => {
+                self.life.notice = Some(match result {
                     Ok(()) => tr(SENT).to_owned(),
                     Err(error) => describe(
                         error,
@@ -213,24 +212,20 @@ impl State {
                     ),
                 });
             }
-            Event::Followed(s, result) if s == serial => {
-                self.busy = None;
-                match result {
-                    Ok(()) => {
-                        self.panel = None;
-                        self.notice = Some(tr("Sent. It shows under Followed announcements in that channel's settings when Discord confirms.").to_owned());
-                    }
-                    Err(error) => {
-                        self.notice = Some(describe(
-                            error,
-                            "Discord refused: you lack Manage Webhooks there, or the channel cannot be followed.",
-                            "The channel you follow or the destination no longer exists.",
-                        ));
-                    }
+            Event::Followed(s, result) if self.life.accept(s) => match result {
+                Ok(()) => {
+                    self.panel = None;
+                    self.life.notice = Some(tr("Sent. It shows under Followed announcements in that channel's settings when Discord confirms.").to_owned());
                 }
-            }
-            Event::Loaded(s, channel, result) if s == serial => {
-                self.busy = None;
+                Err(error) => {
+                    self.life.notice = Some(describe(
+                        error,
+                        "Discord refused: you lack Manage Webhooks there, or the channel cannot be followed.",
+                        "The channel you follow or the destination no longer exists.",
+                    ));
+                }
+            },
+            Event::Loaded(s, channel, result) if self.life.accept(s) => {
                 if let Some(Panel::Followers {
                     channel: open,
                     list,
@@ -241,7 +236,7 @@ impl State {
                     match result {
                         Ok(found) => *list = Some(found),
                         Err(error) => {
-                            self.notice = Some(describe(
+                            self.life.notice = Some(describe(
                                 error,
                                 "Discord refused: you need Manage Webhooks in this channel.",
                                 "That channel no longer exists.",
@@ -250,8 +245,7 @@ impl State {
                     }
                 }
             }
-            Event::Removed(s, webhook, result) if s == serial => {
-                self.busy = None;
+            Event::Removed(s, webhook, result) if self.life.accept(s) => {
                 let gone = matches!(result, Err(RestError::ResourceGone));
                 match result {
                     Ok(()) | Err(RestError::ResourceGone) => {
@@ -261,7 +255,7 @@ impl State {
                                 list.retain(|f| f.id != webhook);
                             }
                         }
-                        self.notice = Some(
+                        self.life.notice = Some(
                             if gone {
                                 tr("It was already removed.")
                             } else {
@@ -271,7 +265,7 @@ impl State {
                         );
                     }
                     Err(error) => {
-                        self.notice = Some(describe(
+                        self.life.notice = Some(describe(
                             error,
                             "Discord refused: you need Manage Webhooks in this channel.",
                             "That follower no longer exists.",
@@ -287,22 +281,23 @@ impl State {
                 }
             }
             Event::CancelPublish => self.publishing = None,
-            Event::Close if self.busy.is_none() => {
+            Event::Close if !self.life.is_busy() => {
                 self.panel = None;
-                self.notice = None;
+                self.life.notice = None;
                 self.publishing = None;
             }
             Event::Close => {}
-            _ if self.busy.is_some() => {
-                self.notice = Some(tr("Wait for the previous request to finish.").to_owned());
+            _ if self.life.is_busy() => {
+                self.life
+                    .say(tr("Wait for the previous request to finish."));
             }
             Event::AskPublish(channel, message) => {
                 match publish_block(navigation, snapshot, channel, message) {
                     None => {
                         self.publishing = Some((channel, message));
-                        self.notice = None;
+                        self.life.notice = None;
                     }
-                    Some(reason) => self.notice = Some(reason.to_owned()),
+                    Some(reason) => self.life.notice = Some(reason.to_owned()),
                 }
             }
             Event::ConfirmPublish(channel, message) => {
@@ -311,7 +306,7 @@ impl State {
                 }
                 self.publishing = None;
                 if let Some(reason) = publish_block(navigation, snapshot, channel, message) {
-                    self.notice = Some(reason.to_owned());
+                    self.life.notice = Some(reason.to_owned());
                     return Task::none();
                 }
                 return self.start(Busy::Publish, move || async move {
@@ -328,7 +323,7 @@ impl State {
                         source: (guild, channel),
                         picked: None,
                     });
-                    self.notice = None;
+                    self.life.notice = None;
                 }
             }
             Event::Pick(target) => {
@@ -354,7 +349,7 @@ impl State {
                     f.source == source && f.targets.iter().any(|t| t.channel == target)
                 });
                 if !offered {
-                    self.notice = Some(
+                    self.life.notice = Some(
                         tr("You can no longer follow into that channel; choose another.")
                             .to_owned(),
                     );
@@ -366,7 +361,7 @@ impl State {
             }
             Event::OpenFollowers(guild, channel) => {
                 if !can_manage_webhooks(navigation, guild, channel) {
-                    self.notice =
+                    self.life.notice =
                         Some(tr("You need Manage Webhooks in a text channel for this.").to_owned());
                     return Task::none();
                 }
@@ -401,7 +396,8 @@ impl State {
                 };
                 let webhook = *webhook;
                 if !can_manage_webhooks(navigation, *guild, *channel) {
-                    self.notice = Some(tr("You need Manage Webhooks in this channel.").to_owned());
+                    self.life.notice =
+                        Some(tr("You need Manage Webhooks in this channel.").to_owned());
                     return Task::none();
                 }
                 return self.start(Busy::Remove, move || async move {
@@ -438,10 +434,10 @@ pub fn view<'a>(
     state: &'a State,
     navigation: &'a NavigationSnapshot,
 ) -> Option<Element<'a, Event>> {
-    if state.panel.is_none() && state.notice.is_none() {
+    if state.panel.is_none() && state.life.notice.is_none() {
         return None;
     }
-    let idle = state.busy.is_none();
+    let idle = !state.life.is_busy();
     let title = match &state.panel {
         Some(Panel::Follow { .. }) => tr("Follow this channel"),
         Some(Panel::Followers { .. }) => tr("Followed announcements"),
@@ -534,7 +530,7 @@ pub fn view<'a>(
         },
         None => {}
     }
-    if let Some(notice) = &state.notice {
+    if let Some(notice) = &state.life.notice {
         panel = panel.push(text(notice.as_str()).size(12));
     }
     Some(container(panel).padding(8).into())
@@ -630,12 +626,12 @@ mod tests {
         let mut state = State::default();
         // Someone else's message needs Manage Messages.
         run(&mut state, Event::AskPublish(NEWS, THEIRS), &nav, &rows);
-        assert!(state.publishing.is_none() && state.notice.is_some());
+        assert!(state.publishing.is_none() && state.life.notice.is_some());
         run(&mut state, Event::AskPublish(NEWS, MINE), &nav, &rows);
         assert_eq!(state.publishing, Some((NEWS, MINE)));
         // A confirm for another message sends nothing.
         run(&mut state, Event::ConfirmPublish(NEWS, THEIRS), &nav, &rows);
-        assert_eq!(state.busy, None);
+        assert_eq!(state.life.busy(), None);
         // Losing the permission before the click blocks the write.
         run(
             &mut state,
@@ -643,19 +639,23 @@ mod tests {
             &news_nav(false, false),
             &rows,
         );
-        assert_eq!(state.busy, None);
-        assert!(state.publishing.is_none() && state.notice.is_some());
+        assert_eq!(state.life.busy(), None);
+        assert!(state.publishing.is_none() && state.life.notice.is_some());
         run(&mut state, Event::AskPublish(NEWS, MINE), &nav, &rows);
         run(&mut state, Event::ConfirmPublish(NEWS, MINE), &nav, &rows);
-        assert_eq!(state.busy, Some(Busy::Publish));
+        assert_eq!(state.life.busy(), Some(Busy::Publish));
         // While the request is in flight nothing else is sent.
         run(&mut state, Event::AskPublish(NEWS, MINE), &nav, &rows);
         assert!(state.publishing.is_none());
         run(&mut state, Event::Published(1, Ok(())), &nav, &rows);
-        assert_eq!(state.busy, Some(Busy::Publish), "a stale answer is ignored");
+        assert_eq!(
+            state.life.busy(),
+            Some(Busy::Publish),
+            "a stale answer is ignored"
+        );
         run(&mut state, Event::Published(0, Ok(())), &nav, &rows);
-        assert_eq!(state.busy, None);
-        assert_eq!(state.notice.as_deref(), Some(SENT));
+        assert_eq!(state.life.busy(), None);
+        assert_eq!(state.life.notice.as_deref(), Some(SENT));
     }
 
     #[test]
@@ -668,7 +668,10 @@ mod tests {
             &rows(1),
         );
         assert!(state.publishing.is_none());
-        assert_eq!(state.notice.as_deref(), Some("It is already published."));
+        assert_eq!(
+            state.life.notice.as_deref(),
+            Some("It is already published.")
+        );
     }
 
     #[test]
@@ -680,12 +683,10 @@ mod tests {
             (RestError::ResourceGone, "no longer exists"),
             (RestError::InvalidRateLimit, "rate limiting"),
         ] {
-            let mut state = State {
-                busy: Some(Busy::Publish),
-                ..State::default()
-            };
+            let mut state = State::default();
+            state.life.begin(Busy::Publish);
             run(&mut state, Event::Published(0, Err(error)), &nav, &rows);
-            assert!(state.notice.unwrap().contains(expect));
+            assert!(state.life.notice.unwrap().contains(expect));
         }
         assert!(State::is_rejected(&Event::Published(
             0,
@@ -718,19 +719,19 @@ mod tests {
         nav.follow = targets(&[20, 21]);
         run(&mut state, Event::Pick(Snowflake(99)), &nav, &rows);
         run(&mut state, Event::Follow, &nav, &rows);
-        assert_eq!(state.busy, None, "nothing picked, nothing sent");
+        assert_eq!(state.life.busy(), None, "nothing picked, nothing sent");
         run(&mut state, Event::Pick(Snowflake(20)), &nav, &rows);
         // The target disappears from the reducer before the click.
         let mut gone = nav.clone();
         gone.follow = targets(&[21]);
         run(&mut state, Event::Follow, &gone, &rows);
-        assert_eq!(state.busy, None);
-        assert!(state.notice.is_some());
+        assert_eq!(state.life.busy(), None);
+        assert!(state.life.notice.is_some());
         run(&mut state, Event::Follow, &nav, &rows);
-        assert_eq!(state.busy, Some(Busy::Follow));
+        assert_eq!(state.life.busy(), Some(Busy::Follow));
         run(&mut state, Event::Follow, &nav, &rows);
         assert_eq!(
-            state.busy,
+            state.life.busy(),
             Some(Busy::Follow),
             "a second click sends nothing"
         );
@@ -749,6 +750,7 @@ mod tests {
         assert!(state.panel.is_some());
         assert!(
             state
+                .life
                 .notice
                 .as_deref()
                 .unwrap()
@@ -757,7 +759,7 @@ mod tests {
         run(&mut state, Event::Pick(Snowflake(20)), &nav, &rows);
         run(&mut state, Event::Follow, &nav, &rows);
         run(&mut state, Event::Followed(0, Ok(())), &nav, &rows);
-        assert!(state.panel.is_none() && state.busy.is_none());
+        assert!(state.panel.is_none() && !state.life.is_busy());
     }
 
     #[test]
@@ -856,7 +858,7 @@ mod tests {
             &nav,
             &rows,
         );
-        assert_eq!(state.busy, Some(Busy::Load));
+        assert_eq!(state.life.busy(), Some(Busy::Load));
         assert_eq!(state.wanted_guild(), Some(Snowflake(2)));
         let list = fastcord_discord::parse_followers(
             include_str!("../../../fixtures/rest/channel-webhooks-synthetic.json").as_bytes(),
@@ -874,15 +876,15 @@ mod tests {
             Some(Panel::Followers { confirm: None, .. })
         ));
         run(&mut state, Event::ConfirmRemove, &nav, &rows);
-        assert_eq!(state.busy, None, "nothing is removed without asking");
+        assert_eq!(state.life.busy(), None, "nothing is removed without asking");
         run(&mut state, Event::AskRemove(Snowflake(7001)), &nav, &rows);
         // Losing the permission before the Confirm blocks the delete.
         run(&mut state, Event::ConfirmRemove, &admin_nav(false), &rows);
-        assert_eq!(state.busy, None);
+        assert_eq!(state.life.busy(), None);
         run(&mut state, Event::ConfirmRemove, &nav, &rows);
-        assert_eq!(state.busy, Some(Busy::Remove));
+        assert_eq!(state.life.busy(), Some(Busy::Remove));
         run(&mut state, Event::ConfirmRemove, &nav, &rows);
-        assert_eq!(state.busy, Some(Busy::Remove));
+        assert_eq!(state.life.busy(), Some(Busy::Remove));
         run(
             &mut state,
             Event::Removed(0, Snowflake(7001), Ok(())),
@@ -918,9 +920,9 @@ mod tests {
         };
         let mut state = State {
             panel: Some(panel()),
-            busy: Some(Busy::Remove),
             ..State::default()
         };
+        state.life.begin(Busy::Remove);
         run(
             &mut state,
             Event::Removed(0, Snowflake(7001), Err(RestError::PermissionDenied)),
@@ -930,8 +932,15 @@ mod tests {
         assert!(
             matches!(&state.panel, Some(Panel::Followers { list: Some(l), .. }) if l.len() == 2)
         );
-        assert!(state.notice.as_deref().unwrap().contains("Manage Webhooks"));
-        state.busy = Some(Busy::Remove);
+        assert!(
+            state
+                .life
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("Manage Webhooks")
+        );
+        state.life.begin(Busy::Remove);
         run(
             &mut state,
             Event::Removed(0, Snowflake(7001), Err(RestError::ResourceGone)),
@@ -953,9 +962,9 @@ mod tests {
         state.sync(Some(Snowflake(11)));
         assert!(state.publishing.is_none());
         run(&mut state, Event::OpenFollow(GUILD, NEWS), &nav, &rows);
-        let serial = state.serial;
+        let serial = state.life.serial();
         state.clear();
-        assert!(state.panel.is_none() && state.serial != serial);
+        assert!(state.panel.is_none() && state.life.serial() != serial);
         assert!(view(&state, &nav).is_none());
     }
 }

@@ -24,6 +24,7 @@ use iced::widget::{column, row, space, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::i18n::{tr, trf};
+use crate::panel_kit::{Gate, WAIT, pick_image};
 use crate::style;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,9 +85,7 @@ pub struct State {
     /// The server the nickname field belongs to.
     nick_guild: Option<Snowflake>,
     connections: Option<Vec<Connection>>,
-    busy: Option<Action>,
-    notice: Option<String>,
-    serial: u64,
+    life: Gate<Action>,
     /// Dropped (aborting the request) only on logout or account change.
     task: Option<iced::task::Handle>,
 }
@@ -139,8 +138,10 @@ impl State {
 
     /// Logout or account change: drops the panel, its fields and any request.
     pub fn clear(&mut self) {
+        let mut life = std::mem::take(&mut self.life);
+        life.reset();
         *self = Self {
-            serial: self.serial.wrapping_add(1),
+            life,
             ..Self::default()
         };
     }
@@ -148,7 +149,7 @@ impl State {
     /// Follows the selected server while the nickname field is untouched by a
     /// request, so a save always names the server shown.
     pub fn sync(&mut self, navigation: &NavigationSnapshot) {
-        if self.open && self.busy.is_none() && self.nick_guild != navigation.selected_guild {
+        if self.open && !self.life.is_busy() && self.nick_guild != navigation.selected_guild {
             self.nick_guild = navigation.selected_guild;
             self.nick = navigation.own_nick.clone().unwrap_or_default();
         }
@@ -159,9 +160,7 @@ impl State {
         F: FnOnce(RestClient) -> Fut,
         Fut: Future<Output = Result<Outcome, ProfileRequestError>> + Send + 'static,
     {
-        self.busy = Some(action);
-        self.notice = None;
-        let serial = self.serial;
+        let serial = self.life.begin(action);
         let client = client.clone();
         let (task, handle) = Task::perform(run(client), move |result| {
             Event::Done(serial, action, result)
@@ -180,7 +179,7 @@ impl State {
     ) -> Task<Event> {
         match event {
             Event::Toggle if self.open => {
-                if self.busy.is_none() {
+                if !self.life.is_busy() {
                     self.clear();
                 }
             }
@@ -198,31 +197,27 @@ impl State {
                         .map_err(ProfileRequestError::Rest)
                 });
             }
-            Event::Done(serial, action, result) if serial == self.serial => {
-                self.busy = None;
+            Event::Done(serial, action, result) if self.life.accept(serial) => {
                 self.task = None;
                 match result {
                     Ok(outcome) => self.finished(outcome, action),
-                    Err(error) => self.notice = Some(describe(error, action)),
+                    Err(error) => self.life.notice = Some(describe(error, action)),
                 }
             }
-            Event::AvatarPicked(serial, result) if serial == self.serial => {
-                self.busy = None;
-                match result {
-                    Ok(Some(avatar)) => {
-                        return self.send(Action::Avatar, client, move |client| async move {
-                            client
-                                .edit_account(&AccountEdit::Avatar(Some(avatar)))
-                                .await
-                                .map(|_| Outcome::Saved)
-                        });
-                    }
-                    Ok(None) => {}
-                    Err(reason) => self.notice = Some(tr(reason).to_owned()),
+            Event::AvatarPicked(serial, result) if self.life.accept(serial) => match result {
+                Ok(Some(avatar)) => {
+                    return self.send(Action::Avatar, client, move |client| async move {
+                        client
+                            .edit_account(&AccountEdit::Avatar(Some(avatar)))
+                            .await
+                            .map(|_| Outcome::Saved)
+                    });
                 }
-            }
+                Ok(None) => {}
+                Err(reason) => self.life.notice = Some(tr(reason).to_owned()),
+            },
             _ if !self.open => {}
-            _ if self.busy.is_some() => {
+            _ if self.life.is_busy() => {
                 // One request at a time; the answer of the first is awaited.
                 if !matches!(
                     event,
@@ -233,7 +228,7 @@ impl State {
                         | Event::PronounsInput(_)
                         | Event::NickInput(_)
                 ) {
-                    self.notice = Some(tr("Wait for the previous change to finish.").to_owned());
+                    self.life.say(tr(WAIT));
                 } else {
                     self.edit_field(event);
                 }
@@ -245,9 +240,9 @@ impl State {
             Event::SaveName => {
                 let name = self.name.trim().to_owned();
                 if name == me.global_name.as_deref().unwrap_or_default() {
-                    self.notice = Some(tr("The display name is unchanged.").to_owned());
+                    self.life.notice = Some(tr("The display name is unchanged.").to_owned());
                 } else if name.chars().count() > MAX_DISPLAY_NAME_CHARS {
-                    self.notice = Some(trf(
+                    self.life.notice = Some(trf(
                         "A display name has at most {} characters.",
                         &[&MAX_DISPLAY_NAME_CHARS],
                     ));
@@ -261,24 +256,9 @@ impl State {
                 }
             }
             Event::PickAvatar => {
-                self.busy = Some(Action::Avatar);
-                self.notice = None;
-                let serial = self.serial;
+                let serial = self.life.begin(Action::Avatar);
                 return Task::perform(
-                    async {
-                        let Some(file) = rfd::AsyncFileDialog::new()
-                            .set_title(tr("Avatar"))
-                            .add_filter(tr("Image"), &["png", "jpg", "jpeg"])
-                            .pick_file()
-                            .await
-                        else {
-                            return Ok(None);
-                        };
-                        let path = file.path().to_owned();
-                        tokio::task::spawn_blocking(move || avatar_from(&path).map(Some))
-                            .await
-                            .unwrap_or(Err("The image could not be read."))
-                    },
+                    pick_image(tr("Avatar"), &["png", "jpg", "jpeg"], avatar_from),
                     move |result| Event::AvatarPicked(serial, result),
                 );
             }
@@ -292,7 +272,7 @@ impl State {
             }
             Event::SaveText => {
                 let Some((bio, pronouns)) = self.loaded.clone() else {
-                    self.notice = Some(
+                    self.life.notice = Some(
                         tr("Your current bio could not be read, so it is not edited.").to_owned(),
                     );
                     return Task::none();
@@ -302,7 +282,7 @@ impl State {
                     pronouns: (self.pronouns.trim() != pronouns).then(|| self.pronouns.clone()),
                 };
                 if text == ProfileText::default() {
-                    self.notice = Some(tr("Bio and pronouns are unchanged.").to_owned());
+                    self.life.notice = Some(tr("Bio and pronouns are unchanged.").to_owned());
                 } else {
                     return self.send(Action::Text, client, move |client| async move {
                         client
@@ -317,12 +297,12 @@ impl State {
                     .nick_guild
                     .filter(|g| navigation.selected_guild == Some(*g))
                 else {
-                    self.notice = Some(tr("Select a server first.").to_owned());
+                    self.life.notice = Some(tr("Select a server first.").to_owned());
                     return Task::none();
                 };
                 let nick = self.nick.trim().to_owned();
                 if nick == navigation.own_nick.as_deref().unwrap_or_default() {
-                    self.notice = Some(tr("The nickname is unchanged.").to_owned());
+                    self.life.notice = Some(tr("The nickname is unchanged.").to_owned());
                 } else {
                     return self.send(Action::Nick, client, move |client| async move {
                         client
@@ -381,7 +361,7 @@ impl State {
     }
 
     fn edit_field(&mut self, event: Event) {
-        self.notice = None;
+        self.life.notice = None;
         match event {
             Event::NameInput(v) => self.name = v.chars().take(MAX_DISPLAY_NAME_CHARS + 8).collect(),
             Event::BioInput(v) if self.loaded.is_some() => {
@@ -402,30 +382,30 @@ impl State {
                 self.pronouns = profile.pronouns.clone();
                 self.loaded = Some((profile.bio, profile.pronouns));
             }
-            Outcome::Saved => self.notice = Some(tr("Saved.").to_owned()),
+            Outcome::Saved => self.life.notice = Some(tr("Saved.").to_owned()),
             Outcome::Connections(list) => {
-                self.notice = list.is_empty().then(|| tr("No connections.").to_owned());
+                self.life.notice = list.is_empty().then(|| tr("No connections.").to_owned());
                 self.connections = Some(list);
             }
             Outcome::Visibility(index, visible) => {
                 if let Some(connection) = self.connections.as_mut().and_then(|l| l.get_mut(index)) {
                     connection.visible = visible;
                 }
-                self.notice = Some(tr("Saved.").to_owned());
+                self.life.notice = Some(tr("Saved.").to_owned());
             }
             Outcome::Activity(index, show) => {
                 if let Some(connection) = self.connections.as_mut().and_then(|l| l.get_mut(index)) {
                     connection.show_activity = Some(show);
                 }
-                self.notice = Some(tr("Saved.").to_owned());
+                self.life.notice = Some(tr("Saved.").to_owned());
             }
             Outcome::Done if action == Action::Text => {
                 // What was sent is now what Discord has.
                 self.loaded = Some((self.bio.trim().to_owned(), self.pronouns.trim().to_owned()));
-                self.notice = Some(tr("Saved.").to_owned());
+                self.life.notice = Some(tr("Saved.").to_owned());
             }
             Outcome::Done => {
-                self.notice =
+                self.life.notice =
                     Some(tr("Sent. It shows here when Discord confirms the change.").to_owned());
             }
         }
@@ -452,7 +432,7 @@ pub fn view<'a>(
     if !state.open {
         return None;
     }
-    let idle = state.busy.is_none();
+    let idle = !state.life.is_busy();
     let editable_text = idle && state.loaded.is_some();
     // A page of the settings screen, which has the title and the cross.
     // Each field saves on its own: its Save is the one filled button there.
@@ -604,10 +584,10 @@ pub fn view<'a>(
         connections = connections.push(column(rows).spacing(4));
     }
     panel = panel.push(field(tr("Connections"), connections.into()));
-    if state.busy.is_some() {
+    if state.life.is_busy() {
         panel = panel.push(crate::ui::note(tr("Waiting for Discord…")));
     }
-    if let Some(notice) = &state.notice {
+    if let Some(notice) = &state.life.notice {
         panel = panel.push(crate::ui::note(notice.as_str()));
     }
     Some(panel.into())
@@ -658,8 +638,8 @@ mod tests {
     async fn bio_is_not_editable_or_saved_until_the_profile_loaded() {
         let mut state = State::default();
         let navigation = open(&mut state);
-        assert_eq!(state.busy, Some(Action::Load));
-        let serial = state.serial;
+        assert_eq!(state.life.busy(), Some(Action::Load));
+        let serial = state.life.serial();
         // The load failed: typing is ignored and a save is refused.
         drop(state.update(
             Event::Done(
@@ -671,19 +651,34 @@ mod tests {
             &me(),
             &rest(),
         ));
-        assert!(state.busy.is_none());
+        assert!(!state.life.is_busy());
         drop(state.update(Event::BioInput("x".into()), &navigation, &me(), &rest()));
         assert!(state.bio.is_empty());
         drop(state.update(Event::SaveText, &navigation, &me(), &rest()));
-        assert!(state.busy.is_none());
-        assert!(state.notice.as_deref().unwrap().contains("not edited"));
+        assert!(!state.life.is_busy());
+        assert!(state.life.notice.as_deref().unwrap().contains("not edited"));
+    }
+
+    #[tokio::test]
+    async fn an_avatar_pick_after_clear_is_ignored() {
+        let mut state = State::default();
+        let navigation = open(&mut state);
+        let stale = state.life.serial();
+        state.clear();
+        drop(state.update(
+            Event::AvatarPicked(stale, Err("The image could not be read.")),
+            &navigation,
+            &me(),
+            &rest(),
+        ));
+        assert!(!state.life.is_busy() && state.life.notice.is_none());
     }
 
     #[tokio::test]
     async fn one_request_at_a_time_failures_keep_the_typing_and_stale_answers_drop() {
         let mut state = State::default();
         let navigation = open(&mut state);
-        let serial = state.serial;
+        let serial = state.life.serial();
         drop(state.update(
             Event::Done(serial, Action::Load, Ok(profile("old"))),
             &navigation,
@@ -693,11 +688,11 @@ mod tests {
         assert_eq!(state.bio, "old");
         drop(state.update(Event::NameInput("New".into()), &navigation, &me(), &rest()));
         drop(state.update(Event::SaveName, &navigation, &me(), &rest()));
-        assert_eq!(state.busy, Some(Action::Name));
+        assert_eq!(state.life.busy(), Some(Action::Name));
         // A second save while one is in flight is refused, not queued.
         drop(state.update(Event::SaveText, &navigation, &me(), &rest()));
-        assert_eq!(state.busy, Some(Action::Name));
-        assert!(state.notice.as_deref().unwrap().contains("Wait"));
+        assert_eq!(state.life.busy(), Some(Action::Name));
+        assert!(state.life.notice.as_deref().unwrap().contains("Wait"));
         // An ambiguous failure keeps the typed name and is never repeated.
         let failure = Err(ProfileRequestError::Rest(RestError::Retryable(
             RetryableFailure::Network(NetworkFailure::Timeout),
@@ -708,9 +703,16 @@ mod tests {
             &me(),
             &rest(),
         ));
-        assert!(state.busy.is_none());
+        assert!(!state.life.is_busy());
         assert_eq!(state.name, "New");
-        assert!(state.notice.as_deref().unwrap().contains("may have been"));
+        assert!(
+            state
+                .life
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("may have been")
+        );
         // An answer from before a logout is ignored.
         state.clear();
         let _ = open(&mut state);
@@ -727,15 +729,15 @@ mod tests {
     async fn a_saved_answer_is_reported_and_a_rejection_stops_the_account() {
         let mut state = State::default();
         let navigation = open(&mut state);
-        let serial = state.serial;
+        let serial = state.life.serial();
         drop(state.update(
             Event::Done(serial, Action::Name, Ok(Outcome::Saved)),
             &navigation,
             &me(),
             &rest(),
         ));
-        assert!(state.busy.is_none());
-        assert_eq!(state.notice.as_deref(), Some("Saved."));
+        assert!(!state.life.is_busy());
+        assert_eq!(state.life.notice.as_deref(), Some("Saved."));
         let rejected = Event::Done(
             serial,
             Action::Name,
@@ -749,7 +751,7 @@ mod tests {
     async fn unchanged_values_and_a_missing_server_send_nothing() {
         let mut state = State::default();
         let navigation = open(&mut state);
-        let serial = state.serial;
+        let serial = state.life.serial();
         drop(state.update(
             Event::Done(serial, Action::Load, Ok(profile("same"))),
             &navigation,
@@ -757,12 +759,19 @@ mod tests {
             &rest(),
         ));
         drop(state.update(Event::SaveName, &navigation, &me(), &rest()));
-        assert!(state.busy.is_none());
+        assert!(!state.life.is_busy());
         drop(state.update(Event::SaveText, &navigation, &me(), &rest()));
-        assert!(state.busy.is_none());
+        assert!(!state.life.is_busy());
         drop(state.update(Event::SaveNick, &navigation, &me(), &rest()));
-        assert!(state.busy.is_none());
-        assert!(state.notice.as_deref().unwrap().contains("Select a server"));
+        assert!(!state.life.is_busy());
+        assert!(
+            state
+                .life
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("Select a server")
+        );
     }
 
     #[test]

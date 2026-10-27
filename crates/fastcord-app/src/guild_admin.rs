@@ -39,6 +39,7 @@ use iced::widget::{checkbox, column, container, pick_list, row, space, text, tex
 use iced::{Element, Length, Task};
 
 use crate::i18n::{tr, trf};
+use crate::panel_kit::pick_image;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -704,20 +705,7 @@ impl State {
                 self.notice = None;
                 let serial = self.serial;
                 return Task::perform(
-                    async {
-                        let Some(file) = rfd::AsyncFileDialog::new()
-                            .set_title(tr("Server icon"))
-                            .add_filter(tr("Image"), &["png", "jpg", "jpeg"])
-                            .pick_file()
-                            .await
-                        else {
-                            return Ok(None);
-                        };
-                        let path = file.path().to_owned();
-                        tokio::task::spawn_blocking(move || read_icon(&path).map(Some))
-                            .await
-                            .unwrap_or(Err("The image could not be read."))
-                    },
+                    pick_image(tr("Server icon"), &["png", "jpg", "jpeg"], read_icon),
                     move |result| Event::IconPicked(serial, result),
                 );
             }

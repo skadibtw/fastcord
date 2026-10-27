@@ -39,7 +39,6 @@ impl<A: Copy + PartialEq> Gate<A> {
         self.busy.is_some()
     }
 
-    #[cfg(test)]
     pub fn busy(&self) -> Option<A> {
         self.busy
     }
@@ -126,6 +125,28 @@ impl<T: Copy + PartialEq> Confirm<T> {
 /// A 401 from Discord: the caller stops the account like any other.
 pub fn auth_rejected<T>(result: &Result<T, RestError>) -> bool {
     matches!(result, Err(RestError::AuthenticationRequired))
+}
+
+/// The shared image pick: the native file dialog, then `read` on a blocking
+/// thread (each caller keeps its own size and type limits). `Ok(None)` is a
+/// cancelled dialog.
+pub async fn pick_image<T: Send + 'static>(
+    title: &'static str,
+    extensions: &[&str],
+    read: fn(&std::path::Path) -> Result<T, &'static str>,
+) -> Result<Option<T>, &'static str> {
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title(title)
+        .add_filter(tr("Image"), extensions)
+        .pick_file()
+        .await
+    else {
+        return Ok(None);
+    };
+    let path = file.path().to_owned();
+    tokio::task::spawn_blocking(move || read(&path).map(Some))
+        .await
+        .unwrap_or(Err("The image could not be read."))
 }
 
 #[cfg(test)]

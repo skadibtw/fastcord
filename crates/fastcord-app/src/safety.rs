@@ -31,6 +31,7 @@ use iced::widget::{column, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 
 use crate::i18n::{tr, trf};
+use crate::panel_kit::{Confirm, Gate, WAIT, auth_rejected};
 use crate::style;
 
 /// Requests shown per page.
@@ -126,13 +127,11 @@ pub struct State {
     tab: Option<Tab>,
     page: usize,
     preview: Option<Preview>,
-    confirm: Option<Snowflake>,
+    confirm: Confirm<Snowflake>,
     form: Option<Form>,
     /// Event stamp when the request in flight was sent.
     requested_at: u64,
-    busy: Option<Action>,
-    notice: Option<String>,
-    serial: u64,
+    life: Gate<Action>,
     /// Numbers previews apart from each other and from the writes.
     preview_serial: u64,
     /// Dropped (aborting the request) on logout, account change or close.
@@ -260,8 +259,10 @@ impl State {
     /// Logout or account change: drops the panel, previews, drafts and any
     /// request in flight.
     pub fn clear(&mut self) {
+        let mut life = std::mem::take(&mut self.life);
+        life.reset();
         *self = Self {
-            serial: self.serial.wrapping_add(1),
+            life,
             preview_serial: self.preview_serial,
             ..Self::default()
         };
@@ -285,8 +286,12 @@ impl State {
             self.preview = None;
             self.preview_task = None;
         }
-        if self.confirm.is_some_and(|channel| !pending(channel)) {
-            self.confirm = None;
+        if self
+            .confirm
+            .pending()
+            .is_some_and(|channel| !pending(channel))
+        {
+            self.confirm.cancel();
         }
         let pages = navigation.requests.rows.len().div_ceil(PAGE_SIZE).max(1);
         self.page = self.page.min(pages - 1);
@@ -320,10 +325,8 @@ impl State {
         F: FnOnce(RestClient) -> Fut,
         Fut: Future<Output = Result<Outcome, PrivacyRequestError>> + Send + 'static,
     {
-        self.busy = Some(action);
-        self.notice = None;
-        self.confirm = None;
-        let serial = self.serial;
+        let serial = self.life.begin(action);
+        self.confirm.cancel();
         let client = client.clone();
         let (task, handle) = Task::perform(run(client), move |result| {
             Event::Done(serial, action, result)
@@ -341,7 +344,7 @@ impl State {
     ) -> Task<Event> {
         match event {
             Event::Toggle if self.open => {
-                if self.busy.is_none() {
+                if !self.life.is_busy() {
                     self.clear();
                 }
             }
@@ -349,14 +352,13 @@ impl State {
                 self.open = true;
                 self.sync(navigation);
             }
-            Event::Close if self.busy.is_none() => self.clear(),
+            Event::Close if !self.life.is_busy() => self.clear(),
             Event::Close => {}
-            Event::Done(serial, action, result) if serial == self.serial => {
-                self.busy = None;
+            Event::Done(serial, action, result) if self.life.accept(serial) => {
                 self.task = None;
                 match result {
                     Ok(outcome) => self.finished(outcome, action, navigation),
-                    Err(error) => self.notice = Some(describe(error, action)),
+                    Err(error) => self.life.notice = Some(describe(error, action)),
                 }
             }
             Event::PreviewLoaded(serial, channel, result) => {
@@ -381,8 +383,8 @@ impl State {
             _ if !self.open => {}
             Event::Tab(tab) => {
                 self.tab = Some(tab);
-                self.notice = None;
-                self.confirm = None;
+                self.life.notice = None;
+                self.confirm.cancel();
             }
             Event::PageNext => {
                 let pages = navigation.requests.rows.len().div_ceil(PAGE_SIZE).max(1);
@@ -417,11 +419,11 @@ impl State {
                     return task;
                 }
             }
-            Event::CancelDecline => self.confirm = None,
-            _ if self.busy.is_some() => {
+            Event::CancelDecline => self.confirm.cancel(),
+            _ if self.life.is_busy() => {
                 // One request at a time; the answer of the first is awaited.
                 if !matches!(event, Event::Done(..)) {
-                    self.notice = Some(tr("Wait for the previous change to finish.").to_owned());
+                    self.life.say(tr(WAIT));
                 }
             }
             Event::Accept(channel) => {
@@ -439,7 +441,7 @@ impl State {
                             .map_err(PrivacyRequestError::Rest)
                     });
                 }
-                self.notice = Some(tr("That request is no longer pending.").to_owned());
+                self.life.notice = Some(tr("That request is no longer pending.").to_owned());
             }
             Event::AskDecline(channel) => {
                 if navigation
@@ -448,8 +450,8 @@ impl State {
                     .iter()
                     .any(|r| r.channel == channel)
                 {
-                    self.confirm = Some(channel);
-                    self.notice = None;
+                    self.confirm.ask(channel);
+                    self.life.notice = None;
                 }
             }
             Event::ConfirmDecline => {
@@ -470,7 +472,7 @@ impl State {
                             .map_err(PrivacyRequestError::Rest)
                     });
                 }
-                self.notice = Some(tr("That request is no longer pending.").to_owned());
+                self.life.notice = Some(tr("That request is no longer pending.").to_owned());
             }
             Event::Unignore(user) => {
                 if navigation.suppressed.get(&user) == Some(&Suppression::Ignored) {
@@ -504,7 +506,7 @@ impl State {
                         }
                         Source::ServerMembers => sources.mutual_guilds = !sources.mutual_guilds,
                     }
-                    self.notice = None;
+                    self.life.notice = None;
                 }
             }
             Event::ToggleDefaultRestricted => {
@@ -512,7 +514,7 @@ impl State {
                     && let Some(restricted) = &mut form.draft.default_guilds_restricted
                 {
                     *restricted = !*restricted;
-                    self.notice = None;
+                    self.life.notice = None;
                 }
             }
             Event::ToggleServer => {
@@ -524,7 +526,7 @@ impl State {
                     } else if list.len() < fastcord_discord::MAX_RESTRICTED_GUILDS {
                         list.push(guild);
                     }
-                    self.notice = None;
+                    self.life.notice = None;
                 }
             }
             Event::SetFilter(level) => {
@@ -533,7 +535,7 @@ impl State {
                     && form.draft.explicit_filter.is_some()
                 {
                     form.draft.explicit_filter = Some(level);
-                    self.notice = None;
+                    self.life.notice = None;
                 }
             }
             Event::SavePrivacy => {
@@ -542,7 +544,7 @@ impl State {
                 };
                 let edit = form.edit();
                 if edit == PrivacyEdit::default() {
-                    self.notice = Some(tr("Nothing changed.").to_owned());
+                    self.life.notice = Some(tr("Nothing changed.").to_owned());
                     return Task::none();
                 }
                 self.requested_at = navigation.privacy.latest;
@@ -570,10 +572,10 @@ impl State {
                     loaded,
                     since: navigation.privacy.latest,
                 });
-                self.notice = (action == Action::SavePrivacy).then(|| tr("Saved.").to_owned());
+                self.life.notice = (action == Action::SavePrivacy).then(|| tr("Saved.").to_owned());
             }
             Outcome::Done => {
-                self.notice = Some(match action {
+                self.life.notice = Some(match action {
                     Action::Accept(_) => {
                         tr("Accepted. The conversation moves to your messages when Discord confirms.")
                     }
@@ -593,13 +595,13 @@ impl State {
                 _,
                 _,
                 Err(PrivacyRequestError::Rest(RestError::AuthenticationRequired))
-            ) | Event::PreviewLoaded(_, _, Err(RestError::AuthenticationRequired))
-        )
+            )
+        ) || matches!(event, Event::PreviewLoaded(_, _, r) if auth_rejected(r))
     }
 
     #[cfg(test)]
     fn busy(&self) -> Option<Action> {
-        self.busy
+        self.life.busy()
     }
 }
 
@@ -639,7 +641,7 @@ pub fn view<'a>(
     if !state.open {
         return None;
     }
-    let idle = state.busy.is_none();
+    let idle = !state.life.is_busy();
     let tab_button = |label: &'static str, tab: Tab| {
         button(text(tr(label)).size(12))
             .on_press(Event::Tab(tab))
@@ -660,14 +662,14 @@ pub fn view<'a>(
         Tab::Ignored => panel.push(ignored_view(navigation, idle)),
         Tab::Privacy => panel.push(privacy_view(state, navigation, idle)),
     };
-    if state.busy.is_some() {
+    if state.life.is_busy() {
         panel = panel.push(
             text(tr("Waiting for Discord…"))
                 .size(12)
                 .color(crate::style::muted()),
         );
     }
-    if let Some(notice) = &state.notice {
+    if let Some(notice) = &state.life.notice {
         panel = panel.push(text(notice.as_str()).size(12).color(crate::style::muted()));
     }
     Some(panel.spacing(12).into())
@@ -691,7 +693,7 @@ fn requests_view<'a>(
     let start = state.page * PAGE_SIZE;
     for request in requests.rows.iter().skip(start).take(PAGE_SIZE) {
         let channel = request.channel;
-        let confirming = state.confirm == Some(channel);
+        let confirming = state.confirm.is(channel);
         let mut line = row![
             text(if request.spam {
                 trf("{} (spam)", &[&request.label])
@@ -816,7 +818,7 @@ fn privacy_view<'a>(
     idle: bool,
 ) -> Element<'a, Event> {
     let mut body = column![].spacing(4);
-    let loading = state.busy == Some(Action::LoadPrivacy);
+    let loading = state.life.busy() == Some(Action::LoadPrivacy);
     body = body.push(
         row![
             text(tr("Settings are read only when you ask."))
@@ -987,7 +989,7 @@ mod tests {
         drop(state.update(Event::LoadPrivacy, navigation, &rest()));
         drop(state.update(
             Event::Done(
-                state.serial,
+                state.life.serial(),
                 Action::LoadPrivacy,
                 Ok(Outcome::Settings(value)),
             ),
@@ -1063,7 +1065,7 @@ mod tests {
         // Decline needs the second click and is validated again at that click.
         drop(state.update(Event::AskDecline(Snowflake(10)), &navigation, &rest()));
         assert_eq!(state.busy(), None);
-        assert_eq!(state.confirm, Some(Snowflake(10)));
+        assert_eq!(state.confirm.pending(), Some(Snowflake(10)));
         drop(state.update(Event::ConfirmDecline, &requests(&[]), &rest()));
         assert_eq!(state.busy(), None, "the request was handled elsewhere");
         drop(state.update(Event::AskDecline(Snowflake(10)), &navigation, &rest()));
@@ -1075,7 +1077,7 @@ mod tests {
         // The answer only reports; the list changes with Discord's event.
         drop(state.update(
             Event::Done(
-                state.serial,
+                state.life.serial(),
                 Action::Decline(Snowflake(10)),
                 Ok(Outcome::Done),
             ),
@@ -1083,7 +1085,7 @@ mod tests {
             &rest(),
         ));
         assert_eq!(state.busy(), None);
-        assert!(state.notice.as_deref().unwrap().contains("confirms"));
+        assert!(state.life.notice.as_deref().unwrap().contains("confirms"));
     }
 
     #[test]
@@ -1093,7 +1095,7 @@ mod tests {
         drop(state.update(Event::Preview(Snowflake(10)), &navigation, &rest()));
         drop(state.update(Event::AskDecline(Snowflake(10)), &navigation, &rest()));
         state.sync(&requests(&[]));
-        assert!(state.preview.is_none() && state.confirm.is_none());
+        assert!(state.preview.is_none() && state.confirm.pending().is_none());
         // An answer after the event is harmless.
         drop(state.update(
             Event::PreviewLoaded(1, Snowflake(10), Ok(Vec::new())),
@@ -1193,7 +1195,7 @@ mod tests {
         // ...and the answer still carries the older value.
         drop(state.update(
             Event::Done(
-                state.serial,
+                state.life.serial(),
                 Action::LoadPrivacy,
                 Ok(Outcome::Settings(settings(false))),
             ),
@@ -1224,10 +1226,10 @@ mod tests {
         drop(state.update(Event::SavePrivacy, &navigation, &rest()));
         assert_eq!(state.busy(), Some(Action::SavePrivacy));
         drop(state.update(Event::SavePrivacy, &navigation, &rest()));
-        assert!(state.notice.as_deref().unwrap().contains("Wait"));
+        assert!(state.life.notice.as_deref().unwrap().contains("Wait"));
         drop(state.update(
             Event::Done(
-                state.serial,
+                state.life.serial(),
                 Action::SavePrivacy,
                 Err(PrivacyRequestError::Rest(RestError::Retryable(
                     RetryableFailure::Network(NetworkFailure::Timeout),
@@ -1239,6 +1241,7 @@ mod tests {
         assert_eq!(state.busy(), None, "nothing is resent by itself");
         assert!(
             state
+                .life
                 .notice
                 .as_deref()
                 .unwrap()
@@ -1296,7 +1299,7 @@ mod tests {
         drop(state.update(Event::Preview(Snowflake(10)), &navigation, &rest()));
         drop(state.update(Event::AskDecline(Snowflake(10)), &navigation, &rest()));
         drop(state.update(Event::ConfirmDecline, &navigation, &rest()));
-        let stale = state.serial;
+        let stale = state.life.serial();
         state.clear();
         assert!(!state.is_open() && state.preview.is_none() && state.busy().is_none());
         // The answer of the request that was in flight finds a new serial.
@@ -1305,7 +1308,7 @@ mod tests {
             &navigation,
             &rest(),
         ));
-        assert!(state.notice.is_none());
+        assert!(state.life.notice.is_none());
     }
 
     #[test]
