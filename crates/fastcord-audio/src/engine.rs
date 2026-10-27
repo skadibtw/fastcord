@@ -215,8 +215,15 @@ pub struct EngineStats {
     pub echo_blocks: u64,
     pub packets_decoded: u64,
     pub decode_errors: u64,
-    /// Remote 20 ms frames recovered from FEC or concealed because a packet was lost or late.
-    pub plc_frames: u64,
+    /// Remote 20 ms frames recovered from FEC or concealed because the packet
+    /// never came (network loss).
+    pub plc_lost: u64,
+    /// Remote 20 ms frames concealed because the packet came after its playout
+    /// time (the jitter target was too short for its delay).
+    pub plc_late: u64,
+    /// Remote 20 ms frames faded out after a speaker's last packet: the end of a
+    /// talkspurt, normally inaudible.
+    pub plc_tail: u64,
     /// Current playout target of the jitter buffer in ms (largest active speaker), 0 when idle.
     pub jitter_target_ms: u64,
     /// 20 ms frames withheld by the input-sensitivity gate.
@@ -406,6 +413,18 @@ impl AudioEngine {
         load_format(&self.shared.output_format)
     }
 
+    /// The longest a received packet took from the transport's socket read to
+    /// the jitter buffer since the previous call: time spent inside fastcord,
+    /// as opposed to the network. Poll from one reader.
+    pub fn take_arrival_delay_max(&self) -> Duration {
+        Duration::from_micros(
+            self.shared
+                .pipeline
+                .arrival_delay_max_us
+                .swap(0, Ordering::Relaxed),
+        )
+    }
+
     /// Microphone level and echo-canceller state, as measured since diagnostics were
     /// switched on with [`EngineControl::Diagnostics`] (all zero before that). The level
     /// maxima cover the time since the previous call, so poll from one reader.
@@ -435,7 +454,9 @@ impl AudioEngine {
             echo_blocks: load(&pipeline.echo_blocks),
             packets_decoded: load(&pipeline.packets_decoded),
             decode_errors: load(&pipeline.decode_errors),
-            plc_frames: load(&pipeline.plc_frames),
+            plc_lost: load(&pipeline.plc_lost),
+            plc_late: load(&pipeline.plc_late),
+            plc_tail: load(&pipeline.plc_tail),
             jitter_target_ms: load(&pipeline.jitter_target_ms),
             frames_gated: load(&pipeline.frames_gated),
             realtime_threads: elevated_threads(),
@@ -853,6 +874,11 @@ fn run_owner<B: Backend>(
                 if let Some(remote) = io.remote_audio.as_mut() {
                     for _ in 0..PLAYBACK_QUEUE {
                         let Ok(packet) = remote.try_recv() else { break };
+                        let delay = packet.read_at.elapsed().as_micros();
+                        shared
+                            .pipeline
+                            .arrival_delay_max_us
+                            .fetch_max(u64::try_from(delay).unwrap_or(u64::MAX), Ordering::Relaxed);
                         pipeline.push_remote(packet);
                     }
                 }
@@ -1423,6 +1449,7 @@ mod tests {
                 sequence: 1,
                 timestamp: 960,
                 packet: frame.packet.clone(),
+                read_at: Instant::now(),
             })
             .unwrap();
         generation = owner.wait_after(generation);
@@ -1445,6 +1472,7 @@ mod tests {
                     sequence,
                     timestamp: sequence as u32 * 960,
                     packet: frame.packet.clone(),
+                    read_at: Instant::now(),
                 })
                 .unwrap();
             generation = owner.wait_after(generation);
@@ -2014,6 +2042,7 @@ mod tests {
                     sequence: sequence as u64,
                     timestamp: header.timestamp,
                     packet: EncodedPacket::from_slice(&payload).unwrap(),
+                    read_at: Instant::now(),
                 });
             }
         }

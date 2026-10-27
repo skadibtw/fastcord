@@ -143,6 +143,8 @@ struct Media {
 
 /// Audio from an SSRC nobody has announced yet.
 struct PendingAudio {
+    /// When the datagram was read from the socket.
+    read_at: Instant,
     sequence: u16,
     timestamp: u32,
     payload: Vec<u8>,
@@ -1220,6 +1222,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             sequence,
             timestamp: audio.timestamp,
             payload,
+            read_at: audio.read_at.into_std(),
         };
         match self.ch.audio.try_send(received) {
             Ok(()) => {}
@@ -1291,6 +1294,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
     }
 
     fn on_rtp(&mut self, packet: &[u8]) {
+        let read_at = Instant::now();
         if self.media.is_none() {
             // No key yet: nothing can be verified.
             Counters::add(&self.ch.counters.rejected_malformed, 1);
@@ -1346,6 +1350,7 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         }
         Counters::add(&counters.rtp_received, 1);
         let audio = PendingAudio {
+            read_at,
             sequence: header.sequence,
             timestamp: header.timestamp,
             payload: body.payload.to_vec(),

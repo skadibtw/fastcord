@@ -67,7 +67,10 @@ impl Speaker {
         })
     }
 
-    fn insert(&mut self, frame: RemoteFrame, now: Instant) {
+    /// Queues `frame` and says what its arrival tells about frames already
+    /// concealed.
+    fn insert(&mut self, frame: RemoteFrame, now: Instant) -> Arrival {
+        let mut arrival = Arrival::Queued;
         // A parked speaker is starting a new talkspurt: whatever sequence numbers the sender
         // used (or skipped) during the silence, play from this packet.
         if self.active_since.is_some() && self.next_due.is_none() {
@@ -78,8 +81,14 @@ impl Speaker {
         }
 
         // Drop genuinely late packets: those older than expected when expected is set
-        if self.expected.is_some_and(|next| frame.sequence < next) {
-            return;
+        if let Some(next) = self.expected
+            && frame.sequence < next
+        {
+            return if next - frame.sequence < FAR_SEQUENCE_THRESHOLD {
+                Arrival::AfterItsTurn
+            } else {
+                Arrival::Queued
+            };
         }
 
         // Check for duplicate
@@ -87,14 +96,19 @@ impl Speaker {
             p.as_ref()
                 .is_some_and(|p| p.frame.sequence == frame.sequence)
         }) {
-            return;
+            return arrival;
         }
 
-        // Reset consecutive PLC counter when new packet arrives (gap is over)
-        if self
-            .expected
-            .is_some_and(|expected| frame.sequence > expected)
+        // A packet ends the concealment run (the gap is over): the awaited one
+        // came late, or a later one shows the awaited ones were lost.
+        if self.consecutive_plc > 0
+            && let Some(expected) = self.expected
         {
+            let frames = self.consecutive_plc as u64;
+            arrival = Arrival::EndedRun {
+                frames,
+                late: frame.sequence == expected,
+            };
             self.consecutive_plc = 0;
         }
 
@@ -158,7 +172,7 @@ impl Speaker {
         // Insert into queue in sorted order
         if self.len == PACKETS {
             if frame.sequence >= self.queue[PACKETS - 1].as_ref().unwrap().frame.sequence {
-                return;
+                return arrival;
             }
             self.queue[PACKETS - 1] = None;
             self.len -= 1;
@@ -172,6 +186,7 @@ impl Speaker {
         }
         self.queue[index] = Some(Queued { frame });
         self.len += 1;
+        arrival
     }
 
     /// Removes and returns the queued packet with the expected sequence, advancing it.
@@ -283,6 +298,32 @@ impl LimiterEnvelope {
     }
 }
 
+/// What a packet's arrival tells about frames already concealed.
+enum Arrival {
+    /// Nothing concealed is explained by it.
+    Queued,
+    /// It ended an open concealment run of `frames`: it is the packet the run
+    /// waited for (`late`), or a later one, so the awaited ones were lost.
+    EndedRun { frames: u64, late: bool },
+    /// It came after its frame had been concealed as lost.
+    AfterItsTurn,
+}
+
+/// Remote 20 ms frames played without their packet, by why it was missing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Concealed {
+    /// The packet never came (so far): a later one proved it missing and the
+    /// frame was recovered from that one's FEC when adjacent, otherwise
+    /// concealed. Network loss.
+    pub(crate) lost: u64,
+    /// The packet came, but after its playout time: the jitter target was
+    /// shorter than its delay.
+    pub(crate) late: u64,
+    /// The faded run after a speaker's last packet, until playback parks: the
+    /// end of a talkspurt, normally silence.
+    pub(crate) tail: u64,
+}
+
 /// Four-speaker bounded per-SSRC reorder/decode/mix stage, owned by the engine thread.
 pub(crate) struct JitterMixer {
     speakers: Vec<Speaker>,
@@ -291,7 +332,7 @@ pub(crate) struct JitterMixer {
     /// When the mixer last found nothing scheduled at all, to release the limiter by
     /// elapsed time while no one is speaking.
     idle_since: Option<Instant>,
-    concealed: u64,
+    concealed: Concealed,
 }
 
 impl JitterMixer {
@@ -301,7 +342,7 @@ impl JitterMixer {
             gains: Vec::with_capacity(128),
             limiter: LimiterEnvelope::default(),
             idle_since: None,
-            concealed: 0,
+            concealed: Concealed::default(),
         })
     }
     fn new_speaker(&self, ssrc: u32) -> Result<Speaker, crate::CodecError> {
@@ -354,7 +395,21 @@ impl JitterMixer {
                 }
             }
         };
-        self.speakers[index].insert(frame, now);
+        match self.speakers[index].insert(frame, now) {
+            Arrival::Queued => {}
+            Arrival::EndedRun { frames, late: true } => self.concealed.late += frames,
+            Arrival::EndedRun {
+                frames,
+                late: false,
+            } => self.concealed.lost += frames,
+            // ponytail: assumes the dropped packet's frame was concealed as lost; a
+            // network duplicate of a played packet would move one frame wrongly.
+            Arrival::AfterItsTurn if self.concealed.lost > 0 => {
+                self.concealed.lost -= 1;
+                self.concealed.late += 1;
+            }
+            Arrival::AfterItsTurn => {}
+        }
     }
     /// Sets the target gain for one SSRC, preserving it across speaker creation.
     pub(crate) fn set_gain(&mut self, ssrc: u32, gain: f32) {
@@ -394,9 +449,9 @@ impl JitterMixer {
         self.limiter = LimiterEnvelope::default();
         self.idle_since = None;
     }
-    /// Produces one 20 ms stereo block when any speaker is due; zeroes `out` otherwise.
     /// Remote frames recovered from FEC or concealed since the mixer was created.
-    pub(crate) fn concealed_frames(&self) -> u64 {
+    /// A run still open (waiting for a packet) is not counted until it ends.
+    pub(crate) fn concealed_frames(&self) -> Concealed {
         self.concealed
     }
 
@@ -410,12 +465,12 @@ impl JitterMixer {
             .unwrap_or(0)
     }
 
+    /// Produces one 20 ms stereo block when any speaker is due; zeroes `out` otherwise.
     pub(crate) fn mix(&mut self, out: &mut [f32; FRAME_SAMPLES * CHANNELS], now: Instant) -> bool {
         out.fill(0.0);
         self.speakers
             .retain(|speaker| now.duration_since(speaker.last_packet) <= INACTIVE);
         let mut active = false;
-        let mut concealed = 0;
 
         for speaker in &mut self.speakers {
             let Some(due) = speaker.next_due else {
@@ -451,7 +506,7 @@ impl JitterMixer {
                 // next packet's FEC data when adjacent, otherwise conceal, and move on.
                 let expected = speaker.expected.unwrap_or(next.frame.sequence);
                 let adjacent = next.frame.sequence == expected.wrapping_add(1);
-                concealed += 1;
+                self.concealed.lost += 1;
                 let decoded = if adjacent {
                     speaker
                         .decoder
@@ -472,12 +527,14 @@ impl JitterMixer {
             } else {
                 // Nothing queued proves nothing was lost (the sender may simply be silent), so
                 // `expected` stays put. Conceal a few frames, then park until a packet arrives.
+                // The packet that ends the run says whether it was late or lost; a run
+                // that parks was the end of a talkspurt.
                 speaker.consecutive_plc += 1;
                 if speaker.consecutive_plc > MAX_CONSECUTIVE_PLC {
                     speaker.next_due = None;
+                    self.concealed.tail += MAX_CONSECUTIVE_PLC as u64;
                     None
                 } else {
-                    concealed += 1;
                     let run = MAX_CONSECUTIVE_PLC as f32;
                     let k = speaker.consecutive_plc as f32;
                     fade = Some((1.0 - (k - 1.0) / run, 1.0 - k / run));
@@ -511,7 +568,6 @@ impl JitterMixer {
                 active = true;
             }
         }
-        self.concealed += concealed;
 
         if active {
             self.idle_since = None;
@@ -564,6 +620,7 @@ mod tests {
             sequence,
             timestamp: sequence as u32 * FRAME_SAMPLES as u32,
             packet,
+            read_at: Instant::now(),
         }
     }
 
@@ -641,7 +698,10 @@ mod tests {
         }
         assert_eq!(
             mixer.concealed_frames(),
-            MAX_CONSECUTIVE_PLC as u64,
+            Concealed {
+                tail: MAX_CONSECUTIVE_PLC as u64,
+                ..Concealed::default()
+            },
             "only the tail"
         );
         let lag = first_played.unwrap() - start;
@@ -649,6 +709,67 @@ mod tests {
             lag >= MIN_TARGET && lag <= INITIAL_TARGET + Duration::from_millis(5),
             "{lag:?}"
         );
+    }
+
+    /// Plays sequences 0..40 of one speaker, each arriving 20 ms apart plus its
+    /// `delay` (None: never), pulled every 5 ms until well after the last.
+    fn conceal_with(delay: impl Fn(u64) -> Option<u64>) -> Concealed {
+        let mut mixer = JitterMixer::new().unwrap();
+        let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
+        let start = Instant::now();
+        let mut out = [0.0; FRAME_SAMPLES * CHANNELS];
+        let mut arrivals: Vec<(u64, u64)> = (0..40)
+            .filter_map(|sequence| delay(sequence).map(|late| (sequence * 20 + late, sequence)))
+            .collect();
+        arrivals.sort();
+        let mut next = 0;
+        for tick in 0..((40 * 20 + 600) / 5) {
+            let now = start + Duration::from_millis(tick * 5);
+            while next < arrivals.len() && start + Duration::from_millis(arrivals[next].0) <= now {
+                let (at, sequence) = arrivals[next];
+                mixer.push_at(
+                    frame(&mut encoder, 1, sequence),
+                    start + Duration::from_millis(at),
+                );
+                next += 1;
+            }
+            mixer.mix(&mut out, now);
+        }
+        mixer.concealed_frames()
+    }
+
+    /// The log must tell network loss, packets later than the target and the
+    /// harmless end of a talkspurt apart.
+    #[test]
+    fn concealment_is_split_into_lost_late_and_tail() {
+        let tail = MAX_CONSECUTIVE_PLC as u64;
+        // Two packets never arrive: lost, and nothing else but the tail.
+        let lost = conceal_with(|sequence| (!matches!(sequence, 10 | 25)).then_some(0));
+        assert_eq!(
+            lost,
+            Concealed {
+                lost: 2,
+                late: 0,
+                tail
+            }
+        );
+
+        // One packet, overtaken by the next ones, comes after its turn.
+        let overtaken = conceal_with(|sequence| Some(if sequence == 10 { 120 } else { 0 }));
+        assert_eq!(
+            overtaken,
+            Concealed {
+                lost: 0,
+                late: 1,
+                tail
+            }
+        );
+
+        // A delay spike holds back everything after 20 by 100 ms: the frames
+        // concealed while waiting are late, none lost.
+        let spike = conceal_with(|sequence| Some(if sequence >= 20 { 100 } else { 0 }));
+        assert_eq!((spike.lost, spike.tail), (0, tail), "{spike:?}");
+        assert!(spike.late >= 2, "{spike:?}");
     }
 
     /// Test: reordered arrival keeps jitter bounded

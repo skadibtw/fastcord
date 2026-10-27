@@ -375,7 +375,8 @@ impl NoiseStatus<'_> {
             let key = |s: &fastcord_audio::EngineStats| {
                 (
                     s.output_underruns,
-                    s.plc_frames,
+                    s.plc_lost,
+                    s.plc_late,
                     s.device_xruns,
                     s.input_overrun_samples,
                     s.late_ticks,
@@ -505,6 +506,7 @@ async fn run_with(
                             sequence: packet.sequence,
                             timestamp: packet.timestamp,
                             packet: packet_bytes,
+                            read_at: packet.read_at,
                         });
                     }
                     Some(VoiceMessage::Event(event)) => {
@@ -593,7 +595,7 @@ async fn run_with(
             }
             _ = stats_tick.tick() => {
                 let (engine_stats, transport_stats) = (engine.stats(), session.stats());
-                anomalies.check(&engine_stats, &transport_stats);
+                anomalies.check(&engine_stats, &transport_stats, engine.take_arrival_delay_max());
                 let transport = controls.borrow().diagnostics_open.then_some(transport_stats);
                 noise_status.publish_stats(engine_stats, transport);
             }
@@ -1288,12 +1290,14 @@ impl Anomalies {
         &mut self,
         engine: &fastcord_audio::EngineStats,
         transport: &fastcord_media::gateway::TransportStats,
+        arrival_delay: Duration,
     ) {
         for line in anomaly_lines(
             self.engine.as_ref(),
             engine,
             self.transport.as_ref(),
             transport,
+            arrival_delay,
         ) {
             crate::voice_log::note(&line);
         }
@@ -1302,11 +1306,19 @@ impl Anomalies {
     }
 }
 
+/// A packet slower than this from the socket read to the jitter buffer is
+/// logged even when nothing was concealed.
+const SLOW_ARRIVAL: Duration = Duration::from_millis(20);
+
+/// `arrival_delay` is the slowest received packet of the last second from the
+/// voice task's socket read to the jitter buffer: time inside fastcord, so a
+/// late frame with a small value was late on the network.
 fn anomaly_lines(
     old_engine: Option<&fastcord_audio::EngineStats>,
     engine: &fastcord_audio::EngineStats,
     old_transport: Option<&fastcord_media::gateway::TransportStats>,
     transport: &fastcord_media::gateway::TransportStats,
+    arrival_delay: Duration,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     let (Some(e), Some(t)) = (old_engine, old_transport) else {
@@ -1347,11 +1359,22 @@ fn anomaly_lines(
         t.audio_without_dave,
         "inbound: audio dropped because no end-to-end session was installed, in the last second",
     );
-    let plc = format!(
-        "playback: audio concealed after loss or a late packet (PLC frames, jitter target {} ms) in the last second",
-        engine.jitter_target_ms
+    let target = engine.jitter_target_ms;
+    let inside = arrival_delay.as_millis();
+    grew(
+        engine.plc_lost,
+        e.plc_lost,
+        "playback: frames concealed for packets lost in the network (FEC or PLC) in the last second",
     );
-    grew(engine.plc_frames, e.plc_frames, &plc);
+    let late = format!(
+        "playback: frames concealed for packets that came after their playout time (jitter target {target} ms, slowest packet inside fastcord {inside} ms) in the last second"
+    );
+    grew(engine.plc_late, e.plc_late, &late);
+    grew(
+        engine.plc_tail,
+        e.plc_tail,
+        "playback: frames faded out after a speaker stopped (end of speech, normally inaudible) in the last second",
+    );
     grew(
         transport.dropped_unknown_ssrc,
         t.dropped_unknown_ssrc,
@@ -1378,6 +1401,11 @@ fn anomaly_lines(
         e.late_ticks,
         "engine: late wake-ups (CPU starved)",
     );
+    if arrival_delay >= SLOW_ARRIVAL {
+        lines.push(format!(
+            "inbound: slowest packet from socket read to the jitter buffer in the last second (time inside fastcord): {inside} ms"
+        ));
+    }
     lines
 }
 
@@ -1389,27 +1417,54 @@ mod anomaly_tests {
     fn only_counters_that_grew_are_logged() {
         let engine = fastcord_audio::EngineStats::default();
         let transport = fastcord_media::gateway::TransportStats::default();
-        assert!(anomaly_lines(None, &engine, None, &transport).is_empty());
-        assert!(anomaly_lines(Some(&engine), &engine, Some(&transport), &transport).is_empty());
+        assert!(anomaly_lines(None, &engine, None, &transport, Duration::ZERO).is_empty());
+        assert!(
+            anomaly_lines(
+                Some(&engine),
+                &engine,
+                Some(&transport),
+                &transport,
+                Duration::ZERO
+            )
+            .is_empty()
+        );
         let failing = fastcord_media::gateway::TransportStats {
             rejected_authentication: 40,
             ..transport
         };
-        let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &failing);
+        let lines = anomaly_lines(
+            Some(&engine),
+            &engine,
+            Some(&transport),
+            &failing,
+            Duration::ZERO,
+        );
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("transport decryption") && lines[0].ends_with(": 40"));
         let refused = fastcord_media::gateway::TransportStats {
             audio_rejected_by_dave: 9,
             ..transport
         };
-        let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &refused);
+        let lines = anomaly_lines(
+            Some(&engine),
+            &engine,
+            Some(&transport),
+            &refused,
+            Duration::ZERO,
+        );
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("sender's epoch") && lines[0].ends_with(": 9"));
         let outside = fastcord_media::gateway::TransportStats {
             audio_dave_unknown_sender: 3,
             ..transport
         };
-        let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &outside);
+        let lines = anomaly_lines(
+            Some(&engine),
+            &engine,
+            Some(&transport),
+            &outside,
+            Duration::ZERO,
+        );
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("outside our end-to-end group") && lines[0].ends_with(": 3"));
 
@@ -1419,18 +1474,57 @@ mod anomaly_tests {
             audio_without_dave: 7,
             ..transport
         };
-        let lines = anomaly_lines(Some(&engine), &engine, Some(&transport), &without);
+        let lines = anomaly_lines(
+            Some(&engine),
+            &engine,
+            Some(&transport),
+            &without,
+            Duration::ZERO,
+        );
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("no end-to-end session") && lines[0].ends_with(": 7"));
 
+        // Loss, lateness and the end of speech each have their own line.
         let concealed = fastcord_audio::EngineStats {
-            plc_frames: 12,
+            plc_lost: 3,
+            plc_late: 5,
+            plc_tail: 16,
             jitter_target_ms: 80,
             ..engine
         };
-        let lines = anomaly_lines(Some(&engine), &concealed, Some(&transport), &transport);
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("PLC frames") && lines[0].ends_with(": 12"));
-        assert!(lines[0].contains("jitter target 80 ms"));
+        let lines = anomaly_lines(
+            Some(&engine),
+            &concealed,
+            Some(&transport),
+            &transport,
+            Duration::from_millis(7),
+        );
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].contains("lost in the network") && lines[0].ends_with(": 3"));
+        assert!(lines[1].contains("after their playout time") && lines[1].ends_with(": 5"));
+        assert!(lines[1].contains("jitter target 80 ms"));
+        // A late frame names the time its packets spent inside fastcord, so
+        // network lateness and a stalled voice task can be told apart.
+        assert!(lines[1].contains("slowest packet inside fastcord 7 ms"));
+        assert!(lines[2].contains("end of speech") && lines[2].ends_with(": 16"));
+
+        // A slow packet is logged on its own, even with nothing concealed.
+        let lines = anomaly_lines(
+            Some(&engine),
+            &engine,
+            Some(&transport),
+            &transport,
+            SLOW_ARRIVAL,
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("time inside fastcord") && lines[0].ends_with(": 20 ms"));
+        let quick = anomaly_lines(
+            Some(&engine),
+            &engine,
+            Some(&transport),
+            &transport,
+            SLOW_ARRIVAL - Duration::from_millis(1),
+        );
+        assert!(quick.is_empty(), "{quick:?}");
     }
 }

@@ -574,6 +574,7 @@ fn run(
                         sequence,
                         timestamp,
                         packet,
+                        read_at: now,
                     },
                     Ok(None) => {
                         // Let what was queued be heard before reporting the end.

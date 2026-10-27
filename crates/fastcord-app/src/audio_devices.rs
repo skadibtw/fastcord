@@ -236,7 +236,7 @@ fn stats_summary(stats: Option<EngineStats>) -> String {
             &[
                 &s.output_underruns,
                 &s.output_underrun_samples,
-                &s.plc_frames,
+                &(s.plc_lost + s.plc_late),
                 &s.device_xruns,
                 &s.input_overrun_samples,
                 &s.realtime_threads,

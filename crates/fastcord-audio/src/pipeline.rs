@@ -109,6 +109,9 @@ pub struct RemoteFrame {
     pub sequence: u64,
     pub timestamp: u32,
     pub packet: EncodedPacket,
+    /// When the transport read the packet's datagram (or the packet was
+    /// produced locally): the mixer measures how long it took to arrive.
+    pub read_at: std::time::Instant,
 }
 
 /// Engine-thread counters (lock-free, read by [`crate::EngineStats`]).
@@ -124,8 +127,15 @@ pub(crate) struct PipelineCounters {
     pub(crate) frames_dropped: AtomicU64,
     pub(crate) packets_decoded: AtomicU64,
     pub(crate) decode_errors: AtomicU64,
-    /// 20 ms remote frames recovered from FEC or concealed (lost or late packets).
-    pub(crate) plc_frames: AtomicU64,
+    /// 20 ms remote frames recovered from FEC or concealed, by cause (see
+    /// [`crate::jitter::Concealed`]): packets lost, packets late, talkspurt tails.
+    pub(crate) plc_lost: AtomicU64,
+    pub(crate) plc_late: AtomicU64,
+    pub(crate) plc_tail: AtomicU64,
+    /// Longest time in microseconds a remote packet took from the transport's
+    /// socket read to the jitter buffer, since the last
+    /// [`crate::AudioEngine::take_arrival_delay_max`].
+    pub(crate) arrival_delay_max_us: AtomicU64,
     /// Current jitter-buffer playout target in ms (largest active speaker), 0 when idle.
     pub(crate) jitter_target_ms: AtomicU64,
     /// Input sensitivity: 0 transmits everything, otherwise frames quieter than
@@ -528,9 +538,10 @@ impl PlaybackPipeline {
             }
             let Some(packet) = next() else {
                 let active = self.mixer.mix(&mut self.mixed, std::time::Instant::now());
-                counters
-                    .plc_frames
-                    .store(self.mixer.concealed_frames(), Ordering::Relaxed);
+                let concealed = self.mixer.concealed_frames();
+                counters.plc_lost.store(concealed.lost, Ordering::Relaxed);
+                counters.plc_late.store(concealed.late, Ordering::Relaxed);
+                counters.plc_tail.store(concealed.tail, Ordering::Relaxed);
                 counters
                     .jitter_target_ms
                     .store(self.mixer.target_ms(), Ordering::Relaxed);

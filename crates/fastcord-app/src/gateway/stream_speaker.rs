@@ -88,6 +88,7 @@ impl Speaker {
             sequence: audio.sequence,
             timestamp: audio.timestamp,
             packet,
+            read_at: audio.read_at,
         });
     }
 
@@ -273,6 +274,7 @@ mod tests {
                         sequence,
                         timestamp: (sequence * 960) as u32,
                         payload: packet.as_bytes().to_vec(),
+                        read_at: std::time::Instant::now(),
                     },
                     audio,
                 );

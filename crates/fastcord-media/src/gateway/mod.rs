@@ -214,6 +214,10 @@ pub struct ReceivedAudio {
     pub sequence: u64,
     pub timestamp: u32,
     pub payload: Vec<u8>,
+    /// When the voice task read its datagram from the socket, before
+    /// decryption and any wait for its SSRC to be announced. Time spent in the
+    /// OS socket buffer before that is not included.
+    pub read_at: std::time::Instant,
 }
 /// One item from a voice session's participant-event and audio streams.
 #[derive(Clone, Debug, PartialEq, Eq)]
