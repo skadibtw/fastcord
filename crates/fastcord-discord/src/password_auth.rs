@@ -257,10 +257,6 @@ impl PasswordAuth {
         network: &fastcord_net::NetworkContext,
         properties: &ClientProperties,
     ) -> Result<Self, PasswordAuthError> {
-        #[cfg(feature = "fake-discord")]
-        if crate::fake_origin::active() {
-            return Err(PasswordAuthError::Configuration);
-        }
         let http = crate::rest::login_client(network, properties)
             .ok_or(PasswordAuthError::Configuration)?;
         Ok(Self { http })

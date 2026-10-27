@@ -2,6 +2,7 @@
 //! clicking through the real app without a Discord account. Test-only: it
 //! binds 127.0.0.1, invents its own world, and is never packaged.
 
+pub mod auth;
 mod gateway;
 pub mod http;
 pub mod log;
@@ -100,7 +101,8 @@ impl Shared {
             let response = Response::json(403, &json!({"message": "fake: forbidden", "code": 0}));
             return (response, None);
         }
-        if req.path.starts_with(rest::PREFIX) {
+        // Login 429s are a scenario (`limited@`), not a count.
+        if req.path.starts_with(rest::PREFIX) && !req.path.contains("/auth/") {
             let limited = self
                 .limiter
                 .lock()

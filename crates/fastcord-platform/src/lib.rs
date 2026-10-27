@@ -314,6 +314,16 @@ impl fmt::Debug for NativeCredentialStore {
 }
 
 impl NativeCredentialStore {
+    /// A store held in process memory, for offline tests: never the OS keyring.
+    #[cfg(feature = "test-support")]
+    pub fn in_memory() -> Self {
+        Self {
+            inner: keyring_core::mock::Store::new().expect("mock store"),
+            access: Arc::new(Mutex::new(())),
+            service: SERVICE,
+        }
+    }
+
     pub fn new() -> Result<Self, StoreError> {
         #[cfg(target_os = "windows")]
         let inner = windows_native_keyring_store::Store::new().map_err(store_error)?;

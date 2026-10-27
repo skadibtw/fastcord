@@ -82,6 +82,15 @@ pub fn handle(world: &mut World, req: &Request, ctx: &Ctx) -> Outcome {
         return not_implemented();
     };
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    // The pre-login requests carry no token.
+    match (req.method.as_str(), segments.as_slice()) {
+        ("GET", ["experiments"]) => return done(crate::auth::experiments(), Vec::new()),
+        ("POST", ["auth", "login"]) => return done(crate::auth::login(world, req), Vec::new()),
+        ("POST", ["auth", "mfa", "totp"]) => {
+            return done(crate::auth::totp(world, req), Vec::new());
+        }
+        _ => {}
+    }
     if segments != ["gateway"] && req.header("authorization") != Some(world.token.as_str()) {
         return error(401, 0, "401: Unauthorized");
     }
@@ -1202,6 +1211,37 @@ mod tests {
     }
 
     #[test]
+    fn login_scenarios_need_no_token() {
+        let login = |w: &mut World, login: &str, key: Option<&str>| {
+            let mut headers = BTreeMap::new();
+            if let Some(key) = key {
+                headers.insert("x-captcha-key".to_owned(), key.to_owned());
+            }
+            handle(
+                w,
+                &Request {
+                    method: "POST".into(),
+                    path: format!("{PREFIX}/auth/login"),
+                    query: String::new(),
+                    headers,
+                    body: json!({"login": login, "password": "fake-password"})
+                        .to_string()
+                        .into_bytes(),
+                },
+                &Ctx { port: 1 },
+            )
+            .response
+        };
+        let mut w = world();
+        assert_eq!(login(&mut w, "direct@fake.test", None).status, 200);
+        assert_eq!(login(&mut w, "mfa@fake.test", None).status, 200);
+        assert_eq!(login(&mut w, "captcha@fake.test", None).status, 400);
+        assert_eq!(login(&mut w, "captcha@fake.test", Some("k")).status, 200);
+        assert_eq!(login(&mut w, "wrong@fake.test", None).status, 400);
+        assert_eq!(login(&mut w, "limited@fake.test", None).status, 429);
+    }
+
+    #[test]
     fn scheduled_events_list_and_everything_else_is_not_implemented() {
         let mut w = world();
         let events = body(&call(
@@ -1212,7 +1252,6 @@ mod tests {
         ));
         assert_eq!(events.as_array().unwrap().len(), 2);
         for (method, path) in [
-            ("POST", "/auth/login"),
             ("GET", "/users/@me/guilds"),
             ("POST", "/interactions"),
             ("GET", "/guilds/5001/audit-logs"),

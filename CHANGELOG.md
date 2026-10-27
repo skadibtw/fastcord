@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- The fake Discord serves the email/password login (`POST /auth/login`, `/auth/mfa/totp`, `GET /experiments`; scenarios token, MFA, CAPTCHA, wrong password, new-location refusal, 429) and `PasswordAuth` works against it in the debug-only fake mode; `tests/password_login.rs` covers each scenario through to an in-memory credential store, and the request log now also redacts tickets, TOTP codes and CAPTCHA headers (#112). Release builds are unchanged.
 - Debug builds print redraw statistics (`view` and `update` counts per 5 s) when `FASTCORD_UI_STATS=1` (#212). No user data.
 - Hovering the call's network icon shows the voice ping: the UDP round trip to the voice server in milliseconds, or "measuring…" until the first answer (#221). It is cleared when the call ends.
 

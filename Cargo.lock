@@ -2051,6 +2051,7 @@ dependencies = [
  "fastcord-discord",
  "fastcord-model",
  "fastcord-net",
+ "fastcord-platform",
  "flate2",
  "futures-util",
  "serde_json",

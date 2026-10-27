@@ -690,8 +690,14 @@ pub(crate) fn login_client(
     network: &fastcord_net::NetworkContext,
     properties: &ClientProperties,
 ) -> Option<fastcord_net::HttpClient> {
-    network
-        .http_builder(fastcord_net::Role::Login)
+    let builder = network.http_builder(fastcord_net::Role::Login);
+    #[cfg(feature = "fake-discord")]
+    let builder = if crate::fake_origin::active() {
+        network.debug_loopback_http_builder(fastcord_net::Role::Login)
+    } else {
+        builder
+    };
+    let builder = builder
         .ok()?
         .default_headers(identity_headers(properties).ok()?)
         .use_rustls_tls()
@@ -699,9 +705,14 @@ pub(crate) fn login_client(
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .ok()
+        .timeout(Duration::from_secs(30));
+    #[cfg(feature = "fake-discord")]
+    let builder = if crate::fake_origin::active() {
+        builder.https_only(false).no_proxy()
+    } else {
+        builder
+    };
+    builder.build().ok()
 }
 
 /// The headers that never change during a run: what the desktop client's

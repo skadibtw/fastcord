@@ -8,14 +8,22 @@ use serde_json::{Map, Value};
 pub const REDACTED: &str = "<redacted>";
 
 /// Keys whose values are replaced: `token`, `password`, `captcha_key`, the
-/// `authorization` and `cookie` headers, and any key mentioning a token or a
-/// password.
+/// `authorization` and `cookie` headers, the login `ticket` and TOTP `code`, and
+/// any key mentioning a token, a password or a captcha.
 pub fn sensitive(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     matches!(
         key.as_str(),
-        "token" | "password" | "captcha_key" | "x-captcha-key" | "authorization" | "cookie"
-    ) || key.contains("token")
+        "token"
+            | "password"
+            | "captcha_key"
+            | "x-captcha-key"
+            | "authorization"
+            | "cookie"
+            | "ticket"
+            | "code"
+    ) || key.contains("captcha")
+        || key.contains("token")
         || key.contains("password")
 }
 
@@ -75,6 +83,20 @@ mod tests {
         assert_eq!(out["d"]["list"][0]["password_confirm"], REDACTED);
         assert_eq!(out["d"]["list"][0]["name"], "n");
         assert!(!out.to_string().contains("t2"));
+    }
+
+    #[test]
+    fn login_secrets_are_replaced() {
+        let out = super::json(&json!({"login": "a@fake.test", "ticket": "t", "code": "000000"}));
+        assert_eq!(out["login"], "a@fake.test");
+        assert_eq!(out["ticket"], REDACTED);
+        assert_eq!(out["code"], REDACTED);
+        let mut map = BTreeMap::new();
+        map.insert("x-captcha-session-id".to_owned(), "s".to_owned());
+        map.insert("x-captcha-rqtoken".to_owned(), "r".to_owned());
+        let out = headers(&map);
+        assert_eq!(out["x-captcha-session-id"], REDACTED);
+        assert_eq!(out["x-captcha-rqtoken"], REDACTED);
     }
 
     #[test]

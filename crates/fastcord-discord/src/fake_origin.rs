@@ -3,8 +3,9 @@
 //! Compiled only with the `fake-discord` feature, and never into a release
 //! build (`compile_error!` in `lib.rs`). Until [`set_origin`] succeeds, the
 //! feature changes nothing. After it, REST goes to `http://127.0.0.1:<port>`
-//! and the Gateway to `ws://127.0.0.1:<port>`; every other host stays refused,
-//! and the remote-auth, password-login and CDN paths never connect anywhere.
+//! and the Gateway to `ws://127.0.0.1:<port>`, and so does the email/password
+//! login (`POST /auth/login`, `/auth/mfa/totp`); every other host stays refused,
+//! and the remote-auth and CDN paths never connect anywhere.
 
 use std::sync::OnceLock;
 
