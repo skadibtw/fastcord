@@ -28,8 +28,8 @@ TLS ClientHello for a particular fastcord flow. It supports packet fake/disorder
 and sequence overlap inspired by zapret-discord-youtube. The native screen can
 check the public Discord API before sign-in. PacketFake restored API access,
 alt-account validation and Gateway READY on the reported VPN-excluded Windows
-route; that is not a universal bypass or UDP/media claim. Keep the packaged
-`windivert/` folder beside release builds. Start is explicit after each restart;
+route; that is not a universal bypass or UDP/media claim. The standalone
+`.exe` embeds WinDivert; the zip also ships it with its license and source. Start is explicit after each restart;
 Off, Proxy and Stop release the helper. See [the evidence](docs/NETWORK_TESTING.md).
 The base catalog splits TLS records/writes around SNI; it does not implicitly
 enable the optional packet helper. Successful offline transport tests alone do

@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::{GetLastError, HMODULE};
 use windows::Win32::NetworkManagement::IpHelper::{GetIfEntry2, MIB_IF_ROW2};
 use windows::Win32::System::LibraryLoader::{
-    GetProcAddress, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+    GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 use windows::core::PCWSTR;
 
@@ -71,27 +71,52 @@ unsafe fn symbol<T: Copy>(module: HMODULE, name: &'static [u8]) -> io::Result<T>
     }
     Ok(unsafe { std::mem::transmute_copy(&pointer) })
 }
+/// The unmodified upstream files, embedded so the standalone executable needs
+/// no `windivert/` folder. They are hash-checked again under a deny-write
+/// handle before loading, wherever they were read from.
+const PINNED: [(&str, &[u8], &str); 2] = [
+    (
+        "WinDivert.dll",
+        include_bytes!("../../native/windivert/WinDivert.dll"),
+        "c1e060ee19444a259b2162f8af0f3fe8c4428a1c6f694dce20de194ac8d7d9a2",
+    ),
+    (
+        "WinDivert64.sys",
+        include_bytes!("../../native/windivert/WinDivert64.sys"),
+        "8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2",
+    ),
+];
+/// Writes the embedded pair into a versioned cache folder unless an intact
+/// copy is already there. A copy that is in use stays; `load` rejects it if
+/// its bytes differ.
+fn extract_embedded() -> Result<std::path::PathBuf, fastcord_net::NetworkError> {
+    let directory = crate::paths::cache_dir("fastcord")
+        .ok_or(fastcord_net::NetworkError::Unsupported)?
+        .join("windivert-2.2.2-A");
+    std::fs::create_dir_all(&directory).map_err(|_| fastcord_net::NetworkError::Unsupported)?;
+    for (name, bytes, _) in PINNED {
+        let path = directory.join(name);
+        if std::fs::read(&path).is_ok_and(|current| current == bytes) {
+            continue;
+        }
+        let _ = crate::paths::write_atomic(&path, bytes);
+    }
+    Ok(directory)
+}
 fn load() -> Result<Arc<Api>, fastcord_net::NetworkError> {
     use std::os::windows::fs::OpenOptionsExt;
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join("windivert")));
     let directory = if cfg!(debug_assertions) {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("native/windivert")
+    } else if let Some(beside) = beside.filter(|d| d.join("WinDivert.dll").is_file()) {
+        beside
     } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("windivert")))
-            .ok_or(fastcord_net::NetworkError::Unsupported)?
+        extract_embedded()?
     };
     let mut pinned = Vec::with_capacity(2);
-    for (name, expected) in [
-        (
-            "WinDivert.dll",
-            "c1e060ee19444a259b2162f8af0f3fe8c4428a1c6f694dce20de194ac8d7d9a2",
-        ),
-        (
-            "WinDivert64.sys",
-            "8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2",
-        ),
-    ] {
+    for (name, _, expected) in PINNED {
         // Deny write/delete sharing throughout DLL/driver use, including the
         // interval between verification and loading in the elevated process.
         let mut file = std::fs::OpenOptions::new()
@@ -126,16 +151,12 @@ fn load() -> Result<Arc<Api>, fastcord_net::NetworkError> {
         .encode_wide()
         .chain([0])
         .collect();
-    // SAFETY: pinned full path and System32-only dependency search. The owned
+    // SAFETY: pinned full path and System32-only dependency search (the cache
+    // folder is user-writable, so nothing beside the DLL is searched). The owned
     // module remains loaded for the lifetime of all Arc<Api> users.
-    let module = unsafe {
-        LoadLibraryExW(
-            PCWSTR(path.as_ptr()),
-            None,
-            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
-        )
-    }
-    .map_err(|_| fastcord_net::NetworkError::Unsupported)?;
+    let module =
+        unsafe { LoadLibraryExW(PCWSTR(path.as_ptr()), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+            .map_err(|_| fastcord_net::NetworkError::Unsupported)?;
     let api = unsafe {
         Api {
             module: module.0 as isize,

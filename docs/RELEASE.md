@@ -16,8 +16,10 @@ Artifacts are unsigned and unnotarized until signing secrets exist.
 
 Windows x64 archives also include `windivert/` for the optional packet helper:
 the pinned upstream DLL and signed driver, full license terms, matching source
-archive, provenance and rebuild instructions. Keep this folder beside the
-executable. The client remains unprivileged; only an explicitly started helper
+archive, provenance and rebuild instructions. The executable also embeds the
+same DLL and driver: without an adjacent `windivert/` folder (the standalone
+`.exe`) it writes them to `%LOCALAPPDATA%\fastcord\cache\windivert-2.2.2-A`
+and loads them only after the SHA-256 check. The client remains unprivileged; only an explicitly started helper
 requests UAC. Other release platforms do not bundle or load WinDivert.
 
 The adjacent `zapret2/` directory contains the MIT-licensed UDP profile data,

@@ -24,6 +24,10 @@ under the repository's MIT license; no relinking keys or application secrets
 are required. Windows independently requires appropriately signed drivers.
 
 Dropping the helper pipe ends the elevated child and closes its filter handles.
+The release executable also embeds `WinDivert.dll` and `WinDivert64.sys`
+unchanged and writes them to a per-user cache folder when no adjacent
+`windivert/` folder exists; both are SHA-256 checked before loading.
+
 WinDivert manages its driver service; stopping the filter does not promise that
 Windows immediately removes the loaded driver/service. The bundled upstream
 source/documentation describes its service lifecycle and removal.

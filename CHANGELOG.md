@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- The Windows executable embeds the pinned WinDivert DLL and driver, so the standalone `.exe` can start packet recovery without a `windivert/` folder: it writes them to `%LOCALAPPDATA%\fastcord\windivert-2.2.2-A` and loads them only after the SHA-256 check. WinDivert's dependencies are now resolved from System32 only.
+
 ## 0.1.0-alpha.9 — 2026-10-27
 
 ### Fixed
