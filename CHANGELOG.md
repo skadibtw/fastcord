@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Hide channel-name completions from the composer when the current account lacks VIEW_CHANNEL, including after permission revocation (#257).
+
 ### Fixed
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).

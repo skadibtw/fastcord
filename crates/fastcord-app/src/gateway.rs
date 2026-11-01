@@ -3981,8 +3981,8 @@ fn mention_candidates(
                 }),
         );
         out.extend(
-            entry
-                .channels()
+            store
+                .readable_guild_channels(entry.id())
                 .filter(|channel| {
                     matches!(
                         channel.kind,
@@ -5565,6 +5565,205 @@ mod tests {
     use fastcord_model::{Channel, ChannelKind, Guild, Snowflake, User};
 
     use super::*;
+
+    #[test]
+    fn channel_completions_follow_view_permission_changes_and_account_ownership() {
+        fn channel(id: u64, kind: u8, name: &str, hidden: bool) -> Channel {
+            serde_json::from_value(serde_json::json!({
+                "id": id.to_string(), "guild_id": "100", "type": kind, "name": name,
+                "permission_overwrites": [{"id":"100", "type":0, "allow":"0",
+                    "deny": if hidden { "1024" } else { "0" }}]
+            }))
+            .unwrap()
+        }
+        let GatewayEvent::Dispatch {
+            event: Dispatch::Ready(mut ready),
+            ..
+        } = ready_event(1, 0, 0)
+        else {
+            unreachable!()
+        };
+        let guild = &mut ready.guilds[0];
+        guild.id = Snowflake(100);
+        guild.owner_id = Some(Snowflake(9));
+        guild.roles = vec![
+            serde_json::from_value(serde_json::json!({
+                "id":"100", "name":"@everyone", "permissions":"68672"
+            }))
+            .unwrap(),
+        ];
+        guild.members = vec![fastcord_model::GuildMember {
+            user_id: Snowflake(1),
+            nick: None,
+            roles: Vec::new(),
+            roles_known: true,
+            communication_disabled_until: None,
+            pending: Some(false),
+            flags: None,
+        }];
+        guild.channels = vec![
+            channel(200, 0, "lounge", false),
+            channel(201, 0, "staff-hidden-text", true),
+            channel(202, 5, "staff-hidden-announcement", true),
+            channel(203, 5, "staff-public", false),
+            channel(204, 2, "staff-voice", false),
+        ];
+        let mut worker = worker();
+        let bridge = worker.bridge.clone();
+        worker.apply_gateway_event(
+            GatewayEvent::Dispatch {
+                sequence: 1,
+                event: Dispatch::Ready(ready.clone()),
+            },
+            |_| {},
+        );
+        assert!(
+            worker
+                .tracker
+                .navigation
+                .select_guild(&worker.tracker.store, Snowflake(100))
+        );
+        assert!(
+            worker
+                .tracker
+                .navigation
+                .select_channel(&worker.tracker.store, Snowflake(200))
+        );
+        let mut snapshot = timeline::Snapshot {
+            channel_id: Some(Snowflake(200)),
+            can_send: true,
+            ..Default::default()
+        };
+        let mut composer = Composer::default();
+        composer.select(snapshot.channel_id);
+        assert!(composer.insert_emoji("#sta"));
+        let picks = |tracker: &Tracker, snapshot: &mut timeline::Snapshot| {
+            snapshot.candidates =
+                mention_candidates(&tracker.store, Some(Snowflake(100)), snapshot);
+            // Use the real coalesced publication that the worker refresh emits.
+            bridge.publish(
+                tracker.navigation.snapshot(&tracker.store, 0, 128, 0, 128),
+                snapshot.clone(),
+                emoji_picker::Snapshot::default(),
+                None,
+            );
+            let latest = bridge.latest.lock().unwrap();
+            let mut ids: Vec<_> = composer
+                .completions(&latest.timeline)
+                .iter()
+                .map(|(candidate, _)| candidate.id.0)
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        assert_eq!(
+            picks(&worker.tracker, &mut snapshot),
+            [203],
+            "hidden names cannot reach the actual composer"
+        );
+        for (sequence, id, kind, name) in [
+            (2, 201, 0, "staff-hidden-text"),
+            (3, 202, 5, "staff-hidden-announcement"),
+        ] {
+            worker.apply_gateway_event(
+                GatewayEvent::Dispatch {
+                    sequence,
+                    event: Dispatch::ChannelUpdate(Box::new(channel(id, kind, name, false))),
+                },
+                |_| {},
+            );
+        }
+        assert_eq!(
+            picks(&worker.tracker, &mut snapshot),
+            [201, 202, 203],
+            "granting VIEW_CHANNEL restores eligible completions"
+        );
+        worker.tracker.navigation_dirty = false;
+        worker.apply_gateway_event(
+            GatewayEvent::Dispatch {
+                sequence: 4,
+                event: Dispatch::ChannelUpdate(Box::new(channel(
+                    201,
+                    0,
+                    "staff-hidden-text",
+                    true,
+                ))),
+            },
+            |_| {},
+        );
+        assert!(
+            worker.tracker.navigation_dirty,
+            "revocation schedules the actual worker snapshot rebuild"
+        );
+        assert_eq!(
+            picks(&worker.tracker, &mut snapshot),
+            [202, 203],
+            "permission revocation removes previously published completion"
+        );
+        ready.guilds[0].roles.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"101", "name":"Admin", "permissions":"8"
+            }))
+            .unwrap(),
+        );
+        ready.guilds[0].members[0].roles = vec![Snowflake(101)];
+        worker.apply_gateway_event(
+            GatewayEvent::Dispatch {
+                sequence: 5,
+                event: Dispatch::Ready(ready.clone()),
+            },
+            |_| {},
+        );
+        assert_eq!(
+            picks(&worker.tracker, &mut snapshot),
+            [201, 202, 203],
+            "administrator bypasses channel overwrites through existing permissions"
+        );
+        ready.guilds[0].roles.pop();
+        // READY replaces account state: no known member means fail closed.
+        ready.guilds[0].members.clear();
+        worker.apply_gateway_event(
+            GatewayEvent::Dispatch {
+                sequence: 6,
+                event: Dispatch::Ready(ready.clone()),
+            },
+            |_| {},
+        );
+        assert!(picks(&worker.tracker, &mut snapshot).is_empty());
+        ready.guilds[0].owner_id = Some(Snowflake(1));
+        worker.apply_gateway_event(
+            GatewayEvent::Dispatch {
+                sequence: 7,
+                event: Dispatch::Ready(ready.clone()),
+            },
+            |_| {},
+        );
+        assert_eq!(
+            picks(&worker.tracker, &mut snapshot),
+            [201, 202, 203],
+            "owner uses the existing permission resolver"
+        );
+        ready.guilds[0]
+            .channels
+            .extend((1000..1260).map(|id| channel(id, 0, "staff-visible", false)));
+        worker.apply_gateway_event(
+            GatewayEvent::Dispatch {
+                sequence: 8,
+                event: Dispatch::Ready(ready),
+            },
+            |_| {},
+        );
+        snapshot.candidates =
+            mention_candidates(&worker.tracker.store, Some(Snowflake(100)), &snapshot);
+        assert_eq!(
+            snapshot.candidates.len(),
+            MAX_CANDIDATES,
+            "channel completion cap is unchanged"
+        );
+        assert!(
+            mention_candidates(&worker.tracker.store, Some(Snowflake(999)), &snapshot).is_empty()
+        );
+    }
 
     #[test]
     fn loading_volume_settings_keeps_live_changes_and_both_bounds() {

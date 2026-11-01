@@ -241,6 +241,14 @@ impl Store {
         self.guilds.get(&id)
     }
 
+    /// Borrow held channels the current account may view, using the same
+    /// permission context as navigation. No names or channel rows are copied.
+    pub fn readable_guild_channels(&self, guild: Snowflake) -> impl Iterator<Item = &Channel> {
+        self.guild(guild)
+            .into_iter()
+            .flat_map(|entry| navigation::readable_channels(self, entry))
+    }
+
     /// Joined guilds currently in an outage (known by ID only).
     pub fn unavailable_guilds(&self) -> impl Iterator<Item = Snowflake> + '_ {
         self.unavailable.iter().copied()
