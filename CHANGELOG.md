@@ -55,6 +55,7 @@
 - Preserve categorical voice reconnect causes and record them in the release voice log, distinguishing signaling Resume (retained UDP/keys) from a new media session (#230).
 
 ### Added
+- Add Linux packet-session admission and lifetime primitives with kernel-authenticated Unix IPC, bounded socket-FD leases and a guarded real NFQUEUE namespace fixture. The shipping Linux helper remains unsupported pending the privileged launcher, packet engine and native readiness gates (#226).
 - Browse public, joined-private and manager-only private thread archives with their respective pagination cursors (#63).
 - Browse accessible server channels with bounded search/pages, independently of folded sidebar categories; selection rechecks current permissions (#91).
 - Refuse screening consent when TERMS values are absent or not an array, as well as when rules are truncated (#91).
