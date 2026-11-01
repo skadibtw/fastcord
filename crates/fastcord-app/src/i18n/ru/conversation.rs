@@ -1,6 +1,7 @@
 //! History, sending, outbox, threads, forums, forwarding, attachments, media players and voice messages.
 
 pub const ENTRIES: &[(&str, &str)] = &[
+    ("Hidden spoiler content", "Содержимое под спойлером скрыто"),
     ("User", "Пользователь"),
     ("Role", "Роль"),
     (

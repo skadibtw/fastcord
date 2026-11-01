@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Components V2 containers display optional RGB accents. Spoiler containers (including malformed spoiler flags) now retain only a hidden-content placeholder; their text and controls are discarded until scoped reveal support exists (#263; partial #100).
+
+
 - Add bounded local user, role, mentionable and channel component pickers over permission-checked held entities, with explicit Submit/Clear and stale account/application/control rejection. Existing interaction writes remain verification-gated.
 
 ### Added

@@ -1462,15 +1462,35 @@ pub(crate) mod harness {
 
         /// Draws the current layout, as iced does after `redraw`.
         pub fn draw(&mut self) {
+            self.draw_with_theme(&Theme::Dark);
+        }
+
+        /// Render the actual widget under an explicit theme for contrast checks.
+        pub fn draw_with_theme(&mut self, theme: &Theme) {
             self.element.as_widget().draw(
                 &self.tree,
                 &mut self.renderer,
-                &Theme::Dark,
+                theme,
                 &renderer::Style::default(),
                 core::Layout::new(&self.node),
                 mouse::Cursor::Unavailable,
                 &core::Rectangle::with_size(self.size),
             );
+        }
+
+        /// Inspect actual computed widget geometry through iced's operation API.
+        pub fn inspect(&mut self, operation: &mut dyn widget::Operation) {
+            self.element.as_widget_mut().operate(
+                &mut self.tree,
+                core::Layout::new(&self.node),
+                &self.renderer,
+                operation,
+            );
+        }
+
+        /// Natural root height after real widget layout.
+        pub fn layout_height(&self) -> f32 {
+            self.node.size().height
         }
 
         /// The scrollable's real offset.

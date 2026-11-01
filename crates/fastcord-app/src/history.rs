@@ -5013,6 +5013,34 @@ mod tests {
     }
 
     #[test]
+    fn container_spoiler_update_rejects_previously_visible_control_without_request() {
+        let (mut history, id) = interacting_history(
+            32768,
+            serde_json::json!([
+                {"type":17,"spoiler":false,"components":[{"type":1,"components":[{"type":2,"style":1,"label":"Action","custom_id":"hidden"}]}]}
+            ]),
+        );
+        assert!(
+            fastcord_model::Component::find(&held(&history, id).components, "hidden").is_some()
+        );
+        history.apply(&Dispatch::MessageUpdate(Box::new(serde_json::from_value(serde_json::json!({
+            "id":id.to_string(),"channel_id":CHANNEL.to_string(),
+            "components":[{"type":17,"spoiler":true,"components":[{"type":1,"components":[{"type":2,"style":1,"label":"Action","custom_id":"hidden"}]}]}]
+        })).unwrap())));
+        press(&mut history, id, "hidden", &[]);
+        assert_eq!(
+            take_interactions(&mut history),
+            0,
+            "stale click cannot submit a hidden descendant"
+        );
+        assert_eq!(history.notice, Some(interactions::STALE));
+        assert!(matches!(
+            held(&history, id).components.as_slice(),
+            [fastcord_model::Component::HiddenSpoiler]
+        ));
+    }
+
+    #[test]
     fn stale_disabled_premium_link_and_unsupported_controls_send_nothing() {
         let (mut history, id) = interacting_history(0, controls());
         for (custom_id, values, notice) in [
