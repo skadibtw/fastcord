@@ -238,6 +238,8 @@ pub const PANELS: &[&str] = &[
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     Open(String),
+    /// Type a query or activate a scoped slash-command form control.
+    Slash(String),
     Size(f32, f32),
     /// One of [`PANELS`].
     Toggle(&'static str),
@@ -272,6 +274,7 @@ fn parse_script(text: &str, dir: &std::path::Path) -> Vec<(Duration, Step)> {
                 continue;
             }
             "open" => Step::Open(rest.to_owned()),
+            "slash" => Step::Slash(rest.to_owned()),
             "size" => match rest
                 .split_once(' ')
                 .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))

@@ -86,7 +86,7 @@ impl History {
             Action::Command {
                 channel,
                 command,
-                subcommand,
+                path,
                 args,
             } => {
                 let session = match self.interaction_target(channel) {
@@ -103,8 +103,7 @@ impl History {
                     channel_id: channel,
                     nonce,
                 };
-                match InteractionRequest::command(&context, &command, subcommand.as_deref(), &args)
-                {
+                match InteractionRequest::command(&context, &command, &path, &args) {
                     Ok(request) => {
                         let entry = Entry {
                             nonce,

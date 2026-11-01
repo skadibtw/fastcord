@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Grouped slash-command forms with scoped group/subcommand controls and explicit Run. Command trees are validated and budgeted before typed allocation; obsolete branch fields clear visibly. Interaction routes remain unverified and gated off by default (#100).
+
 ### Fixed
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).

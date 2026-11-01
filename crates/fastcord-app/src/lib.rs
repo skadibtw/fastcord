@@ -1664,6 +1664,21 @@ impl App {
                 self.pending_link = desktop::parse(&text);
                 Task::none()
             }
+            fake::Step::Slash(command) => {
+                if let Some(text) = command.strip_prefix("type ") {
+                    return self.handle(Message::Composer(composer::Event::Action(composer::Act(
+                        iced::widget::text_editor::Action::Edit(
+                            iced::widget::text_editor::Edit::Paste(Arc::new(text.to_owned())),
+                        ),
+                    ))));
+                }
+                if let Some(event) = self.ui.slash.scripted(&command) {
+                    self.handle(Message::Slash(event))
+                } else {
+                    eprintln!("script: slash control unavailable: {command}");
+                    Task::none()
+                }
+            }
             fake::Step::Size(width, height) => {
                 iced::window::resize(self.main_window, iced::Size::new(width, height))
             }

@@ -9,7 +9,7 @@
 //! command only opens its form; nothing is sent until the user presses Run,
 //! and then the worker re-checks the channel, permissions and session and
 //! sends one interaction (`crate::interactions`). Autocomplete, attachment
-//! options and subcommand groups are not offered.
+//! options are not offered. Groups use the same explicit Run action.
 
 use crate::i18n::{tr, trf};
 use crate::panel_kit::auth_rejected;
@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use crate::ui::button;
 use fastcord_discord::{
-    AppCommand, CommandArg, CommandIndex, CommandOption, IndexScope, InteractionModal,
-    OPTION_BOOLEAN, OPTION_SUB_COMMAND, RestClient, RestError,
+    AppCommand, CommandArg, CommandIndex, CommandOption, CommandPath, IndexScope, InteractionModal,
+    OPTION_BOOLEAN, OPTION_SUB_COMMAND, OPTION_SUB_COMMAND_GROUP, RestClient, RestError,
 };
 use fastcord_model::Snowflake;
 use iced::widget::{column, container, row, scrollable, text, text_input};
@@ -50,15 +50,27 @@ pub enum Event {
     Index(u64, IndexScope, Result<Arc<CommandIndex>, RestError>),
     /// A command of the list was chosen: open its form.
     Pick(Snowflake),
-    /// A subcommand tab of the form.
-    Sub(usize),
-    /// A value for the form's option at this position.
-    Field(usize, String),
-    Run,
-    CloseForm,
+    /// A control of exactly the form/branch that rendered it.
+    Form(FormKey, FormEvent),
     ModalField(Snowflake, usize, String),
     ModalSubmit,
     ModalCancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormKey {
+    channel: Snowflake,
+    command: Snowflake,
+    serial: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum FormEvent {
+    Group(usize),
+    Sub { group: Option<usize>, at: usize },
+    Field(usize, String),
+    Run,
+    Close,
 }
 
 struct Cached {
@@ -75,18 +87,26 @@ struct Loading {
 }
 
 struct Form {
+    key: FormKey,
     channel: Snowflake,
     command: AppCommand,
     /// The chosen subcommand, as an index into `command.options`.
     sub: Option<usize>,
+    group: Option<usize>,
     values: Vec<String>,
     error: Option<&'static str>,
 }
 
 impl Form {
     fn fields(&self) -> &[CommandOption] {
+        let options = self
+            .group
+            .and_then(|at| self.command.options.get(at))
+            .map_or(self.command.options.as_slice(), |group| {
+                group.options.as_slice()
+            });
         match self.sub {
-            Some(at) => &self.command.options[at].options,
+            Some(at) => options.get(at).map_or(&[], |sub| sub.options.as_slice()),
             None if self.has_subcommands() => &[],
             None => &self.command.options,
         }
@@ -96,14 +116,32 @@ impl Form {
         self.command
             .options
             .iter()
-            .any(|option| option.kind == OPTION_SUB_COMMAND)
+            .any(|option| matches!(option.kind, OPTION_SUB_COMMAND | OPTION_SUB_COMMAND_GROUP))
     }
 
-    /// The subcommand name and typed options, if every required one is filled.
-    fn arguments(&self) -> Result<(Option<String>, Vec<CommandArg>), &'static str> {
-        if self.has_subcommands() && self.sub.is_none() {
-            return Err(CHOOSE_SUB);
+    fn path(&self) -> Option<CommandPath> {
+        match (self.group, self.sub) {
+            (Some(group), Some(sub)) => Some(CommandPath::Group {
+                group: self.command.options.get(group)?.name.clone(),
+                subcommand: self
+                    .command
+                    .options
+                    .get(group)?
+                    .options
+                    .get(sub)?
+                    .name
+                    .clone(),
+            }),
+            (None, Some(sub)) => Some(CommandPath::Subcommand(
+                self.command.options.get(sub)?.name.clone(),
+            )),
+            (None, None) if !self.has_subcommands() => Some(CommandPath::Root),
+            _ => None,
         }
+    }
+
+    fn arguments(&self) -> Result<(CommandPath, Vec<CommandArg>), &'static str> {
+        let path = self.path().ok_or(CHOOSE_SUB)?;
         let mut args = Vec::new();
         for (option, value) in self.fields().iter().zip(&self.values) {
             if option.required && value.trim().is_empty() {
@@ -115,8 +153,7 @@ impl Form {
                 text: value.clone(),
             });
         }
-        let sub = self.sub.map(|at| self.command.options[at].name.clone());
-        Ok((sub, args))
+        Ok((path, args))
     }
 }
 
@@ -128,6 +165,7 @@ struct ModalForm {
 
 #[derive(Default)]
 pub struct State {
+    form_serial: u64,
     cache: Vec<Cached>,
     loading: Option<Loading>,
     /// A scope whose list could not be loaded, and why.
@@ -153,6 +191,7 @@ impl State {
     pub fn reset(&mut self) {
         *self = Self {
             serial: self.serial.wrapping_add(1),
+            form_serial: self.form_serial.wrapping_add(1),
             ..Self::default()
         };
     }
@@ -234,6 +273,35 @@ impl State {
         }
     }
 
+    /// Fake-mode scripts use the same scoped controls as the rendered form.
+    #[cfg(feature = "fake-discord")]
+    pub(crate) fn scripted(&self, text: &str) -> Option<Event> {
+        let (verb, rest) = text.split_once(' ').unwrap_or((text, ""));
+        if verb == "pick" {
+            return Some(Event::Pick(Snowflake(rest.parse().ok()?)));
+        }
+        let action = match verb {
+            "group" => FormEvent::Group(rest.parse().ok()?),
+            "sub" => FormEvent::Sub {
+                group: self.form.as_ref()?.group,
+                at: rest.parse().ok()?,
+            },
+            "field" => {
+                let (at, value) = rest.split_once(' ')?;
+                FormEvent::Field(at.parse().ok()?, value.into())
+            }
+            "run" => FormEvent::Run,
+            "close" => FormEvent::Close,
+            _ => return None,
+        };
+        self.form_event(action)
+    }
+
+    #[cfg(any(test, feature = "fake-discord"))]
+    pub(crate) fn form_event(&self, action: FormEvent) -> Option<Event> {
+        self.form.as_ref().map(|form| Event::Form(form.key, action))
+    }
+
     /// Applies an event. Returns the task to run and whether the composer's
     /// `/` text was used up (a command was chosen).
     pub fn update(&mut self, event: Event, env: &Env<'_>) -> (Task<Event>, bool) {
@@ -257,10 +325,17 @@ impl State {
                     .and_then(|index| index.commands.iter().find(|c| c.id == id))
                     .cloned();
                 if let Some(command) = command.filter(|_| env.can_send) {
+                    self.form_serial = self.form_serial.wrapping_add(1);
                     let mut form = Form {
+                        key: FormKey {
+                            channel: env.channel,
+                            command: command.id,
+                            serial: self.form_serial,
+                        },
                         channel: env.channel,
                         command,
                         sub: None,
+                        group: None,
                         values: Vec::new(),
                         error: None,
                     };
@@ -269,29 +344,73 @@ impl State {
                     return (Task::none(), true);
                 }
             }
-            Event::Sub(at) => {
-                if let Some(form) = &mut self.form
-                    && form
-                        .command
-                        .options
-                        .get(at)
-                        .is_some_and(|option| option.kind == OPTION_SUB_COMMAND)
+            Event::Form(key, action) => {
+                if self
+                    .form
+                    .as_ref()
+                    .is_none_or(|form| form.key != key || form.channel != env.channel)
                 {
-                    form.sub = Some(at);
-                    form.values = vec![String::new(); form.fields().len()];
-                    form.error = None;
+                    return (Task::none(), false);
+                }
+                match action {
+                    FormEvent::Close => self.form = None,
+                    FormEvent::Run => self.run(env),
+                    FormEvent::Field(at, value) => {
+                        let form = self.form.as_mut().expect("checked form");
+                        if value.chars().count() > fastcord_discord::MAX_COMMAND_VALUE_CHARS {
+                            form.error = Some(
+                                "An option exceeds 6000 characters; the previous value was kept.",
+                            );
+                        } else if let Some(slot) = form.values.get_mut(at) {
+                            *slot = value;
+                            form.error = None;
+                        }
+                    }
+                    action => {
+                        let form = self.form.as_mut().expect("checked form");
+                        let selected = match action {
+                            FormEvent::Group(at)
+                                if form
+                                    .command
+                                    .options
+                                    .get(at)
+                                    .is_some_and(|o| o.kind == OPTION_SUB_COMMAND_GROUP) =>
+                            {
+                                Some((Some(at), None))
+                            }
+                            FormEvent::Sub { group, at } => {
+                                let options = match group {
+                                    Some(group) if form.group == Some(group) => form
+                                        .command
+                                        .options
+                                        .get(group)
+                                        .map(|g| g.options.as_slice()),
+                                    None => Some(form.command.options.as_slice()),
+                                    _ => None,
+                                };
+                                options
+                                    .and_then(|options| options.get(at))
+                                    .filter(|o| o.kind == OPTION_SUB_COMMAND)
+                                    .map(|_| (group, Some(at)))
+                            }
+                            _ => None,
+                        };
+                        if let Some((group, sub)) = selected
+                            && (form.group, form.sub) != (group, sub)
+                        {
+                            let discarded = form.values.iter().any(|value| !value.is_empty());
+                            self.form_serial = self.form_serial.wrapping_add(1);
+                            form.key.serial = self.form_serial;
+                            form.group = group;
+                            form.sub = sub;
+                            form.values = vec![String::new(); form.fields().len()];
+                            form.error = discarded.then_some(
+                                "Previous option values were cleared for the selected command.",
+                            );
+                        }
+                    }
                 }
             }
-            Event::Field(at, value) => {
-                if let Some(form) = &mut self.form
-                    && let Some(slot) = form.values.get_mut(at)
-                {
-                    *slot = value;
-                    form.error = None;
-                }
-            }
-            Event::CloseForm => self.form = None,
-            Event::Run => self.run(env),
             Event::ModalField(id, at, value) => {
                 if let Some(modal) = self.modal.as_mut().filter(|m| m.id == id)
                     && let Some(slot) = modal.values.get_mut(at)
@@ -328,7 +447,7 @@ impl State {
             form.error = Some(crate::interactions::COMMAND_BUSY);
             return;
         }
-        let (subcommand, args) = match form.arguments() {
+        let (path, args) = match form.arguments() {
             Ok(arguments) => arguments,
             Err(error) => {
                 form.error = Some(error);
@@ -338,7 +457,7 @@ impl State {
         let queued = env.bridge.interact(Action::Command {
             channel: form.channel,
             command: Box::new(form.command.clone()),
-            subcommand,
+            path,
             args,
         });
         if queued {
@@ -461,6 +580,7 @@ fn field_label(option: &CommandOption) -> String {
 }
 
 fn form_view<'a>(form: &'a Form, waiting: Option<&str>) -> Element<'a, Event> {
+    let event = |action| Event::Form(form.key, action);
     let mut panel = column![
         row![
             text(format!("/{}", form.command.name)).size(13),
@@ -468,31 +588,56 @@ fn form_view<'a>(form: &'a Form, waiting: Option<&str>) -> Element<'a, Event> {
                 .size(12)
                 .color(crate::style::muted())
                 .width(Length::Fill),
-            small(tr("Close"), Event::CloseForm),
+            small(tr("Close"), event(FormEvent::Close)),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)
     ]
     .spacing(6);
     if form.has_subcommands() {
-        let tabs = form
-            .command
-            .options
-            .iter()
-            .enumerate()
-            .filter(|(_, option)| option.kind == OPTION_SUB_COMMAND)
-            .fold(row![].spacing(4), |tabs, (at, option)| {
+        let tabs = form.command.options.iter().enumerate().fold(
+            row![].spacing(4),
+            |tabs, (at, option)| {
+                let (action, selected) = if option.kind == OPTION_SUB_COMMAND_GROUP {
+                    (FormEvent::Group(at), form.group == Some(at))
+                } else {
+                    (
+                        FormEvent::Sub { group: None, at },
+                        form.group.is_none() && form.sub == Some(at),
+                    )
+                };
                 tabs.push(
                     button(text(option.name.as_str()).size(12))
-                        .on_press(Event::Sub(at))
-                        .style(if form.sub == Some(at) {
+                        .on_press(event(action))
+                        .style(if selected {
                             button::primary
                         } else {
                             button::secondary
                         }),
                 )
-            });
+            },
+        );
         panel = panel.push(tabs.wrap());
+        if let Some(group) = form.group {
+            let tabs = form.command.options[group].options.iter().enumerate().fold(
+                row![].spacing(4),
+                |tabs, (at, option)| {
+                    tabs.push(
+                        button(text(option.name.as_str()).size(12))
+                            .on_press(event(FormEvent::Sub {
+                                group: Some(group),
+                                at,
+                            }))
+                            .style(if form.sub == Some(at) {
+                                button::primary
+                            } else {
+                                button::secondary
+                            }),
+                    )
+                },
+            );
+            panel = panel.push(tabs.wrap());
+        }
     }
     for (at, (option, value)) in form.fields().iter().zip(&form.values).enumerate() {
         let mut line = column![text(field_label(option)).size(12)].spacing(2);
@@ -522,14 +667,14 @@ fn form_view<'a>(form: &'a Form, waiting: Option<&str>) -> Element<'a, Event> {
             };
             line = line.push(
                 text_input(hint, value)
-                    .on_input(move |text| Event::Field(at, text))
+                    .on_input(move |text| Event::Form(form.key, FormEvent::Field(at, text)))
                     .size(13),
             );
         } else {
             line = line.push(
                 row(choices.into_iter().map(|(name, wire)| {
                     button(text(name).size(12))
-                        .on_press(Event::Field(at, wire.clone()))
+                        .on_press(event(FormEvent::Field(at, wire.clone())))
                         .style(if *value == wire {
                             button::primary
                         } else {
@@ -545,7 +690,7 @@ fn form_view<'a>(form: &'a Form, waiting: Option<&str>) -> Element<'a, Event> {
     }
     panel = panel.push(
         button(text(tr("Run")).size(13))
-            .on_press_maybe(waiting.is_none().then_some(Event::Run))
+            .on_press_maybe(waiting.is_none().then_some(event(FormEvent::Run)))
             .padding([4, 14]),
     );
     if let Some(error) = form.error {
@@ -613,7 +758,7 @@ fn modal_view<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use fastcord_discord::UserToken;
     use fastcord_discord::gateway::{ClientProperties, HostOs};
 
@@ -638,6 +783,13 @@ mod tests {
     }
 
     /// Applies an event; the task a real run would get is never needed here.
+    fn form_step(state: &mut State, action: FormEvent, env: &Env<'_>) -> bool {
+        let Some(event) = state.form_event(action) else {
+            return false;
+        };
+        step(state, event, env)
+    }
+
     fn step(state: &mut State, event: Event, env: &Env<'_>) -> bool {
         state.update(event, env).1
     }
@@ -774,6 +926,214 @@ mod tests {
         assert_eq!(state.cache.len(), MAX_SCOPES);
     }
 
+    fn click_ui(state: &State, now: Instant, wanted: impl Fn(&Event) -> bool) -> Event {
+        use crate::variable_list::harness::Ui;
+        let interaction = InteractionView::default();
+        let element = view(state, Some("admin"), SCOPE, &interaction, now).unwrap();
+        let mut ui = Ui::new(700.0, 450.0, element);
+        ui.redraw();
+        ui.draw();
+        for y in (0..400).step_by(4) {
+            for x in (0..690).step_by(8) {
+                for event in ui.click(x as f32, y as f32) {
+                    if wanted(&event) {
+                        return event;
+                    }
+                }
+            }
+        }
+        panic!("requested command control is not clickable");
+    }
+
+    /// Shared with the History worker regression: events come from real iced controls.
+    pub(crate) fn grouped_ui_action(channel: Snowflake) -> Action {
+        let harness = Harness::new();
+        let mut commands = harness.bridge.take_commands().unwrap();
+        let now = Instant::now();
+        let env = Env {
+            channel,
+            ..harness.env(now)
+        };
+        let mut state = State::default();
+        loaded(&mut state, &harness, now);
+        let pick = click_ui(&state, now, |event| matches!(event, Event::Pick(_)));
+        step(&mut state, pick, &env);
+        let group = click_ui(&state, now, |event| {
+            matches!(event, Event::Form(_, FormEvent::Group(0)))
+        });
+        step(&mut state, group, &env);
+        let sub = click_ui(&state, now, |event| {
+            matches!(
+                event,
+                Event::Form(
+                    _,
+                    FormEvent::Sub {
+                        group: Some(0),
+                        at: 0
+                    }
+                )
+            )
+        });
+        step(&mut state, sub, &env);
+        let choice = click_ui(
+            &state,
+            now,
+            |event| matches!(event, Event::Form(_, FormEvent::Field(0, value)) if value == "2"),
+        );
+        step(&mut state, choice, &env);
+        assert!(
+            commands.try_recv().is_err(),
+            "selection and fields never send"
+        );
+        let run = click_ui(&state, now, |event| {
+            matches!(event, Event::Form(_, FormEvent::Run))
+        });
+        step(&mut state, run.clone(), &env);
+        step(&mut state, run, &env);
+        assert!(state.form.is_none());
+        let Ok(Command::Interact(action)) = commands.try_recv() else {
+            panic!("Run must queue the interaction");
+        };
+        assert!(commands.try_recv().is_err(), "Run is single-shot");
+        *action
+    }
+
+    #[test]
+    fn grouped_command_ui_selects_path_and_typed_choice_before_explicit_run() {
+        let Action::Command {
+            channel,
+            command,
+            path,
+            args,
+        } = grouped_ui_action(CHANNEL)
+        else {
+            panic!()
+        };
+        assert_eq!(channel, CHANNEL);
+        assert_eq!(command.name, "admin");
+        assert_eq!(
+            path,
+            CommandPath::Group {
+                group: "group".into(),
+                subcommand: "sub".into()
+            }
+        );
+        assert_eq!(args[0].text, "2");
+        assert_eq!(args[0].kind, fastcord_discord::OPTION_INTEGER);
+    }
+
+    #[test]
+    fn form_events_are_scoped_to_branch_channel_and_account_and_clear_obsolete_values() {
+        let harness = Harness::new();
+        let mut commands = harness.bridge.take_commands().unwrap();
+        let now = Instant::now();
+        let mut state = State::default();
+        loaded(&mut state, &harness, now);
+        open(&mut state, &harness, "admin", now);
+        form_step(&mut state, FormEvent::Run, &harness.env(now));
+        assert_eq!(state.form.as_ref().unwrap().error, Some(CHOOSE_SUB));
+        form_step(&mut state, FormEvent::Group(0), &harness.env(now));
+        form_step(
+            &mut state,
+            FormEvent::Sub {
+                group: Some(0),
+                at: 0,
+            },
+            &harness.env(now),
+        );
+        form_step(&mut state, FormEvent::Run, &harness.env(now));
+        assert_eq!(state.form.as_ref().unwrap().error, Some(REQUIRED));
+        form_step(
+            &mut state,
+            FormEvent::Field(0, "2".into()),
+            &harness.env(now),
+        );
+        form_step(
+            &mut state,
+            FormEvent::Field(0, "x".repeat(fastcord_discord::MAX_COMMAND_VALUE_CHARS + 1)),
+            &harness.env(now),
+        );
+        assert_eq!(state.form.as_ref().unwrap().values[0], "2");
+        assert!(
+            state
+                .form
+                .as_ref()
+                .unwrap()
+                .error
+                .unwrap()
+                .contains("previous value was kept")
+        );
+        let old_run = state.form_event(FormEvent::Run).unwrap();
+        let old_field = state
+            .form_event(FormEvent::Field(0, "retired".into()))
+            .unwrap();
+        let old_close = state.form_event(FormEvent::Close).unwrap();
+        form_step(&mut state, FormEvent::Group(1), &harness.env(now));
+        assert!(
+            state
+                .form
+                .as_ref()
+                .unwrap()
+                .error
+                .unwrap()
+                .contains("cleared")
+        );
+        form_step(
+            &mut state,
+            FormEvent::Sub {
+                group: Some(1),
+                at: 0,
+            },
+            &harness.env(now),
+        );
+        for old in [old_run.clone(), old_field, old_close] {
+            step(&mut state, old, &harness.env(now));
+        }
+        assert_eq!(state.form.as_ref().unwrap().values, [""]);
+        assert!(commands.try_recv().is_err());
+        let current = state
+            .form_event(FormEvent::Field(0, "true".into()))
+            .unwrap();
+        let elsewhere = Env {
+            channel: Snowflake(999),
+            ..harness.env(now)
+        };
+        step(&mut state, current, &elsewhere);
+        assert_eq!(state.form.as_ref().unwrap().values, [""]);
+        let pending = InteractionView {
+            waiting: Some("admin".into()),
+            ..Default::default()
+        };
+        form_step(
+            &mut state,
+            FormEvent::Field(0, "true".into()),
+            &harness.env(now),
+        );
+        form_step(
+            &mut state,
+            FormEvent::Run,
+            &Env {
+                interaction: &pending,
+                ..harness.env(now)
+            },
+        );
+        assert!(commands.try_recv().is_err());
+        form_step(
+            &mut state,
+            FormEvent::Run,
+            &Env {
+                can_send: false,
+                ..harness.env(now)
+            },
+        );
+        assert!(commands.try_recv().is_err());
+        state.reset();
+        loaded(&mut state, &harness, now);
+        open(&mut state, &harness, "admin", now);
+        step(&mut state, old_run, &harness.env(now));
+        assert!(state.form.is_some() && commands.try_recv().is_err());
+    }
+
     #[test]
     fn a_command_form_collects_typed_options_and_sends_one_interaction() {
         let harness = Harness::new();
@@ -783,12 +1143,20 @@ mod tests {
         loaded(&mut state, &harness, now);
         open(&mut state, &harness, "roll", now);
         // A required option left empty sends nothing.
-        step(&mut state, Event::Run, &harness.env(now));
+        form_step(&mut state, FormEvent::Run, &harness.env(now));
         assert_eq!(state.form.as_ref().unwrap().error, Some(REQUIRED));
         assert!(commands.try_recv().is_err());
-        step(&mut state, Event::Field(0, "20".into()), &harness.env(now));
-        step(&mut state, Event::Field(1, "d20".into()), &harness.env(now));
-        step(&mut state, Event::Run, &harness.env(now));
+        form_step(
+            &mut state,
+            FormEvent::Field(0, "20".into()),
+            &harness.env(now),
+        );
+        form_step(
+            &mut state,
+            FormEvent::Field(1, "d20".into()),
+            &harness.env(now),
+        );
+        form_step(&mut state, FormEvent::Run, &harness.env(now));
         assert!(state.form.is_none(), "queued: the form closes");
         let Ok(Command::Interact(action)) = commands.try_recv() else {
             panic!("nothing queued");
@@ -796,15 +1164,15 @@ mod tests {
         let Action::Command {
             channel,
             command,
-            subcommand,
+            path,
             args,
         } = *action
         else {
             panic!("not a command");
         };
         assert_eq!(
-            (channel, command.name.as_str(), subcommand),
-            (CHANNEL, "roll", None)
+            (channel, command.name.as_str(), path),
+            (CHANNEL, "roll", CommandPath::Root)
         );
         assert_eq!(
             args.iter().map(|a| a.text.as_str()).collect::<Vec<_>>(),
@@ -822,17 +1190,25 @@ mod tests {
         loaded(&mut state, &harness, now);
         open(&mut state, &harness, "poll", now);
         assert!(state.form.as_ref().unwrap().fields().is_empty());
-        step(&mut state, Event::Run, &harness.env(now));
+        form_step(&mut state, FormEvent::Run, &harness.env(now));
         assert_eq!(state.form.as_ref().unwrap().error, Some(CHOOSE_SUB));
-        step(&mut state, Event::Sub(5), &harness.env(now));
+        form_step(
+            &mut state,
+            FormEvent::Sub { group: None, at: 5 },
+            &harness.env(now),
+        );
         assert!(
             state.form.as_ref().unwrap().sub.is_none(),
             "not a subcommand"
         );
-        step(&mut state, Event::Sub(0), &harness.env(now));
-        step(
+        form_step(
             &mut state,
-            Event::Field(0, "Lunch?".into()),
+            FormEvent::Sub { group: None, at: 0 },
+            &harness.env(now),
+        );
+        form_step(
+            &mut state,
+            FormEvent::Field(0, "Lunch?".into()),
             &harness.env(now),
         );
         let waiting = InteractionView {
@@ -843,16 +1219,16 @@ mod tests {
             interaction: &waiting,
             ..harness.env(now)
         };
-        step(&mut state, Event::Run, &busy);
+        form_step(&mut state, FormEvent::Run, &busy);
         assert!(commands.try_recv().is_err());
         assert!(state.form.is_some());
-        step(&mut state, Event::Run, &harness.env(now));
+        form_step(&mut state, FormEvent::Run, &harness.env(now));
         let Ok(Command::Interact(action)) = commands.try_recv() else {
             panic!("nothing queued");
         };
         assert!(matches!(
             *action,
-            Action::Command { subcommand: Some(ref sub), .. } if sub == "create"
+            Action::Command { path: CommandPath::Subcommand(ref sub), .. } if sub == "create"
         ));
         // A form of another conversation closes with the selection.
         open(&mut state, &harness, "roll", now);

@@ -34,8 +34,13 @@ pub const MAX_COMMAND_OPTIONS: usize = 25;
 pub const MAX_OPTION_CHOICES: usize = 25;
 pub const MAX_COMMAND_NAME_CHARS: usize = 32;
 pub const MAX_COMMAND_TEXT_CHARS: usize = 100;
+/// Maximum typed string argument retained by one form field.
+pub const MAX_COMMAND_VALUE_CHARS: usize = 6000;
 /// Heap bytes one parsed index may hold; commands past it are dropped.
 pub const MAX_INDEX_BYTES: usize = 256 * 1024;
+/// Bound the JSON tree before serde allocates it; typed nodes have a separate budget.
+pub const MAX_INDEX_BODY_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_INDEX_NODES: usize = 4096;
 /// Inputs one modal keeps (Discord allows 5).
 pub const MAX_MODAL_INPUTS: usize = 5;
 pub const MAX_MODAL_TEXT_CHARS: usize = 4000;
@@ -96,6 +101,8 @@ pub enum ArgError {
     NotYesOrNo,
     /// A user, channel, role or mentionable needs an ID or a mention.
     NotAnId,
+    InvalidPath,
+    TooLong,
 }
 
 impl fmt::Display for ArgError {
@@ -106,6 +113,8 @@ impl fmt::Display for ArgError {
             Self::NotANumber => "an option needs a number",
             Self::NotYesOrNo => "an option needs yes or no",
             Self::NotAnId => "an option needs an ID or a mention",
+            Self::InvalidPath => "that command path is not available",
+            Self::TooLong => "an option exceeds 6000 characters",
         })
     }
 }
@@ -157,6 +166,46 @@ pub struct CommandArg {
     pub kind: u8,
     /// What the user typed; empty for an optional option they left out.
     pub text: String,
+}
+
+/// A bounded command path: root, one subcommand, or one group and subcommand.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CommandPath {
+    #[default]
+    Root,
+    Subcommand(String),
+    Group {
+        group: String,
+        subcommand: String,
+    },
+}
+
+impl CommandPath {
+    pub fn fields<'a>(&self, command: &'a AppCommand) -> Result<&'a [CommandOption], ArgError> {
+        let sub = |options: &'a [CommandOption], name: &str, kind| {
+            options
+                .iter()
+                .find(|option| option.kind == kind && option.name == name)
+                .map(|option| option.options.as_slice())
+                .ok_or(ArgError::InvalidPath)
+        };
+        match self {
+            Self::Root
+                if command.options.iter().all(|o| {
+                    o.kind != OPTION_SUB_COMMAND && o.kind != OPTION_SUB_COMMAND_GROUP
+                }) =>
+            {
+                Ok(&command.options)
+            }
+            Self::Root => Err(ArgError::InvalidPath),
+            Self::Subcommand(name) => sub(&command.options, name, OPTION_SUB_COMMAND),
+            Self::Group { group, subcommand } => sub(
+                sub(&command.options, group, OPTION_SUB_COMMAND_GROUP)?,
+                subcommand,
+                OPTION_SUB_COMMAND,
+            ),
+        }
+    }
 }
 
 fn options_json(args: &[CommandArg]) -> Result<Vec<Value>, ArgError> {
@@ -215,16 +264,50 @@ impl InteractionRequest {
         request
     }
 
-    /// A slash command, optionally through one subcommand.
+    /// A slash command through a path present in the held command index.
     pub fn command(
         context: &InteractionContext<'_>,
         command: &AppCommand,
-        subcommand: Option<&str>,
+        path: &CommandPath,
         args: &[CommandArg],
     ) -> Result<Self, ArgError> {
+        let fields = path.fields(command)?;
+        if args
+            .iter()
+            .any(|arg| arg.text.chars().count() > MAX_COMMAND_VALUE_CHARS)
+        {
+            return Err(ArgError::TooLong);
+        }
+        if fields.iter().any(|field| {
+            field.required
+                && !args
+                    .iter()
+                    .any(|arg| arg.name == field.name && !arg.text.trim().is_empty())
+        }) {
+            return Err(ArgError::Missing);
+        }
+        let mut names = std::collections::HashSet::new();
+        if args.len() > MAX_COMMAND_OPTIONS
+            || args.iter().any(|arg| {
+                !names.insert(arg.name.as_str())
+                    || !fields
+                        .iter()
+                        .any(|field| field.name == arg.name && field.kind == arg.kind)
+            })
+        {
+            return Err(ArgError::InvalidPath);
+        }
         let mut options = options_json(args)?;
-        if let Some(sub) = subcommand {
-            options = vec![json!({"type": OPTION_SUB_COMMAND, "name": sub, "options": options})];
+        match path {
+            CommandPath::Root => {}
+            CommandPath::Subcommand(sub) => {
+                options = vec![json!({"type": OPTION_SUB_COMMAND, "name": sub, "options": options})]
+            }
+            CommandPath::Group { group, subcommand } => {
+                options = vec![
+                    json!({"type": OPTION_SUB_COMMAND_GROUP, "name": group, "options": [{"type": OPTION_SUB_COMMAND, "name": subcommand, "options": options}]}),
+                ]
+            }
         }
         let data = json!({
             "version": command.version.to_string(),
@@ -522,90 +605,169 @@ impl CommandIndex {
     }
 }
 
-fn parse_option(value: &Value, depth: usize) -> Option<CommandOption> {
-    let kind = u8::try_from(value.get("type")?.as_u64()?).ok()?;
-    let name = text(value, "name", MAX_COMMAND_NAME_CHARS);
-    if name.is_empty() {
+#[derive(Clone, Copy)]
+struct Budget {
+    bytes: usize,
+    nodes: usize,
+}
+impl Budget {
+    fn take(&mut self, bytes: usize, nodes: usize) -> Option<()> {
+        self.bytes = self.bytes.checked_sub(bytes)?;
+        self.nodes = self.nodes.checked_sub(nodes)?;
+        Some(())
+    }
+    fn text(&mut self, value: &Value, key: &str, max: usize, exact: bool) -> Option<String> {
+        let text = value.get(key).and_then(Value::as_str).unwrap_or("");
+        let end = text
+            .char_indices()
+            .nth(max)
+            .map_or(text.len(), |(at, _)| at);
+        if exact && (text.is_empty() || end != text.len()) {
+            return None;
+        }
+        self.take(end, 0)?;
+        Some(text[..end].to_owned())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Level {
+    Root,
+    Group,
+    Fields,
+}
+
+fn parse_options(value: &Value, level: Level, budget: &mut Budget) -> Option<Vec<CommandOption>> {
+    let Some(raw) = value.get("options") else {
+        return Some(Vec::new());
+    };
+    let items = raw.as_array()?;
+    if items.len() > MAX_COMMAND_OPTIONS {
         return None;
     }
-    let choices = value
-        .get("choices")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .take(MAX_OPTION_CHOICES)
-                .filter_map(|choice| {
-                    let value = match choice.get("value")? {
-                        Value::String(s) => s.chars().take(MAX_COMMAND_TEXT_CHARS).collect(),
-                        Value::Number(n) => n.to_string(),
-                        _ => return None,
-                    };
-                    Some(OptionChoice {
-                        name: text(choice, "name", MAX_COMMAND_TEXT_CHARS),
-                        value,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let options = if depth == 0 {
-        parse_options(value, depth + 1)
-    } else {
-        Vec::new()
-    };
-    Some(CommandOption {
-        kind,
-        name,
-        description: text(value, "description", MAX_COMMAND_TEXT_CHARS),
-        required: value
-            .get("required")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        choices,
-        options,
-    })
+    // Reserve the entire list and charge every node before allocating children.
+    budget.take(items.len() * size_of::<CommandOption>(), items.len())?;
+    let mut options = Vec::with_capacity(items.len());
+    let mut branch = None;
+    for (at, value) in items.iter().enumerate() {
+        let kind = u8::try_from(value.get("type")?.as_u64()?).ok()?;
+        let nested = matches!(kind, OPTION_SUB_COMMAND | OPTION_SUB_COMMAND_GROUP);
+        match level {
+            Level::Root => {
+                if branch.is_some_and(|was| was != nested) {
+                    return None;
+                }
+                branch = Some(nested);
+            }
+            Level::Group if kind != OPTION_SUB_COMMAND => return None,
+            Level::Fields if nested => return None,
+            _ => {}
+        }
+        if !(OPTION_SUB_COMMAND..=OPTION_ATTACHMENT).contains(&kind) {
+            return None;
+        }
+        let name = budget.text(value, "name", MAX_COMMAND_NAME_CHARS, true)?;
+        if items[..at]
+            .iter()
+            .any(|previous| previous.get("name").and_then(Value::as_str) == Some(name.as_str()))
+        {
+            return None;
+        }
+        let required = match value.get("required") {
+            None => false,
+            Some(value) => value.as_bool()?,
+        };
+        if (kind == OPTION_ATTACHMENT || nested) && required {
+            return None;
+        }
+        let children = if nested {
+            let children = parse_options(
+                value,
+                if kind == OPTION_SUB_COMMAND_GROUP {
+                    Level::Group
+                } else {
+                    Level::Fields
+                },
+                budget,
+            )?;
+            if kind == OPTION_SUB_COMMAND_GROUP && children.is_empty() {
+                return None;
+            }
+            children
+        } else {
+            if value
+                .get("options")
+                .is_some_and(|v| v.as_array().is_none_or(|v| !v.is_empty()))
+            {
+                return None;
+            }
+            Vec::new()
+        };
+        let choice_values = match value.get("choices") {
+            None => &[][..],
+            Some(v) => v.as_array()?.as_slice(),
+        };
+        if choice_values.len() > MAX_OPTION_CHOICES
+            || (!choice_values.is_empty()
+                && !matches!(kind, OPTION_STRING | OPTION_INTEGER | OPTION_NUMBER))
+        {
+            return None;
+        }
+        budget.take(
+            choice_values.len() * size_of::<OptionChoice>(),
+            choice_values.len(),
+        )?;
+        let mut choices = Vec::with_capacity(choice_values.len());
+        for choice in choice_values {
+            let name = budget.text(choice, "name", MAX_COMMAND_TEXT_CHARS, true)?;
+            let raw = choice.get("value")?;
+            let wire = match raw {
+                Value::String(_) if kind == OPTION_STRING => {
+                    budget.text(choice, "value", MAX_COMMAND_TEXT_CHARS, true)?
+                }
+                Value::Number(number)
+                    if (kind == OPTION_INTEGER && number.is_i64()) || kind == OPTION_NUMBER =>
+                {
+                    // JSON numbers need at most 32 bytes in serde_json's representation.
+                    budget.take(32, 0)?;
+                    number.to_string()
+                }
+                _ => return None,
+            };
+            choices.push(OptionChoice { name, value: wire });
+        }
+        let description = budget.text(value, "description", MAX_COMMAND_TEXT_CHARS, false)?;
+        // Optional files remain unsupported at every nesting level; no upload is invented.
+        if kind != OPTION_ATTACHMENT {
+            options.push(CommandOption {
+                kind,
+                name,
+                description,
+                required,
+                choices,
+                options: children,
+            });
+        }
+    }
+    options.shrink_to_fit();
+    Some(options)
 }
 
-fn parse_options(value: &Value, depth: usize) -> Vec<CommandOption> {
-    value
-        .get("options")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .take(MAX_COMMAND_OPTIONS)
-                .filter_map(|item| parse_option(item, depth))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Whether this client can fill in and send every option of `options`
-/// (subcommand groups and required attachments it cannot).
-fn supported(options: &[CommandOption]) -> bool {
-    options.iter().all(|option| match option.kind {
-        OPTION_SUB_COMMAND_GROUP => false,
-        OPTION_ATTACHMENT => !option.required,
-        OPTION_SUB_COMMAND => supported(&option.options),
-        _ => true,
-    })
-}
-
-/// Parses an `application-command-index` response. Only chat-input commands
-/// this client can complete are kept; malformed ones are dropped.
+/// Parses only complete supported chat commands. An invalid or oversized
+/// command is discarded as a whole, never missing a required option silently.
 pub fn parse_index(body: &[u8]) -> Result<CommandIndex, RestError> {
+    if body.len() > MAX_INDEX_BODY_BYTES {
+        return Err(RestError::InvalidJson);
+    }
     let value: Value = serde_json::from_slice(body).map_err(|_| RestError::InvalidJson)?;
-    let apps: Vec<(Snowflake, String)> = value
-        .get("applications")
-        .and_then(Value::as_array)
-        .map(|apps| {
-            apps.iter()
-                .filter_map(|app| Some((snowflake(app, "id")?, text(app, "name", 40))))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut index = CommandIndex::default();
+    let mut budget = Budget {
+        bytes: MAX_INDEX_BYTES - MAX_COMMANDS * size_of::<AppCommand>(),
+        nodes: MAX_INDEX_NODES,
+    };
+    let mut index = CommandIndex {
+        commands: Vec::with_capacity(MAX_COMMANDS),
+        bytes: 0,
+    };
     let Some(commands) = value.get("application_commands").and_then(Value::as_array) else {
         return Ok(index);
     };
@@ -613,39 +775,47 @@ pub fn parse_index(body: &[u8]) -> Result<CommandIndex, RestError> {
         if index.commands.len() == MAX_COMMANDS {
             break;
         }
-        if item.get("type").and_then(Value::as_u64).unwrap_or(1) != 1 {
+        if item
+            .get("type")
+            .is_some_and(|kind| kind.as_u64() != Some(1))
+        {
             continue;
         }
-        let (Some(id), Some(application_id)) =
-            (snowflake(item, "id"), snowflake(item, "application_id"))
-        else {
-            continue;
+        let mut next = budget;
+        let parse = |budget: &mut Budget| -> Option<AppCommand> {
+            budget.take(size_of::<AppCommand>(), 1)?;
+            let id = snowflake(item, "id")?;
+            let application_id = snowflake(item, "application_id")?;
+            let name = budget.text(item, "name", MAX_COMMAND_NAME_CHARS, true)?;
+            let description = budget.text(item, "description", MAX_COMMAND_TEXT_CHARS, false)?;
+            let app = value
+                .get("applications")
+                .and_then(Value::as_array)
+                .and_then(|apps| {
+                    apps.iter()
+                        .find(|app| snowflake(app, "id") == Some(application_id))
+                });
+            let application = match app {
+                Some(app) => budget.text(app, "name", 40, false)?,
+                None => String::new(),
+            };
+            let options = parse_options(item, Level::Root, budget)?;
+            Some(AppCommand {
+                id,
+                application_id,
+                version: snowflake(item, "version").unwrap_or(id),
+                name,
+                description,
+                application,
+                options,
+            })
         };
-        let name = text(item, "name", MAX_COMMAND_NAME_CHARS);
-        let mut options = parse_options(item, 0);
-        options.retain(|o| o.kind != OPTION_ATTACHMENT || o.required);
-        if name.is_empty() || !supported(&options) {
-            continue;
+        if let Some(command) = parse(&mut next) {
+            // Byte charges precede allocation, including list capacity and string copies.
+            index.bytes += command.heap_bytes();
+            index.commands.push(command);
+            budget = next;
         }
-        let command = AppCommand {
-            id,
-            application_id,
-            version: snowflake(item, "version").unwrap_or(id),
-            name,
-            description: text(item, "description", MAX_COMMAND_TEXT_CHARS),
-            application: apps
-                .iter()
-                .find(|(app, _)| *app == application_id)
-                .map(|(_, name)| name.clone())
-                .unwrap_or_default(),
-            options,
-        };
-        let bytes = command.heap_bytes();
-        if index.bytes + bytes > MAX_INDEX_BYTES {
-            break;
-        }
-        index.bytes += bytes;
-        index.commands.push(command);
     }
     index.commands.shrink_to_fit();
     Ok(index)
@@ -770,7 +940,7 @@ mod tests {
     fn the_index_keeps_usable_chat_commands_with_typed_options() {
         let index = parse_index(INDEX.as_bytes()).unwrap();
         let names: Vec<&str> = index.commands.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["roll", "poll", "remind"], "{names:?}");
+        assert_eq!(names, ["roll", "poll", "remind", "admin"], "{names:?}");
         let roll = &index.commands[0];
         assert_eq!(roll.application, "Dice");
         assert_eq!(roll.version, Snowflake(1_300_000_000_000_000_011));
@@ -806,7 +976,7 @@ mod tests {
         let index = parse_index(&body).unwrap();
         assert_eq!(index.commands.len(), MAX_COMMANDS);
         assert!(index.commands[0].description.chars().count() <= MAX_COMMAND_TEXT_CHARS);
-        let wide: Vec<Value> = (1..=200u64)
+        let wide: Vec<Value> = (1..=20u64)
             .map(|n| {
                 let options: Vec<Value> = (0..25)
                     .map(|o| {
@@ -819,8 +989,127 @@ mod tests {
             .collect();
         let body = serde_json::to_vec(&json!({"application_commands": wide})).unwrap();
         let index = parse_index(&body).unwrap();
-        assert!(index.commands.len() < 200);
+        assert!(index.commands.len() < 20);
         assert!(index.heap_bytes() <= MAX_INDEX_BYTES + 64 * 1024);
+    }
+
+    #[test]
+    fn grouped_command_keeps_complete_leaf_options_and_serializes_the_selected_path() {
+        let index = parse_index(INDEX.as_bytes()).unwrap();
+        let command = index.commands.iter().find(|c| c.name == "admin").unwrap();
+        let path = CommandPath::Group {
+            group: "group".into(),
+            subcommand: "sub".into(),
+        };
+        let fields = path.fields(command).unwrap();
+        assert_eq!(
+            fields.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+            ["level", "note"]
+        );
+        let args = [CommandArg {
+            name: "level".into(),
+            kind: OPTION_INTEGER,
+            text: "2".into(),
+        }];
+        let sent = serde_json::to_value(
+            InteractionRequest::command(&context(nonce()), command, &path, &args).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sent["data"]["options"],
+            json!([{"type":2,"name":"group","options":[{"type":1,"name":"sub","options":[{"type":4,"name":"level","value":2}]}]}])
+        );
+        assert_eq!(
+            InteractionRequest::command(&context(nonce()), command, &path, &[]).unwrap_err(),
+            ArgError::Missing
+        );
+        let other = CommandPath::Group {
+            group: "other".into(),
+            subcommand: "sub".into(),
+        };
+        assert_eq!(
+            InteractionRequest::command(&context(nonce()), command, &other, &args).unwrap_err(),
+            ArgError::Missing
+        );
+        for invalid in [
+            CommandPath::Root,
+            CommandPath::Subcommand("sub".into()),
+            CommandPath::Group {
+                group: "group".into(),
+                subcommand: "missing".into(),
+            },
+        ] {
+            assert_eq!(
+                InteractionRequest::command(&context(nonce()), command, &invalid, &args)
+                    .unwrap_err(),
+                ArgError::InvalidPath
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_or_truncated_option_trees_discard_the_whole_command() {
+        let leaf = json!({"type":3,"name":"required","required":true});
+        let sub = |options: Value| json!({"type":1,"name":"sub","options":options});
+        let group = |options: Value| json!({"type":2,"name":"group","options":options});
+        let bad = [
+            json!([group(json!([sub(
+                json!([{"type":11,"name":"file","required":true}])
+            )]))]),
+            json!([group(json!([leaf.clone()]))]),
+            json!([group(json!([group(json!([sub(json!([]))]))]))]),
+            json!([sub(json!([sub(json!([]))]))]),
+            json!([leaf.clone(), sub(json!([]))]),
+            json!([group(json!([]))]),
+            json!([{"type":99,"name":"future","required":true}]),
+            json!([{"type":3,"name":"x","required":"yes"}]),
+            json!([{"type":3,"name":"x","options":[leaf.clone()]}]),
+            json!([{"type":3,"name":"x"},{"type":3,"name":"x","required":true}]),
+            json!([{"type":11,"name":"x"},{"type":3,"name":"x","required":true}]),
+            json!(
+                (0..26)
+                    .map(|i| json!({"type":3,"name":format!("n{i}"),"required":i==25}))
+                    .collect::<Vec<_>>()
+            ),
+            json!([{"type":3,"name":"x","choices":(0..26).map(|i|json!({"name":format!("c{i}"),"value":i.to_string()})).collect::<Vec<_>>()}]),
+        ];
+        for options in bad {
+            let body = serde_json::to_vec(&json!({"application_commands":[{"id":"1","application_id":"2","name":"invalid","options":options}]})).unwrap();
+            assert!(parse_index(&body).unwrap().commands.is_empty());
+        }
+    }
+
+    #[test]
+    fn typed_tree_budgets_are_charged_before_allocating_lists_and_strings() {
+        let raw = json!({"options":[{"type":3,"name":"required","required":true}]});
+        let mut no_nodes = Budget {
+            bytes: MAX_INDEX_BYTES,
+            nodes: 0,
+        };
+        assert!(parse_options(&raw, Level::Root, &mut no_nodes).is_none());
+        let mut no_list = Budget {
+            bytes: size_of::<CommandOption>() - 1,
+            nodes: MAX_INDEX_NODES,
+        };
+        assert!(parse_options(&raw, Level::Root, &mut no_list).is_none());
+        let mut no_string = Budget {
+            bytes: size_of::<CommandOption>(),
+            nodes: MAX_INDEX_NODES,
+        };
+        assert!(parse_options(&raw, Level::Root, &mut no_string).is_none());
+        let branches = (0..25).map(|g| json!({"type":2,"name":format!("g{g}"),"options":(0..25).map(|s|json!({"type":1,"name":format!("s{s}"),"options":(0..25).map(|o|json!({"type":3,"name":format!("o{o}"),"required":true})).collect::<Vec<_>>()})).collect::<Vec<_>>()})).collect::<Vec<_>>();
+        let body = serde_json::to_vec(&json!({"application_commands":[{"id":"1","application_id":"2","name":"too_wide","options":branches},{"id":"3","application_id":"2","name":"small"}]})).unwrap();
+        let index = parse_index(&body).unwrap();
+        assert_eq!(
+            index
+                .commands
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            ["small"]
+        );
+        assert!(index.heap_bytes() <= MAX_INDEX_BYTES);
+        assert!(parse_index(&vec![b' '; MAX_INDEX_BODY_BYTES + 1]).is_err());
     }
 
     #[test]
@@ -837,15 +1126,14 @@ mod tests {
                 kind: OPTION_STRING,
                 text: "d20".into(),
             },
-            CommandArg {
-                name: "left_out".into(),
-                kind: OPTION_USER,
-                text: String::new(),
-            },
         ];
-        let request =
-            InteractionRequest::command(&context(nonce()), &index.commands[0], None, &args)
-                .unwrap();
+        let request = InteractionRequest::command(
+            &context(nonce()),
+            &index.commands[0],
+            &CommandPath::Root,
+            &args,
+        )
+        .unwrap();
         let sent = serde_json::to_value(&request).unwrap();
         assert_eq!(sent["type"], 2);
         assert_eq!(sent["application_id"], "9000000000000000001");
@@ -863,7 +1151,7 @@ mod tests {
         let sub = InteractionRequest::command(
             &context(nonce()),
             &index.commands[1],
-            Some("create"),
+            &CommandPath::Subcommand("create".into()),
             &[CommandArg {
                 name: "question".into(),
                 kind: OPTION_STRING,
