@@ -484,3 +484,26 @@ fn components_decode_from_a_fixture_and_an_update_replaces_them() {
     assert!(!update(off).alters(&message), "a repeat changes nothing");
     assert!(update("[]").alters(&message), "a removal still applies");
 }
+
+#[test]
+fn component_owner_updates_preserve_omission_and_apply_explicit_replacement_or_null() {
+    let mut message: Message = serde_json::from_str(r#"{"id":"7","channel_id":"5","author":{"id":"9","username":"app","bot":true},"content":"","timestamp":"2026-01-01T00:00:00Z","application_id":"9"}"#).unwrap();
+    assert_eq!(message.component_application(), Some(Snowflake(9)));
+    let update = |body: serde_json::Value| serde_json::from_value::<MessageUpdate>(body).unwrap();
+    message.apply(update(
+        serde_json::json!({"id":"7","channel_id":"5","content":"changed"}),
+    ));
+    assert_eq!(message.application_id, Some(Snowflake(9)));
+    let changed = update(serde_json::json!({"id":"7","channel_id":"5","application_id":"10"}));
+    assert!(changed.has_fields() && changed.alters(&message));
+    message.apply(changed);
+    assert!(message.component_application().is_none());
+    message.apply(update(
+        serde_json::json!({"id":"7","channel_id":"5","application_id":null,"webhook_id":"8"}),
+    ));
+    assert!(message.application_id.is_none() && message.component_application().is_none());
+    message.apply(update(
+        serde_json::json!({"id":"7","channel_id":"5","webhook_id":null}),
+    ));
+    assert_eq!(message.component_application(), Some(Snowflake(9)));
+}

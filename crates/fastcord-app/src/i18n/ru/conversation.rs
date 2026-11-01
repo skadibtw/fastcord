@@ -1,6 +1,23 @@
 //! History, sending, outbox, threads, forums, forwarding, attachments, media players and voice messages.
 
 pub const ENTRIES: &[(&str, &str)] = &[
+    ("User", "Пользователь"),
+    ("Role", "Роль"),
+    (
+        "Choose users, roles, or channels",
+        "Выберите пользователей, роли или каналы",
+    ),
+    (
+        "Only a limited set of choices already loaded in this server or conversation is available. Search stays local.",
+        "Доступна часть вариантов, уже загруженных для этого сервера или беседы. Поиск выполняется локально.",
+    ),
+    ("Search available choices", "Найти доступные варианты"),
+    (
+        "Unavailable selection: {}",
+        "Недоступный выбранный вариант: {}",
+    ),
+    ("No matching choices.", "Совпадений нет."),
+    ("Select {}–{} choices.", "Выберите от {} до {} вариантов."),
     // history.rs
     (
         "A message is too large to display and was left out.",

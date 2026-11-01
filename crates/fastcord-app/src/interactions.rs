@@ -41,6 +41,12 @@ pub const NOT_EPHEMERAL: &str = "Only messages meant for you can be dismissed.";
 /// its own state and never against what a possibly stale UI showed.
 #[derive(Clone, PartialEq)]
 pub enum Action {
+    EntityComponent {
+        target: crate::entity_select::Target,
+        guild: Option<Snowflake>,
+        expected: Box<fastcord_model::Select>,
+        values: Vec<fastcord_model::EntityValue>,
+    },
     /// A button press (`values` empty) or a select choice on a message.
     Component {
         channel: Snowflake,
@@ -71,6 +77,7 @@ impl std::fmt::Debug for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Component { .. } => "Action::Component",
+            Self::EntityComponent { .. } => "Action::EntityComponent",
             Self::Command { .. } => "Action::Command",
             Self::Modal { .. } => "Action::Modal",
             Self::CloseModal => "Action::CloseModal",

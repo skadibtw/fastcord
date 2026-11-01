@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add bounded local user, role, mentionable and channel component pickers over permission-checked held entities, with explicit Submit/Clear and stale account/application/control rejection. Existing interaction writes remain verification-gated.
+
 ### Added
 
 - Grouped slash-command forms with scoped group/subcommand controls and explicit Run. Command trees are validated and budgeted before typed allocation; obsolete branch fields clear visibly. Interaction routes remain unverified and gated off by default (#100).

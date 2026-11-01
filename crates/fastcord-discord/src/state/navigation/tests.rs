@@ -3320,3 +3320,117 @@ fn interested_member_read_scope_is_independent_of_sidebar_window_and_revoked_wit
             .is_empty()
     );
 }
+
+#[test]
+fn component_entities_use_current_account_membership_and_private_thread_permissions() {
+    use fastcord_model::{Component, EntityKind, EntityValue, parse_components};
+    let (mut store, _) = setup(NAV_READY);
+    let source = id(1000);
+    let selected =
+        parse_components(&[json!({"type":8,"custom_id":"channel","channel_types":[0,12]})]);
+    let Component::Select(select) = &selected[0] else {
+        panic!();
+    };
+    let entity = |id| EntityValue {
+        kind: EntityKind::Channel,
+        id: Snowflake(id),
+    };
+    assert!(store.component_entity_allowed(id(1), Some(id(100)), source, select, entity(1000)));
+    assert!(!store.component_entity_allowed(id(2), Some(id(100)), source, select, entity(1000)));
+    assert!(
+        !store.component_entity_allowed(id(1), Some(id(100)), source, select, entity(1002)),
+        "hidden member overwrite"
+    );
+    assert!(
+        !store.component_entity_allowed(id(1), Some(id(100)), source, select, entity(1001)),
+        "wrong channel type"
+    );
+    apply(&mut store,"THREAD_CREATE",&json!({"id":"4000","guild_id":"100","parent_id":"1000","type":12,
+        "name":"private","thread_metadata":{"archived":false,"auto_archive_duration":60,"archive_timestamp":"2026-01-01T00:00:00Z","locked":false}}).to_string());
+    assert!(
+        !store.component_entity_allowed(id(1), Some(id(100)), source, select, entity(4000)),
+        "unjoined private thread"
+    );
+    assert!(
+        !store
+            .component_entities(id(1), Some(id(100)), source)
+            .iter()
+            .any(|c| c.value == entity(4000))
+    );
+    let users = parse_components(&[json!({"type":5,"custom_id":"user"})]);
+    let Component::Select(users) = &users[0] else {
+        panic!();
+    };
+    assert!(store.component_entity_allowed(
+        id(1),
+        Some(id(100)),
+        source,
+        users,
+        EntityValue {
+            kind: EntityKind::User,
+            id: id(1)
+        }
+    ));
+    assert!(!store.component_entity_allowed(
+        id(1),
+        Some(id(100)),
+        source,
+        users,
+        EntityValue {
+            kind: EntityKind::User,
+            id: id(999)
+        }
+    ));
+    own_roles(&mut store, &[]);
+    apply(
+        &mut store,
+        "CHANNEL_UPDATE",
+        &json!({"id":"1000","guild_id":"100","type":0,"name":"now hidden",
+        "permission_overwrites":[{"id":"1","type":1,"allow":"0","deny":"1024"}]})
+        .to_string(),
+    );
+    assert!(
+        store
+            .component_entities(id(1), Some(id(100)), source)
+            .is_empty()
+    );
+    assert!(!store.component_entity_source_allowed(id(1), Some(id(100)), source));
+}
+
+#[test]
+fn component_entities_bound_each_kind_and_names_without_fetching() {
+    use fastcord_model::EntityKind;
+    let mut wire: Value = serde_json::from_str(NAV_READY).unwrap();
+    for n in 0..150 {
+        wire["guilds"][0]["roles"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":(10000+n).to_string(),"name":"界".repeat(400),"permissions":"0"}));
+        wire["guilds"][0]["channels"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":(20000+n).to_string(),"type":0,"name":"界".repeat(400)}));
+    }
+    let (mut store, _) = setup(&wire.to_string());
+    for n in 0..150 {
+        apply(&mut store,"GUILD_MEMBER_ADD",&json!({"guild_id":"100","user":{"id":(30000+n).to_string(),"username":"界".repeat(400)},"roles":[]}).to_string());
+    }
+    let pool = store.component_entities(id(1), Some(id(100)), id(1000));
+    for kind in [EntityKind::User, EntityKind::Role, EntityKind::Channel] {
+        assert_eq!(
+            pool.iter()
+                .filter(|candidate| candidate.value.kind == kind)
+                .count(),
+            MAX_COMPONENT_ENTITIES_PER_KIND
+        );
+    }
+    assert!(
+        pool.iter()
+            .all(|candidate| candidate.label.chars().count() <= 64 && candidate.label.len() <= 256)
+    );
+    assert_eq!(
+        store.component_entities(id(1), Some(id(100)), id(1000)),
+        pool,
+        "stable unchanged store"
+    );
+}

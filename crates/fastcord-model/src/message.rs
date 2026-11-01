@@ -282,6 +282,11 @@ pub struct Message {
     #[serde(default)]
     pub guild_id: Option<Snowflake>,
     pub author: User,
+    /// Component ownership, retained separately from the displayed author.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_id: Option<Snowflake>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_id: Option<Snowflake>,
     pub content: String,
     pub timestamp: String,
     #[serde(default)]
@@ -483,6 +488,10 @@ impl fmt::Debug for ReplyPreview {
 /// an omitted field means "unchanged", never "cleared".
 #[derive(Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct MessageUpdate {
+    #[serde(default, deserialize_with = "double_option")]
+    pub application_id: Option<Option<Snowflake>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub webhook_id: Option<Option<Snowflake>>,
     pub id: Snowflake,
     pub channel_id: Snowflake,
     #[serde(default)]
@@ -523,6 +532,8 @@ impl MessageUpdate {
     /// An update that carries only a poll's new state.
     pub fn poll_only(id: Snowflake, channel_id: Snowflake, poll: Poll) -> Self {
         Self {
+            application_id: None,
+            webhook_id: None,
             id,
             channel_id,
             content: None,
@@ -542,7 +553,7 @@ impl MessageUpdate {
     /// Whether the update carries any field this client models. An update
     /// without one (an embed unfurl) can never change a message.
     pub fn has_fields(&self) -> bool {
-        self.content.is_some()
+        self.application_id.is_some() || self.webhook_id.is_some() || self.content.is_some()
             || self.edited_timestamp.is_some()
             || self.flags.is_some()
             || self.pinned.is_some()
@@ -561,7 +572,10 @@ impl MessageUpdate {
     /// carries fields this client does not model (an embed unfurl) or repeats
     /// current values changes nothing, so consumers can skip it entirely.
     pub fn alters(&self, message: &Message) -> bool {
-        self.content.as_ref().is_some_and(|v| *v != message.content)
+        self.application_id
+            .is_some_and(|v| v != message.application_id)
+            || self.webhook_id.is_some_and(|v| v != message.webhook_id)
+            || self.content.as_ref().is_some_and(|v| *v != message.content)
             || self
                 .edited_timestamp
                 .as_ref()
@@ -598,9 +612,24 @@ impl MessageUpdate {
 }
 
 impl Message {
+    /// Only the existing ordinary-bot interaction contract is supported. A
+    /// webhook/application mismatch is retained but never guessed as a route.
+    pub fn component_application(&self) -> Option<Snowflake> {
+        (self.author.bot
+            && self.webhook_id.is_none()
+            && self.application_id.is_none_or(|id| id == self.author.id))
+        .then_some(self.author.id)
+    }
+
     /// Merge a partial update. Fields absent from the update are kept.
     pub fn apply(&mut self, update: MessageUpdate) {
         debug_assert_eq!(self.id, update.id);
+        if let Some(id) = update.application_id {
+            self.application_id = id;
+        }
+        if let Some(id) = update.webhook_id {
+            self.webhook_id = id;
+        }
         if let Some(content) = update.content {
             self.content = content;
         }
@@ -929,6 +958,8 @@ mod tests {
             message_snapshots: Vec::new(),
             poll: None,
             components: Vec::new(),
+            application_id: None,
+            webhook_id: None,
             id: Snowflake(1),
             channel_id: Snowflake(2),
             guild_id: None,

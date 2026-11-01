@@ -1459,9 +1459,11 @@ pub(crate) fn highest_role_position(guild: &GuildEntry, roles: &[Snowflake]) -> 
 }
 
 mod channels;
+mod entities;
 pub(crate) use channels::active_timeout;
 pub(super) use channels::readable_channels;
 use channels::*;
+pub use entities::{EntityCandidate, MAX_COMPONENT_ENTITIES_PER_KIND};
 
 mod admin;
 pub use admin::{

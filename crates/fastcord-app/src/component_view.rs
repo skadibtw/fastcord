@@ -8,7 +8,7 @@
 //! * Link buttons open through the ordinary link path. Premium buttons are
 //!   disabled with a note: purchases are outside this client.
 //! * String selects with multiple values keep one bounded local draft and send
-//!   only on Submit. Entity selects remain read-only.
+//!   only on Submit. Entity selects open a bounded local picker.
 //! * Anything else (thumbnails, galleries, files, unknown types) is a plain
 //!   "Unsupported component" line.
 
@@ -117,17 +117,26 @@ struct Cx<'a> {
     pending: Option<&'a str>,
     revision: u64,
     choices: Option<Choices>,
+    entity_target: Option<crate::entity_select::Target>,
     next_select: std::cell::Cell<usize>,
 }
 
 /// All components of a row's message.
-pub fn view(row: &Row, channel_id: Snowflake, choices: Option<Choices>) -> Element<'_, Event> {
+pub fn view(
+    row: &Row,
+    channel_id: Snowflake,
+    choices: Option<Choices>,
+    owner: Option<(Snowflake, u64, u64)>,
+) -> Element<'_, Event> {
     let cx = Cx {
         channel_id,
         message_id: row.message.id,
         pending: row.component_pending.as_deref(),
         revision: row.revision,
         choices,
+        entity_target: owner
+            .filter(|_| row.message.component_application().is_some())
+            .map(|owner| crate::entity_select::Target::for_row(row, owner, 0)),
         next_select: std::cell::Cell::new(0),
     };
     column(row.message.components.iter().map(|c| component(c, &cx)))
@@ -241,21 +250,14 @@ fn select<'a>(s: &'a Select, cx: &Cx<'a>, index: usize) -> Element<'a, Event> {
         &s.placeholder
     };
     if s.kind != 3 {
-        let what = match s.kind {
-            3 => tr("needs several values"),
-            5 => tr("users"),
-            6 => tr("roles"),
-            7 => tr("users and roles"),
-            8 => tr("channels"),
-            _ => tr("unknown"),
-        };
-        return text(trf(
-            "{} ({}: not available in this client)",
-            &[&shown, &what],
-        ))
-        .size(12)
-        .color(crate::style::muted())
-        .into();
+        let event = cx
+            .entity_target
+            .filter(|_| !s.disabled && cx.pending.is_none())
+            .map(|mut target| {
+                target.select = index;
+                Event::EntitySelect(crate::entity_select::Event::Open(target))
+            });
+        return button(text(shown)).on_press_maybe(event).into();
     }
     let waiting = cx.pending == Some(s.custom_id.as_str());
     let mut options = column![
@@ -362,13 +364,14 @@ mod tests {
 
     /// Every event the message's controls can send now.
     fn pressable(row: &Row) -> Vec<Event> {
-        let _ = view(row, Snowflake(5), None);
+        let _ = view(row, Snowflake(5), None, None);
         let cx = Cx {
             channel_id: Snowflake(5),
             message_id: Snowflake(7),
             pending: row.component_pending.as_deref(),
             revision: row.revision,
             choices: None,
+            entity_target: None,
             next_select: std::cell::Cell::new(0),
         };
         fn walk(items: &[Component], cx: &Cx<'_>, found: &mut Vec<Event>) {
@@ -488,7 +491,7 @@ mod tests {
             mask: 3,
         };
         let clickable = |choices| {
-            let mut ui = Ui::new(400.0, 400.0, view(&row, Snowflake(5), choices));
+            let mut ui = Ui::new(400.0, 400.0, view(&row, Snowflake(5), choices, None));
             ui.redraw();
             ui.draw();
             let mut found = Vec::new();
@@ -530,6 +533,6 @@ mod tests {
             {"type": 9, "components": [{"type": 10, "content": "side"}],
              "accessory": {"type": 2, "style": 1, "label": "Go", "custom_id": "go"}}
         ]}]);
-        let _ = view(&row_with(list, None), Snowflake(5), None);
+        let _ = view(&row_with(list, None), Snowflake(5), None, None);
     }
 }

@@ -351,6 +351,8 @@ pub struct History {
     poll_requests: FuturesUnordered<PollFuture>,
     /// The Gateway session ID (from READY) interactions are made in.
     session: Option<String>,
+    /// READY changes invalidate local entity drafts and queued intents.
+    interaction_session: u64,
     /// The open channel's server, when it is one.
     guild: Option<Snowflake>,
     /// Interactions the user started that Discord has not settled.
@@ -2182,6 +2184,7 @@ impl History {
         Snapshot {
             channel_id: Some(channel),
             pins_revision: 0,
+            interaction_session: self.interaction_session,
             rows,
             window,
             scroll: self.list.scroll_request(),
@@ -2200,6 +2203,7 @@ impl History {
             can_tts: self.ttsable == Some(channel),
             names: Default::default(),
             candidates: Vec::new(),
+            entity_candidates: Vec::new(),
             reaction_users: self.inspection.as_ref().map(|inspection| ReactionUsers {
                 message: inspection.message,
                 emoji: inspection.emoji.clone(),
@@ -2297,6 +2301,8 @@ mod tests {
             message_snapshots: Vec::new(),
             poll: None,
             components: Vec::new(),
+            application_id: None,
+            webhook_id: None,
             mentions: Vec::new(),
             mention_roles: Vec::new(),
             mention_everyone: false,
@@ -2938,6 +2944,8 @@ mod tests {
             |history: &History, n: u64| history.store.revision(CHANNEL, Snowflake(n)).unwrap();
         let before = revision_of(&history, 9_999);
         history.apply(&Dispatch::MessageUpdate(Box::new(MessageUpdate {
+            application_id: None,
+            webhook_id: None,
             id: Snowflake(9_999),
             channel_id: CHANNEL,
             content: Some("edited".to_owned()),
@@ -3382,6 +3390,8 @@ mod tests {
     /// The Gateway's MESSAGE_UPDATE for an edit: text and time only.
     fn gateway_edit(id: Snowflake, content: &str, at: &str) -> Dispatch {
         Dispatch::MessageUpdate(Box::new(MessageUpdate {
+            application_id: None,
+            webhook_id: None,
             id,
             channel_id: CHANNEL,
             content: Some(content.to_owned()),
@@ -4837,6 +4847,8 @@ mod tests {
 
     fn gateway_edit_fields(id: Snowflake) -> MessageUpdate {
         MessageUpdate {
+            application_id: None,
+            webhook_id: None,
             id,
             channel_id: CHANNEL,
             content: None,
@@ -4868,6 +4880,7 @@ mod tests {
         history.session = Some("fixture-session".to_owned());
         let mut message = message_with(NEWEST + 1, String::new());
         message.author.id = APP;
+        message.author.bot = true;
         message.flags = flags;
         message.components = fastcord_model::parse_components(components.as_array().unwrap());
         history.apply(&Dispatch::MessageCreate(Box::new(message)));
@@ -5037,6 +5050,139 @@ mod tests {
         press(&mut history, id, "yes", &[]);
         assert_eq!(history.snapshot().notice, Some(interactions::NOT_ALLOWED));
         assert_eq!(take_interactions(&mut history), 0, "nothing was asked");
+    }
+
+    #[test]
+    fn entity_select_worker_rechecks_current_entities_owner_and_queues_once() {
+        use fastcord_model::{EntityKind, EntityValue};
+        let mut store = fastcord_discord::state::Store::new();
+        let ready = serde_json::json!({"session_id":"entities-fixture","resume_gateway_url":"wss://gateway.discord.gg",
+            "user":{"id":"42","username":"fixture"},"guilds":[{"id":"5","name":"fixture","owner_id":"42",
+            "roles":[{"id":"5","name":"everyone","permissions":"68608"},{"id":"6","name":"held role","permissions":"0"}],
+            "channels":[{"id":"777","type":0,"name":"general"}]}]});
+        store.apply(fastcord_discord::gateway::GatewayEvent::Dispatch {
+            sequence: 1,
+            event: Dispatch::Ready(Box::new(fastcord_discord::gateway::Ready {
+                session_id: fastcord_discord::gateway::SessionId::new("entities-fixture".into()),
+                user: serde_json::from_value(ready["user"].clone()).unwrap(),
+                guilds: vec![fastcord_model::Guild {
+                    id: Snowflake(5), name: "fixture".into(), icon: None, owner_id: Some(SELF),
+                    roles: serde_json::from_value(ready["guilds"][0]["roles"].clone()).unwrap(),
+                    channels: vec![serde_json::from_value(serde_json::json!({"id":"777","guild_id":"5","type":0,"name":"general"})).unwrap()],
+                    emojis: Vec::new(), members: Vec::new(), voice_states: None, member_count: 1,
+                    stage_instances: Vec::new(), scheduled_events: Vec::new(), settings: Default::default(),
+                }],
+                read: Default::default(),
+                relationships: Vec::new(),
+                ignored: Vec::new(),
+                presences: Vec::new(),
+                users: Vec::new(),
+                unavailable_guilds: Vec::new(),
+                private_channels: Vec::new(),
+            })),
+        });
+        let (mut history, id) = interacting_history(
+            0,
+            serde_json::json!([{"type":6,"custom_id":"role","min_values":0,"max_values":2}]),
+        );
+        let held = held(&history, id);
+        let row = crate::timeline::Row::new(held.clone(), 1);
+        let target =
+            crate::entity_select::Target::for_row(&row, (SELF, 7, history.interaction_session), 0);
+        let expected = Box::new(
+            crate::component_view::select_at(&held.components, 0)
+                .unwrap()
+                .clone(),
+        );
+        let value = EntityValue {
+            kind: EntityKind::Role,
+            id: Snowflake(6),
+        };
+        let action = |values| Interact::EntityComponent {
+            target,
+            guild: Some(Snowflake(5)),
+            expected: expected.clone(),
+            values,
+        };
+        for values in [
+            vec![EntityValue {
+                kind: EntityKind::User,
+                id: value.id,
+            }],
+            vec![EntityValue {
+                kind: EntityKind::Role,
+                id: Snowflake(999),
+            }],
+            vec![value, value],
+        ] {
+            history.interact_held(&rest(), action(values), Some(&store));
+            assert_eq!(take_interactions(&mut history), 0);
+        }
+        let mut stale = target;
+        stale.session = target.session.wrapping_sub(1);
+        history.interact_held(
+            &rest(),
+            Interact::EntityComponent {
+                target: stale,
+                guild: Some(Snowflake(5)),
+                expected: expected.clone(),
+                values: vec![value],
+            },
+            Some(&store),
+        );
+        assert_eq!(
+            take_interactions(&mut history),
+            0,
+            "queued intent from a previous READY is rejected"
+        );
+        stale = target;
+        stale.account = Snowflake(99);
+        history.interact_held(
+            &rest(),
+            Interact::EntityComponent {
+                target: stale,
+                guild: Some(Snowflake(5)),
+                expected: expected.clone(),
+                values: vec![value],
+            },
+            Some(&store),
+        );
+        assert_eq!(take_interactions(&mut history), 0);
+        history.interact_held(&rest(), action(vec![value]), Some(&store));
+        assert_eq!(history.notice, None);
+        history.interact_held(&rest(), action(vec![value]), Some(&store));
+        assert_eq!(
+            take_interactions(&mut history),
+            1,
+            "explicit submission uses existing one-shot ledger; futures never polled"
+        );
+        let nonce = pending_nonce(&history);
+        history.finish_interaction(InteractionEvent::Expired(nonce));
+        store.apply(fastcord_discord::gateway::GatewayEvent::Dispatch {
+            sequence: 2,
+            event: Dispatch::GuildRoleDelete(fastcord_discord::gateway::GuildRoleDelete {
+                guild_id: Snowflake(5),
+                role_id: Snowflake(6),
+            }),
+        });
+        history.interact_held(&rest(), action(vec![value]), Some(&store));
+        assert_eq!(
+            take_interactions(&mut history),
+            0,
+            "fresh deletion rejects stale UI pool"
+        );
+        history.apply(&Dispatch::MessageUpdate(Box::new(
+            serde_json::from_value(
+                serde_json::json!({"id":id.to_string(),"channel_id":"777","application_id":"123"}),
+            )
+            .unwrap(),
+        )));
+        history.interact_held(&rest(), action(vec![]), Some(&store));
+        assert_eq!(
+            take_interactions(&mut history),
+            0,
+            "empty clear still validates application identity"
+        );
     }
 
     #[test]
@@ -5312,6 +5458,7 @@ mod tests {
             avatar: None,
             bot: false,
         };
+        let previous_epoch = history.interaction_session;
         history.apply(&Dispatch::Ready(Box::new(Ready {
             session_id: SessionId::new("second-session".to_owned()),
             user,
@@ -5325,6 +5472,7 @@ mod tests {
             read: Default::default(),
         })));
         assert_eq!(history.session.as_deref(), Some("second-session"));
+        assert_eq!(history.interaction_session, previous_epoch + 1);
         assert!(history.interactions.last_nonce().is_none());
     }
 
