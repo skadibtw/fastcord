@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Fixed
+
+- Isolate scheduled-event cache fixtures from parallel account resets without changing runtime timezone behavior (#254).
 - Allow explicit whole-series recurrence changes when editing an event: keep the current rule, stop repetition, or choose weekly/every-other-week UTC; preserve unknown rules by default and keep writes gated (#92).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).

@@ -432,6 +432,22 @@ fn the_form_is_checked_before_anything_is_sent() {
 
 #[test]
 fn editing_starts_from_the_event_and_an_unmoved_start_may_be_in_the_past() {
+    // Account-worker startup intentionally clears the process-wide display
+    // offsets. Run this UI/cache integration test alone so concurrent account
+    // and reconnect tests cannot replace its worker's publication.
+    if std::env::var_os("FASTCORD_EVENT_PAST_EDIT_FIXTURE").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "scheduled_events::tests::editing_starts_from_the_event_and_an_unmoved_start_may_be_in_the_past",
+                "--nocapture",
+            ])
+            .env("FASTCORD_EVENT_PAST_EDIT_FIXTURE", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated event-edit regression failed");
+        return;
+    }
     let (mut state, bridge) = (State::default(), NavigationBridge::new());
     let past = event(1, EventStatus::Active, EventKind::Voice, 1_000_000_020_000);
     let nav = nav(
@@ -442,6 +458,9 @@ fn editing_starts_from_the_event_and_an_unmoved_start_may_be_in_the_past() {
         true,
     );
     TimeCache::new().prepare(&nav.events);
+    if fastcord_platform::timezone::supported() {
+        assert!(offset_for(nav.events[0].start_ms).is_some());
+    }
     open(&mut state, &nav, &bridge);
     let _ = state.update(Event::Edit(Snowflake(2)), &nav, &client(), &bridge);
     assert!(
@@ -449,6 +468,11 @@ fn editing_starts_from_the_event_and_an_unmoved_start_may_be_in_the_past() {
         "an ended event is not edited"
     );
     let _ = state.update(Event::Edit(Snowflake(1)), &nav, &client(), &bridge);
+    assert!(
+        matches!(state.screen, Screen::Form(_)),
+        "{:?}",
+        state.notice
+    );
     validate_save(&mut state, &nav, &bridge);
     assert!(state.pending.is_some(), "the running event keeps its start");
 }
@@ -965,6 +989,24 @@ fn recurrence_form() -> Form {
 
 #[test]
 fn recurrence_editor_defaults_to_keep_for_complex_series_and_changes_only_explicitly() {
+    // This fixture consumes the global worker-published timezone offsets.
+    // Other account tests may reset them, so keep the real edit path isolated.
+    if std::env::var_os("FASTCORD_EVENT_RECURRENCE_EDIT_FIXTURE").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "scheduled_events::tests::recurrence_editor_defaults_to_keep_for_complex_series_and_changes_only_explicitly",
+                "--nocapture",
+            ])
+            .env("FASTCORD_EVENT_RECURRENCE_EDIT_FIXTURE", "1")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated recurrence-edit regression failed"
+        );
+        return;
+    }
     let (mut state, bridge) = (State::default(), NavigationBridge::new());
     let series: ScheduledEvent = serde_json::from_value(serde_json::json!({
         "id":"1", "guild_id":"100", "channel_id":"200", "creator_id":"9",
@@ -984,6 +1026,9 @@ fn recurrence_editor_defaults_to_keep_for_complex_series_and_changes_only_explic
     );
     let nav = nav(vec![series], true);
     TimeCache::new().prepare(&nav.events);
+    if fastcord_platform::timezone::supported() {
+        assert!(offset_for(nav.events[0].start_ms).is_some());
+    }
     open(&mut state, &nav, &bridge);
     let _ = state.update(Event::Edit(Snowflake(1)), &nav, &client(), &bridge);
     let _ = state.update(
