@@ -303,6 +303,8 @@ pub enum Step {
     /// Type a query or activate a scoped slash-command form control.
     Slash(String),
     DmSort(fastcord_discord::state::navigation::PrivateSort),
+    /// Exercise a scoped local entity selector.
+    Entity(String),
     Size(f32, f32),
     /// One of [`PANELS`].
     Toggle(&'static str),
@@ -375,6 +377,7 @@ fn parse_script(
                     continue;
                 }
             },
+            "entity" if rest.len() <= 512 => Step::Entity(rest.to_owned()),
             "size" => match rest
                 .split_once(' ')
                 .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
@@ -1249,6 +1252,64 @@ mod community_list_tests {
         assert!(steps.iter().all(|(_, step)| matches!(
             step,
             Step::Open(_) | Step::Size(..) | Step::Toggle(_) | Step::Snap(..) | Step::Quit
+        )));
+    }
+}
+
+#[cfg(test)]
+mod sidebar_nickname_tests {
+    use super::*;
+
+    #[test]
+    fn native_sidebar_nickname_script_uses_real_text_channels_and_read_only_steps() {
+        let world: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/fake/world.json")).unwrap();
+        let steps = parse_script(
+            include_str!("../../../fixtures/ui/sidebar-nickname.script"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let links: Vec<_> = steps
+            .iter()
+            .filter_map(|(_, step)| match step {
+                Step::Open(link) => Some(link.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [
+                "discord://-/channels/5001/6005",
+                "discord://-/channels/5002/6101",
+                "discord://-/channels/@me/8003",
+                "discord://-/channels/5001/6005"
+            ]
+        );
+        for (guild, channel) in [("5001", "6005"), ("5002", "6101")] {
+            let guild = world["guilds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| g["id"] == guild)
+                .unwrap();
+            assert!(
+                guild["channels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|c| c["id"] == channel && c["type"] == 0)
+            );
+        }
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|(_, s)| matches!(s, Step::Snap(..)))
+                .count(),
+            4
+        );
+        assert!(steps.iter().all(|(_, s)| matches!(
+            s,
+            Step::Open(_) | Step::Size(..) | Step::Snap(..) | Step::Quit
         )));
     }
 }

@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use crate::Snowflake;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -45,6 +46,18 @@ pub struct SelectOption {
     pub default: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EntityKind {
+    User,
+    Role,
+    Channel,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EntityValue {
+    pub kind: EntityKind,
+    pub id: Snowflake,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Select {
     /// 3 string, 5 user, 6 role, 7 mentionable, 8 channel.
@@ -56,6 +69,9 @@ pub struct Select {
     pub disabled: bool,
     /// Only a string select lists options.
     pub options: Vec<SelectOption>,
+    /// Known channel types only; empty means no channel-type restriction.
+    pub channel_types: Vec<u8>,
+    pub default_values: Vec<EntityValue>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -109,6 +125,87 @@ fn small(value: &Value, key: &str, default: u8) -> u8 {
         .map_or(default, |n| n.min(u64::from(u8::MAX)) as u8)
 }
 
+impl Select {
+    pub fn accepts(&self, value: EntityValue, channel_type: Option<u8>) -> bool {
+        let typed = matches!(
+            (self.kind, value.kind),
+            (5 | 7, EntityKind::User) | (6 | 7, EntityKind::Role) | (8, EntityKind::Channel)
+        );
+        typed
+            && (value.kind != EntityKind::Channel
+                || channel_type.is_some_and(|kind| {
+                    known_channel_type(kind)
+                        && (self.channel_types.is_empty() || self.channel_types.contains(&kind))
+                }))
+    }
+}
+
+pub fn known_channel_type(kind: u8) -> bool {
+    matches!(kind, 0 | 2 | 4 | 5 | 10..=16)
+}
+
+fn entity_constraints(value: &Value, kind: u8) -> Option<(Vec<u8>, Vec<EntityValue>)> {
+    let minimum = value.get("min_values").map_or(Some(1), Value::as_u64)?;
+    let maximum = value.get("max_values").map_or(Some(1), Value::as_u64)?;
+    let custom = value.get("custom_id")?.as_str()?;
+    if custom.is_empty()
+        || custom.chars().count() > MAX_CUSTOM_ID_CHARS
+        || minimum > maximum
+        || !(1..=25).contains(&maximum)
+        || value.get("disabled").is_some_and(|v| !v.is_boolean())
+        || value.get("required").is_some()
+        || value.get("options").is_some()
+    {
+        return None;
+    }
+    let mut channels = Vec::new();
+    if let Some(values) = value.get("channel_types") {
+        if kind != 8 {
+            return None;
+        }
+        let values = values.as_array()?;
+        if values.len() > 16 {
+            return None;
+        }
+        for value in values {
+            let channel = u8::try_from(value.as_u64()?).ok()?;
+            if !known_channel_type(channel) || channels.contains(&channel) {
+                return None;
+            }
+            channels.push(channel);
+        }
+    }
+    let mut defaults = Vec::new();
+    if let Some(values) = value.get("default_values") {
+        let values = values.as_array()?;
+        if values.len() < minimum as usize || values.len() > maximum as usize {
+            return None;
+        }
+        for value in values {
+            let entity_kind = match value.get("type")?.as_str()? {
+                "user" if kind == 5 || kind == 7 => EntityKind::User,
+                "role" if kind == 6 || kind == 7 => EntityKind::Role,
+                "channel" if kind == 8 => EntityKind::Channel,
+                _ => return None,
+            };
+            let text = value.get("id")?.as_str()?;
+            let id = text
+                .parse::<u64>()
+                .ok()
+                .filter(|id| *id != 0 && id.to_string() == text)?;
+            let entity = EntityValue {
+                kind: entity_kind,
+                id: Snowflake(id),
+            };
+            if defaults.contains(&entity) {
+                return None;
+            }
+            defaults.push(entity);
+        }
+    }
+    Some((channels, defaults))
+}
+
 fn children(value: &Value, key: &str, depth: usize, left: &mut usize) -> Vec<Component> {
     let Some(items) = value.get(key).and_then(Value::as_array) else {
         return Vec::new();
@@ -144,6 +241,14 @@ fn parse(value: &Value, depth: usize, left: &mut usize) -> Option<Component> {
             })
         }
         3 | 5..=8 => {
+            let (channel_types, default_values) = if kind == 3 {
+                (Vec::new(), Vec::new())
+            } else {
+                match entity_constraints(value, kind) {
+                    Some(constraints) => constraints,
+                    None => return Some(Component::Unsupported(kind)),
+                }
+            };
             let options = value
                 .get("options")
                 .and_then(Value::as_array)
@@ -169,6 +274,8 @@ fn parse(value: &Value, depth: usize, left: &mut usize) -> Option<Component> {
                 max_values: small(value, "max_values", 1),
                 disabled: flag(value, "disabled"),
                 options,
+                channel_types,
+                default_values,
             })
         }
         10 => Component::Text(cut(value, "content", MAX_COMPONENT_TEXT_CHARS)),
@@ -239,6 +346,8 @@ impl Component {
             Self::Select(select) => {
                 select.custom_id.capacity()
                     + select.placeholder.capacity()
+                    + select.channel_types.capacity()
+                    + select.default_values.capacity() * size_of::<EntityValue>()
                     + select.options.capacity() * size_of::<SelectOption>()
                     + select
                         .options
@@ -274,6 +383,8 @@ impl Component {
                 select.custom_id.shrink_to_fit();
                 select.placeholder.shrink_to_fit();
                 select.options.shrink_to_fit();
+                select.channel_types.shrink_to_fit();
+                select.default_values.shrink_to_fit();
                 for option in &mut select.options {
                     option.label.shrink_to_fit();
                     option.value.shrink_to_fit();
@@ -473,5 +584,66 @@ mod tests {
             {"type": 2, "label": "Yes", "custom_id": "yes"}]}]));
         compact_components(&mut list);
         assert!(components_heap_bytes(&list) >= 2 * size_of::<Component>() + 6);
+    }
+}
+
+#[cfg(test)]
+mod entity_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn typed_defaults_and_channel_filters_are_bounded_and_fail_closed() {
+        let valid = json!({"type":8,"custom_id":"channel","min_values":0,"max_values":2,
+            "channel_types":[0,12],"default_values":[{"id":"9","type":"channel"}]});
+        let parsed = parse_components(std::slice::from_ref(&valid));
+        let Component::Select(select) = &parsed[0] else {
+            panic!("valid channel select");
+        };
+        assert_eq!(
+            select.default_values,
+            [EntityValue {
+                kind: EntityKind::Channel,
+                id: Snowflake(9)
+            }]
+        );
+        assert!(select.accepts(select.default_values[0], Some(12)));
+        assert!(!select.accepts(select.default_values[0], Some(2)));
+        for (key, bad) in [
+            ("channel_types", json!([99])),
+            ("channel_types", json!([0, 0])),
+            ("channel_types", json!(["0"])),
+            ("min_values", json!(3)),
+            ("max_values", json!(26)),
+            ("disabled", json!("false")),
+            ("required", json!(false)),
+            ("default_values", json!([{"id":"9","type":"user"}])),
+            ("default_values", json!([{"id":"0","type":"channel"}])),
+            ("default_values", json!([{"id":"09","type":"channel"}])),
+            (
+                "default_values",
+                json!([{"id":"9","type":"channel"},{"id":"9","type":"channel"}]),
+            ),
+        ] {
+            let mut wire = valid.clone();
+            wire[key] = bad;
+            assert!(
+                matches!(parse_components(&[wire])[0], Component::Unsupported(8)),
+                "{key}"
+            );
+        }
+        assert!(matches!(
+            parse_components(&[
+                json!({"type":5,"custom_id":"user","min_values":1,"default_values":[]})
+            ])[0],
+            Component::Unsupported(5)
+        ));
+        for (kind, accepted) in [(5, "user"), (6, "role"), (7, "user"), (7, "role")] {
+            let parsed = parse_components(&[
+                json!({"type":kind,"custom_id":"entity","default_values":[{"id":"9","type":accepted}]}),
+            ]);
+            assert!(
+                matches!(&parsed[0],Component::Select(select) if select.default_values.len()==1)
+            );
+        }
     }
 }

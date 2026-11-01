@@ -399,6 +399,16 @@ impl App {
             // Forms open as dialogs over the window; only their reminder
             // lines and notices stay above the conversation.
             let mut dialogs: Vec<(Element<'_, Message>, Option<Message>)> = Vec::new();
+            if let Some(picker) = &gateway.entity_select {
+                dialogs.push((
+                    picker
+                        .view(&gateway.timeline)
+                        .map(|event| Message::Timeline(timeline::Event::EntitySelect(event))),
+                    Some(Message::Timeline(timeline::Event::EntitySelect(
+                        crate::entity_select::Event::Close(picker.target),
+                    ))),
+                ));
+            }
             if let Some(panel) =
                 onboarding::view(&self.ui.onboarding, &gateway.navigation, &gateway.revealed)
             {
@@ -544,6 +554,14 @@ impl App {
             // microphone with its device menu, headphones, and the settings.
             let me = own_user(gateway, session);
             let display = me.display_name().to_owned();
+            // This is the identity visible in the selected server. The account
+            // menu remains global so switching accounts is never ambiguous.
+            let sidebar_name = (!gateway.directs)
+                .then_some(gateway.navigation.selected_guild)
+                .flatten()
+                .and(gateway.navigation.own_nick.as_deref())
+                .filter(|nick| !nick.trim().is_empty())
+                .unwrap_or(&display);
             let own = gateway.navigation.presences.get(&session.user.id);
             let own_status = self.ui.status.status(own);
             let mut foot = column![];
@@ -569,7 +587,7 @@ impl App {
                         || ui::initials(&display, session.user.id.0, 32.0),
                     ),
                     column![
-                        text(display.clone())
+                        text(sidebar_name.to_owned())
                             .size(13)
                             .font(bold)
                             .wrapping(text::Wrapping::None),

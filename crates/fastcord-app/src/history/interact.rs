@@ -71,10 +71,32 @@ impl History {
 
     /// The user's explicit interaction. Everything is re-checked here against
     /// the store, the open channel, the permissions and the session.
+    #[cfg(test)]
     pub fn interact(&mut self, rest: &RestClient, action: Action) {
+        self.interact_held(rest, action, None);
+    }
+
+    pub fn interact_held(
+        &mut self,
+        rest: &RestClient,
+        action: Action,
+        entities: Option<&fastcord_discord::state::Store>,
+    ) {
         self.dirty = true;
         self.notice = None;
         match action {
+            Action::EntityComponent {
+                target,
+                guild,
+                expected,
+                values,
+            } => {
+                let Some(store) = entities else {
+                    self.notice = Some(tr(rules::BAD_CHOICE));
+                    return;
+                };
+                self.press_entity(rest, store, target, guild, &expected, values);
+            }
             Action::CloseModal => self.modal = None,
             Action::Dismiss { channel, message } => self.dismiss_ephemeral(channel, message),
             Action::Component {
@@ -117,6 +139,94 @@ impl History {
             }
             Action::Modal { values } => self.submit_modal(rest, values),
         }
+    }
+
+    fn press_entity(
+        &mut self,
+        rest: &RestClient,
+        store: &fastcord_discord::state::Store,
+        target: crate::entity_select::Target,
+        guild: Option<Snowflake>,
+        expected: &fastcord_model::Select,
+        values: Vec<fastcord_model::EntityValue>,
+    ) {
+        let reject = || tr(rules::BAD_CHOICE);
+        if target.session != self.interaction_session
+            || self.user != Some(target.account)
+            || self.guild != guild
+            || expected.disabled
+            || !store.component_entity_source_allowed(target.account, guild, target.channel)
+            || !(5..=8).contains(&expected.kind)
+            || values.len() < usize::from(expected.min_values)
+            || values.len() > usize::from(expected.max_values)
+            || values.len() > 25
+            || values
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != values.len()
+            || !values.iter().all(|value| {
+                store.component_entity_allowed(
+                    target.account,
+                    guild,
+                    target.channel,
+                    expected,
+                    *value,
+                )
+            })
+        {
+            self.notice = Some(reject());
+            return;
+        }
+        let session = match self.interaction_target(target.channel) {
+            Ok(session) => session.to_owned(),
+            Err(notice) => {
+                self.notice = Some(tr(notice));
+                return;
+            }
+        };
+        let Some(held) = self.store.get(target.channel, target.message) else {
+            self.notice = Some(tr(NOT_LOADED));
+            return;
+        };
+        if store.suppression(held.author.id).is_some()
+            || crate::entity_select::Owner::of(&held) != target.owner
+            || crate::component_view::select_at(&held.components, target.select) != Some(expected)
+            || !matches!(Component::find(&held.components, &expected.custom_id), Some(Component::Select(select)) if select == expected)
+        {
+            self.notice = Some(tr(rules::STALE));
+            return;
+        }
+        let Some(application) = held.component_application() else {
+            self.notice = Some(reject());
+            return;
+        };
+        let nonce = self.nonces.next_now();
+        let context = InteractionContext {
+            session_id: &session,
+            guild_id: guild,
+            channel_id: target.channel,
+            nonce,
+        };
+        let values: Vec<_> = values.iter().map(|value| value.id.to_string()).collect();
+        let request = InteractionRequest::component(
+            &context,
+            application,
+            target.message,
+            held.flags,
+            expected.kind,
+            &expected.custom_id,
+            &values,
+        );
+        let entry = Entry {
+            nonce,
+            channel: target.channel,
+            target: Target::Component {
+                message: target.message,
+                custom_id: expected.custom_id.clone(),
+            },
+        };
+        self.begin_interaction(rest, nonce, entry, request);
     }
 
     fn press(
@@ -280,6 +390,7 @@ impl History {
     pub(super) fn apply_interaction_event(&mut self, event: &Dispatch) {
         match event {
             Dispatch::Ready(ready) => {
+                self.interaction_session = self.interaction_session.wrapping_add(1);
                 self.session = Some(ready.session_id.as_str().to_owned());
                 self.interactions.clear();
             }

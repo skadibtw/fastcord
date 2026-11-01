@@ -2,7 +2,10 @@
 
 ## Unreleased
 
+- Hide channel-name completions from the composer when the current account lacks VIEW_CHANNEL, including after permission revocation (#257).
+
 ### Fixed
+- Preserve shutdown requests across delayed legacy byedpi startup, retry failed shutdown wakes and retain exclusive engine ownership until the worker joins (#259).
 - Isolate the scheduled-event edit/cache regression from concurrent account resets, keeping native CI deterministic without changing runtime timezone behavior.
 - Allow explicit whole-series recurrence changes when editing an event: keep the current rule, stop repetition, or choose weekly/every-other-week UTC; preserve unknown rules by default and keep writes gated (#92).
 - Add bounded same-server custom emoji selection and explicit clearing to onboarding answers, rechecking ownership and permissions while preserving unavailable existing emoji and unknown nested fields (#97).
@@ -22,6 +25,7 @@
 
 - Make the onboarding checklist regression force actual scrolling before checking scrollbar clearance, so platform font metrics cannot invalidate its fixture; production layout and click/disabled checks are unchanged (#252).
 - Let Community onboarding role and channel checklists use the available form width and reserve space for their scrollbars, keeping labels such as Moderator readable while long names wrap (#252).
+- Show the selected server’s held nickname in the sidebar identity, with the global name in DMs and the account menu; no nickname or settings write is sent (#106).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).
 - Compile the VA-API-only RBSP bit-length helper only on Linux, keeping Windows and macOS all-target test builds clean under warnings-as-errors.
@@ -74,6 +78,7 @@
 - Preserve categorical voice reconnect causes and record them in the release voice log, distinguishing signaling Resume (retained UDP/keys) from a new media session (#230).
 
 ### Added
+- Add bounded local user, role, mentionable and channel component pickers over permission-checked loaded entities, with explicit Submit/Clear and stale account/application/control rejection. Existing interaction writes remain verification-gated (#100).
 - Grouped slash-command forms with scoped group/subcommand controls and explicit Run. Command trees are validated and budgeted before typed allocation; obsolete branch fields clear visibly. Interaction routes remain unverified and gated off by default (#100).
 - Filter the loaded public-server discovery pages by name or description with bounded Unicode text; filtering also releases unused icon interests and never fetches another page automatically. Global discovery search and direct discovery joins remain unavailable (#90).
 - Deterministic App regression for repeated manual reconnect during blocked voice-volume persistence: the latest mute survives stale disk snapshots, coalesced dragging, flush and writer/account status changes (#233).

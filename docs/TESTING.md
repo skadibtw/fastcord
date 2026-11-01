@@ -17,6 +17,8 @@
   Global search/direct discovery joining, real user-account route acceptance,
   and Windows/macOS native acceptance remain outstanding.
 
+Channel mention privacy (#257): `gateway::tests::channel_completions_follow_view_permission_changes_and_account_ownership` applies Gateway events through the actual worker, checks that revocation schedules a snapshot rebuild, publishes candidates through the real bridge, and queries the actual composer. Hidden text/announcement channels are absent; channel permission grants/revocations update the results, unknown membership fails closed, owner/administrator permissions remain valid, unsupported kinds stay excluded, and the existing channel candidate cap remains in force. Native fake check: open `discord://-/channels/5002/6101`, type `#sta` without sending, and verify the denied `staff-only` channel is absent from suggestions as well as the sidebar.
+
 ## Stranger friend-request confirmation (#211, 2026-10-25)
 
 - Offline coverage: the relationship request tests check plain acceptance,
@@ -1108,6 +1110,24 @@ Only the groups listed under "On by default" in PROTOCOL.md "Write allowlist" se
 - [ ] Alt account, Windows: join channels set to 64 and 96 kbit/s (and a boosted one if available) with the audio dialog open: "Sending your voice at N kbps" follows the channel. Change the joined channel's bitrate in the official client: the line changes without an audio gap. The voice sounds right in the official client.
 
 ### Blocking bypass (byedpi, SPEC 5.4)
+
+- **Delayed-start shutdown (#259):** `readiness_timeout_joins_delayed_native_start_after_failed_wake`
+  runs the real `Engine::start` readiness timeout in an isolated child. A channel
+  gate prevents native entry until shutdown has set cancellation and attempted
+  its first loopback wake (which cannot connect before the listener exists).
+  The child must return `NotReady`, join the canceled worker and start/stop a
+  fresh engine. The parent kills and reaps only that child if it exceeds 30 s;
+  it never detaches an engine or holds the shared engine-test lock. The four
+  existing ordinary relay, presets, restart and invalid-strategy tests use the
+  same exact-test subprocess watchdog. All their assertions and repeated starts
+  still execute within each child; stderr phase markers distinguish startup,
+  CONNECT, echo I/O, echo-thread join and engine drop. Run the full
+  `cargo test -p fastcord-bypass --locked` suite for all scenarios. Windows and macOS CI must exercise their actual
+  native shims; Linux success is not cross-platform runtime evidence.
+- The original pinned-source delayed-entry probe reproduced a lost stop: worker
+  entry cleared cancellation after an unsuccessful shutdown wake, and another
+  connection alone could not stop it. This is consistent with a Windows CI
+  stall but does not establish which test or interleaving caused that run.
 - **Retired from the app (2026-10-25):** the setting was removed together with the app's `fastcord-bypass` dependency, because it had started nothing since the transport moved to `fastcord-net` (AGENTS.md, #214, #218). The crate, its engine and the checks below stay in the workspace for a possible re-enable as an explicit transport; the manual results record the integration that existed while the app still linked it.
 - **Automated:** `fastcord-bypass` `tests::relays_a_connection_through_connect` (a real engine running the Automatic chain relays bytes to a loopback server through HTTP CONNECT), `byedpi_accepts_every_preset_and_the_automatic_chain` (and preset ids stay distinct), `restarts_and_refuses_a_second_engine` (stop, restart with the compiled-in defaults, one engine per process), `rejects_unknown_options` (byedpi's own refusal and a NUL byte end the start, leaving the engine free). `live_discord_api_through_engine` is ignored: run it with `cargo test -p fastcord-bypass -- --ignored --nocapture` on a filtered network; it prints each preset's result and asserts Automatic, with `FASTCORD_BYPASS_OPTIONS` prepended (for example `-I <address>` behind a VPN TUN).
 - **Windows, 2026-10-25, maintainer's filtered ISP route, no account used:** the machine runs Throne (sing-box TUN); its process exclusion re-dials connections from ThroneCore, which erased every split and TTL (TTL 1 still reached ya.ru), so the checks bound byedpi to the physical address with `-I 192.168.1.114`. Then TTL 1-3 died as expected. Without desync, `discord.com/api/v9/gateway`, `gateway.discord.gg`, `cdn.discordapp.com`, `media.discordapp.net`, `discordapp.com` and `latency.discord.media` timed out after the ClientHello; with `-s1 -r1+s` or `-d1` each answered (200/404/403/401/520 from the services), as did `-o1`, `-q1`, `-d1+s` and fake strategies (`-f-1 -t3`, `-d1 -f-1 -t5`). The ignored live test failed (timeout) with `-I 192.168.1.114` alone and passed with `-I 192.168.1.114 -s1 -r1+s` (reqwest through CONNECT). In the debug `fastcord.exe`, "Show QR code" failed ("Could not connect to Discord's QR login service") with the bypass off and showed a QR code with it on (`-I 192.168.1.114 -s1 -r1+s`, enabled in the new settings section, which read "Restart fastcord to apply" until relaunched); the connection belonged to `fastcord.exe` from the physical address. With the presets and Automatic (same day, options `-I 192.168.1.114`): every preset returned 200 for the Gateway URL, Automatic returned 200 in 2.25 s (the direct group's 2 s timeout, then the first preset), and `fastcord.exe` set to Automatic with that option under Advanced showed the QR code.
@@ -1355,7 +1375,7 @@ Reducer regressions `private_sort_keeps_ids_badges_requests_and_mute_semantics_t
 
 For the native fake check, copy `fixtures/ui/dm-sort.script` into a scratch directory (screenshots are saved beside the script). Run the existing fake server with its default world, chatter off, and an isolated fake settings directory; start the app with `--fake-discord <port> --script <copied-script>`. Inspect five captures: Recent lists Weekend plans, Birch, Aster; Unread first moves unread Aster above the read conversations; selecting Weekend plans and changing order keeps that group open. The script finishes on Unread first. Restart with the same settings directory and open Direct Messages to verify that choice and order persist. Check the fake request log: sorting adds no authenticated setting writes (opening a conversation may perform the existing history/read operations). Run a second account with default Recent, then return to the first to confirm isolation. An actual keyboard check must follow the visible order, while the unread shortcut retains its muted-conversation skip behavior.
 
-This fixture validates local behavior only. Favorites, synchronized user settings, mobile push preferences, notification-write quarantine, native Windows/macOS acceptance and alt-account interoperability remain outstanding under #106; this increment does not close it.
+This fixture validates local behavior only. Synchronized user settings, mobile push preferences, notification-write quarantine, native Windows/macOS acceptance and alt-account interoperability remain outstanding under #106; this increment does not close it.
 
 ### Notification Mark as read follow-up (#105)
 
@@ -1382,3 +1402,27 @@ The existing past-start event-edit and new recurrence-editor regressions each la
 
 
 The #252 wrapped-label fixture forces overflow with distinct trailing roles and channels before asserting the 15 px scrollbar clearance for each list. Iced 0.14 reserves embedded-scrollbar spacing only when content overflows; one wrapped row can fit within 90 px on a platform font and legitimately occupy the full width. The original assertion failed on macOS and was reproduced locally with Nimbus Sans and Liberation Sans: an 83.2 px role row fit in the 90 px viewport, while its approximately 239.2 px width fit the 240 px viewport but exceeded an assumed, absent gutter. The corrected fixture retains all wrapping, target-ID and disabled-click checks and passed the same two fonts plus DejaVu Sans, Noto Sans and Ubuntu Sans using temporary test-only renderer instrumentation. That instrumentation is not committed; fresh native CI remains the macOS runtime verification.
+
+### Sidebar nickname context (#106)
+
+`sidebar_nickname_tracks_guild_dm_reset_and_account_without_renaming_account_menu`
+inspects the actual rendered text at 760×640 through guild A/B, DM, missing and
+empty nickname, nickname replacement and account replacement. The existing
+member-state regression covers real `GUILD_MEMBER_UPDATE` replay/null reset and
+guild switching. `production_footer_keeps_six_direct_actions_inside_the_fixed_sidebar`
+uses a long nickname and exercises the real footer buttons at 760, 960 and 1280px.
+
+Copy `fixtures/ui/sidebar-nickname.script` into a scratch directory and run the
+fake server with its default world and chatter off, then the fake app with an
+isolated settings directory and `--fake-discord <port> --script <copy>`. Inspect
+four captures: server 5001 shows **Fake Admin**, server 5002 and the DM show
+**Fake Me**, and returning to server 5001 restores **Fake Admin**. At 760px,
+click the sidebar identity and verify the account menu still says **Fake Me**
+and **@fake_me**, and the existing Edit profile action remains available. The
+script performs no nickname/settings write; normal history/read operations may
+occur. This proves local rendering only, not live nickname-route interoperability.
+
+### Held entity component selectors (#100 follow-up)
+
+- Offline: model `entity_tests` and `component_owner_updates_*` validate bounded typed defaults/filter metadata and partial ownership updates. Reducer `component_entities_*` checks current accounts, hidden channels and unjoined private threads. App `entity_select_*` / `entity_draft_*` / `entity_query_*` tests cover local drafts, stale controls/accounts/applications and the existing one-shot interaction ledger. No test contacts Discord.
+- Native fake scenario: generate an isolated world with `python3 fixtures/fake/issue100-entities/generate.py <scratch>/world.json`, copy `entity-controls.script` beside it, and run the debug fake server with that world and a request log. Run debug fake-feature `fastcord --fake-discord <port> --script <scratch>/entity-controls.script` with isolated application data. Inspect the seven images: controls, unavailable default, role selection, local user filter, mentionable selection, filtered channels, explicit-submit refusal. Only the final Submit should cause one `/interactions` POST; the local fake refuses it with its existing 404 and no retry. Opening/filtering/choosing must add no remote searches or member fetches. Script dispatches the same scoped intents as widgets; iced tests click the actual controls independently. This scenario is not live Discord interoperability evidence.
