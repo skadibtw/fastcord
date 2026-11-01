@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Isolate the scheduled-event edit/cache regression from concurrent account resets, keeping native CI deterministic without changing runtime timezone behavior.
 
 - Give every rules, onboarding-question and server-guide read its own panel ownership; close, replacement and account reset cancel retired reads without cancelling or retrying pending writes (#243).
 - Keep thread creation responses scoped to their original draft and account; late responses cannot clear a replacement draft or navigate away from the current channel (#238).
