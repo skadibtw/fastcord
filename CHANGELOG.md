@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Honor fixed Windows timezone snapshots, including fully disabled DST, without reloading transition dates from the zone registry (#92).
 - Resolve scheduled-event local times on Windows using date-specific native rules; reject DST gaps/folds and failed conversions, preserve historical offsets, and refresh after timezone changes through the existing bounded worker cache (#92).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).

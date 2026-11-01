@@ -4,8 +4,8 @@ use ::windows::Win32::{
     Foundation::{FILETIME, SYSTEMTIME},
     System::Time::{
         DYNAMIC_TIME_ZONE_INFORMATION, FileTimeToSystemTime, GetDynamicTimeZoneInformation,
-        GetTimeZoneInformationForYear, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTimeEx,
-        TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
+        GetTimeZoneInformationForYear, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime,
+        SystemTimeToTzSpecificLocalTimeEx, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
     },
 };
 
@@ -65,12 +65,33 @@ fn civil_time(civil: Civil) -> Option<SYSTEMTIME> {
         .then_some(value)
 }
 
+/// The disabled-dynamic snapshot owns its transition dates. Looking it up by
+/// registry key again can restore DST even after both dates were cleared.
+fn fixed_rules(zone: &DYNAMIC_TIME_ZONE_INFORMATION) -> TIME_ZONE_INFORMATION {
+    TIME_ZONE_INFORMATION {
+        Bias: zone.Bias,
+        StandardName: zone.StandardName,
+        StandardDate: zone.StandardDate,
+        StandardBias: zone.StandardBias,
+        DaylightName: zone.DaylightName,
+        DaylightDate: zone.DaylightDate,
+        DaylightBias: zone.DaylightBias,
+    }
+}
+
 fn local_wall(zone: &DYNAMIC_TIME_ZONE_INFORMATION, utc: i64) -> Option<i64> {
     let utc = system_time(utc)?;
     let mut local = SYSTEMTIME::default();
-    // SAFETY: a single zone snapshot and both time records live through this
-    // call. Ex applies date-specific historical rules, including year crossings.
-    unsafe { SystemTimeToTzSpecificLocalTimeEx(Some(zone), &utc, &mut local) }.ok()?;
+    if zone.DynamicDaylightTimeDisabled {
+        let rules = fixed_rules(zone);
+        // SAFETY: initialized, owned records live throughout the call. The
+        // fixed API uses these exact transitions without a registry re-read.
+        unsafe { SystemTimeToTzSpecificLocalTime(Some(&rules), &utc, &mut local) }.ok()?;
+    } else {
+        // SAFETY: a single zone snapshot and both time records live through
+        // this call. Ex applies historical rules, including year crossings.
+        unsafe { SystemTimeToTzSpecificLocalTimeEx(Some(zone), &utc, &mut local) }.ok()?;
+    }
     seconds(&local)
 }
 
@@ -96,12 +117,17 @@ fn resolve_in(zone: &DYNAMIC_TIME_ZONE_INFORMATION, civil: Civil) -> LocalResult
     let Some(value) = civil_time(civil) else {
         return LocalResult::Missing;
     };
-    let mut rules = TIME_ZONE_INFORMATION::default();
-    // SAFETY: all records remain valid for the call. The year is LOCAL, as
-    // required by this API, and the snapshot retains DynamicDaylightTimeDisabled.
-    if unsafe { GetTimeZoneInformationForYear(value.wYear, Some(zone), &mut rules) }.is_err() {
-        return LocalResult::Missing;
-    }
+    let rules = if zone.DynamicDaylightTimeDisabled {
+        fixed_rules(zone)
+    } else {
+        let mut rules = TIME_ZONE_INFORMATION::default();
+        // SAFETY: all records remain valid for the call. The year is LOCAL,
+        // as required by this API. Only dynamic snapshots consult year rules.
+        if unsafe { GetTimeZoneInformationForYear(value.wYear, Some(zone), &mut rules) }.is_err() {
+            return LocalResult::Missing;
+        }
+        rules
+    };
     let Some(biases) = biases(&rules) else {
         return LocalResult::Missing;
     };

@@ -1,7 +1,5 @@
 use super::*;
-use ::windows::Win32::System::Time::{
-    EnumDynamicTimeZoneInformation, SystemTimeToTzSpecificLocalTime,
-};
+use ::windows::Win32::System::Time::EnumDynamicTimeZoneInformation;
 
 fn civil(year: i32, month: u8, day: u8, hour: u8, minute: u8) -> Civil {
     Civil {
@@ -115,7 +113,8 @@ fn zone_snapshots_change_rendering_without_changing_the_instant_or_global_zone()
 #[test]
 fn explicit_native_half_hour_transitions_and_disabled_dst_are_respected() {
     // A fixed synthetic rule: +10:30 standard / +11 daylight, southern summer.
-    let rules = TIME_ZONE_INFORMATION {
+    let southern = DYNAMIC_TIME_ZONE_INFORMATION {
+        DynamicDaylightTimeDisabled: true,
         Bias: -630,
         DaylightBias: -30,
         StandardDate: SYSTEMTIME {
@@ -132,24 +131,12 @@ fn explicit_native_half_hour_transitions_and_disabled_dst_are_respected() {
         },
         ..Default::default()
     };
-    let resolve_fixed = |input| {
-        let wall = seconds(&civil_time(input).unwrap()).unwrap();
-        candidates::resolve(wall, biases(&rules).unwrap(), |utc| {
-            let mut local = SYSTEMTIME::default();
-            // SAFETY: all fixed fixture/input/output records remain live.
-            unsafe {
-                SystemTimeToTzSpecificLocalTime(Some(&rules), &system_time(utc)?, &mut local)
-            }
-            .ok()?;
-            seconds(&local)
-        })
-    };
     assert_eq!(
-        resolve_fixed(civil(2026, 4, 5, 1, 45)),
+        resolve_in(&southern, civil(2026, 4, 5, 1, 45)),
         LocalResult::Ambiguous
     );
     assert_eq!(
-        resolve_fixed(civil(2026, 10, 4, 2, 15)),
+        resolve_in(&southern, civil(2026, 10, 4, 2, 15)),
         LocalResult::Missing
     );
 
@@ -175,6 +162,16 @@ fn explicit_native_half_hour_transitions_and_disabled_dst_are_respected() {
         LocalResult::Unique(1_142_870_400)
     );
 
+    // Explicit transitions must win over the registry's current rule as well.
+    // The installed Eastern zone already uses DST in April; this snapshot does not.
+    eastern.DaylightDate.wMonth = 5;
+    eastern.DaylightDate.wDay = 1;
+    assert_eq!(offset_in(&eastern, 1_145_120_400), Some(-18_000));
+    assert_eq!(
+        resolve_in(&eastern, civil(2006, 4, 15, 12, 0)),
+        LocalResult::Unique(1_145_120_400)
+    );
+
     // Fully disabling DST also clears both transition dates, as documented.
     eastern.StandardDate = SYSTEMTIME::default();
     eastern.DaylightDate = SYSTEMTIME::default();
@@ -183,6 +180,14 @@ fn explicit_native_half_hour_transitions_and_disabled_dst_are_respected() {
         resolve_in(&eastern, civil(2026, 3, 8, 2, 30)),
         LocalResult::Unique(1_772_955_000)
     );
+    assert_eq!(
+        resolve_in(&eastern, civil(2026, 11, 1, 1, 30)),
+        LocalResult::Unique(1_793_514_600),
+        "the registry's autumn fold does not exist in this no-DST snapshot"
+    );
+    // A disabled-dynamic snapshot remains self-contained even without a key.
+    eastern.TimeZoneKeyName.fill(0);
+    assert_eq!(offset_in(&eastern, 1_782_907_200), Some(-18_000));
 }
 
 #[test]
@@ -201,4 +206,19 @@ fn native_epoch_arithmetic_preserves_seconds_and_rejects_out_of_range() {
         }),
         Some([-345; 2])
     );
+}
+
+#[test]
+fn current_snapshot_matches_native_current_zone_without_changing_settings() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let zone = current_zone().expect("read-only current zone");
+    let mut local = SYSTEMTIME::default();
+    // SAFETY: initialized time records live throughout the call. None asks
+    // Windows to use the machine's actual current zone, without changing it.
+    unsafe { SystemTimeToTzSpecificLocalTime(None, &system_time(now).unwrap(), &mut local) }
+        .unwrap();
+    assert_eq!(local_wall(&zone, now), seconds(&local));
 }
