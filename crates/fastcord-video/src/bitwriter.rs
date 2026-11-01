@@ -45,6 +45,7 @@ impl BitWriter {
     }
 
     /// Number of meaningful bits, before optional byte-alignment padding.
+    #[cfg(target_os = "linux")]
     pub(crate) fn bit_len(&self) -> usize {
         self.bytes.len() * 8 + usize::from(self.used)
     }
