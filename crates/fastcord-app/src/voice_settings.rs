@@ -51,6 +51,11 @@ pub struct Writer {
 }
 
 impl Writer {
+    #[cfg(test)]
+    pub(crate) fn thread_id(&self) -> Option<std::thread::ThreadId> {
+        self.thread.as_ref().map(|thread| thread.thread().id())
+    }
+
     pub fn start(account: Snowflake) -> (Self, impl iced::futures::Stream<Item = Status>) {
         let (writer, receiver) = Self::at(settings_path(), account);
         let events = iced::futures::stream::unfold(receiver, |mut receiver| async move {

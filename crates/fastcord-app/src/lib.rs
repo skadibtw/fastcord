@@ -326,6 +326,8 @@ struct App {
     speech_voices: Vec<fastcord_platform::speech::Voice>,
     audio_saving: Option<audio_devices::Preferences>,
     volume_writer: Option<voice_settings::Writer>,
+    /// The writer survives manual Gateway reconnects, including its status stream.
+    volume_writer_session: u64,
     volume_notice: Option<String>,
     /// The camera picker; probed only when the user asks.
     camera_list: gateway::CameraList,
@@ -755,6 +757,7 @@ impl App {
                 speech_voices: Vec::new(),
                 audio_saving: None,
                 volume_writer: None,
+                volume_writer_session: 0,
                 volume_notice: None,
                 camera_list: gateway::CameraList::default(),
                 shortcuts: shortcuts::Runtime::default(),
@@ -2511,6 +2514,9 @@ and a fourth"
         let mut controls = gateway::NavigationBridge::new();
         if let Some(previous) = &previous {
             controls.inherit(previous);
+            // Pending volume changes may not be on disk yet. Keep them above
+            // the async disk snapshot, just like changes made during loading.
+            controls.set_volume_settings(previous.voice_controls().volumes.clone());
         }
         controls.set_account_id(session.user.id);
         let account = session.user.id;
@@ -2525,12 +2531,19 @@ and a fourth"
                 },
             )
         };
-        let (writer, statuses) = voice_settings::Writer::start(account);
-        self.volume_writer = Some(writer);
-        self.volume_notice = None;
-        let volume_events = Task::run(statuses, move |status| {
-            Message::VolumeSettingsStatus(id, status)
-        });
+        let volume_events = if previous.is_some() && self.volume_writer.is_some() {
+            // Reconnecting the same account must not detach a writer that can
+            // still flush. Its original status task remains alive as well.
+            Task::none()
+        } else {
+            let (writer, statuses) = voice_settings::Writer::start(account);
+            self.volume_writer = Some(writer);
+            self.volume_writer_session = id;
+            self.volume_notice = None;
+            Task::run(statuses, move |status| {
+                Message::VolumeSettingsStatus(id, status)
+            })
+        };
         controls.set_audio_devices(&self.audio_preferences);
         controls.set_voice_input(&self.audio_preferences.voice_input);
         self.shortcuts.rebuild(&self.audio_preferences.voice_input);

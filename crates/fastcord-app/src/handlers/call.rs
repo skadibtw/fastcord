@@ -477,10 +477,10 @@ impl App {
                     writer.flush();
                 }
             }
-            Message::VolumeSettingsStatus(id, status) => {
-                if matches!(&self.phase, Phase::Account { gateway, .. } if gateway.id == id) {
-                    self.volume_notice = status.notice().map(str::to_owned);
-                }
+            Message::VolumeSettingsStatus(id, status)
+                if self.volume_writer.is_some() && self.volume_writer_session == id =>
+            {
+                self.volume_notice = status.notice().map(str::to_owned);
             }
             _ => {}
         }

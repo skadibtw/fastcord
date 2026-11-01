@@ -4,6 +4,72 @@
 use super::*;
 
 #[tokio::test]
+async fn manual_reconnect_preserves_volume_writer_and_pending_settings() {
+    use fastcord_discord::gateway::StopReason;
+
+    let mut app = login_app();
+    let session = authenticate(&mut app, Persistence::MemoryOnly);
+    let path = std::env::temp_dir()
+        .join(format!("fastcord-reconnect-volume-{}", std::process::id()))
+        .join("voice-settings.csv");
+    let (writer, _) = voice_settings::Writer::at(Some(path.clone()), session.user.id);
+    let thread = writer.thread_id().expect("volume writer started");
+    app.volume_writer = Some(writer);
+    let _ = app.update(Message::SetParticipantVolume(Snowflake(99), 62));
+    let (id, _) = gateway_status(&app);
+    let _ = app.update(Message::Gateway(
+        id,
+        GatewayStatus::Stopped(StopReason::ReconnectFailures),
+    ));
+    drop(app.update(Message::ReconnectGateway));
+    assert_ne!(gateway_status(&app).0, id);
+    assert_eq!(
+        app.volume_writer.as_ref().unwrap().thread_id(),
+        Some(thread)
+    );
+    assert_eq!(
+        app.phase
+            .gateway()
+            .unwrap()
+            .controls
+            .voice_controls()
+            .volume_percent(Snowflake(99)),
+        62,
+    );
+    // The original status stream remains valid for the retained writer, even
+    // though its Gateway has been replaced.
+    let _ = app.update(Message::VolumeSettingsStatus(
+        id,
+        voice_settings::Status::Failed,
+    ));
+    assert!(app.volume_notice.is_some());
+    let _ = app.update(Message::VolumeSettingsStatus(
+        id + 1,
+        voice_settings::Status::Saved,
+    ));
+    assert!(
+        app.volume_notice.is_some(),
+        "unrelated writer status ignored"
+    );
+    let _ = app.update(Message::SetParticipantVolume(Snowflake(99), 81));
+    let (_, _, writer) = app.teardown_account().unwrap();
+    assert_eq!(
+        writer.unwrap().finish_async().await,
+        voice_settings::Status::Saved
+    );
+    assert_eq!(
+        voice_settings::load_from(&path, session.user.id)[0].percent,
+        81
+    );
+    let _ = app.update(Message::VolumeSettingsStatus(
+        id,
+        voice_settings::Status::Failed,
+    ));
+    assert!(app.volume_notice.is_none(), "retired writer status ignored");
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn participant_volume_change_survives_account_teardown_without_release() {
     let mut app = login_app();
     let session = authenticate(&mut app, Persistence::MemoryOnly);
