@@ -1,0 +1,21 @@
+# Default fake world; this fixture only reads documents and changes view state.
+wait 2
+size 1080 800
+open discord://-/channels/5001/6005
+wait 1
+toggle community-list-open
+wait 1
+toggle community-list-onboarding
+wait 1
+snap community-default-channels
+toggle community-list-question
+toggle community-list-answer
+toggle community-list-end
+wait 1
+snap community-answer-lists-wide
+size 760 800
+wait 1
+toggle community-list-end
+wait 1
+snap community-answer-lists-narrow
+quit

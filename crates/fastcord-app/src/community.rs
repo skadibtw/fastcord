@@ -1153,7 +1153,12 @@ fn onboarding_view<'a>(ed: &'a OnbEd, admin: &'a GuildAdmin, edit: bool) -> Elem
     )
     .spacing(2)
     .padding([0, 8]);
-    panel = panel.push(scrollable(defaults).height(Length::Fixed(110.0)));
+    panel = panel.push(
+        scrollable(defaults)
+            .width(Length::Fill)
+            .spacing(6)
+            .height(Length::Fixed(110.0)),
+    );
     panel = panel.push(row![
         text(tr("Questions")).size(13),
         space::horizontal(),
@@ -1326,7 +1331,12 @@ fn option_view<'a>(
             .into()
     }))
     .spacing(2);
-    panel = panel.push(scrollable(roles).height(Length::Fixed(90.0)));
+    panel = panel.push(
+        scrollable(roles)
+            .width(Length::Fill)
+            .spacing(6)
+            .height(Length::Fixed(90.0)),
+    );
     panel = panel.push(text(tr("Channels shown")).size(13));
     let channels = column(
         admin
@@ -1343,7 +1353,12 @@ fn option_view<'a>(
     )
     .spacing(2);
     panel
-        .push(scrollable(channels).height(Length::Fixed(90.0)))
+        .push(
+            scrollable(channels)
+                .width(Length::Fill)
+                .spacing(6)
+                .height(Length::Fixed(90.0)),
+        )
         .into()
 }
 
@@ -1581,7 +1596,11 @@ pub fn view<'a>(
             None => small("Loading\u{2026}").into(),
         },
     };
-    body = body.push(scrollable(container(content).padding([0, 8])).height(Length::Fixed(320.0)));
+    body = body.push(
+        scrollable(container(content).padding([0, 8]))
+            .id(iced::widget::Id::new("community-content"))
+            .height(Length::Fixed(320.0)),
+    );
     let save_label = if panel.tab == Tab::Community {
         "Turn on Community"
     } else {

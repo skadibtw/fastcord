@@ -1819,6 +1819,31 @@ impl App {
                     "event-weekly" => Message::Events(scheduled_events::Event::Repeat(Some(
                         fastcord_discord::EventRecurrence::Weekly,
                     ))),
+                    "community-list-open" => {
+                        let Some(guild) = self
+                            .phase
+                            .gateway()
+                            .and_then(|gateway| gateway.navigation.selected_guild)
+                        else {
+                            return Task::none();
+                        };
+                        Message::Community(community::Event::Open(guild))
+                    }
+                    "community-list-onboarding" => {
+                        Message::Community(community::Event::Tab(community::Tab::Onboarding))
+                    }
+                    "community-list-question" => Message::Community(community::Event::Onboarding(
+                        community::OnbMsg::SelectPrompt(0),
+                    )),
+                    "community-list-answer" => Message::Community(community::Event::Onboarding(
+                        community::OnbMsg::SelectOption(0),
+                    )),
+                    "community-list-end" => {
+                        return iced::widget::operation::snap_to(
+                            iced::widget::Id::new("community-content"),
+                            iced::widget::scrollable::RelativeOffset { x: 0.0, y: 1.0 },
+                        );
+                    }
                     "onboarding-questions" => {
                         let Some(guild) = self
                             .phase

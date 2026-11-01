@@ -596,3 +596,196 @@ fn every_view_builds() {
     }
     assert!(view(&state, &make_nav(admin(false, true))).is_some());
 }
+
+#[derive(Default)]
+struct ListGeometry {
+    scrolls: Vec<(iced::Rectangle, iced::Rectangle)>,
+    labels: Vec<(String, iced::Rectangle)>,
+}
+
+impl iced::advanced::widget::Operation for ListGeometry {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation)) {
+        operate(self);
+    }
+    fn scrollable(
+        &mut self,
+        _id: Option<&iced::advanced::widget::Id>,
+        bounds: iced::Rectangle,
+        content: iced::Rectangle,
+        _translation: iced::Vector,
+        _state: &mut dyn iced::advanced::widget::operation::Scrollable,
+    ) {
+        self.scrolls.push((bounds, content));
+    }
+    fn text(
+        &mut self,
+        _id: Option<&iced::advanced::widget::Id>,
+        bounds: iced::Rectangle,
+        text: &str,
+    ) {
+        self.labels.push((text.to_owned(), bounds));
+    }
+}
+
+#[test]
+fn community_checkbox_lists_fill_real_form_and_reserve_space_beside_labels() {
+    use crate::variable_list::harness::Ui;
+    let mut admin = admin(true, true);
+    admin.roles = (0..8)
+        .map(|n| {
+            let mut role = role(401 + n, None);
+            role.name = ["Admin", "Moderator", "Builder"][n as usize % 3].into();
+            role
+        })
+        .collect();
+    admin.channels = (0..8)
+        .map(|n| channel(201 + n, AdminKind::Text, "general", true))
+        .collect();
+    let ed = OnbEd::new(onboarding());
+    for width in [260.0, 700.0] {
+        let mut ui = Ui::new(
+            width,
+            900.0,
+            option_view(&ed, &ed.doc.prompts[0].options[0], &admin, true),
+        );
+        ui.draw();
+        let mut geometry = ListGeometry::default();
+        ui.inspect(&mut geometry);
+        assert_eq!(geometry.scrolls.len(), 2);
+        for (bounds, content) in &geometry.scrolls {
+            assert!(
+                (bounds.width - (width - 20.0)).abs() < 1.0,
+                "list must use available answer width: {bounds:?}"
+            );
+            assert!(
+                content.height > bounds.height,
+                "fixture forces actual vertical scrolling"
+            );
+            assert!(
+                content.x + content.width <= bounds.x + bounds.width - 15.0,
+                "content must not live under scrollbar: {bounds:?} {content:?}"
+            );
+        }
+        for (label, bounds) in &geometry.labels {
+            let scroll = if ["Admin", "Moderator", "Builder"].contains(&label.as_str()) {
+                Some(geometry.scrolls[0].0)
+            } else if label == "#general" {
+                Some(geometry.scrolls[1].0)
+            } else {
+                None
+            };
+            if let Some(scroll) = scroll {
+                assert!(
+                    bounds.x + bounds.width <= scroll.x + scroll.width - 15.0,
+                    "{label} must remain clear of the scrollbar"
+                );
+            }
+        }
+        let mut defaults = Ui::new(width, 900.0, onboarding_view(&ed, &admin, true));
+        defaults.draw();
+        let mut geometry = ListGeometry::default();
+        defaults.inspect(&mut geometry);
+        assert_eq!(geometry.scrolls.len(), 1);
+        let (bounds, content) = geometry.scrolls[0];
+        assert!(
+            (bounds.width - width).abs() < 1.0,
+            "default channels use form width"
+        );
+        assert!(content.height > bounds.height);
+        assert!(content.x + content.width <= bounds.x + bounds.width - 15.0);
+    }
+}
+
+#[test]
+fn community_wrapped_checkbox_labels_keep_target_and_disabled_behavior() {
+    use crate::variable_list::harness::Ui;
+    let long_role = "Moderator for regional support and community questions";
+    let long_channel = "regional-support-and-community-questions";
+    for edit in [true, false] {
+        for locked in [true, false] {
+            let role_id = if locked { 499 } else { 401 };
+            let mut admin = admin(true, true);
+            let mut r = role(
+                role_id,
+                locked.then_some("This role is not below your highest role."),
+            );
+            r.name = long_role.into();
+            admin.roles = vec![r];
+            admin.channels = vec![channel(201, AdminKind::Text, long_channel, true)];
+            let ed = OnbEd::new(onboarding());
+            let mut ui = Ui::new(
+                260.0,
+                900.0,
+                option_view(&ed, &ed.doc.prompts[0].options[0], &admin, edit),
+            );
+            ui.draw();
+            let mut geometry = ListGeometry::default();
+            ui.inspect(&mut geometry);
+            let role_bounds = geometry
+                .labels
+                .iter()
+                .find(|(label, _)| label.starts_with(long_role))
+                .unwrap()
+                .1;
+            assert!(
+                role_bounds.height > 30.0,
+                "long role label wraps at narrow form width"
+            );
+            let role_scroll = geometry.scrolls[0].0;
+            assert!(role_bounds.x + role_bounds.width <= role_scroll.x + role_scroll.width - 15.0);
+            let events = ui.click(
+                role_bounds.x + role_bounds.width - 2.0,
+                role_bounds.y + 10.0,
+            );
+            if edit && !locked {
+                assert!(
+                    matches!(events.as_slice(), [Event::Onboarding(OnbMsg::ToggleRole(id))] if *id == Snowflake(401)),
+                    "{events:?}"
+                );
+            } else {
+                assert!(
+                    events.is_empty(),
+                    "disabled role cannot be changed through its label: {events:?}"
+                );
+            }
+            let channel_bounds = geometry
+                .labels
+                .iter()
+                .find(|(label, _)| label.starts_with('#'))
+                .unwrap()
+                .1;
+            let events = ui.click(
+                channel_bounds.x + channel_bounds.width - 2.0,
+                channel_bounds.y + 10.0,
+            );
+            if edit {
+                assert!(
+                    matches!(events.as_slice(), [Event::Onboarding(OnbMsg::ToggleChannel(id))] if *id == Snowflake(201)),
+                    "{events:?}"
+                );
+            } else {
+                assert!(events.is_empty());
+            }
+            let mut defaults = Ui::new(260.0, 900.0, onboarding_view(&ed, &admin, edit));
+            defaults.draw();
+            let mut geometry = ListGeometry::default();
+            defaults.inspect(&mut geometry);
+            let bounds = geometry
+                .labels
+                .iter()
+                .find(|(label, _)| label.starts_with('#'))
+                .unwrap()
+                .1;
+            assert!(bounds.height > 30.0);
+            let events = defaults.click(bounds.x + bounds.width - 2.0, bounds.y + 10.0);
+            if edit {
+                assert!(
+                    matches!(events.as_slice(), [Event::Onboarding(OnbMsg::ToggleDefault(id))] if *id == Snowflake(201)),
+                    "{events:?}"
+                );
+            } else {
+                assert!(events.is_empty());
+            }
+        }
+    }
+}
