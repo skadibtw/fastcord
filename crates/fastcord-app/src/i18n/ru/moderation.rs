@@ -358,9 +358,14 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Показаны первые {} серверов.",
     ),
     ("Explore public servers", "Обзор серверов"),
+    ("Filter loaded servers", "Фильтр загруженных серверов"),
     (
-        "To join a server, open an invite link to it. Searching the list is not available.",
-        "Чтобы вступить на сервер, откройте ссылку-приглашение. Поиск по списку недоступен.",
+        "No loaded servers match this filter.",
+        "Среди загруженных серверов совпадений нет.",
+    ),
+    (
+        "Filter only the servers loaded here. Show more loads another page. To join, open an invite link.",
+        "Фильтр ищет только среди загруженных серверов. «Показать ещё» загрузит следующую страницу. Для вступления откройте приглашение.",
     ),
     ("Profile", "Профиль"),
     ("Roles…", "Роли…"),
@@ -708,4 +713,21 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Окончание: ГГГГ-ММ-ДД ЧЧ:ММ (необязательно)",
     ),
     ("Edit event", "Изменить событие"),
+    ("Once", "Однократно"),
+    ("Weekly (UTC)", "Еженедельно (UTC)"),
+    ("Every other week (UTC)", "Раз в две недели (UTC)"),
+    ("Keep current repeat", "Сохранить текущее повторение"),
+    ("Current repeat: {}", "Текущее повторение: {}"),
+    (
+        "Repeat changes apply to the whole series.",
+        "Изменения повторения применяются ко всей серии.",
+    ),
+    (
+        "This replaces the current repeat rule for the entire event series.",
+        "Это заменит текущее правило повторения для всей серии событий.",
+    ),
+    (
+        "Repeats at the same UTC time and weekday as the first occurrence. Local times may shift when daylight saving time changes.",
+        "Повторяется в то же время UTC и день недели, что и первое событие. Местное время может сместиться при переходе на летнее или зимнее время.",
+    ),
 ];

@@ -8,8 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# Exposes the Win32 helper window that hardware capture tests of dependent
-# crates paint known pixels with (never enabled in a normal build).
+# Exposes native capture fixtures and the guarded Linux packet-session example
+# (never enabled in a normal build).
 test-support = []
 
 [dependencies]
@@ -45,6 +45,7 @@ windows = { workspace = true, features = [
     "Graphics_DirectX",
     "Graphics_DirectX_Direct3D11",
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Networking_WinSock",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
@@ -69,6 +70,7 @@ windows = { workspace = true, features = [
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_System_Time",
     "Win32_System_Variant",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Direct3D11",
@@ -86,7 +88,7 @@ dispatch2.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-core-audio-types.workspace = true
-objc2-core-foundation.workspace = true
+objc2-core-foundation = { workspace = true, features = ["CFLocale", "CFDateFormatter"] }
 objc2-core-graphics.workspace = true
 objc2-core-media.workspace = true
 objc2-core-video.workspace = true
@@ -114,3 +116,7 @@ workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[[example]]
+name = "linux_packet_session"
+required-features = ["test-support"]

@@ -106,6 +106,26 @@ pub fn handle(world: &mut World, req: &Request, ctx: &Ctx) -> Outcome {
     match (method, segments.as_slice()) {
         ("GET", ["gateway"]) => ok(json!({"url": format!("ws://127.0.0.1:{}", ctx.port)})),
         ("GET", ["users", "@me"]) => ok(world.me.clone()),
+        // Read-only, synthetic discovery page for the native filter smoke test.
+        // Public CDN icons are omitted so this fixture stays entirely local.
+        ("GET", ["discoverable-guilds"]) => {
+            let Ok(offset) = get("offset").unwrap_or("0").parse::<usize>() else {
+                return error(400, 0, "Invalid offset");
+            };
+            if get("limit") != Some("24") {
+                return error(400, 0, "Fixture requires limit 24");
+            }
+            let mut fixture: Value = serde_json::from_str(include_str!(
+                "../../../fixtures/rest/discovery-synthetic.json"
+            ))
+            .expect("synthetic discovery fixture");
+            let guilds = fixture["guilds"].as_array_mut().expect("fixture guilds");
+            for guild in guilds.iter_mut() {
+                guild["icon"] = Value::Null;
+            }
+            let page: Vec<_> = guilds.iter().skip(offset).take(24).cloned().collect();
+            ok(json!({"guilds": page}))
+        }
         ("GET", ["guilds", "5001", "onboarding"])
             if world.guilds.iter().any(|guild| text(guild, "id") == "5001") =>
         {
@@ -116,6 +136,17 @@ pub fn handle(world: &mut World, req: &Request, ctx: &Ctx) -> Outcome {
             fixture["guild_id"] = json!("5001");
             fixture["default_channel_ids"] = json!(["6001"]);
             ok(fixture)
+        }
+
+        ("GET", ["guilds", guild, "application-command-index"]) => {
+            if world.guild_index(guild).is_none() {
+                return error(404, 10004, "Unknown Guild");
+            }
+            // Read-only offline UI fixture. POST /interactions stays unimplemented.
+            ok(serde_json::from_str(include_str!(
+                "../../../fixtures/rest/application-command-index.json"
+            ))
+            .expect("static command index fixture"))
         }
 
         ("GET", ["channels", channel, "messages"]) => history(world, channel, &get),
@@ -906,6 +937,47 @@ mod tests {
     }
 
     #[test]
+    fn discovery_fixture_is_read_only_bounded_and_has_no_remote_images() {
+        let mut world = world();
+        let first = call(
+            &mut world,
+            "GET",
+            "/discoverable-guilds?offset=0&limit=24",
+            None,
+        );
+        assert_eq!(first.response.status, 200);
+        assert!(first.events.is_empty());
+        let page = body(&first);
+        let guilds = page["guilds"].as_array().unwrap();
+        assert_eq!(guilds.len(), 2);
+        assert!(guilds.iter().all(|guild| guild["icon"].is_null()));
+        let later = call(
+            &mut world,
+            "GET",
+            "/discoverable-guilds?offset=24&limit=24",
+            None,
+        );
+        assert!(body(&later)["guilds"].as_array().unwrap().is_empty());
+        assert_eq!(
+            call(
+                &mut world,
+                "GET",
+                "/discoverable-guilds?offset=x&limit=24",
+                None
+            )
+            .response
+            .status,
+            400
+        );
+        assert_eq!(
+            call(&mut world, "POST", "/discoverable-guilds", None)
+                .response
+                .status,
+            404
+        );
+    }
+
+    #[test]
     fn onboarding_fixture_is_read_only_and_scoped_to_its_guild() {
         let mut world = world();
         let result = call(&mut world, "GET", "/guilds/5001/onboarding", None);
@@ -1348,6 +1420,39 @@ mod tests {
         assert_eq!(login(&mut w, "captcha@fake.test", Some("k")).status, 200);
         assert_eq!(login(&mut w, "wrong@fake.test", None).status, 400);
         assert_eq!(login(&mut w, "limited@fake.test", None).status, 429);
+    }
+
+    #[test]
+    fn command_index_fixture_is_scoped_and_does_not_invent_interaction_success() {
+        let mut world = world();
+        let response = call(
+            &mut world,
+            "GET",
+            "/guilds/5001/application-command-index",
+            None,
+        );
+        assert_eq!(response.response.status, 200);
+        let index =
+            fastcord_discord::parse_command_index(&serde_json::to_vec(&body(&response)).unwrap())
+                .unwrap();
+        assert!(index.commands.iter().any(|command| command.name == "admin"));
+        assert_eq!(
+            call(
+                &mut world,
+                "GET",
+                "/guilds/999999/application-command-index",
+                None
+            )
+            .response
+            .status,
+            404
+        );
+        assert_eq!(
+            call(&mut world, "POST", "/interactions", Some(json!({"type":2})))
+                .response
+                .status,
+            404
+        );
     }
 
     #[test]

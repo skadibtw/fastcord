@@ -3,12 +3,13 @@
 //! [`fastcord_discord::DISCOVERY_PAGE`] servers is asked for at a time, on
 //! open and on an explicit "Show more", at most [`MAX_PAGES`] pages are kept,
 //! and a page is never asked twice. There is no join route here: a server is
-//! joined with an invite link. Free-text discovery search is not implemented.
+//! joined with an invite link. A bounded local query filters only loaded pages;
+//! global discovery search is not implemented.
 
 use crate::ui::button;
 use fastcord_discord::state::navigation::NavigationSnapshot;
 use fastcord_discord::{DISCOVERY_PAGE, DiscoveredGuild, RestClient, RestError};
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::avatars::{self, AvatarKey};
@@ -17,11 +18,14 @@ use crate::panel_kit::auth_rejected;
 
 /// Pages kept, so at most `MAX_PAGES * DISCOVERY_PAGE` servers.
 pub const MAX_PAGES: usize = 4;
+/// At most 400 UTF-8 bytes retained, independent of pasted input size.
+const QUERY_CHARS: usize = 100;
 
 #[derive(Clone, Debug)]
 pub enum Event {
     Toggle,
     More,
+    Query(String),
     /// A page answered (generation, offset).
     Page(u64, usize, Result<Vec<DiscoveredGuild>, RestError>),
 }
@@ -30,6 +34,7 @@ pub enum Event {
 pub struct State {
     open: bool,
     guilds: Vec<DiscoveredGuild>,
+    query: String,
     /// A request is in flight.
     loading: bool,
     /// The last page was full, so another may exist.
@@ -70,6 +75,10 @@ impl State {
 
     pub fn update(&mut self, event: Event, client: &RestClient) -> Task<Event> {
         let offset = match event {
+            Event::Query(query) => {
+                self.query = query.chars().take(QUERY_CHARS).collect();
+                return Task::none();
+            }
             Event::Toggle => {
                 self.open = !self.open;
                 if !self.open || !self.guilds.is_empty() {
@@ -114,13 +123,22 @@ impl State {
         }
     }
 
-    /// Icons of the listed servers, while the list is open.
+    /// Filter only retained pages, preserving their order and pagination cursor.
+    fn matching(&self) -> impl Iterator<Item = &DiscoveredGuild> {
+        let query = self.query.trim().to_lowercase();
+        self.guilds.iter().filter(move |guild| {
+            query.is_empty()
+                || guild.name.to_lowercase().contains(&query)
+                || guild.description.to_lowercase().contains(&query)
+        })
+    }
+
+    /// Icons of the filtered servers, while the list is open.
     pub fn icon_keys(&self) -> Vec<AvatarKey> {
         if !self.open {
             return Vec::new();
         }
-        self.guilds
-            .iter()
+        self.matching()
             .filter_map(|g| AvatarKey::guild(g.id, g.icon.as_deref()))
             .collect()
     }
@@ -147,7 +165,9 @@ pub fn view<'a>(
         return None;
     }
     let mut list = column![].spacing(8);
-    for guild in &state.guilds {
+    let mut matches = 0;
+    for guild in state.matching() {
+        matches += 1;
         let name = guild.name.clone();
         let fallback = move || -> Element<'static, Event> {
             let initial = name
@@ -194,6 +214,9 @@ pub fn view<'a>(
     if state.guilds.is_empty() && !state.loading && state.error.is_none() {
         list = list.push(text(tr("No public servers were listed.")).size(12));
     }
+    if matches == 0 && !state.query.trim().is_empty() && !state.guilds.is_empty() {
+        list = list.push(text(tr("No loaded servers match this filter.")).size(12));
+    }
     if state.more && !state.loading && state.next_offset().is_some() {
         list = list.push(button(text(tr("Show more")).size(13)).on_press(Event::More));
     } else if state.guilds.len() >= MAX_PAGES * DISCOVERY_PAGE {
@@ -212,10 +235,14 @@ pub fn view<'a>(
                 crate::icons::close(Some(Event::Toggle)),
             ],
             text(tr(
-                "To join a server, open an invite link to it. Searching the list is not available."
+                "Filter only the servers loaded here. Show more loads another page. To join, open an invite link."
             ))
             .size(12)
             .color(crate::style::muted()),
+            text_input(tr("Filter loaded servers"), &state.query)
+                .on_input(Event::Query)
+                .size(14)
+                .padding(6),
             scrollable(list).height(Length::Fixed(280.0)),
         ]
         .spacing(6)
@@ -320,6 +347,140 @@ mod tests {
             0,
             Err(RestError::AuthenticationRequired)
         )));
+    }
+
+    #[test]
+    fn local_filter_matches_unicode_names_and_descriptions_and_limits_icon_demand() {
+        let client = client();
+        let mut guilds = page(1, 3);
+        guilds[0].name = "Музыка".into();
+        guilds[1].description = "ÉTUDES et musique".into();
+        guilds[2].name = "Games".into();
+        for guild in &mut guilds {
+            guild.icon = Some("0123456789abcdef0123456789abcdef".into());
+        }
+        let mut state = State {
+            open: true,
+            guilds,
+            ..State::default()
+        };
+        let ids = |state: &State| state.matching().map(|guild| guild.id.0).collect::<Vec<_>>();
+        assert_eq!(ids(&state), [1, 2, 3]);
+        assert_eq!(state.icon_keys().len(), 3);
+        for (query, expected) in [
+            ("  МУЗЫКА ", vec![1]),
+            ("études", vec![2]),
+            ("absent", vec![]),
+        ] {
+            assert_eq!(state.update(Event::Query(query.into()), &client).units(), 0);
+            assert_eq!(ids(&state), expected);
+            let icons = state.icon_keys();
+            assert_eq!(icons.len(), expected.len());
+            for (icon, id) in icons.iter().zip(expected) {
+                assert!(matches!(icon, AvatarKey::Guild { id: found, .. } if found.0 == id));
+            }
+        }
+        assert_eq!(state.update(Event::Query(" ".into()), &client).units(), 0);
+        assert_eq!(ids(&state), [1, 2, 3], "clearing restores original order");
+        state.open = false;
+        assert!(state.icon_keys().is_empty());
+    }
+
+    #[test]
+    fn typing_never_fetches_and_more_uses_loaded_count_even_with_no_matches() {
+        let client = client();
+        let mut state = State::default();
+        assert_eq!(
+            state.update(Event::Query("wanted".into()), &client).units(),
+            0
+        );
+        assert!(!state.loading, "typing cannot start the initial request");
+        assert_eq!(state.update(Event::Toggle, &client).units(), 1);
+        assert_eq!(
+            state.update(Event::Query("WANTED".into()), &client).units(),
+            0
+        );
+        assert_eq!(
+            state
+                .update(Event::Page(0, 0, Ok(page(1, DISCOVERY_PAGE))), &client)
+                .units(),
+            0
+        );
+        assert_eq!(state.matching().count(), 0);
+        assert_eq!(state.next_offset(), Some(DISCOVERY_PAGE));
+        assert_eq!(
+            state.update(Event::Query("wanted".into()), &client).units(),
+            0
+        );
+        assert!(
+            !state.loading,
+            "no automatic page fetch for an empty filtered list"
+        );
+        assert_eq!(state.update(Event::More, &client).units(), 1);
+        assert_eq!(
+            state.update(Event::More, &client).units(),
+            0,
+            "one request at a time"
+        );
+        let mut next = page(100, 1);
+        next[0].description = "The wanted server".into();
+        assert_eq!(
+            state
+                .update(Event::Page(0, DISCOVERY_PAGE, Ok(next)), &client)
+                .units(),
+            0
+        );
+        assert_eq!(state.matching().map(|g| g.id.0).collect::<Vec<_>>(), [100]);
+        assert_eq!(state.guilds.len(), DISCOVERY_PAGE + 1);
+        assert_eq!(state.query, "wanted");
+        assert!(!state.more);
+    }
+
+    #[test]
+    fn query_is_utf8_bounded_and_account_reset_forgets_it_and_old_pages() {
+        let client = client();
+        let mut state = State::default();
+        assert_eq!(
+            state
+                .update(Event::Query("😀".repeat(10_000)), &client)
+                .units(),
+            0
+        );
+        assert_eq!(state.query.chars().count(), QUERY_CHARS);
+        assert_eq!(state.query.len(), QUERY_CHARS * 4);
+        let _ = state.update(Event::Toggle, &client);
+        let old = state.generation;
+        state.clear();
+        assert!(state.query.is_empty() && state.guilds.is_empty() && !state.open);
+        let _ = state.update(Event::Page(old, 0, Ok(page(1, DISCOVERY_PAGE))), &client);
+        assert!(state.guilds.is_empty() && state.icon_keys().is_empty());
+    }
+
+    #[test]
+    fn an_empty_filtered_page_keeps_manual_pagination_clickable() {
+        use crate::variable_list::harness::Ui;
+        let state = State {
+            open: true,
+            guilds: page(1, DISCOVERY_PAGE),
+            query: "no match".into(),
+            more: true,
+            ..State::default()
+        };
+        let nav = NavigationSnapshot::default();
+        let pictures = crate::avatars::Views::default();
+        let mut ui = Ui::new(420.0, 500.0, view(&state, &nav, &pictures).unwrap());
+        ui.redraw();
+        ui.draw();
+        let mut more = false;
+        for y in (100..400).step_by(4) {
+            for x in (8..150).step_by(8) {
+                more |= ui
+                    .click(x as f32, y as f32)
+                    .iter()
+                    .any(|event| matches!(event, Event::More));
+            }
+        }
+        assert!(more, "zero matching servers must not hide Show more");
     }
 
     #[test]

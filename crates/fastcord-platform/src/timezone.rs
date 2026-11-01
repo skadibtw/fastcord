@@ -16,17 +16,24 @@ pub enum LocalResult {
     Unsupported,
 }
 pub const fn supported() -> bool {
-    cfg!(unix)
+    cfg!(any(unix, windows))
 }
 #[cfg(unix)]
 pub use native::{offset_at, refresh, resolve};
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{offset_at, refresh, resolve};
+#[cfg(any(windows, test))]
+mod candidates;
+#[cfg(not(any(unix, windows)))]
 pub fn refresh() {}
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn offset_at(_: i64) -> Option<i32> {
     None
 }
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn resolve(_: Civil) -> LocalResult {
     LocalResult::Unsupported
 }

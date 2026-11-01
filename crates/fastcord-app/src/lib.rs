@@ -211,6 +211,8 @@ fn open_link(url: &str) {
 
 /// The whole application; the `fastcord` binary only calls this.
 pub fn run() -> iced::Result {
+    #[cfg(feature = "fake-discord")]
+    fake::init();
     if std::env::args_os().any(|arg| arg == "--packet-helper") {
         let args: Vec<_> = std::env::args().collect();
         if args.len() == 4
@@ -250,13 +252,10 @@ pub fn run() -> iced::Result {
     i18n::set(i18n::Lang::system());
     // One session per process and per sign-in: a second launch hands its link
     // to the first and exits, never opening a second Gateway on the same token.
-    #[cfg(feature = "fake-discord")]
-    fake::init();
     // Fake mode takes no part in the hand-off: it neither receives a real
     // instance's links nor is found by one.
     let arg = std::env::args().nth(1).filter(|_| !fake_mode());
     let (forwarded, requests) = tokio::sync::mpsc::channel(8);
-    notify::set_clicks(forwarded.clone());
     let _instance = if fake_mode() {
         None
     } else {
@@ -274,12 +273,18 @@ pub fn run() -> iced::Result {
     // A daemon, not an application: a watched stream gets a window of its own
     // (`player`), so its pictures never redraw the main window. `boot` opens
     // the main window and `Message::Exit` ends the process.
-    render::daemon(App::boot, App::update, App::window_view)
+    let result = render::daemon(App::boot, App::update, App::window_view)
         .title(App::window_title)
         .theme(App::window_theme)
         .scale_factor(App::window_scale)
         .subscription(App::subscription)
-        .run()
+        .run();
+    // The failed script first follows the ordinary Quit/Exit shutdown path.
+    #[cfg(feature = "fake-discord")]
+    if fake::script_failed() {
+        std::process::exit(1);
+    }
+    result
 }
 
 fn main_window_settings() -> iced::window::Settings {
@@ -692,6 +697,7 @@ enum Message {
     Tray(desktop::TrayEvent),
     /// A second launch handed its argument over (or only asked to be raised).
     Forwarded(fastcord_platform::instance::Forwarded),
+    Notification(notify::Event),
     /// The window's close button: hide to the tray or quit, per the setting.
     CloseRequested,
     /// Leave any call, close the Gateway cleanly and exit.
@@ -874,7 +880,7 @@ impl App {
             gateway
                 .controls
                 .follow_source(self.ui.announce.wanted_follow());
-            gateway.controls.assets_guild(self.ui.assets.wanted());
+            gateway.controls.assets_guild(self.asset_demand());
             gateway
                 .controls
                 .admin_member(self.ui.guild_admin.wanted_member());
@@ -1036,6 +1042,7 @@ impl App {
                 iced::Subscription::run(desktop::tray_stream).map(Message::Tray)
             },
             iced::Subscription::run(desktop::forwarded_stream).map(Message::Forwarded),
+            iced::Subscription::run(notify::stream).map(Message::Notification),
             #[cfg(feature = "fake-discord")]
             iced::Subscription::run(fake::script).map(Message::FakeStep),
         ])
@@ -1659,10 +1666,28 @@ impl App {
 
     #[cfg(feature = "fake-discord")]
     fn fake_step(&mut self, step: fake::Step) -> Task<Message> {
+        if !fake::active() {
+            return Task::none();
+        }
         match step {
             fake::Step::Open(text) => {
                 self.pending_link = desktop::parse(&text);
                 Task::none()
+            }
+            fake::Step::Slash(command) => {
+                if let Some(text) = command.strip_prefix("type ") {
+                    return self.handle(Message::Composer(composer::Event::Action(composer::Act(
+                        iced::widget::text_editor::Action::Edit(
+                            iced::widget::text_editor::Edit::Paste(Arc::new(text.to_owned())),
+                        ),
+                    ))));
+                }
+                if let Some(event) = self.ui.slash.scripted(&command) {
+                    self.handle(Message::Slash(event))
+                } else {
+                    eprintln!("script: slash control unavailable: {command}");
+                    Task::none()
+                }
             }
             fake::Step::Size(width, height) => {
                 iced::window::resize(self.main_window, iced::Size::new(width, height))
@@ -1678,16 +1703,13 @@ impl App {
                 // text primitives still have their widget owners. The returned
                 // pixels are owned before any later app message can rebuild UI.
                 let draw = fake::next_draw(id);
-                Task::future(draw.wait()).then(move |shot| {
-                    if let Some(shot) = shot {
+                Task::future(draw.wait()).then(move |shot| match shot {
+                    Ok(shot) => {
                         Task::done(Message::FakeShot(path.clone(), shot, completion.clone()))
-                    } else {
-                        eprintln!(
-                            "script: screenshot canceled, oversized, or window did not present: {}",
-                            path.display()
-                        );
+                    }
+                    Err(error) => {
                         if let Some(completion) = &completion {
-                            completion.finish();
+                            completion.finish(Err(error));
                         }
                         Task::none()
                     }
@@ -1700,9 +1722,29 @@ impl App {
                 }
                 Task::none()
             }
+            fake::Step::DmSort(sort) => {
+                let Some((session, gateway)) = self.phase.account() else {
+                    return Task::none();
+                };
+                self.handle(Message::Organize(organize::Event::PrivateSort(
+                    organize::SortTarget {
+                        account: session.user.id,
+                        generation: gateway.id,
+                    },
+                    sort,
+                )))
+            }
             fake::Step::Toggle(panel) => {
                 let message = match panel {
                     "search" => Message::Search(search::Event::Toggle),
+                    "discover" => Message::Discover(discover::Event::Toggle),
+                    "discover-filter" => {
+                        Message::Discover(discover::Event::Query("SYNTHETIC".into()))
+                    }
+                    "discover-no-match" => {
+                        Message::Discover(discover::Event::Query("no matching server".into()))
+                    }
+                    "discover-clear" => Message::Discover(discover::Event::Query(String::new())),
                     "pins" => Message::Pins(pins::Event::Toggle),
                     "thread-archive" => {
                         let Some(selection) = self
@@ -1799,7 +1841,7 @@ impl App {
                         };
                         Message::Events(scheduled_events::Event::Open(guild))
                     }
-                    "event-details" | "event-users" => {
+                    "event-details" | "event-users" | "event-edit" => {
                         let Some(event) = self
                             .phase
                             .gateway()
@@ -1810,15 +1852,67 @@ impl App {
                         };
                         Message::Events(if panel == "event-details" {
                             scheduled_events::Event::Show(event)
+                        } else if panel == "event-edit" {
+                            scheduled_events::Event::Edit(event)
                         } else {
                             scheduled_events::Event::ShowUsers(event)
                         })
                     }
                     "event-users-next" => Message::Events(scheduled_events::Event::NextUsers),
                     "event-new" => Message::Events(scheduled_events::Event::New),
-                    "event-weekly" => Message::Events(scheduled_events::Event::Repeat(Some(
-                        fastcord_discord::EventRecurrence::Weekly,
-                    ))),
+                    "event-weekly" => Message::Events(scheduled_events::Event::Repeat(
+                        fastcord_discord::EventRecurrenceChange::Replace(
+                            fastcord_discord::EventRecurrence::Weekly,
+                        ),
+                    )),
+                    "event-once" => Message::Events(scheduled_events::Event::Repeat(
+                        fastcord_discord::EventRecurrenceChange::Clear,
+                    )),
+                    "event-keep-repeat" => Message::Events(scheduled_events::Event::Repeat(
+                        fastcord_discord::EventRecurrenceChange::Keep,
+                    )),
+                    "community-setup" | "community-list-open" => {
+                        let Some(guild) = self
+                            .phase
+                            .gateway()
+                            .and_then(|gateway| gateway.navigation.selected_guild)
+                        else {
+                            return Task::none();
+                        };
+                        Message::Community(community::Event::Open(guild))
+                    }
+                    "community-onboarding" | "community-list-onboarding" => {
+                        Message::Community(community::Event::Tab(community::Tab::Onboarding))
+                    }
+                    "community-question" | "community-list-question" => Message::Community(
+                        community::Event::Onboarding(community::OnbMsg::SelectPrompt(0)),
+                    ),
+                    "community-answer" | "community-list-answer" => Message::Community(
+                        community::Event::Onboarding(community::OnbMsg::SelectOption(0)),
+                    ),
+                    "community-custom" | "community-clear" => {
+                        let Some(event) = self
+                            .ui
+                            .community
+                            .fake_emoji((panel == "community-custom").then_some(Snowflake(901)))
+                        else {
+                            return Task::none();
+                        };
+                        Message::Community(event)
+                    }
+                    "community-discard" => Message::Community(community::Event::Discard),
+                    "community-list-end" => {
+                        return iced::widget::operation::snap_to(
+                            iced::widget::Id::new("community-content"),
+                            iced::widget::scrollable::RelativeOffset { x: 0.0, y: 1.0 },
+                        );
+                    }
+                    "community-emoji-scroll" => {
+                        return iced::widget::operation::scroll_to(
+                            iced::widget::Id::new("community-content"),
+                            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 560.0 },
+                        );
+                    }
                     "onboarding-questions" => {
                         let Some(guild) = self
                             .phase
@@ -1914,6 +2008,7 @@ and a fourth"
             | Message::Initialized(..)
             | Message::VoiceInput(..)
             | Message::Tray(..)
+            | Message::Notification(..)
             | Message::Forwarded(..)
             | Message::CloseRequested
             | Message::Quit
@@ -2144,6 +2239,18 @@ and a fourth"
             .or_else(|| self.ui.automod.page().map(|g| (g, Section::AutoMod)))
             .or_else(|| self.ui.apps.page())
             .or_else(|| self.ui.moderation.page())
+    }
+
+    /// Match the actually rendered settings page, including higher-level screens.
+    fn asset_demand(&self) -> Option<Snowflake> {
+        if self.audio_settings.open || self.compact_call {
+            return None;
+        }
+        match self.server_page()? {
+            (_, server_settings::Section::Expressions) => self.ui.assets.wanted(),
+            (_, server_settings::Section::Community) => self.ui.community.wanted_assets(),
+            _ => None,
+        }
     }
 
     /// Closes every panel that is a settings page.

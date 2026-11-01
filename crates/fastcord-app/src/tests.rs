@@ -127,6 +127,155 @@ fn retired_panel_auth_failures_cannot_reject_the_replacement_account() {
 }
 
 #[tokio::test]
+async fn repeated_manual_reconnect_keeps_pending_mute_while_persistence_is_blocked() {
+    use fastcord_discord::gateway::StopReason;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let mut app = login_app();
+    let session = authenticate(&mut app, Persistence::MemoryOnly);
+    let user = Snowflake(99);
+    let path = std::env::temp_dir()
+        .join(format!(
+            "fastcord-blocked-reconnect-volume-{}",
+            std::process::id()
+        ))
+        .join("voice-settings.csv");
+    let (seed, _) = voice_settings::Writer::at(Some(path.clone()), session.user.id);
+    seed.set(user, 100);
+    assert_eq!(seed.finish_async().await, voice_settings::Status::Saved);
+    let saved = voice_settings::load_from(&path, session.user.id);
+    assert_eq!(saved[0].percent, 100);
+    let (writer, mut statuses) = voice_settings::Writer::at(Some(path.clone()), session.user.id);
+    let thread = writer.thread_id().expect("writer started");
+    app.volume_writer = Some(writer);
+    let owner = app.volume_writer_session;
+
+    // The handshake, not a sleep, makes every reconnect race a real pending
+    // write. The watchdog only releases a regressed blocking UI path so the
+    // test fails instead of leaving the whole test process stuck forever.
+    let (locked, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timeout = timed_out.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = voice_settings::lock_persistence();
+        let _ = locked.send(());
+        if matches!(
+            wait.recv_timeout(Duration::from_secs(30)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            timeout.store(true, Ordering::Relaxed);
+        }
+    });
+    ready.await.unwrap();
+
+    for _ in 0..16 {
+        // A long drag can produce thousands of changes without slider release.
+        // Its final mute must win over the stale on-disk 100% on every restart.
+        for percent in (0..=200).rev() {
+            drop(app.update(Message::SetParticipantVolume(user, percent)));
+        }
+        let (id, _) = gateway_status(&app);
+        drop(app.update(Message::Gateway(
+            id,
+            GatewayStatus::Stopped(StopReason::ReconnectFailures),
+        )));
+        drop(app.update(Message::ReconnectGateway));
+        assert_ne!(gateway_status(&app).0, id);
+        assert_eq!(
+            app.volume_writer.as_ref().unwrap().thread_id(),
+            Some(thread)
+        );
+        assert_eq!(app.volume_writer_session, owner);
+        let controls = &app.phase.gateway().unwrap().controls;
+        assert_eq!(controls.voice_controls().volume_percent(user), 0);
+        // Deliver the real load_from result after reconnect, exactly as the
+        // production async load completion merges it into the replacement.
+        controls.set_volume_settings(saved.clone());
+        assert_eq!(controls.voice_controls().volume_percent(user), 0);
+        assert_eq!(
+            voice_settings::load_from(&path, session.user.id)[0].percent,
+            100
+        );
+    }
+    drop(app.update(Message::VolumeSettingsStatus(
+        owner,
+        voice_settings::Status::Failed,
+    )));
+    assert!(app.volume_notice.is_some());
+    drop(app.update(Message::VolumeSettingsStatus(
+        gateway_status(&app).0,
+        voice_settings::Status::Saved,
+    )));
+    assert!(
+        app.volume_notice.is_some(),
+        "replacement Gateway does not own retained writer status"
+    );
+    drop(app.update(Message::CommitParticipantVolume(user)));
+    let _ = release.send(());
+    holder.join().unwrap();
+    assert!(
+        !timed_out.load(Ordering::Relaxed),
+        "manual reconnect waited for persistence"
+    );
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            statuses.changed().await.unwrap();
+            assert_eq!(*statuses.borrow_and_update(), voice_settings::Status::Saved);
+            if voice_settings::load_from(&path, session.user.id)[0].percent == 0 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("latest coalesced mute flushed");
+    let (id, _) = gateway_status(&app);
+    drop(app.update(Message::Gateway(
+        id,
+        GatewayStatus::Stopped(StopReason::ReconnectFailures),
+    )));
+    drop(app.update(Message::ReconnectGateway));
+    let controls = &app.phase.gateway().unwrap().controls;
+    controls.set_volume_settings(voice_settings::load_from(&path, session.user.id));
+    assert_eq!(controls.voice_controls().volume_percent(user), 0);
+    assert_eq!(
+        app.volume_writer.as_ref().unwrap().thread_id(),
+        Some(thread)
+    );
+    drop(app.update(Message::VolumeSettingsStatus(
+        owner,
+        voice_settings::Status::Saved,
+    )));
+    assert!(app.volume_notice.is_none());
+    let (_, _, writer) = app.teardown_account().unwrap();
+    assert_eq!(
+        writer.unwrap().finish_async().await,
+        voice_settings::Status::Saved
+    );
+    authenticate(&mut app, Persistence::MemoryOnly);
+    assert_ne!(app.volume_writer_session, owner);
+    drop(app.update(Message::VolumeSettingsStatus(
+        owner,
+        voice_settings::Status::Failed,
+    )));
+    assert!(
+        app.volume_notice.is_none(),
+        "retired account writer cannot affect replacement"
+    );
+    let (_, _, writer) = app.teardown_account().unwrap();
+    assert_eq!(
+        writer.unwrap().finish_async().await,
+        voice_settings::Status::Saved
+    );
+    assert_eq!(
+        voice_settings::load_from(&path, session.user.id)[0].percent,
+        0
+    );
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn manual_reconnect_preserves_volume_writer_and_pending_settings() {
     use fastcord_discord::gateway::StopReason;
 
@@ -1715,4 +1864,214 @@ fn production_footer_keeps_six_direct_actions_inside_the_fixed_sidebar() {
             assert!(hit.contains(action), "{action} missing at {width}x{height}");
         }
     }
+}
+
+#[cfg(feature = "fake-discord")]
+mod fake {
+    use super::*;
+
+    #[test]
+    fn script_dispatch_is_inert_without_an_established_loopback_origin() {
+        assert!(!crate::fake::active());
+        let mut app = login_app();
+        assert!(!app.audio_settings.open);
+        assert!(app.pending_link.is_none());
+        for step in [
+            crate::fake::Step::Toggle("audio"),
+            crate::fake::Step::Open("discord://-/channels/@me".into()),
+            crate::fake::Step::Size(900.0, 600.0),
+            crate::fake::Step::Snap("must-not-write.png".into(), None),
+            crate::fake::Step::Join(1, 2),
+            crate::fake::Step::Stream(1.0),
+            crate::fake::Step::Quit,
+        ] {
+            assert_eq!(app.fake_step(step).units(), 0);
+        }
+        assert!(!app.audio_settings.open);
+        assert!(app.pending_link.is_none());
+        let path =
+            std::env::temp_dir().join(format!("fastcord-disabled-shot-{}.png", std::process::id()));
+        assert!(!path.exists());
+        let shot = iced::window::Screenshot::new(vec![0, 0, 0, 255], iced::Size::new(1, 1), 1.0);
+        let _ = app.handle(Message::FakeShot(path.clone(), shot, None));
+        assert!(!path.exists(), "disabled fake capture must not write files");
+    }
+}
+
+#[test]
+fn community_asset_demand_matches_visible_settings_and_releases_hidden_editors() {
+    let mut app = login_app();
+    let session = login::fixture_session();
+    let nav = fastcord_discord::state::navigation::NavigationSnapshot::default();
+    let _ = app.ui.community.update(
+        community::Event::Open(Snowflake(1)),
+        &nav,
+        &session.client,
+        session.user.id,
+    );
+    assert_eq!(app.asset_demand(), None);
+    let _ = app.ui.community.update(
+        community::Event::Tab(community::Tab::Onboarding),
+        &nav,
+        &session.client,
+        session.user.id,
+    );
+    assert_eq!(app.asset_demand(), Some(Snowflake(1)));
+    app.ui.assets.guild = Some(Snowflake(2));
+    assert_eq!(
+        app.server_page(),
+        Some((Snowflake(2), server_settings::Section::Expressions))
+    );
+    assert_eq!(
+        app.asset_demand(),
+        Some(Snowflake(2)),
+        "same priority as the visible page"
+    );
+    app.audio_settings.open = true;
+    assert_eq!(app.asset_demand(), None);
+    app.audio_settings.open = false;
+    app.compact_call = true;
+    assert_eq!(app.asset_demand(), None);
+    app.compact_call = false;
+    app.ui.assets.guild = None;
+    assert_eq!(
+        app.asset_demand(),
+        Some(Snowflake(1)),
+        "community takes the released interest"
+    );
+    let _ = app.ui.community.update(
+        community::Event::Tab(community::Tab::Guide),
+        &nav,
+        &session.client,
+        session.user.id,
+    );
+    assert_eq!(app.asset_demand(), None);
+    let _ = app.ui.community.update(
+        community::Event::Tab(community::Tab::Onboarding),
+        &nav,
+        &session.client,
+        session.user.id,
+    );
+    let _ = app.ui.community.update(
+        community::Event::Close,
+        &nav,
+        &session.client,
+        session.user.id,
+    );
+    assert_eq!(app.asset_demand(), None);
+    app.ui.community.clear();
+    assert_eq!(app.asset_demand(), None);
+}
+
+#[test]
+fn private_sort_real_controls_route_and_reject_retired_account_generations() {
+    use crate::variable_list::harness::Ui;
+    use fastcord_discord::state::navigation::PrivateSort;
+    fn enter(app: &mut App, account: u64) -> organize::SortTarget {
+        let mut session = login::fixture_session();
+        Arc::get_mut(&mut session).unwrap().user.id = Snowflake(account);
+        app.phase = Phase::Authenticating {
+            saved_account: None,
+        };
+        drop(
+            app.update(Message::LoginFinished(Ok(LoginOutcome::Authenticated(
+                session,
+                Persistence::MemoryOnly,
+            )))),
+        );
+        organize::SortTarget {
+            account: Snowflake(account),
+            generation: gateway_status(app).0,
+        }
+    }
+    fn click(target: organize::SortTarget, selected: PrivateSort, unread: bool) -> Message {
+        let mut ui = Ui::new(
+            240.0,
+            60.0,
+            navigation::private_sort_controls(target, selected),
+        );
+        ui.draw();
+        let mut events = ui.click(if unread { 120.0 } else { 35.0 }, 15.0);
+        assert_eq!(events.len(), 1, "{events:?}");
+        events.remove(0)
+    }
+    let mut app = login_app();
+    let a = enter(&mut app, 9_906_106);
+    let old = click(a, PrivateSort::Recent, true);
+    let action = click(a, PrivateSort::Recent, true);
+    assert!(
+        matches!(action, Message::Organize(organize::Event::PrivateSort(
+        target, PrivateSort::UnreadFirst
+    )) if target == a)
+    );
+    let save = app.update(action);
+    assert!(
+        save.units() > 0,
+        "existing local settings writer is scheduled"
+    );
+    drop(save); // Do not write the host's settings during this reducer test.
+    assert_eq!(
+        app.audio_preferences
+            .organize
+            .layout(a.account.0)
+            .private_sort,
+        PrivateSort::UnreadFirst
+    );
+    // The existing save coalescer must retain a second choice made mid-save.
+    drop(app.update(click(a, PrivateSort::UnreadFirst, false)));
+    assert_eq!(
+        app.audio_preferences
+            .organize
+            .layout(a.account.0)
+            .private_sort,
+        PrivateSort::Recent
+    );
+    assert!(app.update(Message::AudioPreferencesSaved(Ok(()))).units() > 0);
+    assert_eq!(
+        app.audio_saving.as_ref().unwrap().organize,
+        app.audio_preferences.organize
+    );
+
+    drop(app.teardown_account());
+    let b = enter(&mut app, 9_906_107);
+    drop(app.update(old));
+    assert_eq!(
+        app.audio_preferences
+            .organize
+            .layout(b.account.0)
+            .private_sort,
+        PrivateSort::Recent
+    );
+    drop(app.update(click(b, PrivateSort::Recent, true)));
+    assert_eq!(
+        app.audio_preferences
+            .organize
+            .layout(b.account.0)
+            .private_sort,
+        PrivateSort::UnreadFirst
+    );
+    drop(app.teardown_account());
+    let again = enter(&mut app, a.account.0);
+    assert_ne!(again.generation, a.generation);
+    let before = app.audio_preferences.organize.clone();
+    assert_eq!(app.update(click(a, PrivateSort::Recent, true)).units(), 0);
+    assert_eq!(
+        app.audio_preferences.organize, before,
+        "A → B → A rejects A's old control"
+    );
+    drop(app.update(click(again, PrivateSort::Recent, true)));
+    assert_eq!(
+        app.audio_preferences
+            .organize
+            .layout(a.account.0)
+            .private_sort,
+        PrivateSort::UnreadFirst
+    );
+    drop(app.teardown_account());
+    app.phase = Phase::Login;
+    assert_eq!(
+        app.update(click(again, PrivateSort::UnreadFirst, false))
+            .units(),
+        0
+    );
 }

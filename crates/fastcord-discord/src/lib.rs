@@ -127,12 +127,13 @@ pub use inbox::{
     NotifySetting,
 };
 pub use interaction::{
-    AppCommand, ArgError, CommandArg, CommandIndex, CommandOption, IndexScope, InteractionContext,
-    InteractionModal, InteractionOutcome, InteractionRequest, MAX_COMMAND_TEXT_CHARS, MAX_COMMANDS,
-    MAX_INDEX_BYTES, ModalInput, OPTION_ATTACHMENT, OPTION_BOOLEAN, OPTION_CHANNEL, OPTION_INTEGER,
-    OPTION_MENTIONABLE, OPTION_NUMBER, OPTION_ROLE, OPTION_STRING, OPTION_SUB_COMMAND, OPTION_USER,
-    OptionChoice, parse_index as parse_command_index, parse_modal as parse_interaction_modal,
-    parse_outcome as parse_interaction_outcome,
+    AppCommand, ArgError, CommandArg, CommandIndex, CommandOption, CommandPath, IndexScope,
+    InteractionContext, InteractionModal, InteractionOutcome, InteractionRequest,
+    MAX_COMMAND_TEXT_CHARS, MAX_COMMAND_VALUE_CHARS, MAX_COMMANDS, MAX_INDEX_BYTES, ModalInput,
+    OPTION_ATTACHMENT, OPTION_BOOLEAN, OPTION_CHANNEL, OPTION_INTEGER, OPTION_MENTIONABLE,
+    OPTION_NUMBER, OPTION_ROLE, OPTION_STRING, OPTION_SUB_COMMAND, OPTION_SUB_COMMAND_GROUP,
+    OPTION_USER, OptionChoice, parse_index as parse_command_index,
+    parse_modal as parse_interaction_modal, parse_outcome as parse_interaction_outcome,
 };
 pub use invite::{
     CREATE_AGES, CREATE_USES, CREATED_MAX_AGE_SECONDS, DISCOVERY_PAGE, DiscoveredGuild, Expiry,
@@ -178,7 +179,7 @@ pub use role_admin::{MAX_OVERWRITES, MAX_ROLE_COLOR, MAX_ROLE_NAME_CHARS, RoleEd
 pub use route::{MajorParameter, Route, RouteKey};
 pub use scheduled_event::{
     DraftError, EVENT_USERS_PAGE, EventAction, EventDraft, EventPermissions, EventRecurrence,
-    EventUser, EventUsers,
+    EventRecurrenceChange, EventUser, EventUsers,
 };
 pub use search::{
     MAX_SEARCH_CHARS, MAX_SEARCH_OFFSET, SEARCH_PAGE_SIZE, SearchHas, SearchOutcome, SearchPage,

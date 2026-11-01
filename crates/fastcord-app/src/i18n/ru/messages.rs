@@ -451,6 +451,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ("Flags", "Флаги"),
     ("All emoji", "Все эмодзи"),
     ("Recent", "Недавние"),
+    ("Unread first", "Сначала непрочитанные"),
+    ("Order on this device", "Порядок на этом устройстве"),
     ("Server emoji", "Эмодзи сервера"),
     ("Unicode variants", "Варианты Unicode"),
     ("Skin tones", "Оттенки кожи"),

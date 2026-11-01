@@ -1628,6 +1628,12 @@ impl History {
         }));
     }
 
+    #[cfg(test)]
+    pub(crate) fn notification_ack_fixture(&self) -> Option<(Snowflake, Snowflake, bool)> {
+        self.ack_inflight
+            .map(|ack| (ack.channel, ack.message, ack.manual))
+    }
+
     /// The user marked a conversation read. `message` is its newest.
     pub fn mark_read(&mut self, rest: &RestClient, channel: Snowflake, message: Snowflake) {
         self.want_ack(rest, channel, message, true);
@@ -5079,6 +5085,52 @@ mod tests {
     }
 
     #[test]
+    fn grouped_ui_action_reaches_worker_validation_and_never_retries_ambiguous_failure() {
+        let action = crate::slash::tests::grouped_ui_action(CHANNEL);
+        let (mut history, _) = interacting_history(0, controls());
+        history.interact(&rest(), action.clone());
+        assert_eq!(
+            history.snapshot().interaction.waiting.as_deref(),
+            Some("admin")
+        );
+        assert_eq!(
+            history.interaction_requests.len(),
+            2,
+            "one REST request and one expiry timer"
+        );
+        history.interact(&rest(), action.clone());
+        assert_eq!(history.interaction_requests.len(), 2);
+        let nonce = pending_nonce(&history);
+        assert!(!history.finish_interaction(InteractionEvent::Sent(
+            nonce,
+            Err(RestError::Retryable(
+                fastcord_discord::RetryableFailure::Network(
+                    fastcord_discord::NetworkFailure::Timeout
+                ),
+            ))
+        )));
+        assert!(
+            history
+                .snapshot()
+                .notice
+                .unwrap()
+                .contains("may have been received")
+        );
+        assert_eq!(
+            history.interaction_requests.len(),
+            2,
+            "ambiguous failure schedules no retry"
+        );
+        history.sendable = None;
+        history.interact(&rest(), action);
+        assert_eq!(
+            history.interaction_requests.len(),
+            2,
+            "permission rechecked in worker"
+        );
+    }
+
+    #[test]
     fn a_command_is_sent_once_waits_per_channel_and_checks_its_arguments() {
         let (mut history, _) = interacting_history(0, controls());
         let index = fastcord_discord::parse_command_index(include_bytes!(
@@ -5092,7 +5144,7 @@ mod tests {
                 Interact::Command {
                     channel: CHANNEL,
                     command: Box::new(roll.clone()),
-                    subcommand: None,
+                    path: fastcord_discord::CommandPath::Root,
                     args: vec![fastcord_discord::CommandArg {
                         name: "sides".into(),
                         kind: fastcord_discord::OPTION_INTEGER,

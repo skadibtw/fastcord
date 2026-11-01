@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Fixed
+- Isolate the scheduled-event edit/cache regression from concurrent account resets, keeping native CI deterministic without changing runtime timezone behavior.
+- Allow explicit whole-series recurrence changes when editing an event: keep the current rule, stop repetition, or choose weekly/every-other-week UTC; preserve unknown rules by default and keep writes gated (#92).
+- Add bounded same-server custom emoji selection and explicit clearing to onboarding answers, rechecking ownership and permissions while preserving unavailable existing emoji and unknown nested fields (#97).
+- Resolve scheduled-event local times on Windows using date-specific native rules; reject DST gaps/folds and failed conversions, preserve historical offsets, and refresh after timezone changes through the existing bounded worker cache (#92).
+- Honor fixed Windows timezone snapshots, including fully disabled DST, without reloading transition dates from the zone registry (#92).
+- Failed scripted screenshots now stop subsequent actions, quit gracefully and exit unsuccessfully; capture cancellation, timeouts, oversize windows and PNG save errors cannot acknowledge stale evidence (#236).
+- Reject nonfinite, overflowing or overlong fake-script waits before running actions; accumulated pauses are capped at ten minutes and invalid waits fail the run instead of panicking its task (#240).
+- Reject scripted launches without a valid fake loopback origin before GUI or account startup; validate missing script/port inputs and keep script streams and dispatch inert outside fake mode (#241).
 
 - Give every rules, onboarding-question and server-guide read its own panel ownership; close, replacement and account reset cancel retired reads without cancelling or retrying pending writes (#243).
 - Keep thread creation responses scoped to their original draft and account; late responses cannot clear a replacement draft or navigate away from the current channel (#238).
@@ -11,6 +19,7 @@
 - Reserve bounded compressed-video backlog for audio-synchronized presentation and repaired bursts; fall back to immediate presentation under queue pressure instead of needlessly breaking the reference chain (#234).
 - Preserve unfinished multi-select answers when reactions or unrelated message fields change; invalidate the draft when its component tree changes or the row becomes hidden, pending, deleted or leaves the conversation (#235).
 - Give each scheduled-event list request distinct ownership and cancel it on close/reopen/reset; ignore stale list, attendee and write authentication failures while preserving in-flight write deduplication (#237).
+- Let Community onboarding role and channel checklists use the available form width and reserve space for their scrollbars, keeping labels such as Moderator readable while long names wrap (#252).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).
 - Compile the VA-API-only RBSP bit-length helper only on Linux, keeping Windows and macOS all-target test builds clean under warnings-as-errors.
@@ -63,6 +72,15 @@
 - Preserve categorical voice reconnect causes and record them in the release voice log, distinguishing signaling Resume (retained UDP/keys) from a new media session (#230).
 
 ### Added
+- Grouped slash-command forms with scoped group/subcommand controls and explicit Run. Command trees are validated and budgeted before typed allocation; obsolete branch fields clear visibly. Interaction routes remain unverified and gated off by default (#100).
+- Filter the loaded public-server discovery pages by name or description with bounded Unicode text; filtering also releases unused icon interests and never fetches another page automatically. Global discovery search and direct discovery joins remain unavailable (#90).
+- Deterministic App regression for repeated manual reconnect during blocked voice-volume persistence: the latest mute survives stale disk snapshots, coalesced dragging, flush and writer/account status changes (#233).
+- System clock format now reads the native Windows/macOS short-time hour-cycle preference during the existing background startup load, honoring user overrides with bounded pattern parsing and unchanged explicit 12/24-hour choices (#103).
+
+- Add Linux packet-session admission and lifetime primitives with kernel-authenticated Unix IPC, bounded socket-FD leases and a guarded real NFQUEUE namespace fixture. The shipping Linux helper remains unsupported pending the privileged launcher, packet engine and native readiness gates (#226).
+- Choose Recent or Unread first for DMs and group DMs on this device, separately for each account. The virtual sidebar and keyboard navigation share the same order; conversations, badges and active selection stay intact (#106; synchronization and other organization features remain outstanding).
+
+- Add an explicit Mark as read action to desktop notifications while Fastcord runs, using the existing ACK queue with account/session and current permission checks; reject forged Linux notification replies/signals and recover service ownership on the next toast after daemon replacement (#105). Reply and activation after process exit remain pending.
 - Browse public, joined-private and manager-only private thread archives with their respective pagination cursors (#63).
 - Browse accessible server channels with bounded search/pages, independently of folded sidebar categories; selection rechecks current permissions (#91).
 - Refuse screening consent when TERMS values are absent or not an array, as well as when rules are truncated (#91).

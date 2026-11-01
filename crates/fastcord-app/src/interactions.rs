@@ -13,7 +13,8 @@
 use std::time::Duration;
 
 use fastcord_discord::{
-    AppCommand, ArgError, CommandArg, NetworkFailure, Nonce, RestError, RetryableFailure,
+    AppCommand, ArgError, CommandArg, CommandPath, NetworkFailure, Nonce, RestError,
+    RetryableFailure,
 };
 use fastcord_model::Snowflake;
 
@@ -47,11 +48,11 @@ pub enum Action {
         custom_id: String,
         values: Vec<String>,
     },
-    /// Run a slash command, optionally through one subcommand.
+    /// Run a slash command through its validated root/subcommand/group path.
     Command {
         channel: Snowflake,
         command: Box<AppCommand>,
-        subcommand: Option<String>,
+        path: CommandPath,
         args: Vec<CommandArg>,
     },
     /// Submit the open modal; one answer per input.
@@ -243,6 +244,8 @@ pub fn failure(error: RestError) -> &'static str {
 /// A fixed sentence for a typed option that cannot be sent.
 pub fn argument(error: ArgError) -> &'static str {
     match error {
+        ArgError::InvalidPath => crate::i18n::tr("That command path is no longer available."),
+        ArgError::TooLong => crate::i18n::tr("An option exceeds 6000 characters."),
         ArgError::Missing => crate::i18n::tr("A required option is empty."),
         ArgError::NotAnInteger => crate::i18n::tr("An option needs a whole number."),
         ArgError::NotANumber => crate::i18n::tr("An option needs a number."),
