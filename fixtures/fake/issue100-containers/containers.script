@@ -1,0 +1,9 @@
+size 1080 720
+wait 2
+open discord://-/channels/5001/6005
+wait 2
+snap containers-wide
+size 760 640
+wait 1
+snap containers-narrow
+quit

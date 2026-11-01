@@ -9,6 +9,8 @@
 //!   disabled with a note: purchases are outside this client.
 //! * String selects with multiple values keep one bounded local draft and send
 //!   only on Submit. Entity selects open a bounded local picker.
+//! * Spoiler containers are a childless placeholder; component-scoped reveal is
+//!   not implemented. Ordinary containers show their optional RGB accent.
 //! * Anything else (thumbnails, galleries, files, unknown types) is a plain
 //!   "Unsupported component" line.
 
@@ -206,12 +208,30 @@ fn component<'a>(item: &'a Component, cx: &Cx<'a>) -> Element<'a, Event> {
             }
             line.into()
         }
-        Component::Container { body, .. } => {
-            container(column(body.iter().map(|c| component(c, cx))).spacing(4))
+        Component::Container { body, accent } => {
+            let content = container(column(body.iter().map(|c| component(c, cx))).spacing(4))
                 .padding(8)
-                .style(container::rounded_box)
+                .width(Length::Fill);
+            let content: Element<'a, Event> = if let Some(rgb) = accent {
+                let color = iced::Color::from_rgb8((rgb >> 16) as u8, (rgb >> 8) as u8, *rgb as u8);
+                row![
+                    container(iced::widget::Space::new().width(4).height(Length::Fill))
+                        .width(4)
+                        .height(Length::Fill)
+                        .style(move |_| container::Style::default().background(color)),
+                    content,
+                ]
+                .height(Length::Shrink)
                 .into()
+            } else {
+                content.into()
+            };
+            container(content).style(container::rounded_box).into()
         }
+        Component::HiddenSpoiler => text(tr("Hidden spoiler content"))
+            .size(14)
+            .color(crate::style::muted())
+            .into(),
         Component::Separator => iced::widget::rule::horizontal(1).into(),
         Component::Unsupported(_) => text(tr("Unsupported component"))
             .size(12)
@@ -435,6 +455,126 @@ mod tests {
             message_id: Snowflake(7),
             custom_id: id.to_owned(),
             values: values.iter().map(|v| (*v).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn hidden_container_has_no_widget_actions_and_nested_visible_controls_still_work() {
+        use iced::advanced::widget::{Id, Operation};
+        #[derive(Default)]
+        struct Labels(Vec<(String, iced::Rectangle)>, Vec<iced::Rectangle>);
+        impl Operation for Labels {
+            fn container(&mut self, _: Option<&Id>, bounds: iced::Rectangle) {
+                self.1.push(bounds);
+            }
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
+                self.0.push((value.to_owned(), bounds));
+            }
+        }
+        let button =
+            serde_json::json!({"type":2,"style":1,"label":"Visible action","custom_id":"visible"});
+        for accent in [
+            serde_json::Value::Null,
+            serde_json::json!(0),
+            serde_json::json!(0xFFFFFF),
+            serde_json::json!(0x123456),
+        ] {
+            let visible = row_with(
+                serde_json::json!([{"type":17,"accent_color":accent,"components":[
+                    {"type":1,"components":[button.clone()]}
+                ]}]),
+                None,
+            );
+            let mut ui = crate::variable_list::harness::Ui::new(
+                320.0,
+                200.0,
+                view(&visible, Snowflake(5), None, None),
+            );
+            assert!(
+                ui.layout_height() > 32.0 && ui.layout_height() < 100.0,
+                "accent bar follows natural content height: {}",
+                ui.layout_height()
+            );
+            ui.redraw();
+            ui.draw();
+            ui.draw_with_theme(&iced::Theme::Light);
+            let mut labels = Labels::default();
+            ui.inspect(&mut labels);
+            let stripes: Vec<_> = labels
+                .1
+                .iter()
+                .filter(|bounds| bounds.width == 4.0)
+                .collect();
+            assert_eq!(
+                stripes.len(),
+                usize::from(!accent.is_null()),
+                "only explicit RGB draws a stripe"
+            );
+            for stripe in stripes {
+                assert!(
+                    (stripe.height - ui.layout_height()).abs() < 0.01,
+                    "stripe fills natural content height, not zero or the viewport: {stripe:?}"
+                );
+            }
+            let bounds = labels
+                .0
+                .iter()
+                .find(|(label, _)| label == "Visible action")
+                .expect("valid container-row-button remains rendered")
+                .1;
+            assert!(bounds.width > 0.0 && bounds.height > 0.0);
+            assert_eq!(
+                ui.click(bounds.center_x(), bounds.center_y()),
+                [press("visible", &[])],
+                "nested button remains reachable with {accent}"
+            );
+        }
+        let hidden = row_with(
+            serde_json::json!([{"type":17,"spoiler":true,"components":[
+                {"type":17,"components":[{"type":1,"components":[button]}]},
+                {"type":6,"custom_id":"hidden-select"}
+            ]}]),
+            None,
+        );
+        assert!(pressable(&hidden).is_empty());
+        let mixed = row_with(
+            serde_json::json!([
+                {"type":17,"spoiler":true,"components":[{"type":1,"components":[{"type":6,"custom_id":"hidden"}]}]},
+                {"type":17,"components":[{"type":1,"components":[{"type":6,"custom_id":"visible-select"}]}]}
+            ]),
+            None,
+        );
+        assert_eq!(
+            select_at(&mixed.message.components, 0).unwrap().custom_id,
+            "visible-select"
+        );
+        assert!(select_at(&mixed.message.components, 1).is_none());
+        assert!(select_at(&hidden.message.components, 0).is_none());
+        let mut ui = crate::variable_list::harness::Ui::new(
+            320.0,
+            200.0,
+            view(&hidden, Snowflake(5), None, None),
+        );
+        ui.redraw();
+        ui.draw();
+        let mut labels = Labels::default();
+        ui.inspect(&mut labels);
+        assert_eq!(
+            labels
+                .0
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            [tr("Hidden spoiler content")]
+        );
+        for (x, y) in [(4.0, 8.0), (36.0, 24.0), (100.0, 20.0)] {
+            assert!(
+                ui.click(x, y).is_empty(),
+                "placeholder cannot reveal or send an action"
+            );
         }
     }
 

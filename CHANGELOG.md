@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Hide channel-name completions from the composer when the current account lacks VIEW_CHANNEL, including after permission revocation (#257).
+- Components V2 containers display optional RGB accents. Spoiler containers (including malformed spoiler flags) now retain only a hidden-content placeholder; their text and controls are discarded until scoped reveal support exists (#263; partial #100).
 
 ### Fixed
 - Preserve shutdown requests across delayed legacy byedpi startup, retry failed shutdown wakes and retain exclusive engine ownership until the worker joins (#259).
