@@ -56,6 +56,14 @@ pub(crate) trait Transport: Send + Sync + 'static {
         url: &GatewayUrl,
     ) -> impl Future<Output = Result<Self::Socket, ConnectError>> + Send;
 
+    fn connect_timed(
+        &self,
+        url: &GatewayUrl,
+        _timing: Option<super::timing::Timing>,
+    ) -> impl Future<Output = Result<Self::Socket, ConnectError>> + Send {
+        self.connect(url)
+    }
+
     /// Completes when the account's authenticated work has been stopped
     /// elsewhere (REST observed a 401, or explicit logout).
     fn authentication_required(&self) -> impl Future<Output = ()> + Send;
@@ -147,6 +155,24 @@ impl Transport for LiveTransport {
 
     async fn connect(&self, url: &GatewayUrl) -> Result<TlsSocket, ConnectError> {
         connect_tls(self.rest.network(), url, &self.rest.identity().properties()).await
+    }
+
+    async fn connect_timed(
+        &self,
+        url: &GatewayUrl,
+        timing: Option<super::timing::Timing>,
+    ) -> Result<TlsSocket, ConnectError> {
+        ws::connect_timed(
+            self.rest.network(),
+            fastcord_net::Role::Gateway,
+            url.as_str(),
+            ORIGIN,
+            &self.rest.identity().properties(),
+            websocket_config(),
+            CONNECT_TIMEOUT,
+            timing,
+        )
+        .await
     }
 
     async fn authentication_required(&self) {

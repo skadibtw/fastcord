@@ -88,7 +88,11 @@ impl Choice {
 
     pub fn source(&self) -> String {
         match self {
-            Self::Unicode(id) => emoji::entries()[usize::from(*id)].text.to_owned(),
+            Self::Unicode(id) => emoji::entries()
+                .get(usize::from(*id))
+                .expect("generated emoji ID")
+                .text
+                .to_owned(),
             Self::Custom {
                 id, animated, name, ..
             } => {
@@ -102,7 +106,13 @@ impl Choice {
         match self {
             Self::Unicode(id) => Emoji {
                 id: None,
-                name: Some(emoji::entries()[usize::from(*id)].text.to_owned()),
+                name: Some(
+                    emoji::entries()
+                        .get(usize::from(*id))
+                        .expect("generated emoji ID")
+                        .text
+                        .to_owned(),
+                ),
                 animated: false,
             },
             Self::Custom {
@@ -117,14 +127,24 @@ impl Choice {
 
     fn name(&self) -> &str {
         match self {
-            Self::Unicode(id) => emoji::entries()[usize::from(*id)].name,
+            Self::Unicode(id) => {
+                emoji::entries()
+                    .get(usize::from(*id))
+                    .expect("generated emoji ID")
+                    .name
+            }
             Self::Custom { name, .. } => name,
         }
     }
 
     fn fallback(&self) -> &str {
         match self {
-            Self::Unicode(id) => emoji::entries()[usize::from(*id)].text,
+            Self::Unicode(id) => {
+                emoji::entries()
+                    .get(usize::from(*id))
+                    .expect("generated emoji ID")
+                    .text
+            }
             Self::Custom { name, .. } => name,
         }
     }
@@ -348,7 +368,9 @@ fn matches_name(name: &str, query: &str) -> bool {
 }
 
 fn unicode_cell(id: u16) -> Cell {
-    let entry = &emoji::entries()[usize::from(id)];
+    let entry = &emoji::entries()
+        .get(usize::from(id))
+        .expect("generated emoji ID");
     let variants = emoji::entries()
         .get(usize::from(id) + 1)
         .is_some_and(|next| next.base == entry.base);
@@ -800,9 +822,17 @@ mod tests {
         assert_eq!(snapshot(&request, &store, &navigation).total, 6);
         request.category = Category::Unicode(8);
         let flags = snapshot(&request, &store, &navigation);
-        assert!(flags.cells.iter().all(|cell| match cell.choice {
-            Choice::Unicode(id) => emoji::entries()[usize::from(id)].category == "Flags",
-            _ => false,
+        assert!(flags.cells.iter().all(|cell| {
+            match cell.choice {
+                Choice::Unicode(id) => {
+                    emoji::entries()
+                        .get(usize::from(id))
+                        .expect("generated emoji ID")
+                        .category
+                        == "Flags"
+                }
+                _ => false,
+            }
         }));
         request.category = Category::All;
         request.window = Window {

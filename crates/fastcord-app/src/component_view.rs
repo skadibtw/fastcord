@@ -7,9 +7,8 @@
 //!   the same message are drawn disabled.
 //! * Link buttons open through the ordinary link path. Premium buttons are
 //!   disabled with a note: purchases are outside this client.
-//! * A string select lists its options as buttons; choosing one sends that one
-//!   value. Selects of users, roles, mentionables and channels, and string
-//!   selects that need more than one value, are shown read-only.
+//! * String selects with multiple values keep one bounded local draft and send
+//!   only on Submit. Entity selects remain read-only.
 //! * Anything else (thumbnails, galleries, files, unknown types) is a plain
 //!   "Unsupported component" line.
 
@@ -21,19 +20,115 @@ use iced::{Element, Length};
 
 use crate::timeline::{Event, Row};
 
+/// One local multi-select draft (at most 25 bits, no text or request queue).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Choices {
+    pub channel: Snowflake,
+    pub message: Snowflake,
+    pub revision: u64,
+    pub select: usize,
+    pub mask: u32,
+}
+
+pub fn select_at(items: &[Component], mut index: usize) -> Option<&Select> {
+    fn walk<'a>(items: &'a [Component], index: &mut usize) -> Option<&'a Select> {
+        for item in items {
+            match item {
+                Component::Select(select) => {
+                    if *index == 0 {
+                        return Some(select);
+                    }
+                    *index -= 1;
+                }
+                Component::Row(body) | Component::Container { body, .. } => {
+                    if let Some(found) = walk(body, index) {
+                        return Some(found);
+                    }
+                }
+                Component::Section { body, accessory } => {
+                    if let Some(found) = walk(body, index) {
+                        return Some(found);
+                    }
+                    if let Some(accessory) = accessory
+                        && let Some(found) = walk(std::slice::from_ref(accessory.as_ref()), index)
+                    {
+                        return Some(found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    walk(items, &mut index)
+}
+
+fn default_mask(select: &Select) -> u32 {
+    select
+        .options
+        .iter()
+        .take(25)
+        .enumerate()
+        .fold(0, |mask, (at, option)| {
+            mask | if option.default { 1 << at } else { 0 }
+        })
+}
+
+/// Validate stale UI input against the current row before changing local choices.
+pub fn toggle(current: Option<Choices>, row: &Row, key: Choices, option: usize) -> Option<Choices> {
+    if row.message.id != key.message
+        || row.message.channel_id != key.channel
+        || row.revision != key.revision
+        || row.component_pending.is_some()
+    {
+        return current;
+    }
+    let Some(select) = select_at(&row.message.components, key.select) else {
+        return current;
+    };
+    if select.disabled
+        || select.kind != 3
+        || select.max_values <= 1
+        || option >= select.options.len()
+        || option >= 25
+    {
+        return current;
+    }
+    let mut next = key;
+    next.mask = current
+        .filter(|held| same_select(*held, key))
+        .map_or_else(|| default_mask(select), |held| held.mask);
+    let bit = 1 << option;
+    if next.mask & bit == 0 && next.mask.count_ones() >= u32::from(select.max_values) {
+        return current;
+    }
+    next.mask ^= bit;
+    Some(next)
+}
+
+fn same_select(a: Choices, b: Choices) -> bool {
+    (a.channel, a.message, a.revision, a.select) == (b.channel, b.message, b.revision, b.select)
+}
+
 struct Cx<'a> {
     channel_id: Snowflake,
     message_id: Snowflake,
     /// The `custom_id` waiting for Discord; every control is locked meanwhile.
     pending: Option<&'a str>,
+    revision: u64,
+    choices: Option<Choices>,
+    next_select: std::cell::Cell<usize>,
 }
 
 /// All components of a row's message.
-pub fn view(row: &Row, channel_id: Snowflake) -> Element<'_, Event> {
+pub fn view(row: &Row, channel_id: Snowflake, choices: Option<Choices>) -> Element<'_, Event> {
     let cx = Cx {
         channel_id,
         message_id: row.message.id,
         pending: row.component_pending.as_deref(),
+        revision: row.revision,
+        choices,
+        next_select: std::cell::Cell::new(0),
     };
     column(row.message.components.iter().map(|c| component(c, &cx)))
         .spacing(4)
@@ -47,7 +142,11 @@ fn component<'a>(item: &'a Component, cx: &Cx<'a>) -> Element<'a, Event> {
             .wrap()
             .into(),
         Component::Button(b) => push_button(b, cx),
-        Component::Select(s) => select(s, cx),
+        Component::Select(s) => {
+            let index = cx.next_select.get();
+            cx.next_select.set(index + 1);
+            select(s, cx, index)
+        }
         Component::Text(content) => text(content.as_str())
             .size(14)
             .wrapping(text::Wrapping::WordOrGlyph)
@@ -135,13 +234,13 @@ fn push_button<'a>(b: &'a Button, cx: &Cx<'a>) -> Element<'a, Event> {
         .into()
 }
 
-fn select<'a>(s: &'a Select, cx: &Cx<'a>) -> Element<'a, Event> {
+fn select<'a>(s: &'a Select, cx: &Cx<'a>, index: usize) -> Element<'a, Event> {
     let shown = if s.placeholder.is_empty() {
         tr("Select")
     } else {
         &s.placeholder
     };
-    if s.kind != 3 || s.min_values > 1 {
+    if s.kind != 3 {
         let what = match s.kind {
             3 => tr("needs several values"),
             5 => tr("users"),
@@ -169,7 +268,19 @@ fn select<'a>(s: &'a Select, cx: &Cx<'a>) -> Element<'a, Event> {
         .color(crate::style::muted())
     ]
     .spacing(2);
-    for option in &s.options {
+    let key = Choices {
+        channel: cx.channel_id,
+        message: cx.message_id,
+        revision: cx.revision,
+        select: index,
+        mask: 0,
+    };
+    let multiple = s.max_values > 1;
+    let mask = cx
+        .choices
+        .filter(|held| same_select(*held, key))
+        .map_or_else(|| default_mask(s), |held| held.mask);
+    for (at, option) in s.options.iter().enumerate() {
         let label = if option.description.is_empty() {
             option.label.clone()
         } else {
@@ -179,16 +290,53 @@ fn select<'a>(s: &'a Select, cx: &Cx<'a>) -> Element<'a, Event> {
             button(
                 text(format!(
                     "{} {label}",
-                    if option.default { "[x]" } else { "[ ]" }
+                    if (multiple && mask & (1 << at) != 0) || (!multiple && option.default) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    }
                 ))
                 .size(13)
                 .wrapping(text::Wrapping::WordOrGlyph),
             )
             .width(Length::Fill)
             .padding([2, 8])
-            .on_press_maybe(option_event(s, &option.value, cx))
+            .on_press_maybe(if multiple {
+                (!s.disabled && cx.pending.is_none())
+                    .then_some(Event::SelectChoice { key, option: at })
+            } else {
+                option_event(s, &option.value, cx)
+            })
             .style(crate::style::secondary_button(false)),
         );
+    }
+    if multiple {
+        let values: Vec<_> = s
+            .options
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| mask & (1 << at) != 0)
+            .map(|(_, option)| option.value.clone())
+            .collect();
+        let valid =
+            values.len() >= usize::from(s.min_values) && values.len() <= usize::from(s.max_values);
+        options = options.push(button(text(tr("Submit"))).on_press_maybe(
+            (valid && !s.disabled && cx.pending.is_none()).then_some(Event::Component {
+                channel_id: cx.channel_id,
+                message_id: cx.message_id,
+                custom_id: s.custom_id.clone(),
+                values,
+            }),
+        ));
+    } else if s.min_values == 0 {
+        options = options.push(button(text(tr("Clear"))).on_press_maybe(
+            (!s.disabled && cx.pending.is_none()).then_some(Event::Component {
+                channel_id: cx.channel_id,
+                message_id: cx.message_id,
+                custom_id: s.custom_id.clone(),
+                values: Vec::new(),
+            }),
+        ));
     }
     container(options).max_width(360).into()
 }
@@ -214,11 +362,14 @@ mod tests {
 
     /// Every event the message's controls can send now.
     fn pressable(row: &Row) -> Vec<Event> {
-        let _ = view(row, Snowflake(5));
+        let _ = view(row, Snowflake(5), None);
         let cx = Cx {
             channel_id: Snowflake(5),
             message_id: Snowflake(7),
             pending: row.component_pending.as_deref(),
+            revision: row.revision,
+            choices: None,
+            next_select: std::cell::Cell::new(0),
         };
         fn walk(items: &[Component], cx: &Cx<'_>, found: &mut Vec<Event>) {
             for item in items {
@@ -271,6 +422,107 @@ mod tests {
         assert_eq!(pressable(&row_with(list, Some("yes"))), [link]);
     }
 
+    fn multi_row() -> Row {
+        row_with(
+            serde_json::json!([{"type": 17, "components": [{"type": 1, "components": [{
+                "type": 3, "custom_id": "multi", "min_values": 2, "max_values": 2,
+                "options": [{"label": "A", "value": "a", "default": true},
+                            {"label": "B", "value": "b"}, {"label": "C", "value": "c"}]
+            }]}]}]),
+            None,
+        )
+    }
+
+    #[test]
+    fn multi_select_drafts_are_bounded_and_stale_changes_are_refused() {
+        let mut row = multi_row();
+        let key = Choices {
+            channel: Snowflake(5),
+            message: Snowflake(7),
+            revision: row.revision,
+            select: 0,
+            mask: 0,
+        };
+        assert_eq!(
+            select_at(&row.message.components, 0).unwrap().custom_id,
+            "multi"
+        );
+        assert!(select_at(&row.message.components, 1).is_none());
+        let chosen = toggle(None, &row, key, 1).unwrap();
+        assert_eq!(chosen.mask, 3, "default A plus chosen B");
+        assert_eq!(
+            toggle(Some(chosen), &row, key, 2),
+            Some(chosen),
+            "maximum two"
+        );
+        assert_eq!(toggle(Some(chosen), &row, key, 25), Some(chosen));
+        let fewer = toggle(Some(chosen), &row, key, 0).unwrap();
+        assert_eq!(
+            fewer.mask, 2,
+            "removing is allowed below minimum before Submit"
+        );
+        row.revision += 1;
+        assert_eq!(
+            toggle(Some(chosen), &row, key, 0),
+            Some(chosen),
+            "stale revision"
+        );
+        row.revision = key.revision;
+        row.component_pending = Some("multi".into());
+        assert_eq!(
+            toggle(Some(chosen), &row, key, 0),
+            Some(chosen),
+            "pending request"
+        );
+    }
+
+    #[test]
+    fn multi_select_ui_emits_local_toggles_and_one_explicit_submission() {
+        use crate::variable_list::harness::Ui;
+        let row = multi_row();
+        let key = Choices {
+            channel: Snowflake(5),
+            message: Snowflake(7),
+            revision: row.revision,
+            select: 0,
+            mask: 3,
+        };
+        let clickable = |choices| {
+            let mut ui = Ui::new(400.0, 400.0, view(&row, Snowflake(5), choices));
+            ui.redraw();
+            ui.draw();
+            let mut found = Vec::new();
+            for y in (0..250).step_by(4) {
+                for x in (0..390).step_by(8) {
+                    for event in ui.click(x as f32, y as f32) {
+                        if !found.contains(&event) {
+                            found.push(event);
+                        }
+                    }
+                }
+            }
+            found
+        };
+        let before = clickable(None);
+        assert!(
+            before
+                .iter()
+                .any(|event| matches!(event, Event::SelectChoice { .. }))
+        );
+        assert!(
+            !before
+                .iter()
+                .any(|event| matches!(event, Event::Component { .. })),
+            "minimum not met"
+        );
+        let after = clickable(Some(key));
+        let writes: Vec<_> = after
+            .into_iter()
+            .filter(|event| matches!(event, Event::Component { .. }))
+            .collect();
+        assert_eq!(writes, [press("multi", &["a", "b"])]);
+    }
+
     #[test]
     fn layout_pieces_draw() {
         let list = serde_json::json!([{"type": 17, "components": [
@@ -278,6 +530,6 @@ mod tests {
             {"type": 9, "components": [{"type": 10, "content": "side"}],
              "accessory": {"type": 2, "style": 1, "label": "Go", "custom_id": "go"}}
         ]}]);
-        let _ = view(&row_with(list, None), Snowflake(5));
+        let _ = view(&row_with(list, None), Snowflake(5), None);
     }
 }

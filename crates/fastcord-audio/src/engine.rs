@@ -239,6 +239,7 @@ pub struct EngineStats {
 
 #[derive(Default)]
 struct Shared {
+    playout: Arc<crate::playout::PlayoutClock>,
     input: Arc<StreamCounters>,
     output: Arc<StreamCounters>,
     capture_enabled: Arc<AtomicBool>,
@@ -307,6 +308,9 @@ pub struct AudioEngine {
 type Ready = Result<(Option<DeviceFormat>, Option<DeviceFormat>), AudioError>;
 
 impl AudioEngine {
+    pub fn playout_clock(&self) -> Arc<crate::playout::PlayoutClock> {
+        Arc::clone(&self.shared.playout)
+    }
     /// Opens the configured devices on a new owner thread and starts
     /// processing. Blocks until the streams are running or have failed, so
     /// call it off the UI thread.
@@ -490,6 +494,7 @@ impl Drop for AudioEngine {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        self.shared.playout.clear();
     }
 }
 
@@ -535,14 +540,21 @@ fn open_playback<B: Backend>(
     counters: &Arc<StreamCounters>,
 ) -> Result<(B::Stream, PlaybackPipeline, StreamFormat), AudioError> {
     let mut producer = None;
+    let mut position = None;
     let (stream, format) = backend.open_output(choice, counters, &mut |format| {
         let (ring, consumer) =
             sample_ring(format.channels, frames_for(format.rate, PLAYBACK_RING_MS));
         producer = Some(ring);
-        OutputCallback::new(consumer, Arc::clone(counters))
+        let clock = Arc::new(crate::playout::OutputPosition::new(
+            format.rate,
+            format.channels,
+        ));
+        position = Some(Arc::clone(&clock));
+        OutputCallback::new(consumer, Arc::clone(counters)).with_position(clock)
     })?;
     let ring = producer.ok_or(AudioError::EngineThread)?;
-    let pipeline = PlaybackPipeline::new(format, ring)?;
+    let mut pipeline = PlaybackPipeline::new(format, ring)?;
+    pipeline.set_output_position(position.ok_or(AudioError::EngineThread)?);
     Ok((stream, pipeline, format))
 }
 
@@ -869,6 +881,9 @@ fn run_owner<B: Backend>(
                 pending[2] = Some(EngineEvent::NoiseSuppressionChanged(status));
             }
         }
+        if playback.is_none() || !output_enabled {
+            shared.playout.clear();
+        }
         if let Some((_, pipeline)) = playback.as_mut() {
             if output_enabled {
                 if let Some(remote) = io.remote_audio.as_mut() {
@@ -884,6 +899,7 @@ fn run_owner<B: Backend>(
                 }
                 if let Some(playback_receiver) = io.playback.as_mut() {
                     pipeline.run(&shared.pipeline, &mut || playback_receiver.try_recv().ok());
+                    pipeline.publish_playout(&shared.playout);
                 }
             } else {
                 for _ in 0..PLAYBACK_QUEUE {
@@ -2572,6 +2588,111 @@ mod tests {
             crate::alloc_counter::callback_heap_ops(),
             heap_before,
             "a device callback touched the heap"
+        );
+    }
+
+    /// Real Linux CPAL/ALSA callbacks, restricted to a separately launched
+    /// private PipeWire server with a named virtual null sink. Never opens input.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires FASTCORD_TEST_VIRTUAL_AUDIO=1 and isolated PipeWire null sink"]
+    fn live_virtual_output_publishes_moving_rtp_clock_and_clears_on_drop() {
+        assert_eq!(
+            std::env::var("FASTCORD_TEST_VIRTUAL_AUDIO").as_deref(),
+            Ok("1")
+        );
+        let runtime =
+            std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("private runtime"));
+        assert!(
+            runtime
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("fc-pw-"),
+            "use the isolated with_pipewire.py harness"
+        );
+        let server = runtime.join("pipewire-0");
+        assert!(server.exists(), "private PipeWire socket");
+        // Exact config pins BOTH the private server and the virtual target.
+        // Reject any hardware/default fallback or additional PCM definition.
+        let expected = format!(
+            "pcm.!default {{ type pipewire server \"{}\" playback_node \"fastcord-clock-null\" hint {{ show on description \"Fastcord isolated clock test\" }} }}",
+            server.display()
+        );
+        let config = std::fs::read_to_string(
+            std::env::var_os("ALSA_CONFIG_PATH").expect("isolated ALSA config"),
+        )
+        .unwrap();
+        assert_eq!(config.trim(), expected);
+        let (engine, channels) = AudioEngine::start(EngineConfig {
+            input: None,
+            output: Some(DeviceChoice::SystemDefault),
+            capture_enabled: false,
+            noise_suppression: NoiseSuppression::Off,
+            echo_cancellation: false,
+            ..EngineConfig::default()
+        })
+        .unwrap();
+        assert!(channels.captured.is_none());
+        let clock = engine.playout_clock();
+        let remote = channels.remote_audio.unwrap();
+        let mut encoder = VoiceEncoder::new(DEFAULT_BITRATE).unwrap();
+        let tone = std::array::from_fn(|i| (i as f32 * 0.0576).sin() * 0.01);
+        let mut previous: Option<crate::playout::PlayoutPoint> = None;
+        let mut advances = 0;
+        for sequence in 0..80u64 {
+            let mut packet = EncodedPacket::empty();
+            encoder.encode_mono(&tone, &mut packet).unwrap();
+            remote
+                .try_send(RemoteFrame {
+                    ssrc: 42,
+                    sequence,
+                    timestamp: (u32::MAX - 960).wrapping_add(sequence as u32 * 960),
+                    packet,
+                    read_at: Instant::now(),
+                })
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            if let Some(point) = clock.point(42) {
+                assert!(point.at >= point.observed_at);
+                assert!(point.at.duration_since(point.observed_at) <= Duration::from_secs(1));
+                if let Some(old) = previous
+                    && point.observed_at > old.observed_at
+                {
+                    let ticks = point.rtp_timestamp.wrapping_sub(old.rtp_timestamp);
+                    assert!(
+                        (1..48_000).contains(&ticks),
+                        "output cursor must move forward within the synthetic run"
+                    );
+                    advances += 1;
+                }
+                previous = Some(point);
+            }
+        }
+        let stats = engine.stats();
+        assert_eq!(stats.input_callbacks, 0);
+        assert!(stats.output_callbacks > 10);
+        assert!(
+            advances > 5,
+            "native CPAL timestamps did not produce fresh moving RTP anchors: {stats:?}"
+        );
+        let (_, output_callbacks) = engine.callback_probes();
+        drop(engine);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while output_callbacks.upgrade().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            output_callbacks.upgrade().is_none(),
+            "native output callback closures retired"
+        );
+        assert!(
+            clock.point(42).is_none(),
+            "drop clears externally held clock snapshots"
+        );
+        println!(
+            "private virtual CPAL output: {advances} moving anchors, {} callbacks; no input opened",
+            stats.output_callbacks
         );
     }
 

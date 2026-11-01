@@ -114,22 +114,47 @@ pub async fn resolve_versions(network: &fastcord_net::NetworkContext) -> Version
     if crate::fake_origin::active() {
         return Versions::bundled(os);
     }
-    resolve_once(&RESOLVED, async move {
+    let tracing = std::env::var_os("FASTCORD_GATEWAY_TIMING").is_some();
+    let started = tracing.then(tokio::time::Instant::now);
+    let cached = RESOLVED.get().is_some();
+    let mut fetched = false;
+    let mut manifest_us = None;
+    let mut build_us = None;
+    let result = resolve_once(&RESOLVED, async {
+        fetched = true;
         let (manifest, build) = tokio::join!(
-            fetch_manifest(network, os, APP_ARCH),
-            fetch_build_number(network)
+            measured_version_fetch(fetch_manifest(network, os, APP_ARCH), tracing),
+            measured_version_fetch(fetch_build_number(network), tracing)
         );
+        manifest_us = manifest.1;
+        build_us = build.1;
         let mut versions = Versions::bundled(os);
-        if let Some(release) = manifest {
+        if let Some(release) = manifest.0 {
             versions.client_version = release.host_version;
             versions.native_build_number = Some(release.metadata_version);
         }
-        if let Some(build) = build {
+        if let Some(build) = build.0 {
             versions.client_build_number = build;
         }
         versions
     })
-    .await
+    .await;
+    if let Some(started) = started {
+        eprintln!(
+            "Gateway versions timing: cached={cached} fetched={fetched} total_us={} manifest_us={manifest_us:?} build_us={build_us:?}",
+            started.elapsed().as_micros()
+        );
+    }
+    result
+}
+
+async fn measured_version_fetch<T>(
+    future: impl Future<Output = T>,
+    enabled: bool,
+) -> (T, Option<u128>) {
+    let started = enabled.then(tokio::time::Instant::now);
+    let result = future.await;
+    (result, started.map(|at| at.elapsed().as_micros()))
 }
 
 /// The cached value, or `fetch` run once (concurrent callers share that run).
@@ -1184,5 +1209,26 @@ mod tests {
         );
         assert_eq!(chromium, CHROMIUM_VERSION, "Chromium runtime pair drift");
         assert_eq!(electron, ELECTRON_VERSION, "Electron runtime pair drift");
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    #[tokio::test(start_paused = true)]
+    async fn version_fetch_timing_includes_wait_without_changing_the_result() {
+        let (value, elapsed) = super::measured_version_fetch(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(9)).await;
+                42
+            },
+            true,
+        )
+        .await;
+        assert_eq!(value, 42);
+        assert_eq!(elapsed, Some(9000));
+        assert_eq!(
+            super::measured_version_fetch(async { 7 }, false).await,
+            (7, None)
+        );
     }
 }

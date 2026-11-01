@@ -442,6 +442,20 @@ impl Harness {
         }
     }
 
+    async fn retry_event(&mut self) -> (RetryCause, bool) {
+        loop {
+            if let VoiceEvent::Retry {
+                cause,
+                attempt,
+                resume,
+            } = self.event().await
+            {
+                assert!(attempt > 0);
+                return (cause, resume);
+            }
+        }
+    }
+
     async fn event(&mut self) -> VoiceEvent {
         timeout(Duration::from_secs(600), self.session.next_event())
             .await
@@ -589,6 +603,16 @@ async fn install_test_dave_group_for(
     channel_id: u64,
     group_id: u64,
 ) -> TestDaveGroup {
+    install_test_dave_group_with_receive_health(harness, ws, channel_id, group_id, false).await
+}
+
+async fn install_test_dave_group_with_receive_health(
+    harness: &Harness,
+    ws: &mut Ws,
+    channel_id: u64,
+    group_id: u64,
+    failed: bool,
+) -> TestDaveGroup {
     const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256;
     let Message::Binary(client_key_package) = ws.0.next().await.unwrap().unwrap() else {
         panic!("expected DAVE key package")
@@ -638,9 +662,20 @@ async fn install_test_dave_group_for(
     ws.0.send(Message::binary(frame)).await.unwrap();
     assert_eq!(ws.recv_op(23).await["d"]["transition_id"], 1);
     ws.send(json!({"op": 22, "d": {"transition_id": 1}})).await;
-    harness
-        .wait_status(|status| matches!(status, VoiceStatus::Connected { .. }))
-        .await;
+    if failed {
+        // Ordered WS barrier: transition execution has been handled before this reply.
+        ws.send(json!({"op":3,"d":null})).await;
+        let heartbeat = ws.recv_op(3).await;
+        ws.send(json!({"op":6,"d":{"t":heartbeat["d"]["t"]}})).await;
+        assert_eq!(
+            harness.session.status(),
+            VoiceStatus::IncomingAudioDecryptionFailed
+        );
+    } else {
+        harness
+            .wait_status(|status| matches!(status, VoiceStatus::Connected { .. }))
+            .await;
+    }
     TestDaveGroup {
         peer,
         provider,
@@ -845,6 +880,51 @@ async fn rtp_timestamps_follow_real_time_across_silence() {
     for i in 1..sent.len() {
         assert_eq!(sent[i].sequence, sent[i - 1].sequence.wrapping_add(1));
     }
+}
+
+/// Soundshare SRs keep the audio clock aligned with wall time even when a
+/// quiet application has stopped sending packets before the report deadline.
+#[tokio::test(start_paused = true)]
+async fn soundshare_sender_report_extrapolates_the_audio_clock_through_silence() {
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    let (mut udp, _) = negotiate(&mut harness, &mut ws, &BOTH_MODES).await;
+    ws.send(session_description("aead_aes256_gcm_rtpsize"))
+        .await;
+    let _fixture = install_test_dave_group(&harness, &mut ws).await;
+    let key = TransportKey::from_slice(&KEY).unwrap();
+    let cipher = TransportCipher::new(TransportMode::Aes256GcmRtpSize, &key);
+    let sent_at = Instant::now();
+    harness
+        .session
+        .media()
+        .send_soundshare(b"frame".to_vec())
+        .unwrap();
+    let sent = open_rtp(&cipher, &udp.recv().await).0;
+    let datagram = udp.recv().await;
+    let elapsed = Instant::now().duration_since(sent_at);
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "report must follow real silence"
+    );
+    let mut plain = Vec::new();
+    cipher.open(&datagram, RTCP_CLEAR_LEN, &mut plain).unwrap();
+    let mut compound = datagram[..RTCP_CLEAR_LEN].to_vec();
+    compound.extend_from_slice(&plain);
+    let crate::rtcp::RtcpPacket::SenderReport(report) = crate::rtcp::Compound::new(&compound)
+        .next()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected authenticated sender report")
+    };
+    let ticks = (elapsed.as_nanos() * 48_000 / 1_000_000_000) as u32;
+    assert_eq!(
+        report.info.rtp_timestamp,
+        sent.timestamp.wrapping_add(ticks)
+    );
+    assert_eq!(report.info.packet_count, 1);
+    assert_ne!(report.info.ntp_timestamp, 0);
 }
 
 /// One server RTP datagram from `ssrc`.
@@ -1091,6 +1171,10 @@ async fn heartbeats_ack_sequences_and_resume_keeps_transport_without_releasing_m
     let unanswered = ws.recv_raw().await;
     assert_eq!(unanswered["d"]["t"], 7_001);
     // No ACK: at the next interval the connection is a zombie and resumes.
+    assert_eq!(
+        harness.retry_event().await,
+        (RetryCause::HeartbeatAckTimeout, true)
+    );
     harness
         .wait_status(|s| matches!(s, VoiceStatus::Resuming { .. }))
         .await;
@@ -1162,6 +1246,10 @@ async fn close_codes_decide_between_stopping_and_resuming() {
     let mut second = signaling.accept().await;
     connected(&mut harness, &mut ws).await;
     ws.close(4015).await;
+    assert_eq!(
+        harness.retry_event().await,
+        (RetryCause::ServerClose(Some(4015)), true)
+    );
     second.hello(QUIET_HEARTBEAT_MS).await;
     assert_eq!(second.recv_op(7).await["op"], 7);
 
@@ -1176,6 +1264,23 @@ async fn close_codes_decide_between_stopping_and_resuming() {
     second.send(ready(&BOTH_MODES)).await;
     harness.udp().await;
     assert_eq!(harness.binds.lock().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_diagnostics_distinguish_phase_deadline_and_abrupt_socket_loss() {
+    let (mut harness, signaling) = Harness::start(options());
+    let _ws = signaling.accept().await;
+    assert_eq!(
+        harness.retry_event().await,
+        (RetryCause::PhaseTimeout(RetryPhase::Hello), false)
+    );
+    let (mut harness, signaling) = Harness::start(options());
+    let mut ws = signaling.accept().await;
+    ws.hello(QUIET_HEARTBEAT_MS).await;
+    ws.recv_op(0).await;
+    drop(ws);
+    // Tungstenite categorizes an unclean transport EOF as a read error.
+    assert_eq!(harness.retry_event().await, (RetryCause::ReadError, false));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1619,4 +1724,26 @@ async fn audio_refused_for_a_whole_run_rebuilds_the_keys_once() {
     assert!(stats.audio_rejected_by_dave >= 50, "{stats:?}");
     assert_eq!(stats.dave_stuck_recoveries, 1);
     assert!(harness.session.next_audio().now_or_never().is_none());
+    assert_eq!(
+        harness.session.status(),
+        VoiceStatus::IncomingAudioDecryptionFailed
+    );
+    let mut recovered = install_test_dave_group_with_receive_health(
+        &harness, &mut ws, channel_id, channel_id, true,
+    )
+    .await;
+    // A valid welcome/execute alone did not clear the failed-receive indication.
+    let sealed = recovered
+        .peer
+        .encrypt_opus(b"audio-after-recovery")
+        .unwrap();
+    udp.send(server_rtp(&mut sender, 555, 61, &sealed));
+    let received = timeout(Duration::from_secs(1), harness.session.next_audio())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.payload, b"audio-after-recovery");
+    harness
+        .wait_status(|s| matches!(s, VoiceStatus::Connected { .. }))
+        .await;
 }

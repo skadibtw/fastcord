@@ -59,3 +59,8 @@ pub use mic_test::{MicTest, MicTestFailure, MicTestMode, MicTestPhase, MicTestSn
 pub use pipeline::{CapturedFrame, RemoteFrame};
 pub use recorder::{RecorderSnapshot, Recording, RecordingFailure, VoiceRecorder};
 pub use resample::UnsupportedRate;
+
+pub mod playout;
+
+#[cfg(feature = "test-support")]
+pub use pipeline::test_support;

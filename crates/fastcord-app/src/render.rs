@@ -112,7 +112,11 @@ fn adapter_missing(error: &gpu::window::compositor::Error) -> bool {
 }
 
 // The newtype changes iced's associated compositor, not its rendering engine.
-struct NativeRenderer(iced::Renderer, Vec<SoftwareVideo>);
+struct NativeRenderer(
+    iced::Renderer,
+    Vec<SoftwareVideo>,
+    #[cfg(feature = "fake-discord")] Option<iced::window::Id>,
+);
 
 enum NativeCompositor {
     Gpu(Box<gpu::window::Compositor>),
@@ -139,6 +143,8 @@ impl graphics::Compositor for NativeCompositor {
         shell: graphics::Shell,
         _backend: Option<&str>,
     ) -> Result<Self, graphics::Error> {
+        #[cfg(feature = "fake-discord")]
+        crate::fake::set_draw_shell(shell.clone());
         let mut native_settings = gpu_settings(settings);
         if let Some(present_mode) = gpu::settings::present_mode_from_env() {
             native_settings.present_mode = present_mode;
@@ -169,7 +175,12 @@ impl graphics::Compositor for NativeCompositor {
                 iced_renderer::fallback::Renderer::Secondary(compositor.renderer())
             }
         };
-        NativeRenderer(renderer, Vec::new())
+        NativeRenderer(
+            renderer,
+            Vec::new(),
+            #[cfg(feature = "fake-discord")]
+            None,
+        )
     }
 
     fn create_surface<W: compositor::Window + Clone>(
@@ -218,6 +229,8 @@ impl graphics::Compositor for NativeCompositor {
         }
     }
 
+    // The fake feature inspects the result before returning it.
+    #[cfg_attr(not(feature = "fake-discord"), allow(clippy::let_and_return))]
     fn present(
         &mut self,
         renderer: &mut Self::Renderer,
@@ -226,7 +239,9 @@ impl graphics::Compositor for NativeCompositor {
         background_color: core::Color,
         on_pre_present: impl FnOnce(),
     ) -> Result<(), compositor::SurfaceError> {
-        match (self, &mut renderer.0, surface) {
+        #[cfg(feature = "fake-discord")]
+        let capture = renderer.2.and_then(crate::fake::take_capture);
+        let result = match (&mut *self, &mut renderer.0, surface) {
             (
                 Self::Gpu(compositor),
                 iced_renderer::fallback::Renderer::Primary(renderer),
@@ -251,7 +266,23 @@ impl graphics::Compositor for NativeCompositor {
                 on_pre_present,
             ),
             _ => unreachable!("renderer and surface belong to their compositor"),
+        };
+        #[cfg(feature = "fake-discord")]
+        if result.is_ok()
+            && let Some(capture) = capture
+            && !capture.is_closed()
+            && crate::fake::capture_size_allowed(viewport.physical_size())
+        {
+            // No event-loop yield or app update between draw/present and
+            // capture: weak text primitives still have their widget owners.
+            let bytes = self.screenshot(renderer, viewport, background_color);
+            let _ = capture.send(iced::window::Screenshot::new(
+                bytes,
+                viewport.physical_size(),
+                viewport.scale_factor(),
+            ));
         }
+        result
     }
 
     fn screenshot(
@@ -386,7 +417,14 @@ impl renderer::Headless for NativeRenderer {
                     Some("tiny-skia"),
                 )
                 .await
-                .map(|renderer| Self(renderer, Vec::new()));
+                .map(|renderer| {
+                    Self(
+                        renderer,
+                        Vec::new(),
+                        #[cfg(feature = "fake-discord")]
+                        None,
+                    )
+                });
             }
         };
 
@@ -426,6 +464,8 @@ impl renderer::Headless for NativeRenderer {
                 default_text_size,
             )),
             Vec::new(),
+            #[cfg(feature = "fake-discord")]
+            None,
         ))
     }
 
@@ -456,7 +496,11 @@ where
         state: &'a State,
         window: iced::window::Id,
     ) -> core::Element<'a, Message, Theme, NativeRenderer> {
-        core::Element::new(NativeWidget(self.0.view(state, window)))
+        core::Element::new(NativeWidget {
+            content: self.0.view(state, window),
+            #[cfg(feature = "fake-discord")]
+            window: Some(window),
+        })
     }
 }
 
@@ -466,37 +510,45 @@ where
     V: ViewFn<'a, State, Message, Theme, iced::Renderer>,
 {
     fn view(&self, state: &'a State) -> core::Element<'a, Message, Theme, NativeRenderer> {
-        core::Element::new(NativeWidget(self.0.view(state)))
+        core::Element::new(NativeWidget {
+            content: self.0.view(state),
+            #[cfg(feature = "fake-discord")]
+            window: None,
+        })
     }
 }
 
 // Bridge only the root, not every child. Forward the original tree unchanged so
 // focus, scrolling, QR geometry caches, and all widget state survive rebuilding.
-struct NativeWidget<'a, Message>(Element<'a, Message>);
+struct NativeWidget<'a, Message> {
+    content: Element<'a, Message>,
+    #[cfg(feature = "fake-discord")]
+    window: Option<iced::window::Id>,
+}
 
 impl<'a, Message: 'a> core::Widget<Message, Theme, NativeRenderer> for NativeWidget<'a, Message> {
     fn size(&self) -> core::Size<core::Length> {
-        self.0.as_widget().size()
+        self.content.as_widget().size()
     }
 
     fn size_hint(&self) -> core::Size<core::Length> {
-        self.0.as_widget().size_hint()
+        self.content.as_widget().size_hint()
     }
 
     fn tag(&self) -> widget::tree::Tag {
-        self.0.as_widget().tag()
+        self.content.as_widget().tag()
     }
 
     fn state(&self) -> widget::tree::State {
-        self.0.as_widget().state()
+        self.content.as_widget().state()
     }
 
     fn children(&self) -> Vec<widget::Tree> {
-        self.0.as_widget().children()
+        self.content.as_widget().children()
     }
 
     fn diff(&self, tree: &mut widget::Tree) {
-        self.0.as_widget().diff(tree);
+        self.content.as_widget().diff(tree);
     }
 
     fn layout(
@@ -505,7 +557,9 @@ impl<'a, Message: 'a> core::Widget<Message, Theme, NativeRenderer> for NativeWid
         renderer: &NativeRenderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        self.0.as_widget_mut().layout(tree, &renderer.0, limits)
+        self.content
+            .as_widget_mut()
+            .layout(tree, &renderer.0, limits)
     }
 
     fn operate(
@@ -515,7 +569,7 @@ impl<'a, Message: 'a> core::Widget<Message, Theme, NativeRenderer> for NativeWid
         renderer: &NativeRenderer,
         operation: &mut dyn widget::Operation,
     ) {
-        self.0
+        self.content
             .as_widget_mut()
             .operate(tree, layout, &renderer.0, operation);
     }
@@ -531,7 +585,7 @@ impl<'a, Message: 'a> core::Widget<Message, Theme, NativeRenderer> for NativeWid
         shell: &mut core::Shell<'_, Message>,
         viewport: &core::Rectangle,
     ) {
-        self.0.as_widget_mut().update(
+        self.content.as_widget_mut().update(
             tree,
             event,
             layout,
@@ -559,7 +613,7 @@ impl<'a, Message: 'a> core::Widget<Message, Theme, NativeRenderer> for NativeWid
             std::mem::swap(&mut *layers, &mut renderer.1);
             layers.clear();
         });
-        self.0.as_widget().draw(
+        self.content.as_widget().draw(
             tree,
             &mut renderer.0,
             theme,
@@ -571,6 +625,10 @@ impl<'a, Message: 'a> core::Widget<Message, Theme, NativeRenderer> for NativeWid
         SOFTWARE_VIDEO.with(|layers| {
             std::mem::swap(&mut *layers.borrow_mut(), &mut renderer.1);
         });
+        #[cfg(feature = "fake-discord")]
+        {
+            renderer.2 = self.window;
+        }
     }
 
     fn mouse_interaction(
@@ -581,7 +639,7 @@ impl<'a, Message: 'a> core::Widget<Message, Theme, NativeRenderer> for NativeWid
         viewport: &core::Rectangle,
         renderer: &NativeRenderer,
     ) -> mouse::Interaction {
-        self.0
+        self.content
             .as_widget()
             .mouse_interaction(tree, layout, cursor, viewport, &renderer.0)
     }
@@ -594,7 +652,7 @@ impl<'a, Message: 'a> core::Widget<Message, Theme, NativeRenderer> for NativeWid
         viewport: &core::Rectangle,
         translation: core::Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, NativeRenderer>> {
-        self.0
+        self.content
             .as_widget_mut()
             .overlay(tree, layout, &renderer.0, viewport, translation)
             .map(|overlay| overlay::Element::new(Box::new(NativeOverlay(overlay))))

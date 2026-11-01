@@ -1,12 +1,14 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["vendor/block", "vendor/coreaudio-rs"]
+exclude = ["vendor/block", "vendor/coreaudio-rs", "vendor/ashpd"]
 
 # coreaudio-rs 0.14.2 leaks callback allocations when registration fails (#68).
 # block 0.1.6 declares an uninhabited foreign static; keep Metal's existing
 # dependency/API while fixing its opaque class declaration (see provenance).
+# ashpd 0.11.1 lacks the ScreenCast v6 object serial accessor (#33).
 [patch.crates-io]
+ashpd = { path = "vendor/ashpd" }
 block = { path = "vendor/block" }
 coreaudio-rs = { path = "vendor/coreaudio-rs" }
 
@@ -75,6 +77,7 @@ tls_codec = { version = "=0.4.2" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 iced = { version = "0.14", default-features = false, features = ["advanced", "canvas", "image-without-codecs", "wgpu", "tiny-skia", "tokio", "x11", "wayland", "qr_code"] }
+iced_runtime = "0.14"
 iced_renderer = { version = "0.14", default-features = false }
 iced_tiny_skia = { version = "0.14", default-features = false, features = ["image"] }
 keyring-core = "1.0.0"
@@ -100,6 +103,7 @@ symphonia-bundle-mp3 = { version = "0.6.1", default-features = false, features =
 symphonia-codec-aac = "0.6.1"
 symphonia-core = { version = "0.6.1", default-features = false }
 sys-locale = "0.3"
+libc = "0.2.190"
 softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 tiny-skia = { version = "0.11.4", default-features = false, features = ["std", "simd"] }
 time = { version = "0.3", default-features = false, features = ["std", "parsing", "local-offset"] }

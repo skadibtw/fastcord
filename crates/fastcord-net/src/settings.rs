@@ -48,6 +48,14 @@ pub struct RoleHint {
 }
 
 impl RoleHint {
+    pub(crate) fn confirmed(role: Role, strategy: Strategy, confirmed_at_unix_secs: u64) -> Self {
+        Self {
+            role,
+            strategy: strategy.into(),
+            confirmed_at_unix_secs,
+        }
+    }
+
     pub fn strategy(&self) -> Strategy {
         self.strategy.into()
     }
@@ -55,6 +63,7 @@ impl RoleHint {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum SavedStrategy {
+    Profile(crate::tls::TlsShape),
     Direct,
     TlsRecordSplit,
     WriteSplit,
@@ -70,6 +79,7 @@ impl From<Strategy> for SavedStrategy {
     fn from(strategy: Strategy) -> Self {
         match strategy {
             Strategy::Direct => Self::Direct,
+            Strategy::Profile(shape) => Self::Profile(shape),
             Strategy::TlsRecordSplit => Self::TlsRecordSplit,
             Strategy::WriteSplit => Self::WriteSplit,
             Strategy::Combined => Self::Combined,
@@ -86,6 +96,7 @@ impl From<SavedStrategy> for Strategy {
     fn from(strategy: SavedStrategy) -> Self {
         match strategy {
             SavedStrategy::Direct => Self::Direct,
+            SavedStrategy::Profile(shape) => Self::Profile(shape),
             SavedStrategy::TlsRecordSplit => Self::TlsRecordSplit,
             SavedStrategy::WriteSplit => Self::WriteSplit,
             SavedStrategy::Combined => Self::Combined,
@@ -364,6 +375,29 @@ fn deserialize_hints<'de, D: Deserializer<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extended_profile_hint_roundtrips_without_endpoints_and_versions_expire_it() {
+        let mut settings = Settings::default();
+        let profile = Strategy::Profile(crate::tls::TlsShape::Fragments {
+            count: crate::tls::FragmentCount::Six,
+            offset: crate::tls::WriteOffset::After,
+            pacing: crate::tls::WritePacing::Ms30,
+        });
+        settings
+            .remember_hint(&"a".repeat(64), Role::Rest, profile, 100)
+            .unwrap();
+        let encoded = settings.encode(100).unwrap();
+        let decoded = Settings::decode(&encoded, 100).unwrap();
+        assert_eq!(decoded.profiles[0].hints[0].strategy(), profile);
+        settings.catalog_version = CATALOG_VERSION - 1;
+        assert!(
+            Settings::decode(&settings.encode(100).unwrap(), 100)
+                .unwrap()
+                .profiles
+                .is_empty()
+        );
+    }
 
     #[test]
     fn defaults_are_off_and_do_not_enable_udp() {

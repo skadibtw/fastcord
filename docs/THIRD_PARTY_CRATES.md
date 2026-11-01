@@ -40,7 +40,7 @@ standard text of its declared license, credited to the authors in its manifest.
 | arrayvec | 0.7.8 | MIT OR Apache-2.0 | crates.io |
 | as-raw-xcb-connection | 1.0.1 | MIT OR Apache-2.0 | crates.io |
 | ash | 0.38.0+1.3.281 | MIT OR Apache-2.0 | crates.io |
-| ashpd | 0.11.1 | MIT | crates.io |
+| ashpd | 0.11.1 | MIT | path |
 | async-broadcast | 0.7.2 | MIT OR Apache-2.0 | crates.io |
 | async-channel | 2.5.0 | Apache-2.0 OR MIT | crates.io |
 | async-compression | 0.4.51 | MIT OR Apache-2.0 | crates.io |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerates crates/fastcord-app/src/emoji_index.rs from pinned sources.
+"""Regenerates the compact emoji-index.bin from pinned sources.
 
 Inputs (all in this repository):
   source/emoji-data-16.0.0.json    iamcal/emoji-data v16.0.0 emoji.json (MIT)
@@ -12,7 +12,7 @@ Inputs (all in this repository):
       DIR is the extracted assets/72x72 of the Twemoji release: verify (or with
       --write-bin rewrite) the bundle and the file list from it first.
 
-Rules (reproduce the table committed in M15 byte for byte):
+Rules (preserve the logical table committed in M15):
   * emoji by sort_order, each followed by its skin variations in file order;
   * the image is the lowercase unpadded unified sequence, or, without ZWJ, that
     sequence without FE0F; emoji with no such image are skipped;
@@ -32,7 +32,11 @@ ROOT = HERE.parents[1]
 SRC = HERE / "source" / "emoji-data-16.0.0.json"
 NAMES = HERE / "source" / "twemoji-17.0.3-files.txt"
 BIN = HERE / "twemoji-17.0.3.bin"
-OUT = ROOT / "crates" / "fastcord-app" / "src" / "emoji_index.rs"
+OUT = HERE / "emoji-index.bin"
+MAGIC = b"FCEMIDX1"
+HEADER_SIZE = 32
+ENTRY_SIZE = 44
+LOOKUP_SIZE = 12
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
 
@@ -67,7 +71,7 @@ def from_twemoji(directory: Path, write: bool) -> None:
         sys.exit("twemoji directory differs from the committed bundle or file list")
 
 
-def render() -> str:
+def records():
     stems = NAMES.read_text(encoding="utf8").split("\n")[:-1]
     lens = split_png(BIN.read_bytes())
     assert len(stems) == len(lens), "file list and bundle disagree"
@@ -103,31 +107,40 @@ def render() -> str:
             if non_qualified and "-" in non_qualified:
                 lookup.setdefault(text(non_qualified), idx)
 
-    out = [
-        "// Generated from iamcal/emoji-data v16.0.0 (Unicode 16.0), MIT; Twemoji v17.0.3, CC-BY-4.0.",
-        "// Source commits and content hashes are recorded in assets/emoji/NOTICE.txt.",
-        "use super::Entry;",
-        "pub static ENTRIES: &[Entry] = &[",
-    ]
-    for t, e, base, (o, n) in entries:
+    return entries, sorted(lookup.items(), key=lambda kv: kv[0].encode())
+
+
+def render() -> bytes:
+    entries, lookup = records()
+    assert len(entries) <= 65536, "runtime emoji IDs are u16"
+    strings, offsets = bytearray(), {}
+
+    def intern(value):
+        encoded = value.encode("utf8")
+        if encoded not in offsets:
+            offsets[encoded] = (len(strings), len(encoded))
+            strings.extend(encoded)
+        return offsets[encoded]
+
+    def record(values):
+        assert all(0 <= value <= 0xffffffff for value in values), "u32 index overflow"
+        return struct.pack("<" + "I" * len(values), *values)
+
+    entry_bytes = bytearray()
+    for t, e, base, (offset, length) in entries:
         aliases = " ".join(e["short_names"]) + " " + e["name"].lower()
-        for s in (t, e["short_name"], aliases, e["category"]):
-            assert '"' not in s and "\\" not in s
-        out += [
-            "    Entry {",
-            f'        text: "{t}",',
-            f'        name: "{e["short_name"]}",',
-            f'        aliases: "{aliases}",',
-            f'        category: "{e["category"]}",',
-            f"        base: {base},",
-            f"        offset: {o},",
-            f"        len: {n},",
-            "    },",
-        ]
-    out += ["];", "pub static LOOKUP: &[(&str, u16)] = &["]
-    out += [f'    ("{k}", {v}),' for k, v in sorted(lookup.items(), key=lambda kv: kv[0].encode())]
-    out += ["];", 'pub static PNGS: &[u8] = include_bytes!("../../../assets/emoji/twemoji-17.0.3.bin");', ""]
-    return "\n".join(out)
+        fields = []
+        for value in (t, e["short_name"], aliases, e["category"]):
+            fields.extend(intern(value))
+        entry_bytes.extend(record([*fields, base, offset, length]))
+    lookup_bytes = b"".join(record([*intern(text), index]) for text, index in lookup)
+    assert len(entry_bytes) == len(entries) * ENTRY_SIZE
+    assert len(lookup_bytes) == len(lookup) * LOOKUP_SIZE
+    lookup_start = HEADER_SIZE + len(entry_bytes)
+    strings_start = lookup_start + len(lookup_bytes)
+    header = MAGIC + record([len(entries), len(lookup), HEADER_SIZE,
+                             lookup_start, strings_start, len(strings)])
+    return header + entry_bytes + lookup_bytes + strings
 
 
 def main() -> None:
@@ -138,7 +151,7 @@ def main() -> None:
     args = ap.parse_args()
     if args.twemoji:
         from_twemoji(args.twemoji, args.write_bin)
-    new = render().encode("utf8")
+    new = render()
     if args.check:
         if OUT.read_bytes() != new:
             sys.exit(f"{OUT.relative_to(ROOT)} is stale: run python -I assets/emoji/generate.py")

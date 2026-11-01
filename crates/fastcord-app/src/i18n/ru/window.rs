@@ -370,6 +370,7 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ),
     ("High-contrast colors", "Высококонтрастные цвета"),
     ("Time format", "Формат времени"),
+    ("System (12-hour)", "Системный (12 часов)"),
     ("System (24-hour)", "Системный (24 часа)"),
     ("12-hour", "12 часов"),
     ("24-hour", "24 часа"),
@@ -401,8 +402,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Речь синтезируется на этом компьютере, текст никуда не отправляется. Начните сообщение с /tts, чтобы отправить его как TTS-сообщение Discord.",
     ),
     (
-        "Tab moves between controls and Space toggles them. Screen readers and spellcheck are not supported yet.",
-        "Tab переходит между элементами, пробел переключает их. Экранные дикторы и проверка орфографии пока не поддерживаются.",
+        "Tab moves between controls and Space toggles them. Screen readers are not supported yet. Linux spelling is available for a selected composer word.",
+        "Tab переходит между элементами, пробел переключает их. Экранные дикторы пока не поддерживаются. В Linux доступна проверка выделенного слова в редакторе сообщения.",
     ),
     (
         "This is how messages will sound.",

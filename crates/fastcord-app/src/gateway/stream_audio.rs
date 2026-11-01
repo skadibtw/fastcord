@@ -103,9 +103,11 @@ async fn pump(
     presentation: Arc<crate::playback::Session>,
 ) {
     let mut playback = Playback::default();
+    let sync = Arc::new(super::av_sync::AvSync::default());
     let mut audio = presentation.watch_audio();
     let mut controls_open = true;
     let mut decoder = StreamDecoder::new(session.media(), visible, Some(sink), Arc::clone(&status));
+    decoder.set_av_sync(Arc::clone(&sync));
     let mut connection = session.watch_status();
     let mut observed_visible = *visibility.borrow_and_update();
     let mut last_video = Instant::now();
@@ -139,6 +141,7 @@ async fn pump(
                 let announced = *visibility.borrow_and_update();
                 session.media().set_video_wanted(announced);
                 decoder.visibility_notified(observed_visible, announced);
+                sync.reset();
                 observed_visible = announced;
                 last_video = Instant::now();
                 refreshes = 0;
@@ -148,11 +151,13 @@ async fn pump(
                     controls_open = false;
                 } else {
                     playback.apply(&controls.borrow_and_update(), *audio.borrow());
+                    sync.disable_audio(); decoder.sync_changed();
                 }
             }
             changed = audio.changed() => {
                 if changed.is_ok() {
                     playback.apply(&controls.borrow(), *audio.borrow_and_update());
+                    sync.disable_audio(); decoder.sync_changed();
                 }
             }
             changed = connection.changed() => {
@@ -190,11 +195,19 @@ async fn pump(
                     decoder.push(frame);
                 },
                 Some(VoiceMessage::Audio(packet)) => {
+                    let ssrc=packet.ssrc;
                     let report = playback.push(packet, &controls.borrow(), *audio.borrow());
                     presentation.audio_status(report);
+                    sync.audio(ssrc,playback.playout_clock());
+                    decoder.sync_changed();
                 },
                 Some(VoiceMessage::Event(VoiceEvent::VideoSource { ssrc, active, .. })) => {
                     decoder.source_changed(if active { ssrc } else { 0 });
+                    sync.reset();
+                }
+                Some(VoiceMessage::Event(VoiceEvent::SenderClock {user_id,ssrc,video,rtp_timestamp,ntp_timestamp,received_at})) => {
+                    sync.report(user_id,ssrc,video,rtp_timestamp,ntp_timestamp,received_at);
+                    decoder.sync_changed();
                 }
                 Some(_) => {}
                 None => break,

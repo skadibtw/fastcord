@@ -106,6 +106,18 @@ pub fn handle(world: &mut World, req: &Request, ctx: &Ctx) -> Outcome {
     match (method, segments.as_slice()) {
         ("GET", ["gateway"]) => ok(json!({"url": format!("ws://127.0.0.1:{}", ctx.port)})),
         ("GET", ["users", "@me"]) => ok(world.me.clone()),
+        ("GET", ["guilds", "5001", "onboarding"])
+            if world.guilds.iter().any(|guild| text(guild, "id") == "5001") =>
+        {
+            let mut fixture: Value = serde_json::from_str(include_str!(
+                "../../../fixtures/rest/onboarding-synthetic.json"
+            ))
+            .expect("static onboarding fixture");
+            fixture["guild_id"] = json!("5001");
+            fixture["default_channel_ids"] = json!(["6001"]);
+            ok(fixture)
+        }
+
         ("GET", ["channels", channel, "messages"]) => history(world, channel, &get),
         ("GET", ["channels", channel, "messages", "pins"])
         | ("GET", ["channels", channel, "pins"]) => pins(world, channel),
@@ -165,6 +177,9 @@ pub fn handle(world: &mut World, req: &Request, ctx: &Ctx) -> Outcome {
             }
         }
         ("PUT", ["guilds", guild, "requests", "@me"]) => verify(world, guild),
+        ("GET", ["guilds", guild, "scheduled-events", event, "users"]) => {
+            event_users(world, guild, event, &get)
+        }
         ("GET", ["guilds", guild, "scheduled-events"]) => match world.guild_index(guild) {
             Some(_) => ok(world
                 .scheduled_events
@@ -175,6 +190,70 @@ pub fn handle(world: &mut World, req: &Request, ctx: &Ctx) -> Outcome {
         },
         _ => not_implemented(),
     }
+}
+
+fn event_users<'a>(
+    world: &World,
+    guild: &str,
+    event_id: &str,
+    get: &impl Fn(&str) -> Option<&'a str>,
+) -> Outcome {
+    if world.guild_index(guild).is_none() {
+        return error(404, 10004, "Unknown Guild");
+    }
+    let Some(event) = world
+        .scheduled_events
+        .get(guild)
+        .and_then(Value::as_array)
+        .and_then(|events| events.iter().find(|event| text(event, "id") == event_id))
+    else {
+        return error(404, 10070, "Unknown Scheduled Event");
+    };
+    if let Some(channel) = event.get("channel_id").and_then(Value::as_str) {
+        // permissions_in also handles private channels and intentionally returns
+        // all bits for unknown IDs. An event must instead reference this guild.
+        let Some((guild_at, channel_at)) = world.guild_channel_at(channel) else {
+            return missing_access();
+        };
+        if text(&world.guilds[guild_at], "id") != guild
+            || world.channel_permissions(guild_at, channel_at) & VIEW_CHANNEL == 0
+        {
+            return missing_access();
+        }
+    }
+    let limit = get("limit")
+        .unwrap_or("50")
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=100).contains(n));
+    let after = get("after").unwrap_or("0").parse::<u64>().ok();
+    let (Some(limit), Some(after)) = (limit, after) else {
+        return error(400, 50035, "Invalid pagination");
+    };
+    if get("with_member").is_some_and(|value| value != "false") || get("before").is_some() {
+        return not_implemented();
+    }
+    let Some(users) = world
+        .scheduled_event_users
+        .get(&format!("{guild}:{event_id}"))
+        .and_then(Value::as_array)
+    else {
+        return ok(json!([]));
+    };
+    let mut rows: Vec<_> = users
+        .iter()
+        .filter_map(|row| {
+            let id = row.get("user")?.get("id")?.as_str()?.parse::<u64>().ok()?;
+            (id > after).then_some((id, row))
+        })
+        .collect();
+    rows.sort_by_key(|(id, _)| *id);
+    ok(Value::Array(
+        rows.into_iter()
+            .take(limit)
+            .map(|(_, row)| row.clone())
+            .collect(),
+    ))
 }
 
 fn history<'a>(world: &World, channel: &str, get: &impl Fn(&str) -> Option<&'a str>) -> Outcome {
@@ -827,6 +906,36 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_fixture_is_read_only_and_scoped_to_its_guild() {
+        let mut world = world();
+        let result = call(&mut world, "GET", "/guilds/5001/onboarding", None);
+        assert_eq!(result.response.status, 200);
+        assert!(result.events.is_empty());
+        assert_eq!(body(&result)["guild_id"], "5001");
+        assert_eq!(
+            body(&result)["prompts"][0]["options"][1]["emoji"]["id"],
+            "900"
+        );
+        assert_eq!(
+            call(&mut world, "GET", "/guilds/999/onboarding", None)
+                .response
+                .status,
+            404
+        );
+        assert_eq!(
+            call(
+                &mut world,
+                "PUT",
+                "/guilds/5001/onboarding-responses",
+                Some(json!({}))
+            )
+            .response
+            .status,
+            404
+        );
+    }
+
+    #[test]
     fn identity_and_authorization() {
         let mut w = world();
         let me = call(&mut w, "GET", "/users/@me", None);
@@ -1264,5 +1373,100 @@ mod tests {
                 json!({"message": "fake: not implemented", "code": 0})
             );
         }
+    }
+    #[test]
+    fn scheduled_event_users_are_read_only_scoped_and_manually_paged() {
+        let mut world = world();
+        let first = call(
+            &mut world,
+            "GET",
+            "/guilds/5001/scheduled-events/900/users?limit=50&with_member=false",
+            None,
+        );
+        assert_eq!(first.response.status, 200);
+        assert!(first.events.is_empty());
+        let rows = body(&first);
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 50);
+        assert_eq!(rows[0]["user"]["id"], "40001");
+        assert_eq!(rows[49]["user"]["id"], "40050");
+        let next = body(&call(
+            &mut world,
+            "GET",
+            "/guilds/5001/scheduled-events/900/users?limit=50&with_member=false&after=40050",
+            None,
+        ));
+        assert_eq!(next.as_array().unwrap().len(), 5);
+        assert_eq!(next[0]["user"]["id"], "40051");
+        assert_eq!(
+            call(
+                &mut world,
+                "GET",
+                "/guilds/5001/scheduled-events/999/users",
+                None
+            )
+            .response
+            .status,
+            404
+        );
+        assert_eq!(
+            call(
+                &mut world,
+                "GET",
+                "/guilds/5001/scheduled-events/900/users?limit=101",
+                None
+            )
+            .response
+            .status,
+            400
+        );
+        for channel in ["999999", "6101"] {
+            world.scheduled_events.get_mut("5001").unwrap()[0]["channel_id"] = json!(channel);
+            assert_eq!(
+                call(
+                    &mut world,
+                    "GET",
+                    "/guilds/5001/scheduled-events/900/users",
+                    None
+                )
+                .response
+                .status,
+                403,
+                "unknown or other-guild channels never inherit private access"
+            );
+        }
+        world.scheduled_events.get_mut("5001").unwrap()[0]["channel_id"] = json!("6009");
+        let (guild_at, channel_at) = world.guild_channel_at("6009").unwrap();
+        world.guilds[guild_at]["owner_id"] = json!("2001");
+        for role in world.guilds[guild_at]["roles"].as_array_mut().unwrap() {
+            role["permissions"] = json!(VIEW_CHANNEL.to_string());
+        }
+        world.guilds[guild_at]["channels"][channel_at]["permission_overwrites"] = json!([
+            {"id":"5001", "type":0, "allow":"0", "deny":VIEW_CHANNEL.to_string()}
+        ]);
+        assert_eq!(
+            call(
+                &mut world,
+                "GET",
+                "/guilds/5001/scheduled-events/900/users",
+                None
+            )
+            .response
+            .status,
+            403
+        );
+        world.guilds[guild_at]["owner_id"] = json!("1001");
+        assert_eq!(
+            call(
+                &mut world,
+                "GET",
+                "/guilds/5001/scheduled-events/900/users",
+                None
+            )
+            .response
+            .status,
+            200,
+            "owner still bypasses overwrites in a real guild channel"
+        );
     }
 }

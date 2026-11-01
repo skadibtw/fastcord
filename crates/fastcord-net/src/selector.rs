@@ -186,6 +186,23 @@ pub struct BudgetSnapshot {
     pub campaign_bytes: usize,
 }
 
+/// Categorical progress only: no endpoint appears in the UI snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchProgress {
+    pub role: Role,
+    pub tested: usize,
+    pub total: usize,
+    pub confirmed: bool,
+    pub retry_after: Duration,
+}
+struct ExtendedSearch {
+    target: DiagnosticTarget,
+    next: usize,
+    total: usize,
+    confirmed: bool,
+    preferred: Option<Strategy>,
+}
+
 /// Implemented by the OS integration crate. The callback is a bounded hint:
 /// the app debounces it for 500 ms and invalidates the controller generation.
 /// A hint never disconnects a healthy session or starts a probe by itself.
@@ -211,6 +228,9 @@ struct Policy {
     rolling_dials: VecDeque<u64>,
     active: Option<Campaign>,
     confirmations: VecDeque<Candidate>,
+    hints: Vec<crate::settings::RoleHint>,
+    hint_revision: u64,
+    searches: VecDeque<ExtendedSearch>,
     status: Vec<(Role, ServiceStatus)>,
 }
 
@@ -317,6 +337,9 @@ impl Policy {
     fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.confirmations.clear();
+        self.searches.clear();
+        self.hints.clear();
+        self.hint_revision = self.hint_revision.wrapping_add(1);
         // Neither budget is reset. Healthy sessions stay healthy: an OS hint
         // does not establish that a working route has become unusable.
         for (_, status) in &mut self.status {
@@ -403,6 +426,48 @@ impl Controller {
         }
     }
 
+    pub fn search_progress(&self) -> Option<SearchProgress> {
+        let now = self.now_ms();
+        let mut policy = self.policy();
+        policy.prune_dials(now);
+        let search = policy.searches.back()?;
+        let mut wait = policy.last_started_ms.map_or(0, |last| {
+            (last + CAMPAIGN_SPACING.as_millis() as u64).saturating_sub(now)
+        });
+        let needed = (policy.rolling_dials.len() + 2).saturating_sub(MAX_ROLLING_DIALS);
+        if needed > 0
+            && let Some(at) = policy.rolling_dials.get(needed - 1)
+        {
+            wait = wait.max((at + ROLLING_WINDOW.as_millis() as u64).saturating_sub(now));
+        }
+        Some(SearchProgress {
+            role: search.target.role,
+            tested: search.next,
+            total: search.total,
+            confirmed: search.confirmed,
+            retry_after: Duration::from_millis(wait),
+        })
+    }
+
+    /// Fresh, genuinely twice-probed candidates for this role. A candidate is
+    /// not proof that every existing pooled connection uses it.
+    pub fn confirmed_strategies(&self, role: Role) -> Vec<(TlsProfile, Strategy)> {
+        let policy = self.policy();
+        let now = self.now_ms();
+        let mut found = Vec::new();
+        for c in &policy.confirmations {
+            let value = (c.target.profile, c.strategy);
+            if c.generation == policy.generation
+                && c.target.role == role
+                && now.saturating_sub(c.verified_at_ms) < exact_lifetime()
+                && !found.contains(&value)
+            {
+                found.push(value);
+            }
+        }
+        found
+    }
+
     pub fn network_changed(&self) {
         let generation = {
             let mut policy = self.policy();
@@ -477,6 +542,42 @@ impl Controller {
             .map(|candidate| candidate.strategy)
     }
 
+    /// Imports preferences only; never creates endpoint confirmations or probes.
+    /// Stale asynchronous identity/settings reads cannot populate a new generation.
+    pub fn load_profile_hints(
+        &self,
+        generation: u64,
+        hints: &[crate::settings::RoleHint],
+        now: u64,
+    ) -> bool {
+        let mut policy = self.policy();
+        if policy.generation != generation {
+            return false;
+        }
+        policy.hints.clear();
+        for hint in hints.iter().take(crate::settings::MAX_ROLE_HINTS) {
+            if hint.confirmed_at_unix_secs <= now
+                && now - hint.confirmed_at_unix_secs < crate::settings::HINT_EXPIRY_SECS
+                && hint.strategy().in_catalog()
+                && !policy.hints.iter().any(|h| h.role == hint.role)
+            {
+                policy.hints.push(hint.clone());
+            }
+        }
+        policy.hint_revision = policy.hint_revision.wrapping_add(1);
+        true
+    }
+
+    /// Fixed-role bounded preferences, with no endpoint or network identifier.
+    pub fn profile_hints(&self) -> (u64, u64, Vec<crate::settings::RoleHint>) {
+        let policy = self.policy();
+        (
+            policy.generation,
+            policy.hint_revision,
+            policy.hints.clone(),
+        )
+    }
+
     pub fn service_status(&self, role: Role) -> ServiceStatus {
         self.policy()
             .status
@@ -506,7 +607,21 @@ impl Controller {
     }
 
     pub fn note_failure(&self, role: Role, failure: NetworkError) {
-        self.set_status(role, ServiceStatus::Failed(failure));
+        let mut policy = self.policy();
+        // An untried imported preference survives the initial direct failure.
+        // A failed confirmed production route is no longer remembered.
+        let confirmed = failure.eligible_for_selection()
+            && policy.confirmations.iter().any(|c| c.target.role == role);
+        if confirmed {
+            policy.confirmations.retain(|c| c.target.role != role);
+            policy.hints.retain(|h| h.role != role);
+            policy.hint_revision = policy.hint_revision.wrapping_add(1);
+        }
+        let changed = policy.set_status(role, ServiceStatus::Failed(failure));
+        drop(policy);
+        if changed || confirmed {
+            self.notify();
+        }
     }
 
     /// The caller must first record the real production failure in its normal
@@ -532,13 +647,54 @@ impl Controller {
         target: DiagnosticTarget,
         error: NetworkError,
         strategies: &[Strategy],
+        probe: F,
+    ) -> Result<Option<Candidate>, NetworkError>
+    where
+        F: FnMut(ProbeRequest) -> Fut,
+        Fut: Future<Output = ProbeOutcome>,
+    {
+        if strategies == Strategy::ORDER {
+            self.diagnose_extended(target, error, probe).await
+        } else {
+            self.diagnose_inner(target, error, strategies, false, probe)
+                .await
+        }
+    }
+
+    pub(crate) async fn diagnose_extended<F, Fut>(
+        &self,
+        target: DiagnosticTarget,
+        error: NetworkError,
+        probe: F,
+    ) -> Result<Option<Candidate>, NetworkError>
+    where
+        F: FnMut(ProbeRequest) -> Fut,
+        Fut: Future<Output = ProbeOutcome>,
+    {
+        // The caller keeps no-SNI and explicit-helper restrictions. This
+        // method only expands a permitted ordinary TLS shaping campaign.
+        if target.profile.omits_sni() {
+            return self
+                .diagnose_inner(target, error, &[Strategy::Direct], false, probe)
+                .await;
+        }
+        self.diagnose_inner(target, error, &Strategy::catalog(), true, probe)
+            .await
+    }
+
+    async fn diagnose_inner<F, Fut>(
+        &self,
+        target: DiagnosticTarget,
+        error: NetworkError,
+        strategies: &[Strategy],
+        extended: bool,
         mut probe: F,
     ) -> Result<Option<Candidate>, NetworkError>
     where
         F: FnMut(ProbeRequest) -> Fut,
         Fut: Future<Output = ProbeOutcome>,
     {
-        if strategies.is_empty() || strategies.len() > Strategy::ORDER.len() {
+        if strategies.is_empty() || strategies.len() > 42 {
             return Err(NetworkError::InvalidTarget);
         }
         // Fields are visible to the transport executor, so revalidate at this
@@ -557,6 +713,45 @@ impl Controller {
         let (id, generation) = {
             let mut policy = self.policy();
             let id = policy.begin(error, self.now_ms())?;
+            if extended {
+                let previous = policy
+                    .searches
+                    .iter()
+                    .position(|s| s.target == target)
+                    .and_then(|index| policy.searches.remove(index));
+                let search = previous
+                    .filter(|s| s.next < strategies.len() && !s.confirmed)
+                    .unwrap_or_else(|| {
+                        let wall_now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let preferred = policy
+                            .hints
+                            .iter()
+                            .find(|h| {
+                                h.role == target.role
+                                    && h.confirmed_at_unix_secs <= wall_now
+                                    && wall_now - h.confirmed_at_unix_secs
+                                        < crate::settings::HINT_EXPIRY_SECS
+                                    && strategies.contains(&h.strategy())
+                            })
+                            .map(|h| h.strategy());
+                        ExtendedSearch {
+                            target: target.clone(),
+                            next: 0,
+                            total: strategies.len(),
+                            confirmed: false,
+                            preferred,
+                        }
+                    });
+                // 16 short endpoint/cursor records, never a retained catalog
+                // per target; <8 KiB in addition to the confirmation cache.
+                if policy.searches.len() == 16 {
+                    policy.searches.pop_front();
+                }
+                policy.searches.push_back(search);
+            }
             self.0.active.send_replace(true);
             policy.set_status(target.role, ServiceStatus::Selecting);
             (id, policy.generation)
@@ -568,7 +763,36 @@ impl Controller {
             role: target.role,
             completed: false,
         };
-        let mut strategy_index = 0;
+        // Extended search has a stable cursor. Ordinary default campaigns
+        // may prefer a typed saved profile; explicit helper/no-SNI plans may
+        // never expand their allowlist.
+        let mut ordered = strategies.to_vec();
+        if extended {
+            if let Some(preferred) = self.policy().searches.back().and_then(|s| s.preferred)
+                && let Some(index) = ordered.iter().position(|s| *s == preferred)
+            {
+                ordered.swap(0, index);
+            }
+        } else {
+            let wall_now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if let Some(hint) = self.policy().hints.iter().find(|h| {
+                h.role == target.role
+                    && h.confirmed_at_unix_secs <= wall_now
+                    && wall_now - h.confirmed_at_unix_secs < crate::settings::HINT_EXPIRY_SECS
+            }) && let Some(index) = ordered.iter().position(|s| *s == hint.strategy())
+            {
+                ordered.swap(0, index);
+            }
+        }
+        let strategies = ordered.as_slice();
+        let mut strategy_index = if extended {
+            self.policy().searches.back().map_or(0, |s| s.next)
+        } else {
+            0
+        };
         let mut successes = 0;
         loop {
             if self.generation() != generation {
@@ -633,6 +857,23 @@ impl Controller {
                         policy.confirmations.pop_front();
                     }
                     policy.confirmations.push_back(candidate.clone());
+                    if extended && let Some(search) = policy.searches.back_mut() {
+                        search.next = strategy_index + 1;
+                        search.confirmed = true;
+                    }
+                    if candidate.strategy.in_catalog() {
+                        policy.hints.retain(|h| h.role != candidate.target.role);
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        policy.hints.push(crate::settings::RoleHint::confirmed(
+                            candidate.target.role,
+                            candidate.strategy,
+                            now,
+                        ));
+                        policy.hint_revision = policy.hint_revision.wrapping_add(1);
+                    }
                     policy.set_status(candidate.target.role, ServiceStatus::TlsReachable);
                     drop(policy);
                     self.notify();
@@ -646,6 +887,17 @@ impl Controller {
                     .result
                     .err()
                     .unwrap_or(NetworkError::TlsProtocolRejected);
+                {
+                    let mut policy = self.policy();
+                    let before = policy.hints.len();
+                    policy.hints.retain(|h| {
+                        h.role != target.role || h.strategy() != strategies[strategy_index]
+                    });
+                    if before != policy.hints.len() {
+                        policy.hint_revision = policy.hint_revision.wrapping_add(1);
+                    }
+                }
+                self.notify();
                 if !failure.eligible_for_selection() {
                     self.note_failure(target.role, failure);
                     guard.completed = true;
@@ -653,6 +905,9 @@ impl Controller {
                 }
                 successes = 0;
                 strategy_index += 1;
+                if extended && let Some(search) = self.policy().searches.back_mut() {
+                    search.next = strategy_index;
+                }
                 if strategy_index == strategies.len() {
                     self.note_failure(target.role, failure);
                     guard.completed = true;
@@ -712,6 +967,301 @@ mod tests {
             TlsProfile::WebSocket,
         )
         .unwrap()
+    }
+
+    fn advance_clock(controller: &mut Controller, elapsed: Duration) {
+        Arc::get_mut(&mut controller.0)
+            .expect("completed campaign owns no controller clone")
+            .epoch -= elapsed;
+    }
+    fn failed_probe() -> ProbeOutcome {
+        ProbeOutcome {
+            result: Err(NetworkError::TlsTimeout),
+            sent_bytes: 100,
+            received_bytes: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_failed_demand_resumes_beyond_the_first_six_without_more_budget() {
+        let mut controller = Controller::new();
+        let mut seen = Vec::new();
+        let result = controller
+            .diagnose(target(), NetworkError::TlsTimeout, |r| {
+                seen.push(r.strategy);
+                async { failed_probe() }
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), NetworkError::BudgetExhausted);
+        assert_eq!(seen, Strategy::ORDER);
+        assert_eq!(controller.search_progress().unwrap().tested, 6);
+        assert_eq!(controller.budget_snapshot().rolling_dials, 12);
+        assert!(
+            controller
+                .diagnose(target(), NetworkError::TlsTimeout, |_| async {
+                    panic!("cooldown must refuse before a dial")
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(controller.search_progress().unwrap().tested, 6);
+        advance_clock(&mut controller, Duration::from_secs(61));
+        let wanted = Strategy::catalog()[6];
+        let mut confirmations = 0;
+        let candidate = controller
+            .diagnose(target(), NetworkError::TlsTimeout, |r| {
+                assert_eq!(r.strategy, wanted);
+                confirmations += 1;
+                async {
+                    ProbeOutcome {
+                        result: Ok(()),
+                        sent_bytes: 100,
+                        received_bytes: 100,
+                    }
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(confirmations, 2);
+        assert_eq!(candidate.strategy, wanted);
+        assert_eq!(controller.budget_snapshot().rolling_dials, 16);
+        assert_eq!(
+            controller.confirmed_strategies(Role::Gateway),
+            [(TlsProfile::WebSocket, wanted)]
+        );
+        assert!(controller.confirmed_strategies(Role::Rest).is_empty());
+        controller.network_changed();
+        assert!(controller.search_progress().is_none());
+        assert!(controller.confirmed_strategies(Role::Gateway).is_empty());
+        assert_eq!(controller.budget_snapshot().rolling_dials, 16);
+    }
+
+    #[tokio::test]
+    async fn a_single_sixth_probe_success_requires_two_new_confirmations_next_campaign() {
+        let mut controller = Controller::new();
+        let wanted = Strategy::ORDER[5];
+        let mut calls = 0;
+        let result = controller
+            .diagnose(target(), NetworkError::TlsTimeout, |request| {
+                calls += 1;
+                let success = request.strategy == wanted;
+                async move {
+                    if success {
+                        ProbeOutcome {
+                            result: Ok(()),
+                            sent_bytes: 10,
+                            received_bytes: 10,
+                        }
+                    } else {
+                        failed_probe()
+                    }
+                }
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), NetworkError::BudgetExhausted);
+        assert_eq!(calls, 6);
+        assert_eq!(controller.search_progress().unwrap().tested, 5);
+        assert!(controller.confirmed_strategies(Role::Gateway).is_empty());
+        advance_clock(&mut controller, Duration::from_secs(61));
+        let mut fresh = 0;
+        let candidate = controller
+            .diagnose(target(), NetworkError::TlsTimeout, |request| {
+                assert_eq!(request.strategy, wanted);
+                fresh += 1;
+                async {
+                    ProbeOutcome {
+                        result: Ok(()),
+                        sent_bytes: 10,
+                        received_bytes: 10,
+                    }
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh, 2);
+        assert_eq!(candidate.strategy, wanted);
+        assert_eq!(controller.budget_snapshot().rolling_dials, 16);
+    }
+
+    #[tokio::test]
+    async fn typed_persisted_winner_still_requires_two_fresh_probes() {
+        let controller = Controller::new();
+        let strategy = Strategy::catalog()[20];
+        let hint = remembered(Role::Gateway, strategy);
+        assert!(controller.load_profile_hints(
+            0,
+            std::slice::from_ref(&hint),
+            hint.confirmed_at_unix_secs
+        ));
+        assert!(controller.strategy_for(&target()).is_none());
+        let mut calls = 0;
+        controller
+            .diagnose(target(), NetworkError::TlsReset, |request| {
+                assert_eq!(request.strategy, strategy);
+                calls += 1;
+                async {
+                    ProbeOutcome {
+                        result: Ok(()),
+                        sent_bytes: 100,
+                        received_bytes: 100,
+                    }
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn expanded_catalog_never_changes_no_sni_policy() {
+        let controller = Controller::new();
+        let mut target = target();
+        target.profile = TlsProfile::DiscordWebSocketWithoutSni;
+        let mut seen = Vec::new();
+        controller
+            .diagnose(target, NetworkError::TlsTimeout, |r| {
+                seen.push(r.strategy);
+                async { failed_probe() }
+            })
+            .await
+            .unwrap();
+        assert_eq!(seen, [Strategy::Direct]);
+        assert!(controller.search_progress().is_none());
+    }
+
+    fn remembered(role: Role, strategy: Strategy) -> crate::settings::RoleHint {
+        crate::settings::RoleHint::confirmed(
+            role,
+            strategy,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+    }
+
+    #[tokio::test]
+    async fn profile_hint_reorders_but_needs_two_confirmations_and_failure_evicts_it() {
+        let controller = Controller::new();
+        let hint = remembered(target().role, Strategy::SniFragment);
+        assert!(controller.load_profile_hints(
+            0,
+            std::slice::from_ref(&hint),
+            hint.confirmed_at_unix_secs
+        ));
+        controller.note_failure(target().role, NetworkError::TlsTimeout);
+        assert_eq!(
+            controller.profile_hints().2.len(),
+            1,
+            "initial Direct failure keeps untried hint"
+        );
+        assert_eq!(controller.strategy_for(&target()), None);
+        let mut probes = 0;
+        let candidate = controller
+            .diagnose(target(), NetworkError::TlsReset, |request| {
+                probes += 1;
+                assert_eq!(request.strategy, Strategy::SniFragment);
+                assert_eq!(
+                    controller.strategy_for(&target()),
+                    None,
+                    "not trusted before two successes"
+                );
+                async {
+                    ProbeOutcome {
+                        result: Ok(()),
+                        sent_bytes: 100,
+                        received_bytes: 100,
+                    }
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(probes, 2);
+        assert_eq!(candidate.strategy, Strategy::SniFragment);
+        assert_eq!(controller.budget_snapshot().rolling_dials, 4);
+        for failure in [
+            NetworkError::CertificateRejected,
+            NetworkError::TlsProtocolRejected,
+            NetworkError::WebSocketUpgrade,
+            NetworkError::InvalidTarget,
+            NetworkError::ProxyRefused,
+        ] {
+            controller.note_failure(target().role, failure);
+            assert_eq!(
+                controller.strategy_for(&target()),
+                Some(Strategy::SniFragment)
+            );
+            assert_eq!(
+                controller.profile_hints().2.len(),
+                1,
+                "policy/service errors do not invalidate TLS evidence"
+            );
+        }
+        controller.note_failure(target().role, NetworkError::TlsReset);
+        assert!(controller.profile_hints().2.is_empty());
+        assert_eq!(controller.strategy_for(&target()), None);
+        assert_eq!(controller.budget_snapshot().rolling_dials, 4);
+    }
+
+    #[tokio::test]
+    async fn failed_saved_probe_is_evicted_and_disallowed_hint_cannot_expand_a_plan() {
+        for plan in [&[Strategy::SniFragment][..], &[Strategy::Direct][..]] {
+            let controller = Controller::new();
+            let hint = remembered(target().role, Strategy::SniFragment);
+            controller.load_profile_hints(
+                0,
+                std::slice::from_ref(&hint),
+                hint.confirmed_at_unix_secs,
+            );
+            let result = controller
+                .diagnose_plan(target(), NetworkError::TlsReset, plan, |request| {
+                    assert_eq!(request.strategy, plan[0]);
+                    async {
+                        ProbeOutcome {
+                            result: Err(NetworkError::TlsReset),
+                            sent_bytes: 10,
+                            received_bytes: 0,
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+            assert!(result.is_none());
+            assert_eq!(
+                controller.profile_hints().2.is_empty(),
+                plan[0] == Strategy::SniFragment
+            );
+            assert_eq!(controller.budget_snapshot().rolling_dials, 2);
+        }
+    }
+
+    #[test]
+    fn profile_load_rejects_old_generations_and_never_refunds_budgets() {
+        let controller = Controller::new();
+        let hint = remembered(target().role, Strategy::SniFragment);
+        let id = controller
+            .policy()
+            .begin(NetworkError::TlsReset, 0)
+            .unwrap();
+        controller.policy().reserve(id, 0).unwrap();
+        controller.network_changed();
+        assert!(!controller.load_profile_hints(
+            0,
+            std::slice::from_ref(&hint),
+            hint.confirmed_at_unix_secs
+        ));
+        assert!(controller.profile_hints().2.is_empty());
+        assert_eq!(controller.budget_snapshot().rolling_dials, 2);
+        assert!(controller.load_profile_hints(
+            1,
+            std::slice::from_ref(&hint),
+            hint.confirmed_at_unix_secs + crate::settings::HINT_EXPIRY_SECS
+        ));
+        assert!(controller.profile_hints().2.is_empty());
     }
 
     #[test]

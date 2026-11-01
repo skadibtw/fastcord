@@ -41,6 +41,7 @@ pub(crate) struct Attempt {
     generation: u64,
     mode: Mode,
     state: Mutex<State>,
+    pub evidence: Mutex<Option<crate::evidence::Receipt>>,
 }
 
 impl Attempt {
@@ -132,6 +133,7 @@ impl Attempts {
             generation,
             mode,
             state: Mutex::default(),
+            evidence: Mutex::default(),
         });
         self.entries
             .lock()
@@ -171,6 +173,7 @@ pub(crate) struct ConnectLayer {
     pub context: NetworkContext,
     pub role: Role,
     pub timeout: Option<std::time::Duration>,
+    pub evidence: Option<crate::evidence::Receipt>,
 }
 #[derive(Clone)]
 pub(crate) struct Connector<S> {
@@ -221,6 +224,7 @@ where
             })
             .await?;
             let attempt = registration.attempt.clone();
+            *attempt.evidence.lock().unwrap_or_else(|p| p.into_inner()) = config.evidence.clone();
             CURRENT
                 .scope(attempt.clone(), async move {
                     // Reqwest invokes its custom proxy matcher during Service::call.
@@ -341,10 +345,64 @@ mod tests {
             Box::pin(std::future::pending())
         }
     }
+    #[derive(Clone)]
+    struct ReceiptConnector {
+        context: NetworkContext,
+    }
+    impl Service<()> for ReceiptConnector {
+        type Response = ();
+        type Error = BoxError;
+        type Future = Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>>;
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, _: ()) -> Self::Future {
+            let id = current("discord.com", 443).unwrap();
+            // The bridge resolves the private CONNECT id and role this way;
+            // no global/latest-request evidence slot is involved.
+            let attempt = self.context.attempts().get(id, Role::Rest).unwrap();
+            assert!(attempt.matches("discord.com", 443));
+            let receipt = attempt
+                .evidence
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("connector must pass receipt");
+            receipt.selected(crate::tls::Strategy::Direct);
+            Box::pin(std::future::pending())
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn connector_receipts_follow_registration_and_timeout_removes_the_link() {
+        let context = NetworkContext::new(Mode::Auto);
+        let receipt = crate::evidence::Receipt::new(Mode::Auto, TlsProfile::HttpWithoutSni, true);
+        let other = crate::evidence::Receipt::new(Mode::Auto, TlsProfile::HttpWithoutSni, true);
+        let mut connector = ConnectLayer {
+            context: context.clone(),
+            role: Role::Rest,
+            timeout: Some(std::time::Duration::from_secs(1)),
+            evidence: Some(receipt.clone()),
+        }
+        .layer(ReceiptConnector {
+            context: context.clone(),
+        });
+        assert!(connector.call(()).await.is_err());
+        let snapshot = receipt.snapshot();
+        assert_eq!(snapshot.selected, Some(crate::tls::Strategy::Direct));
+        assert!(!snapshot.packet_attempted);
+        assert!(other.snapshot().selected.is_none());
+        assert!(context.attempts().get(1, Role::Rest).is_none());
+        assert!(context.attempts().entries.lock().unwrap().is_empty());
+        // Immutable returned snapshots cannot change after another request.
+        other.selected(crate::tls::Strategy::PacketFake);
+        assert_eq!(snapshot.selected, Some(crate::tls::Strategy::Direct));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn handshake_timeout_records_only_its_own_endpoint_and_releases_registration() {
         let context = NetworkContext::new(crate::settings::Mode::Auto);
         let mut connector = ConnectLayer {
+            evidence: None,
             context: context.clone(),
             role: Role::Rest,
             timeout: Some(std::time::Duration::from_secs(3)),
@@ -366,6 +424,7 @@ mod tests {
     async fn cancelling_a_connector_is_not_reported_as_a_timeout_or_new_recovery_demand() {
         let context = NetworkContext::new(crate::settings::Mode::Auto);
         let mut connector = ConnectLayer {
+            evidence: None,
             context: context.clone(),
             role: Role::Rest,
             timeout: Some(std::time::Duration::from_secs(3)),
@@ -382,6 +441,7 @@ mod tests {
         );
         assert!(context.attempts().entries.lock().unwrap().is_empty());
         let mut unscoped = ConnectLayer {
+            evidence: None,
             context,
             role: Role::Rest,
             timeout: None,

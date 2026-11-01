@@ -237,7 +237,22 @@ impl AutoModRule {
             + list(&self.keywords)
             + list(&self.regex)
             + list(&self.allow)
-            + self.actions.len() * 96
+            + self
+                .actions
+                .iter()
+                .map(|action| match action {
+                    AutoModAction::Other(value) => 96 + json_bytes(value),
+                    AutoModAction::BlockMessage { message } => {
+                        96 + message.as_ref().map_or(0, String::len)
+                    }
+                    _ => 96,
+                })
+                .sum::<usize>()
+            + self
+                .extra
+                .iter()
+                .map(|(key, value)| key.len() + 64 + json_bytes(value))
+                .sum::<usize>()
             + (self.exempt_roles.len() + self.exempt_channels.len()) * 8
     }
 
@@ -597,18 +612,39 @@ pub fn parse_rules(body: &[u8], guild: Snowflake) -> Result<Vec<AutoModRule>, Re
         .collect())
 }
 
+fn json_bytes(value: &Value) -> usize {
+    std::mem::size_of::<Value>()
+        + match value {
+            Value::String(text) => text.capacity(),
+            Value::Array(values) => values.iter().map(json_bytes).sum(),
+            Value::Object(values) => values
+                .iter()
+                .map(|(key, value)| key.capacity() + 64 + json_bytes(value))
+                .sum(),
+            _ => 0,
+        }
+}
+
 /// A rule the Gateway reported created, changed or deleted.
 #[derive(Clone, PartialEq, Eq)]
 pub enum AutoModChange {
     Upsert(Box<AutoModRule>),
-    Delete { guild: Snowflake, id: Snowflake },
+    Delete {
+        guild: Snowflake,
+        id: Snowflake,
+    },
+    /// The rule changed but its payload cannot fit in the change feed.
+    Invalidated {
+        guild: Snowflake,
+        id: Snowflake,
+    },
 }
 
 impl AutoModChange {
     pub fn guild(&self) -> Snowflake {
         match self {
             Self::Upsert(rule) => rule.guild,
-            Self::Delete { guild, .. } => *guild,
+            Self::Delete { guild, .. } | Self::Invalidated { guild, .. } => *guild,
         }
     }
 }
@@ -618,9 +654,32 @@ impl fmt::Debug for AutoModChange {
         match self {
             Self::Upsert(rule) => write!(f, "Upsert({:?})", rule.id),
             Self::Delete { id, .. } => write!(f, "Delete({id:?})"),
+            Self::Invalidated { id, .. } => write!(f, "Invalidated({id:?})"),
         }
     }
 }
+
+/// Fixed-size execution metadata. Content, matches and unknown action metadata
+/// are deliberately not retained (nor included in Debug output).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub struct AutoModExecution {
+    pub guild_id: Snowflake,
+    pub rule_id: Snowflake,
+    pub user_id: Snowflake,
+    pub rule_trigger_type: u64,
+    pub action: ExecutionAction,
+    pub channel_id: Option<Snowflake>,
+    pub message_id: Option<Snowflake>,
+    pub alert_system_message_id: Option<Snowflake>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub struct ExecutionAction {
+    #[serde(rename = "type")]
+    pub kind: u64,
+}
+
+pub const EXECUTION_ITEMS: usize = 16;
 
 /// The last few rule changes with a running number, so a panel that is open
 /// can apply the ones it has not seen. Bounded by count and by bytes.
@@ -628,21 +687,44 @@ impl fmt::Debug for AutoModChange {
 pub struct AutoModFeed {
     pub items: Vec<(u64, Arc<AutoModChange>)>,
     seq: u64,
+    pub executions: Vec<(u64, AutoModExecution)>,
+    execution_sequence: Option<u64>,
 }
 
 const FEED_BYTES: usize = 256 * 1024;
 
 impl AutoModFeed {
+    pub fn push_execution(&mut self, sequence: u64, event: AutoModExecution) {
+        if self.execution_sequence.is_some_and(|seen| sequence <= seen) {
+            return;
+        }
+        self.execution_sequence = Some(sequence);
+        self.seq += 1;
+        // Evict before push: retained capacity never exceeds sixteen fixed-size entries.
+        if self.executions.len() == EXECUTION_ITEMS {
+            self.executions.remove(0);
+        }
+        self.executions.push((self.seq, event));
+    }
+
     pub fn push(&mut self, change: AutoModChange) {
+        let change = match change {
+            AutoModChange::Upsert(rule) if rule.bytes() > FEED_BYTES => {
+                AutoModChange::Invalidated {
+                    guild: rule.guild,
+                    id: rule.id,
+                }
+            }
+            other => other,
+        };
         self.seq += 1;
         self.items.push((self.seq, Arc::new(change)));
         let cost = |c: &AutoModChange| match c {
             AutoModChange::Upsert(rule) => rule.bytes(),
-            AutoModChange::Delete { .. } => 32,
+            AutoModChange::Delete { .. } | AutoModChange::Invalidated { .. } => 32,
         };
         while self.items.len() > FEED_ITEMS
-            || (self.items.len() > 1
-                && self.items.iter().map(|(_, c)| cost(c)).sum::<usize>() > FEED_BYTES)
+            || self.items.iter().map(|(_, c)| cost(c)).sum::<usize>() > FEED_BYTES
         {
             self.items.remove(0);
         }
@@ -655,6 +737,8 @@ impl AutoModFeed {
 
     pub fn clear(&mut self) {
         self.items.clear();
+        self.executions.clear();
+        self.execution_sequence = None;
     }
 }
 
@@ -1070,6 +1154,32 @@ mod tests {
         assert_eq!(feed.items.len(), FEED_ITEMS);
         assert_eq!(feed.latest(), 20);
         assert_eq!(feed.items[0].0, 13);
+    }
+
+    #[test]
+    fn oversized_gateway_rule_keeps_only_an_invalidation() {
+        let mut rule = AutoModRule::draft(Snowflake(9), TRIGGER_KEYWORD);
+        rule.id = Snowflake(7);
+        // Unknown metadata is retained for safe edits and must count too.
+        rule.extra
+            .insert("future".into(), json!("x".repeat(FEED_BYTES)));
+        assert!(rule.bytes() > FEED_BYTES);
+        let mut feed = AutoModFeed::default();
+        feed.push(AutoModChange::Upsert(Box::new(rule)));
+        assert_eq!(feed.latest(), 1);
+        assert_eq!(
+            *feed.items[0].1,
+            AutoModChange::Invalidated {
+                guild: Snowflake(9),
+                id: Snowflake(7)
+            }
+        );
+        feed.push(AutoModChange::Delete {
+            guild: Snowflake(9),
+            id: Snowflake(8),
+        });
+        assert_eq!(feed.latest(), 2);
+        assert_eq!(feed.items.len(), 2);
     }
 
     #[test]

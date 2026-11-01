@@ -11,6 +11,8 @@
 //! change only through the roles and channels Discord then sends. Answers are
 //! ignored after logout (generation counter).
 
+mod preview;
+
 use std::collections::{HashMap, HashSet};
 
 use crate::ui::button;
@@ -20,7 +22,7 @@ use fastcord_discord::{
     onboarding_due,
 };
 use fastcord_model::Snowflake;
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 
 use crate::emoji::{Asset, View};
@@ -43,8 +45,13 @@ pub enum Event {
     OpenQuestions(Snowflake, bool),
     Questions(u64, Snowflake, Result<Onboarding, RestError>),
     Choose(Snowflake, Snowflake),
+    Preview(u64, preview::Event),
     Submit,
     Submitted(u64, Snowflake, Result<(), RestError>),
+    OpenBrowse(Snowflake),
+    BrowseQuery(String),
+    BrowsePage(usize),
+    BrowseGo(Snowflake),
     OpenGuide(Snowflake),
     GuideLoaded(u64, Snowflake, Result<Guide, RestError>),
     /// A channel of the guide; selected only if the account can see it.
@@ -100,6 +107,11 @@ enum Panel {
     Rules(Rules),
     Questions(Questions),
     Guide(GuideView),
+    Browse {
+        guild: Snowflake,
+        query: String,
+        offset: usize,
+    },
 }
 
 /// Nothing to draw for the welcome text's emoji and pictures.
@@ -124,6 +136,7 @@ pub struct State {
     /// Answers are being sent.
     submitting: bool,
     plain: Plain,
+    previews: preview::Pool,
     generation: u64,
 }
 
@@ -216,6 +229,41 @@ impl State {
         self.panel.is_some()
     }
 
+    pub fn browse_request(&self) -> Option<(Snowflake, &str, usize)> {
+        match &self.panel {
+            Some(Panel::Browse {
+                guild,
+                query,
+                offset,
+            }) => Some((*guild, query, *offset)),
+            _ => None,
+        }
+    }
+
+    fn browse_page<'a>(
+        &self,
+        navigation: &'a NavigationSnapshot,
+    ) -> Option<&'a fastcord_discord::state::navigation::BrowseChannels> {
+        let (guild, query, offset) = self.browse_request()?;
+        navigation
+            .browse
+            .as_ref()
+            .filter(|page| page.guild == guild && page.query == query && page.requested == offset)
+    }
+
+    pub fn browse_target(
+        &self,
+        navigation: &NavigationSnapshot,
+        channel: Snowflake,
+    ) -> Option<Snowflake> {
+        let page = self.browse_page(navigation)?;
+        page.window
+            .rows
+            .iter()
+            .any(|row| row.id == channel)
+            .then_some(page.guild)
+    }
+
     /// Logout or account change.
     pub fn clear(&mut self) {
         *self = Self {
@@ -251,6 +299,16 @@ impl State {
         self.outcomes.push((guild, outcome));
     }
 
+    pub(crate) fn sync_previews(
+        &mut self,
+        cache: Option<&crate::attachments::AttachmentCache>,
+    ) -> Task<Event> {
+        let generation = self.generation;
+        self.previews
+            .sync(cache)
+            .map(move |event| Event::Preview(generation, event))
+    }
+
     pub fn update(
         &mut self,
         event: Event,
@@ -258,7 +316,54 @@ impl State {
         client: &RestClient,
     ) -> Task<Event> {
         let generation = self.generation;
+        if matches!(
+            &event,
+            Event::OpenRules(_) | Event::OpenBrowse(_) | Event::OpenGuide(_) | Event::Close
+        ) || matches!(&event, Event::OpenQuestions(guild, _) if !matches!(&self.panel, Some(Panel::Questions(q)) if q.guild == *guild && !matches!(q.load, Load::Failed(_))))
+        {
+            self.previews.clear();
+        }
         match event {
+            Event::Preview(answered, event) => {
+                if answered == generation && matches!(&self.panel, Some(Panel::Questions(_))) {
+                    self.previews.update(event);
+                }
+                Task::none()
+            }
+            Event::OpenBrowse(guild) => {
+                if self.accepting.is_none() && !self.submitting {
+                    self.panel = Some(Panel::Browse {
+                        guild,
+                        query: String::new(),
+                        offset: 0,
+                    });
+                }
+                Task::none()
+            }
+            Event::BrowseQuery(value) => {
+                if let Some(Panel::Browse { query, offset, .. }) = &mut self.panel {
+                    *query = value
+                        .chars()
+                        .take(fastcord_discord::state::navigation::BROWSE_QUERY_CHARS)
+                        .collect();
+                    *offset = 0;
+                }
+                Task::none()
+            }
+            Event::BrowsePage(wanted) => {
+                if let Some(page) = self.browse_page(navigation) {
+                    let offset = page.window.offset;
+                    let size = fastcord_discord::state::navigation::BROWSE_PAGE;
+                    if ((wanted == offset.saturating_sub(size))
+                        || (wanted == offset.saturating_add(size) && wanted < page.window.total))
+                        && let Some(Panel::Browse { offset, .. }) = &mut self.panel
+                    {
+                        *offset = wanted;
+                    }
+                }
+                Task::none()
+            }
+            Event::BrowseGo(_) => Task::none(),
             Event::OpenRules(guild) => {
                 if matches!(&self.panel, Some(Panel::Rules(r)) if r.guild == guild && !matches!(r.load, Load::Failed(_)))
                 {
@@ -520,6 +625,13 @@ pub fn view<'a>(
         ]
     };
     let body: Element<'a, Event> = match panel {
+        Panel::Browse { query, .. } => column![
+            title("Browse channels", false),
+            text_input(tr("Search channels"), query).on_input(Event::BrowseQuery),
+            browse_body(state, navigation),
+        ]
+        .spacing(6)
+        .into(),
         Panel::Rules(rules) => column![
             title("Server rules", state.accepting.is_some()),
             rules_body(state, rules),
@@ -540,6 +652,53 @@ pub fn view<'a>(
         .into(),
     };
     Some(container(body).max_width(720).into())
+}
+
+fn browse_body<'a>(state: &State, navigation: &'a NavigationSnapshot) -> Element<'a, Event> {
+    let Some(page) = state.browse_page(navigation) else {
+        return text(tr("Loading…")).into();
+    };
+    let mut rows = column![].spacing(4);
+    for channel in &page.window.rows {
+        use fastcord_discord::state::navigation::ChannelKind;
+        let kind = match channel.kind {
+            ChannelKind::Voice if channel.stage => "Stage",
+            ChannelKind::Voice => "Voice",
+            ChannelKind::Forum => "Forum",
+            ChannelKind::Announcement => "Announcement",
+            ChannelKind::Thread => "Thread",
+            _ => "Text",
+        };
+        rows = rows.push(
+            button(row![
+                text(channel.name.as_str()).width(Length::Fill),
+                text(tr(kind)).size(12)
+            ])
+            .width(Length::Fill)
+            .on_press(Event::BrowseGo(channel.id)),
+        );
+    }
+    if page.window.rows.is_empty() {
+        rows = rows.push(text(tr("No accessible channels match.")));
+    }
+    let size = fastcord_discord::state::navigation::BROWSE_PAGE;
+    let offset = page.window.offset;
+    column![
+        scrollable(rows).height(Length::Fixed(320.0)),
+        row![
+            button(text(tr("Previous"))).on_press_maybe(
+                (offset > 0).then_some(Event::BrowsePage(offset.saturating_sub(size)))
+            ),
+            text(trf("{} channels", &[&page.window.total])).width(Length::Fill),
+            button(text(tr("Next"))).on_press_maybe(
+                (offset.saturating_add(size) < page.window.total)
+                    .then_some(Event::BrowsePage(offset.saturating_add(size)))
+            ),
+        ]
+        .spacing(8),
+    ]
+    .spacing(8)
+    .into()
 }
 
 fn banner<'a>(state: &'a State, navigation: &NavigationSnapshot) -> Option<Element<'a, Event>> {
@@ -693,11 +852,26 @@ fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> 
         for option in &prompt.options {
             let picked = q.chosen.contains(&option.id);
             let mut label = format!("{} {}", if picked { "[x]" } else { "[ ]" }, option.title);
-            if !option.emoji.is_empty() {
+            if option.custom_emoji.is_none() && !option.emoji.is_empty() {
                 label = format!("{label} {}", option.emoji);
             }
+            let mut option_label = row![text(label).size(13)].spacing(6);
+            if let Some(id) = option.custom_emoji {
+                let generation = state.generation;
+                let fallback = if option.emoji.is_empty() {
+                    ":emoji:"
+                } else {
+                    &option.emoji
+                };
+                option_label = option_label.push(
+                    state
+                        .previews
+                        .view((prompt.id, option.id), id, fallback)
+                        .map(move |event| Event::Preview(generation, event)),
+                );
+            }
             let mut item = column![
-                button(text(label).size(13))
+                button(option_label)
                     .on_press_maybe(
                         (!state.submitting).then_some(Event::Choose(prompt.id, option.id))
                     )
@@ -844,6 +1018,40 @@ mod tests {
         Onboarding::from_json(body.as_bytes()).unwrap()
     }
 
+    #[test]
+    fn channel_browser_rejects_stale_pages_bounds_query_and_clears_on_reset() {
+        use fastcord_discord::state::navigation::{BrowseChannels, BrowseRow, ChannelKind, Window};
+        let mut state = State::default();
+        let mut nav = NavigationSnapshot::default();
+        let _ = state.update(Event::OpenBrowse(guild()), &nav, &client());
+        nav.browse = Some(BrowseChannels {
+            guild: guild(),
+            query: String::new(),
+            requested: 0,
+            window: Window {
+                offset: 0,
+                total: 100,
+                rows: vec![BrowseRow {
+                    id: Snowflake(9),
+                    name: "Shown".into(),
+                    kind: ChannelKind::Text,
+                    stage: false,
+                }],
+            },
+        });
+        assert_eq!(state.browse_target(&nav, Snowflake(9)), Some(guild()));
+        let _ = state.update(Event::BrowsePage(50), &nav, &client());
+        assert!(state.browse_target(&nav, Snowflake(9)).is_none());
+        let _ = state.update(Event::BrowseQuery("😀".repeat(1000)), &nav, &client());
+        let (_, query, offset) = state.browse_request().unwrap();
+        assert_eq!(query.chars().count(), 100);
+        assert_eq!(offset, 0);
+        assert!(state.browse_target(&nav, Snowflake(9)).is_none());
+        state.clear();
+        assert!(state.browse_request().is_none());
+        assert!(state.browse_target(&nav, Snowflake(9)).is_none());
+    }
+
     fn guild() -> Snowflake {
         Snowflake(100)
     }
@@ -865,6 +1073,34 @@ mod tests {
             nav,
             &client(),
         );
+    }
+
+    #[test]
+    fn custom_preview_visibility_is_account_scoped_and_close_clears_it() {
+        let (mut state, nav) = (State::default(), NavigationSnapshot::default());
+        questions_open(&mut state, false, &nav);
+        let visible =
+            preview::Event::Visible(1, (Snowflake(300), Snowflake(302)), Snowflake(900), true);
+        let _ = state.update(Event::Preview(0, visible.clone()), &nav, &client());
+        assert_eq!(state.previews.interests(), 1);
+        assert!(view(&state, &nav, &HashSet::new()).is_some());
+        state.clear();
+        questions_open(&mut state, false, &nav);
+        let _ = state.update(Event::Preview(0, visible.clone()), &nav, &client());
+        assert_eq!(
+            state.previews.interests(),
+            0,
+            "old account visibility ignored"
+        );
+        let _ = state.update(
+            Event::Preview(state.generation, visible.clone()),
+            &nav,
+            &client(),
+        );
+        assert_eq!(state.previews.interests(), 1);
+        let _ = state.update(Event::Close, &nav, &client());
+        let _ = state.update(Event::Preview(state.generation, visible), &nav, &client());
+        assert_eq!(state.previews.interests(), 0);
     }
 
     fn chosen(state: &State) -> Vec<u64> {

@@ -6,6 +6,7 @@
 //! screen shows, and is dropped, with the connection and the state it owns,
 //! when the account screen is left (which closes the Gateway session cleanly).
 
+mod av_sync;
 mod camera;
 mod share_audio;
 mod stream_audio;
@@ -403,8 +404,11 @@ struct Tracker {
     typing: TypingTable,
     /// The typing line changed: the snapshot is rebuilt.
     typing_dirty: bool,
+    /// Coalesced invalidation for the currently open channel only.
+    pins_revision: u64,
     /// AutoMod rule changes the Gateway reported (issue #96).
     automod: fastcord_discord::AutoModFeed,
+    webhooks_revision: u64,
     clock: MonotonicClock,
 }
 
@@ -440,9 +444,25 @@ impl Tracker {
             }),
             dispatch @ GatewayEvent::Dispatch { .. } => {
                 let automod_before = self.automod.latest();
-                if let GatewayEvent::Dispatch { event, .. } = &dispatch {
+                let pins_before = self.pins_revision;
+                let webhooks_before = self.webhooks_revision;
+                if let GatewayEvent::Dispatch { event, sequence } = &dispatch {
+                    if matches!(event, Dispatch::Ready(_)) {
+                        self.automod.clear();
+                    }
+                    if let Dispatch::AutoModerationExecution(execution) = event {
+                        self.automod.push_execution(*sequence, *execution);
+                    }
                     self.history.apply(event);
                     self.apply_typing(event);
+                    if let Dispatch::ChannelPinsUpdate(channel) = event
+                        && self.history.open_channel() == Some(*channel)
+                    {
+                        self.pins_revision = self.pins_revision.wrapping_add(1);
+                    }
+                    if matches!(event, Dispatch::WebhooksUpdate(_)) {
+                        self.webhooks_revision = self.webhooks_revision.wrapping_add(1);
+                    }
                     if let Dispatch::AutoModeration(change) = event {
                         self.automod.push((**change).clone());
                     }
@@ -503,9 +523,11 @@ impl Tracker {
                     );
                 }
                 let changes = self.store.apply(dispatch);
-                self.navigation_dirty = (relevant && !changes.is_empty())
+                self.navigation_dirty = self.pins_revision != pins_before
+                    || (relevant && !changes.is_empty())
                     || changes.read
                     || self.automod.latest() != automod_before
+                    || self.webhooks_revision != webhooks_before
                     || self.store.limit_exceeded();
                 if self.navigation_dirty {
                     self.navigation.reconcile(&self.store);
@@ -610,6 +632,7 @@ struct Request {
     inbox: usize,
     /// The quick switcher's query while it is open (`None`: closed).
     quick: Option<String>,
+    browse: Option<(Snowflake, String, usize)>,
     /// The server the management panel shows (`None`: closed).
     admin: Option<Snowflake>,
     /// The member the roles panel or permission inspection describes.
@@ -626,6 +649,7 @@ struct Request {
 
 #[derive(Default)]
 struct Latest {
+    startup_timing: Option<fastcord_discord::gateway::StartupStamp>,
     snapshot: Arc<NavigationSnapshot>,
     timeline: Arc<timeline::Snapshot>,
     emoji: Arc<emoji_picker::Snapshot>,
@@ -637,6 +661,7 @@ struct Latest {
 
 /// What one consumed notification carries to the UI.
 pub struct Consumed {
+    startup_timing: Option<fastcord_discord::gateway::StartupStamp>,
     pub navigation: Arc<NavigationSnapshot>,
     pub timeline: Arc<timeline::Snapshot>,
     pub emoji: Arc<emoji_picker::Snapshot>,
@@ -1654,6 +1679,27 @@ impl NavigationBridge {
         });
     }
 
+    /// One bounded, read-only channel-browser demand; None releases the page.
+    pub fn browse_channels(&self, wanted: Option<(Snowflake, &str, usize)>) {
+        let wanted = wanted.map(|(guild, query, offset)| {
+            (
+                guild,
+                query
+                    .chars()
+                    .take(fastcord_discord::state::navigation::BROWSE_QUERY_CHARS)
+                    .collect::<String>(),
+                offset,
+            )
+        });
+        self.requests.send_if_modified(|request| {
+            if request.browse == wanted {
+                return false;
+            }
+            request.browse = wanted;
+            true
+        });
+    }
+
     /// The server the management panel is open for, `None` once it closes.
     pub fn admin_guild(&self, guild: Option<Snowflake>) {
         self.requests.send_if_modified(|request| {
@@ -1897,12 +1943,24 @@ impl NavigationBridge {
             .is_ok()
     }
 
+    #[cfg(test)]
     pub(crate) fn publish(
         &self,
         snapshot: NavigationSnapshot,
         timeline: timeline::Snapshot,
         emoji: emoji_picker::Snapshot,
         status: Option<GatewayStatus>,
+    ) -> bool {
+        self.publish_timed(snapshot, timeline, emoji, status, None)
+    }
+
+    pub(crate) fn publish_timed(
+        &self,
+        snapshot: NavigationSnapshot,
+        timeline: timeline::Snapshot,
+        emoji: emoji_picker::Snapshot,
+        status: Option<GatewayStatus>,
+        timing: Option<fastcord_discord::gateway::StartupStamp>,
     ) -> bool {
         let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
         let status_changed = status
@@ -1926,18 +1984,27 @@ impl NavigationBridge {
         if let Some(status) = status {
             latest.status = Some(status);
         }
-        if latest.notified {
-            false
-        } else {
-            latest.notified = true;
-            true
+        let published_at = tokio::time::Instant::now();
+        if let Some(timing) = timing {
+            latest.startup_timing = Some(timing);
         }
+        let notify = !latest.notified;
+        latest.notified = true;
+        drop(latest);
+        if let Some(timing) = timing {
+            timing.record_at(
+                fastcord_discord::gateway::StartupStage::SnapshotPublished,
+                published_at,
+            );
+        }
+        notify
     }
 
     pub fn consume(&self) -> Consumed {
         let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
         latest.notified = false;
         Consumed {
+            startup_timing: latest.startup_timing.take(),
             navigation: Arc::clone(&latest.snapshot),
             timeline: Arc::clone(&latest.timeline),
             emoji: Arc::clone(&latest.emoji),
@@ -2121,6 +2188,7 @@ enum WorkerInput {
 }
 
 struct Worker {
+    event_times: crate::scheduled_events::TimeCache,
     start: Option<(RestClient, Arc<UserToken>)>,
     rest: RestClient,
     gateway: Option<Gateway>,
@@ -3297,11 +3365,12 @@ impl Worker {
             Correlation::Ignored | Correlation::Waiting => {}
         }
     }
-    fn refresh(
+    fn refresh_timed(
         &mut self,
         gateway: &Gateway,
         request: Request,
         status: Option<GatewayStatus>,
+        timing: Option<fastcord_discord::gateway::StartupStamp>,
     ) -> bool {
         if request.revision != self.revision {
             match request.selection {
@@ -3372,6 +3441,7 @@ impl Worker {
                     .start
                     .saturating_add(request.private_channels.count),
         );
+        self.event_times.prepare(&navigation.events);
         navigation.inbox = self
             .tracker
             .navigation
@@ -3383,7 +3453,13 @@ impl Worker {
                 fastcord_discord::state::navigation::MAX_QUICK_RESULTS,
             )
         });
+        navigation.browse = request.browse.as_ref().map(|(guild, query, offset)| {
+            self.tracker
+                .navigation
+                .browse_channels(&self.tracker.store, *guild, query, *offset)
+        });
         navigation.automod = self.tracker.automod.clone();
+        navigation.webhooks_revision = self.tracker.webhooks_revision;
         navigation.admin = request.admin.and_then(|guild| {
             fastcord_discord::state::navigation::guild_admin(&self.tracker.store, guild)
         });
@@ -3412,6 +3488,7 @@ impl Worker {
             .history
             .refresh(&self.rest, &navigation, &request.timeline);
         let mut timeline = self.tracker.history.snapshot();
+        timeline.pins_revision = self.tracker.pins_revision;
         let store = &self.tracker.store;
         for row in &mut timeline.rows {
             row.mentions_me = store.mentions_account(&row.message);
@@ -3457,7 +3534,8 @@ impl Worker {
                 true
             }
         });
-        self.bridge.publish(navigation, timeline, emoji, status)
+        self.bridge
+            .publish_timed(navigation, timeline, emoji, status, timing)
     }
 }
 
@@ -3497,6 +3575,7 @@ pub fn status_stream(
     let commands = bridge.take_commands().unwrap_or_else(|| mpsc::channel(1).1);
     let history = bridge.new_history();
     let worker = Worker {
+        event_times: crate::scheduled_events::TimeCache::new(),
         start: Some((rest, token)),
         rest: rest_client,
         gateway: None,
@@ -3544,15 +3623,27 @@ pub fn status_stream(
         };
         loop {
             let mut voice_changed = false;
+            let mute_deadline = worker.tracker.store.next_mute_expiry();
+            let mute_now =
+                (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+            let mute_wait = Duration::from_millis(
+                mute_deadline
+                    .unwrap_or(mute_now)
+                    .saturating_sub(mute_now)
+                    .max(0) as u64,
+            );
+            let mut local_times_changed = false;
+            let event_time_wait = worker.event_times.wait(std::time::Instant::now());
             let typing_wait = worker.typing_wait();
             let typing_armed = worker
                 .tracker
                 .typing
                 .next_expiry(worker.tracker.history.open_channel())
                 .is_some();
+            let mut startup_timing = None;
             let (status, requested) = tokio::select! {
-                event = gateway.next_event() => {
-                    let event = event?;
+                event = gateway.next_event_timed() => {
+                    let (event, timing) = event?;
                     if let GatewayEvent::Dispatch {
                         event: Dispatch::Ready(_),
                         ..
@@ -3565,6 +3656,10 @@ pub fn status_stream(
                     let status = worker.apply_gateway_event(event, |worker| {
                         worker.start_private_list_fetch();
                     });
+                    if let Some(timing) = timing {
+                        timing.record(fastcord_discord::gateway::StartupStage::ReducerApplied);
+                        startup_timing = Some(timing);
+                    }
                     if let Some(correlation) = correlation {
                         worker.handle_correlation(correlation).await;
                     }
@@ -3641,6 +3736,18 @@ pub fn status_stream(
                         }
                     }
                 }
+                _ = tokio::time::sleep(mute_wait), if mute_deadline.is_some() => {
+                    let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+                    if worker.tracker.store.expire_mutes(now) {
+                        worker.tracker.navigation_dirty = true;
+                        worker.tracker.navigation.reconcile(&worker.tracker.store);
+                    }
+                    (None, false)
+                }
+                _ = tokio::time::sleep(event_time_wait.unwrap_or(Duration::ZERO)), if event_time_wait.is_some() => {
+                    local_times_changed = worker.event_times.refresh_due(std::time::Instant::now());
+                    (None, false)
+                }
                 // One-shot: armed only while a typing indicator is showing.
                 _ = tokio::time::sleep(typing_wait), if typing_armed =>
                 {
@@ -3674,7 +3781,9 @@ pub fn status_stream(
             {
                 // Voice controls are read straight from the bridge's watches, so a
                 // voice-only change needs a (coalesced) redraw but no snapshot rebuild.
-                if voice_changed && worker.bridge.notify_voice() {
+                // Local event offsets also live outside the Discord snapshot;
+                // reuse the existing coalesced view notification when they change.
+                if (voice_changed || local_times_changed) && worker.bridge.notify_voice() {
                     worker.gateway = Some(gateway);
                     return Some(((), worker));
                 }
@@ -3690,9 +3799,12 @@ pub fn status_stream(
             if terminal {
                 worker.answer_in_flight().await;
             }
-            let snapshot_notification = worker.refresh(&gateway, request, status);
+            let snapshot_notification =
+                worker.refresh_timed(&gateway, request, status, startup_timing);
             let notice_notification = worker.bridge.take_private_notice_pending();
-            let notified = notice_notification || snapshot_notification;
+            let notified = notice_notification
+                || snapshot_notification
+                || (local_times_changed && worker.bridge.notify_voice());
             if terminal {
                 worker.start = None;
                 worker.stop_voice().await;
@@ -3717,6 +3829,8 @@ pub struct PrivateConversationUi {
 
 /// Messages from an earlier session (identified by `id`) are ignored.
 pub struct GatewayPanel {
+    /// One fixed-size local string-select draft, dropped with the account.
+    pub component_choices: Option<crate::component_view::Choices>,
     pub id: u64,
     pub status: GatewayStatus,
     pub navigation: Arc<NavigationSnapshot>,
@@ -3973,6 +4087,7 @@ impl GatewayPanel {
         Self {
             id,
             status: GatewayStatus::Connecting { attempt: 0 },
+            component_choices: None,
             navigation: Arc::default(),
             timeline: Arc::default(),
             controls,
@@ -4066,6 +4181,17 @@ impl GatewayPanel {
         );
         self.call_view.prune(&crate::call_layout::ids(&tiles));
         self.composer.select(self.timeline.channel_id);
+        if self.component_choices.is_some_and(|choices| {
+            self.timeline.channel_id != Some(choices.channel)
+                || !self.timeline.rows.iter().any(|row| {
+                    row.message.id == choices.message
+                        && row.revision == choices.revision
+                        && row.component_pending.is_none()
+                })
+        }) {
+            self.component_choices = None;
+        }
+
         if self
             .confirm_delete
             .is_some_and(|(channel, _)| self.timeline.channel_id != Some(channel))
@@ -4077,6 +4203,9 @@ impl GatewayPanel {
             .is_some_and(|(channel, _)| self.timeline.channel_id != Some(channel))
         {
             self.more = None;
+        }
+        if let Some(timing) = consumed.startup_timing {
+            timing.record(fastcord_discord::gateway::StartupStage::UiConsumed);
         }
         consumed.status
     }
@@ -4147,6 +4276,7 @@ impl GatewayPanel {
     /// What the timeline shows about rows the UI is working on.
     pub fn interaction(&self) -> timeline::Interaction {
         timeline::Interaction {
+            component_choices: self.component_choices,
             editing: self.composer.editing(),
             replying: self.composer.replying(),
             confirming: self
@@ -4181,6 +4311,18 @@ impl GatewayPanel {
             self.more = None;
         }
         let queued = match event {
+            Event::SelectChoice { key, option } if open == Some(key.channel) => {
+                if let Some(row) = self
+                    .timeline
+                    .rows
+                    .iter()
+                    .find(|row| row.message.id == key.message)
+                {
+                    self.component_choices =
+                        crate::component_view::toggle(self.component_choices, row, key, option);
+                }
+                return false;
+            }
             Event::More(message) => {
                 self.more = message
                     .zip(open)
@@ -5563,6 +5705,7 @@ mod tests {
         )
         .unwrap();
         Worker {
+            event_times: crate::scheduled_events::TimeCache::isolated(),
             start: None,
             rest: rest.clone(),
             gateway: None,
@@ -6117,6 +6260,24 @@ mod tests {
     }
 
     #[test]
+    fn pins_events_invalidate_only_the_open_channel() {
+        let mut tracker = Tracker::default();
+        tracker.history.set_open_channel(Some(Snowflake(7)));
+        let event = |channel| GatewayEvent::Dispatch {
+            sequence: 2,
+            event: Dispatch::ChannelPinsUpdate(Snowflake(channel)),
+        };
+        tracker.apply(event(8));
+        assert_eq!(tracker.pins_revision, 0);
+        assert!(!tracker.navigation_dirty);
+        tracker.apply(event(7));
+        assert_eq!(tracker.pins_revision, 1);
+        assert!(tracker.navigation_dirty);
+        tracker.apply(event(7));
+        assert_eq!(tracker.pins_revision, 2);
+    }
+
+    #[test]
     fn typing_shows_until_a_new_session_and_unknown_users_are_someone() {
         let mut tracker = Tracker::default();
         let channel = Snowflake(7);
@@ -6249,6 +6410,20 @@ mod tests {
                 direct_messages: 1
             }))
         );
+    }
+
+    #[test]
+    fn webhook_events_publish_navigation_invalidation() {
+        let mut tracker = Tracker::default();
+        for seq in 1..=2 {
+            tracker.navigation_dirty = false;
+            tracker.apply(GatewayEvent::Dispatch {
+                sequence: seq,
+                event: Dispatch::WebhooksUpdate(Snowflake(seq)),
+            });
+            assert!(tracker.navigation_dirty);
+            assert_eq!(tracker.webhooks_revision, seq);
+        }
     }
 
     #[test]

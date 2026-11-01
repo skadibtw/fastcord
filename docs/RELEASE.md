@@ -35,7 +35,7 @@ Linux archives include `share/applications/fastcord.desktop` and hicolor PNG/SVG
 icons. For a user-local Linux installation, place the executable in
 `~/.local/bin/fastcord` (on PATH), copy `share/applications/fastcord.desktop` into
 `~/.local/share/applications/` and merge `share/icons/hicolor/` into
-`~/.local/share/icons/hicolor/`. The archive does not modify desktop settings.
+`~/.local/share/icons/hicolor/`. The desktop entry advertises the `discord:` URL scheme and passes one URL to the existing bounded deep-link/instance handler. Installing the entry makes fastcord available as a handler; it does not select it as the default. The archive does not modify desktop settings.
 
 The Linux executable links the system PipeWire client library
 (`libpipewire-0.3.so.0`, present on current GNOME and

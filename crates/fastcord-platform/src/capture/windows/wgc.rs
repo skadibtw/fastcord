@@ -460,6 +460,8 @@ impl Capture {
             return Ok(Flow::Continue);
         };
         let output = self.governor.output(held.content, now);
+        let requested = self.handler.output_size(output);
+        let output = super::super::convert::bounded_output_size(output, requested);
         let handler = &mut self.handler;
         let path = self.converter.path();
         // Zero-copy first, when the handler wants it: the converted texture
@@ -484,7 +486,7 @@ impl Capture {
                 held.content,
                 output,
                 timestamp,
-                |sample| handler.frame(sample),
+                |sample| handler.scaled_frame(sample),
             )?,
         };
         if self.converter.path() != path {

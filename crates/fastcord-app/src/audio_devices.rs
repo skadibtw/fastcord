@@ -659,6 +659,7 @@ fn save_to(path: &Path, prefs: &Preferences) -> io::Result<()> {
 
 pub async fn load() -> Preferences {
     tokio::task::spawn_blocking(|| {
+        fastcord_platform::clock_format::initialize();
         path().map_or_else(Preferences::default, |path| load_from(&path))
     })
     .await

@@ -19,7 +19,7 @@ pub const MAX_SCALE: u16 = 150;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TimeFormat {
-    /// No locale API is read, so this is the 24-hour clock the client always showed.
+    /// Cached native clock preference, with a 24-hour fallback if unavailable.
     #[default]
     System,
     Hour12,
@@ -45,13 +45,22 @@ impl TimeFormat {
     }
 
     pub fn hour12(self) -> bool {
-        self == Self::Hour12
+        self.with_system(fastcord_platform::clock_format::hour12())
+    }
+
+    fn with_system(self, system: Option<bool>) -> bool {
+        match self {
+            Self::System => system.unwrap_or(false),
+            Self::Hour12 => true,
+            Self::Hour24 => false,
+        }
     }
 }
 
 impl std::fmt::Display for TimeFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::System if self.hour12() => tr("System (12-hour)"),
             Self::System => tr("System (24-hour)"),
             Self::Hour12 => tr("12-hour"),
             Self::Hour24 => tr("24-hour"),
@@ -443,7 +452,7 @@ pub fn view<'a>(prefs: Prefs, speech: &SpeechView<'a>) -> Element<'a, Message> {
         ),
         speech_rows(speech),
         text(tr(
-            "Tab moves between controls and Space toggles them. Screen readers and spellcheck are not supported yet."
+            "Tab moves between controls and Space toggles them. Screen readers are not supported yet. Linux spelling is available for a selected composer word."
         ))
         .size(12)
         .color(crate::style::MUTED),
@@ -538,6 +547,13 @@ mod tests {
         assert_eq!(clock(16, 5, true), "4:05 PM");
         assert_eq!(clock(0, 30, true), "12:30 AM");
         assert_eq!(clock(12, 0, true), "12:00 PM");
-        assert!(TimeFormat::Hour12.hour12() && !TimeFormat::System.hour12());
+        for system in [Some(true), Some(false), None] {
+            assert!(TimeFormat::Hour12.with_system(system));
+            assert!(!TimeFormat::Hour24.with_system(system));
+            assert_eq!(
+                TimeFormat::System.with_system(system),
+                system.unwrap_or(false)
+            );
+        }
     }
 }

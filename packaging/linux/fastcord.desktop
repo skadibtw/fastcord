@@ -2,8 +2,9 @@
 Type=Application
 Name=fastcord
 Comment=Lightweight native Discord client
-Exec=fastcord
+Exec=fastcord %u
 Icon=fastcord
 Terminal=false
+MimeType=x-scheme-handler/discord;
 Categories=Network;InstantMessaging;Chat;
 StartupWMClass=fastcord

@@ -326,6 +326,8 @@ struct App {
     speech_voices: Vec<fastcord_platform::speech::Voice>,
     audio_saving: Option<audio_devices::Preferences>,
     volume_writer: Option<voice_settings::Writer>,
+    /// The writer survives manual Gateway reconnects, including its status stream.
+    volume_writer_session: u64,
     volume_notice: Option<String>,
     /// The camera picker; probed only when the user asks.
     camera_list: gateway::CameraList,
@@ -460,7 +462,11 @@ enum Message {
     #[cfg(feature = "fake-discord")]
     FakeStep(fake::Step),
     #[cfg(feature = "fake-discord")]
-    FakeShot(std::path::PathBuf, iced::window::Screenshot),
+    FakeShot(
+        std::path::PathBuf,
+        iced::window::Screenshot,
+        Option<fake::SnapshotAck>,
+    ),
     TokenEdited(Arc<UserToken>),
     InputTooLong,
     Acknowledge(bool),
@@ -491,6 +497,7 @@ enum Message {
     AccountRemoved(Snowflake, Result<(), StoreError>),
     AccountIndexSaved,
     VolumeSettingsLoaded,
+    VolumeWriterFinished(voice_settings::Status),
     VoiceVolumesPurged {
         failed: bool,
     },
@@ -750,6 +757,7 @@ impl App {
                 speech_voices: Vec::new(),
                 audio_saving: None,
                 volume_writer: None,
+                volume_writer_session: 0,
                 volume_notice: None,
                 camera_list: gateway::CameraList::default(),
                 shortcuts: shortcuts::Runtime::default(),
@@ -843,7 +851,10 @@ impl App {
         if let Some(gateway) = self.phase.gateway() {
             gateway.controls.quick_query(self.ui.switcher.wanted());
             self.ui.guild_admin.sync(&gateway.navigation);
-            self.ui.automod.observe(&gateway.navigation.automod);
+            self.ui.automod.observe(
+                &gateway.navigation.automod,
+                gateway.navigation.admin.as_ref(),
+            );
             gateway.controls.admin_guild(
                 self.ui
                     .guild_admin
@@ -1004,6 +1015,8 @@ impl App {
         iced::Subscription::batch([
             activity,
             iced::Subscription::run(network_ui::changes).map(|()| Message::NetworkChanged),
+            iced::Subscription::run(network_ui::profiles)
+                .map(|profile| Message::Network(network_ui::Action::ProfileChanged(profile))),
             iced::Subscription::run_with(
                 network_ui::Updates(self.network.controller().clone()),
                 network_ui::updates,
@@ -1379,6 +1392,20 @@ impl App {
 
     fn network_event(&mut self, action: network_ui::Action) -> Task<Message> {
         match action {
+            network_ui::Action::ProfileChanged(profile) => {
+                if profile != self.network_settings.profile_digest {
+                    self.network.controller().network_changed();
+                    self.network_settings.profile_digest = profile;
+                    self.network_settings.bind_profile(&self.network);
+                }
+            }
+            network_ui::Action::HintsSaved(result) => {
+                self.network_settings.saving = false;
+                if result.is_err() {
+                    self.network_settings.notice =
+                        Some("Network strategy preferences could not be saved.");
+                }
+            }
             network_ui::Action::PacketStart => {
                 if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
                     self.network_settings.saving = true;
@@ -1452,6 +1479,66 @@ impl App {
                     },
                     |()| Message::Network(network_ui::Action::Retried),
                 );
+            }
+            network_ui::Action::SourceAddress(value) => {
+                if matches!(self.phase, Phase::Login)
+                    && !self.network_settings.saving
+                    && value.len() <= 64
+                {
+                    self.network_settings.source_address = value;
+                }
+            }
+            network_ui::Action::ApplySourceAddress => {
+                if matches!(self.phase, Phase::Login) && !self.network_settings.saving {
+                    match self.network_settings.apply_source(&self.network) {
+                        Ok(context) => {
+                            self.network.controller().network_changed();
+                            self.network = context;
+                            self.network_settings.notice = Some(
+                                "Direct source preference applied for this session. Proxy mode ignores it; existing OS routes are unchanged.",
+                            );
+                        }
+                        Err(notice) => self.network_settings.notice = Some(notice),
+                    }
+                }
+            }
+            network_ui::Action::FullSearch => {
+                if self.network.mode() == fastcord_net::settings::Mode::Auto
+                    && !self.network_settings.search_busy()
+                {
+                    let context = self.network.clone();
+                    let ticket = self
+                        .network_settings
+                        .begin_search(context.controller().generation());
+                    return Task::perform(
+                        async move { context.extended_search().await },
+                        move |outcome| {
+                            Message::Network(network_ui::Action::FullSearchFinished {
+                                ticket,
+                                outcome,
+                            })
+                        },
+                    );
+                }
+            }
+            network_ui::Action::FullSearchFinished { ticket, outcome } => {
+                if !self
+                    .network_settings
+                    .finish_search(ticket, self.network.controller().generation())
+                {
+                    return Task::none();
+                }
+                self.network_settings.notice = Some(match outcome {
+                    fastcord_net::ExtendedSearchOutcome::NoDemand => {
+                        "No eligible failed TLS endpoint is available. Check the required connection first."
+                    }
+                    fastcord_net::ExtendedSearchOutcome::Restricted => {
+                        "Extended shaping does not override Proxy, no-SNI or an explicitly selected packet helper."
+                    }
+                    fastcord_net::ExtendedSearchOutcome::Finished => {
+                        "Bounded search finished or paused at its budget. Progress and cooldown are shown below; ordinary reconnect limits still apply."
+                    }
+                });
             }
             network_ui::Action::Retried => {
                 self.network_settings.notice =
@@ -1557,7 +1644,17 @@ impl App {
                     Some(result.err().unwrap_or("Network settings saved."))
             }
         }
-        Task::none()
+        self.save_network_hints()
+    }
+
+    fn save_network_hints(&mut self) -> Task<Message> {
+        self.network_settings
+            .collect_hints(&self.network)
+            .map_or_else(Task::none, |settings| {
+                Task::perform(network_ui::save(settings), |result| {
+                    Message::Network(network_ui::Action::HintsSaved(result))
+                })
+            })
     }
 
     #[cfg(feature = "fake-discord")]
@@ -1570,14 +1667,31 @@ impl App {
             fake::Step::Size(width, height) => {
                 iced::window::resize(self.main_window, iced::Size::new(width, height))
             }
-            fake::Step::Snap(path) => {
+            fake::Step::Snap(path, completion) => {
                 // A watcher may copy the screen itself: overlays drawn by the
                 // compositor are missing from the window's own pixels.
                 eprintln!("script: snap {}", path.display());
                 // The player window when one is open (the script's `stream`
                 // step), otherwise the main window.
                 let id = self.players.first().map_or(self.main_window, |p| p.window);
-                iced::window::screenshot(id).map(move |shot| Message::FakeShot(path.clone(), shot))
+                // Capture inside this window's actual presentation, while all
+                // text primitives still have their widget owners. The returned
+                // pixels are owned before any later app message can rebuild UI.
+                let draw = fake::next_draw(id);
+                Task::future(draw.wait()).then(move |shot| {
+                    if let Some(shot) = shot {
+                        Task::done(Message::FakeShot(path.clone(), shot, completion.clone()))
+                    } else {
+                        eprintln!(
+                            "script: screenshot canceled, oversized, or window did not present: {}",
+                            path.display()
+                        );
+                        if let Some(completion) = &completion {
+                            completion.finish();
+                        }
+                        Task::none()
+                    }
+                })
             }
             fake::Step::Stream(seconds) => {
                 if let Some(gateway) = self.phase.gateway() {
@@ -1586,76 +1700,190 @@ impl App {
                 }
                 Task::none()
             }
-            fake::Step::Toggle(panel) => self.handle(match panel {
-                "search" => Message::Search(search::Event::Toggle),
-                "pins" => Message::Pins(pins::Event::Toggle),
-                "inbox" => Message::Inbox(inbox::Event::Toggle),
-                "friends" => Message::Friends(friends::Event::Open),
-                "emoji" => Message::EmojiPicker(emoji_picker::Event::Toggle),
-                "audio" => Message::OpenAudioSettings,
-                "app" => Message::Settings(settings::Event::Open(settings::Section::App)),
-                "network" => {
-                    if self.network_settings.open {
-                        Message::Settings(settings::Event::Close)
-                    } else {
-                        Message::Network(network_ui::Action::Open)
+            fake::Step::Toggle(panel) => {
+                let message = match panel {
+                    "search" => Message::Search(search::Event::Toggle),
+                    "pins" => Message::Pins(pins::Event::Toggle),
+                    "thread-archive" => {
+                        let Some(selection) = self
+                            .phase
+                            .gateway()
+                            .and_then(|gateway| gateway.navigation.selection.as_ref())
+                        else {
+                            return Task::none();
+                        };
+                        Message::Threads(threads::Event::ToggleArchived(
+                            selection.guild_id,
+                            selection.channel_id,
+                        ))
                     }
-                }
-                "chat" => Message::Settings(settings::Event::Open(settings::Section::Chat)),
-                "login-qr" => {
-                    Message::LoginUi(login_screen::Event::Method(login_screen::Method::Qr))
-                }
-                "login-password" => {
-                    Message::LoginUi(login_screen::Event::Method(login_screen::Method::Password))
-                }
-                "login-token" => {
-                    Message::LoginUi(login_screen::Event::Method(login_screen::Method::Token))
-                }
-                "login-accounts" => Message::LoginUi(login_screen::Event::Accounts),
-                "server-menu" => Message::OpenMenu(Some(Menu::Server(Snowflake(5001)))),
-                "conversation-menu" => Message::OpenMenu(Some(Menu::Conversation)),
-                "account-menu" => Message::Status(status::Event::ToggleMenu),
-                "mic-menu" => Message::MicMenu(true),
-                "new-dm" => Message::NewDm(new_dm::Event::Open),
-                "requests" => Message::ShowRequests,
-                "settings" => Message::Settings(settings::Event::Open(settings::Section::Voice)),
-                "close-menus" => Message::OpenMenu(None),
-                "escape" => Message::Shortcut(switcher::Shortcut::Escape { captured: false }),
-                "gif" => Message::Expressions(Expressions::Gif),
-                "sticker" => Message::Expressions(Expressions::Sticker),
-                "profile" => Message::Settings(settings::Event::Open(settings::Section::Profile)),
-                "accounts" => Message::Settings(settings::Event::Open(settings::Section::Accounts)),
-                "server-settings" => {
-                    Message::GuildAdmin(guild_admin::Event::Settings(Snowflake(5001)))
-                }
-                "roles" => Message::GuildAdmin(guild_admin::Event::Roles(Snowflake(5001))),
-                "bans" => Message::ServerSettings(Snowflake(5001), server_settings::Section::Bans),
-                "automod" => {
-                    Message::ServerSettings(Snowflake(5001), server_settings::Section::AutoMod)
-                }
-                "group" => Message::Group(group_dm::Event::Toggle),
-                "create-channel" => {
-                    Message::GuildAdmin(guild_admin::Event::CreateChannel(Snowflake(5001), None))
-                }
-                "network-details" => {
-                    Message::Network(network_ui::Action::Details(!self.network_settings.details))
-                }
-                "friend-menu" => match &self.phase {
-                    Phase::Account { gateway, .. } => Message::Friends(friends::Event::Menu(
-                        gateway.navigation.relationships.first().map(|r| r.user.id),
+                    "archive-public" => Message::Threads(threads::Event::ArchiveKind(
+                        fastcord_discord::ArchiveKind::Public,
                     )),
-                    _ => Message::OpenMenu(None),
-                },
-                "long-draft" => Message::Composer(composer::Event::Complete {
-                    replaced: 0,
-                    insertion: "A longer draft
+                    "archive-private" => Message::Threads(threads::Event::ArchiveKind(
+                        fastcord_discord::ArchiveKind::Private,
+                    )),
+                    "archive-joined" => Message::Threads(threads::Event::ArchiveKind(
+                        fastcord_discord::ArchiveKind::JoinedPrivate,
+                    )),
+                    "spelling-prepare" => {
+                        if let Some(gateway) = self.phase.gateway_mut() {
+                            gateway
+                                .composer
+                                .perform(iced::widget::text_editor::Action::SelectAll);
+                            gateway.composer.insert_emoji("helo");
+                            gateway
+                                .composer
+                                .perform(iced::widget::text_editor::Action::SelectAll);
+                        }
+                        Message::Composer(composer::Event::Spelling(
+                            composer::spelling::Event::Open,
+                        ))
+                    }
+                    "spelling-en-us" => Message::Composer(composer::Event::Spelling(
+                        composer::spelling::Event::Language(
+                            self.phase
+                                .gateway()
+                                .map_or(0, |gateway| gateway.composer.spelling_serial()),
+                            "en_US".into(),
+                        ),
+                    )),
+                    "spelling-apply" => Message::Composer(composer::Event::Spelling(
+                        composer::spelling::Event::Apply(
+                            self.phase
+                                .gateway()
+                                .map_or(0, |gateway| gateway.composer.spelling_serial()),
+                            0,
+                        ),
+                    )),
+                    "inbox" => Message::Inbox(inbox::Event::Toggle),
+                    "friends" => Message::Friends(friends::Event::Open),
+                    "emoji" => Message::EmojiPicker(emoji_picker::Event::Toggle),
+                    "audio" => Message::OpenAudioSettings,
+                    "app" => Message::Settings(settings::Event::Open(settings::Section::App)),
+                    "network" => {
+                        if self.network_settings.open {
+                            Message::Settings(settings::Event::Close)
+                        } else {
+                            Message::Network(network_ui::Action::Open)
+                        }
+                    }
+                    "chat" => Message::Settings(settings::Event::Open(settings::Section::Chat)),
+                    "login-qr" => {
+                        Message::LoginUi(login_screen::Event::Method(login_screen::Method::Qr))
+                    }
+                    "login-password" => Message::LoginUi(login_screen::Event::Method(
+                        login_screen::Method::Password,
+                    )),
+                    "login-token" => {
+                        Message::LoginUi(login_screen::Event::Method(login_screen::Method::Token))
+                    }
+                    "login-accounts" => Message::LoginUi(login_screen::Event::Accounts),
+                    "browse-channels" => {
+                        let Some(guild) = self
+                            .phase
+                            .gateway()
+                            .and_then(|gateway| gateway.navigation.selected_guild)
+                        else {
+                            return Task::none();
+                        };
+                        Message::Onboarding(onboarding::Event::OpenBrowse(guild))
+                    }
+                    "events" => {
+                        let Some(guild) = self
+                            .phase
+                            .gateway()
+                            .and_then(|gateway| gateway.navigation.selected_guild)
+                        else {
+                            return Task::none();
+                        };
+                        Message::Events(scheduled_events::Event::Open(guild))
+                    }
+                    "event-details" | "event-users" => {
+                        let Some(event) = self
+                            .phase
+                            .gateway()
+                            .and_then(|gateway| gateway.navigation.events.first())
+                            .map(|event| event.id)
+                        else {
+                            return Task::none();
+                        };
+                        Message::Events(if panel == "event-details" {
+                            scheduled_events::Event::Show(event)
+                        } else {
+                            scheduled_events::Event::ShowUsers(event)
+                        })
+                    }
+                    "event-users-next" => Message::Events(scheduled_events::Event::NextUsers),
+                    "event-new" => Message::Events(scheduled_events::Event::New),
+                    "event-weekly" => Message::Events(scheduled_events::Event::Repeat(Some(
+                        fastcord_discord::EventRecurrence::Weekly,
+                    ))),
+                    "onboarding-questions" => {
+                        let Some(guild) = self
+                            .phase
+                            .gateway()
+                            .and_then(|gateway| gateway.navigation.selected_guild)
+                        else {
+                            return Task::none();
+                        };
+                        Message::Onboarding(onboarding::Event::OpenQuestions(guild, false))
+                    }
+                    "server-menu" => Message::OpenMenu(Some(Menu::Server(Snowflake(5001)))),
+                    "conversation-menu" => Message::OpenMenu(Some(Menu::Conversation)),
+                    "account-menu" => Message::Status(status::Event::ToggleMenu),
+                    "mic-menu" => Message::MicMenu(true),
+                    "new-dm" => Message::NewDm(new_dm::Event::Open),
+                    "requests" => Message::ShowRequests,
+                    "settings" => {
+                        Message::Settings(settings::Event::Open(settings::Section::Voice))
+                    }
+                    "close-menus" => Message::OpenMenu(None),
+                    "escape" => Message::Shortcut(switcher::Shortcut::Escape { captured: false }),
+                    "gif" => Message::Expressions(Expressions::Gif),
+                    "sticker" => Message::Expressions(Expressions::Sticker),
+                    "profile" => {
+                        Message::Settings(settings::Event::Open(settings::Section::Profile))
+                    }
+                    "accounts" => {
+                        Message::Settings(settings::Event::Open(settings::Section::Accounts))
+                    }
+                    "server-settings" => {
+                        Message::GuildAdmin(guild_admin::Event::Settings(Snowflake(5001)))
+                    }
+                    "roles" => Message::GuildAdmin(guild_admin::Event::Roles(Snowflake(5001))),
+                    "bans" => {
+                        Message::ServerSettings(Snowflake(5001), server_settings::Section::Bans)
+                    }
+                    "automod" => {
+                        Message::ServerSettings(Snowflake(5001), server_settings::Section::AutoMod)
+                    }
+                    "group" => Message::Group(group_dm::Event::Toggle),
+                    "create-channel" => Message::GuildAdmin(guild_admin::Event::CreateChannel(
+                        Snowflake(5001),
+                        None,
+                    )),
+                    "network-details" => Message::Network(network_ui::Action::Details(
+                        !self.network_settings.details,
+                    )),
+                    "friend-menu" => match &self.phase {
+                        Phase::Account { gateway, .. } => Message::Friends(friends::Event::Menu(
+                            gateway.navigation.relationships.first().map(|r| r.user.id),
+                        )),
+                        _ => Message::OpenMenu(None),
+                    },
+                    "long-draft" => Message::Composer(composer::Event::Complete {
+                        replaced: 0,
+                        insertion: "A longer draft
 with a second line
 and a third
 and a fourth"
-                        .into(),
-                }),
-                _ => Message::Account(account_panel::Event::Toggle),
-            }),
+                            .into(),
+                    }),
+                    _ => Message::Account(account_panel::Event::Toggle),
+                };
+                self.handle(message)
+            }
             fake::Step::Join(guild, channel) => {
                 self.handle(Message::JoinVoice(Snowflake(guild), Snowflake(channel)))
             }
@@ -1756,6 +1984,7 @@ and a fourth"
             | Message::AccountRemoved(..)
             | Message::AccountIndexSaved
             | Message::VolumeSettingsLoaded
+            | Message::VolumeWriterFinished(_)
             | Message::VoiceVolumesPurged { .. }
             | Message::Forget(..)
             | Message::RetryDelete
@@ -2079,15 +2308,11 @@ and a fourth"
     /// and its attachment cache, which the caller purges.
     fn teardown_account(
         &mut self,
-    ) -> Option<(Snowflake, Option<crate::attachments::AttachmentCache>)> {
-        // Join before account removal can purge its file rows. Shutdown wakes
-        // the writer immediately rather than waiting out the coalescing delay.
-        if let Some(writer) = self.volume_writer.take() {
-            let status = writer.finish();
-            if let Some(notice) = status.notice() {
-                self.notice = Some(notice.to_owned());
-            }
-        }
+    ) -> Option<(
+        Snowflake,
+        Option<crate::attachments::AttachmentCache>,
+        Option<voice_settings::Writer>,
+    )> {
         self.volume_notice = None;
         if let Some(gateway) = self.phase.gateway_mut() {
             // Drafts live in memory only; logout forgets them at once.
@@ -2096,7 +2321,14 @@ and a fourth"
         self.ui.reset();
         let (session, gateway) = self.phase.account()?;
         session.client.stop_authenticated_work();
-        Some((session.user.id, gateway.attachments.clone()))
+        let (account, cache) = (session.user.id, gateway.attachments.clone());
+        Some((account, cache, self.volume_writer.take()))
+    }
+
+    fn finish_volume_writer(writer: Option<voice_settings::Writer>) -> Task<Message> {
+        writer.map_or(Task::none(), |writer| {
+            Task::perform(writer.finish_async(), Message::VolumeWriterFinished)
+        })
     }
 
     fn purge_cache(cache: Option<crate::attachments::AttachmentCache>) -> Task<Message> {
@@ -2108,10 +2340,10 @@ and a fourth"
     }
 
     fn save_account_index(&self) -> Task<Message> {
-        let index = self.account_index.clone();
+        let save = accounts::Save::new(&self.account_index);
         Task::perform(
             async move {
-                let _ = tokio::task::spawn_blocking(move || accounts::save(&index)).await;
+                let _ = tokio::task::spawn_blocking(move || save.run()).await;
             },
             |()| Message::AccountIndexSaved,
         )
@@ -2282,6 +2514,9 @@ and a fourth"
         let mut controls = gateway::NavigationBridge::new();
         if let Some(previous) = &previous {
             controls.inherit(previous);
+            // Pending volume changes may not be on disk yet. Keep them above
+            // the async disk snapshot, just like changes made during loading.
+            controls.set_volume_settings(previous.voice_controls().volumes.clone());
         }
         controls.set_account_id(session.user.id);
         let account = session.user.id;
@@ -2296,12 +2531,19 @@ and a fourth"
                 },
             )
         };
-        let (writer, statuses) = voice_settings::Writer::start(account);
-        self.volume_writer = Some(writer);
-        self.volume_notice = None;
-        let volume_events = Task::run(statuses, move |status| {
-            Message::VolumeSettingsStatus(id, status)
-        });
+        let volume_events = if previous.is_some() && self.volume_writer.is_some() {
+            // Reconnecting the same account must not detach a writer that can
+            // still flush. Its original status task remains alive as well.
+            Task::none()
+        } else {
+            let (writer, statuses) = voice_settings::Writer::start(account);
+            self.volume_writer = Some(writer);
+            self.volume_writer_session = id;
+            self.volume_notice = None;
+            Task::run(statuses, move |status| {
+                Message::VolumeSettingsStatus(id, status)
+            })
+        };
         controls.set_audio_devices(&self.audio_preferences);
         controls.set_voice_input(&self.audio_preferences.voice_input);
         self.shortcuts.rebuild(&self.audio_preferences.voice_input);

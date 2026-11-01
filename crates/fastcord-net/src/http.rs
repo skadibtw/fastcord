@@ -23,6 +23,7 @@ pub struct HttpBuilder {
     role: Role,
     local: bool,
     invalid_headers: bool,
+    headers: HeaderMap,
     connector: Option<crate::connect::ConnectLayer>,
 }
 
@@ -59,10 +60,16 @@ impl HttpBuilder {
                 context: context.clone(),
                 role,
                 timeout: None,
+                evidence: None,
             })
         } else {
             if !local {
-                inner = inner.dns_resolver(Arc::new(PublicResolver { role }));
+                inner = inner
+                    .local_address(context.source_address())
+                    .dns_resolver(Arc::new(PublicResolver {
+                        role,
+                        source_address: context.source_address(),
+                    }));
             }
             None
         };
@@ -72,13 +79,14 @@ impl HttpBuilder {
             role,
             local,
             invalid_headers: false,
+            headers: HeaderMap::new(),
             connector,
         })
     }
 
     pub fn default_headers(mut self, headers: HeaderMap) -> Self {
         self.invalid_headers |= !allowed_headers(self.role, &headers);
-        self.inner = self.inner.default_headers(headers);
+        self.headers.extend(headers);
         self
     }
 
@@ -130,14 +138,41 @@ impl HttpBuilder {
         self
     }
 
+    /// Consumes a fresh client for exactly one credential-free GET, so pooled
+    /// connections, concurrent requests and recovery probes cannot contaminate its receipt.
+    pub async fn anonymous_get(
+        mut self,
+        url: &str,
+    ) -> (Result<Response, HttpError>, crate::TransportEvidence) {
+        let receipt = crate::evidence::Receipt::new(
+            self.context.mode(),
+            http_profile(self.context.mode(), self.role),
+            self.context.packet_helper_available(),
+        );
+        if let Some(connector) = &mut self.connector {
+            connector.evidence = Some(receipt.clone());
+        } else {
+            receipt.selected(crate::tls::Strategy::Direct);
+        }
+        // This diagnostic API never inherits configured authentication headers.
+        self.headers.clear();
+        self.invalid_headers = false;
+        let result = match self.build() {
+            Ok(client) => client.get(url).send().await,
+            Err(error) => Err(HttpError::from_category(error)),
+        };
+        (result, receipt.snapshot())
+    }
+
     pub fn build(self) -> Result<HttpClient, NetworkError> {
         if self.invalid_headers {
             return Err(NetworkError::InvalidTarget);
         }
+        let builder = self.inner.default_headers(self.headers);
         let inner = if let Some(connector) = self.connector {
-            self.inner.connector_layer(connector)
+            builder.connector_layer(connector)
         } else {
-            self.inner
+            builder
         };
         let inner = inner
             .build()
@@ -368,15 +403,24 @@ fn allowed_headers(role: Role, headers: &HeaderMap) -> bool {
 }
 
 struct PublicResolver {
+    source_address: Option<std::net::IpAddr>,
     role: Role,
 }
 impl Resolve for PublicResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let host = name.as_str().to_owned();
         let role = self.role;
+        let source = self.source_address;
         Box::pin(async move {
             authorize(role, &host, 443)?;
             let addresses = resolve_public(&host, 0).await?;
+            let addresses: Vec<_> = addresses
+                .into_iter()
+                .filter(|a| source.is_none_or(|ip| ip.is_ipv4() == a.is_ipv4()))
+                .collect();
+            if addresses.is_empty() {
+                return Err(NetworkError::NoRoute.into());
+            }
             Ok(Box::new(addresses.into_iter()) as Addrs)
         })
     }
@@ -385,6 +429,38 @@ impl Resolve for PublicResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn anonymous_receipts_do_not_inherit_headers_or_claim_packet_attempts_on_timeout() {
+        use tokio::io::AsyncReadExt;
+        for mode in [Mode::Off, Mode::Auto, Mode::Proxy] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                let count = socket.read(&mut bytes).await.unwrap();
+                assert!(!String::from_utf8_lossy(&bytes[..count]).contains("canary-secret"));
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            });
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                HeaderValue::from_static("canary-secret"),
+            );
+            let (result, receipt) = HttpBuilder::new(NetworkContext::new(mode), Role::Rest, true)
+                .unwrap()
+                .default_headers(headers)
+                .timeout(Duration::from_millis(50))
+                .anonymous_get(&url)
+                .await;
+            assert!(result.unwrap_err().is_timeout());
+            assert_eq!(receipt.mode, mode);
+            assert!(!receipt.packet_attempted);
+            assert!(!receipt.packet_completed);
+            server.abort();
+        }
+    }
+
     #[tokio::test]
     async fn numeric_private_and_credential_urls_fail_before_networking() {
         let http = NetworkContext::off()

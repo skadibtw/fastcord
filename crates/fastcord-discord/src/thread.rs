@@ -48,7 +48,26 @@ impl From<RestError> for ThreadError {
     }
 }
 
-/// One page of archived public threads.
+/// Which archive the user explicitly requested. Joined-private uses an ID
+/// cursor; the other archives use archive timestamps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArchiveKind {
+    #[default]
+    Public,
+    Private,
+    JoinedPrivate,
+}
+
+impl ArchiveKind {
+    pub fn cursor(self, page: &ArchivedThreads) -> Option<String> {
+        match self {
+            Self::JoinedPrivate => page.threads.last().map(|thread| thread.id.to_string()),
+            _ => page.cursor().map(str::to_owned),
+        }
+    }
+}
+
+/// One page of archived threads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchivedThreads {
     /// Newest archived first, all threads of the asked channel.
@@ -257,7 +276,11 @@ fn membership_route(method: Method, thread: Snowflake) -> Result<Route, RestErro
     Route::new(method, &format!("/channels/{thread}/thread-members/@me"))
 }
 
-fn archived_route(channel: Snowflake, before: Option<&str>) -> Result<Route, RestError> {
+fn archived_route(
+    channel: Snowflake,
+    kind: ArchiveKind,
+    before: Option<&str>,
+) -> Result<Route, RestError> {
     let mut url = Url::parse("https://discord.invalid/").map_err(|_| RestError::InvalidRoute)?;
     {
         let mut pairs = url.query_pairs_mut();
@@ -267,21 +290,33 @@ fn archived_route(channel: Snowflake, before: Option<&str>) -> Result<Route, Res
         }
     }
     let query = url.query().unwrap_or_default();
+    let suffix = match kind {
+        ArchiveKind::Public => "threads/archived/public",
+        ArchiveKind::Private => "threads/archived/private",
+        ArchiveKind::JoinedPrivate => "users/@me/threads/archived/private",
+    };
     Route::new(
         Method::GET,
-        &format!("/channels/{channel}/threads/archived/public?{query}"),
+        &format!("/channels/{channel}/{suffix}?{query}"),
     )
 }
 
 #[derive(Deserialize)]
 struct ArchivedWire {
     #[serde(default)]
+    members: Vec<ArchivedMember>,
+    #[serde(default)]
     threads: Vec<Channel>,
     #[serde(default)]
     has_more: bool,
 }
 
-/// Lenient about members and unknown fields; strict that every thread is a
+#[derive(Deserialize)]
+struct ArchivedMember {
+    id: Snowflake,
+}
+
+/// Lenient about unknown fields; strict that every thread is a
 /// thread of `channel` and that the page is not larger than asked.
 pub(crate) fn parse_archived(
     body: &[u8],
@@ -291,15 +326,20 @@ pub(crate) fn parse_archived(
     let mut wire: ArchivedWire =
         serde_json::from_slice(body).map_err(|_| RestError::InvalidJson)?;
     if wire.threads.len() > ARCHIVED_PAGE_SIZE
-        || wire
-            .threads
-            .iter()
-            .any(|t| !t.kind.is_thread() || t.parent_id != Some(channel))
+        || wire.members.len() > ARCHIVED_PAGE_SIZE
+        || wire.threads.iter().any(|t| {
+            !t.kind.is_thread()
+                || t.parent_id != Some(channel)
+                || t.guild_id.is_some_and(|id| id != guild)
+        })
     {
         return Err(RestError::InvalidJson);
     }
     for thread in &mut wire.threads {
         thread.guild_id.get_or_insert(guild);
+        if wire.members.iter().any(|member| member.id == thread.id) {
+            thread.member = Some(fastcord_model::ThreadMember {});
+        }
     }
     Ok(ArchivedThreads {
         threads: wire.threads,
@@ -410,7 +450,18 @@ impl<C: Clock> RestClient<C> {
         channel: Snowflake,
         before: Option<&str>,
     ) -> Result<ArchivedThreads, RestError> {
-        let request = RestRequest::new(archived_route(channel, before)?, Priority::UserRead);
+        self.archived_threads_kind(guild, channel, ArchiveKind::Public, before)
+            .await
+    }
+
+    pub async fn archived_threads_kind(
+        &self,
+        guild: Snowflake,
+        channel: Snowflake,
+        kind: ArchiveKind,
+        before: Option<&str>,
+    ) -> Result<ArchivedThreads, RestError> {
+        let request = RestRequest::new(archived_route(channel, kind, before)?, Priority::UserRead);
         let response = self.execute(request).await?;
         parse_archived(response.body(), guild, channel)
     }
@@ -435,6 +486,27 @@ mod tests {
     }
 
     #[test]
+    fn private_archives_use_distinct_routes_and_joined_cursor_is_an_id() {
+        assert_eq!(
+            path(&archived_route(PARENT, ArchiveKind::Private, Some("stamp")).unwrap()),
+            "/channels/500/threads/archived/private?limit=25&before=stamp"
+        );
+        assert_eq!(
+            path(&archived_route(PARENT, ArchiveKind::JoinedPrivate, Some("9001")).unwrap()),
+            "/channels/500/users/@me/threads/archived/private?limit=25&before=9001"
+        );
+        let page = parse_archived(ARCHIVED.as_bytes(), GUILD, PARENT).unwrap();
+        assert_eq!(
+            ArchiveKind::JoinedPrivate.cursor(&page).as_deref(),
+            Some("9002")
+        );
+        assert_eq!(ArchiveKind::Public.cursor(&page).as_deref(), page.cursor());
+        assert!(page.threads[0].member.is_some());
+        assert!(page.threads[1].member.is_none());
+        assert!(parse_archived(ARCHIVED.as_bytes(), Snowflake(77), PARENT).is_err());
+    }
+
+    #[test]
     fn routes_are_exactly_the_documented_ones() {
         let put = membership_route(Method::PUT, Snowflake(7)).unwrap();
         assert_eq!(put.key.method(), &Method::PUT);
@@ -447,11 +519,18 @@ mod tests {
             &Method::DELETE
         );
         assert_eq!(
-            path(&archived_route(PARENT, None).unwrap()),
+            path(&archived_route(PARENT, ArchiveKind::Public, None).unwrap()),
             "/channels/500/threads/archived/public?limit=25"
         );
         assert_eq!(
-            path(&archived_route(PARENT, Some("2026-10-07T12:00:00.000000+00:00")).unwrap()),
+            path(
+                &archived_route(
+                    PARENT,
+                    ArchiveKind::Public,
+                    Some("2026-10-07T12:00:00.000000+00:00")
+                )
+                .unwrap()
+            ),
             "/channels/500/threads/archived/public?limit=25&before=2026-10-07T12%3A00%3A00.000000%2B00%3A00"
         );
     }

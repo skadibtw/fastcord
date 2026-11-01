@@ -33,10 +33,10 @@ pub enum Event {
     Sent(u64, Result<(), SendError>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Status {
     Loading,
-    Failed(&'static str),
+    Failed(String),
     Done,
     Sending,
 }
@@ -74,34 +74,28 @@ impl Default for State {
     }
 }
 
-fn describe(error: RestError) -> &'static str {
-    match error {
-        RestError::PermissionDenied | RestError::AuthenticationRequired => {
-            tr("Discord did not let this account list stickers here.")
-        }
-        RestError::ResourceGone => tr("This server's stickers are no longer available."),
-        RestError::InvalidRateLimit
-        | RestError::RateLimited
-        | RestError::SchedulerCapacityExceeded => {
-            tr("Discord is rate limiting this request. Try again shortly.")
-        }
-        RestError::Retryable(_) | RestError::Http(_) => {
-            tr("Stickers could not be loaded. Try again.")
-        }
-        _ => tr("The sticker list could not be read."),
-    }
+fn describe(error: RestError) -> String {
+    crate::rest_text::describe(
+        error,
+        &crate::rest_text::Wording {
+            forbidden: "Discord did not let this account list stickers here.",
+            gone: "This server is no longer available.",
+            unconfirmed: "Stickers could not be read. Try again.",
+            ..crate::rest_text::DEFAULT
+        },
+    )
 }
 
-fn describe_send(error: SendError) -> &'static str {
-    if matches!(error.cause(), RestError::WriteNotVerified(_)) {
-        tr(fastcord_discord::WRITE_NOT_VERIFIED)
-    } else if error.is_ambiguous() {
-        tr("The sticker may have been delivered. Check the conversation before sending again.")
-    } else {
-        tr(
-            "Discord did not send the sticker: it may be unavailable, or you may lack permission here.",
-        )
-    }
+fn describe_send(error: SendError) -> String {
+    crate::rest_text::describe(
+        error.cause(),
+        &crate::rest_text::Wording {
+            forbidden: "Discord did not send the sticker: it may be unavailable, or you may lack permission here.",
+            gone: "That sticker is no longer available.",
+            unconfirmed: "The sticker may have been delivered. Check the conversation before sending again.",
+            ..crate::rest_text::DEFAULT
+        },
+    )
 }
 
 impl State {
@@ -248,10 +242,10 @@ impl State {
 pub fn view(state: &State) -> Option<Element<'_, Event>> {
     let open = state.open?;
     let note = |line: &'static str| text(tr(line)).size(12).color(crate::style::muted());
-    let status: Element<'_, Event> = match state.status {
+    let status: Element<'_, Event> = match &state.status {
         Status::Loading => note("Loading…").into(),
         Status::Sending => note("Sending…").into(),
-        Status::Failed(reason) => text(tr(reason)).size(12).style(text::danger).into(),
+        Status::Failed(reason) => text(reason.clone()).size(12).style(text::danger).into(),
         Status::Done if open.guild.is_none() => {
             note("Stickers from other servers and packs need Nitro; open a server channel.").into()
         }

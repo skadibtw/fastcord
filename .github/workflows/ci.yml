@@ -36,6 +36,7 @@ jobs:
           python3 scripts/gen_third_party_licenses.py --check
           python3 assets/icons/generate.py --check-text
           python3 -I assets/emoji/generate.py --check
+          python3 -I assets/emoji/test_generate.py
 
   deny:
     runs-on: ubuntu-24.04

@@ -544,8 +544,12 @@ fn build_output(
             };
             device.build_output_stream::<T, _, _>(
                 config,
-                move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                    callback.callback().process(data)
+                move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+                    let timing = info.timestamp();
+                    callback.callback().process_timed(
+                        data,
+                        timing.playback.checked_duration_since(timing.callback),
+                    )
                 },
                 move |error: cpal::Error| counters.callback().record_error(error.kind()),
                 None,

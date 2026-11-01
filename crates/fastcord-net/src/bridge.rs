@@ -32,6 +32,7 @@ const HALF_CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 struct Upstream {
+    source_address: Option<std::net::IpAddr>,
     mode: crate::settings::Mode,
     factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>,
     controller: Controller,
@@ -92,6 +93,7 @@ impl Bridge {
                 .collect(),
         );
         let upstream = Upstream {
+            source_address: context.source_address(),
             mode: context.mode(),
             factory: context.prefix_factory(),
             controller: context.controller().clone(),
@@ -233,17 +235,23 @@ async fn tunnel(
             .await;
         return;
     }
+    let evidence = attempt
+        .as_ref()
+        .and_then(|a| a.evidence.lock().unwrap_or_else(|p| p.into_inner()).clone());
+    let factory = upstream.factory.clone().map(|factory| match &evidence {
+        Some(receipt) => receipt.wrap(factory),
+        None => factory,
+    });
     let mut failed_address = None;
     let connected = if let Some(proxy) = &upstream.proxy {
         crate::proxy::dial(proxy, &host, port)
             .await
             .map(|io| (io, None, None))
     } else {
-        dial_public(&host, port, &mut failed_address)
+        dial_public(&host, port, &mut failed_address, upstream.source_address)
             .await
             .map(|(io, address)| {
-                let native =
-                    crate::socket::NativeIo::new(io).with_factory(upstream.factory.clone());
+                let native = crate::socket::NativeIo::new(io).with_factory(factory);
                 let control = native.control();
                 (Box::new(native) as BoxedIo, Some(address), Some(control))
             })
@@ -289,6 +297,9 @@ async fn tunnel(
     } else {
         Strategy::Direct
     };
+    if let Some(receipt) = evidence {
+        receipt.selected(strategy);
+    }
     if client.set_nodelay(true).is_err()
         || client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -694,11 +705,20 @@ mod tests {
         let certificate =
             CertificateDer::from(include_bytes!("tls/fixtures/test-cert.der").to_vec());
         let key = include_bytes!("tls/fixtures/test-key.der");
-        for strategy in Strategy::LEGACY.into_iter().chain([
-            Strategy::MultiSplit,
-            Strategy::PacketFake,
-            Strategy::PacketOverlap,
-        ]) {
+        for (strategy, profile, fail) in Strategy::LEGACY
+            .into_iter()
+            .chain([
+                Strategy::MultiSplit,
+                Strategy::PacketFake,
+                Strategy::PacketOverlap,
+            ])
+            .map(|s| (s, TlsProfile::Http, false))
+            .chain([
+                (Strategy::PacketFake, TlsProfile::HttpWithoutSni, false),
+                (Strategy::PacketOverlap, TlsProfile::HttpWithoutSni, false),
+                (Strategy::PacketFake, TlsProfile::HttpWithoutSni, true),
+            ])
+        {
             let mut roots = RootCertStore::empty();
             roots.add(certificate.clone()).unwrap();
             let mut config =
@@ -707,6 +727,7 @@ mod tests {
                     .unwrap()
                     .with_root_certificates(roots)
                     .with_no_client_auth();
+            config.enable_sni = !profile.omits_sni();
             config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let mut server_config =
                 ServerConfig::builder_with_provider(Arc::new(crypto::ring::default_provider()))
@@ -748,18 +769,26 @@ mod tests {
                     443,
                     Role::Rest,
                     bridge_out.peer_addr().unwrap(),
-                    TlsProfile::Http,
+                    profile,
                 )
             } else {
                 strategy
             };
-            let native = crate::socket::NativeIo::new(bridge_out).with_factory(Some(factory));
+            let packet = matches!(strategy, Strategy::PacketFake | Strategy::PacketOverlap);
+            let receipt = crate::evidence::Receipt::new(crate::settings::Mode::Auto, profile, true);
+            receipt.selected(strategy);
+            let native =
+                crate::socket::NativeIo::new(bridge_out).with_factory(Some(receipt.wrap(factory)));
             let control = native.control();
             let forwarding = tokio::spawn(async move {
                 forward_with_control(bridge_in, native, strategy, forwarded_budget, Some(control))
                     .await
             });
             let origin = tokio::spawn(async move {
+                if fail {
+                    drop(server);
+                    return;
+                }
                 let mut stream = tokio_rustls::TlsAcceptor::from(Arc::new(server_config))
                     .accept(server)
                     .await
@@ -775,10 +804,22 @@ mod tests {
                 stream.shutdown().await.unwrap();
             });
             let check = async {
-                let mut stream = tokio_rustls::TlsConnector::from(Arc::new(config))
+                let connected = tokio_rustls::TlsConnector::from(Arc::new(config))
                     .connect(ServerName::try_from("localhost").unwrap(), client)
-                    .await
-                    .unwrap();
+                    .await;
+                if fail {
+                    assert!(connected.is_err());
+                    origin.await.unwrap();
+                    let _ = forwarding.await.unwrap();
+                    assert_eq!(calls.load(Ordering::Relaxed), 0);
+                    let observed = receipt.snapshot();
+                    assert!(observed.helper_available);
+                    assert_eq!(observed.selected, Some(Strategy::Direct));
+                    assert!(!observed.packet_attempted);
+                    assert!(!observed.packet_completed);
+                    return;
+                }
+                let mut stream = connected.unwrap();
                 assert_eq!(stream.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
                 stream
                     .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
@@ -795,6 +836,11 @@ mod tests {
                 forwarding.await.unwrap().unwrap();
                 assert_eq!(budget.available_permits(), 4);
                 assert_eq!(calls.load(Ordering::Relaxed), usize::from(packet));
+                let observed = receipt.snapshot();
+                assert!(observed.helper_available);
+                assert_eq!(observed.selected, Some(strategy));
+                assert_eq!(observed.packet_attempted, packet);
+                assert_eq!(observed.packet_completed, packet);
             };
             tokio::time::timeout(Duration::from_secs(10), check)
                 .await

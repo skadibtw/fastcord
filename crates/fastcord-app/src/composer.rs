@@ -7,6 +7,8 @@
 //! snapshot's outbox and is only displayed here. Enter sends, Shift+Enter starts
 //! a new line, and nothing is ever sent without one of the two.
 
+pub mod spelling;
+
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -114,6 +116,7 @@ impl fmt::Debug for Act {
 /// What the composer's widgets ask for.
 #[derive(Clone, Debug)]
 pub enum Event {
+    Spelling(spelling::Event),
     Action(Act),
     Send,
     Everyone(bool),
@@ -215,6 +218,7 @@ struct EditableAttachment {
 }
 
 pub struct Composer {
+    spelling: spelling::State,
     content: Content,
     channel: Option<Snowflake>,
     /// Characters in the editor, and in what would be sent (trimmed).
@@ -243,6 +247,7 @@ pub struct Composer {
 impl Default for Composer {
     fn default() -> Self {
         Self {
+            spelling: spelling::State::default(),
             content: Content::new(),
             channel: None,
             chars: 0,
@@ -289,6 +294,7 @@ impl Composer {
         if self.channel == channel {
             return;
         }
+        self.cancel_spelling();
         let was_editing = self.editing.is_some();
         self.cancel_edit();
         if let Some(old) = self.channel {
@@ -327,6 +333,7 @@ impl Composer {
 
     /// Empties the editor text only (a command was chosen from its slash).
     pub fn clear_text(&mut self) {
+        self.cancel_spelling();
         self.content = Content::new();
         self.recount();
     }
@@ -345,6 +352,7 @@ impl Composer {
     /// Applies an editor action, refusing edits that would grow the draft
     /// past [`MAX_EDITOR_CHARS`].
     pub fn perform(&mut self, action: Action) {
+        self.cancel_spelling();
         if let Action::Edit(edit) = &action {
             let added = match edit {
                 Edit::Insert(_) | Edit::Enter | Edit::Indent => 1,
@@ -417,6 +425,7 @@ impl Composer {
     /// Picker insertion is a normal editor paste: it replaces the selection at
     /// the current cursor, keeps source tokens intact, and is one undo step.
     pub fn insert_emoji(&mut self, source: &str) -> bool {
+        self.cancel_spelling();
         let selected = self
             .content
             .selection()
@@ -604,6 +613,7 @@ impl Composer {
     /// worker marked as the user's own qualify, and none with a change still
     /// being saved. Returns whether editing started.
     pub fn begin_edit(&mut self, snapshot: &Snapshot, message: Snowflake) -> bool {
+        self.cancel_spelling();
         let Some(channel) = self
             .channel
             .filter(|&open| snapshot.channel_id == Some(open))
@@ -667,6 +677,7 @@ impl Composer {
 
     /// Ends editing and brings the set-aside draft back. Nothing is saved.
     pub fn cancel_edit(&mut self) {
+        self.cancel_spelling();
         let Some(editing) = self.editing.take() else {
             return;
         };
@@ -735,6 +746,7 @@ impl Composer {
 
     /// The worker accepted the draft: empty the editor.
     pub fn sent(&mut self) {
+        self.cancel_spelling();
         self.content = Content::new();
         self.everyone = false;
         self.files.clear();
@@ -747,6 +759,7 @@ impl Composer {
     /// editor, or after the current text. Returns `false`, changing nothing,
     /// when it does not fit.
     pub fn restore(&mut self, text: &str) -> bool {
+        self.cancel_spelling();
         let separator = if self.blank { "" } else { "\n\n" };
         let added = separator.chars().count() + text.chars().count();
         let base = if self.blank { 0 } else { self.chars };
@@ -802,7 +815,11 @@ pub fn update(
     snapshot: &Snapshot,
     bridge: &NavigationBridge,
 ) {
+    if !matches!(event, Event::Spelling(_)) {
+        composer.cancel_spelling();
+    }
     match event {
+        Event::Spelling(_) => {}
         Event::Action(Act(action)) => composer.perform(action),
         Event::Everyone(allowed) => composer.set_everyone(allowed),
         Event::ReplyMention(allowed) => composer.set_reply_mention(allowed),
@@ -1244,6 +1261,9 @@ pub fn view<'a>(composer: &'a Composer, snapshot: &'a Snapshot, place: &str) -> 
             }))
             .spacing(4),
         );
+    }
+    if let Some(spelling) = spelling::view(composer) {
+        layout = layout.push(spelling);
     }
     let picks = composer.completions(snapshot);
     if !picks.is_empty() {

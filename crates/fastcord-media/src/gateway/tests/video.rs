@@ -574,6 +574,20 @@ async fn receiver_reports_carry_loss_and_the_sender_report_echo() {
     rig.send_frame(keyframe, false);
     next_video(&mut rig.harness).await;
     rig.udp.send(sealed_rtcp(&mut rig.server, &report));
+    assert!(
+        matches!(
+            rig.harness.event().await,
+            VoiceEvent::SenderClock {
+                user_id: ALICE,
+                ssrc: VIDEO_SSRC,
+                video: true,
+                rtp_timestamp: 1_000_000,
+                ntp_timestamp: 0x0000_1234_5678_0000,
+                ..
+            }
+        ),
+        "authenticated primary SR reaches the presentation clock"
+    );
     // Two packets of the next frame are lost and then repaired late.
     let frame = rig.forward(delta, false);
     for packet in &frame[..frame.len() - 1] {

@@ -397,7 +397,8 @@ scheduled = {
          "name": "Movie night", "description": "Bring snacks.",
          "scheduled_start_time": "2026-10-30T18:00:00.000000+00:00", "scheduled_end_time": None,
          "privacy_level": 2, "status": 1, "entity_type": 2, "entity_id": None,
-         "entity_metadata": None, "user_count": 12},
+         "entity_metadata": None, "user_count": 55,
+         "recurrence_rule": {"start": "2026-10-30T18:00:00Z", "frequency": 2, "interval": 2, "by_weekday": [4]}},
         {"id": "901", "guild_id": G1, "channel_id": None, "creator_id": people[0]["id"],
          "name": "Meetup", "description": None,
          "scheduled_start_time": "2026-11-02T10:00:00.000000+00:00",
@@ -418,6 +419,13 @@ world = {
     "read_state": read_state,
     "messages": messages,
     "scheduled_events": scheduled,
+    "scheduled_event_users": {
+        f"{G1}:900": [
+            {"guild_scheduled_event_id": "900", "user": {"id": str(40000 + n),
+             "username": f"event_guest_{n:02}", "global_name": f"Interested member {n:02}"}}
+            for n in range(1, 56)
+        ]
+    },
     "invites": {
         "fakeinvite": {
             "type": 0, "code": "fakeinvite", "expires_at": None,

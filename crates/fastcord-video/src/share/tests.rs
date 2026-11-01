@@ -212,6 +212,15 @@ impl Rig {
     }
 
     fn picture(&mut self, width: u32, height: u32, source_ms: u64) -> Flow {
+        self.picture_conversion(width, height, source_ms, false)
+    }
+    fn picture_conversion(
+        &mut self,
+        width: u32,
+        height: u32,
+        source_ms: u64,
+        native_scaled: bool,
+    ) -> Flow {
         let stride = width as usize;
         let bytes = vec![0x80; nv12_len(stride, height as usize)];
         let sample = VideoSample::nv12(
@@ -222,7 +231,11 @@ impl Rig {
             Duration::from_secs(5000) + Duration::from_millis(source_ms),
         )
         .unwrap();
-        self.pipeline.picture(&sample, self.now)
+        if native_scaled {
+            self.pipeline.picture_scaled(&sample, self.now)
+        } else {
+            self.pipeline.picture(&sample, self.now)
+        }
     }
 
     fn advance(&mut self, millis: u64) {
@@ -828,7 +841,7 @@ fn pace_trades_frame_rate_for_encode_time_and_recovers() {
     assert!(pace.admit(at(base + 66)));
     // Cheap encodes bring the rate back up, one step per hold.
     let mut recovered = None;
-    for tick in 0..400u64 {
+    for tick in 0..800u64 {
         let now = base + 100 + tick * 33;
         if pace.record(Duration::from_millis(2), at(now)) && pace.paced_fps().is_none() {
             recovered = Some(now);
@@ -836,4 +849,196 @@ fn pace_trades_frame_rate_for_encode_time_and_recovers() {
         }
     }
     assert!(recovered.is_some(), "never returned to the capture rate");
+}
+
+#[test]
+fn paced_output_matches_twenty_and_fifteen_fps_on_thirty_fps_capture() {
+    use super::pipeline::Pace;
+    for target in [20, 15] {
+        let start = Instant::now();
+        let mut pace = Pace::new(30);
+        for tick in 0..200u64 {
+            pace.record(
+                Duration::from_millis(30),
+                start + Duration::from_millis(tick * 33),
+            );
+            if pace.paced_fps() == Some(target) {
+                break;
+            }
+        }
+        assert_eq!(pace.paced_fps(), Some(target));
+        let start = start + Duration::from_secs(10);
+        let admitted = (0..300u64)
+            .filter(|tick| pace.admit(start + Duration::from_nanos(tick * 1_000_000_000 / 30)))
+            .count();
+        assert_eq!(admitted, target as usize * 10, "target {target}");
+        let after_pause = start + Duration::from_secs(30);
+        assert!(pace.admit(after_pause));
+        assert!(
+            !pace.admit(after_pause + Duration::from_millis(1)),
+            "no catch-up burst"
+        );
+    }
+}
+
+#[test]
+fn sustained_overload_reconfigures_actual_encoder_dimensions_and_recovers_stably() {
+    use fastcord_platform::capture::FrameHandler;
+    let config = ShareConfig {
+        capture: fastcord_platform::capture::CaptureConfig {
+            width: 320,
+            height: 240,
+            frame_rate: 30,
+        },
+        ..ShareConfig::SCREEN_SHARE_720P30
+    };
+    let mut rig = Rig::armed(config);
+    rig.pipeline.set_encode_duration(Duration::from_millis(30));
+    // CPU fallback: the source keeps delivering its original NV12 dimensions.
+    // The production encode-duration path must change the actual encoder.
+    for n in 0..150 {
+        assert_eq!(rig.picture(320, 240, n * 100), Flow::Continue);
+        rig.advance(100);
+    }
+    let sizes: Vec<_> = rig
+        .log
+        .lock()
+        .opened
+        .iter()
+        .map(|(c, _)| (c.width, c.height))
+        .collect();
+    assert_eq!(sizes, [(320, 240), (240, 180), (160, 120)]);
+    assert_eq!(rig.pipeline.output_size((320, 240)), (160, 120));
+    assert_eq!(rig.shared.counters.width.load(Ordering::Relaxed), 160);
+    assert_eq!(rig.shared.counters.height.load(Ordering::Relaxed), 120);
+    assert_eq!(
+        rig.sent_keyframes().iter().filter(|key| **key).count(),
+        3,
+        "each replacement starts with IDR"
+    );
+    let last = rig.log.lock().encodes.last().unwrap().0;
+    // A short quiet patch cannot oscillate back up.
+    rig.pipeline.set_encode_duration(Duration::from_millis(2));
+    for n in 150..190 {
+        rig.picture(320, 240, n * 100);
+        rig.advance(100);
+    }
+    assert_eq!(rig.log.lock().opened.len(), 3);
+    // A sustained recovery reverses resolution before restoring 20/30 fps.
+    for n in 190..600 {
+        rig.picture(320, 240, n * 100);
+        rig.advance(100);
+    }
+    let log = rig.log.lock();
+    let sizes: Vec<_> = log
+        .opened
+        .iter()
+        .map(|(c, _)| (c.width, c.height))
+        .collect();
+    assert_eq!(
+        sizes,
+        [(320, 240), (240, 180), (160, 120), (240, 180), (320, 240)]
+    );
+    assert!(log.encodes.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert!(log.encodes.last().unwrap().0 > last);
+    assert_eq!(rig.pipeline.output_size((320, 240)), (320, 240));
+    assert_eq!(rig.shared.counters.paced_fps.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn native_conversion_bounds_are_consumed_without_double_scaling_or_upscaling() {
+    use fastcord_platform::capture::FrameHandler;
+    let mut rig = Rig::armed(ShareConfig::SCREEN_SHARE_720P30);
+    rig.pipeline.set_encode_duration(Duration::from_millis(30));
+    // Native converters consume exactly this FrameHandler contract before
+    // creating a texture/sample. Portrait aspect is preserved at every rung.
+    for n in 0..150 {
+        let size = fastcord_platform::capture::convert::bounded_output_size(
+            (360, 720),
+            rig.pipeline.output_size((360, 720)),
+        );
+        rig.picture_conversion(size.0, size.1, n * 100, true);
+        rig.advance(100);
+    }
+    let sizes: Vec<_> = rig
+        .log
+        .lock()
+        .opened
+        .iter()
+        .map(|(c, _)| (c.width, c.height))
+        .collect();
+    assert_eq!(sizes, [(360, 720), (270, 540), (180, 360)]);
+    assert_eq!(rig.pipeline.output_size((16, 640)), (16, 640));
+    assert_eq!(rig.pipeline.output_size((20, 640)), (16, 512));
+    rig.picture(16, 16, 15_100); // source resize below the cap must stay native-sized
+    assert_eq!(
+        rig.log
+            .lock()
+            .opened
+            .last()
+            .map(|(c, _)| (c.width, c.height)),
+        Some((16, 16))
+    );
+}
+
+#[test]
+fn source_smaller_than_configured_cap_still_trades_resolution_without_double_scaling() {
+    use fastcord_platform::capture::FrameHandler;
+    for native in [false, true] {
+        let mut rig = Rig::armed(ShareConfig::SCREEN_SHARE_720P30);
+        rig.pipeline.set_encode_duration(Duration::from_millis(30));
+        for n in 0..150 {
+            let size = if native {
+                fastcord_platform::capture::convert::bounded_output_size(
+                    (640, 360),
+                    rig.pipeline.output_size((640, 360)),
+                )
+            } else {
+                (640, 360)
+            };
+            rig.picture_conversion(size.0, size.1, n * 100, native);
+            rig.advance(100);
+        }
+        let sizes: Vec<_> = rig
+            .log
+            .lock()
+            .opened
+            .iter()
+            .map(|(c, _)| (c.width, c.height))
+            .collect();
+        assert_eq!(
+            sizes,
+            [(640, 360), (480, 270), (320, 180)],
+            "native scaling: {native}"
+        );
+    }
+}
+
+#[test]
+fn native_and_cpu_adaptation_agree_after_non_integral_aspect_rounding() {
+    use fastcord_platform::capture::{FrameHandler, convert::bounded_output_size};
+    let mut histories = Vec::new();
+    for native in [false, true] {
+        let mut rig = Rig::armed(ShareConfig::SCREEN_SHARE_720P30);
+        rig.pipeline.set_encode_duration(Duration::from_millis(30));
+        for n in 0..150 {
+            let size = if native {
+                bounded_output_size((642, 360), rig.pipeline.output_size((642, 360)))
+            } else {
+                (642, 360)
+            };
+            rig.picture_conversion(size.0, size.1, n * 100, native);
+            rig.advance(100);
+        }
+        histories.push(
+            rig.log
+                .lock()
+                .opened
+                .iter()
+                .map(|(c, _)| (c.width, c.height))
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(histories[0], histories[1]);
+    assert_eq!(histories[0], [(642, 360), (480, 268), (320, 180)]);
 }

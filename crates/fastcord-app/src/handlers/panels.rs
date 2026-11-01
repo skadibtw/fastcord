@@ -564,6 +564,22 @@ impl App {
         };
         match event {
             onboarding::Event::Rich(event) => return self.handle(Message::Timeline(event)),
+            onboarding::Event::BrowseGo(channel) => {
+                if let Some(guild) = self
+                    .ui
+                    .onboarding
+                    .browse_target(&gateway.navigation, channel)
+                {
+                    gateway.controls.select_channel(guild, channel);
+                    let _ = self.ui.onboarding.update(
+                        onboarding::Event::Close,
+                        &gateway.navigation,
+                        &session.client,
+                    );
+                    gateway.controls.browse_channels(None);
+                }
+                return Task::none();
+            }
             onboarding::Event::GoChannel(guild, channel) => {
                 // The guide never opens a channel the account cannot see.
                 if onboarding::visible_channel(&gateway.navigation, channel) {
@@ -578,10 +594,19 @@ impl App {
             .ui
             .onboarding
             .update(event, &gateway.navigation, &session.client);
+        gateway
+            .controls
+            .browse_channels(self.ui.onboarding.browse_request());
         if rejected {
             return self.reject_login(gateway.id);
         }
-        task.map(Message::Onboarding)
+        Task::batch([
+            task,
+            self.ui
+                .onboarding
+                .sync_previews(gateway.attachments.as_ref()),
+        ])
+        .map(Message::Onboarding)
     }
 
     pub(crate) fn events_event(&mut self, event: scheduled_events::Event) -> Task<Message> {

@@ -53,5 +53,10 @@ sys-locale.workspace = true
 tao.workspace = true
 wry.workspace = true
 
+[dev-dependencies]
+# Poll the account teardown Task without starting a window.
+iced_runtime.workspace = true
+fastcord-audio = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true

@@ -151,7 +151,10 @@ pub struct Env<'a> {
 impl State {
     /// Forgets lists, forms and answers (logout, account change).
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            serial: self.serial.wrapping_add(1),
+            ..Self::default()
+        };
     }
 
     /// Closes what belongs to another conversation.
@@ -683,6 +686,31 @@ mod tests {
             .id;
         let used = step(state, Event::Pick(id), &harness.env(now));
         assert!(used, "choosing a command uses the typed slash up");
+    }
+
+    #[test]
+    fn account_reset_does_not_accept_previous_accounts_command_index() {
+        let harness = Harness::new();
+        let mut state = State::default();
+        let now = Instant::now();
+        let _ = state.typed(true, &harness.env(now));
+        let old = state.loading.as_ref().unwrap().serial;
+        state.reset();
+        let _ = state.typed(true, &harness.env(now));
+        let current = state.loading.as_ref().unwrap().serial;
+        step(
+            &mut state,
+            Event::Index(old, SCOPE, Ok(index())),
+            &harness.env(now),
+        );
+        assert!(state.cache.is_empty());
+        assert!(state.loading.is_some());
+        step(
+            &mut state,
+            Event::Index(current, SCOPE, Ok(index())),
+            &harness.env(now),
+        );
+        assert!(state.fresh(SCOPE, now).is_some());
     }
 
     #[test]

@@ -5,9 +5,10 @@ use crate::*;
 impl App {
     pub(crate) fn desktop_message(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::NetworkProgress => {}
+            Message::NetworkProgress => return self.save_network_hints(),
             Message::NetworkChanged => {
                 self.network.controller().network_changed();
+                self.network_settings.bind_profile(&self.network);
             }
             Message::Network(action) => return self.network_event(action),
             Message::Initialized(preferences, network, store) => {
@@ -16,6 +17,7 @@ impl App {
                         self.network.with_mode(fastcord_net::settings::Mode::Proxy)
                     });
                 self.network_settings.apply(&network);
+                self.network_settings.bind_profile(&self.network);
                 if let Some(warning) = network.warning {
                     self.notice = Some(warning.to_owned());
                 }
@@ -67,7 +69,12 @@ impl App {
             #[cfg(feature = "fake-discord")]
             Message::FakeStep(step) => return self.fake_step(step),
             #[cfg(feature = "fake-discord")]
-            Message::FakeShot(path, shot) => fake::save(&path, &shot),
+            Message::FakeShot(path, shot, completion) => {
+                fake::save(&path, &shot);
+                if let Some(completion) = completion {
+                    completion.finish();
+                }
+            }
             Message::Tray(event) => match event {
                 desktop::TrayEvent::Started => self.tray = Ok(()),
                 desktop::TrayEvent::Failed(error) => self.tray = Err(error),

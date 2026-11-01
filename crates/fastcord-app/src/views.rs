@@ -656,16 +656,55 @@ impl App {
                 false,
                 i18n::tr("Settings"),
             ));
+            let profile = icons::action(action(
+                icons::Icon::Profile,
+                Some(Message::Settings(settings::Event::Open(
+                    settings::Section::Profile,
+                ))),
+                false,
+                false,
+                i18n::tr("Edit profile"),
+            ));
+            let requests = u32::try_from(gateway.navigation.requests.total).unwrap_or(u32::MAX);
+            let safety = icons::action(icons::Action {
+                icon: icons::Icon::Safety,
+                on_press: Some(Message::Safety(safety::Event::Toggle)),
+                active: false,
+                danger: false,
+                tip: format!("{} ({requests})", i18n::tr("Message requests")),
+                badge: requests,
+            });
+            let audio = icons::action(action(
+                icons::Icon::Audio,
+                Some(Message::Settings(settings::Event::Open(
+                    settings::Section::Voice,
+                ))),
+                false,
+                false,
+                i18n::tr("Voice and video"),
+            ));
+            let logout = icons::action(action(
+                icons::Icon::Exit,
+                Some(Message::Account(account_panel::Event::Logout)),
+                false,
+                true,
+                i18n::tr("Log out"),
+            ));
             foot = foot.push(
                 container(
-                    row![
-                        container(identity).width(Length::Fill).clip(true),
-                        row![mic, devices, headphones, gear]
-                            .spacing(0)
+                    column![
+                        row![
+                            container(identity).width(Length::Fill).clip(true),
+                            devices,
+                            gear
+                        ]
+                        .spacing(2)
+                        .align_y(iced::alignment::Vertical::Center),
+                        row![mic, headphones, profile, safety, audio, logout]
+                            .spacing(2)
                             .align_y(iced::alignment::Vertical::Center),
                     ]
-                    .spacing(2)
-                    .align_y(iced::alignment::Vertical::Center),
+                    .spacing(4),
                 )
                 .padding([6, 6])
                 .style(style::footer),

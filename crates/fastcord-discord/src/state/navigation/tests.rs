@@ -2417,6 +2417,38 @@ fn scheduled_event_gateway_events_settle_on_the_last_one_seen() {
 }
 
 #[test]
+fn replayed_event_deletes_preserve_the_full_tombstone_window_and_byte_ledger() {
+    let (mut store, _) = setup(NAV_READY);
+    for event in 1..=32 {
+        apply(
+            &mut store,
+            "GUILD_SCHEDULED_EVENT_DELETE",
+            &json!({"id": event.to_string(), "guild_id": "100"}).to_string(),
+        );
+        assert_eq!(store.bytes(), store.recount());
+    }
+    for _ in 0..40 {
+        apply(
+            &mut store,
+            "GUILD_SCHEDULED_EVENT_DELETE",
+            &json!({"id": "32", "guild_id": "100"}).to_string(),
+        );
+    }
+    let late = scheduled(1, 1, "2026-11-01T10:00:00+00:00");
+    apply(
+        &mut store,
+        "GUILD_SCHEDULED_EVENT_UPDATE",
+        &late.to_string(),
+    );
+    store.replace_scheduled_events(id(100), vec![serde_json::from_value(late).unwrap()]);
+    assert!(
+        held(&store).is_empty(),
+        "replays must not evict older tombstones"
+    );
+    assert_eq!(store.bytes(), store.recount());
+}
+
+#[test]
 fn scheduled_events_are_bounded_and_the_snapshot_orders_them() {
     let (mut store, mut navigation) = setup(NAV_READY);
     assert!(navigation.select_channel(&store, id(1000)));
@@ -2985,6 +3017,8 @@ fn collapsed_categories_and_hidden_muted_channels_keep_unread_and_open_ones() {
         crate::gateway::GuildMuteUpdate {
             guild_id: Some(g),
             guild_muted: false,
+            guild_mute_until: None,
+            channel_mute_until: Vec::new(),
             channels: vec![(id(2001), true), (id(2002), true)],
             level: None,
             suppress_everyone: false,
@@ -3165,4 +3199,124 @@ fn a_timed_out_moderator_gets_no_management_and_unknown_own_roles_fail_closed_ev
     let guild = store.guild(id(100)).unwrap();
     assert_eq!(highest_role_position(guild, &[id(999)]), None);
     assert_eq!(highest_role_position(guild, &[]), Some(0));
+}
+
+#[test]
+fn browse_channels_ignores_folding_but_rechecks_permissions_and_account() {
+    let (mut store, mut navigation) = setup(NAV_READY);
+    let mut layout = Layout::default();
+    layout.collapsed_categories.insert(id(2000));
+    navigation.set_layout(Arc::new(layout));
+    assert!(!ids(&rows(&navigation, &store)).contains(&id(2002)));
+    let page = navigation.browse_channels(&store, id(100), "CHILD", 0);
+    assert!(page.window.rows.iter().any(|row| row.id == id(2002)));
+    assert!(
+        !navigation
+            .browse_channels(&store, id(100), "hidden-member", 0)
+            .window
+            .rows
+            .iter()
+            .any(|row| row.id == id(1002))
+    );
+    apply(&mut store, "CHANNEL_UPDATE", &json!({"id":"2002", "guild_id":"100", "type":0,
+        "name":"first-child", "permission_overwrites":[{"id":"1","type":1,"deny":"1024","allow":"0"}]}).to_string());
+    assert!(
+        !navigation.select_channel(&store, id(2002)),
+        "click rechecks fresh permissions"
+    );
+    assert!(
+        !navigation
+            .browse_channels(&store, id(100), "child", 0)
+            .window
+            .rows
+            .iter()
+            .any(|row| row.id == id(2002))
+    );
+    assert!(
+        Navigation::default()
+            .browse_channels(&store, id(100), "", 0)
+            .window
+            .rows
+            .is_empty()
+    );
+}
+
+#[test]
+fn browse_channels_pages_and_queries_are_bounded_and_deleted_rows_disappear() {
+    let mut raw: Value = serde_json::from_str(NAV_READY).unwrap();
+    raw["guilds"][0]["channels"] = Value::Array((0..123).map(|n| json!({
+        "id": (9000+n).to_string(), "type":0, "name":format!("page-{n:03}"), "position":n,
+        "permission_overwrites":[]
+    })).collect());
+    let (mut store, navigation) = setup(&raw.to_string());
+    let first = navigation.browse_channels(&store, id(100), "page-", 0);
+    let second = navigation.browse_channels(&store, id(100), "page-", BROWSE_PAGE);
+    assert_eq!(first.window.total, 123);
+    assert_eq!(first.window.rows.len(), BROWSE_PAGE);
+    assert_eq!(second.window.rows.len(), BROWSE_PAGE);
+    assert!(
+        first
+            .window
+            .rows
+            .iter()
+            .all(|a| second.window.rows.iter().all(|b| a.id != b.id))
+    );
+    let last = navigation.browse_channels(&store, id(100), "", usize::MAX);
+    assert_eq!(last.window.offset, 100);
+    assert_eq!(last.window.rows.len(), 23);
+    assert_eq!(
+        navigation
+            .browse_channels(&store, id(100), &"😀".repeat(1000), 0)
+            .query
+            .len(),
+        BROWSE_QUERY_CHARS * 4
+    );
+    apply(
+        &mut store,
+        "CHANNEL_DELETE",
+        r#"{"id":"9000","guild_id":"100","type":0}"#,
+    );
+    assert_eq!(
+        navigation
+            .browse_channels(&store, id(100), "page-", 0)
+            .window
+            .total,
+        122
+    );
+}
+
+#[test]
+fn interested_member_read_scope_is_independent_of_sidebar_window_and_revoked_with_permissions() {
+    let (mut store, navigation) = setup(NAV_READY);
+    let mut raw = scheduled(1, 1, "2026-12-01T10:00:00Z");
+    raw["channel_id"] = json!("2002");
+    store.replace_scheduled_events(id(100), vec![serde_json::from_value(raw).unwrap()]);
+    assert_eq!(
+        navigation.snapshot(&store, 0, 1, 0, 0).readable_events,
+        vec![id(1)]
+    );
+    apply(
+        &mut store,
+        "CHANNEL_UPDATE",
+        &json!({"id":"2002","guild_id":"100","type":0,"name":"hidden",
+        "permission_overwrites":[{"id":"1","type":1,"deny":"1024","allow":"0"}]})
+        .to_string(),
+    );
+    assert!(
+        navigation
+            .snapshot(&store, 0, 1, 0, 0)
+            .readable_events
+            .is_empty()
+    );
+    apply(
+        &mut store,
+        "GUILD_MEMBER_REMOVE",
+        r#"{"guild_id":"100","user":{"id":"1"}}"#,
+    );
+    assert!(
+        navigation
+            .snapshot(&store, 0, 1, 0, 0)
+            .readable_events
+            .is_empty()
+    );
 }

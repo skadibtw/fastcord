@@ -277,8 +277,6 @@ dependencies = [
 [[package]]
 name = "ashpd"
 version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2f3f79755c74fd155000314eb349864caa787c6592eace6c6882dad873d9c39"
 dependencies = [
  "enumflags2",
  "futures-channel",
@@ -1966,6 +1964,7 @@ dependencies = [
  "futures-util",
  "iced",
  "iced_renderer",
+ "iced_runtime",
  "iced_tiny_skia",
  "image",
  "parking_lot 0.12.5",
@@ -2131,6 +2130,7 @@ dependencies = [
  "fastcord-net",
  "futures-util",
  "keyring-core",
+ "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-audio-types",
@@ -2148,6 +2148,7 @@ dependencies = [
  "sha2 0.10.9",
  "sys-locale",
  "tokio",
+ "unicode-segmentation",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-native-keyring-store",

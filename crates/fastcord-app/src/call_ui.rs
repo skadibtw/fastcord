@@ -429,6 +429,13 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
             style::YELLOW,
             tr("Voice transport connected; waiting for encryption keys. Click to open the call"),
         ),
+        VoiceAudioState::IncomingAudioDecryptionFailed => (
+            tr("Audio key error"),
+            style::RED,
+            tr(
+                "Receive keys failed. Recovery is being attempted; this warning clears after audio decrypts. Click to open the call",
+            ),
+        ),
         VoiceAudioState::EngineFailed => (
             tr("Audio failed"),
             style::RED,
@@ -450,6 +457,7 @@ pub fn bar<'a>(bar: Bar) -> Element<'a, Message> {
         (
             VoiceAudioState::Connecting
             | VoiceAudioState::WaitingForKeys
+            | VoiceAudioState::IncomingAudioDecryptionFailed
             | VoiceAudioState::EngineFailed,
             _,
         ) => tip.to_owned(),
@@ -819,6 +827,31 @@ mod tests {
             WIDTH + 200.0,
             120.0,
             container(bar(bar_input(false, true))).width(WIDTH).into(),
+        );
+        assert!(reachable(&mut wide, WIDTH as i32, WIDTH as i32 + 200, 120).is_empty());
+    }
+
+    #[test]
+    fn receive_key_failure_fits_the_sidebar_and_preserves_controls() {
+        let mut input = bar_input(false, true);
+        input.state = VoiceAudioState::IncomingAudioDecryptionFailed;
+        let mut ui = Ui::new(WIDTH, 120.0, bar(input));
+        let hit = reachable(&mut ui, 0, WIDTH as i32, 120);
+        for action in [
+            "OpenCall",
+            "LeaveVoice",
+            "ToggleCamera",
+            "OpenSharePicker",
+            "ToggleVoiceDetails",
+        ] {
+            assert!(hit.contains(action), "{action} missing: {hit:?}");
+        }
+        let mut input = bar_input(false, true);
+        input.state = VoiceAudioState::IncomingAudioDecryptionFailed;
+        let mut wide = Ui::new(
+            WIDTH + 200.0,
+            120.0,
+            container(bar(input)).width(WIDTH).into(),
         );
         assert!(reachable(&mut wide, WIDTH as i32, WIDTH as i32 + 200, 120).is_empty());
     }

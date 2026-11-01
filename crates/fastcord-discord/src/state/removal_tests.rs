@@ -140,6 +140,8 @@ fn seed_read(store: &mut Store, guild: Option<Snowflake>, channels: &[u64]) {
     store.read.update_levels(&GuildMuteUpdate {
         guild_id: guild,
         guild_muted: false,
+        guild_mute_until: None,
+        channel_mute_until: Vec::new(),
         channels: Vec::new(),
         level: Some(NotifyLevel::Mentions),
         suppress_everyone: true,

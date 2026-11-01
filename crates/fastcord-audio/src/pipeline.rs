@@ -424,8 +424,19 @@ impl CapturePipeline {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PlayoutAnchor {
+    ssrc: u32,
+    timestamp: u32,
+    start: usize,
+    end: usize,
+}
+const PLAYOUT_ANCHORS: usize = 256;
+
 pub(crate) struct PlaybackPipeline {
     ring: RingProducer,
+    output_position: Option<std::sync::Arc<crate::playout::OutputPosition>>,
+    anchors: std::collections::VecDeque<PlayoutAnchor>,
     target: AdaptiveTarget,
     decoder: VoiceDecoder,
     pcm: Box<[f32]>,
@@ -453,6 +464,8 @@ impl PlaybackPipeline {
         let pending_frames =
             (MAX_FRAME_SAMPLES + 480) * format.rate as usize / SAMPLE_RATE as usize + 64;
         Ok(Self {
+            output_position: None,
+            anchors: std::collections::VecDeque::with_capacity(PLAYOUT_ANCHORS),
             target: AdaptiveTarget::new(
                 target_frames * format.channels,
                 step_frames * format.channels,
@@ -473,6 +486,65 @@ impl PlaybackPipeline {
         })
     }
 
+    pub(crate) fn set_output_position(
+        &mut self,
+        position: std::sync::Arc<crate::playout::OutputPosition>,
+    ) {
+        self.output_position = Some(position);
+    }
+    pub(crate) fn publish_playout(&mut self, clock: &crate::playout::PlayoutClock) {
+        let Some(position) = self.output_position.as_ref().and_then(|p| p.snapshot()) else {
+            clock.clear();
+            return;
+        };
+        if !self.enabled {
+            clock.clear();
+            return;
+        }
+        while self.anchors.front().is_some_and(|a| {
+            position.read.wrapping_sub(a.end) < usize::MAX / 2 && position.read != a.end
+        }) {
+            self.anchors.pop_front();
+        }
+        let mut points = [None; crate::playout::MAX_PLAYOUT_SOURCES];
+        let mut count = 0;
+        for a in self.anchors.iter().rev() {
+            let delta = position.read.wrapping_sub(a.start);
+            if delta > a.end.wrapping_sub(a.start)
+                || points[..count]
+                    .iter()
+                    .flatten()
+                    .any(|p: &crate::playout::PlayoutPoint| p.ssrc == a.ssrc)
+            {
+                continue;
+            }
+            let timestamp = a.timestamp.wrapping_add(
+                ((delta / self.ring.channels()) as u64 * 48_000 / u64::from(self.rate)) as u32,
+            );
+            points[count] = Some(crate::playout::PlayoutPoint {
+                ssrc: a.ssrc,
+                rtp_timestamp: timestamp,
+                at: position.at,
+                observed_at: position.observed_at,
+            });
+            count += 1;
+            if count == points.len() {
+                break;
+            }
+        }
+        // Owner thread only; a fixed stack array keeps publication bounded.
+        let mut resolved = [crate::playout::PlayoutPoint {
+            ssrc: 0,
+            rtp_timestamp: 0,
+            at: position.at,
+            observed_at: position.observed_at,
+        }; crate::playout::MAX_PLAYOUT_SOURCES];
+        for (target, point) in resolved.iter_mut().zip(points.into_iter().take(count)) {
+            *target = point.unwrap();
+        }
+        clock.publish(&resolved[..count]);
+    }
+
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
         if self.enabled == enabled {
             return;
@@ -480,6 +552,8 @@ impl PlaybackPipeline {
         self.enabled = enabled;
         if !enabled {
             self.ring.clear();
+            self.anchors.clear();
+            self.converter.reset();
             self.pending.clear();
             self.pending_start = 0;
             self.mixer.clear();
@@ -557,6 +631,23 @@ impl PlaybackPipeline {
                     converter.process(mixed.as_slice(), &mut |block: &[f32]| {
                         pending.extend_from_slice(block);
                     });
+                    let channels = self.ring.channels();
+                    let start = self
+                        .ring
+                        .write_position()
+                        .wrapping_add(self.converter.output_delay() * channels);
+                    let length = self.pending.len() / CHANNELS * channels;
+                    for (ssrc, timestamp) in self.mixer.mixed_timestamps() {
+                        if self.anchors.len() == PLAYOUT_ANCHORS {
+                            self.anchors.pop_front();
+                        }
+                        self.anchors.push_back(PlayoutAnchor {
+                            ssrc,
+                            timestamp,
+                            start,
+                            end: start.wrapping_add(length),
+                        });
+                    }
                     continue;
                 }
                 self.target.idle();
@@ -1055,5 +1146,82 @@ mod adaptive_target_tests {
             target.observe(80, at);
         }
         assert_eq!(target.current, 40, "never below the base");
+    }
+}
+
+/// Hardware-free integration harness using the production Opus mixer,
+/// resampler, ring, output callback and clock publication. No synthetic clock
+/// injection is exposed to production callers.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::*;
+    use crate::callback::{OutputCallback, StreamCounters};
+    use crate::playout::{OutputPosition, PlayoutClock};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    pub struct PlayoutHarness {
+        pipeline: PlaybackPipeline,
+        callback: OutputCallback,
+        pub clock: Arc<PlayoutClock>,
+        counters: PipelineCounters,
+        device: Vec<f32>,
+    }
+    impl PlayoutHarness {
+        pub fn new(rate: u32, ssrc: u32, timestamp: u32) -> Self {
+            let (producer, consumer) =
+                crate::ring::sample_ring(2, frames_for(rate, PLAYBACK_RING_MS));
+            let mut pipeline = PlaybackPipeline::new(
+                StreamFormat {
+                    rate,
+                    channels: 2,
+                    period_frames: None,
+                },
+                producer,
+            )
+            .unwrap();
+            let position = Arc::new(OutputPosition::new(rate, 2));
+            pipeline.set_output_position(position.clone());
+            let callback = OutputCallback::new(consumer, Arc::new(StreamCounters::default()))
+                .with_position(position);
+            let mut encoder = VoiceEncoder::new(64_000).unwrap();
+            let mono = std::array::from_fn(|i| (i as f32 * 0.0576).sin() * 0.2);
+            let started = Instant::now() - Duration::from_millis(200);
+            for sequence in 0..8 {
+                let mut packet = EncodedPacket::empty();
+                encoder.encode_mono(&mono, &mut packet).unwrap();
+                pipeline.mixer.push_at(
+                    RemoteFrame {
+                        ssrc,
+                        sequence,
+                        timestamp: timestamp.wrapping_add(sequence as u32 * 960),
+                        packet,
+                        read_at: started,
+                    },
+                    started,
+                );
+            }
+            Self {
+                pipeline,
+                callback,
+                clock: Arc::new(PlayoutClock::default()),
+                counters: PipelineCounters::default(),
+                device: vec![0.0; rate as usize / 100 * 2],
+            }
+        }
+        pub fn callback(&mut self, latency: Option<Duration>) {
+            self.pipeline.run(&self.counters, &mut || None);
+            self.callback.process_timed(&mut self.device, latency);
+            self.pipeline.publish_playout(&self.clock);
+        }
+        pub fn disable(&mut self) {
+            self.pipeline.set_enabled(false);
+            self.pipeline.publish_playout(&self.clock);
+        }
+    }
+    impl Drop for PlayoutHarness {
+        fn drop(&mut self) {
+            self.clock.clear();
+        }
     }
 }

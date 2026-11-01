@@ -384,6 +384,18 @@ pub trait FrameHandler {
     /// A new picture, at most one per frame interval.
     fn frame(&mut self, sample: &VideoSample<'_>) -> Flow;
 
+    /// Requested size relative to the actual source after configured fitting.
+    /// Backends may apply it during owner-thread conversion; never upscale.
+    fn output_size(&self, source: (u32, u32)) -> (u32, u32) {
+        source
+    }
+
+    /// A CPU picture already converted to `output_size`. The separate entry
+    /// prevents handlers with their own fallback scaler from scaling twice.
+    fn scaled_frame(&mut self, sample: &VideoSample<'_>) -> Flow {
+        self.frame(sample)
+    }
+
     /// Whether the handler would take pictures as [`GpuFrame`]s right now.
     /// Asked before every picture; only the GPU converter can honor it.
     fn wants_gpu(&self) -> bool {

@@ -234,6 +234,7 @@ async fn drive<T: Transport, J: JitterSource>(
             GatewayEvent::State(ConnectionState::Connecting { attempt: failures }),
             STATE_COST,
         );
+        let timing = super::timing::Timing::enabled();
         let resume_url = driver
             .session
             .as_ref()
@@ -268,21 +269,28 @@ async fn drive<T: Transport, J: JitterSource>(
                 }
             }
         };
-        let socket =
-            match interruptible(&mut driver.interrupt, driver.transport.connect(&url)).await? {
-                Ok(socket) => socket,
-                Err(_) => {
-                    failures = driver.retries.failed_attempt();
-                    give_up_after_failures(failures)?;
-                    if driver.session.is_none() {
-                        // Ask Discord for a fresh address after a failed connect.
-                        base_url = None;
-                    }
-                    wait(driver, failures, ReconnectReason::ConnectFailed).await?;
-                    continue;
+        if let Some(timing) = &timing {
+            timing.stage(super::timing::Stage::Discovery);
+        }
+        let socket = match interruptible(
+            &mut driver.interrupt,
+            driver.transport.connect_timed(&url, timing.clone()),
+        )
+        .await?
+        {
+            Ok(socket) => socket,
+            Err(_) => {
+                failures = driver.retries.failed_attempt();
+                give_up_after_failures(failures)?;
+                if driver.session.is_none() {
+                    // Ask Discord for a fresh address after a failed connect.
+                    base_url = None;
                 }
-            };
-        let ended = connection(driver, socket).await?;
+                wait(driver, failures, ReconnectReason::ConnectFailed).await?;
+                continue;
+            }
+        };
+        let ended = connection(driver, socket, timing).await?;
         if !ended.resume {
             driver.session = None;
         }
@@ -514,6 +522,7 @@ where
 async fn connection<T: Transport, J: JitterSource>(
     driver: &mut Driver<T, J>,
     mut socket: T::Socket,
+    timing: Option<super::timing::Timing>,
 ) -> Result<Ended, Terminal> {
     let Driver {
         transport,
@@ -532,6 +541,7 @@ async fn connection<T: Transport, J: JitterSource>(
         voice,
         voice_sent,
     } = driver;
+    outbox.set_timing(timing.as_ref().map(|t| t.stamp()));
     let mut conn = Conn {
         hello_seen: false,
         interval: MAX_HEARTBEAT,
@@ -696,23 +706,23 @@ async fn connection<T: Transport, J: JitterSource>(
                 if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
                     eprintln!("Gateway frame received: bytes={}", message.len());
                 }
-                let complete = match message {
-                    Message::Binary(bytes) => match inflater.push_compressed(&bytes) {
-                        Ok(complete) => complete,
-                        Err(error) => break inflate_end(error),
-                    },
-                    Message::Text(text) => match inflater.set_plain(text.as_bytes()) {
-                        Ok(()) => true,
-                        Err(error) => break inflate_end(error),
-                    },
+                if let Some(timing) = &timing { timing.message(); }
+                let inflated = match message {
+                    Message::Binary(bytes) => super::timing::measure_inflate(timing.as_ref(), || inflater.push_compressed(&bytes)),
+                    Message::Text(text) => super::timing::measure_inflate(timing.as_ref(), || inflater.set_plain(text.as_bytes()).map(|()| true)),
                     Message::Close(frame) => {
                         break close_end(frame.map(|f| u16::from(f.code)), &**transport);
                     }
-                    Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => false,
+                    Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => Ok(false),
+                };
+                let complete = match inflated {
+                    Ok(complete) => complete,
+                    Err(error) => break inflate_end(error),
                 };
                 if !complete {
                     continue;
                 }
+                let decode_started = Instant::now();
                 let action = on_message(
                     &mut conn,
                     properties,
@@ -723,9 +733,11 @@ async fn connection<T: Transport, J: JitterSource>(
                     Instant::now(),
                 );
                 inflater.finish_message();
+                if let Some(timing) = &timing { timing.decoded(decode_started.elapsed().as_micros().min(u64::MAX as u128) as u64); }
                 match action {
                     Action::Nothing => {}
                     Action::Ready => {
+                        if let Some(timing) = &timing { timing.stage(super::timing::Stage::ReadyQueued); timing.report("ready_queued"); }
                         #[cfg(debug_assertions)]
                         if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
                             eprintln!("Gateway: READY");
@@ -744,6 +756,10 @@ async fn connection<T: Transport, J: JitterSource>(
                         stream_due = stream_pending.as_ref().map(|_| now);
                     }
                     Action::Resumed => {
+                        if let Some(timing) = &timing {
+                            timing.stage(super::timing::Stage::ReadyQueued);
+                            timing.report("resumed_queued");
+                        }
                         #[cfg(debug_assertions)]
                         if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
                             eprintln!("Gateway: RESUMED");
@@ -758,6 +774,7 @@ async fn connection<T: Transport, J: JitterSource>(
                         stream_due = stream_pending.as_ref().map(|_| now);
                     }
                     Action::Hello(interval) => {
+                        if let Some(timing) = &timing { timing.stage(super::timing::Stage::Hello); }
                         #[cfg(debug_assertions)]
                         if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
                             eprintln!("Gateway: HELLO");
@@ -798,6 +815,7 @@ async fn connection<T: Transport, J: JitterSource>(
                         if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
                             eprintln!("Gateway startup sent: bytes={}", payload.len());
                         }
+                        if let Some(timing) = &timing { timing.stage(super::timing::Stage::StartupSent); }
                         startup_deadline = Some(Instant::now() + READY_TIMEOUT);
                     }
                     Action::HeartbeatRequested => {
@@ -819,6 +837,22 @@ async fn connection<T: Transport, J: JitterSource>(
         }
     };
 
+    if let Some(timing) = &timing {
+        let reason = match &end {
+            Ok((ReconnectReason::ReadyTimeout, _)) => "ready_timeout",
+            Ok((ReconnectReason::HelloTimeout, _)) => "hello_timeout",
+            Ok((ReconnectReason::HeartbeatTimeout, _)) => "heartbeat_timeout",
+            Ok((ReconnectReason::Closed(_), _)) => "socket_closed",
+            Ok((ReconnectReason::ServerRequested, _)) => "server_requested",
+            Ok((ReconnectReason::Network, _)) => "socket_error",
+            Ok((ReconnectReason::Protocol, _)) => "protocol_decode_error",
+            Ok((ReconnectReason::InvalidSession { .. }, _)) => "invalid_session",
+            Ok((ReconnectReason::ConnectFailed, _)) => "connect_failed",
+            Ok((ReconnectReason::DiscoveryFailed, _)) => "discovery_failed",
+            Err(_) => "terminal",
+        };
+        timing.report(reason);
+    }
     #[cfg(debug_assertions)]
     if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some()
         && let Ok((reason, _)) = &end

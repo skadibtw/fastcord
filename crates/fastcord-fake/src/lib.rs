@@ -13,7 +13,7 @@ pub mod world;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -66,6 +66,7 @@ pub(crate) struct Shared {
     limiter: Mutex<ratelimit::RateLimiter>,
     port: u16,
     rate_limited: AtomicU64,
+    reject_next_message: AtomicBool,
     sessions: Mutex<std::collections::HashMap<String, u64>>,
     session_counter: AtomicU64,
     switches: Switches,
@@ -100,6 +101,23 @@ impl Shared {
         {
             let response = Response::json(403, &json!({"message": "fake: forbidden", "code": 0}));
             return (response, None);
+        }
+        // Deterministic one-shot fault at the real HTTP boundary. Other
+        // routes (READY/history/acks) cannot consume a send's rejection.
+        let message_create = req.method == "POST"
+            && req
+                .path
+                .strip_prefix(&format!("{}/channels/", rest::PREFIX))
+                .is_some_and(|tail| {
+                    tail.split_once('/')
+                        .is_some_and(|(_, tail)| tail == "messages")
+                });
+        if message_create && self.reject_next_message.swap(false, Ordering::Relaxed) {
+            self.rate_limited.fetch_add(1, Ordering::Relaxed);
+            return (
+                too_many(&rate_key, Duration::from_secs(1)),
+                Some("RATE_LIMITED"),
+            );
         }
         // Login 429s are a scenario (`limited@`), not a count.
         if req.path.starts_with(rest::PREFIX) && !req.path.contains("/auth/") {
@@ -240,6 +258,29 @@ impl Handle {
         self.shared.rate_limited.load(Ordering::Relaxed)
     }
 
+    /// Refuse exactly the next message-creation POST with a confirmed 429.
+    /// No message or Gateway echo is created by the refused request.
+    pub fn rate_limit_next_message(&self) {
+        self.shared
+            .reject_next_message
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Post as the fixture friend and deliver a real Gateway dispatch. Used
+    /// for deterministic incoming-message tests instead of timed chatter.
+    pub fn post_friend_message(&self, channel: &str, content: &str) {
+        let event = {
+            let mut world = self.shared.world();
+            let friend = world.chatter.friend.clone();
+            let message = world.post(channel, &friend, content, None);
+            Event {
+                name: "MESSAGE_CREATE",
+                data: world.with_guild(&message),
+            }
+        };
+        self.shared.emit(vec![event]);
+    }
+
     /// Automatic acknowledgements that did not carry the token last issued
     /// for their channel.
     pub fn ack_token_mismatches(&self) -> u64 {
@@ -275,6 +316,7 @@ pub async fn start(config: Config) -> Result<Handle, String> {
         limiter: Mutex::default(),
         port: addr.port(),
         rate_limited: AtomicU64::new(0),
+        reject_next_message: AtomicBool::new(false),
         sessions: Mutex::default(),
         session_counter: AtomicU64::new(0),
         switches: config.switches,

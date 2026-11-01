@@ -27,6 +27,8 @@ pub enum VoiceAudioState {
     Connecting,
     /// The voice transport is ready; encrypted media waits for DAVE keys.
     WaitingForKeys,
+    /// Receive keys failed; key exchange alone does not prove recovery.
+    IncomingAudioDecryptionFailed,
     /// The audio engine is running and carrying the call.
     Running,
     /// The engine could not open the selected audio devices; the call was left.
@@ -38,7 +40,10 @@ impl VoiceAudioState {
     pub(crate) const fn controls_available(self) -> bool {
         matches!(
             self,
-            Self::Connecting | Self::WaitingForKeys | Self::Running
+            Self::Connecting
+                | Self::WaitingForKeys
+                | Self::IncomingAudioDecryptionFailed
+                | Self::Running
         )
     }
 }
@@ -566,6 +571,9 @@ async fn run_with(
                         });
                     }
                     Some(VoiceMessage::Event(event)) => {
+                        if let VoiceEvent::Retry { cause, attempt, resume } = event {
+                            crate::voice_log::note(&describe_retry(cause, attempt, resume));
+                        }
                         if let VoiceEvent::UdpLatency(rtt) = event {
                             noise_status.publish_ping(rtt);
                         }
@@ -747,6 +755,9 @@ fn media_audio_state(status: VoiceStatus) -> VoiceAudioState {
     match status {
         VoiceStatus::Connected { .. } => VoiceAudioState::Running,
         VoiceStatus::Rekeying { .. } => VoiceAudioState::WaitingForKeys,
+        VoiceStatus::IncomingAudioDecryptionFailed => {
+            VoiceAudioState::IncomingAudioDecryptionFailed
+        }
         VoiceStatus::Closed(_) => VoiceAudioState::Idle,
         _ => VoiceAudioState::Connecting,
     }
@@ -825,7 +836,9 @@ fn apply_voice_event(
         }
         // Video negotiation and encoder feedback belong to stream sessions; this
         // parent call offers no video.
-        VoiceEvent::UdpLatency(_)
+        VoiceEvent::Retry { .. }
+        | VoiceEvent::SenderClock { .. }
+        | VoiceEvent::UdpLatency(_)
         | VoiceEvent::ReceptionReport { .. }
         | VoiceEvent::VideoNegotiated { .. }
         | VoiceEvent::VideoSource { .. }
@@ -1362,6 +1375,33 @@ mod tests {
     }
 }
 
+fn describe_retry(
+    cause: fastcord_media::gateway::RetryCause,
+    attempt: u32,
+    resume: bool,
+) -> String {
+    format!(
+        "connection retry: {cause:?}; attempt {attempt}; {}",
+        if resume {
+            "signaling resume, retaining UDP and keys"
+        } else {
+            "new media session"
+        }
+    )
+}
+
+#[test]
+fn release_retry_line_separates_signaling_and_media_restarts() {
+    use fastcord_media::gateway::RetryCause;
+    let line = describe_retry(RetryCause::HeartbeatAckTimeout, 2, true);
+    assert!(line.contains("HeartbeatAckTimeout"));
+    assert!(line.contains("attempt 2"));
+    assert!(line.contains("retaining UDP and keys"));
+    let line = describe_retry(RetryCause::MediaLivenessTimeout, 1, false);
+    assert!(line.contains("new media session"));
+    assert!(!line.contains("retaining"));
+}
+
 /// A short, key-free name for a connection state.
 fn describe_status(status: &VoiceStatus) -> String {
     match status {
@@ -1372,6 +1412,9 @@ fn describe_status(status: &VoiceStatus) -> String {
             format!("experimental UDP discovery, variant {variant}/3")
         }
         VoiceStatus::Negotiating => "negotiating transport".into(),
+        VoiceStatus::IncomingAudioDecryptionFailed => {
+            "incoming audio cannot be decrypted; receive keys are being recovered".into()
+        }
         VoiceStatus::Rekeying { transition_id } => match transition_id {
             Some(id) => format!(
                 "end-to-end keys changing (transition {id}); audio pauses until it executes"
@@ -1642,4 +1685,17 @@ mod anomaly_tests {
         );
         assert!(quick.is_empty(), "{quick:?}");
     }
+}
+
+#[test]
+fn receive_failure_has_distinct_ui_state_without_disabling_call_controls() {
+    let state = media_audio_state(VoiceStatus::IncomingAudioDecryptionFailed);
+    assert_eq!(state, VoiceAudioState::IncomingAudioDecryptionFailed);
+    assert!(state.controls_available());
+    assert_ne!(
+        state,
+        media_audio_state(VoiceStatus::Rekeying {
+            transition_id: Some(1)
+        })
+    );
 }

@@ -22,6 +22,7 @@ keyring-core.workspace = true
 parking_lot.workspace = true
 sys-locale.workspace = true
 zeroize.workspace = true
+unicode-segmentation.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 rand_core.workspace = true
@@ -94,12 +95,13 @@ objc2-screen-capture-kit.workspace = true
 objc2-user-notifications.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+rand_core.workspace = true
 arboard = { workspace = true, features = ["wayland-data-control"] }
 ashpd.workspace = true
 futures-util.workspace = true
 pipewire.workspace = true
 png.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
 zbus.workspace = true
 zbus-secret-service-keyring-store.workspace = true
 
@@ -109,3 +111,6 @@ pipewire = { workspace = true, features = ["v0_3_44"] }
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

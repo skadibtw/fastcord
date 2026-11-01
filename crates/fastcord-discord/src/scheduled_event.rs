@@ -19,6 +19,26 @@ use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route, iso8601}
 /// A list body larger than this is not parsed at all.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
+/// Supported creation presets. Existing event edits never send a recurrence rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventRecurrence {
+    Weekly,
+    EveryOtherWeek,
+}
+
+impl EventRecurrence {
+    fn body(self, start_ms: u64) -> Option<Value> {
+        let start =
+            time::OffsetDateTime::from_unix_timestamp(i64::try_from(start_ms / 1000).ok()?).ok()?;
+        Some(json!({
+            "start": iso8601(start_ms / 1000),
+            "frequency": 2,
+            "interval": match self { Self::Weekly => 1, Self::EveryOtherWeek => 2 },
+            "by_weekday": [start.weekday().number_days_from_monday()],
+        }))
+    }
+}
+
 /// What the user typed for a created or edited event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventDraft {
@@ -31,6 +51,8 @@ pub struct EventDraft {
     pub location: String,
     pub start_ms: u64,
     pub end_ms: Option<u64>,
+    /// Creation only; omitted for all existing-event edits.
+    pub recurrence: Option<EventRecurrence>,
 }
 
 /// Why a draft is not sent.
@@ -85,6 +107,12 @@ impl EventDraft {
                 }
             }
         }
+        if self
+            .recurrence
+            .is_some_and(|rule| rule.body(self.start_ms).is_none())
+        {
+            return Err(DraftError::Start);
+        }
         if future && self.start_ms <= now_ms {
             return Err(DraftError::Start);
         }
@@ -106,6 +134,9 @@ impl EventDraft {
             "privacy_level": 2,
         });
         let object = body.as_object_mut().expect("an object");
+        if !edit && let Some(rule) = self.recurrence.and_then(|rule| rule.body(self.start_ms)) {
+            object.insert("recurrence_rule".into(), rule);
+        }
         let description = self.description.trim();
         if !description.is_empty() {
             object.insert("description".into(), json!(description));
@@ -292,3 +323,6 @@ impl<C: Clock> RestClient<C> {
 
 #[cfg(test)]
 mod tests;
+
+mod users;
+pub use users::{EVENT_USERS_PAGE, EventUser, EventUsers};

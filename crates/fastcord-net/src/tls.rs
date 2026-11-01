@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Sleep;
 
-pub const CATALOG_VERSION: u32 = 4;
+pub const CATALOG_VERSION: u32 = 5;
 pub const MAX_CLIENT_HELLO: usize = 32 * 1024;
 /// Records the first plaintext ClientHello is refragmented into by
 /// `Strategy::RecordFragment`.
@@ -37,10 +37,81 @@ const HRR_RANDOM: [u8; 32] = [
     0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
 ];
 
+/// Only bounded, named parameters can enter the shaping plan or saved hints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FragmentCount {
+    Two,
+    Four,
+    Six,
+}
+impl FragmentCount {
+    fn count(self) -> usize {
+        match self {
+            Self::Two => 2,
+            Self::Four => 4,
+            Self::Six => 6,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WriteOffset {
+    Before,
+    After,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WritePacing {
+    Immediate,
+    Ms10,
+    Ms30,
+}
+impl WritePacing {
+    fn delay(self) -> Duration {
+        Duration::from_millis(match self {
+            Self::Immediate => 0,
+            Self::Ms10 => 10,
+            Self::Ms30 => 30,
+        })
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitPoint {
+    FirstByte,
+    DomainMiddle,
+    SniMiddle,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum TlsShape {
+    Fragments {
+        count: FragmentCount,
+        offset: WriteOffset,
+        pacing: WritePacing,
+    },
+    RecordSplit {
+        at: SplitPoint,
+        pacing: WritePacing,
+    },
+    WriteSplit {
+        at: SplitPoint,
+        pacing: WritePacing,
+    },
+}
+impl TlsShape {
+    fn pacing(self) -> WritePacing {
+        match self {
+            Self::Fragments { pacing, .. }
+            | Self::RecordSplit { pacing, .. }
+            | Self::WriteSplit { pacing, .. } => pacing,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Strategy {
     #[default]
     Direct,
+    /// Explicit extended-search profile; legacy defaults are unchanged.
+    Profile(TlsShape),
     TlsRecordSplit,
     WriteSplit,
     Combined,
@@ -77,12 +148,60 @@ impl Strategy {
         Self::SniFragment,
     ];
 
+    /// Default plans stay unchanged; explicit extended searches may use this
+    /// finite catalog. At most42 entries, never arbitrary offsets or delays.
+    pub fn catalog() -> Vec<Self> {
+        let mut result = Vec::with_capacity(42);
+        result.extend(Self::ORDER);
+        for pacing in [WritePacing::Immediate, WritePacing::Ms10, WritePacing::Ms30] {
+            for at in [
+                SplitPoint::FirstByte,
+                SplitPoint::DomainMiddle,
+                SplitPoint::SniMiddle,
+            ] {
+                result.push(Self::Profile(TlsShape::RecordSplit { at, pacing }));
+                result.push(Self::Profile(TlsShape::WriteSplit { at, pacing }));
+            }
+            for count in [FragmentCount::Two, FragmentCount::Four, FragmentCount::Six] {
+                for offset in [WriteOffset::Before, WriteOffset::After] {
+                    result.push(Self::Profile(TlsShape::Fragments {
+                        count,
+                        offset,
+                        pacing,
+                    }));
+                }
+            }
+        }
+        result
+    }
+    pub const fn in_catalog(self) -> bool {
+        !matches!(
+            self,
+            Self::MultiSplit | Self::PacketFake | Self::PacketOverlap
+        )
+    }
+    fn write_delay(self) -> Duration {
+        match self {
+            Self::SniFragment => SNI_WRITE_DELAY,
+            Self::Profile(shape) => shape.pacing().delay(),
+            _ => WRITE_DELAY,
+        }
+    }
+
     const fn record_split(self) -> bool {
-        matches!(self, Self::TlsRecordSplit | Self::Combined)
+        matches!(
+            self,
+            Self::TlsRecordSplit | Self::Combined | Self::Profile(TlsShape::RecordSplit { .. })
+        )
     }
 
     const fn write_split(self) -> bool {
-        matches!(self, Self::WriteSplit | Self::Combined)
+        matches!(
+            self,
+            Self::WriteSplit
+                | Self::Combined
+                | Self::Profile(TlsShape::RecordSplit { .. } | TlsShape::WriteSplit { .. })
+        )
     }
 }
 
@@ -102,6 +221,7 @@ pub enum ParseError {
 pub struct ClientHello {
     pub split_at: usize,
     pub sni_mid: usize,
+    pub sni_center: usize,
     pub sni_end: usize,
     pub record_start: usize,
     pub record_end: usize,
@@ -170,12 +290,13 @@ pub fn inspect_client_hello(records: &[u8]) -> Result<Inspection, ParseError> {
                 expected = Some(total);
             }
             if expected == Some(hello.len()) {
-                let (logical_split, middle, sni_end) = sni_split(&hello)?;
+                let (logical_split, middle, sni_end, center) = sni_split(&hello)?;
                 let (record_start, split_at, record_end) =
                     locate(records, logical_split).ok_or(ParseError::InvalidRecord)?;
                 return Ok(Inspection::ClientHello(ClientHello {
                     split_at,
                     sni_mid: locate(records, middle).ok_or(ParseError::InvalidRecord)?.1,
+                    sni_center: locate(records, center).ok_or(ParseError::InvalidRecord)?.1,
                     sni_end: locate(records, sni_end).ok_or(ParseError::InvalidRecord)?.1,
                     record_start,
                     record_end,
@@ -201,7 +322,7 @@ fn locate(records: &[u8], mut logical_offset: usize) -> Option<(usize, usize, us
     }
 }
 
-fn sni_split(hello: &[u8]) -> Result<(usize, usize, usize), ParseError> {
+fn sni_split(hello: &[u8]) -> Result<(usize, usize, usize, usize), ParseError> {
     let invalid = ParseError::InvalidHandshake;
     // Handshake header, legacy_version and random.
     let mut offset = 4 + 2 + 32;
@@ -268,6 +389,7 @@ fn sni_split(hello: &[u8]) -> Result<(usize, usize, usize), ParseError> {
                         offset + name + 1,
                         offset + name + middle,
                         offset + name + length,
+                        offset + name + length.div_ceil(2),
                     ));
                 }
                 name += length;
@@ -333,6 +455,13 @@ pub fn split_record(bytes: &mut Vec<u8>, hello: ClientHello) -> Result<(), Parse
 /// rewrite inserts `5 * (FRAGMENTS - 1)` bytes in place, so staging keeps its
 /// one bounded buffer instead of copying the hello twice.
 pub fn fragment_record(bytes: &mut Vec<u8>, hello: ClientHello) -> Result<Vec<usize>, ParseError> {
+    fragment_record_count(bytes, hello, FRAGMENTS)
+}
+fn fragment_record_count(
+    bytes: &mut Vec<u8>,
+    hello: ClientHello,
+    count: usize,
+) -> Result<Vec<usize>, ParseError> {
     let header_end = hello
         .record_start
         .checked_add(5)
@@ -341,11 +470,11 @@ pub fn fragment_record(bytes: &mut Vec<u8>, hello: ClientHello) -> Result<Vec<us
         .record_end
         .checked_sub(header_end)
         .ok_or(ParseError::InvalidRecord)?;
-    if payload < 2 * FRAGMENTS || hello.record_end > bytes.len() {
+    if payload < 2 * count || hello.record_end > bytes.len() {
         return Err(ParseError::InvalidRecord);
     }
-    let cuts: Vec<_> = (1..FRAGMENTS)
-        .map(|index| header_end + payload * index / FRAGMENTS)
+    let cuts: Vec<_> = (1..count)
+        .map(|index| header_end + payload * index / count)
         .collect();
     fragment_record_at(bytes, hello, &cuts)
 }
@@ -737,7 +866,31 @@ impl<S> ShapedStream<S> {
                     self.mode = Mode::Pass;
                     self.end = self.bytes.len();
                 }
-                Ok(Inspection::ClientHello(hello)) => {
+                Ok(Inspection::ClientHello(mut hello)) => {
+                    if let Strategy::Profile(
+                        TlsShape::RecordSplit { at, .. } | TlsShape::WriteSplit { at, .. },
+                    ) = self.strategy
+                    {
+                        let point = match at {
+                            SplitPoint::FirstByte => 6,
+                            SplitPoint::DomainMiddle => hello.sni_mid,
+                            SplitPoint::SniMiddle => hello.sni_center,
+                        };
+                        let mut start = 0;
+                        while start < self.bytes.len() {
+                            let Some(length) = u16_at(&self.bytes, start + 3) else {
+                                return self.unsupported();
+                            };
+                            let end = start + 5 + length;
+                            if point > start + 5 && point <= end {
+                                hello.record_start = start;
+                                hello.record_end = end;
+                                hello.split_at = point;
+                                break;
+                            }
+                            start = end;
+                        }
+                    }
                     let old_len = self.bytes.len();
                     if self.strategy.record_split() && split_record(&mut self.bytes, hello).is_err()
                     {
@@ -745,10 +898,16 @@ impl<S> ShapedStream<S> {
                     }
                     let fragments = if matches!(
                         self.strategy,
-                        Strategy::RecordFragment | Strategy::SniFragment
+                        Strategy::RecordFragment
+                            | Strategy::SniFragment
+                            | Strategy::Profile(TlsShape::Fragments { .. })
                     ) {
                         let result = if self.strategy == Strategy::SniFragment {
                             fragment_sni_record(&mut self.bytes, hello)
+                        } else if let Strategy::Profile(TlsShape::Fragments { count, .. }) =
+                            self.strategy
+                        {
+                            fragment_record_count(&mut self.bytes, hello, count.count())
                         } else {
                             fragment_record(&mut self.bytes, hello)
                         };
@@ -785,7 +944,22 @@ impl<S> ShapedStream<S> {
     fn plan_fragments(&mut self, boundaries: &[usize]) {
         let interior = boundaries.len().saturating_sub(1).min(self.steps.len() - 1);
         for (index, boundary) in boundaries[..interior].iter().enumerate() {
-            self.steps[index] = Step::new(boundary.saturating_sub(1), SendMode::Ordinary, true);
+            let end = if matches!(
+                self.strategy,
+                Strategy::Profile(TlsShape::Fragments {
+                    offset: WriteOffset::After,
+                    ..
+                })
+            ) {
+                boundary + 1
+            } else {
+                boundary.saturating_sub(1)
+            };
+            self.steps[index] = Step::new(
+                end,
+                SendMode::Ordinary,
+                !self.strategy.write_delay().is_zero(),
+            );
         }
         self.steps[interior] = Step::new(self.end, SendMode::Ordinary, false);
         self.step_count = interior + 1;
@@ -803,7 +977,7 @@ impl<S> ShapedStream<S> {
         let first = hello.split_at;
         if self.strategy.write_split() {
             self.steps[..2].copy_from_slice(&[
-                Step::new(first, Ordinary, true),
+                Step::new(first, Ordinary, !self.strategy.write_delay().is_zero()),
                 Step::new(self.end, Ordinary, false),
             ]);
             self.step_count = 2;
@@ -906,13 +1080,7 @@ impl<S: AsyncWrite + Unpin> ShapedStream<S> {
                 if self.written == step.end {
                     if step.pause {
                         let delay = self.delay.get_or_insert_with(|| {
-                            Box::pin(tokio::time::sleep(
-                                if self.strategy == Strategy::SniFragment {
-                                    SNI_WRITE_DELAY
-                                } else {
-                                    WRITE_DELAY
-                                },
-                            ))
+                            Box::pin(tokio::time::sleep(self.strategy.write_delay()))
                         });
                         std::task::ready!(delay.as_mut().poll(cx));
                         self.delay = None;

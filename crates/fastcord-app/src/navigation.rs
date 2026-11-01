@@ -23,8 +23,7 @@ const BOLD: Font = Font {
 };
 /// Height of one server icon row in the rail.
 pub const RAIL_ROW: f32 = 56.0;
-pub(crate) const RAIL_WIDTH: f32 = 72.0;
-pub(crate) const SIDEBAR_WIDTH: f32 = 240.0;
+pub(crate) use crate::style::geometry::{RAIL_WIDTH, SIDEBAR_WIDTH};
 /// Air between the timeline and the message box.
 pub(crate) const COMPOSER_GAP: f32 = 14.0;
 
@@ -639,7 +638,7 @@ fn sidebar<'a>(
     };
     let header = container(line)
         .padding([7, 8])
-        .height(49)
+        .height(style::geometry::HEADER_HEIGHT)
         .width(Length::Fill)
         .align_y(alignment::Vertical::Center)
         .clip(true)
@@ -880,7 +879,7 @@ fn header<'a>(title: String, note: &'static str, tools: Tools, wide: bool) -> El
     ));
     container(line)
         .padding([0, 16])
-        .height(49)
+        .height(style::geometry::HEADER_HEIGHT)
         .align_y(alignment::Vertical::Center)
         .width(Length::Fill)
         .style(|_| container::Style {

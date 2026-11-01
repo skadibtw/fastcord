@@ -1,4 +1,5 @@
 //! Network preferences share the per-user settings directory and fake namespace.
+use crate::i18n::tr;
 use crate::ui::button;
 use fastcord_discord::UserToken;
 use fastcord_net::proxy::{ProxyConfig, ProxyKind};
@@ -103,6 +104,12 @@ impl Default for Loaded {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchTicket {
+    generation: u64,
+    serial: u64,
+}
+
 #[derive(Default)]
 pub struct State {
     pub open: bool,
@@ -111,7 +118,14 @@ pub struct State {
     pub settings: Settings,
     pub notice: Option<&'static str>,
     pub saving: bool,
+    search: Option<SearchTicket>,
+    pub source_address: String,
     pub packet_active: bool,
+    pub profile_digest: Option<String>,
+    profile_generation: Option<u64>,
+    profile_revision: u64,
+    profile_dirty: bool,
+    initialized: bool,
     pub proxy_kind: Option<ProxyKind>,
     pub proxy_host: String,
     pub proxy_port: String,
@@ -121,10 +135,19 @@ pub struct State {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    ProfileChanged(Option<String>),
+    HintsSaved(Result<(), &'static str>),
     Open,
     Details(bool),
     Retry,
     Retried,
+    FullSearch,
+    SourceAddress(String),
+    ApplySourceAddress,
+    FullSearchFinished {
+        ticket: SearchTicket,
+        outcome: fastcord_net::ExtendedSearchOutcome,
+    },
     Mode(Mode),
     Saved(Result<(), &'static str>),
     ProxyKind(ProxyKind),
@@ -157,73 +180,52 @@ pub async fn start_packet() -> Result<PacketRoute, &'static str> {
     }).await.unwrap_or(Err("Packet recovery worker stopped."))
 }
 pub async fn packet_check(context: fastcord_net::NetworkContext) -> &'static str {
-    use fastcord_net::tls::Strategy;
     use std::time::Duration;
     let mut packet_tried = false;
-    for strategy in [Strategy::PacketFake, Strategy::PacketOverlap] {
-        let packet =
-            context.mode() == Mode::Auto && context.select_packet_strategy(strategy).is_ok();
-        packet_tried |= packet;
-        if !packet && strategy == Strategy::PacketOverlap {
-            break;
-        }
-        let Ok(client) = context
-            .http_builder(fastcord_net::Role::Rest)
-            .and_then(|b| {
-                b.connect_timeout(Duration::from_secs(8))
-                    .timeout(Duration::from_secs(12))
-                    .build()
-            })
-        else {
+    let mut helper_available = context.packet_helper_available();
+    for attempt in 0..2 {
+        let Ok(builder) = context.http_builder(fastcord_net::Role::Rest) else {
             return "Anonymous check: HTTP client could not start.";
         };
-        #[cfg(debug_assertions)]
-        eprintln!("Anonymous API check: packet={packet}; strategy={strategy:?}");
-        let mut result = client
-            .get("https://discord.com/api/v9/gateway")
-            .send()
+        let (result, evidence) = builder
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(12))
+            .anonymous_get("https://discord.com/api/v9/gateway")
             .await;
-        // This explicit, credential-free GET may be checked once more after
-        // selection. A first click must not report failure without running
-        // the recovery it offered. Account validation/writes are never replayed.
-        if !packet
-            && context.mode() == Mode::Auto
-            && result
-                .as_ref()
-                .is_err_and(|error| error.category().eligible_for_selection())
-        {
-            context.wait_for_recovery().await;
-            if context
-                .controller()
-                .service_status(fastcord_net::Role::Rest)
-                == fastcord_net::selector::ServiceStatus::TlsReachable
-            {
-                result = client
-                    .get("https://discord.com/api/v9/gateway")
-                    .send()
-                    .await;
-            }
-        }
+        packet_tried |= evidence.packet_attempted;
+        helper_available = evidence.helper_available;
         match result {
             Ok(response) if response.status().as_u16() == 200 => {
-                // A response confirms the service, not which optional
-                // transport component caused it (SNI-less profiles may not
-                // need the enabled helper at all).
                 return "Anonymous Discord API check passed (HTTP 200). You can try signing in.";
             }
             Ok(_) => {
                 return "Discord returned an HTTP response; the anonymous API check did not return 200.";
             }
             Err(error) => {
-                #[cfg(debug_assertions)]
-                eprintln!("Anonymous API check failed: {:?}", error.category());
-                if !error.category().eligible_for_selection() {
+                if attempt != 0
+                    || context.mode() != Mode::Auto
+                    || !error.category().eligible_for_selection()
+                {
+                    break;
+                }
+                // Only one credential-free retry after real recovery evidence.
+                // Selecting an available helper is not a transport attempt.
+                context.wait_for_recovery().await;
+                if context
+                    .controller()
+                    .service_status(fastcord_net::Role::Rest)
+                    != fastcord_net::selector::ServiceStatus::TlsReachable
+                {
                     break;
                 }
             }
         }
     }
-    check_failed(context.mode(), packet_tried)
+    if context.mode() == Mode::Auto && helper_available && !packet_tried {
+        "Anonymous Discord API check failed with TLS recovery. The packet helper was available but was not attempted by this request."
+    } else {
+        check_failed(context.mode(), packet_tried)
+    }
 }
 
 /// Names the route the failed check took, so it never blames a helper that
@@ -281,8 +283,50 @@ pub async fn load() -> Loaded {
 }
 
 impl State {
+    pub fn search_busy(&self) -> bool {
+        self.search.is_some()
+    }
+
+    pub fn begin_search(&mut self, generation: u64) -> SearchTicket {
+        // Process-wide serials survive a settings-state reload/replacement.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let ticket = SearchTicket {
+            generation,
+            serial: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        };
+        self.search = Some(ticket);
+        ticket
+    }
+
+    pub fn finish_search(&mut self, ticket: SearchTicket, generation: u64) -> bool {
+        if self.search != Some(ticket) {
+            return false;
+        }
+        self.search = None;
+        ticket.generation == generation
+    }
+
+    pub fn apply_source(
+        &self,
+        context: &fastcord_net::NetworkContext,
+    ) -> Result<fastcord_net::NetworkContext, &'static str> {
+        let text = self.source_address.trim();
+        let address = if text.is_empty() {
+            None
+        } else {
+            Some(text.parse::<std::net::IpAddr>().map_err(
+                |_| "Enter a numeric local IP address, without a port or interface name.",
+            )?)
+        };
+        context
+            .with_source_address(address)
+            .map_err(|_| "Choose a specific unicast local address, or leave the field empty.")
+    }
+
     pub fn apply(&mut self, loaded: &Loaded) {
         self.settings = loaded.settings.clone();
+        self.initialized = true;
+        self.profile_generation = None;
         self.notice = loaded.warning;
         self.proxy_password = Some(loaded.password.clone());
         if let Some(config) = &loaded.settings.proxy {
@@ -292,6 +336,75 @@ impl State {
             self.proxy_username = config.username.clone().unwrap_or_default();
         }
     }
+    pub fn bind_profile(&mut self, context: &fastcord_net::NetworkContext) {
+        if !self.initialized {
+            return;
+        }
+        let generation = context.controller().generation();
+        if self.profile_generation == Some(generation) {
+            return;
+        }
+        let hints = if context.mode() == Mode::Auto {
+            self.profile_digest
+                .as_ref()
+                .and_then(|digest| {
+                    self.settings
+                        .profiles
+                        .iter()
+                        .find(|p| &p.local_network_digest == digest)
+                })
+                .map_or(&[][..], |p| p.hints.as_slice())
+        } else {
+            &[][..]
+        };
+        context
+            .controller()
+            .load_profile_hints(generation, hints, now());
+        self.profile_generation = Some(generation);
+        self.profile_revision = context.controller().profile_hints().1;
+    }
+
+    pub fn collect_hints(&mut self, context: &fastcord_net::NetworkContext) -> Option<Settings> {
+        self.bind_profile(context);
+        if !self.initialized || context.mode() != Mode::Auto {
+            return None;
+        }
+        let digest = self.profile_digest.as_ref()?;
+        let (generation, revision, hints) = context.controller().profile_hints();
+        if self.profile_generation != Some(generation) {
+            return None;
+        }
+        if revision != self.profile_revision {
+            self.settings
+                .profiles
+                .retain(|p| &p.local_network_digest != digest);
+            for hint in hints {
+                if self
+                    .settings
+                    .remember_hint(digest, hint.role, hint.strategy(), now())
+                    .is_ok()
+                    && let Some(saved) = self
+                        .settings
+                        .profiles
+                        .iter_mut()
+                        .find(|p| &p.local_network_digest == digest)
+                        .and_then(|p| p.hints.iter_mut().find(|h| h.role == hint.role))
+                {
+                    saved.confirmed_at_unix_secs = hint.confirmed_at_unix_secs;
+                }
+            }
+            self.profile_revision = revision;
+            self.profile_dirty = true;
+        }
+        if self.profile_dirty && !self.saving {
+            self.profile_dirty = false;
+            self.saving = true;
+            Some(self.settings.clone())
+        } else {
+            None
+        }
+    }
+
     pub fn proxy_config(&self) -> Result<ProxyConfig, &'static str> {
         let config = ProxyConfig {
             kind: self.proxy_kind.unwrap_or(ProxyKind::Http),
@@ -386,6 +499,20 @@ pub fn view<'a>(
     context: &fastcord_net::NetworkContext,
     editable: bool,
 ) -> Element<'a, crate::Message> {
+    view_with_capability(
+        state,
+        context,
+        editable,
+        fastcord_platform::network::packet_capabilities().tcp_fake,
+    )
+}
+
+fn view_with_capability<'a>(
+    state: &'a State,
+    context: &fastcord_net::NetworkContext,
+    editable: bool,
+    native_helper: bool,
+) -> Element<'a, crate::Message> {
     use crate::i18n::tr;
     use crate::{style, ui};
     let open = editable && !state.saving;
@@ -439,7 +566,20 @@ pub fn view<'a>(
     body = body.push(ui::note(tr(
         "Automatic retries a blocked secure connection by another route. Certificates are always checked.",
     )));
-    if cfg!(target_os = "windows") {
+    body = body.push(section(tr("Local source address (this session)"))).push(
+        row![
+            text_input("Automatic, or a numeric local IP", &state.source_address)
+                .on_input_maybe(open.then_some(|value| crate::Message::Network(Action::SourceAddress(value)))),
+            button(text(tr("Apply"))).on_press_maybe(act(Action::ApplySourceAddress)),
+        ].spacing(6)
+    ).push(ui::note(tr(if context.mode() == Mode::Proxy {
+        "Proxy mode ignores the direct source address. The proxy connection and relay choose their own source."
+    } else if context.source_address().is_some() {
+        "A direct source address is configured. Bind failures stop the connection; no automatic unbound fallback. This does not select an interface or bypass VPN/TUN routing."
+    } else {
+        "Direct connections use the system-selected source. A local address does not select an interface or bypass VPN/TUN routing."
+    })));
+    if native_helper {
         body = body.push(
             row![
                 button(
@@ -457,10 +597,6 @@ pub fn view<'a>(
                 }))
                 .padding([7, 14])
                 .style(style::secondary_button(false)),
-                button(text(tr("Check connection")).size(14))
-                    .on_press_maybe(act(Action::PacketCheck))
-                    .padding([7, 14])
-                    .style(style::secondary_button(false)),
             ]
             .spacing(6)
             .wrap(),
@@ -475,6 +611,23 @@ pub fn view<'a>(
             )
         }));
     }
+
+    body = body.push(
+        button(text(tr("Check connection")).size(14))
+            .on_press_maybe(act(Action::PacketCheck))
+            .padding([7, 14])
+            .style(style::secondary_button(false)),
+    );
+    if !native_helper {
+        body = body.push(ui::note(tr(
+            "Native packet recovery is unsupported on this platform. Automatic TLS recovery and configured proxies remain available.",
+        )));
+    }
+    body = body.push(ui::note(tr(if state.profile_digest.is_some() {
+        "Strategy preferences are saved for this connection profile and checked again before use."
+    } else {
+        "Network strategies will be remembered only for this session."
+    })));
 
     // Proxy.
     let password = state
@@ -581,10 +734,17 @@ pub fn view<'a>(
         services = services.push(
             row![
                 text(tr(label)).size(13).width(140),
-                text(status_text(context.controller().service_status(role)))
-                    .size(13)
-                    .color(style::SUBTLE)
-                    .width(Length::Fill),
+                column![
+                    text(status_text(context.controller().service_status(role)))
+                        .size(13)
+                        .color(style::SUBTLE),
+                    text(confirmed_text(
+                        &context.controller().confirmed_strategies(role)
+                    ))
+                    .size(12)
+                    .color(style::SUBTLE),
+                ]
+                .width(Length::Fill),
             ]
             .spacing(8),
         );
@@ -604,6 +764,11 @@ pub fn view<'a>(
         body = body.push(
             column![
                 text(budget_text(context.controller().budget_snapshot())).size(13),
+                text(search_text(context.controller().search_progress())).size(13),
+                button(text(tr("Try all TLS strategies (bounded)")).size(13))
+                    .on_press_maybe((context.mode() == Mode::Auto && !state.search_busy()).then_some(crate::Message::Network(Action::FullSearch)))
+                    .padding([6,12]).style(style::secondary_button(false)),
+                ui::note(tr("Uses only an eligible failed endpoint. Each click keeps the same probe and cooldown limits; an incomplete search continues later. No login or write is replayed.")),
                 ui::note(tr(
                     "Auto checks only a required service after an eligible connection failure. TLS reachability does not establish that Discord or media works. Recovery is bounded; it never bypasses certificate verification."
                 )),
@@ -644,6 +809,55 @@ fn path_text(mode: Mode, packet: bool, proxy: Option<ProxyKind>) -> String {
     }
 }
 
+fn confirmed_text(
+    candidates: &[(
+        fastcord_net::selector::TlsProfile,
+        fastcord_net::tls::Strategy,
+    )],
+) -> String {
+    if candidates.is_empty() {
+        return tr("No TLS shape confirmed for this service").into();
+    }
+    // These are actual twice-probed candidates, not a guessed global winner
+    // or a claim about every pre-existing HTTP pooled connection.
+    let labels = candidates
+        .iter()
+        .take(3)
+        .map(|(profile, strategy)| format!("{profile:?}: {strategy:?}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let extra = candidates.len().saturating_sub(3);
+    if extra == 0 {
+        format!("{}: {labels}", tr("Confirmed TLS candidates"))
+    } else {
+        format!("{}: {labels}; +{extra}", tr("Confirmed TLS candidates"))
+    }
+}
+fn search_text(progress: Option<fastcord_net::selector::SearchProgress>) -> String {
+    let Some(progress) = progress else {
+        return tr("Extended search has not started; a failed required endpoint is needed.").into();
+    };
+    let state = if progress.confirmed {
+        tr("TLS candidate confirmed; service success is separate")
+    } else if progress.tested < progress.total {
+        tr("incomplete; remaining strategies have not all been tested")
+    } else {
+        tr("catalog exhausted; no TLS candidate confirmed")
+    };
+    format!(
+        "{:?}: {}/{} {}; {} {}s",
+        progress.role,
+        progress.tested,
+        progress.total,
+        state,
+        tr("next campaign in at least"),
+        progress
+            .retry_after
+            .as_secs()
+            .saturating_add(u64::from(progress.retry_after.subsec_nanos() > 0))
+    )
+}
+
 fn budget_text(budget: fastcord_net::selector::BudgetSnapshot) -> String {
     use crate::i18n::{tr, trf};
     use fastcord_net::selector::{MAX_ROLLING_DIALS, MAX_TLS_PROBES};
@@ -679,6 +893,9 @@ pub(crate) fn status_text(status: fastcord_net::selector::ServiceStatus) -> Stri
         ServiceStatus::UdpDiscovering { variant } => {
             trf("Experimental UDP discovery: variant {}/3", &[&variant])
         }
+        ServiceStatus::Failed(fastcord_net::NetworkError::BudgetExhausted) => {
+            tr("Recovery budget reached; some strategy checks may remain incomplete.").into()
+        }
         ServiceStatus::Failed(error) => tr(&error.to_string()).to_owned(),
     }
 }
@@ -695,6 +912,41 @@ pub fn updates(spec: &Updates) -> impl iced::futures::Stream<Item = ()> + use<> 
         receiver.changed().await.ok()?;
         Some(((), receiver))
     })
+}
+
+/// NetworkManager identity is separate from generic change hints. Fake mode
+/// never reads the system bus or installation salt. Other platforms explicitly
+/// stay process-only until they implement a genuine OS-profile identity.
+pub fn profiles() -> impl iced::futures::Stream<Item = Option<String>> {
+    iced::stream::channel(
+        1,
+        |mut output: iced::futures::channel::mpsc::Sender<Option<String>>| async move {
+            use iced::futures::SinkExt;
+            #[cfg(target_os = "linux")]
+            if !crate::fake_mode()
+                && let Some(directory) = crate::audio_devices::data_dir()
+            {
+                let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+                let task = tokio::spawn(fastcord_platform::network::profile::watch(
+                    directory, sender,
+                ));
+                struct Abort(tokio::task::JoinHandle<()>);
+                impl Drop for Abort {
+                    fn drop(&mut self) {
+                        self.0.abort();
+                    }
+                }
+                let _guard = Abort(task);
+                while let Some(profile) = receiver.recv().await {
+                    if output.send(profile).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            let _ = output.send(None).await;
+            std::future::pending::<()>().await;
+        },
+    )
 }
 
 /// Native hints are events. The debounce exists only while a change is pending.
@@ -861,6 +1113,189 @@ pub fn preview() -> iced::Result {
 mod tests {
     use super::*;
     use fastcord_net::selector::BudgetSnapshot;
+
+    #[test]
+    fn connection_check_is_platform_neutral_and_respects_busy_state() {
+        use crate::variable_list::harness::Ui;
+        let context = fastcord_net::NetworkContext::off();
+        for native in [false, true] {
+            for (editable, saving) in [(true, false), (false, false), (true, true)] {
+                let state = State {
+                    saving,
+                    ..State::default()
+                };
+                let mut ui = Ui::new(
+                    820.0,
+                    1600.0,
+                    view_with_capability(&state, &context, editable, native),
+                );
+                let mut check = false;
+                let mut helper = false;
+                for y in (0..700).step_by(8) {
+                    for x in (0..820).step_by(8) {
+                        for event in ui.click(x as f32, y as f32) {
+                            match event {
+                                crate::Message::Network(Action::PacketCheck) => check = true,
+                                crate::Message::Network(Action::PacketStart) => helper = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                assert_eq!(check, editable && !saving);
+                assert_eq!(helper, native && editable && !saving);
+            }
+        }
+    }
+
+    #[test]
+    fn stale_search_completion_cannot_clear_a_new_request_after_settings_reload() {
+        let mut state = State::default();
+        let old = state.begin_search(4);
+        state = State::default();
+        let current = state.begin_search(5);
+        assert!(!state.finish_search(old, 5));
+        assert!(state.search_busy());
+        assert!(state.finish_search(current, 5));
+        assert!(!state.search_busy());
+        // Even a reload in the same network generation cannot reuse a ticket.
+        let old = state.begin_search(5);
+        state = State::default();
+        let current = state.begin_search(5);
+        assert!(!state.finish_search(old, 5));
+        assert!(state.search_busy());
+        assert!(state.finish_search(current, 5));
+        let cancelled = state.begin_search(5);
+        assert!(!state.finish_search(cancelled, 6));
+        assert!(!state.search_busy());
+    }
+
+    #[test]
+    fn source_address_is_numeric_session_only_and_invalid_edits_preserve_context() {
+        let context = fastcord_net::NetworkContext::off();
+        let mut state = State::default();
+        for invalid in ["example.com", "127.0.0.1:8080", "0.0.0.0", "fe80::1%eth0"] {
+            state.source_address = invalid.into();
+            assert!(state.apply_source(&context).is_err());
+            assert_eq!(context.source_address(), None);
+        }
+        state.source_address = "127.0.0.1".into();
+        let selected = state.apply_source(&context).unwrap();
+        assert_eq!(
+            selected.source_address(),
+            Some("127.0.0.1".parse().unwrap())
+        );
+        assert!(
+            !serde_json::to_string(&state.settings)
+                .unwrap()
+                .contains("127.0.0.1")
+        );
+        state.source_address.clear();
+        assert_eq!(
+            state.apply_source(&selected).unwrap().source_address(),
+            None
+        );
+    }
+
+    #[test]
+    fn full_search_text_distinguishes_incomplete_budget_from_all_failed() {
+        let progress = fastcord_net::selector::SearchProgress {
+            role: fastcord_net::Role::Rest,
+            tested: 6,
+            total: 42,
+            confirmed: false,
+            retry_after: std::time::Duration::from_secs(58),
+        };
+        let text = search_text(Some(progress));
+        assert!(text.contains("6/42") && text.contains("incomplete") && text.contains("58s"));
+        assert!(
+            search_text(Some(fastcord_net::selector::SearchProgress {
+                tested: 42,
+                ..progress
+            }))
+            .contains("exhausted")
+        );
+        assert!(confirmed_text(&[]).contains("No TLS shape confirmed"));
+        let candidates = [(
+            fastcord_net::selector::TlsProfile::Http,
+            fastcord_net::tls::Strategy::RecordFragment,
+        )];
+        let text = confirmed_text(&candidates);
+        assert!(text.contains("candidate") && text.contains("RecordFragment"));
+    }
+
+    #[test]
+    fn hint_saves_serialize_and_keep_original_confirmation_age() {
+        let digest = "b".repeat(64);
+        let timestamp = now() - 100;
+        let mut source = Settings::default();
+        source
+            .remember_hint(
+                &digest,
+                fastcord_net::Role::Gateway,
+                fastcord_net::tls::Strategy::SniFragment,
+                timestamp,
+            )
+            .unwrap();
+        let hints = source.profiles[0].hints.clone();
+        let context = fastcord_net::NetworkContext::new(Mode::Auto);
+        let mut state = State {
+            profile_digest: Some(digest.clone()),
+            ..State::default()
+        };
+        state.apply(&Loaded::default());
+        state.bind_profile(&context);
+        context.controller().load_profile_hints(0, &hints, now());
+        let first = state.collect_hints(&context).unwrap();
+        assert_eq!(first.profiles[0].hints[0].confirmed_at_unix_secs, timestamp);
+        assert!(state.saving);
+        context.controller().load_profile_hints(0, &[], now());
+        assert!(
+            state.collect_hints(&context).is_none(),
+            "no overlapping write"
+        );
+        state.saving = false; // first save completion
+        let second = state.collect_hints(&context).unwrap();
+        assert!(
+            second.profiles.is_empty(),
+            "pending eviction must be saved next"
+        );
+    }
+
+    #[test]
+    fn profile_preferences_stay_out_of_proxy_and_off_modes() {
+        let digest = "a".repeat(64);
+        let mut settings = Settings::default();
+        settings
+            .remember_hint(
+                &digest,
+                fastcord_net::Role::Gateway,
+                fastcord_net::tls::Strategy::SniFragment,
+                now(),
+            )
+            .unwrap();
+        let loaded = Loaded {
+            settings,
+            ..Loaded::default()
+        };
+        for mode in [Mode::Off, Mode::Proxy, Mode::Auto] {
+            let mut state = State {
+                profile_digest: Some(digest.clone()),
+                ..State::default()
+            };
+            state.apply(&loaded);
+            let context = fastcord_net::NetworkContext::new(mode);
+            state.bind_profile(&context);
+            assert_eq!(
+                context.controller().profile_hints().2.len(),
+                usize::from(mode == Mode::Auto)
+            );
+            assert!(
+                state.collect_hints(&context).is_none(),
+                "import does not rewrite settings or renew age"
+            );
+        }
+    }
 
     #[test]
     fn a_failed_check_blames_only_the_route_it_took() {

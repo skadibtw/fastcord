@@ -26,6 +26,8 @@ mod pacing;
 pub(crate) mod profile;
 mod stream;
 mod subscription;
+pub(crate) mod timing;
+pub use timing::{StartupStage, StartupStamp};
 mod transport;
 mod url;
 mod voice;
@@ -133,6 +135,11 @@ impl Gateway {
     /// delivered and the queue is drained.
     pub async fn next_event(&mut self) -> Option<GatewayEvent> {
         self.events.recv().await
+    }
+
+    /// Same ordered event delivery with optional opt-in startup correlation.
+    pub async fn next_event_timed(&mut self) -> Option<(GatewayEvent, Option<StartupStamp>)> {
+        self.events.recv_timed().await
     }
 
     /// The handle through which the consumer states which guilds, member-list

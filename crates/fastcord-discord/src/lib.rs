@@ -87,12 +87,13 @@ pub use assets::{
 };
 pub use attachment::{RefreshedAttachmentUrl, decode_waveform};
 pub use automod::{
-    AutoModAction, AutoModChange, AutoModFeed, AutoModRequestError, AutoModRule, CREATABLE,
-    MAX_ALLOW_KEYWORD, MAX_ALLOW_PRESET, MAX_BLOCK_MESSAGE_CHARS, MAX_EXEMPT_CHANNELS,
-    MAX_EXEMPT_ROLES, MAX_KEYWORD_CHARS, MAX_KEYWORDS, MAX_MENTION_LIMIT, MAX_REGEX,
-    MAX_REGEX_CHARS, MAX_RULE_NAME_CHARS, MAX_RULES, MAX_TIMEOUT_SECONDS, PRESETS, RuleError,
-    TRIGGER_KEYWORD, TRIGGER_MENTION, TRIGGER_PRESET, TRIGGER_PROFILE, TRIGGER_SPAM,
-    decode_change as decode_automod_change, has_keywords, trigger_limit, trigger_name,
+    AutoModAction, AutoModChange, AutoModExecution, AutoModFeed, AutoModRequestError, AutoModRule,
+    CREATABLE, EXECUTION_ITEMS, ExecutionAction, MAX_ALLOW_KEYWORD, MAX_ALLOW_PRESET,
+    MAX_BLOCK_MESSAGE_CHARS, MAX_EXEMPT_CHANNELS, MAX_EXEMPT_ROLES, MAX_KEYWORD_CHARS,
+    MAX_KEYWORDS, MAX_MENTION_LIMIT, MAX_REGEX, MAX_REGEX_CHARS, MAX_RULE_NAME_CHARS, MAX_RULES,
+    MAX_TIMEOUT_SECONDS, PRESETS, RuleError, TRIGGER_KEYWORD, TRIGGER_MENTION, TRIGGER_PRESET,
+    TRIGGER_PROFILE, TRIGGER_SPAM, decode_change as decode_automod_change, has_keywords,
+    trigger_limit, trigger_name,
 };
 pub use call::CallSignal;
 pub use clock::{Clock, MonotonicClock};
@@ -175,7 +176,10 @@ pub use reqwest::{Method, StatusCode};
 pub use rest::{Priority, RestClient, RestRequest, RestResponse};
 pub use role_admin::{MAX_OVERWRITES, MAX_ROLE_COLOR, MAX_ROLE_NAME_CHARS, RoleEdit};
 pub use route::{MajorParameter, Route, RouteKey};
-pub use scheduled_event::{DraftError, EventAction, EventDraft, EventPermissions};
+pub use scheduled_event::{
+    DraftError, EVENT_USERS_PAGE, EventAction, EventDraft, EventPermissions, EventRecurrence,
+    EventUser, EventUsers,
+};
 pub use search::{
     MAX_SEARCH_CHARS, MAX_SEARCH_OFFSET, SEARCH_PAGE_SIZE, SearchHas, SearchOutcome, SearchPage,
     SearchQuery, SearchScope,
@@ -191,8 +195,8 @@ pub use sticker::{
     GUILD_STICKERS, GuildSticker, MAX_STICKER_DESCRIPTION_CHARS, MAX_STICKER_TAGS_CHARS,
 };
 pub use thread::{
-    ARCHIVED_PAGE_SIZE, ArchivedThreads, ForumPost, MAX_THREAD_NAME_CHARS, PostError, PostInvalid,
-    PostRules, ThreadError, thread_name,
+    ARCHIVED_PAGE_SIZE, ArchiveKind, ArchivedThreads, ForumPost, MAX_THREAD_NAME_CHARS, PostError,
+    PostInvalid, PostRules, ThreadError, thread_name,
 };
 pub use typing::{TYPING_LIFETIME, TypingSend, TypingTable};
 pub use upload::{

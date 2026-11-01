@@ -178,6 +178,7 @@ struct Shared {
     request_keyframe: RequestKeyframe,
     visible: Arc<AtomicBool>,
     status: StatusSink,
+    av_sync: Mutex<Option<Arc<super::av_sync::AvSync>>>,
 }
 
 impl Shared {
@@ -219,6 +220,13 @@ pub(super) struct StreamDecoder {
 }
 
 impl StreamDecoder {
+    pub(super) fn set_av_sync(&self, sync: Arc<super::av_sync::AvSync>) {
+        *self.shared.av_sync.lock() = Some(sync);
+        self.shared.wake.notify_all();
+    }
+    pub(super) fn sync_changed(&self) {
+        self.shared.wake.notify_all();
+    }
     /// Native H.264 or dav1d AV1, with keyframes asked for through `media`.
     pub(super) fn new(
         media: MediaSender,
@@ -261,6 +269,7 @@ impl StreamDecoder {
                 request_keyframe: config.request_keyframe,
                 visible: config.visible,
                 status: config.status,
+                av_sync: Mutex::new(None),
             }),
             pending: Some((config.open, config.sink)),
             thread: None,
@@ -631,9 +640,9 @@ impl Worker {
             }
             if !queue.suspended
                 && self.shared.visible.load(Ordering::Acquire)
-                && let Some(frame) = queue.pop()
+                && !queue.frames.is_empty()
             {
-                return Some((frame, queue.generation));
+                return queue.pop().map(|frame| (frame, queue.generation));
             }
             self.shared.wake.wait(&mut queue);
         }
@@ -703,8 +712,53 @@ impl Worker {
             counters
                 .height
                 .store(picture.image.height(), Ordering::Relaxed);
-            if let Some(sink) = sink.as_mut() {
-                sink(ssrc, picture);
+            // Schedule the actual output timestamp, not the compressed input:
+            // native codecs can buffer/reorder pictures. The synchronous emit
+            // borrow remains valid during this bounded, interruptible wait;
+            // there is no decoded-frame queue or additional pixel copy.
+            let ticks = ((picture.timestamp.as_nanos() * u128::from(RTP_CLOCK_HZ) + 500_000_000)
+                / 1_000_000_000) as u32;
+            let wait_started = std::time::Instant::now();
+            loop {
+                let mut queue = shared.lock();
+                if queue.closed
+                    || queue.suspended
+                    || queue.generation != generation
+                    || !shared.visible.load(Ordering::Acquire)
+                {
+                    return;
+                }
+                let decision = shared
+                    .av_sync
+                    .lock()
+                    .as_ref()
+                    .map_or(super::av_sync::Decision::Immediate, |sync| {
+                        sync.decide(ssrc, ticks, std::time::Instant::now())
+                    });
+                let decision = if matches!(decision, super::av_sync::Decision::Wait(_))
+                    && wait_started.elapsed() >= Duration::from_millis(500)
+                {
+                    super::av_sync::Decision::Immediate
+                } else {
+                    decision
+                };
+                match decision {
+                    super::av_sync::Decision::Wait(delay) => {
+                        shared
+                            .wake
+                            .wait_for(&mut queue, delay.min(Duration::from_millis(10)));
+                    }
+                    super::av_sync::Decision::Late => return,
+                    super::av_sync::Decision::Immediate => {
+                        drop(queue);
+                        if shared.current(generation)
+                            && let Some(sink) = sink.as_mut()
+                        {
+                            sink(ssrc, picture);
+                        }
+                        break;
+                    }
+                }
             }
         });
         counters
