@@ -1473,6 +1473,16 @@ pub(crate) mod harness {
             );
         }
 
+        /// Visits the actual laid-out widgets, including their text and bounds.
+        pub fn inspect(&mut self, operation: &mut dyn core::widget::Operation) {
+            self.element.as_widget_mut().operate(
+                &mut self.tree,
+                core::Layout::new(&self.node),
+                &self.renderer,
+                operation,
+            );
+        }
+
         /// The scrollable's real offset.
         pub fn offset(&mut self) -> f32 {
             probe(

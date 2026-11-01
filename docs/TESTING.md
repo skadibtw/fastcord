@@ -1276,4 +1276,23 @@ Reducer regressions `private_sort_keeps_ids_badges_requests_and_mute_semantics_t
 
 For the native fake check, copy `fixtures/ui/dm-sort.script` into a scratch directory (screenshots are saved beside the script). Run the existing fake server with its default world, chatter off, and an isolated fake settings directory; start the app with `--fake-discord <port> --script <copied-script>`. Inspect five captures: Recent lists Weekend plans, Birch, Aster; Unread first moves unread Aster above the read conversations; selecting Weekend plans and changing order keeps that group open. The script finishes on Unread first. Restart with the same settings directory and open Direct Messages to verify that choice and order persist. Check the fake request log: sorting adds no authenticated setting writes (opening a conversation may perform the existing history/read operations). Run a second account with default Recent, then return to the first to confirm isolation. An actual keyboard check must follow the visible order, while the unread shortcut retains its muted-conversation skip behavior.
 
-This fixture validates local behavior only. Favorites, synchronized user settings, mobile push preferences, notification-write quarantine, native Windows/macOS acceptance and alt-account interoperability remain outstanding under #106; this increment does not close it.
+This fixture validates local behavior only. Synchronized user settings, mobile push preferences, notification-write quarantine, native Windows/macOS acceptance and alt-account interoperability remain outstanding under #106; this increment does not close it.
+
+### Sidebar nickname context (#106)
+
+`sidebar_nickname_tracks_guild_dm_reset_and_account_without_renaming_account_menu`
+inspects the actual rendered text at 760×640 through guild A/B, DM, missing and
+empty nickname, nickname replacement and account replacement. The existing
+member-state regression covers real `GUILD_MEMBER_UPDATE` replay/null reset and
+guild switching. `production_footer_keeps_six_direct_actions_inside_the_fixed_sidebar`
+uses a long nickname and exercises the real footer buttons at 760, 960 and 1280px.
+
+Copy `fixtures/ui/sidebar-nickname.script` into a scratch directory and run the
+fake server with its default world and chatter off, then the fake app with an
+isolated settings directory and `--fake-discord <port> --script <copy>`. Inspect
+four captures: server 5001 shows **Fake Admin**, server 5002 and the DM show
+**Fake Me**, and returning to server 5001 restores **Fake Admin**. At 760px,
+click the sidebar identity and verify the account menu still says **Fake Me**
+and **@fake_me**, and the existing Edit profile action remains available. The
+script performs no nickname/settings write; normal history/read operations may
+occur. This proves local rendering only, not live nickname-route interoperability.

@@ -1,0 +1,16 @@
+# Default fake world, chatter off, isolated settings. Read-only navigation.
+wait 2
+size 760 640
+open discord://-/channels/5001/6005
+wait 1
+snap nickname-server
+open discord://-/channels/5002/6101
+wait 1
+snap nickname-no-nick
+open discord://-/channels/@me/8003
+wait 1
+snap nickname-dm
+open discord://-/channels/5001/6005
+wait 1
+snap nickname-return
+quit

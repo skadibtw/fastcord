@@ -544,6 +544,14 @@ impl App {
             // microphone with its device menu, headphones, and the settings.
             let me = own_user(gateway, session);
             let display = me.display_name().to_owned();
+            // This is the identity visible in the selected server. The account
+            // menu remains global so switching accounts is never ambiguous.
+            let sidebar_name = (!gateway.directs)
+                .then_some(gateway.navigation.selected_guild)
+                .flatten()
+                .and(gateway.navigation.own_nick.as_deref())
+                .filter(|nick| !nick.trim().is_empty())
+                .unwrap_or(&display);
             let own = gateway.navigation.presences.get(&session.user.id);
             let own_status = self.ui.status.status(own);
             let mut foot = column![];
@@ -569,7 +577,7 @@ impl App {
                         || ui::initials(&display, session.user.id.0, 32.0),
                     ),
                     column![
-                        text(display.clone())
+                        text(sidebar_name.to_owned())
                             .size(13)
                             .font(bold)
                             .wrapping(text::Wrapping::None),
