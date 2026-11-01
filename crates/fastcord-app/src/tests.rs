@@ -3,6 +3,155 @@
 
 use super::*;
 
+#[tokio::test]
+async fn repeated_manual_reconnect_keeps_pending_mute_while_persistence_is_blocked() {
+    use fastcord_discord::gateway::StopReason;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let mut app = login_app();
+    let session = authenticate(&mut app, Persistence::MemoryOnly);
+    let user = Snowflake(99);
+    let path = std::env::temp_dir()
+        .join(format!(
+            "fastcord-blocked-reconnect-volume-{}",
+            std::process::id()
+        ))
+        .join("voice-settings.csv");
+    let (seed, _) = voice_settings::Writer::at(Some(path.clone()), session.user.id);
+    seed.set(user, 100);
+    assert_eq!(seed.finish_async().await, voice_settings::Status::Saved);
+    let saved = voice_settings::load_from(&path, session.user.id);
+    assert_eq!(saved[0].percent, 100);
+    let (writer, mut statuses) = voice_settings::Writer::at(Some(path.clone()), session.user.id);
+    let thread = writer.thread_id().expect("writer started");
+    app.volume_writer = Some(writer);
+    let owner = app.volume_writer_session;
+
+    // The handshake, not a sleep, makes every reconnect race a real pending
+    // write. The watchdog only releases a regressed blocking UI path so the
+    // test fails instead of leaving the whole test process stuck forever.
+    let (locked, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timeout = timed_out.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = voice_settings::lock_persistence();
+        let _ = locked.send(());
+        if matches!(
+            wait.recv_timeout(Duration::from_secs(30)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            timeout.store(true, Ordering::Relaxed);
+        }
+    });
+    ready.await.unwrap();
+
+    for _ in 0..16 {
+        // A long drag can produce thousands of changes without slider release.
+        // Its final mute must win over the stale on-disk 100% on every restart.
+        for percent in (0..=200).rev() {
+            drop(app.update(Message::SetParticipantVolume(user, percent)));
+        }
+        let (id, _) = gateway_status(&app);
+        drop(app.update(Message::Gateway(
+            id,
+            GatewayStatus::Stopped(StopReason::ReconnectFailures),
+        )));
+        drop(app.update(Message::ReconnectGateway));
+        assert_ne!(gateway_status(&app).0, id);
+        assert_eq!(
+            app.volume_writer.as_ref().unwrap().thread_id(),
+            Some(thread)
+        );
+        assert_eq!(app.volume_writer_session, owner);
+        let controls = &app.phase.gateway().unwrap().controls;
+        assert_eq!(controls.voice_controls().volume_percent(user), 0);
+        // Deliver the real load_from result after reconnect, exactly as the
+        // production async load completion merges it into the replacement.
+        controls.set_volume_settings(saved.clone());
+        assert_eq!(controls.voice_controls().volume_percent(user), 0);
+        assert_eq!(
+            voice_settings::load_from(&path, session.user.id)[0].percent,
+            100
+        );
+    }
+    drop(app.update(Message::VolumeSettingsStatus(
+        owner,
+        voice_settings::Status::Failed,
+    )));
+    assert!(app.volume_notice.is_some());
+    drop(app.update(Message::VolumeSettingsStatus(
+        gateway_status(&app).0,
+        voice_settings::Status::Saved,
+    )));
+    assert!(
+        app.volume_notice.is_some(),
+        "replacement Gateway does not own retained writer status"
+    );
+    drop(app.update(Message::CommitParticipantVolume(user)));
+    let _ = release.send(());
+    holder.join().unwrap();
+    assert!(
+        !timed_out.load(Ordering::Relaxed),
+        "manual reconnect waited for persistence"
+    );
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            statuses.changed().await.unwrap();
+            assert_eq!(*statuses.borrow_and_update(), voice_settings::Status::Saved);
+            if voice_settings::load_from(&path, session.user.id)[0].percent == 0 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("latest coalesced mute flushed");
+    let (id, _) = gateway_status(&app);
+    drop(app.update(Message::Gateway(
+        id,
+        GatewayStatus::Stopped(StopReason::ReconnectFailures),
+    )));
+    drop(app.update(Message::ReconnectGateway));
+    let controls = &app.phase.gateway().unwrap().controls;
+    controls.set_volume_settings(voice_settings::load_from(&path, session.user.id));
+    assert_eq!(controls.voice_controls().volume_percent(user), 0);
+    assert_eq!(
+        app.volume_writer.as_ref().unwrap().thread_id(),
+        Some(thread)
+    );
+    drop(app.update(Message::VolumeSettingsStatus(
+        owner,
+        voice_settings::Status::Saved,
+    )));
+    assert!(app.volume_notice.is_none());
+    let (_, _, writer) = app.teardown_account().unwrap();
+    assert_eq!(
+        writer.unwrap().finish_async().await,
+        voice_settings::Status::Saved
+    );
+    authenticate(&mut app, Persistence::MemoryOnly);
+    assert_ne!(app.volume_writer_session, owner);
+    drop(app.update(Message::VolumeSettingsStatus(
+        owner,
+        voice_settings::Status::Failed,
+    )));
+    assert!(
+        app.volume_notice.is_none(),
+        "retired account writer cannot affect replacement"
+    );
+    let (_, _, writer) = app.teardown_account().unwrap();
+    assert_eq!(
+        writer.unwrap().finish_async().await,
+        voice_settings::Status::Saved
+    );
+    assert_eq!(
+        voice_settings::load_from(&path, session.user.id)[0].percent,
+        0
+    );
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
 #[test]
 fn retired_panel_auth_failures_cannot_reject_the_replacement_account() {
     use fastcord_discord::{

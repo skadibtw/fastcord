@@ -1286,3 +1286,7 @@ real Opus output-clock scheduling, stale clock fallback, mute, source replacemen
 suspension and teardown. Only decoders configured for stream synchronization grow their compressed allowance to 43 frames; cameras retain 13. The
 6 MiB byte cap and the one borrowed decoded picture remain unchanged. Physical
 lip-sync and native device latency acceptance remain separate checks.
+
+### Reconnect while volume persistence is blocked (#233)
+
+`repeated_manual_reconnect_keeps_pending_mute_while_persistence_is_blocked` seeds an isolated temporary CSV at 100%, holds the actual persistence mutex through a thread handshake, performs 3,216 slider changes and sixteen actual App manual reconnects ending at 0%, and merges the stale disk snapshot into each replacement bridge. It checks retained writer thread/status ownership, zero before/after the real flush and another reconnect, and old-account status rejection after teardown/re-entry. Returned network/subscription tasks are dropped; no account credentials or API requests are used. A thirty-second watchdog only releases a regressed blocking path so it reports failure instead of hanging.
