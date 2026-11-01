@@ -1200,6 +1200,11 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
+        if let organize::Event::PrivateSort(target, _) = event
+            && (target.account != session.user.id || target.generation != gateway.id)
+        {
+            return Task::none();
+        }
         self.audio_preferences
             .organize
             .apply(session.user.id.0, event);

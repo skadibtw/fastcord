@@ -224,13 +224,7 @@ impl Navigation {
         let private = self.selected_private_channel.is_some() || self.selected_guild.is_none();
         // (conversation, unread and not muted) in sidebar order.
         let list: Vec<(Snowflake, bool)> = if private {
-            let mut channels: Vec<_> = store
-                .private_channels()
-                .filter(|channel| is_private_conversation(channel))
-                .collect();
-            channels
-                .sort_by_key(|channel| (std::cmp::Reverse(channel.last_message_id), channel.id));
-            channels
+            self.ordered_private(store)
                 .into_iter()
                 .map(|c| {
                     let unread = store.unread(c.id, None, c.last_message_id);

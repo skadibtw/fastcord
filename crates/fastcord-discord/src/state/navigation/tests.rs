@@ -3320,3 +3320,182 @@ fn interested_member_read_scope_is_independent_of_sidebar_window_and_revoked_wit
             .is_empty()
     );
 }
+
+fn private_sort_store(count: u64) -> (Store, Navigation) {
+    let mut initial = ready(READY);
+    initial.private_channels = (1..=count)
+        .map(|n| {
+            serde_json::from_value(json!({
+                "id": (8000 + n).to_string(), "type": if n % 2 == 0 { 3 } else { 1 },
+                "name": format!("Conversation {n}"), "recipient_ids": ["7"],
+                "last_message_id": (100 + n / 2).to_string(),
+            }))
+            .unwrap()
+        })
+        .collect();
+    initial.read.entries = (1..=count)
+        .map(|n| crate::gateway::ReadStateEntry {
+            channel_id: id(8000 + n),
+            last_acked: id(if n % 3 == 0 { 1 } else { 100 + n / 2 }),
+            mention_count: 0,
+        })
+        .collect();
+    let mut store = Store::new();
+    replace(&mut store, initial);
+    let mut navigation = Navigation::default();
+    navigation.reconcile(&store);
+    (store, navigation)
+}
+
+#[test]
+fn private_sort_keeps_ids_badges_requests_and_mute_semantics_through_updates() {
+    let (mut store, mut nav) = private_sort_store(8);
+    for (n, last) in [
+        (1u64, 100u64),
+        (2, 300),
+        (3, 200),
+        (4, 400),
+        (5, 250),
+        (6, 150),
+        (7, 999),
+        (8, 200),
+    ] {
+        apply(
+            &mut store,
+            "CHANNEL_UPDATE",
+            &json!({
+                "id": (8000 + n).to_string(), "type": if n % 2 == 0 { 3 } else { 1 },
+                "last_message_id": last.to_string(), "is_message_request": n == 7,
+            })
+            .to_string(),
+        );
+    }
+    // Unknown read state on 8004 remains read. Muted 8006 still has a badge.
+    let mut initial = ready(READY);
+    initial.private_channels = store.private_channels().cloned().collect();
+    initial.read.entries = [
+        (1, 99, 0),
+        (2, 300, 0),
+        (3, 199, 0),
+        (5, 249, 0),
+        (6, 149, 2),
+        (8, 199, 0),
+    ]
+    .into_iter()
+    .map(|(n, ack, mention_count)| crate::gateway::ReadStateEntry {
+        channel_id: id(8000 + n),
+        last_acked: id(ack),
+        mention_count,
+    })
+    .collect();
+    initial.read.mutes.channels = vec![id(8005), id(8006)];
+    replace(&mut store, initial);
+    nav.reconcile(&store);
+    assert!(nav.select_private_channel(&store, id(8002)));
+    let all = |nav: &Navigation, store: &Store| nav.private_window(store, 0, usize::MAX).rows;
+    let before = all(&nav, &store);
+    assert_eq!(
+        before.iter().map(|r| r.id.0).collect::<Vec<_>>(),
+        [8004, 8002, 8005, 8003, 8008, 8006, 8001]
+    );
+    nav.set_layout(Arc::new(Layout {
+        private_sort: PrivateSort::UnreadFirst,
+        ..Default::default()
+    }));
+    let ordered = all(&nav, &store);
+    assert_eq!(
+        ordered.iter().map(|r| r.id.0).collect::<Vec<_>>(),
+        [8003, 8008, 8006, 8001, 8004, 8002, 8005]
+    );
+    for row in &ordered {
+        assert_eq!(
+            row,
+            before.iter().find(|r| r.id == row.id).unwrap(),
+            "only positions change"
+        );
+    }
+    assert_eq!(nav.private_selection(&store).unwrap().channel_id, id(8002));
+    assert!(
+        !nav.select_private_channel(&store, id(8007)),
+        "requests stay excluded"
+    );
+    assert!(nav.select_private_channel(&store, id(8008)));
+    assert!(nav.step(
+        &store,
+        Step {
+            scope: StepScope::Unread,
+            forward: true
+        }
+    ));
+    assert_eq!(
+        nav.private_selection(&store).unwrap().channel_id,
+        id(8001),
+        "unread shortcut still skips muted badge row"
+    );
+    store.apply(event(Dispatch::MessageAck(crate::gateway::MessageAck {
+        channel_id: id(8003),
+        message_id: id(200),
+        mention_count: 0,
+    })));
+    assert_eq!(all(&nav, &store)[0].id, id(8008));
+    apply(
+        &mut store,
+        "MESSAGE_CREATE",
+        &json!({
+            "id": "1000", "channel_id": "8001", "author": {"id":"7","username":"other"},
+            "content":"new", "timestamp":"2026-11-02T00:00:00Z",
+        })
+        .to_string(),
+    );
+    assert_eq!(all(&nav, &store)[0].id, id(8001));
+    assert_eq!(store.bytes(), store.recount());
+}
+
+#[test]
+fn private_sort_large_pages_and_keyboard_share_exact_order_without_changing_selection() {
+    let (store, mut nav) = private_sort_store(401);
+    assert!(nav.select_private_channel(&store, id(8050)));
+    let bytes = store.bytes();
+    for sort in [PrivateSort::UnreadFirst, PrivateSort::Recent] {
+        nav.set_layout(Arc::new(Layout {
+            private_sort: sort,
+            ..Default::default()
+        }));
+        assert_eq!(nav.private_selection(&store).unwrap().channel_id, id(8050));
+        let mut ids = Vec::new();
+        for offset in (0..401).step_by(MAX_WINDOW_ROWS) {
+            let page = nav.private_window(&store, offset, usize::MAX);
+            assert_eq!(page.total, 401);
+            assert!(page.rows.len() <= MAX_WINDOW_ROWS);
+            ids.extend(page.rows.iter().map(|r| r.id));
+        }
+        assert_eq!(ids.len(), 401);
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 401);
+        assert!(nav.select_private_channel(&store, *ids.last().unwrap()));
+        for expected in &ids {
+            assert!(nav.step(
+                &store,
+                Step {
+                    scope: StepScope::Channel,
+                    forward: true
+                }
+            ));
+            assert_eq!(nav.private_selection(&store).unwrap().channel_id, *expected);
+        }
+        assert!(nav.step(
+            &store,
+            Step {
+                scope: StepScope::Channel,
+                forward: false
+            }
+        ));
+        assert_eq!(
+            nav.private_selection(&store).unwrap().channel_id,
+            ids[ids.len() - 2]
+        );
+        assert_eq!(nav.private_window(&store, 9999, 20).rows.len(), 0);
+        assert!(nav.select_private_channel(&store, id(8050)));
+    }
+    assert_eq!(store.bytes(), bytes);
+    assert_eq!(store.bytes(), store.recount());
+}

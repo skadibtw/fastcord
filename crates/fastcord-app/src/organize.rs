@@ -1,6 +1,6 @@
 //! Local conversation organization (issue #106): which server folders are
 //! open, which categories are folded and which servers hide their muted
-//! channels. These are per-account choices kept in the settings file next to
+//! channels, plus the DM/group-DM sort order. These are per-account choices kept in the settings file next to
 //! the other preferences and never sent to Discord. The reducer reads the
 //! current account's copy from one process-wide slot, like `chat_prefs`, so no
 //! plumbing is needed beyond a nudge when it changes.
@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-use fastcord_discord::state::navigation::Layout;
+use fastcord_discord::state::navigation::{Layout, PrivateSort};
 use fastcord_model::Snowflake;
 use serde_json::{Value, json};
 
@@ -16,12 +16,21 @@ use serde_json::{Value, json};
 const MAX_ACCOUNTS: usize = 16;
 const MAX_ENTRIES: usize = 1024;
 
+/// The account and Gateway generation that rendered a sorting control.
+/// The generation also rejects a queued control after A → B → A.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SortTarget {
+    pub account: Snowflake,
+    pub generation: u64,
+}
+
 /// One click on the lists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Category(Snowflake),
     Folder(u64),
     HideMuted(Snowflake),
+    PrivateSort(SortTarget, PrivateSort),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,6 +59,7 @@ impl Local {
             Event::Category(id) => flip(&mut layout.collapsed_categories, id),
             Event::Folder(id) => flip(&mut layout.open_folders, id),
             Event::HideMuted(id) => flip(&mut layout.hide_muted, id),
+            Event::PrivateSort(_, sort) => layout.private_sort = sort,
         }
     }
 
@@ -73,6 +83,10 @@ impl Local {
             .flatten()
             .filter_map(|(account, entry)| {
                 let layout = Layout {
+                    private_sort: match entry.get("private_sort").and_then(Value::as_str) {
+                        Some("unread_first") => PrivateSort::UnreadFirst,
+                        _ => PrivateSort::Recent,
+                    },
                     collapsed_categories: ids(entry, "categories")
                         .into_iter()
                         .map(Snowflake)
@@ -103,6 +117,10 @@ impl Local {
                     (
                         account.to_string(),
                         json!({
+                            "private_sort": match layout.private_sort {
+                                PrivateSort::Recent => "recent",
+                                PrivateSort::UnreadFirst => "unread_first",
+                            },
                             "categories": sorted(&layout.collapsed_categories, |id| id.0),
                             "folders": sorted(&layout.open_folders, |id| id),
                             "hide_muted": sorted(&layout.hide_muted, |id| id.0),
@@ -164,6 +182,41 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn private_sort_round_trips_and_unknown_values_keep_other_layout_choices() {
+        let mut local = Local::from_json(&json!({"1": {
+            "folders": [7], "categories": [10], "hide_muted": [5]
+        }}));
+        assert_eq!(local.layout(1).private_sort, PrivateSort::Recent);
+        local.apply(
+            1,
+            Event::PrivateSort(
+                SortTarget {
+                    account: Snowflake(1),
+                    generation: 9,
+                },
+                PrivateSort::UnreadFirst,
+            ),
+        );
+        assert_eq!(Local::from_json(&local.to_json()), local);
+        assert_eq!(local.layout(2).private_sort, PrivateSort::Recent);
+        for invalid in [
+            json!("future-mode"),
+            json!(true),
+            json!(2),
+            json!({}),
+            Value::Null,
+        ] {
+            let mut value = local.to_json();
+            value["1"]["private_sort"] = invalid;
+            let restored = Local::from_json(&value).layout(1);
+            assert_eq!(restored.private_sort, PrivateSort::Recent);
+            assert!(restored.open_folders.contains(&7));
+            assert!(restored.collapsed_categories.contains(&Snowflake(10)));
+            assert!(restored.hide_muted.contains(&Snowflake(5)));
+        }
     }
 
     #[test]

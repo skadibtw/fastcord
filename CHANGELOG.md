@@ -55,6 +55,7 @@
 - Preserve categorical voice reconnect causes and record them in the release voice log, distinguishing signaling Resume (retained UDP/keys) from a new media session (#230).
 
 ### Added
+- Choose Recent or Unread first for DMs and group DMs on this device, separately for each account. The virtual sidebar and keyboard navigation share the same order; conversations, badges and active selection stay intact (#106; synchronization and other organization features remain outstanding).
 - Browse public, joined-private and manager-only private thread archives with their respective pagination cursors (#63).
 - Browse accessible server channels with bounded search/pages, independently of folded sidebar categories; selection rechecks current permissions (#91).
 - Refuse screening consent when TERMS values are absent or not an array, as well as when rules are truncated (#91).

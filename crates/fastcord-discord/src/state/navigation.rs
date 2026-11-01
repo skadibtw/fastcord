@@ -119,6 +119,15 @@ pub struct NotificationView {
 }
 
 /// Local, per-account presentation choices (never sent to Discord).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PrivateSort {
+    #[default]
+    Recent,
+    /// Visible unread dots or mention badges first; never hides a conversation.
+    UnreadFirst,
+}
+
+/// Local, per-account presentation choices (never sent to Discord).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Layout {
     /// Categories whose channels are folded away.
@@ -127,6 +136,7 @@ pub struct Layout {
     pub open_folders: HashSet<u64>,
     /// Servers that hide their muted channels.
     pub hide_muted: HashSet<Snowflake>,
+    pub private_sort: PrivateSort,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -453,6 +463,7 @@ pub struct NavigationSnapshot {
     /// One on-demand page, independent of the folded sidebar.
     pub browse: Option<BrowseChannels>,
     pub private_channels: Window<PrivateChannelRow>,
+    pub private_sort: PrivateSort,
     pub private_selection: Option<PrivateChannelSelection>,
     pub selected_guild: Option<Snowflake>,
     /// The selected guild's name, empty when none is selected.
@@ -641,17 +652,35 @@ impl Navigation {
         true
     }
 
+    /// One order for the virtual sidebar and keyboard stepping. Only borrowed
+    /// channel pointers are collected from the byte-bounded store; sorting
+    /// needs no copied names, messages or additional heap scratch space.
+    fn ordered_private<'a>(&self, store: &'a Store) -> Vec<&'a Channel> {
+        let mut channels: Vec<_> = store
+            .private_channels()
+            .filter(|channel| is_private_conversation(channel))
+            .collect();
+        channels.sort_unstable_by_key(|channel| {
+            let unread = self.layout.private_sort == PrivateSort::UnreadFirst
+                && store
+                    .unread(channel.id, None, channel.last_message_id)
+                    .any();
+            (
+                !unread,
+                std::cmp::Reverse(channel.last_message_id),
+                channel.id,
+            )
+        });
+        channels
+    }
+
     pub fn private_window(
         &self,
         store: &Store,
         offset: usize,
         count: usize,
     ) -> Window<PrivateChannelRow> {
-        let mut channels: Vec<_> = store
-            .private_channels()
-            .filter(|channel| is_private_conversation(channel))
-            .collect();
-        channels.sort_by_key(|channel| (std::cmp::Reverse(channel.last_message_id), channel.id));
+        let channels = self.ordered_private(store);
         let total = channels.len();
         let offset = offset.min(total);
         let rows = channels
@@ -1105,6 +1134,7 @@ impl Navigation {
                 private_rows.end.saturating_sub(private_rows.start),
             ),
             private_selection: self.private_selection(store),
+            private_sort: self.layout.private_sort,
             selected_guild_name: selected_guild
                 .and_then(|id| store.guild(id))
                 .map_or_else(String::new, |guild| {

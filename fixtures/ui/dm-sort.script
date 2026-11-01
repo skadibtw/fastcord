@@ -1,0 +1,22 @@
+# Default fake world, with chatter off; use an isolated settings directory.
+# 8001 (Aster) is unread and oldest. 8003 (Weekend plans) is newest and read.
+wait 2
+open discord://-/channels/@me/8003
+wait 1
+sort-dms recent
+wait 1
+snap dm-sort-recent
+sort-dms unread-first
+wait 1
+snap dm-sort-unread
+# Open the already-read group: its ID must stay selected when order changes.
+open discord://-/channels/@me/8003
+wait 1
+snap dm-sort-selected
+sort-dms recent
+wait 1
+snap dm-sort-selected-recent
+sort-dms unread-first
+wait 1
+snap dm-sort-persisted
+quit

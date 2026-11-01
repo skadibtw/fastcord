@@ -3372,6 +3372,13 @@ impl Worker {
         status: Option<GatewayStatus>,
         timing: Option<fastcord_discord::gateway::StartupStamp>,
     ) -> bool {
+        // A sort choice and keyboard step may arrive in the same wakeup.
+        // Apply the current account's layout before interpreting the step.
+        if let Some(me) = self.tracker.store.current_user().map(|user| user.id) {
+            self.tracker
+                .navigation
+                .set_layout(crate::organize::current(me.0));
+        }
         if request.revision != self.revision {
             match request.selection {
                 Some(SelectionIntent::Guild(guild)) => {
@@ -3424,11 +3431,6 @@ impl Worker {
             .subscription_target(&self.tracker.store);
         self.tracker.store.focus(&target);
         gateway.subscriptions().update(|current| *current = target);
-        if let Some(me) = self.tracker.store.current_user().map(|user| user.id) {
-            self.tracker
-                .navigation
-                .set_layout(crate::organize::current(me.0));
-        }
         let mut navigation = self.tracker.navigation.snapshot_with_private(
             &self.tracker.store,
             request.guilds.start,
