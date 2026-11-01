@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Compile the VA-API-only RBSP bit-length helper only on Linux, keeping Windows and macOS all-target test builds clean under warnings-as-errors.
 - Linux VA-API H.264 encoding selects YUV420 and CBR from driver capability masks and supplies packed Baseline slice headers when supported, fixing rejected configurations and NAL-type-0 output on radeonsi (#30).
 - Linux H.264 share/watch can use the bundled OpenH264 codec when `/dev/dri` is absent; missing GPU devices no longer abort codec discovery before software fallback. Explicit Software selection skips hardware discovery (#30).

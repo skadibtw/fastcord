@@ -1232,6 +1232,14 @@ fn real_audio_clock_schedules_video_without_losing_late_reference_frames() {
     );
     let requests = Arc::new(Mutex::new(Vec::new()));
     let (mut decoder, received) = real_decoder(&requests);
+    let (presented, presentation_times) = mpsc::channel();
+    let pending_sink = &mut decoder.pending.as_mut().unwrap().1;
+    let mut sink = pending_sink.take().unwrap();
+    *pending_sink = Some(Box::new(move |ssrc, picture| {
+        // Observe presentation on the worker, before copying or channel delivery.
+        presented.send(Instant::now()).unwrap();
+        sink(ssrc, picture);
+    }));
     decoder.set_av_sync(sync.clone());
     let mut frames = units().into_iter();
     push_settled(&mut decoder, video(SSRC, 0, true, frames.next().unwrap()));
@@ -1263,12 +1271,15 @@ fn real_audio_clock_schedules_video_without_losing_late_reference_frames() {
     let mut frame = video(SSRC, 1, false, frames.next().unwrap());
     frame.timestamp = 27_000;
     decoder.push(frame);
+    let (_, _, pixels) = received.recv_timeout(Duration::from_secs(30)).unwrap();
+    let presented_at = presentation_times
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap();
+    // A delayed receiver may already have a correctly scheduled frame queued.
     assert!(
-        received.recv_timeout(Duration::from_millis(20)).is_err(),
+        presented_at >= point.at + Duration::from_millis(100),
         "future picture waits for audio"
     );
-    let (_, _, pixels) = received.recv_timeout(Duration::from_secs(30)).unwrap();
-    assert!(Instant::now() >= point.at + Duration::from_millis(100));
     assert_eq!(
         pixels,
         picture(1),
