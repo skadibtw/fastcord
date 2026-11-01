@@ -1099,8 +1099,16 @@ fn community_wrapped_checkbox_labels_keep_target_and_disabled_behavior() {
                 locked.then_some("This role is not below your highest role."),
             );
             r.name = long_role.into();
-            admin.roles = vec![r];
-            admin.channels = vec![channel(201, AdminKind::Text, long_channel, true)];
+            // Embedded gutters only exist while content overflows. One wrapped
+            // row can fit on a different platform font, legitimately leaving no
+            // scrollbar. Keep the target first and force overflow independently
+            // of its wrapping before asserting scrollbar clearance.
+            admin.roles = std::iter::once(r)
+                .chain((1000..1008).map(|id| role(id, None)))
+                .collect();
+            admin.channels = std::iter::once(channel(201, AdminKind::Text, long_channel, true))
+                .chain((1200..1208).map(|id| channel(id, AdminKind::Text, "overflow", true)))
+                .collect();
             let ed = OnbEd::new(onboarding());
             let mut ui = Ui::new(
                 260.0,
@@ -1132,8 +1140,15 @@ fn community_wrapped_checkbox_labels_keep_target_and_disabled_behavior() {
                 role_bounds.height > 30.0,
                 "long role label wraps at narrow form width"
             );
-            let role_scroll = geometry.scrolls[0].0;
-            assert!(role_bounds.x + role_bounds.width <= role_scroll.x + role_scroll.width - 15.0);
+            let (role_scroll, role_content) = geometry.scrolls[0];
+            assert!(
+                role_content.height > role_scroll.height,
+                "role fixture must have a scrollbar: {role_content:?} {role_scroll:?}"
+            );
+            assert!(
+                role_bounds.x + role_bounds.width <= role_scroll.x + role_scroll.width - 15.0,
+                "wrapped role overlaps a real scrollbar: {role_bounds:?} {role_scroll:?}"
+            );
             let events = ui.click(
                 role_bounds.x + role_bounds.width - 2.0,
                 role_bounds.y + 10.0,
@@ -1155,6 +1170,16 @@ fn community_wrapped_checkbox_labels_keep_target_and_disabled_behavior() {
                 .find(|(label, _)| label.starts_with('#'))
                 .unwrap()
                 .1;
+            let (channel_scroll, channel_content) = geometry.scrolls[1];
+            assert!(
+                channel_content.height > channel_scroll.height,
+                "channel fixture must have a scrollbar: {channel_content:?} {channel_scroll:?}"
+            );
+            assert!(
+                channel_bounds.x + channel_bounds.width
+                    <= channel_scroll.x + channel_scroll.width - 15.0,
+                "wrapped channel overlaps a real scrollbar: {channel_bounds:?} {channel_scroll:?}"
+            );
             let events = ui.click(
                 channel_bounds.x + channel_bounds.width - 2.0,
                 channel_bounds.y + 10.0,
@@ -1178,6 +1203,15 @@ fn community_wrapped_checkbox_labels_keep_target_and_disabled_behavior() {
                 .unwrap()
                 .1;
             assert!(bounds.height > 30.0);
+            let (default_scroll, default_content) = geometry.scrolls[0];
+            assert!(
+                default_content.height > default_scroll.height,
+                "default-channel fixture must have a scrollbar: {default_content:?} {default_scroll:?}"
+            );
+            assert!(
+                bounds.x + bounds.width <= default_scroll.x + default_scroll.width - 15.0,
+                "wrapped default channel overlaps a real scrollbar: {bounds:?} {default_scroll:?}"
+            );
             let events = defaults.click(bounds.x + bounds.width - 2.0, bounds.y + 10.0);
             if edit {
                 assert!(

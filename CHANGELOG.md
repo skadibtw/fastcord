@@ -19,6 +19,8 @@
 - Reserve bounded compressed-video backlog for audio-synchronized presentation and repaired bursts; fall back to immediate presentation under queue pressure instead of needlessly breaking the reference chain (#234).
 - Preserve unfinished multi-select answers when reactions or unrelated message fields change; invalidate the draft when its component tree changes or the row becomes hidden, pending, deleted or leaves the conversation (#235).
 - Give each scheduled-event list request distinct ownership and cancel it on close/reopen/reset; ignore stale list, attendee and write authentication failures while preserving in-flight write deduplication (#237).
+
+- Make the onboarding checklist regression force actual scrolling before checking scrollbar clearance, so platform font metrics cannot invalidate its fixture; production layout and click/disabled checks are unchanged (#252).
 - Let Community onboarding role and channel checklists use the available form width and reserve space for their scrollbars, keeping labels such as Moderator readable while long names wrap (#252).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).
