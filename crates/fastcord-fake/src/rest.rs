@@ -106,6 +106,26 @@ pub fn handle(world: &mut World, req: &Request, ctx: &Ctx) -> Outcome {
     match (method, segments.as_slice()) {
         ("GET", ["gateway"]) => ok(json!({"url": format!("ws://127.0.0.1:{}", ctx.port)})),
         ("GET", ["users", "@me"]) => ok(world.me.clone()),
+        // Read-only, synthetic discovery page for the native filter smoke test.
+        // Public CDN icons are omitted so this fixture stays entirely local.
+        ("GET", ["discoverable-guilds"]) => {
+            let Ok(offset) = get("offset").unwrap_or("0").parse::<usize>() else {
+                return error(400, 0, "Invalid offset");
+            };
+            if get("limit") != Some("24") {
+                return error(400, 0, "Fixture requires limit 24");
+            }
+            let mut fixture: Value = serde_json::from_str(include_str!(
+                "../../../fixtures/rest/discovery-synthetic.json"
+            ))
+            .expect("synthetic discovery fixture");
+            let guilds = fixture["guilds"].as_array_mut().expect("fixture guilds");
+            for guild in guilds.iter_mut() {
+                guild["icon"] = Value::Null;
+            }
+            let page: Vec<_> = guilds.iter().skip(offset).take(24).cloned().collect();
+            ok(json!({"guilds": page}))
+        }
         ("GET", ["guilds", "5001", "onboarding"])
             if world.guilds.iter().any(|guild| text(guild, "id") == "5001") =>
         {
@@ -903,6 +923,47 @@ mod tests {
 
     fn body(outcome: &Outcome) -> Value {
         outcome.response.json_body().unwrap()
+    }
+
+    #[test]
+    fn discovery_fixture_is_read_only_bounded_and_has_no_remote_images() {
+        let mut world = world();
+        let first = call(
+            &mut world,
+            "GET",
+            "/discoverable-guilds?offset=0&limit=24",
+            None,
+        );
+        assert_eq!(first.response.status, 200);
+        assert!(first.events.is_empty());
+        let page = body(&first);
+        let guilds = page["guilds"].as_array().unwrap();
+        assert_eq!(guilds.len(), 2);
+        assert!(guilds.iter().all(|guild| guild["icon"].is_null()));
+        let later = call(
+            &mut world,
+            "GET",
+            "/discoverable-guilds?offset=24&limit=24",
+            None,
+        );
+        assert!(body(&later)["guilds"].as_array().unwrap().is_empty());
+        assert_eq!(
+            call(
+                &mut world,
+                "GET",
+                "/discoverable-guilds?offset=x&limit=24",
+                None
+            )
+            .response
+            .status,
+            400
+        );
+        assert_eq!(
+            call(&mut world, "POST", "/discoverable-guilds", None)
+                .response
+                .status,
+            404
+        );
     }
 
     #[test]

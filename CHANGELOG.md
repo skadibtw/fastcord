@@ -55,6 +55,7 @@
 - Preserve categorical voice reconnect causes and record them in the release voice log, distinguishing signaling Resume (retained UDP/keys) from a new media session (#230).
 
 ### Added
+- Filter the loaded public-server discovery pages by name or description with bounded Unicode text; filtering also releases unused icon interests and never fetches another page automatically. Global discovery search and direct discovery joins remain unavailable (#90).
 - Browse public, joined-private and manager-only private thread archives with their respective pagination cursors (#63).
 - Browse accessible server channels with bounded search/pages, independently of folded sidebar categories; selection rechecks current permissions (#91).
 - Refuse screening consent when TERMS values are absent or not an array, as well as when rules are truncated (#91).

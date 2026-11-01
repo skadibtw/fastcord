@@ -182,6 +182,10 @@ async fn send_step(
 /// Panels a script can open or close.
 pub const PANELS: &[&str] = &[
     "search",
+    "discover",
+    "discover-filter",
+    "discover-no-match",
+    "discover-clear",
     "pins",
     "thread-archive",
     "archive-public",

@@ -1,5 +1,22 @@
 # Testing
 
+## Loaded discovery filter (#90, 2026-11-02)
+
+- Offline regressions cover Unicode lowercase matching in names/descriptions,
+  original order after clearing, the 100-character/400-byte query bound,
+  filtered icon demand, and account reset rejecting old pages. Query events
+  return no tasks before/during/after loading; only an explicit Show more
+  fetches another page, using the unfiltered offset. An iced widget test checks
+  Show more remains clickable with no matches.
+- The fake server exposes a read-only two-server discovery fixture without
+  remote icons; fake script steps `discover`, `discover-filter`,
+  `discover-no-match`, and `discover-clear` drive the actual app handlers.
+- Linux local checks passed: all eight `discover::tests`, the fake discovery
+  fixture test, and app/fake all-target Clippy with warnings denied. Native
+  screenshots of this change are pending a rebuilt fake-mode executable.
+  Global search/direct discovery joining, real user-account route acceptance,
+  and Windows/macOS native acceptance remain outstanding.
+
 ## Stranger friend-request confirmation (#211, 2026-10-25)
 
 - Offline coverage: the relationship request tests check plain acceptance,
