@@ -268,19 +268,24 @@ impl graphics::Compositor for NativeCompositor {
             _ => unreachable!("renderer and surface belong to their compositor"),
         };
         #[cfg(feature = "fake-discord")]
-        if result.is_ok()
-            && let Some(capture) = capture
+        if let Some(capture) = capture
             && !capture.is_closed()
-            && crate::fake::capture_size_allowed(viewport.physical_size())
         {
-            // No event-loop yield or app update between draw/present and
-            // capture: weak text primitives still have their widget owners.
-            let bytes = self.screenshot(renderer, viewport, background_color);
-            let _ = capture.send(iced::window::Screenshot::new(
-                bytes,
-                viewport.physical_size(),
-                viewport.scale_factor(),
-            ));
+            let shot = if result.is_err() {
+                Err(crate::fake::SnapshotError::Presentation)
+            } else if !crate::fake::capture_size_allowed(viewport.physical_size()) {
+                Err(crate::fake::SnapshotError::Oversized)
+            } else {
+                // No event-loop yield or app update between draw/present and
+                // capture: weak text primitives still have their widget owners.
+                let bytes = self.screenshot(renderer, viewport, background_color);
+                Ok(iced::window::Screenshot::new(
+                    bytes,
+                    viewport.physical_size(),
+                    viewport.scale_factor(),
+                ))
+            };
+            let _ = capture.send(shot);
         }
         result
     }

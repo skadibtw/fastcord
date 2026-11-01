@@ -211,6 +211,8 @@ fn open_link(url: &str) {
 
 /// The whole application; the `fastcord` binary only calls this.
 pub fn run() -> iced::Result {
+    #[cfg(feature = "fake-discord")]
+    fake::init();
     if std::env::args_os().any(|arg| arg == "--packet-helper") {
         let args: Vec<_> = std::env::args().collect();
         if args.len() == 4
@@ -250,8 +252,6 @@ pub fn run() -> iced::Result {
     i18n::set(i18n::Lang::system());
     // One session per process and per sign-in: a second launch hands its link
     // to the first and exits, never opening a second Gateway on the same token.
-    #[cfg(feature = "fake-discord")]
-    fake::init();
     // Fake mode takes no part in the hand-off: it neither receives a real
     // instance's links nor is found by one.
     let arg = std::env::args().nth(1).filter(|_| !fake_mode());
@@ -274,12 +274,18 @@ pub fn run() -> iced::Result {
     // A daemon, not an application: a watched stream gets a window of its own
     // (`player`), so its pictures never redraw the main window. `boot` opens
     // the main window and `Message::Exit` ends the process.
-    render::daemon(App::boot, App::update, App::window_view)
+    let result = render::daemon(App::boot, App::update, App::window_view)
         .title(App::window_title)
         .theme(App::window_theme)
         .scale_factor(App::window_scale)
         .subscription(App::subscription)
-        .run()
+        .run();
+    // The failed script first follows the ordinary Quit/Exit shutdown path.
+    #[cfg(feature = "fake-discord")]
+    if fake::script_failed() {
+        std::process::exit(1);
+    }
+    result
 }
 
 fn main_window_settings() -> iced::window::Settings {
@@ -1659,6 +1665,9 @@ impl App {
 
     #[cfg(feature = "fake-discord")]
     fn fake_step(&mut self, step: fake::Step) -> Task<Message> {
+        if !fake::active() {
+            return Task::none();
+        }
         match step {
             fake::Step::Open(text) => {
                 self.pending_link = desktop::parse(&text);
@@ -1678,16 +1687,13 @@ impl App {
                 // text primitives still have their widget owners. The returned
                 // pixels are owned before any later app message can rebuild UI.
                 let draw = fake::next_draw(id);
-                Task::future(draw.wait()).then(move |shot| {
-                    if let Some(shot) = shot {
+                Task::future(draw.wait()).then(move |shot| match shot {
+                    Ok(shot) => {
                         Task::done(Message::FakeShot(path.clone(), shot, completion.clone()))
-                    } else {
-                        eprintln!(
-                            "script: screenshot canceled, oversized, or window did not present: {}",
-                            path.display()
-                        );
+                    }
+                    Err(error) => {
                         if let Some(completion) = &completion {
-                            completion.finish();
+                            completion.finish(Err(error));
                         }
                         Task::none()
                     }

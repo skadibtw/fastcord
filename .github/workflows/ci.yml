@@ -71,6 +71,7 @@ jobs:
         run: |
           cargo clippy -p fastcord-fake -p fastcord-discord -p fastcord-app --features fastcord-app/fake-discord --all-targets --locked -- -D warnings
           cargo test -p fastcord-fake --locked
+          cargo test -p fastcord-app --features fake-discord --lib fake:: --locked
       - name: Validate vendored Blocks runtime compatibility
         if: runner.os == 'macOS'
         run: |

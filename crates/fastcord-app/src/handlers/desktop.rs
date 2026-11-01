@@ -70,9 +70,12 @@ impl App {
             Message::FakeStep(step) => return self.fake_step(step),
             #[cfg(feature = "fake-discord")]
             Message::FakeShot(path, shot, completion) => {
-                fake::save(&path, &shot);
+                if !fake::active() {
+                    return Task::none();
+                }
+                let result = fake::save(&path, &shot);
                 if let Some(completion) = completion {
-                    completion.finish();
+                    completion.finish(result);
                 }
             }
             Message::Tray(event) => match event {

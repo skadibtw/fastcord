@@ -1593,3 +1593,35 @@ fn production_footer_keeps_six_direct_actions_inside_the_fixed_sidebar() {
         }
     }
 }
+
+#[cfg(feature = "fake-discord")]
+mod fake {
+    use super::*;
+
+    #[test]
+    fn script_dispatch_is_inert_without_an_established_loopback_origin() {
+        assert!(!crate::fake::active());
+        let mut app = login_app();
+        assert!(!app.audio_settings.open);
+        assert!(app.pending_link.is_none());
+        for step in [
+            crate::fake::Step::Toggle("audio"),
+            crate::fake::Step::Open("discord://-/channels/@me".into()),
+            crate::fake::Step::Size(900.0, 600.0),
+            crate::fake::Step::Snap("must-not-write.png".into(), None),
+            crate::fake::Step::Join(1, 2),
+            crate::fake::Step::Stream(1.0),
+            crate::fake::Step::Quit,
+        ] {
+            assert_eq!(app.fake_step(step).units(), 0);
+        }
+        assert!(!app.audio_settings.open);
+        assert!(app.pending_link.is_none());
+        let path =
+            std::env::temp_dir().join(format!("fastcord-disabled-shot-{}.png", std::process::id()));
+        assert!(!path.exists());
+        let shot = iced::window::Screenshot::new(vec![0, 0, 0, 255], iced::Size::new(1, 1), 1.0);
+        let _ = app.handle(Message::FakeShot(path.clone(), shot, None));
+        assert!(!path.exists(), "disabled fake capture must not write files");
+    }
+}
