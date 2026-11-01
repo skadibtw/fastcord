@@ -396,6 +396,7 @@ fn open_guild_channel(
 /// commands are also validated here, never against a stale UI snapshot.
 #[derive(Default)]
 struct Tracker {
+    notification_owner: Option<NotificationOwner>,
     store: Store,
     history: History,
     navigation: Navigation,
@@ -508,6 +509,7 @@ impl Tracker {
                     crate::notify::on_message(
                         message,
                         me,
+                        self.notification_owner.clone(),
                         muted,
                         suppressed,
                         self.store.notifies_account(message),
@@ -734,6 +736,11 @@ pub enum Command {
     /// Mark several conversations read, each up to its newest message (the
     /// user asked); they share the one acknowledgement path.
     MarkReadMany(Vec<(Option<Snowflake>, Snowflake)>),
+    NotificationRead {
+        account: Snowflake,
+        guild: Option<Snowflake>,
+        channel: Snowflake,
+    },
     /// Stop a send that is still uploading its files.
     CancelUpload(OpId),
     /// Save new text for one of the user's messages.
@@ -922,6 +929,7 @@ impl fmt::Debug for Command {
             Self::Retry(id) => f.debug_tuple("Retry").field(id).finish(),
             Self::Discard(id) => f.debug_tuple("Discard").field(id).finish(),
             Self::CancelUpload(id) => f.debug_tuple("CancelUpload").field(id).finish(),
+            Self::NotificationRead { .. } => f.write_str("NotificationRead"),
             Self::MarkReadMany(rows) => f.debug_tuple("MarkReadMany").field(&rows.len()).finish(),
             Self::MarkRead { channel, .. } => f
                 .debug_struct("MarkRead")
@@ -1055,7 +1063,38 @@ pub struct NavigationBridge {
     camera_tiles: Arc<CameraTiles>,
 }
 
+/// Identity of the original account worker; never upgrades a stopped receiver.
+#[derive(Clone)]
+pub struct NotificationOwner(mpsc::WeakSender<Command>);
+
+impl std::fmt::Debug for NotificationOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NotificationOwner")
+    }
+}
+
+impl NotificationOwner {
+    pub fn matches(&self, bridge: &NavigationBridge, account: Snowflake) -> bool {
+        if *bridge.account_id.lock().unwrap_or_else(|e| e.into_inner()) != Some(account) {
+            return false;
+        }
+        self.0
+            .upgrade()
+            .is_some_and(|sender| !sender.is_closed() && sender.same_channel(&bridge.commands))
+    }
+}
+
 impl NavigationBridge {
+    pub fn notification_read(&self, event: &crate::notify::Event) {
+        if event.owner.matches(self, event.account) {
+            let _ = self.commands.try_send(Command::NotificationRead {
+                account: event.account,
+                guild: event.guild,
+                channel: event.channel,
+            });
+        }
+    }
+
     /// One bounded command with a one-slot answer; the reducer rechecks current
     /// permissions immediately before handing the request to the transport.
     pub async fn moderate(
@@ -2714,6 +2753,19 @@ impl Worker {
                 history.send_with_files(&self.rest, channel, &content, files, everyone, reply);
             }
             Command::CancelUpload(id) => history.cancel_upload(id),
+            Command::NotificationRead {
+                account,
+                guild,
+                channel,
+            } => {
+                if let Some(last) = self
+                    .tracker
+                    .store
+                    .notification_read_target(account, guild, channel)
+                {
+                    history.mark_read(&self.rest, channel, last);
+                }
+            }
             Command::MarkRead { guild, channel } => {
                 if let Some(last) = self.tracker.store.last_message(guild, channel) {
                     history.mark_read(&self.rest, channel, last);
@@ -3580,6 +3632,7 @@ pub fn status_stream(
         rest: rest_client,
         gateway: None,
         tracker: Tracker {
+            notification_owner: Some(NotificationOwner(bridge.commands.downgrade())),
             history,
             ..Tracker::default()
         },
@@ -4522,6 +4575,50 @@ impl GatewayPanel {
 #[cfg(test)]
 mod bridge_tests {
     use super::*;
+
+    #[test]
+    fn notification_actions_are_bound_to_the_original_account_and_live_receiver() {
+        let bridge = NavigationBridge::new();
+        bridge.set_account_id(Snowflake(1));
+        let mut commands = bridge.take_commands().unwrap();
+        let owner = NotificationOwner(bridge.commands.downgrade());
+        let event = crate::notify::Event {
+            owner: owner.clone(),
+            account: Snowflake(1),
+            guild: None,
+            channel: Snowflake(2),
+            message: Snowflake(3),
+            action: fastcord_platform::notify::Action::MarkRead,
+        };
+        assert!(owner.matches(&bridge, Snowflake(1)));
+        assert!(!owner.matches(&bridge, Snowflake(9)));
+        let replacement = NavigationBridge::new();
+        replacement.set_account_id(Snowflake(1));
+        assert!(
+            !owner.matches(&replacement, Snowflake(1)),
+            "same account, different session"
+        );
+        replacement.notification_read(&event);
+        assert!(replacement.take_commands().unwrap().try_recv().is_err());
+        bridge.notification_read(&event);
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::NotificationRead {
+                account: Snowflake(1),
+                channel: Snowflake(2),
+                ..
+            }
+        ));
+        bridge.set_account_id(Snowflake(9));
+        bridge.notification_read(&event);
+        assert!(commands.try_recv().is_err());
+        bridge.set_account_id(Snowflake(1));
+        drop(commands);
+        assert!(
+            !owner.matches(&bridge, Snowflake(1)),
+            "stopped worker cannot act"
+        );
+    }
 
     #[tokio::test]
     async fn a_gone_worker_is_disconnected_not_a_rejected_login() {
@@ -5661,6 +5758,51 @@ mod tests {
             })),
         }
     }
+    #[test]
+    fn notification_read_uses_current_target_and_existing_ack_without_optimistic_read() {
+        let mut worker = worker();
+        let GatewayEvent::Dispatch {
+            event: Dispatch::Ready(mut ready),
+            ..
+        } = ready_event(0, 0, 1)
+        else {
+            unreachable!()
+        };
+        let account = ready.user.id;
+        ready.private_channels[0].last_message_id = Some(Snowflake(99));
+        worker.tracker.apply(GatewayEvent::Dispatch {
+            sequence: 1,
+            event: Dispatch::Ready(ready),
+        });
+        for (account, channel) in [
+            (Snowflake(u64::MAX), Snowflake(0)),
+            (account, Snowflake(999)),
+        ] {
+            worker.command(Command::NotificationRead {
+                account,
+                guild: None,
+                channel,
+            });
+            assert!(worker.tracker.history.notification_ack_fixture().is_none());
+        }
+        let before = worker.tracker.store.acked(Snowflake(0));
+        worker.command(Command::NotificationRead {
+            account,
+            guild: None,
+            channel: Snowflake(0),
+        });
+        assert_eq!(
+            worker.tracker.history.notification_ack_fixture(),
+            Some((Snowflake(0), Snowflake(99), true))
+        );
+        assert_eq!(
+            worker.tracker.store.acked(Snowflake(0)),
+            before,
+            "no optimistic success"
+        );
+        // The ACK future was queued but never polled: this regression makes no network calls.
+    }
+
     #[test]
     fn a_channel_of_another_server_opens_that_server_first() {
         let mut tracker = Tracker::default();

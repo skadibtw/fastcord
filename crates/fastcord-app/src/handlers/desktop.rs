@@ -80,6 +80,23 @@ impl App {
                 desktop::TrayEvent::Failed(error) => self.tray = Err(error),
                 desktop::TrayEvent::Command(command) => return self.tray_command(command),
             },
+            Message::Notification(event) => {
+                let Some(gateway) = self.phase.gateway() else {
+                    return Task::none();
+                };
+                if !event.owner.matches(&gateway.controls, event.account) {
+                    return Task::none();
+                }
+                match event.action {
+                    fastcord_platform::notify::Action::MarkRead => {
+                        gateway.controls.notification_read(&event)
+                    }
+                    fastcord_platform::notify::Action::Open => {
+                        self.pending_link = desktop::parse(&event.link());
+                        return self.show_window();
+                    }
+                }
+            }
             Message::Forwarded(request) => {
                 if let fastcord_platform::instance::Forwarded::Open(text) = request
                     && let Some(link) = desktop::parse(&text)

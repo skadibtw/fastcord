@@ -256,7 +256,6 @@ pub fn run() -> iced::Result {
     // instance's links nor is found by one.
     let arg = std::env::args().nth(1).filter(|_| !fake_mode());
     let (forwarded, requests) = tokio::sync::mpsc::channel(8);
-    notify::set_clicks(forwarded.clone());
     let _instance = if fake_mode() {
         None
     } else {
@@ -692,6 +691,7 @@ enum Message {
     Tray(desktop::TrayEvent),
     /// A second launch handed its argument over (or only asked to be raised).
     Forwarded(fastcord_platform::instance::Forwarded),
+    Notification(notify::Event),
     /// The window's close button: hide to the tray or quit, per the setting.
     CloseRequested,
     /// Leave any call, close the Gateway cleanly and exit.
@@ -1036,6 +1036,7 @@ impl App {
                 iced::Subscription::run(desktop::tray_stream).map(Message::Tray)
             },
             iced::Subscription::run(desktop::forwarded_stream).map(Message::Forwarded),
+            iced::Subscription::run(notify::stream).map(Message::Notification),
             #[cfg(feature = "fake-discord")]
             iced::Subscription::run(fake::script).map(Message::FakeStep),
         ])
@@ -1914,6 +1915,7 @@ and a fourth"
             | Message::Initialized(..)
             | Message::VoiceInput(..)
             | Message::Tray(..)
+            | Message::Notification(..)
             | Message::Forwarded(..)
             | Message::CloseRequested
             | Message::Quit

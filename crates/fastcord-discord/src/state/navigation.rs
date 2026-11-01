@@ -1443,6 +1443,39 @@ impl<'a> OwnScope<'a> {
 }
 
 impl Store {
+    /// Current read target for an explicit notification action. Rechecked on
+    /// the owning worker, including permission loss since the toast appeared.
+    pub fn notification_read_target(
+        &self,
+        account: Snowflake,
+        guild: Option<Snowflake>,
+        channel: Snowflake,
+    ) -> Option<Snowflake> {
+        if self.current_user()?.id != account {
+            return None;
+        }
+        match guild {
+            Some(guild) => {
+                let entry = self.guild(guild)?;
+                let row = entry.channel(channel)?;
+                let permissions = PermissionContext::new(self, entry)?.permissions(entry, row);
+                if !permissions.view_channel
+                    || !permissions.read_history
+                    || !row.kind.is_text_like()
+                {
+                    return None;
+                }
+            }
+            None => {
+                let row = self.private_channel(channel)?;
+                if !is_private_conversation(row) || call_hidden(self, row) {
+                    return None;
+                }
+            }
+        }
+        self.last_message(guild, channel)
+    }
+
     /// The account's own scope in `guild_id`, `None` while anything needed is unknown.
     pub(crate) fn own_scope(&self, guild_id: Snowflake) -> Option<OwnScope<'_>> {
         OwnScope::of(self, self.guild(guild_id)?, OffsetDateTime::now_utc)

@@ -3,8 +3,9 @@
 //! "N new messages" summary on the next allowed toast, and a bounded replay
 //! filter so Resume never notifies twice. Pure and clock-injected; the toast
 //! itself is `fastcord_platform::notify`. No timer or polling: decisions are
-//! made only when a message event arrives. Clicking a toast opens its message
-//! through the second-launch hand-off queue, as a `discord://` link would.
+//! made only when a message event arrives. Native actions enter an app-only
+//! bounded queue and are checked against their original account worker before
+//! opening a message or asking the existing worker to mark its channel read.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -12,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use fastcord_model::{Message, Snowflake};
-use fastcord_platform::instance::Forwarded;
+use fastcord_platform::notify::Action;
 
 use crate::i18n::tr;
 
@@ -112,16 +113,49 @@ static POLICY: Mutex<Option<Policy>> = Mutex::new(None);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static ACTIVE: AtomicBool = AtomicBool::new(true);
 static PREVIEWS: AtomicBool = AtomicBool::new(true);
-/// The hand-off queue `main` also gives the single-instance guard.
-static CLICKS: Mutex<Option<tokio::sync::mpsc::Sender<Forwarded>>> = Mutex::new(None);
+/// Native callbacks carry only fixed-size targets and a weak reference to
+/// their original worker channel. They cannot keep an account session alive.
+#[derive(Clone, Debug)]
+pub struct Event {
+    pub owner: crate::gateway::NotificationOwner,
+    pub account: Snowflake,
+    pub guild: Option<Snowflake>,
+    pub channel: Snowflake,
+    pub message: Snowflake,
+    pub action: Action,
+}
 
-pub fn set_clicks(sender: tokio::sync::mpsc::Sender<Forwarded>) {
-    if let Ok(mut slot) = CLICKS.lock() {
-        *slot = Some(sender);
+static ACTIONS: Mutex<Option<tokio::sync::mpsc::Sender<Event>>> = Mutex::new(None);
+
+pub fn stream() -> impl iced::futures::Stream<Item = Event> {
+    iced::stream::channel(8, async move |mut output| {
+        use iced::futures::SinkExt;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        if let Ok(mut slot) = ACTIONS.lock() {
+            *slot = Some(sender);
+        }
+        while let Some(event) = receiver.recv().await {
+            if output.send(event).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+impl Event {
+    pub fn link(&self) -> String {
+        let guild = self
+            .guild
+            .map_or_else(|| "@me".to_owned(), |id| id.to_string());
+        format!(
+            "discord://-/channels/{guild}/{}/{}",
+            self.channel, self.message
+        )
     }
 }
 
 /// The link a toast's click opens: the message in its conversation.
+#[cfg(test)]
 fn link(message: &Message) -> String {
     let guild = message
         .guild_id
@@ -150,12 +184,15 @@ pub fn set_active(active: bool) {
 pub fn on_message(
     message: &Message,
     me: Option<Snowflake>,
+    owner: Option<crate::gateway::NotificationOwner>,
     muted: bool,
     suppressed: bool,
     mentions_me: bool,
     dnd: bool,
 ) {
-    let Some(me) = me else { return };
+    let (Some(me), Some(owner)) = (me, owner) else {
+        return;
+    };
     if ACTIVE.load(Ordering::Relaxed) || !ENABLED.load(Ordering::Relaxed) {
         return;
     }
@@ -188,15 +225,29 @@ pub fn on_message(
     });
     if let Some(toast) = toast {
         crate::ui_sound::play(crate::ui_sound::Sound::Ping);
-        let link = link(message);
-        let clicks = CLICKS.lock().ok().and_then(|slot| slot.clone());
+        let clicks = ACTIONS.lock().ok().and_then(|slot| slot.clone());
+        let target = Event {
+            owner,
+            account: me,
+            guild: message.guild_id,
+            channel: message.channel_id,
+            message: message.id,
+            action: Action::Open,
+        };
+        let open_label = tr("Open");
+        let mark_read_label = tr("Mark as read");
         std::thread::spawn(move || {
-            let _ = fastcord_platform::notify::show(&toast.title, &toast.body, move || {
-                if let Some(clicks) = clicks {
-                    // A full queue drops the click; the toast is gone either way.
-                    let _ = clicks.try_send(Forwarded::Open(link));
-                }
-            });
+            let _ = fastcord_platform::notify::show(
+                &toast.title,
+                &toast.body,
+                open_label,
+                mark_read_label,
+                move |action| {
+                    if let Some(clicks) = clicks {
+                        let _ = clicks.try_send(Event { action, ..target });
+                    }
+                },
+            );
         });
     }
 }
