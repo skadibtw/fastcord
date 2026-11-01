@@ -14,18 +14,30 @@ const SOURCES: &[&str] = &[
 ];
 // Each replacement must match exactly once, so an upstream change fails the
 // build instead of compiling silently. The engine stops when Rust sets the
-// flag and then connects to the listener to wake the event loop: upstream's
+// atomic flag and connects to the listener to wake the event loop: upstream's
 // SIGINT `shutdown` does not wake WSAPoll on Windows.
-const PATCHES: &[(&str, &str, &str)] = &[(
-    "proxy.c",
-    "static int on_accept(struct poolhd *pool, struct eval *val, int et)\n{\n",
-    "extern volatile int fastcord_stop_requested;\n\n\
+const PATCHES: &[(&str, &str, &str)] = &[
+    (
+        "proxy.c",
+        "static int on_accept(struct poolhd *pool, struct eval *val, int et)\n{\n",
+        "extern int fastcord_byedpi_stopping(void);\n\n\
      static int on_accept(struct poolhd *pool, struct eval *val, int et)\n{\n\
-     \x20   if (fastcord_stop_requested) {\n\
+     \x20   if (fastcord_byedpi_stopping()) {\n\
      \x20       pool->brk = 1;\n\
      \x20       return -1;\n\
      \x20   }\n",
-)];
+    ),
+    (
+        "conev.c",
+        "void loop_event(struct poolhd *pool)\n{",
+        "extern int fastcord_byedpi_stopping(void);\n\nvoid loop_event(struct poolhd *pool)\n{",
+    ),
+    (
+        "conev.c",
+        "    while (!pool->brk) {\n",
+        "    while (!pool->brk && !fastcord_byedpi_stopping()) {\n",
+    ),
+];
 // MSVC has no C99 variable-length arrays.
 const MSVC_PATCHES: &[(&str, &str, &str)] = &[
     (

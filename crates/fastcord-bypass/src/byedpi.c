@@ -33,13 +33,37 @@ int register_winsvc(int argc, char *argv[])
 static struct params defaults;
 static int saved;
 
-/* ponytail: a volatile flag, not a C11 atomic (MSVC C11 atomics are
- * experimental); the waking connect orders it in practice. */
-volatile int fastcord_stop_requested;
+/* Cancellation is monotonic for one owned worker. Reset it on the Rust
+ * caller before spawning, never on entry to a potentially delayed worker. */
+#ifdef _WIN32
+#include <windows.h>
+static volatile LONG stop_requested;
+void fastcord_byedpi_prepare(void) { InterlockedExchange(&stop_requested, 0); }
+void fastcord_byedpi_request_stop(void) { InterlockedExchange(&stop_requested, 1); }
+int fastcord_byedpi_stopping(void)
+{
+    return InterlockedCompareExchange(&stop_requested, 0, 0) != 0;
+}
+#else
+#include <stdatomic.h>
+static atomic_int stop_requested;
+void fastcord_byedpi_prepare(void)
+{
+    atomic_store_explicit(&stop_requested, 0, memory_order_release);
+}
+void fastcord_byedpi_request_stop(void)
+{
+    atomic_store_explicit(&stop_requested, 1, memory_order_release);
+}
+int fastcord_byedpi_stopping(void)
+{
+    return atomic_load_explicit(&stop_requested, memory_order_acquire);
+}
+#endif
 
 int fastcord_byedpi_run(int argc, char **argv)
 {
-    fastcord_stop_requested = 0;
+    if (fastcord_byedpi_stopping()) return 0;
     if (!saved) {
         defaults = params;
         saved = 1;
@@ -55,10 +79,4 @@ int fastcord_byedpi_run(int argc, char **argv)
     optreset = 1;
 #endif
     return byedpi_main(argc, argv);
-}
-
-/* Read by the patched on_accept once the caller wakes the event loop. */
-void fastcord_byedpi_request_stop(void)
-{
-    fastcord_stop_requested = 1;
 }
