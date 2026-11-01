@@ -1593,3 +1593,68 @@ fn production_footer_keeps_six_direct_actions_inside_the_fixed_sidebar() {
         }
     }
 }
+
+#[test]
+fn community_asset_demand_matches_visible_settings_and_releases_hidden_editors() {
+    let mut app = login_app();
+    let session = login::fixture_session();
+    let nav = fastcord_discord::state::navigation::NavigationSnapshot::default();
+    let _ = app.ui.community.update(
+        community::Event::Open(Snowflake(1)),
+        &nav,
+        &session.client,
+        session.user.id,
+    );
+    assert_eq!(app.asset_demand(), None);
+    let _ = app.ui.community.update(
+        community::Event::Tab(community::Tab::Onboarding),
+        &nav,
+        &session.client,
+        session.user.id,
+    );
+    assert_eq!(app.asset_demand(), Some(Snowflake(1)));
+    app.ui.assets.guild = Some(Snowflake(2));
+    assert_eq!(
+        app.server_page(),
+        Some((Snowflake(2), server_settings::Section::Expressions))
+    );
+    assert_eq!(
+        app.asset_demand(),
+        Some(Snowflake(2)),
+        "same priority as the visible page"
+    );
+    app.audio_settings.open = true;
+    assert_eq!(app.asset_demand(), None);
+    app.audio_settings.open = false;
+    app.compact_call = true;
+    assert_eq!(app.asset_demand(), None);
+    app.compact_call = false;
+    app.ui.assets.guild = None;
+    assert_eq!(
+        app.asset_demand(),
+        Some(Snowflake(1)),
+        "community takes the released interest"
+    );
+    let _ = app.ui.community.update(
+        community::Event::Tab(community::Tab::Guide),
+        &nav,
+        &session.client,
+        session.user.id,
+    );
+    assert_eq!(app.asset_demand(), None);
+    let _ = app.ui.community.update(
+        community::Event::Tab(community::Tab::Onboarding),
+        &nav,
+        &session.client,
+        session.user.id,
+    );
+    let _ = app.ui.community.update(
+        community::Event::Close,
+        &nav,
+        &session.client,
+        session.user.id,
+    );
+    assert_eq!(app.asset_demand(), None);
+    app.ui.community.clear();
+    assert_eq!(app.asset_demand(), None);
+}

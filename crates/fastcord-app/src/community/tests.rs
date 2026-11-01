@@ -403,10 +403,11 @@ fn onboarding_options_edit_roles_channels_emoji_and_stay_bounded() {
         &nav,
         Event::Onboarding(OnbMsg::ToggleChannel(Snowflake(204))),
     );
+    let target = state.emoji_target().unwrap();
     step(
         &mut state,
         &nav,
-        Event::Onboarding(OnbMsg::OptionEmoji("🎲".into())),
+        Event::Onboarding(OnbMsg::OptionEmoji(target, "🎲".into())),
     );
     step(&mut state, &nav, Event::Onboarding(OnbMsg::Single(true)));
     let ed = onboarding_of(&state);
@@ -595,4 +596,380 @@ fn every_view_builds() {
         assert!(view(&state, &nav).is_some());
     }
     assert!(view(&state, &make_nav(admin(false, true))).is_some());
+}
+
+fn emoji_nav() -> NavigationSnapshot {
+    let mut nav = make_nav(admin(true, false));
+    nav.admin
+        .as_mut()
+        .unwrap()
+        .roles
+        .extend((403..=405).map(|id| role(id, None)));
+    nav.assets = Some(GuildAssets {
+        id: Snowflake(1),
+        name: "Home".into(),
+        me: ME,
+        can_create: false,
+        can_manage: false,
+        tier: None,
+        emojis: vec![
+            AssetEmoji {
+                id: Snowflake(900),
+                name: "stone".into(),
+                animated: false,
+                usable: true,
+                creator: None,
+                creator_name: None,
+            },
+            AssetEmoji {
+                id: Snowflake(901),
+                name: "wave".into(),
+                animated: true,
+                usable: true,
+                creator: None,
+                creator_name: None,
+            },
+        ],
+    });
+    nav
+}
+
+fn select_answer(state: &mut State, nav: &NavigationSnapshot, option: usize) -> EmojiTarget {
+    step(state, nav, Event::Tab(Tab::Onboarding));
+    step(state, nav, Event::Onboarding(OnbMsg::SelectPrompt(0)));
+    step(state, nav, Event::Onboarding(OnbMsg::SelectOption(option)));
+    state.emoji_target().unwrap()
+}
+
+#[test]
+fn custom_selection_clear_unicode_and_discard_use_the_actual_editor() {
+    let nav = emoji_nav();
+    let mut state = open(&nav);
+    let target = select_answer(&mut state, &nav, 0);
+    assert_eq!(
+        step(
+            &mut state,
+            &nav,
+            Event::Onboarding(OnbMsg::OptionCustom(target, Snowflake(901)))
+        ),
+        0
+    );
+    let ed = onboarding_of(&state);
+    assert_eq!(
+        ed.doc.prompts[0].options[0].emoji,
+        OnboardingEmoji::Custom {
+            id: Snowflake(901),
+            name: "wave".into(),
+            animated: true
+        }
+    );
+    let body = ed
+        .doc
+        .body(&ed.baseline, &Refs::of(nav.admin.as_ref().unwrap()).known())
+        .unwrap();
+    let emoji = &body["prompts"][0]["options"][0];
+    assert_eq!(
+        emoji["emoji"],
+        serde_json::json!({"id":"901","name":"wave","animated":true})
+    );
+    assert_eq!(emoji["emoji_id"], "901");
+    assert_eq!(emoji["emoji_animated"], true);
+    step(&mut state, &nav, Event::Discard);
+    assert_eq!(onboarding_of(&state).doc, onboarding_of(&state).baseline);
+    let target = select_answer(&mut state, &nav, 1);
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::ClearEmoji(target)),
+    );
+    let ed = onboarding_of(&state);
+    let body = ed
+        .doc
+        .body(&ed.baseline, &Refs::of(nav.admin.as_ref().unwrap()).known())
+        .unwrap();
+    let cleared = &body["prompts"][0]["options"][1];
+    assert!(
+        cleared["emoji"].is_null()
+            && cleared["emoji_id"].is_null()
+            && cleared["emoji_name"].is_null()
+    );
+    assert_eq!(cleared["emoji_animated"], false);
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::OptionEmoji(target, "🌊".into())),
+    );
+    assert_eq!(
+        onboarding_of(&state).doc.prompts[0].options[1].emoji,
+        OnboardingEmoji::Unicode("🌊".into())
+    );
+}
+
+#[test]
+fn custom_actions_recheck_guild_option_generation_and_manage_server() {
+    let mut nav = emoji_nav();
+    let mut state = open(&nav);
+    let target = select_answer(&mut state, &nav, 0);
+    let before = onboarding_of(&state).doc.clone();
+    nav.assets.as_mut().unwrap().id = Snowflake(2);
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::OptionCustom(target, Snowflake(901))),
+    );
+    assert_eq!(onboarding_of(&state).doc, before);
+    nav.assets.as_mut().unwrap().id = Snowflake(1);
+    nav.assets.as_mut().unwrap().emojis[1].usable = false;
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::OptionCustom(target, Snowflake(901))),
+    );
+    assert_eq!(
+        onboarding_of(&state).doc,
+        before,
+        "known unavailable/role-restricted emoji cannot be introduced"
+    );
+    assert!(
+        emoji_choices(nav.assets.as_ref(), Snowflake(1), "", 0)
+            .items
+            .iter()
+            .all(|item| item.0 != Snowflake(901))
+    );
+    nav.assets.as_mut().unwrap().emojis[1].usable = true;
+    select_answer(&mut state, &nav, 1);
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::ClearEmoji(target)),
+    );
+    assert_eq!(
+        onboarding_of(&state).doc,
+        before,
+        "old answer control must not edit new answer"
+    );
+    let current = state.emoji_target().unwrap();
+    nav.admin.as_mut().unwrap().can_manage_guild = false;
+    for msg in [
+        OnbMsg::OptionCustom(current, Snowflake(901)),
+        OnbMsg::ClearEmoji(current),
+        OnbMsg::OptionEmoji(current, "🙂".into()),
+    ] {
+        step(&mut state, &nav, Event::Onboarding(msg));
+    }
+    assert_eq!(onboarding_of(&state).doc, before);
+    nav.admin.as_mut().unwrap().can_manage_guild = true;
+    state.clear();
+    step(&mut state, &nav, Event::Open(Snowflake(1)));
+    let serial = state.serial;
+    step(
+        &mut state,
+        &nav,
+        Event::OnboardingLoaded(serial, Ok(onboarding())),
+    );
+    select_answer(&mut state, &nav, 1);
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::ClearEmoji(current)),
+    );
+    assert_eq!(
+        onboarding_of(&state).doc,
+        before,
+        "previous account's same IDs are stale"
+    );
+    step(&mut state, &nav, Event::Open(Snowflake(2)));
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::OptionCustom(target, Snowflake(901))),
+    );
+    assert_eq!(state.page(), Some(Snowflake(2)));
+}
+
+#[test]
+fn save_rejects_deleted_or_changed_new_emoji_but_preserves_unavailable_baseline() {
+    let mut nav = emoji_nav();
+    let mut state = open(&nav);
+    let target = select_answer(&mut state, &nav, 0);
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::OptionCustom(target, Snowflake(901))),
+    );
+    nav.assets.as_mut().unwrap().emojis[1].name = "renamed".into();
+    assert_eq!(step(&mut state, &nav, Event::Save), 0);
+    assert_eq!(state.notice.as_deref(), Some(EMOJI_UNAVAILABLE));
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::OptionCustom(target, Snowflake(901))),
+    );
+    assert_eq!(
+        onboarding_of(&state).doc.prompts[0].options[0].emoji,
+        OnboardingEmoji::Custom {
+            id: Snowflake(901),
+            name: "renamed".into(),
+            animated: true
+        }
+    );
+    nav.assets.as_mut().unwrap().emojis[1].usable = false;
+    assert_eq!(
+        step(&mut state, &nav, Event::Save),
+        0,
+        "newly chosen emoji became unavailable"
+    );
+    nav.assets = None;
+    assert_eq!(step(&mut state, &nav, Event::Save), 0);
+    assert!(state.busy.is_none());
+    step(&mut state, &nav, Event::Discard);
+    let target = select_answer(&mut state, &nav, 1);
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::OptionTitle("Changed title".into())),
+    );
+    assert!(onboarding_of(&state).custom_emojis_valid(Snowflake(1), None));
+    nav.assets = emoji_nav().assets;
+    nav.assets.as_mut().unwrap().emojis[0].usable = false;
+    assert!(onboarding_of(&state).custom_emojis_valid(Snowflake(1), nav.assets.as_ref()));
+    assert_eq!(
+        step(&mut state, &nav, Event::Save),
+        1,
+        "unchanged baseline custom emoji may remain missing"
+    );
+    assert_eq!(state.busy, Some(Tab::Onboarding));
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::ClearEmoji(target)),
+    );
+    assert!(
+        onboarding_of(&state).doc.prompts[0].options[1]
+            .emoji
+            .is_custom(),
+        "in-flight form is locked"
+    );
+}
+
+#[test]
+fn custom_picker_is_paged_unicode_searchable_and_never_keeps_asset_copies() {
+    let mut nav = emoji_nav();
+    let assets = nav.assets.as_mut().unwrap();
+    assets.emojis = (1..=600)
+        .map(|id| AssetEmoji {
+            id: Snowflake(id),
+            name: format!("эмодзи-{id}"),
+            animated: id % 2 == 0,
+            usable: true,
+            creator: None,
+            creator_name: None,
+        })
+        .collect();
+    let mut state = open(&nav);
+    assert_eq!(state.wanted_assets(), None);
+    let target = select_answer(&mut state, &nav, 0);
+    assert_eq!(state.wanted_assets(), Some(Snowflake(1)));
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::EmojiPage(target, true)),
+    );
+    assert_eq!(onboarding_of(&state).emoji_page, 1);
+    let page = emoji_choices(nav.assets.as_ref(), Snowflake(1), "", usize::MAX);
+    assert_eq!((page.page, page.pages, page.items.len()), (20, 21, 20));
+    assert!(page.items.iter().all(|item| item.0.0 <= 500));
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::EmojiQuery(target, " ЭМОДЗИ-500 ".into())),
+    );
+    assert_eq!(
+        emoji_choices(
+            nav.assets.as_ref(),
+            Snowflake(1),
+            &onboarding_of(&state).emoji_query,
+            0
+        )
+        .items[0]
+            .0,
+        Snowflake(500)
+    );
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::EmojiQuery(target, "🦀".repeat(10000))),
+    );
+    assert_eq!(
+        onboarding_of(&state).emoji_query.chars().count(),
+        EMOJI_QUERY_CHARS
+    );
+    assert!(onboarding_of(&state).emoji_query.len() <= 4 * EMOJI_QUERY_CHARS);
+    step(&mut state, &nav, Event::Tab(Tab::Guide));
+    assert_eq!(state.wanted_assets(), None);
+    step(&mut state, &nav, Event::Close);
+    assert_eq!(state.wanted_assets(), None);
+    state.clear();
+    assert!(state.panel.is_none());
+}
+
+#[test]
+fn emoji_widget_emits_scoped_selection_and_clear_and_disables_after_permission_loss() {
+    use crate::variable_list::harness::Ui;
+    let nav = emoji_nav();
+    let mut state = open(&nav);
+    let target = select_answer(&mut state, &nav, 1);
+    for edit in [true, false] {
+        let ed = onboarding_of(&state);
+        let option = &ed.doc.prompts[0].options[1];
+        let mut ui = Ui::new(
+            420.0,
+            350.0,
+            emoji_view(ed, option, nav.assets.as_ref(), edit, target),
+        );
+        ui.draw();
+        let mut selected = false;
+        let mut cleared = false;
+        for y in (0..300).step_by(8) {
+            for x in [20.0, 160.0, 360.0] {
+                for event in ui.click(x, y as f32) {
+                    match event {
+                        Event::Onboarding(OnbMsg::OptionCustom(found, _)) => {
+                            assert_eq!(found, target);
+                            selected = true;
+                        }
+                        Event::Onboarding(OnbMsg::ClearEmoji(found)) => {
+                            assert_eq!(found, target);
+                            cleared = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!((selected, cleared), (edit, edit));
+    }
+}
+
+#[tokio::test]
+async fn selecting_custom_emoji_does_not_enable_the_community_write_group() {
+    let nav = emoji_nav();
+    let mut state = open(&nav);
+    let target = select_answer(&mut state, &nav, 0);
+    step(
+        &mut state,
+        &nav,
+        Event::Onboarding(OnbMsg::OptionCustom(target, Snowflake(901))),
+    );
+    let ed = onboarding_of(&state);
+    let refs = Refs::of(nav.admin.as_ref().unwrap());
+    let result = client()
+        .save_onboarding(Snowflake(1), &ed.doc, &ed.baseline, &refs.known())
+        .await;
+    assert!(matches!(
+        result,
+        Err(CommunityRequestError::Rest(RestError::WriteNotVerified(
+            fastcord_discord::WriteGroup::CommunityConfig
+        )))
+    ));
 }

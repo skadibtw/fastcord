@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Add bounded same-server custom emoji selection and explicit clearing to onboarding answers, rechecking ownership and permissions while preserving unavailable existing emoji and unknown nested fields (#97).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).
 - Compile the VA-API-only RBSP bit-length helper only on Linux, keeping Windows and macOS all-target test builds clean under warnings-as-errors.

@@ -3320,3 +3320,44 @@ fn interested_member_read_scope_is_independent_of_sidebar_window_and_revoked_wit
             .is_empty()
     );
 }
+
+#[test]
+fn community_emoji_source_is_same_guild_bounded_and_follows_reducer_updates() {
+    let mut guild = assets_guild("32"); // Manage Guild, without Manage Expressions.
+    guild["emojis"] = Value::Array(
+        (1..=600)
+            .map(|id| json!({"id":id.to_string(), "name":format!("emoji_{id}"), "animated":false}))
+            .collect(),
+    );
+    guild["emojis"][0]["available"] = json!(false);
+    guild["emojis"][1]["roles"] = json!(["999999"]);
+    let mut store = admin_store(&guild);
+    let assets = guild_assets(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(!assets.emojis[0].usable && !assets.emojis[1].usable);
+    assert!(assets.emojis[2].usable);
+    assert_eq!(assets.id, id(ADMIN_GUILD));
+    assert!(!assets.can_manage && !assets.can_create);
+    assert_eq!(assets.emojis.len(), MAX_ASSET_EMOJI);
+    assert!(guild_assets(&store, id(999_999)).is_none());
+    let changes = apply(&mut store, "GUILD_EMOJIS_UPDATE", &json!({"guild_id":ADMIN_GUILD.to_string(), "emojis":[{"id":"9702", "name":"renamed", "animated":true}]}).to_string());
+    assert!(
+        changes.guilds.contains(&id(ADMIN_GUILD)),
+        "worker invalidates navigation assets for this event"
+    );
+    let fresh = guild_assets(&store, id(ADMIN_GUILD)).unwrap();
+    assert!(fresh.emojis[0].usable);
+    assert_eq!(fresh.emojis.len(), 1);
+    assert_eq!(
+        (
+            fresh.emojis[0].id,
+            fresh.emojis[0].name.as_str(),
+            fresh.emojis[0].animated
+        ),
+        (id(9702), "renamed", true)
+    );
+    assert_eq!(
+        assets.emojis.len(),
+        MAX_ASSET_EMOJI,
+        "old read model is immutable; editor must recheck current source"
+    );
+}

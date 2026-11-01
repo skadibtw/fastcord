@@ -874,7 +874,7 @@ impl App {
             gateway
                 .controls
                 .follow_source(self.ui.announce.wanted_follow());
-            gateway.controls.assets_guild(self.ui.assets.wanted());
+            gateway.controls.assets_guild(self.asset_demand());
             gateway
                 .controls
                 .admin_member(self.ui.guild_admin.wanted_member());
@@ -1819,6 +1819,42 @@ impl App {
                     "event-weekly" => Message::Events(scheduled_events::Event::Repeat(Some(
                         fastcord_discord::EventRecurrence::Weekly,
                     ))),
+                    "community-setup" => {
+                        let Some(guild) = self
+                            .phase
+                            .gateway()
+                            .and_then(|gateway| gateway.navigation.selected_guild)
+                        else {
+                            return Task::none();
+                        };
+                        Message::Community(community::Event::Open(guild))
+                    }
+                    "community-onboarding" => {
+                        Message::Community(community::Event::Tab(community::Tab::Onboarding))
+                    }
+                    "community-question" => Message::Community(community::Event::Onboarding(
+                        community::OnbMsg::SelectPrompt(0),
+                    )),
+                    "community-answer" => Message::Community(community::Event::Onboarding(
+                        community::OnbMsg::SelectOption(0),
+                    )),
+                    "community-custom" | "community-clear" => {
+                        let Some(event) = self
+                            .ui
+                            .community
+                            .fake_emoji((panel == "community-custom").then_some(Snowflake(901)))
+                        else {
+                            return Task::none();
+                        };
+                        Message::Community(event)
+                    }
+                    "community-discard" => Message::Community(community::Event::Discard),
+                    "community-emoji-scroll" => {
+                        return iced::widget::operation::scroll_to(
+                            iced::widget::Id::new("community-content"),
+                            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 560.0 },
+                        );
+                    }
                     "onboarding-questions" => {
                         let Some(guild) = self
                             .phase
@@ -2144,6 +2180,18 @@ and a fourth"
             .or_else(|| self.ui.automod.page().map(|g| (g, Section::AutoMod)))
             .or_else(|| self.ui.apps.page())
             .or_else(|| self.ui.moderation.page())
+    }
+
+    /// Match the actually rendered settings page, including higher-level screens.
+    fn asset_demand(&self) -> Option<Snowflake> {
+        if self.audio_settings.open || self.compact_call {
+            return None;
+        }
+        match self.server_page()? {
+            (_, server_settings::Section::Expressions) => self.ui.assets.wanted(),
+            (_, server_settings::Section::Community) => self.ui.community.wanted_assets(),
+            _ => None,
+        }
     }
 
     /// Closes every panel that is a settings page.
