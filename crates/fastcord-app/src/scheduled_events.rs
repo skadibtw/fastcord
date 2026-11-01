@@ -143,7 +143,9 @@ pub struct State {
     /// The serial of the write in flight.
     pending: Option<u64>,
     serial: u64,
+    /// Unique ownership of the current list request, also advanced on close/reset.
     generation: u64,
+    list_task: Option<iced::task::Handle>,
     notice: Option<String>,
     confirm: Option<(Confirm, Snowflake)>,
     hidden: Vec<Snowflake>,
@@ -163,6 +165,7 @@ impl Default for State {
             pending: None,
             serial: 0,
             generation: 0,
+            list_task: None,
             notice: None,
             confirm: None,
             hidden: Vec::new(),
@@ -506,23 +509,50 @@ impl State {
 
     /// Logout or account change.
     pub fn clear(&mut self) {
+        self.clear_list();
         self.clear_users();
         *self = Self {
             serial: self.serial.wrapping_add(1),
             users_epoch: self.users_epoch.wrapping_add(1),
-            generation: self.generation.wrapping_add(1),
+            generation: self.generation,
             ..Self::default()
         };
     }
 
-    /// A 401 stops the account like every other request.
-    pub fn is_rejected(event: &Event) -> bool {
+    /// Only an answer owned by this panel/account may reject its login. Check
+    /// before update consumes the ownership marker, just like applying results.
+    pub fn is_rejected(&self, event: &Event, navigation: &NavigationSnapshot) -> bool {
         match event {
-            Event::Loaded(_, _, r) => auth_rejected(r),
-            Event::Done(_, r) => auth_rejected(r),
-            Event::UsersLoaded(_, _, r) => auth_rejected(r),
+            Event::Loaded(generation, guild, result) => {
+                self.owns_list(*generation, *guild) && auth_rejected(result)
+            }
+            Event::Done(serial, result) => self.pending == Some(*serial) && auth_rejected(result),
+            Event::UsersLoaded(epoch, event, result) => {
+                self.owns_users(*epoch, *event, navigation) && auth_rejected(result)
+            }
             _ => false,
         }
+    }
+
+    fn owns_list(&self, generation: u64, guild: Snowflake) -> bool {
+        generation == self.generation
+            && self.guild == Some(guild)
+            && matches!(self.load, Load::Loading)
+    }
+
+    fn clear_list(&mut self) {
+        if let Some(task) = self.list_task.take() {
+            task.abort();
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.load = Load::Idle;
+    }
+
+    fn owns_users(&self, epoch: u64, event: Snowflake, navigation: &NavigationSnapshot) -> bool {
+        epoch == self.users_epoch
+            && self.users_loading
+            && matches!(self.screen, Screen::Users(open) if open == event)
+            && self.users_visible(navigation, event)
     }
 
     fn clear_users(&mut self) {
@@ -577,12 +607,16 @@ impl State {
     }
 
     fn fetch(&mut self, guild: Snowflake, client: &RestClient) -> Task<Event> {
+        self.clear_list();
         self.load = Load::Loading;
         let (client, generation) = (client.clone(), self.generation);
-        Task::perform(
+        let (task, handle) = Task::perform(
             async move { client.scheduled_events(guild).await },
             move |result| Event::Loaded(generation, guild, result),
         )
+        .abortable();
+        self.list_task = Some(handle.abort_on_drop());
+        task
     }
 
     fn write(
@@ -618,6 +652,8 @@ impl State {
                 if self.guild == Some(guild) && !matches!(self.load, Load::Failed(_)) {
                     return Task::none();
                 }
+                self.clear_list();
+                self.clear_users();
                 // A write in flight survives a reopen: dropping it would let a
                 // second Create through and lose the first one's answer.
                 *self = Self {
@@ -632,6 +668,7 @@ impl State {
                 self.fetch(guild, client)
             }
             Event::Close => {
+                self.clear_list();
                 self.clear_users();
                 // A write in flight still ends in `Done`; the notice is dropped.
                 self.guild = None;
@@ -643,12 +680,10 @@ impl State {
                 _ => Task::none(),
             },
             Event::Loaded(answered, guild, result) => {
-                if answered != self.generation
-                    || self.guild != Some(guild)
-                    || !matches!(self.load, Load::Loading)
-                {
+                if !self.owns_list(answered, guild) {
                     return Task::none();
                 }
+                self.list_task = None;
                 match result {
                     Ok(events) => {
                         self.load = Load::Idle;

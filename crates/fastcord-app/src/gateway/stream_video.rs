@@ -30,8 +30,16 @@ use fastcord_media::{MediaSendError, MediaSender};
 use fastcord_video::{CodecError, DecodedFrame, VideoDecoder};
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
-/// Frames waiting for the decoder: the burst a repaired loss releases at once
-/// must fit, or the repair turns into a drop and a keyframe request.
+/// The accepted audio lead at the supported 60 fps receive rate. Keep this
+/// tied to the synchronizer's maximum wait, not the sender's 30 fps default.
+const SYNC_BACKLOG_FRAMES: usize =
+    (super::av_sync::MAX_WAIT.as_millis() * 60).div_ceil(1000) as usize;
+/// Ordinary synchronized backlog plus the transport's bounded repair burst.
+/// Only compressed pictures are retained; the decoded callback holds one.
+const MAX_SYNC_QUEUED_FRAMES: usize =
+    SYNC_BACKLOG_FRAMES + fastcord_media::gateway::WATCH_VIDEO_QUEUE_FRAMES;
+/// Cameras and other decoders without audio synchronization retain only the
+/// original repair allowance.
 const MAX_QUEUED_FRAMES: usize = fastcord_media::gateway::WATCH_VIDEO_QUEUE_FRAMES;
 /// Bytes waiting for the decoder (a frame is at most 2 MiB, so three of them).
 pub(crate) const MAX_QUEUED_BYTES: usize = 6 << 20;
@@ -127,6 +135,7 @@ struct Stream {
 struct Queue {
     frames: VecDeque<ReceivedVideo>,
     bytes: usize,
+    max_frames: usize,
     /// No decodable chain exists: delta frames are dropped until a keyframe is
     /// queued. True before the first keyframe.
     awaiting_keyframe: bool,
@@ -161,6 +170,31 @@ impl Queue {
         self.retry_request = None;
         self.request_needed = false;
         self.clear()
+    }
+
+    /// Stop delaying presentation before admission runs out of room. Leave
+    /// the transport's 13-frame / 4 MiB repair allowance available while the
+    /// owner wakes. This is fallback headroom, not a promise against arbitrary
+    /// input bursts or a codec that itself cannot keep up.
+    fn presentation_pressure(&self) -> bool {
+        self.frames.len() >= SYNC_BACKLOG_FRAMES
+            || self.bytes >= MAX_QUEUED_BYTES - 2 * fastcord_media::video::MAX_FRAME_BYTES
+    }
+
+    fn presentation_decision(
+        &self,
+        decision: super::av_sync::Decision,
+        waited: Duration,
+    ) -> super::av_sync::Decision {
+        if matches!(decision, super::av_sync::Decision::Wait(_))
+            && (waited >= super::av_sync::MAX_WAIT || self.presentation_pressure())
+        {
+            // Resume ordinary audio-master scheduling once the backlog has
+            // room again. Decoded references are never discarded for this.
+            super::av_sync::Decision::Immediate
+        } else {
+            decision
+        }
     }
 
     fn pop(&mut self) -> Option<ReceivedVideo> {
@@ -221,7 +255,11 @@ pub(super) struct StreamDecoder {
 
 impl StreamDecoder {
     pub(super) fn set_av_sync(&self, sync: Arc<super::av_sync::AvSync>) {
+        // Same queue -> sync lock order as the presentation callback.
+        let mut queue = self.shared.lock();
         *self.shared.av_sync.lock() = Some(sync);
+        queue.max_frames = MAX_SYNC_QUEUED_FRAMES;
+        drop(queue);
         self.shared.wake.notify_all();
     }
     pub(super) fn sync_changed(&self) {
@@ -253,6 +291,7 @@ impl StreamDecoder {
                 queue: Mutex::new(Queue {
                     frames: VecDeque::new(),
                     bytes: 0,
+                    max_frames: MAX_QUEUED_FRAMES,
                     awaiting_keyframe: true,
                     stream: None,
                     last_ssrc: None,
@@ -450,7 +489,7 @@ impl StreamDecoder {
                 return;
             }
         }
-        if queue.frames.len() >= MAX_QUEUED_FRAMES || queue.bytes + len > MAX_QUEUED_BYTES {
+        if queue.frames.len() >= queue.max_frames || queue.bytes + len > MAX_QUEUED_BYTES {
             let dropped = queue.clear();
             Counters::add(&counters.frames_dropped, dropped);
             if !frame.keyframe {
@@ -735,13 +774,7 @@ impl Worker {
                     .map_or(super::av_sync::Decision::Immediate, |sync| {
                         sync.decide(ssrc, ticks, std::time::Instant::now())
                     });
-                let decision = if matches!(decision, super::av_sync::Decision::Wait(_))
-                    && wait_started.elapsed() >= Duration::from_millis(500)
-                {
-                    super::av_sync::Decision::Immediate
-                } else {
-                    decision
-                };
+                let decision = queue.presentation_decision(decision, wait_started.elapsed());
                 match decision {
                     super::av_sync::Decision::Wait(delay) => {
                         shared

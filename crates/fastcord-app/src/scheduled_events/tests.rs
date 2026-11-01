@@ -161,11 +161,15 @@ fn opening_loads_once_and_hands_the_list_to_the_reducer() {
         &bridge,
     );
     assert!(matches!(&state.load, Load::Failed(m) if m.contains("403")));
-    assert!(State::is_rejected(&Event::Loaded(
-        0,
-        guild(),
-        Err(RestError::AuthenticationRequired)
-    )));
+    let _ = state.update(Event::Reload, &nav, &client(), &bridge);
+    assert!(state.is_rejected(
+        &Event::Loaded(
+            state.generation,
+            guild(),
+            Err(RestError::AuthenticationRequired)
+        ),
+        &nav
+    ));
 }
 
 #[test]
@@ -263,10 +267,6 @@ fn failures_are_shown_and_never_applied() {
         assert!(shown.contains(expect), "{shown}");
         assert!(state.pending.is_none());
     }
-    assert!(State::is_rejected(&Event::Done(
-        0,
-        Err(RestError::AuthenticationRequired)
-    )));
 
     // A late answer after logout is ignored.
     let (mut state, bridge) = (State::default(), NavigationBridge::new());
@@ -738,11 +738,6 @@ fn attendee_read_errors_release_loading_and_allow_only_explicit_retry() {
         let _ = state.update(Event::FirstUsers, &nav, &client(), &bridge);
         assert!(state.users_loading);
     }
-    assert!(State::is_rejected(&Event::UsersLoaded(
-        0,
-        Snowflake(1),
-        Err(RestError::AuthenticationRequired)
-    )));
 }
 
 #[test]
@@ -986,4 +981,159 @@ fn time_offset_publication_rejects_late_old_owner_and_clears_for_empty_new_accou
     assert!(empty.wait(now).is_none());
     old.update_with(vec![1], now + TimeCache::INTERVAL * 2, || {}, |_| Some(0));
     assert!(published.lock().unwrap().entries.is_empty());
+}
+
+#[test]
+fn reopened_event_lists_reject_old_results_and_cancel_read_ownership() {
+    let (mut state, bridge) = (State::default(), NavigationBridge::new());
+    let mut commands = bridge.take_commands().unwrap();
+    let nav = nav(Vec::new(), true);
+    let client = client();
+    let _ = state.update(Event::Open(guild()), &nav, &client, &bridge);
+    let old = state.generation;
+    let old_task = state.list_task.as_ref().unwrap().clone();
+    let _ = state.update(Event::Close, &nav, &client, &bridge);
+    assert!(old_task.is_aborted());
+    let _ = state.update(Event::Open(guild()), &nav, &client, &bridge);
+    let current = state.generation;
+    assert_ne!(old, current);
+    let current_task = state.list_task.as_ref().unwrap().clone();
+    for result in [
+        Ok(vec![event(
+            1,
+            EventStatus::Scheduled,
+            EventKind::Voice,
+            FUTURE,
+        )]),
+        Err(RestError::PermissionDenied),
+        Err(RestError::AuthenticationRequired),
+    ] {
+        let answer = Event::Loaded(old, guild(), result);
+        assert!(!state.is_rejected(&answer, &nav));
+        let _ = state.update(answer, &nav, &client, &bridge);
+        assert!(matches!(state.load, Load::Loading));
+        assert!(!current_task.is_aborted());
+        assert!(
+            commands.try_recv().is_err(),
+            "old result must never enter reducer"
+        );
+    }
+    let _ = state.update(
+        Event::Loaded(
+            current,
+            guild(),
+            Ok(vec![event(
+                2,
+                EventStatus::Scheduled,
+                EventKind::Voice,
+                FUTURE,
+            )]),
+        ),
+        &nav,
+        &client,
+        &bridge,
+    );
+    assert!(matches!(state.load, Load::Idle));
+    assert!(state.list_task.is_none());
+    assert!(
+        matches!(commands.try_recv(), Ok(crate::gateway::Command::EventsLoaded { events, .. })
+        if events.len() == 1 && events[0].id == Snowflake(2))
+    );
+    let _ = state.update(Event::Reload, &nav, &client, &bridge);
+    let reload = state.generation;
+    assert_ne!(reload, current);
+    let late = Event::Loaded(current, guild(), Err(RestError::AuthenticationRequired));
+    assert!(!state.is_rejected(&late, &nav));
+    let _ = state.update(late, &nav, &client, &bridge);
+    assert!(matches!(state.load, Load::Loading));
+    assert!(state.is_rejected(
+        &Event::Loaded(reload, guild(), Err(RestError::AuthenticationRequired)),
+        &nav
+    ));
+    // Switching guild and account each invalidate the pending read as well.
+    let reload_task = state.list_task.as_ref().unwrap().clone();
+    let _ = state.update(Event::Open(Snowflake(101)), &nav, &client, &bridge);
+    assert!(reload_task.is_aborted());
+    let other = state.generation;
+    let other_task = state.list_task.as_ref().unwrap().clone();
+    state.clear();
+    assert!(other_task.is_aborted());
+    let _ = state.update(Event::Open(Snowflake(101)), &nav, &client, &bridge);
+    let late = Event::Loaded(
+        other,
+        Snowflake(101),
+        Err(RestError::AuthenticationRequired),
+    );
+    assert!(!state.is_rejected(&late, &nav));
+    let _ = state.update(late, &nav, &client, &bridge);
+    assert!(matches!(state.load, Load::Loading));
+    assert!(commands.try_recv().is_err());
+}
+
+#[test]
+fn auth_rejection_requires_owned_attendee_or_write_completion() {
+    let (mut state, bridge) = (State::default(), NavigationBridge::new());
+    let mut nav = nav(
+        vec![event(1, EventStatus::Scheduled, EventKind::Voice, FUTURE)],
+        true,
+    );
+    let client = client();
+    open(&mut state, &nav, &bridge);
+    let _ = state.update(Event::ShowUsers(Snowflake(1)), &nav, &client, &bridge);
+    let old_users = state.users_epoch;
+    assert!(state.is_rejected(
+        &Event::UsersLoaded(
+            old_users,
+            Snowflake(1),
+            Err(RestError::AuthenticationRequired)
+        ),
+        &nav
+    ));
+    nav.readable_events.clear();
+    assert!(!state.is_rejected(
+        &Event::UsersLoaded(
+            old_users,
+            Snowflake(1),
+            Err(RestError::AuthenticationRequired)
+        ),
+        &nav
+    ));
+    nav.readable_events.push(Snowflake(1));
+    let _ = state.update(Event::Close, &nav, &client, &bridge);
+    open(&mut state, &nav, &bridge);
+    let _ = state.update(Event::ShowUsers(Snowflake(1)), &nav, &client, &bridge);
+    let late = Event::UsersLoaded(
+        old_users,
+        Snowflake(1),
+        Err(RestError::AuthenticationRequired),
+    );
+    assert!(!state.is_rejected(&late, &nav));
+    let _ = state.update(late, &nav, &client, &bridge);
+    assert!(state.users_loading && state.users_error.is_none());
+
+    let _ = state.write(guild(), EventAction::Delete(Snowflake(1)), &bridge);
+    let serial = state.pending.unwrap();
+    assert!(state.is_rejected(
+        &Event::Done(serial, Err(RestError::AuthenticationRequired)),
+        &nav
+    ));
+    let _ = state.update(Event::Close, &nav, &client, &bridge);
+    let _ = state.update(Event::Open(guild()), &nav, &client, &bridge);
+    assert_eq!(
+        state.pending,
+        Some(serial),
+        "closing must not permit duplicate writes"
+    );
+    assert!(state.is_rejected(
+        &Event::Done(serial, Err(RestError::AuthenticationRequired)),
+        &nav
+    ));
+    state.clear();
+    let _ = state.write(guild(), EventAction::Delete(Snowflake(1)), &bridge);
+    let current = state.pending;
+    let late = Event::Done(serial, Err(RestError::AuthenticationRequired));
+    assert!(!state.is_rejected(&late, &nav));
+    let _ = state.update(late, &nav, &client, &bridge);
+    assert_eq!(state.pending, current);
+    assert!(state.notice.is_none());
 }

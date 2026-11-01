@@ -432,7 +432,15 @@ impl State {
     }
 
     /// Whether the rejected request means the login is no longer accepted (401).
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Listed(serial, ..) | Event::Sent(serial, ..) => *serial == self.serial,
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         match event {
             Event::Listed(_, r) => auth_rejected(r),
             Event::Sent(_, _, r) => auth_rejected(r),
@@ -823,7 +831,7 @@ mod tests {
             Play::Failed(describe_play(&RestError::InvalidJson))
         );
         assert!(describe_play(&RestError::InvalidJson).contains("not sent again"));
-        assert!(State::is_rejected(&Event::Sent(
+        assert!(State::default().is_rejected(&Event::Sent(
             0,
             Snowflake(1),
             Err(RestError::AuthenticationRequired)

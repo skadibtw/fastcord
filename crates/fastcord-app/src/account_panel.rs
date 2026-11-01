@@ -205,7 +205,17 @@ impl State {
 
     /// A bare 401 stops the account like every other request. A 401 that
     /// carries Discord's re-authentication demand (60003) does not.
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Sessions(serial, ..)
+            | Event::Overview(serial, ..)
+            | Event::LoggedOut(serial, ..) => self.life.is_current(*serial),
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         let error = match event {
             Event::Sessions(_, Err(error))
             | Event::Overview(_, Err(error))
@@ -479,7 +489,7 @@ mod tests {
             let refused = Err(mfa_refusal(status));
             let event = Event::LoggedOut(generation, "a".into(), refused);
             // Not a revoked token: the account is not stopped.
-            assert!(!State::is_rejected(&event));
+            assert!(!state.is_rejected(&event));
             let (task, action) = state.update(event, &client);
             assert!(action.is_none());
             drop(task);
@@ -502,7 +512,7 @@ mod tests {
         }
         // An ordinary 401 still stops the account.
         let bare = Event::Sessions(0, Err(RestError::AuthenticationRequired));
-        assert!(State::is_rejected(&bare));
+        assert!(State::default().is_rejected(&bare));
     }
 
     #[test]

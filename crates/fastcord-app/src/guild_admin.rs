@@ -565,7 +565,15 @@ impl State {
         }
     }
 
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Done(serial, ..) | Event::Regions(serial, ..) => *serial == self.serial,
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         matches!(
             event,
             Event::Done(
@@ -2300,7 +2308,7 @@ mod tests {
             "Unknown Channel",
         ));
         assert!(text(missing).contains("no longer exists"));
-        assert!(State::is_rejected(&Event::Done(
+        assert!(State::default().is_rejected(&Event::Done(
             0,
             Action::Move,
             Err(AdminRequestError::Rest(RestError::AuthenticationRequired))

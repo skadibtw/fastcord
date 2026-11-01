@@ -1268,3 +1268,21 @@ Onboarding custom emoji (#91) tests cover DTO fallback/ID bounds, pool count/byt
 TLS/source-selection (#222) tests exercise all 42 finite profiles through actual TLS 1.2/1.3/HRR and application data, writer split/pacing paths, continuation/cooldown/two-fresh-success budgets, real local socket binding, strict family/failure behavior, proxy isolation and bind-only UDP. No UDP public probe is sent. Network UI state serials reject stale full-search completions. Native packet-helper profile expansion and Windows/macOS persistent network identities remain separate implementation scopes.
 
 Fake screenshot completion is synchronized with actual compositor presentation, with one bounded pending readback and a saved-file acknowledgement before the next script step. Repeated X11 captures were compared with pixels from the owned private X display. Private Weston headless checks cover Wayland; host GNOME may withhold frame callbacks for an occluded window, so its timed-out captures are not exported as visual evidence. Readback duration itself is not covered by the presentation-wait deadline.
+
+
+### Synchronized receive backlog (#234)
+
+`gateway::stream_video::tests::accepted_audio_lead_and_repair_burst_preserve_real_video_references`
+uses a handshake gate to queue the reported 300 ms / 60 fps backlog and the
+maximum 500 ms backlog at 30 and 60 fps, each followed by the bounded 13-frame
+repair burst. The real dav1d decoder must preserve every fixture pixel and
+output timestamp without a queue drop or keyframe request. It does not depend
+on CI scheduling a test receiver before a short deadline. The separate
+`shifting_audio_clock_yields_to_queue_pressure_without_abandoning_references`
+exercises the production presentation decision with repeatedly renewed waits,
+count and byte pressure, normal scheduling after draining, late output and the
+absolute wait limit. Existing tests retain exact frame/byte overflow bounds,
+real Opus output-clock scheduling, stale clock fallback, mute, source replacement,
+suspension and teardown. Only decoders configured for stream synchronization grow their compressed allowance to 43 frames; cameras retain 13. The
+6 MiB byte cap and the one borrowed decoded picture remain unchanged. Physical
+lip-sync and native device latency acceptance remain separate checks.

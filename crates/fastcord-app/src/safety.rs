@@ -588,7 +588,19 @@ impl State {
     }
 
     /// A 401 from this panel's request: the caller stops the account.
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::PreviewLoaded(serial, channel, _) => self
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.serial == *serial && preview.channel == *channel),
+            Event::Done(serial, ..) => self.life.is_current(*serial),
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         matches!(
             event,
             Event::Done(
@@ -1288,12 +1300,20 @@ mod tests {
             Action::Accept(Snowflake(1)),
             Err(PrivacyRequestError::Rest(RestError::AuthenticationRequired)),
         );
-        assert!(State::is_rejected(&rejected));
-        assert!(State::is_rejected(&Event::PreviewLoaded(
-            0,
-            Snowflake(1),
-            Err(RestError::AuthenticationRequired)
-        )));
+        assert!(State::default().is_rejected(&rejected));
+        let mut preview = State {
+            preview: Some(Preview {
+                channel: Snowflake(1),
+                serial: 0,
+                state: PreviewState::Loading,
+            }),
+            ..State::default()
+        };
+        let rejected_preview =
+            Event::PreviewLoaded(0, Snowflake(1), Err(RestError::AuthenticationRequired));
+        assert!(preview.is_rejected(&rejected_preview));
+        preview.clear();
+        assert!(!preview.is_rejected(&rejected_preview));
         let navigation = requests(&[10]);
         let mut state = opened(&navigation);
         drop(state.update(Event::Preview(Snowflake(10)), &navigation, &rest()));

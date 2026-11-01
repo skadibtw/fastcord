@@ -137,7 +137,11 @@ pub struct State {
     submitting: bool,
     plain: Plain,
     previews: preview::Pool,
+    /// Account ownership for writes and preview events.
     generation: u64,
+    /// One read request for the currently open panel, independent of writes.
+    read_serial: u64,
+    read_task: Option<iced::task::Handle>,
 }
 
 /// What a failed request tells the user. `what` names the change a write
@@ -266,14 +270,63 @@ impl State {
 
     /// Logout or account change.
     pub fn clear(&mut self) {
+        self.clear_read();
         *self = Self {
             generation: self.generation.wrapping_add(1),
+            read_serial: self.read_serial,
             ..Self::default()
         };
     }
 
+    fn clear_read(&mut self) {
+        if let Some(task) = self.read_task.take() {
+            task.abort();
+        }
+        self.read_serial = self.read_serial.wrapping_add(1);
+    }
+
+    fn reading(&mut self, task: Task<Event>) -> Task<Event> {
+        let (task, handle) = task.abortable();
+        self.read_task = Some(handle.abort_on_drop());
+        task
+    }
+
+    fn owns_read(&self, event: &Event) -> bool {
+        match (event, &self.panel) {
+            (Event::Rules(serial, guild, _), Some(Panel::Rules(panel))) => {
+                *serial == self.read_serial
+                    && *guild == panel.guild
+                    && matches!(panel.load, Load::Loading)
+            }
+            (Event::Questions(serial, guild, _), Some(Panel::Questions(panel))) => {
+                *serial == self.read_serial
+                    && *guild == panel.guild
+                    && matches!(panel.load, Load::Loading)
+            }
+            (Event::GuideLoaded(serial, guild, _), Some(Panel::Guide(panel))) => {
+                *serial == self.read_serial
+                    && *guild == panel.guild
+                    && matches!(panel.load, Load::Loading)
+            }
+            _ => false,
+        }
+    }
+
     /// A 401 stops the account like every other request.
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Rules(..) | Event::Questions(..) | Event::GuideLoaded(..) => {
+                self.owns_read(event)
+            }
+            Event::Accepted(serial, ..) | Event::Submitted(serial, ..) => {
+                *serial == self.generation
+            }
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         match event {
             Event::Rules(_, _, r) => auth_rejected(r),
             Event::Accepted(_, _, r) => auth_rejected(r),
@@ -332,6 +385,7 @@ impl State {
             }
             Event::OpenBrowse(guild) => {
                 if self.accepting.is_none() && !self.submitting {
+                    self.clear_read();
                     self.panel = Some(Panel::Browse {
                         guild,
                         query: String::new(),
@@ -369,23 +423,26 @@ impl State {
                 {
                     return Task::none();
                 }
+                self.clear_read();
+                let serial = self.read_serial;
                 self.panel = Some(Panel::Rules(Rules {
                     guild,
                     load: Load::Loading,
                     error: None,
                 }));
                 let client = client.clone();
-                Task::perform(
+                self.reading(Task::perform(
                     async move { client.member_verification(guild).await },
-                    move |result| Event::Rules(generation, guild, result),
-                )
+                    move |result| Event::Rules(serial, guild, result),
+                ))
             }
             Event::Rules(answered, guild, result) => {
-                if answered == generation
+                if answered == self.read_serial
                     && let Some(Panel::Rules(rules)) = &mut self.panel
                     && rules.guild == guild
                     && matches!(rules.load, Load::Loading)
                 {
+                    self.read_task = None;
                     rules.load = match result {
                         Ok(screening) => Load::Ready(screening),
                         Err(error) => Load::Failed(failure(error, "Nothing")),
@@ -444,6 +501,8 @@ impl State {
                 {
                     return Task::none();
                 }
+                self.clear_read();
+                let serial = self.read_serial;
                 self.panel = Some(Panel::Questions(Questions {
                     guild,
                     revisit,
@@ -453,23 +512,30 @@ impl State {
                     saved: false,
                 }));
                 let client = client.clone();
-                Task::perform(
+                self.reading(Task::perform(
                     async move { client.onboarding(guild).await },
-                    move |result| Event::Questions(generation, guild, result),
-                )
+                    move |result| Event::Questions(serial, guild, result),
+                ))
             }
             Event::Questions(answered, guild, result) => {
-                let held: Vec<Snowflake> = navigation
-                    .current_user
-                    .as_ref()
-                    .and_then(|me| navigation.members.get(&me.id))
-                    .map(|member| member.roles.clone())
-                    .unwrap_or_default();
-                if answered == generation
+                if answered == self.read_serial
                     && let Some(Panel::Questions(q)) = &mut self.panel
                     && q.guild == guild
                     && matches!(q.load, Load::Loading)
                 {
+                    self.read_task = None;
+                    // Members belong only to the selected guild. Never seed
+                    // this form with another server's roles after navigation.
+                    if navigation.selected_guild != Some(q.guild) {
+                        q.load = Load::Failed(tr("The selected server changed. Reopen Channels & Roles in the original server.").to_owned());
+                        return Task::none();
+                    }
+                    let held: Vec<Snowflake> = navigation
+                        .current_user
+                        .as_ref()
+                        .and_then(|me| navigation.members.get(&me.id))
+                        .map(|member| member.roles.clone())
+                        .unwrap_or_default();
                     q.load = match result {
                         Ok(mut onboarding) => {
                             let revisit = q.revisit;
@@ -487,6 +553,7 @@ impl State {
             Event::Choose(prompt, option) => {
                 if let Some(Panel::Questions(q)) = &mut self.panel
                     && let Load::Ready(onboarding) = &q.load
+                    && navigation.selected_guild == Some(q.guild)
                     && !self.submitting
                 {
                     toggle(&onboarding.prompts, &mut q.chosen, prompt, option);
@@ -501,6 +568,11 @@ impl State {
                 let Load::Ready(onboarding) = &q.load else {
                     return Task::none();
                 };
+                if navigation.selected_guild != Some(q.guild) {
+                    q.error =
+                        Some(tr("Return to this server before saving your choices.").to_owned());
+                    return Task::none();
+                }
                 if self.submitting || missing_required(&onboarding.prompts, &q.chosen).is_some() {
                     return Task::none();
                 }
@@ -539,6 +611,8 @@ impl State {
                 {
                     return Task::none();
                 }
+                self.clear_read();
+                let serial = self.read_serial;
                 let mut names = rich::Names {
                     roles: navigation.guild_roles.clone(),
                     channels: Vec::new(),
@@ -555,17 +629,18 @@ impl State {
                     names,
                 }));
                 let client = client.clone();
-                Task::perform(
+                self.reading(Task::perform(
                     async move { client.new_member_welcome(guild).await },
-                    move |result| Event::GuideLoaded(generation, guild, result),
-                )
+                    move |result| Event::GuideLoaded(serial, guild, result),
+                ))
             }
             Event::GuideLoaded(answered, guild, result) => {
-                if answered == generation
+                if answered == self.read_serial
                     && let Some(Panel::Guide(view)) = &mut self.panel
                     && view.guild == guild
                     && matches!(view.load, Load::Loading)
                 {
+                    self.read_task = None;
                     view.load = match result {
                         Ok(guide) => Load::Ready(guide),
                         Err(error) if is_absent(&error) => {
@@ -579,6 +654,7 @@ impl State {
             // Handled by the application (selection, spoilers and links).
             Event::GoChannel(..) | Event::Rich(_) => Task::none(),
             Event::Close => {
+                self.clear_read();
                 self.panel = None;
                 Task::none()
             }
@@ -640,7 +716,7 @@ pub fn view<'a>(
         .into(),
         Panel::Questions(q) => column![
             title("Channels & Roles", state.submitting),
-            questions_body(state, q),
+            questions_body(state, q, navigation.selected_guild == Some(q.guild)),
         ]
         .spacing(6)
         .into(),
@@ -813,7 +889,7 @@ fn rules_body<'a>(state: &'a State, rules: &'a Rules) -> Element<'a, Event> {
         .into()
 }
 
-fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> {
+fn questions_body<'a>(state: &'a State, q: &'a Questions, in_guild: bool) -> Element<'a, Event> {
     if let Some(shown) = loading(&q.load) {
         return shown;
     }
@@ -873,7 +949,8 @@ fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> 
             let mut item = column![
                 button(option_label)
                     .on_press_maybe(
-                        (!state.submitting).then_some(Event::Choose(prompt.id, option.id))
+                        (in_guild && !state.submitting)
+                            .then_some(Event::Choose(prompt.id, option.id))
                     )
                     .style(if picked {
                         button::primary
@@ -901,6 +978,13 @@ fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> 
         .color(crate::style::muted())
     ]
     .spacing(4);
+    if !in_guild {
+        footer = footer.push(
+            text(tr("Return to this server before saving your choices."))
+                .size(12)
+                .style(text::danger),
+        );
+    }
     if let Some(error) = &q.error {
         footer = footer.push(text(error.as_str()).size(12).style(text::danger));
     }
@@ -919,7 +1003,9 @@ fn questions_body<'a>(state: &'a State, q: &'a Questions) -> Element<'a, Event> 
             })
             .size(13),
         )
-        .on_press_maybe((!state.submitting && missing.is_none()).then_some(Event::Submit)),
+        .on_press_maybe(
+            (in_guild && !state.submitting && missing.is_none()).then_some(Event::Submit),
+        ),
     );
     column![scrollable(list).height(Length::Fixed(280.0)), footer]
         .spacing(6)
@@ -1052,6 +1138,13 @@ mod tests {
         assert!(state.browse_target(&nav, Snowflake(9)).is_none());
     }
 
+    fn navigation() -> NavigationSnapshot {
+        NavigationSnapshot {
+            selected_guild: Some(guild()),
+            ..NavigationSnapshot::default()
+        }
+    }
+
     fn guild() -> Snowflake {
         Snowflake(100)
     }
@@ -1060,7 +1153,7 @@ mod tests {
         let nav = NavigationSnapshot::default();
         let _ = state.update(Event::OpenRules(guild()), &nav, &client());
         let _ = state.update(
-            Event::Rules(state.generation, guild(), Ok(screening())),
+            Event::Rules(state.read_serial, guild(), Ok(screening())),
             &nav,
             &client(),
         );
@@ -1069,15 +1162,405 @@ mod tests {
     fn questions_open(state: &mut State, revisit: bool, nav: &NavigationSnapshot) {
         let _ = state.update(Event::OpenQuestions(guild(), revisit), nav, &client());
         let _ = state.update(
-            Event::Questions(state.generation, guild(), Ok(onboarding())),
+            Event::Questions(state.read_serial, guild(), Ok(onboarding())),
             nav,
             &client(),
         );
     }
 
+    fn authenticated_app() -> crate::App {
+        let (mut app, _) = crate::App::boot();
+        app.phase = crate::Phase::Authenticating {
+            saved_account: None,
+        };
+        let _ = app.update(crate::Message::LoginFinished(Ok(
+            crate::LoginOutcome::Authenticated(
+                crate::login::fixture_session(),
+                crate::Persistence::MemoryOnly,
+            ),
+        )));
+        publish_guild(&mut app, guild(), vec![Snowflake(401)]);
+        app
+    }
+
+    fn publish_guild(app: &mut crate::App, selected: Snowflake, roles: Vec<Snowflake>) {
+        let gateway = app.phase.gateway().unwrap();
+        let id = gateway.id;
+        let me = crate::login::fixture_session().user.clone();
+        let mut nav = NavigationSnapshot {
+            selected_guild: Some(selected),
+            current_user: Some(me.clone()),
+            ..NavigationSnapshot::default()
+        };
+        nav.members.insert(
+            me.id,
+            fastcord_discord::state::navigation::MemberView {
+                roles,
+                ..Default::default()
+            },
+        );
+        gateway.controls.publish(
+            nav,
+            crate::timeline::Snapshot::default(),
+            crate::emoji_picker::Snapshot::default(),
+            None,
+        );
+        let _ = app.handle(crate::Message::Navigation(id));
+        assert_eq!(
+            app.phase.gateway().unwrap().navigation.selected_guild,
+            Some(selected)
+        );
+    }
+
+    fn navigate_away(app: &mut crate::App, keyboard: bool) {
+        if keyboard {
+            use fastcord_discord::state::navigation::{Step, StepScope};
+            let _ = app.handle(crate::Message::WindowShortcut(
+                app.main_window,
+                crate::switcher::Shortcut::Step(Step {
+                    scope: StepScope::Server,
+                    forward: true,
+                }),
+            ));
+        } else {
+            let _ = app.open_link(crate::desktop::DeepLink::Channel {
+                guild: Some(Snowflake(200)),
+                channel: Snowflake(201),
+                message: None,
+            });
+        }
+        assert!(
+            app.ui.nav_pending,
+            "the actual keyboard/deep-link route requested navigation"
+        );
+        // The reducer's next published read model contains only server B's roles.
+        publish_guild(app, Snowflake(200), vec![Snowflake(402), Snowflake(403)]);
+    }
+
+    fn app_questions(app: &crate::App) -> &Questions {
+        let Some(Panel::Questions(q)) = &app.ui.onboarding.panel else {
+            panic!("questions remain visible")
+        };
+        q
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ReadPanel {
+        Rules,
+        Questions,
+        Guide,
+    }
+
+    impl ReadPanel {
+        fn open(self) -> Event {
+            match self {
+                Self::Rules => Event::OpenRules(guild()),
+                Self::Questions => Event::OpenQuestions(guild(), true),
+                Self::Guide => Event::OpenGuide(guild()),
+            }
+        }
+
+        fn answer(self, serial: u64, result: Result<&str, RestError>) -> Event {
+            match self {
+                Self::Rules => Event::Rules(
+                    serial,
+                    guild(),
+                    result.map(|label| {
+                        let mut form = screening();
+                        form.description = label.into();
+                        form
+                    }),
+                ),
+                Self::Questions => Event::Questions(
+                    serial,
+                    guild(),
+                    result.map(|label| {
+                        let mut form = onboarding();
+                        form.prompts[0].title = label.into();
+                        form
+                    }),
+                ),
+                Self::Guide => Event::GuideLoaded(
+                    serial,
+                    guild(),
+                    result.map(|label| Guide {
+                        welcome: label.into(),
+                        actions: vec![],
+                        resources: vec![],
+                    }),
+                ),
+            }
+        }
+    }
+
+    fn loaded_label(state: &State) -> Option<&str> {
+        match &state.panel {
+            Some(Panel::Rules(Rules {
+                load: Load::Ready(form),
+                ..
+            })) => Some(&form.description),
+            Some(Panel::Questions(Questions {
+                load: Load::Ready(form),
+                ..
+            })) => Some(&form.prompts[0].title),
+            Some(Panel::Guide(GuideView {
+                load: Load::Ready(form),
+                ..
+            })) => Some(&form.welcome),
+            _ => None,
+        }
+    }
+
+    fn read_failed(state: &State) -> bool {
+        matches!(
+            &state.panel,
+            Some(Panel::Rules(Rules {
+                load: Load::Failed(_),
+                ..
+            })) | Some(Panel::Questions(Questions {
+                load: Load::Failed(_),
+                ..
+            })) | Some(Panel::Guide(GuideView {
+                load: Load::Failed(_),
+                ..
+            }))
+        )
+    }
+
+    fn reopen(app: &mut crate::App, kind: ReadPanel, reset: bool) {
+        if reset {
+            let _ = app.teardown_account();
+            app.phase = crate::Phase::Authenticating {
+                saved_account: None,
+            };
+            let _ = app.update(crate::Message::LoginFinished(Ok(
+                crate::LoginOutcome::Authenticated(
+                    crate::login::fixture_session(),
+                    crate::Persistence::MemoryOnly,
+                ),
+            )));
+            publish_guild(app, guild(), vec![Snowflake(401)]);
+        } else {
+            let _ = app.handle(crate::Message::Onboarding(Event::Close));
+        }
+        let task = app.handle(crate::Message::Onboarding(kind.open()));
+        assert_eq!(
+            task.units(),
+            1,
+            "one new read task, deliberately not polled"
+        );
+    }
+
+    #[test]
+    fn read_router_rejects_retired_reads_in_both_orders_and_after_account_reset() {
+        for kind in [ReadPanel::Rules, ReadPanel::Questions, ReadPanel::Guide] {
+            for reset in [false, true] {
+                for current_first in [false, true] {
+                    for stale_auth in [false, true] {
+                        let mut app = authenticated_app();
+                        let _ = app.handle(crate::Message::Onboarding(kind.open()));
+                        let old = app.ui.onboarding.read_serial;
+                        let old_task = app.ui.onboarding.read_task.as_ref().unwrap().clone();
+                        reopen(&mut app, kind, reset);
+                        assert!(old_task.is_aborted(), "only the retired GET is cancelled");
+                        let current = app.ui.onboarding.read_serial;
+                        let current_task = app.ui.onboarding.read_task.as_ref().unwrap().clone();
+                        assert_ne!(old, current);
+                        if current_first {
+                            let _ = app.handle(crate::Message::Onboarding(
+                                kind.answer(current, Ok("current")),
+                            ));
+                        }
+                        let stale = if stale_auth {
+                            Err(RestError::AuthenticationRequired)
+                        } else {
+                            Ok("retired")
+                        };
+                        let _ = app.handle(crate::Message::Onboarding(kind.answer(old, stale)));
+                        assert!(
+                            app.phase.gateway().is_some(),
+                            "retired read cannot reject this account"
+                        );
+                        if !current_first {
+                            assert!(loaded_label(&app.ui.onboarding).is_none());
+                            assert!(!read_failed(&app.ui.onboarding));
+                            assert!(
+                                !current_task.is_aborted(),
+                                "retired answer cannot cancel current GET"
+                            );
+                            let _ = app.handle(crate::Message::Onboarding(
+                                kind.answer(current, Ok("current")),
+                            ));
+                        }
+                        assert_eq!(
+                            loaded_label(&app.ui.onboarding),
+                            Some("current"),
+                            "{kind:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn read_router_keeps_current_errors_and_current_auth_still_rejects_login() {
+        for kind in [ReadPanel::Rules, ReadPanel::Questions, ReadPanel::Guide] {
+            for current_first in [false, true] {
+                let mut app = authenticated_app();
+                let _ = app.handle(crate::Message::Onboarding(kind.open()));
+                let old = app.ui.onboarding.read_serial;
+                reopen(&mut app, kind, false);
+                let current = app.ui.onboarding.read_serial;
+                if current_first {
+                    let _ = app.handle(crate::Message::Onboarding(
+                        kind.answer(current, Err(RestError::PermissionDenied)),
+                    ));
+                }
+                let _ = app.handle(crate::Message::Onboarding(kind.answer(old, Ok("retired"))));
+                if !current_first {
+                    let _ = app.handle(crate::Message::Onboarding(
+                        kind.answer(current, Err(RestError::PermissionDenied)),
+                    ));
+                }
+                assert!(read_failed(&app.ui.onboarding));
+                assert!(loaded_label(&app.ui.onboarding).is_none());
+                // Explicit retry gets a fresh owner, whose 401 still stops the account.
+                let _ = app.handle(crate::Message::Onboarding(kind.open()));
+                let retry = app.ui.onboarding.read_serial;
+                assert_ne!(retry, current);
+                let _ = app.handle(crate::Message::Onboarding(
+                    kind.answer(retry, Err(RestError::AuthenticationRequired)),
+                ));
+                assert!(app.phase.gateway().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn closing_or_replacing_reads_does_not_release_or_repeat_pending_writes() {
+        for kind in [ReadPanel::Rules, ReadPanel::Questions] {
+            let mut app = authenticated_app();
+            let _ = app.handle(crate::Message::Onboarding(kind.open()));
+            let serial = app.ui.onboarding.read_serial;
+            let _ = app.handle(crate::Message::Onboarding(
+                kind.answer(serial, Ok("current")),
+            ));
+            let write = match kind {
+                ReadPanel::Rules => Event::AcceptRules,
+                _ => Event::Submit,
+            };
+            let task = app.handle(crate::Message::Onboarding(write.clone()));
+            assert_eq!(task.units(), 1);
+            let account = app.ui.onboarding.generation;
+            reopen(&mut app, kind, false);
+            let serial = app.ui.onboarding.read_serial;
+            let _ = app.handle(crate::Message::Onboarding(
+                kind.answer(serial, Ok("replacement")),
+            ));
+            assert_eq!(
+                app.ui.onboarding.generation, account,
+                "read lifetime cannot retire the write"
+            );
+            let duplicate = app.handle(crate::Message::Onboarding(write));
+            assert_eq!(duplicate.units(), 0, "pending write remains single-flight");
+            let done = match kind {
+                ReadPanel::Rules => {
+                    assert_eq!(app.ui.onboarding.accepting, Some(guild()));
+                    Event::Accepted(account, guild(), Ok(ApplicationStatus::Waiting))
+                }
+                _ => {
+                    assert!(app.ui.onboarding.submitting);
+                    Event::Submitted(account, guild(), Ok(()))
+                }
+            };
+            let _ = app.handle(crate::Message::Onboarding(done));
+            assert!(app.ui.onboarding.accepting.is_none());
+            assert!(!app.ui.onboarding.submitting);
+            assert_eq!(loaded_label(&app.ui.onboarding), Some("replacement"));
+        }
+    }
+
+    #[test]
+    fn question_load_after_keyboard_or_deep_link_navigation_is_visibly_invalidated() {
+        for keyboard in [true, false] {
+            let mut app = authenticated_app();
+            let _ = app.handle(crate::Message::Onboarding(Event::OpenQuestions(
+                guild(),
+                true,
+            )));
+            let generation = app.ui.onboarding.read_serial;
+            navigate_away(&mut app, keyboard);
+            let _ = app.handle(crate::Message::Onboarding(Event::Questions(
+                generation,
+                guild(),
+                Ok(onboarding()),
+            )));
+            assert!(
+                matches!(&app_questions(&app).load, Load::Failed(reason) if reason.contains("selected server changed"))
+            );
+            assert!(
+                app_questions(&app).chosen.is_empty(),
+                "server B roles must never seed server A answers"
+            );
+            let task = app.handle(crate::Message::Onboarding(Event::Submit));
+            assert_eq!(task.units(), 0);
+            assert!(!app.ui.onboarding.submitting);
+        }
+    }
+
+    #[test]
+    fn loaded_choices_survive_keyboard_and_deep_link_navigation_but_cannot_save_cross_guild() {
+        for keyboard in [true, false] {
+            let mut app = authenticated_app();
+            let _ = app.handle(crate::Message::Onboarding(Event::OpenQuestions(
+                guild(),
+                true,
+            )));
+            let generation = app.ui.onboarding.read_serial;
+            let _ = app.handle(crate::Message::Onboarding(Event::Questions(
+                generation,
+                guild(),
+                Ok(onboarding()),
+            )));
+            assert_eq!(app_questions(&app).chosen, vec![Snowflake(301)]);
+            navigate_away(&mut app, keyboard);
+            let _ = app.handle(crate::Message::Onboarding(Event::Choose(
+                Snowflake(300),
+                Snowflake(302),
+            )));
+            let task = app.handle(crate::Message::Onboarding(Event::Submit));
+            assert_eq!(
+                task.units(),
+                0,
+                "cross-guild Submit must not schedule a write"
+            );
+            assert!(!app.ui.onboarding.submitting);
+            assert_eq!(app_questions(&app).chosen, vec![Snowflake(301)]);
+            assert!(
+                app_questions(&app)
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .contains("Return to this server")
+            );
+            publish_guild(&mut app, guild(), vec![Snowflake(401)]);
+            let task = app.handle(crate::Message::Onboarding(Event::Submit));
+            assert_eq!(
+                task.units(),
+                1,
+                "explicit Save after returning schedules the existing write once"
+            );
+            assert!(app.ui.onboarding.submitting);
+            assert_eq!(app_questions(&app).guild, guild());
+            assert_eq!(app_questions(&app).chosen, vec![Snowflake(301)]);
+            assert!(app_questions(&app).error.is_none());
+        }
+    }
+
     #[test]
     fn custom_preview_visibility_is_account_scoped_and_close_clears_it() {
-        let (mut state, nav) = (State::default(), NavigationSnapshot::default());
+        let (mut state, nav) = (State::default(), navigation());
         questions_open(&mut state, false, &nav);
         let visible =
             preview::Event::Visible(1, (Snowflake(300), Snowflake(302)), Snowflake(900), true);
@@ -1139,7 +1622,11 @@ mod tests {
         let nav = NavigationSnapshot::default();
         let _ = state.update(Event::OpenRules(guild()), &nav, &client());
         let asked = Screening::from_json(value["with_question"].to_string().as_bytes()).unwrap();
-        let _ = state.update(Event::Rules(0, guild(), Ok(asked)), &nav, &client());
+        let _ = state.update(
+            Event::Rules(state.read_serial, guild(), Ok(asked)),
+            &nav,
+            &client(),
+        );
         let _ = state.update(Event::AcceptRules, &nav, &client());
         assert!(state.accepting.is_none());
     }
@@ -1200,30 +1687,31 @@ mod tests {
         let mut state = State::default();
         let nav = NavigationSnapshot::default();
         let _ = state.update(Event::OpenRules(guild()), &nav, &client());
-        let old = state.generation;
+        let old = state.read_serial;
+        let old_account = state.generation;
         state.clear();
         let _ = state.update(Event::OpenRules(guild()), &nav, &client());
         let _ = state.update(Event::Rules(old, guild(), Ok(screening())), &nav, &client());
         assert!(matches!(&state.panel, Some(Panel::Rules(r)) if matches!(r.load, Load::Loading)));
         let _ = state.update(
-            Event::Rules(state.generation, Snowflake(7), Ok(screening())),
+            Event::Rules(state.read_serial, Snowflake(7), Ok(screening())),
             &nav,
             &client(),
         );
         assert!(matches!(&state.panel, Some(Panel::Rules(r)) if matches!(r.load, Load::Loading)));
         let _ = state.update(
-            Event::Accepted(old, guild(), Ok(ApplicationStatus::Waiting)),
+            Event::Accepted(old_account, guild(), Ok(ApplicationStatus::Waiting)),
             &nav,
             &client(),
         );
         assert!(state.outcome(guild()).is_none());
-        assert!(State::is_rejected(&Event::Rules(
-            0,
+        assert!(state.is_rejected(&Event::Rules(
+            state.read_serial,
             guild(),
             Err(RestError::AuthenticationRequired)
         )));
-        assert!(!State::is_rejected(&Event::Rules(
-            0,
+        assert!(!state.is_rejected(&Event::Rules(
+            state.read_serial,
             guild(),
             Err(RestError::ResourceGone)
         )));
@@ -1232,7 +1720,7 @@ mod tests {
     #[test]
     fn single_choice_keeps_one_and_multiple_choice_keeps_many() {
         let mut state = State::default();
-        let nav = NavigationSnapshot::default();
+        let nav = navigation();
         questions_open(&mut state, false, &nav);
         // The settings-only question (320) is not asked on joining.
         let Some(Panel::Questions(q)) = &state.panel else {
@@ -1266,7 +1754,7 @@ mod tests {
     #[test]
     fn a_required_question_blocks_the_submit_and_a_second_submit_waits() {
         let mut state = State::default();
-        let nav = NavigationSnapshot::default();
+        let nav = navigation();
         questions_open(&mut state, false, &nav);
         let _ = state.update(Event::Submit, &nav, &client());
         assert!(!state.submitting, "question 300 is required");
@@ -1309,7 +1797,7 @@ mod tests {
             ),
         ] {
             let mut state = State::default();
-            let nav = NavigationSnapshot::default();
+            let nav = navigation();
             questions_open(&mut state, false, &nav);
             let _ = state.update(
                 Event::Choose(Snowflake(300), Snowflake(301)),
@@ -1365,7 +1853,11 @@ mod tests {
             let mut state = State::default();
             let nav = NavigationSnapshot::default();
             let _ = state.update(Event::OpenGuide(guild()), &nav, &client());
-            let _ = state.update(Event::GuideLoaded(0, guild(), Err(error)), &nav, &client());
+            let _ = state.update(
+                Event::GuideLoaded(state.read_serial, guild(), Err(error)),
+                &nav,
+                &client(),
+            );
             let Some(Panel::Guide(view)) = &state.panel else {
                 panic!()
             };
@@ -1378,7 +1870,7 @@ mod tests {
         let _ = state.update(Event::OpenGuide(guild()), &nav, &client());
         let _ = state.update(
             Event::GuideLoaded(
-                0,
+                state.read_serial,
                 guild(),
                 Err(RestError::Retryable(RetryableFailure::Network(
                     NetworkFailure::Connection,

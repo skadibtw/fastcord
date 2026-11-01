@@ -3,6 +3,129 @@
 
 use super::*;
 
+#[test]
+fn retired_panel_auth_failures_cannot_reject_the_replacement_account() {
+    use fastcord_discord::{
+        PrivacyRequestError, ProfileRequestError, ReportRequestError, RestError,
+    };
+
+    let mut app = login_app();
+    authenticate(&mut app, Persistence::MemoryOnly);
+    // Start an actual panel request in the original account's initial epoch.
+    app.ui = account_ui::AccountUi::default();
+    let old_request = app.update(Message::Discover(discover::Event::Toggle));
+    assert!(old_request.units() > 0);
+    drop(old_request);
+    assert!(app.teardown_account().is_some());
+    authenticate(&mut app, Persistence::MemoryOnly);
+    let current_gateway = gateway_status(&app).0;
+    let auth = || RestError::AuthenticationRequired;
+    let id = Snowflake(7);
+    let stale = [
+        (
+            "assets",
+            Message::Assets(assets::Event::Stickers(0, 0, Err(auth()))),
+        ),
+        (
+            "apps",
+            Message::Apps(apps::Event::Authorized(0, Err(auth()))),
+        ),
+        (
+            "announce",
+            Message::Announce(announce::Event::Loaded(0, id, Err(auth()))),
+        ),
+        (
+            "slash",
+            Message::Slash(slash::Event::Index(
+                0,
+                fastcord_discord::IndexScope::Guild(id),
+                Err(auth()),
+            )),
+        ),
+        (
+            "soundboard",
+            Message::Soundboard(soundboard::Event::Listed(0, Err(auth()))),
+        ),
+        (
+            "group",
+            Message::Group(group_dm::Event::Done(
+                0,
+                group_dm::Action::Leave,
+                Err(auth()),
+            )),
+        ),
+        (
+            "onboarding",
+            Message::Onboarding(onboarding::Event::Rules(0, id, Err(auth()))),
+        ),
+        (
+            "discover",
+            Message::Discover(discover::Event::Page(0, 0, Err(auth()))),
+        ),
+        (
+            "invite",
+            Message::Invite(invite::Event::Resolved(0, "test".into(), Err(auth()))),
+        ),
+        (
+            "community",
+            Message::Community(community::Event::RulesLoaded(0, Err(auth()))),
+        ),
+        (
+            "guild admin",
+            Message::GuildAdmin(guild_admin::Event::Regions(0, id, Err(auth()))),
+        ),
+        (
+            "moderation",
+            Message::Moderation(moderation::Event::BansDone(0, Err(auth()))),
+        ),
+        (
+            "automod",
+            Message::AutoMod(automod::Event::Loaded(0, Err(auth()))),
+        ),
+        (
+            "profile",
+            Message::Identity(profile_edit::Event::Done(
+                0,
+                profile_edit::Action::Load,
+                Err(ProfileRequestError::Rest(auth())),
+            )),
+        ),
+        (
+            "report",
+            Message::Report(report::Event::Menu(
+                0,
+                Err(ReportRequestError::Rest(auth())),
+            )),
+        ),
+        (
+            "safety",
+            Message::Safety(safety::Event::Done(
+                0,
+                safety::Action::LoadPrivacy,
+                Err(PrivacyRequestError::Rest(auth())),
+            )),
+        ),
+        (
+            "account",
+            Message::Account(account_panel::Event::Sessions(0, Err(auth()))),
+        ),
+    ];
+    for (panel, event) in stale {
+        drop(app.update(event));
+        assert!(
+            app.phase.account().is_some(),
+            "{panel} rejected the replacement account"
+        );
+        assert_eq!(gateway_status(&app).0, current_gateway, "{panel}");
+    }
+
+    // A real current request's 401 must still stop the account.
+    app.ui.discover = discover::State::default();
+    drop(app.update(Message::Discover(discover::Event::Toggle)));
+    drop(app.update(Message::Discover(discover::Event::Page(0, 0, Err(auth())))));
+    assert!(matches!(app.phase, Phase::Login));
+}
+
 #[tokio::test]
 async fn manual_reconnect_preserves_volume_writer_and_pending_settings() {
     use fastcord_discord::gateway::StopReason;
