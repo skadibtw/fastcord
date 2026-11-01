@@ -33,6 +33,23 @@ pub fn fit_output(width: u32, height: u32, max_width: u32, max_height: u32) -> (
     (even(out_w), even(out_h))
 }
 
+/// Accept a handler's already aspect-fitted output request without fitting a
+/// second time (which can shave another row after even-dimension rounding).
+/// Invalid, upscaled or sub-minimum requests leave the fitted source unchanged.
+pub fn bounded_output_size(source: (u32, u32), requested: (u32, u32)) -> (u32, u32) {
+    if requested.0 >= MIN_OUTPUT_EDGE
+        && requested.1 >= MIN_OUTPUT_EDGE
+        && requested.0 <= source.0
+        && requested.1 <= source.1
+        && requested.0.is_multiple_of(2)
+        && requested.1.is_multiple_of(2)
+    {
+        requested
+    } else {
+        source
+    }
+}
+
 /// Bytes of an NV12 picture with `height` luma rows, each `stride` bytes: the
 /// luma plane, then `height / 2` interleaved chroma rows at the same stride.
 pub const fn nv12_len(stride: usize, height: usize) -> usize {
@@ -378,5 +395,20 @@ mod tests {
             "short"
         );
         converter.convert(&image, 2, 2, 2, &mut out).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod adaptive_size_tests {
+    use super::*;
+    #[test]
+    fn accepted_request_is_not_aspect_fitted_twice() {
+        let base = (642, 360);
+        let requested = fit_output(base.0, base.1, base.0 * 3 / 4, base.1 * 3 / 4);
+        assert_eq!(requested, (480, 268));
+        assert_eq!(bounded_output_size(base, requested), requested);
+        for invalid in [(644, 360), (642, 362), (481, 270), (16, 15), (0, 0)] {
+            assert_eq!(bounded_output_size(base, invalid), base);
+        }
     }
 }

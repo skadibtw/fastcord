@@ -2181,6 +2181,7 @@ impl History {
         let bounds = self.store.window(channel);
         Snapshot {
             channel_id: Some(channel),
+            pins_revision: 0,
             rows,
             window,
             scroll: self.list.scroll_request(),
@@ -5044,6 +5045,37 @@ mod tests {
         press(&mut history, id, "pick", &["b"]);
         assert_eq!(pending_of(&mut history, id).as_deref(), Some("pick"));
         assert_eq!(take_interactions(&mut history), 1);
+    }
+
+    #[test]
+    fn multi_select_and_optional_clear_validate_counts_unique_values_and_send_once() {
+        let controls = |min| {
+            serde_json::json!([{"type": 3, "custom_id": "multi",
+            "min_values": min, "max_values": 2, "options": [
+                {"label": "A", "value": "a"}, {"label": "B", "value": "b"}]}])
+        };
+        for values in [
+            vec!["a"],
+            vec!["a", "a"],
+            vec!["a", "unknown"],
+            vec!["a", "b", "a"],
+        ] {
+            let (mut history, id) = interacting_history(0, controls(2));
+            press(&mut history, id, "multi", &values);
+            assert_eq!(take_interactions(&mut history), 0);
+            assert_eq!(history.notice, Some(interactions::BAD_CHOICE));
+        }
+        let (mut history, id) = interacting_history(0, controls(2));
+        press(&mut history, id, "multi", &["a", "b"]);
+        press(&mut history, id, "multi", &["a", "b"]);
+        assert_eq!(take_interactions(&mut history), 1);
+        let (mut history, id) = interacting_history(0, controls(0));
+        press(&mut history, id, "multi", &[]);
+        assert_eq!(
+            take_interactions(&mut history),
+            1,
+            "optional select may clear"
+        );
     }
 
     #[test]

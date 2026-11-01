@@ -32,7 +32,10 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 use super::transport::{Network, Signaling, UdpLink, voice_url};
 use super::wire::{self, op};
-use super::{CloseReason, Counters, MediaCommand, ReceivedAudio, VoiceEvent, VoiceStatus};
+use super::{
+    CloseReason, Counters, MediaCommand, ReceivedAudio, RetryCause, RetryPhase, VoiceEvent,
+    VoiceStatus,
+};
 use crate::crypto::{CryptoError, RTCP_CLEAR_LEN, TransportCipher, TransportKey, TransportMode};
 use crate::dave::{DaveError, DaveSession};
 use crate::rtcp::{self, Compound, ReportBlocks, RtcpPacket, SenderInfo};
@@ -158,6 +161,15 @@ struct Media {
     reported_packets: u32,
 }
 
+fn audio_report_timestamp(media: &Media, now: Instant) -> u32 {
+    let last = media.rtp.next_timestamp().wrapping_sub(OPUS_FRAME_TICKS);
+    let elapsed = media
+        .last_audio_at
+        .map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
+    let ticks = elapsed.as_nanos() * 48_000 / 1_000_000_000;
+    last.wrapping_add(ticks as u32)
+}
+
 /// Audio from an SSRC nobody has announced yet.
 struct PendingAudio {
     /// When the datagram was read from the socket.
@@ -182,6 +194,7 @@ enum End {
     /// Reconnect; `progressed` when this connection got past the handshake.
     Retry {
         progressed: bool,
+        cause: RetryCause,
     },
     Close(CloseReason),
 }
@@ -206,9 +219,10 @@ struct Conn {
 }
 
 impl Conn {
-    fn retry(&self) -> End {
+    fn retry(&self, cause: RetryCause) -> End {
         End::Retry {
             progressed: self.progressed,
+            cause,
         }
     }
 
@@ -287,6 +301,7 @@ struct Driver<S, N: Network> {
     dave_refused: u32,
     /// `dave_refused` reached [`DAVE_STUCK_PACKETS`]; handled by the main loop.
     dave_stuck: bool,
+    dave_receive_failed: bool,
     dave_recoveries: u8,
     dave_recovered_at: Option<Instant>,
     /// Opcode 25 may arrive before Session Description creates the DAVE engine.
@@ -339,6 +354,7 @@ pub(crate) async fn run<S: Signaling, N: Network>(
         udp_heard: false,
         dave_refused: 0,
         dave_stuck: false,
+        dave_receive_failed: false,
         dave_recoveries: 0,
         dave_recovered_at: None,
         pending_external_sender: None,
@@ -375,9 +391,9 @@ fn close_code(code: u16, conn: &Conn) -> End {
         4017 => End::Close(CloseReason::E2eeRequired),
         4021 => End::Close(CloseReason::RateLimited),
         // Server-side crashes: resume.
-        4013 | 4015 => conn.retry(),
+        4013 | 4015 => conn.retry(RetryCause::ServerClose(Some(code))),
         4000..=4999 => End::Close(CloseReason::Protocol(Some(code))),
-        _ => conn.retry(),
+        _ => conn.retry(RetryCause::ServerClose(Some(code))),
     }
 }
 
@@ -574,6 +590,11 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             };
             let Ok(socket) = connected else {
                 failures += 1;
+                self.event(VoiceEvent::Retry {
+                    cause: RetryCause::ConnectFailed,
+                    attempt: failures,
+                    resume,
+                });
                 continue;
             };
             let end = self.connection(socket, resume).await;
@@ -593,8 +614,14 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             }
             match end {
                 End::Close(reason) => return reason,
-                End::Retry { progressed: true } => failures = 1,
-                End::Retry { progressed: false } => failures += 1,
+                End::Retry { progressed, cause } => {
+                    failures = if progressed { 1 } else { failures + 1 };
+                    self.event(VoiceEvent::Retry {
+                        cause,
+                        attempt: failures,
+                        resume: self.media.is_some(),
+                    });
+                }
             }
         }
     }
@@ -631,6 +658,15 @@ impl<S: Signaling, N: Network> Driver<S, N> {
     }
 
     fn set_status(&self, status: VoiceStatus) {
+        let status = if self.dave_receive_failed
+            && matches!(
+                status,
+                VoiceStatus::Connected { .. } | VoiceStatus::Rekeying { .. }
+            ) {
+            VoiceStatus::IncomingAudioDecryptionFailed
+        } else {
+            status
+        };
         self.signaling.note_status(status);
         self.ch.status.send_replace(status);
     }
@@ -785,6 +821,8 @@ impl<S: Signaling, N: Network> Driver<S, N> {
     ) -> Result<(), End> {
         self.dave_stuck = false;
         self.dave_refused = 0;
+        self.dave_receive_failed = true;
+        self.set_status(VoiceStatus::IncomingAudioDecryptionFailed);
         let now = Instant::now();
         if self.dave_recoveries >= DAVE_STUCK_RECOVERIES
             || self
@@ -807,7 +845,8 @@ impl<S: Signaling, N: Network> Driver<S, N> {
     async fn send_text(conn: &Conn, socket: &mut S::Socket, text: &str) -> Result<(), End> {
         match timeout(SEND_TIMEOUT, socket.send(Message::text(text))).await {
             Ok(Ok(())) => Ok(()),
-            _ => Err(conn.retry()),
+            Ok(Err(_)) => Err(conn.retry(RetryCause::SendError)),
+            Err(_) => Err(conn.retry(RetryCause::SendTimeout)),
         }
     }
     async fn send_binary(conn: &Conn, socket: &mut S::Socket, frame: Vec<u8>) -> Result<(), End> {
@@ -818,7 +857,8 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         );
         match timeout(SEND_TIMEOUT, socket.send(Message::Binary(frame.into()))).await {
             Ok(Ok(())) => Ok(()),
-            _ => Err(conn.retry()),
+            Ok(Err(_)) => Err(conn.retry(RetryCause::SendError)),
+            Err(_) => Err(conn.retry(RetryCause::SendTimeout)),
         }
     }
 
@@ -850,10 +890,11 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     network_diagnostic!("Media WebSocket closed: code={}", u16::from(frame.code));
                     close_code(frame.code.into(), conn)
                 }
-                None => conn.retry(),
+                None => conn.retry(RetryCause::ServerClose(None)),
             }),
             Some(Ok(_)) => Ok(()),
-            Some(Err(_)) | None => Err(conn.retry()),
+            Some(Err(_)) => Err(conn.retry(RetryCause::ReadError)),
+            None => Err(conn.retry(RetryCause::EndOfStream)),
         }
     }
 
@@ -1335,6 +1376,10 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             }
         };
         self.dave_refused = 0;
+        if self.dave_receive_failed {
+            self.dave_receive_failed = false;
+            self.set_status(self.connected_status());
+        }
         let sequence = self
             .sequences
             .entry(ssrc)
@@ -1653,7 +1698,9 @@ impl<S: Signaling, N: Network> Driver<S, N> {
         media.reported_packets = media.packets;
         let info = SenderInfo {
             ntp_timestamp: ntp_now(),
-            rtp_timestamp: media.rtp.next_timestamp(),
+            // An SR maps the current wall clock to the running media clock,
+            // not to the next queued packet (which stops advancing in silence).
+            rtp_timestamp: audio_report_timestamp(media, Instant::now()),
             packet_count: media.packets,
             octet_count: media.octets,
         };
@@ -1693,14 +1740,23 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                 }
                 Phase::Connected => conn.deadline = None,
                 // No HELLO, READY, RESUMED, or Session Description in time.
-                _ => return Err(conn.retry()),
+                _ => {
+                    return Err(conn.retry(RetryCause::PhaseTimeout(match conn.phase {
+                        Phase::AwaitHello => RetryPhase::Hello,
+                        Phase::Identifying => RetryPhase::Identify,
+                        Phase::Discovering { .. } => RetryPhase::Discovery,
+                        Phase::Negotiating => RetryPhase::Negotiation,
+                        Phase::Resuming => RetryPhase::Resume,
+                        Phase::Connected => RetryPhase::Connected,
+                    })));
+                }
             }
         }
         if conn.heartbeat_at.is_some_and(|at| at <= now) {
             if conn.awaiting_ack.is_some() {
                 // The previous heartbeat was never acknowledged: zombie.
                 network_diagnostic!("Media heartbeat ACK deadline expired");
-                return Err(conn.retry());
+                return Err(conn.retry(RetryCause::HeartbeatAckTimeout));
             }
             conn.heartbeat_at = Some(now + conn.heartbeat_interval);
             self.heartbeat(conn, socket).await?;
@@ -1761,7 +1817,10 @@ impl<S: Signaling, N: Network> Driver<S, N> {
                     self.discovery = discovery::Campaign::new(false);
                 }
                 self.media = None;
-                return Err(End::Retry { progressed: true });
+                return Err(End::Retry {
+                    progressed: true,
+                    cause: RetryCause::MediaLivenessTimeout,
+                });
             }
             if let Some(udp) = &self.udp {
                 self.ping_sequence = self.ping_sequence.wrapping_add(1);
@@ -1804,5 +1863,38 @@ impl<S: Signaling, N: Network> Driver<S, N> {
             self.on_video_timers(now).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod audio_clock_tests {
+    use super::*;
+
+    #[test]
+    fn sender_report_clock_starts_at_the_sent_packet_and_wraps_during_silence() {
+        let at = Instant::now();
+        let first = u32::MAX - 479;
+        let mut rtp = RtpSender::new(7, OPUS_PAYLOAD_TYPE, 1, first);
+        rtp.next_header(OPUS_FRAME_TICKS);
+        let key = crate::crypto::TransportKey::from_slice(&[0; 32]).unwrap();
+        let media = Media {
+            cipher: TransportCipher::new(TransportMode::Aes256GcmRtpSize, &key),
+            rtp,
+            speaking: true,
+            silence_left: 0,
+            last_audio_at: Some(at),
+            packets: 1,
+            octets: 1,
+            reported_packets: 0,
+        };
+        assert_eq!(audio_report_timestamp(&media, at), first);
+        assert_eq!(
+            audio_report_timestamp(&media, at + Duration::from_millis(10)),
+            0
+        );
+        assert_eq!(
+            audio_report_timestamp(&media, at + Duration::from_secs(2)),
+            95_520
+        );
     }
 }

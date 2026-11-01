@@ -870,6 +870,21 @@ impl<S: Signaling, N: Network> Driver<S, N> {
     /// The sender's report about a remote stream: echoed back in ours so the
     /// sender can measure the round trip.
     pub(super) fn on_remote_sender_report(&mut self, ssrc: u32, info: SenderInfo) {
+        if let Some(owner) = self.ssrcs.owner(ssrc)
+            && matches!(
+                owner.kind,
+                crate::ssrc::StreamKind::Audio | crate::ssrc::StreamKind::Video
+            )
+        {
+            self.event(VoiceEvent::SenderClock {
+                user_id: owner.user_id,
+                ssrc,
+                video: owner.kind == crate::ssrc::StreamKind::Video,
+                rtp_timestamp: info.rtp_timestamp,
+                ntp_timestamp: info.ntp_timestamp,
+                received_at: std::time::Instant::now(),
+            });
+        }
         let now = Instant::now();
         if let Some(receiver) = self
             .video

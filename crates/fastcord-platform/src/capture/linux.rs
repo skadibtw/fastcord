@@ -243,10 +243,7 @@ fn run(
             .await?
             .response()?;
         let streams = proxy.start(&session, None).await?.response()?;
-        let node = streams
-            .streams()
-            .first()
-            .map(|stream| stream.pipe_wire_node_id());
+        let node = streams.streams().first().map(StreamTarget::from_portal);
         let fd = proxy.open_pipe_wire_remote(&session).await?;
         Ok::<_, ashpd::Error>((proxy, session, node, fd))
     };
@@ -294,7 +291,7 @@ impl Shared {
         }
         let (width, height) = self.output;
         let flow = match VideoSample::nv12(width, height, width as usize, &self.picture, now()) {
-            Ok(sample) => self.handler.frame(&sample),
+            Ok(sample) => self.handler.scaled_frame(&sample),
             Err(error) => {
                 self.end(Err(error));
                 return;
@@ -351,7 +348,12 @@ impl Shared {
         if !due && paused {
             return;
         }
+        let base = self.config.fit(width, height);
+        let requested = self.handler.output_size(base);
+        self.output = convert::bounded_output_size(base, requested);
         let (out_w, out_h) = self.output;
+        self.picture
+            .resize(convert::nv12_len(out_w as usize, out_h as usize), 0);
         let converted = Bgra::new(data, stride, width, height).and_then(|source| {
             self.converter
                 .convert(&source, out_w, out_h, out_w as usize, &mut self.picture)
@@ -457,8 +459,29 @@ fn buffers_param() -> Result<Vec<u8>, CaptureError> {
         .map_err(|_| CaptureError::Worker("the PipeWire buffer request could not be built"))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamTarget {
+    Node(u32),
+    Serial(u64),
+}
+
+impl StreamTarget {
+    fn from_portal(stream: &ashpd::desktop::screencast::Stream) -> Self {
+        stream
+            .pipewire_serial()
+            .map_or_else(|| Self::Node(stream.pipe_wire_node_id()), Self::Serial)
+    }
+
+    fn connection(self) -> (Option<u32>, Option<String>) {
+        match self {
+            Self::Node(node) => (Some(node), None),
+            Self::Serial(serial) => (None, Some(serial.to_string())),
+        }
+    }
+}
+
 fn stream(
-    node: u32,
+    target: StreamTarget,
     fd: std::os::fd::OwnedFd,
     config: CaptureConfig,
     control: Arc<Control>,
@@ -470,16 +493,17 @@ fn stream(
     let mainloop = pw::main_loop::MainLoopBox::new(None).map_err(pipewire_error)?;
     let context = pw::context::ContextBox::new(mainloop.loop_(), None).map_err(pipewire_error)?;
     let core = context.connect_fd(fd, None).map_err(pipewire_error)?;
-    let stream = pw::stream::StreamBox::new(
-        &core,
-        "fastcord-screen",
-        pw::properties::properties! {
-            *pw::keys::MEDIA_TYPE => "Video",
-            *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::MEDIA_ROLE => "Screen",
-        },
-    )
-    .map_err(pipewire_error)?;
+    let (node, serial) = target.connection();
+    let mut properties = pw::properties::properties! {
+        *pw::keys::MEDIA_TYPE => "Video",
+        *pw::keys::MEDIA_CATEGORY => "Capture",
+        *pw::keys::MEDIA_ROLE => "Screen",
+    };
+    if let Some(serial) = serial {
+        properties.insert("target.object", serial);
+    }
+    let stream =
+        pw::stream::StreamBox::new(&core, "fastcord-screen", properties).map_err(pipewire_error)?;
 
     let shared = Rc::new(RefCell::new(Shared {
         config,
@@ -583,7 +607,7 @@ fn stream(
     stream
         .connect(
             spa::utils::Direction::Input,
-            Some(node),
+            node,
             pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
             &mut params,
         )
@@ -645,6 +669,29 @@ mod tests {
         });
         assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
         assert!(std::ptr::eq(first, runtime().unwrap()), "one runtime");
+    }
+
+    #[test]
+    fn portal_stream_serial_is_typed_and_preferred_over_the_legacy_node() {
+        use std::collections::HashMap;
+        use zbus::zvariant::{LE, Value, serialized::Context, to_bytes};
+        let check = |serial: Option<Value<'_>>| {
+            let mut properties = HashMap::new();
+            if let Some(serial) = serial {
+                properties.insert("pipewire-serial", serial);
+            }
+            let bytes = to_bytes(Context::new_dbus(LE, 0), &(42u32, properties)).unwrap();
+            bytes
+                .deserialize::<ashpd::desktop::screencast::Stream>()
+                .map(|(stream, _)| StreamTarget::from_portal(&stream).connection())
+        };
+        assert_eq!(check(None).unwrap(), (Some(42), None));
+        assert_eq!(
+            check(Some(Value::U64(u64::MAX))).unwrap(),
+            (None, Some(u64::MAX.to_string()))
+        );
+        assert!(check(Some(Value::from("not-a-serial"))).is_err());
+        assert!(check(Some(Value::U32(42))).is_err());
     }
 
     /// Width, height and first luma byte of each delivered picture.
@@ -783,7 +830,10 @@ mod tests {
 
     /// A 640x360 BGRx video source of solid blue at 30 fps, driving the graph
     /// itself, published on the PipeWire daemon of `XDG_RUNTIME_DIR`.
-    fn blue_source(node: std::sync::mpsc::Sender<u32>, stop: Arc<std::sync::atomic::AtomicBool>) {
+    fn blue_source(
+        node: std::sync::mpsc::Sender<(u32, u64)>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    ) {
         use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
         use spa::pod::{Object, Property, Value};
         const W: u32 = 640;
@@ -792,22 +842,43 @@ mod tests {
         let mainloop = pw::main_loop::MainLoopBox::new(None).unwrap();
         let context = pw::context::ContextBox::new(mainloop.loop_(), None).unwrap();
         let core = context.connect(None).unwrap();
+        let registry = core.get_registry().unwrap();
+        static SOURCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let name = format!(
+            "fastcord-test-source-{}-{}",
+            std::process::id(),
+            SOURCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let _registry = registry
+            .add_listener_local()
+            .global({
+                let name = name.clone();
+                move |global| {
+                    let Some(props) = global.props.as_ref() else {
+                        return;
+                    };
+                    if global.type_ == pw::types::ObjectType::Node
+                        && props.get("node.name") == Some(name.as_str())
+                        && let Some(serial) =
+                            props.get("object.serial").and_then(|s| s.parse().ok())
+                    {
+                        let _ = node.send((global.id, serial));
+                    }
+                }
+            })
+            .register();
         let stream = pw::stream::StreamBox::new(
             &core,
             "fastcord-test-source",
             pw::properties::properties! {
                 *pw::keys::MEDIA_CLASS => "Video/Source",
                 *pw::keys::MEDIA_TYPE => "Video",
+                *pw::keys::NODE_NAME => name,
             },
         )
         .unwrap();
         let _listener = stream
             .add_local_listener::<()>()
-            .state_changed(move |stream, _, _, state| {
-                if state == pw::stream::StreamState::Paused {
-                    let _ = node.send(stream.node_id());
-                }
-            })
             .param_changed(|stream, _, id, param| {
                 if id != spa::param::ParamType::Format.as_raw() || param.is_none() {
                     return;
@@ -927,13 +998,23 @@ mod tests {
     #[test]
     #[ignore = "needs a PipeWire daemon and session manager on XDG_RUNTIME_DIR"]
     fn a_real_pipewire_source_is_converted_paced_and_stopped() {
+        check_real_pipewire_source(false);
+    }
+
+    #[test]
+    #[ignore = "needs a PipeWire daemon and session manager on XDG_RUNTIME_DIR"]
+    fn a_real_pipewire_source_is_selected_by_object_serial() {
+        check_real_pipewire_source(true);
+    }
+
+    fn check_real_pipewire_source(by_serial: bool) {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (node_tx, node_rx) = std::sync::mpsc::channel();
         let source = std::thread::spawn({
             let stop = Arc::clone(&stop);
             move || blue_source(node_tx, stop)
         });
-        let node = node_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (node, serial) = node_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let socket =
             std::path::Path::new(&std::env::var("XDG_RUNTIME_DIR").unwrap()).join("pipewire-0");
         let fd: std::os::fd::OwnedFd = std::os::unix::net::UnixStream::connect(socket)
@@ -947,7 +1028,11 @@ mod tests {
         let started = Instant::now();
         let handler_frames = Arc::clone(&frames);
         let result = stream(
-            node,
+            if by_serial {
+                StreamTarget::Serial(serial)
+            } else {
+                StreamTarget::Node(node)
+            },
             fd,
             config,
             control,

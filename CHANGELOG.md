@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+### Fixed
+- Linux VA-API H.264 encoding selects YUV420 and CBR from driver capability masks and supplies packed Baseline slice headers when supported, fixing rejected configurations and NAL-type-0 output on radeonsi (#30).
+- Linux H.264 share/watch can use the bundled OpenH264 codec when `/dev/dri` is absent; missing GPU devices no longer abort codec discovery before software fallback. Explicit Software selection skips hardware discovery (#30).
+- Linux screen capture prefers the portal v6 PipeWire object serial via `target.object`, retaining legacy node-ID selection for older portals (#33).
+- Synchronize received stream video to the actual audio output cursor using authenticated sender clock pairs; bound waits and skip late presentation while decoding reference frames, with immediate fallback for missing/stale/muted audio.
+- Audio and soundshare RTCP sender reports now map wall time to the running 48 kHz media clock, including silence, instead of pairing it with a stale next-packet timestamp (#35).
+- Refresh the visible pinned-message list when Discord reports a pin change in its conversation; stale pages cannot restore removed pins (#59).
+- Preserve archived-thread membership and reject old archive pages after account reset (#63).
+- Reject empty or one-character invite creation responses before offering an unusable link (#90).
+- Show bounded static custom emoji previews for visible onboarding choices, preserving Unicode/name fallbacks and canceling offscreen or stale work (#91).
+- Refuse one-click rules acceptance when a rules list or rule text was truncated or malformed (#91).
+- Refresh retained event timezone offsets on an account-worker timer every 60 seconds; quiet calendars update after OS timezone changes, failed lookups recover, and unchanged edit fields preserve their original instants (#92).
+- Replayed scheduled-event deletions no longer evict other deletion markers; unknown-event markers are charged to the byte budget (#92).
+- Enforce the AutoMod panel byte limit on replacements and invalidate stale editors when an update cannot fit.
+- Add a bounded, read-only AutoMod execution metadata feed with permission and session guards; discard message text and preserve unknown numeric action types safely. Documented bot-only event delivery remains unverified for user accounts.
+- Enforce the AutoMod change-feed byte cap even for one oversized rule; invalidate stale list/editor data visibly and account for retained unknown metadata/actions (#96).
+- Refresh open announcement follower lists after Gateway webhook changes and reject stale list replies (#98).
+- Open incoming-webhook panels drop cached tokens and refresh on gateway webhook invalidation; stale reads cannot restore old entries and an in-flight write finishes before one coalesced refresh (#101, #98).
+- Add explicit Linux composer selected-word spelling through installed Enchant dictionaries, with bounded cancellable local processes and stale-selection-safe suggestions.
+- Follow cached Linux LC_TIME date ordering in timestamp dates, with explicit fallback for unsupported formats; native locale reads stay off the UI thread.
+- Honor Linux LC_TIME 12/24-hour clock preference for System timestamps, cached off the UI thread; explicit clock choices still override it (#103).
+- Advertise the existing Discord deep-link handler in the Linux desktop entry and pass the URL argument to fastcord (#105).
+- Expire timed guild/channel mutes locally at their retained deadline with an armed-only worker timer; notification writes remain disabled (#106).
+- Preserve session identifiers exactly and reject malformed/oversize hashes instead of truncating logout targets (#107).
+- Give each CAPTCHA challenge a fresh temporary browser profile and release its context before cleanup on initialization failure (#112).
+- Keep profile, message requests, audio and logout directly reachable beside microphone/deafen in a second compact footer row, with bounded request badge (#117).
+- Matching network callers wait for an owned recovery campaign even while it is pending behind the controller; unrelated endpoints still proceed (#121).
+- Ignore previous-account inbox, forum-post and slash-command responses after account reset instead of reusing request serials (#169).
+- Replace generated Unicode emoji pointer tables with a compact checked binary index while preserving all IDs, spellings, search fields, variants and attributed PNG assets.
+- Finish voice-volume persistence off the UI thread during logout/account switch, before deleting account data or restoring another account (#181).
+- Order saved-account index writes by request generation so an older worker cannot restore removed account labels (#181).
+- Retry still-visible emoji animations rejected for cache capacity once space is freed, without retrying malformed images or repeatedly decoding under unchanged pressure (#187).
+- Route notification, thread, pins, inbox, search, GIF and sticker errors through the shared REST wording so unsent requests, ambiguous responses and MFA challenges receive accurate advice (#192).
+- Lower share resolution after sustained encode overload reaches 15 fps, restore it after stable recovery, and retain the Windows zero-copy converter path.
+- Screen-share pacing now delivers the advertised 20 fps step from 30 fps capture instead of accidentally dropping to 15 fps; missed deadlines do not cause catch-up bursts (#213).
+- Voice shows a distinct incoming-audio decryption failure through key recovery; only successfully decrypted audio clears it (#215).
+- Network recovery now says when its bounded strategy search may be incomplete instead of presenting a generic budget error (#222).
+- Add bounded parameterized TLS shaping, demand-driven catalog continuation, explicit full-search progress and per-role confirmed candidates; preserve initial strategy behavior and all probe budgets (#222).
+- Add a session-only local source-address preference for direct HTTP/TCP/probes/UDP, with strict family/bind failure handling and an explicit Proxy exception; no route changes or TUN-escape claim (#222).
+- Remember bounded, expiring TLS strategy preferences by a salted Linux NetworkManager connection profile; imported hints only reorder fresh verified probes and never override routing policy (#222).
+- Added opt-in bounded Gateway startup timing, including reads below WebSocket framing and categorical termination (#224).
+- Make the Windows packet helper’s pure TCP/UDP profile and reassembly tests portable, sharing production layout code and adding independent checksum vectors without changing network strategies.
+- Exposed native packet-operation capabilities and explicit unsupported-platform guidance; Linux/macOS do not imply Windows helper parity (#226, #227).
+- Added an isolated Linux NFQUEUE feasibility fixture proving registered-flow interception, same-UID unregistered-flow exclusion, payload preservation and stopped-listener bypass; production packet support remains unavailable (#226).
+- Documented macOS native packet-recovery feasibility boundaries and required signed prototype evidence (#227).
+- Offer the anonymous connection check on Linux and macOS as well as Windows; only packet-helper controls depend on the native backend (#228).
+- Attribute anonymous connection checks to a per-request transport receipt; helper availability alone no longer counts as packet recovery and no-SNI checks do not cycle equivalent helper profiles (#229).
+- Preserve categorical voice reconnect causes and record them in the release voice log, distinguishing signaling Resume (retained UDP/keys) from a new media session (#230).
+
+### Added
+- Browse public, joined-private and manager-only private thread archives with their respective pagination cursors (#63).
+- Browse accessible server channels with bounded search/pages, independently of folded sidebar categories; selection rechecks current permissions (#91).
+- Refuse screening consent when TERMS values are absent or not an array, as well as when rules are truncated (#91).
+- Add creation-only weekly/biweekly UTC recurrence presets behind the existing unverified write gate; preserve more recurrence details in read views (#92).
+- View interested event members in bounded manual pages, with permission/deletion and stale-response checks; the read route remains unverified with user accounts (#92).
+- Resolve scheduled-event civil times using date-specific Unix timezone rules on workers; reject DST gaps/folds and use explicitly labeled UTC where native conversion is unsupported (#92).
+- Multi-value string-select components now collect local choices and submit once, with optional clearing, bounds and stale-control checks (#100).
+
+### Changed
+- Share shell geometry tokens across navigation and message avatars; compact icon actions now retain a 32-pixel-high hit area without widening the sidebar (#115).
+- Exercise the actual account worker/outbox against a one-shot HTTP 429 in the fake-server integration test, including exactly-once Gateway reconciliation (#176).
+
 ## 0.1.0-alpha.10 — 2026-10-28
 
 ### Changed

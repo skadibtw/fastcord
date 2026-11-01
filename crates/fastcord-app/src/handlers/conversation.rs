@@ -458,6 +458,7 @@ impl App {
                         | timeline::Event::SetEmbeds { .. }
                         | timeline::Event::More(_)
                         | timeline::Event::PollVoters { .. }
+                        | timeline::Event::SelectChoice { .. }
                         | timeline::Event::Component { .. }
                         | timeline::Event::DismissEphemeral { .. }
                         | timeline::Event::React { .. }) => {
@@ -564,6 +565,11 @@ impl App {
                         },
                         Message::FilesPicked,
                     );
+                }
+            }
+            Message::Composer(composer::Event::Spelling(event)) => {
+                if let Some(gateway) = self.phase.gateway_mut() {
+                    return gateway.composer.spelling(event).map(Message::Composer);
                 }
             }
             Message::Composer(event) => {

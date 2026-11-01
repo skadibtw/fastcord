@@ -117,6 +117,9 @@ const BLOCK: u8 = 0xB0;
 /// Waits until released, then fails.
 const BLOCK_THEN_BROKEN: u8 = 0xB1;
 const PANIC: u8 = 0xFF;
+/// Simulates buffered/reordered decoder output with a different PTS.
+const SHIFTED_PTS: u8 = 0xE1;
+const LATE_PTS: u8 = 0xE2;
 
 #[derive(Default)]
 struct Control {
@@ -236,7 +239,11 @@ impl VideoDecoder for Scripted {
         out(DecodedFrame {
             image: Nv12::packed(2, 2, &[7; 6]).unwrap(),
             color: ColorDescription::default(),
-            timestamp,
+            timestamp: match id {
+                SHIFTED_PTS => Duration::from_millis(200),
+                LATE_PTS => Duration::ZERO,
+                _ => timestamp,
+            },
         });
         Ok(())
     }
@@ -1197,4 +1204,168 @@ fn a_deferred_resume_request_uses_a_source_announcement_without_waiting_for_medi
     assert_eq!(*requests.lock(), [SSRC]);
     assert!(decoder.thread.is_none());
     assert_eq!(decoder.finish().keyframes_requested, 1);
+}
+
+#[test]
+fn real_audio_clock_schedules_video_without_losing_late_reference_frames() {
+    use fastcord_audio::test_support::PlayoutHarness;
+    let mut audio = PlayoutHarness::new(48_000, 42, u32::MAX - 100);
+    audio.callback(Some(Duration::from_millis(8)));
+    let point = audio.clock.point(42).unwrap();
+    let sync = Arc::new(super::super::av_sync::AvSync::default());
+    sync.audio(42, Some(audio.clock.clone()));
+    sync.report(
+        Snowflake(7),
+        42,
+        false,
+        point.rtp_timestamp,
+        100 << 32,
+        point.observed_at,
+    );
+    sync.report(
+        Snowflake(7),
+        SSRC,
+        true,
+        18_000,
+        100 << 32,
+        point.observed_at,
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (mut decoder, received) = real_decoder(&requests);
+    decoder.set_av_sync(sync.clone());
+    let mut frames = units().into_iter();
+    push_settled(&mut decoder, video(SSRC, 0, true, frames.next().unwrap()));
+    assert!(
+        received.try_recv().is_err(),
+        "late keyframe decoded but not displayed"
+    );
+    audio.callback(Some(Duration::from_millis(8)));
+    let point = audio.clock.point(42).unwrap();
+    // Refresh both maps coherently at the actual newly consumed audio position.
+    sync.reset();
+    sync.audio(42, Some(audio.clock.clone()));
+    sync.report(
+        Snowflake(7),
+        42,
+        false,
+        point.rtp_timestamp,
+        101 << 32,
+        point.observed_at,
+    );
+    sync.report(
+        Snowflake(7),
+        SSRC,
+        true,
+        18_000,
+        101 << 32,
+        point.observed_at,
+    );
+    let mut frame = video(SSRC, 1, false, frames.next().unwrap());
+    frame.timestamp = 27_000;
+    decoder.push(frame);
+    assert!(
+        received.recv_timeout(Duration::from_millis(20)).is_err(),
+        "future picture waits for audio"
+    );
+    let (_, _, pixels) = received.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert!(Instant::now() >= point.at + Duration::from_millis(100));
+    assert_eq!(
+        pixels,
+        picture(1),
+        "late keyframe still fed the real reference decoder"
+    );
+    sync.disable_audio();
+    decoder.sync_changed();
+    let mut frame = video(SSRC, 2, false, frames.next().unwrap());
+    frame.timestamp = 45_000;
+    push_settled(&mut decoder, frame);
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(30)).unwrap().2,
+        picture(2)
+    );
+    assert_eq!(decoder.finish().pictures_decoded, 3);
+}
+
+#[test]
+fn stalled_audio_clock_releases_a_waiting_real_picture_without_freezing() {
+    use fastcord_audio::test_support::PlayoutHarness;
+    let mut audio = PlayoutHarness::new(48_000, 42, 0);
+    audio.callback(Some(Duration::from_millis(8)));
+    let point = audio.clock.point(42).unwrap();
+    let sync = Arc::new(super::super::av_sync::AvSync::default());
+    sync.audio(42, Some(audio.clock.clone()));
+    sync.report(
+        Snowflake(7),
+        42,
+        false,
+        point.rtp_timestamp,
+        100 << 32,
+        point.observed_at,
+    );
+    sync.report(Snowflake(7), SSRC, true, 0, 100 << 32, point.observed_at);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (mut decoder, received) = real_decoder(&requests);
+    decoder.set_av_sync(sync);
+    let mut frame = video(SSRC, 0, true, units().remove(0));
+    frame.timestamp = 36_000;
+    decoder.push(frame);
+    // No more output callbacks: a stale device cursor must stop delaying video.
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(2)).unwrap().2,
+        picture(0)
+    );
+    assert_eq!(decoder.finish().pictures_decoded, 1);
+}
+
+#[test]
+fn reordered_picture_uses_its_own_pts_instead_of_the_compressed_input_pts() {
+    use fastcord_audio::test_support::PlayoutHarness;
+    let mut audio = PlayoutHarness::new(48_000, 42, 0);
+    let sync = Arc::new(super::super::av_sync::AvSync::default());
+    let control = Arc::new(Control::default());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut config = scripted_config(&control, &requests, 0);
+    let (sent, received) = mpsc::channel();
+    config.sink = Some(Box::new(move |_, picture| {
+        sent.send(picture.timestamp).unwrap();
+    }));
+    let mut decoder = StreamDecoder::with(config);
+    decoder.set_av_sync(sync.clone());
+    for (index, tag) in [SHIFTED_PTS, LATE_PTS].into_iter().enumerate() {
+        audio.callback(Some(Duration::from_millis(8)));
+        let point = audio.clock.point(42).unwrap();
+        sync.reset();
+        sync.audio(42, Some(audio.clock.clone()));
+        sync.report(
+            Snowflake(7),
+            42,
+            false,
+            point.rtp_timestamp,
+            100 << 32,
+            point.observed_at,
+        );
+        sync.report(
+            Snowflake(7),
+            SSRC,
+            true,
+            18_000,
+            100 << 32,
+            point.observed_at,
+        );
+        let mut frame = video(SSRC, index as u32, index == 0, vec![tag]);
+        frame.timestamp = if index == 0 { 0 } else { 18_000 };
+        push_settled(&mut decoder, frame);
+        if index == 0 {
+            // Compressed PTS is 200ms late, but emitted PTS is on time.
+            // Classifying the input would discard this picture outright.
+            assert_eq!(
+                received.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Duration::from_millis(200)
+            );
+        } else {
+            // Compressed PTS is on time, but the buffered output is 200ms late.
+            assert!(received.try_recv().is_err());
+        }
+    }
+    assert_eq!(decoder.finish().pictures_decoded, 2);
 }

@@ -180,6 +180,11 @@ impl App {
             ))
             .push(ui::item(
                 Some(icons::Icon::Grid),
+                i18n::tr("Browse channels"),
+                pick(Message::Onboarding(onboarding::Event::OpenBrowse(guild))),
+            ))
+            .push(ui::item(
+                Some(icons::Icon::Grid),
                 i18n::tr("Channels and roles"),
                 pick(Message::Onboarding(onboarding::Event::OpenQuestions(
                     guild, true,
@@ -359,6 +364,15 @@ impl App {
         let pick = |message| Some(Message::MenuPick(Box::new(message)));
         let can_send = gateway.timeline.can_send;
         let mut rows = column![
+            ui::item(
+                None,
+                i18n::tr("Check selected word"),
+                can_send
+                    .then(|| pick(Message::Composer(composer::Event::Spelling(
+                        composer::spelling::Event::Open
+                    ))))
+                    .flatten()
+            ),
             ui::item(
                 Some(icons::Icon::Attach),
                 i18n::tr("Attach a file"),

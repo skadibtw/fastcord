@@ -5,7 +5,9 @@ mod bridge;
 mod broker;
 mod connect;
 mod dial;
+mod evidence;
 mod http;
+pub use evidence::TransportEvidence;
 pub mod proxy;
 pub mod selector;
 pub mod settings;
@@ -13,7 +15,7 @@ mod socket;
 pub mod tls;
 pub mod udp;
 
-pub use broker::{BoxedIo, NetworkContext, SocketBroker, TlsStream};
+pub use broker::{BoxedIo, ExtendedSearchOutcome, NetworkContext, SocketBroker, TlsStream};
 pub use http::{HttpBuilder, HttpClient, HttpError, HttpRequestBuilder};
 pub use proxy::{ProxyConfig, ProxyKind};
 use serde::{Deserialize, Serialize};
@@ -151,3 +153,5 @@ impl std::fmt::Display for NetworkError {
 }
 
 impl std::error::Error for NetworkError {}
+
+pub mod timing;

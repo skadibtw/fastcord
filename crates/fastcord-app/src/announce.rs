@@ -92,6 +92,7 @@ pub struct State {
     publishing: Option<(Snowflake, Snowflake)>,
     panel: Option<Panel>,
     life: Gate<Busy>,
+    webhooks_revision: u64,
 }
 
 const SENT: &str = "Sent. The message shows Published when Discord confirms.";
@@ -183,6 +184,41 @@ impl State {
         }
     }
 
+    /// Refresh only an open follower list; a scalar revision cannot lose an
+    /// invalidation when several channels change between UI snapshots.
+    pub fn webhooks_changed(
+        &mut self,
+        navigation: &NavigationSnapshot,
+        snapshot: &timeline::Snapshot,
+        client: &RestClient,
+    ) -> Task<Event> {
+        if self.webhooks_revision == navigation.webhooks_revision {
+            return Task::none();
+        }
+        // Keep exactly one request in flight, including reads. Repeated
+        // revisions coalesce until that request completes; then refresh once.
+        if self.life.is_busy() {
+            return Task::none();
+        }
+        self.webhooks_revision = navigation.webhooks_revision;
+        let Some(Panel::Followers { guild, channel, .. }) = self.panel else {
+            return Task::none();
+        };
+        let notice = self.life.notice.take();
+        self.life.reset();
+        self.panel = None;
+        let task = self.update(
+            Event::OpenFollowers(guild, channel),
+            navigation,
+            snapshot,
+            client,
+        );
+        if self.life.notice.is_none() {
+            self.life.notice = notice;
+        }
+        task
+    }
+
     fn start<F, Fut>(&mut self, busy: Busy, run: F) -> Task<Event>
     where
         F: FnOnce() -> Fut,
@@ -234,7 +270,10 @@ impl State {
                     && *open == channel
                 {
                     match result {
-                        Ok(found) => *list = Some(found),
+                        Ok(found) if self.webhooks_revision == navigation.webhooks_revision => {
+                            *list = Some(found);
+                        }
+                        Ok(_) => {}
                         Err(error) => {
                             self.life.notice = Some(describe(
                                 error,
@@ -360,6 +399,7 @@ impl State {
                 });
             }
             Event::OpenFollowers(guild, channel) => {
+                self.webhooks_revision = navigation.webhooks_revision;
                 if !can_manage_webhooks(navigation, guild, channel) {
                     self.life.notice =
                         Some(tr("You need Manage Webhooks in a text channel for this.").to_owned());
@@ -405,7 +445,7 @@ impl State {
                 });
             }
         }
-        Task::none()
+        self.webhooks_changed(navigation, snapshot, &client)
     }
 }
 
@@ -837,6 +877,138 @@ mod tests {
                 top_position: 0,
             }),
             ..NavigationSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn webhook_invalidation_refreshes_visible_list_and_rejects_old_answer() {
+        let mut state = State::default();
+        let mut nav = admin_nav(true);
+        let rows = timeline::Snapshot::default();
+        run(
+            &mut state,
+            Event::OpenFollowers(Snowflake(2), Snowflake(20)),
+            &nav,
+            &rows,
+        );
+        let old = state.life.serial();
+        for revision in 1..=8 {
+            nav.webhooks_revision = revision;
+            assert_eq!(
+                state.webhooks_changed(&nav, &rows, &client()).units(),
+                0,
+                "no additional GET while one is pending"
+            );
+            assert_eq!(state.life.serial(), old);
+            assert_eq!(state.life.busy(), Some(Busy::Load));
+        }
+        let refresh = state.update(
+            Event::Loaded(old, Snowflake(20), Ok(Vec::new())),
+            &nav,
+            &rows,
+            &client(),
+        );
+        assert_eq!(
+            refresh.units(),
+            1,
+            "one fresh GET for the entire invalidation burst"
+        );
+        assert_eq!(state.webhooks_revision, 8);
+        assert_ne!(state.life.serial(), old);
+        assert_eq!(
+            state
+                .update(
+                    Event::Loaded(old, Snowflake(20), Ok(Vec::new())),
+                    &nav,
+                    &rows,
+                    &client()
+                )
+                .units(),
+            0
+        );
+        assert_eq!(state.life.busy(), Some(Busy::Load));
+        assert!(matches!(
+            state.panel,
+            Some(Panel::Followers { list: None, .. })
+        ));
+        assert_eq!(state.webhooks_changed(&nav, &rows, &client()).units(), 0);
+        let current = state.life.serial();
+        run(
+            &mut state,
+            Event::Loaded(current, Snowflake(20), Ok(Vec::new())),
+            &nav,
+            &rows,
+        );
+        assert!(matches!(
+            state.panel,
+            Some(Panel::Followers { list: Some(_), .. })
+        ));
+        state.clear();
+        nav.webhooks_revision += 1;
+        assert_eq!(state.webhooks_changed(&nav, &rows, &client()).units(), 0);
+    }
+
+    #[test]
+    fn webhook_change_waits_for_unfollow_completion_and_keeps_failure() {
+        for permission in [true, false] {
+            let mut nav = admin_nav(true);
+            let rows = rows(0);
+            let client = client();
+            let mut state = State::default();
+            run(
+                &mut state,
+                Event::OpenFollowers(Snowflake(2), Snowflake(20)),
+                &nav,
+                &rows,
+            );
+            let list = fastcord_discord::parse_followers(
+                include_str!("../../../fixtures/rest/channel-webhooks-synthetic.json").as_bytes(),
+            )
+            .unwrap();
+            run(
+                &mut state,
+                Event::Loaded(0, Snowflake(20), Ok(list)),
+                &nav,
+                &rows,
+            );
+            run(&mut state, Event::AskRemove(Snowflake(7001)), &nav, &rows);
+            run(&mut state, Event::ConfirmRemove, &nav, &rows);
+            let serial = state.life.serial();
+            nav.webhooks_revision = 1;
+            assert_eq!(state.webhooks_changed(&nav, &rows, &client).units(), 0);
+            nav.webhooks_revision = 2;
+            assert_eq!(
+                state
+                    .update(Event::ConfirmRemove, &nav, &rows, &client)
+                    .units(),
+                0
+            );
+            assert_eq!(state.life.busy(), Some(Busy::Remove));
+            assert_eq!(state.life.serial(), serial);
+            let revision = nav.webhooks_revision;
+            nav = admin_nav(permission);
+            nav.webhooks_revision = revision;
+            let task = state.update(
+                Event::Removed(serial, Snowflake(7001), Err(RestError::PermissionDenied)),
+                &nav,
+                &rows,
+                &client,
+            );
+            assert_eq!(task.units(), usize::from(permission));
+            if permission {
+                assert_eq!(state.life.busy(), Some(Busy::Load));
+                assert!(
+                    state
+                        .life
+                        .notice
+                        .as_deref()
+                        .unwrap()
+                        .contains("Discord refused")
+                );
+            } else {
+                assert!(state.panel.is_none());
+            }
+            assert_eq!(state.webhooks_changed(&nav, &rows, &client).units(), 0);
         }
     }
 

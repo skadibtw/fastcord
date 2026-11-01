@@ -163,14 +163,25 @@ impl Writer {
         wake.notify_one();
     }
 
+    /// Await the final disk write without joining its thread on the UI/runtime.
+    pub async fn finish_async(self) -> Status {
+        tokio::task::spawn_blocking(move || self.finish())
+            .await
+            .unwrap_or(Status::Failed)
+    }
+
     pub fn finish(mut self) -> Status {
         self.stop()
     }
 
-    fn stop(&mut self) -> Status {
+    fn request_stop(&self) {
         let (lock, wake) = &*self.pending;
         lock.lock().unwrap_or_else(|e| e.into_inner()).stop = true;
         wake.notify_one();
+    }
+
+    fn stop(&mut self) -> Status {
+        self.request_stop();
         self.thread.take().map_or(Status::Failed, |thread| {
             thread.join().unwrap_or(Status::Failed)
         })
@@ -180,7 +191,10 @@ impl Writer {
 impl Drop for Writer {
     fn drop(&mut self) {
         if self.thread.is_some() {
-            self.stop();
+            // A cancelled, never-polled Task can drop this on the UI thread.
+            // Ask the owner to flush and exit, but never join here. Explicit
+            // finish/finish_async are the durability barriers before purge/Quit.
+            self.request_stop();
         }
     }
 }
@@ -368,6 +382,71 @@ mod tests {
                 std::process::id()
             ))
             .join("voice-settings.csv")
+    }
+
+    #[tokio::test]
+    async fn asynchronous_finish_keeps_runtime_free_and_precedes_purge() {
+        let path = test_path();
+        // Hold the real persistence lock: the actual writer cannot finish its
+        // disk operation, while the async caller must remain able to yield.
+        let (locked, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = locked.send(());
+            let _ = wait.recv();
+        });
+        ready.await.unwrap();
+        let (writer, _) = Writer::at(Some(path.clone()), Snowflake(1));
+        assert!(writer.set(Snowflake(2), 62));
+        let finish = writer.finish_async();
+        tokio::pin!(finish);
+        assert!(matches!(
+            iced::futures::poll!(&mut finish),
+            std::task::Poll::Pending
+        ));
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            iced::futures::poll!(&mut finish),
+            std::task::Poll::Pending
+        ));
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(finish.await, Status::Saved);
+        assert_eq!(load_from(&path, Snowflake(1))[0].percent, 62);
+        purge_from(&path, Snowflake(1)).unwrap();
+        assert!(load_from(&path, Snowflake(1)).is_empty());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn dropping_a_cancelled_writer_never_waits_for_blocked_disk_io() {
+        let path = test_path();
+        let (locked, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = locked.send(());
+            let _ = wait.recv();
+        });
+        ready.await.unwrap();
+        let (writer, mut status) = Writer::at(Some(path.clone()), Snowflake(1));
+        writer.set(Snowflake(2), 62);
+        let (dropped, done) = tokio::sync::oneshot::channel();
+        let dropper = std::thread::spawn(move || {
+            drop(writer);
+            let _ = dropped.send(());
+        });
+        let result = tokio::time::timeout(Duration::from_secs(1), done).await;
+        // Release even on regression, so a failing test leaves no stuck thread.
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        dropper.join().unwrap();
+        assert!(result.is_ok(), "Drop waited for disk I/O");
+        status.changed().await.unwrap();
+        assert_eq!(*status.borrow(), Status::Saved);
+        assert_eq!(load_from(&path, Snowflake(1))[0].percent, 62);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

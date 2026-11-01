@@ -91,6 +91,7 @@ pub struct State {
     name_input: String,
     confirm: Confirm<Target>,
     life: Gate,
+    webhooks_revision: u64,
 }
 
 fn tidy(mut name: String) -> String {
@@ -157,6 +158,51 @@ impl State {
     {
         self.life.begin(());
         Task::perform(run(), |event| event)
+    }
+
+    /// A gateway webhook invalidation drops cached tokens immediately. A write
+    /// or read already in flight finishes before one coalesced read starts.
+    pub fn webhooks_changed(
+        &mut self,
+        navigation: &NavigationSnapshot,
+        client: &RestClient,
+    ) -> Task<Event> {
+        if self.webhooks_revision == navigation.webhooks_revision {
+            return Task::none();
+        }
+        let Some(Panel::Webhooks {
+            guild,
+            channel,
+            list,
+            editing,
+        }) = &mut self.panel
+        else {
+            self.webhooks_revision = navigation.webhooks_revision;
+            return Task::none();
+        };
+        let (guild, channel) = (*guild, *channel);
+        *list = None;
+        *editing = None;
+        self.confirm.cancel();
+        self.name_input.clear();
+        if self.life.is_busy() {
+            return Task::none();
+        }
+        self.webhooks_revision = navigation.webhooks_revision;
+        self.life.bump();
+        if !can_manage_webhooks(navigation, guild, channel) {
+            self.life.accept(self.life.serial());
+            self.life.notice = Some(tr("You need Manage Webhooks in this channel.").to_owned());
+            return Task::none();
+        }
+        let notice = self.life.notice.take();
+        let serial = self.life.serial();
+        let client = client.clone();
+        let task = self.start(move || async move {
+            Event::Webhooks(serial, channel, client.channel_webhooks(channel).await)
+        });
+        self.life.notice = notice;
+        task
     }
 
     fn webhooks_mut(&mut self, channel: Snowflake) -> Option<&mut Vec<Webhook>> {
@@ -238,7 +284,10 @@ impl State {
                     && *open == channel
                 {
                     match result {
-                        Ok(found) => *list = Some(found),
+                        Ok(found) if self.webhooks_revision == navigation.webhooks_revision => {
+                            *list = Some(found)
+                        }
+                        Ok(_) => {}
                         Err(error) => {
                             self.life.notice = Some(describe(
                                 error,
@@ -415,6 +464,7 @@ impl State {
                         Some(tr("You need Manage Webhooks in a text channel for this.").to_owned());
                     return (Task::none(), None);
                 }
+                self.webhooks_revision = navigation.webhooks_revision;
                 self.open(Panel::Webhooks {
                     guild,
                     channel,
@@ -559,7 +609,7 @@ impl State {
                 );
             }
         }
-        (Task::none(), None)
+        (self.webhooks_changed(navigation, &client), None)
     }
 }
 
@@ -916,6 +966,121 @@ mod tests {
             Event::Webhooks(0, HERE, Ok(vec![hook(7, HERE, true), hook(8, HERE, false)])),
             n,
         );
+        assert!(!state.life.is_busy());
+    }
+
+    #[test]
+    fn webhook_invalidation_drops_tokens_editor_and_confirmation_and_rejects_stale_read() {
+        let mut n = nav(true, true);
+        let mut state = State::default();
+        open_webhooks(&mut state, &n);
+        run(&mut state, Event::Edit(Snowflake(7)), &n);
+        run(&mut state, Event::Ask(Target::Webhook(Snowflake(7))), &n);
+        n.webhooks_revision = 1;
+        let _ = state.webhooks_changed(&n, &client());
+        assert!(state.life.is_busy());
+        assert!(state.confirm.pending().is_none() && state.name_input.is_empty());
+        assert!(matches!(
+            state.panel,
+            Some(Panel::Webhooks {
+                list: None,
+                editing: None,
+                ..
+            })
+        ));
+        assert_eq!(run(&mut state, Event::CopyUrl(Snowflake(7)), &n), None);
+        let current = state.life.serial();
+        run(
+            &mut state,
+            Event::Webhooks(current.wrapping_sub(1), HERE, Ok(vec![hook(7, HERE, true)])),
+            &n,
+        );
+        assert!(state.life.is_busy());
+        n.webhooks_revision = 2;
+        let _ = state.webhooks_changed(&n, &client());
+        assert_eq!(
+            state.life.serial(),
+            current,
+            "coalesce until the GET finishes"
+        );
+        run(
+            &mut state,
+            Event::Webhooks(current, HERE, Ok(vec![hook(7, HERE, true)])),
+            &n,
+        );
+        assert_eq!(state.life.serial(), current.wrapping_add(1));
+        run(
+            &mut state,
+            Event::Webhooks(current, HERE, Ok(vec![hook(7, HERE, true)])),
+            &n,
+        );
+        assert!(matches!(
+            state.panel,
+            Some(Panel::Webhooks { list: None, .. })
+        ));
+        let current = state.life.serial();
+        run(&mut state, Event::Webhooks(current, HERE, Ok(vec![])), &n);
+        assert!(!state.life.is_busy());
+        assert!(state.webhooks_mut(HERE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn webhook_invalidation_during_write_coalesces_after_its_failure() {
+        let mut n = nav(true, true);
+        let mut state = State::default();
+        open_webhooks(&mut state, &n);
+        run(&mut state, Event::Ask(Target::Webhook(Snowflake(7))), &n);
+        run(&mut state, Event::Confirm, &n);
+        let writing = state.life.serial();
+        for revision in 1..=3 {
+            n.webhooks_revision = revision;
+            let _ = state.webhooks_changed(&n, &client());
+            assert_eq!(state.life.serial(), writing, "do not replace a write");
+            assert_eq!(state.webhooks_revision, 0, "keep deferred invalidation");
+        }
+        run(
+            &mut state,
+            Event::Removed(
+                writing,
+                Target::Webhook(Snowflake(7)),
+                Err(RestError::PermissionDenied),
+            ),
+            &n,
+        );
+        assert!(state.life.is_busy());
+        assert_eq!(state.webhooks_revision, 3);
+        assert_eq!(state.life.serial(), writing.wrapping_add(1));
+        assert!(state.life.notice.as_deref().unwrap().contains("refused"));
+        let current = state.life.serial();
+        state.clear();
+        run(
+            &mut state,
+            Event::Webhooks(current, HERE, Ok(vec![hook(7, HERE, true)])),
+            &n,
+        );
+        assert!(state.panel.is_none());
+    }
+
+    #[test]
+    fn invalidation_checks_permission_and_never_reloads_authorized_apps() {
+        let mut n = nav(true, true);
+        let mut state = State::default();
+        open_webhooks(&mut state, &n);
+        n.admin = None;
+        n.webhooks_revision = 1;
+        let _ = state.webhooks_changed(&n, &client());
+        assert!(!state.life.is_busy());
+        assert!(matches!(
+            state.panel,
+            Some(Panel::Webhooks { list: None, .. })
+        ));
+        run(&mut state, Event::OpenAuthorized, &n);
+        let serial = state.life.serial();
+        n.webhooks_revision = 2;
+        let _ = state.webhooks_changed(&n, &client());
+        assert_eq!(state.life.serial(), serial);
+        assert!(matches!(state.panel, Some(Panel::Authorized(None))));
+        run(&mut state, Event::Authorized(serial, Ok(vec![])), &n);
         assert!(!state.life.is_busy());
     }
 

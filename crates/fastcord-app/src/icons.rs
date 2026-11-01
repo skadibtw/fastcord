@@ -231,6 +231,7 @@ pub fn action<'a, M: Clone + 'a>(a: Action<M>) -> Element<'a, M> {
     }
     tooltip(
         button(content)
+            .height(style::geometry::CONTROL_HEIGHT)
             .padding([4, 5])
             .on_press_maybe(a.on_press)
             .style(style::tool_button(a.active, a.danger)),
@@ -306,6 +307,13 @@ mod tests {
         .padding(8)
         .width(WIDTH)
         .into()
+    }
+
+    #[test]
+    fn compact_action_keeps_its_lower_hit_area_reachable() {
+        let mut ui = Ui::new(100.0, 40.0, action(act(Icon::Audio, "audio", true, 0)));
+        assert_eq!(ui.click(10.0, 30.0), ["audio"]);
+        assert!(ui.click(10.0, 34.0).is_empty());
     }
 
     #[test]

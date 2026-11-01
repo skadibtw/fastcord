@@ -164,9 +164,13 @@ impl History {
                 // read-only because choosing a user, role or channel is not
                 // supported here.
                 let offered = select.kind == 3
-                    && !values.is_empty()
                     && values.len() >= usize::from(select.min_values)
                     && values.len() <= usize::from(select.max_values)
+                    && values
+                        .iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                        == values.len()
                     && values
                         .iter()
                         .all(|v| select.options.iter().any(|o| o.value == *v));

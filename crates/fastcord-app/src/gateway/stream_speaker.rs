@@ -7,7 +7,9 @@
 //! ring, nothing on the audio callback but ring reads). It has no microphone,
 //! and it follows the call's output settings: the chosen output device and
 //! the deafen state (own or server). The audio clock is therefore the only
-//! clock; video is presented as it is decoded and is not delayed to match.
+//! master clock: authenticated sender reports map video onto the actual output
+//! cursor when both clocks are available. Missing or stale clocks fall back
+//! to immediate video presentation.
 //! Dropping a [`Speaker`] closes the output stream.
 
 use crate::i18n::{tr, trf};
@@ -154,6 +156,14 @@ pub(super) struct Playback {
 }
 
 impl Playback {
+    pub(super) fn playout_clock(
+        &self,
+    ) -> Option<std::sync::Arc<fastcord_audio::playout::PlayoutClock>> {
+        self.speaker
+            .as_ref()
+            .filter(|s| s.enabled)
+            .map(|s| s._engine.playout_clock())
+    }
     pub(super) fn push(
         &mut self,
         audio: ReceivedAudio,

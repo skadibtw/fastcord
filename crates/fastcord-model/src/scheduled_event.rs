@@ -129,11 +129,23 @@ struct WireMetadata {
     location: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct WireRule {
     frequency: Option<u8>,
     interval: Option<u32>,
     by_weekday: Option<Vec<u8>>,
+    by_n_weekday: Option<Vec<WireNthDay>>,
+    by_month: Option<Vec<u8>>,
+    by_month_day: Option<Vec<u8>>,
+    by_year_day: Option<Vec<u16>>,
+    count: Option<u32>,
+    end: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WireNthDay {
+    n: u8,
+    day: u8,
 }
 
 #[derive(Deserialize)]
@@ -180,7 +192,82 @@ fn recurrence(rule: &WireRule) -> String {
         text.push_str(" on ");
         text.push_str(&days.join(", "));
     }
-    clip(text, MAX_RECURRENCE_CHARS)
+    let complex = "Complex recurrence; see the official client for the full schedule";
+    if rule
+        .by_weekday
+        .as_ref()
+        .is_some_and(|days| days.len() > 7 || days.iter().any(|d| *d > 6))
+    {
+        return complex.into();
+    }
+    if let Some(days) = &rule.by_n_weekday {
+        if days.len() > 5 || days.iter().any(|d| !(1..=5).contains(&d.n) || d.day > 6) {
+            return complex.into();
+        }
+        for day in days {
+            text.push_str(&format!(
+                " on week {} {}",
+                day.n,
+                DAYS[usize::from(day.day)]
+            ));
+        }
+    }
+    if let Some(months) = &rule.by_month {
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        if months.len() > 12 || months.iter().any(|m| !(1..=12).contains(m)) {
+            return complex.into();
+        }
+        if !months.is_empty() {
+            text.push_str(" in ");
+            text.push_str(
+                &months
+                    .iter()
+                    .map(|m| MONTHS[usize::from(*m - 1)])
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+    }
+    if let Some(days) = &rule.by_month_day {
+        if days.len() > 31 || days.iter().any(|d| !(1..=31).contains(d)) {
+            return complex.into();
+        }
+        if !days.is_empty() {
+            text.push_str(" on day ");
+            text.push_str(
+                &days
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+    }
+    if rule
+        .by_year_day
+        .as_ref()
+        .is_some_and(|days| !days.is_empty())
+    {
+        return complex.into();
+    }
+    if let Some(count) = rule.count {
+        text.push_str(&format!("; {count} occurrences"));
+    }
+    if let Some(end) = &rule.end {
+        if parse_unix_ms(end).is_none() {
+            return complex.into();
+        }
+        // Preserve the supplied timezone offset; do not imply UTC or local time.
+        text.push_str("; until ");
+        text.push_str(end);
+    }
+    if text.chars().count() > MAX_RECURRENCE_CHARS {
+        complex.into()
+    } else {
+        text
+    }
 }
 
 impl TryFrom<Wire> for ScheduledEvent {
@@ -317,10 +404,38 @@ mod tests {
             frequency,
             interval,
             by_weekday: None,
+            ..WireRule::default()
         };
         assert_eq!(recurrence(&rule(Some(3), Some(1))), "Every day");
         assert_eq!(recurrence(&rule(Some(1), None)), "Every month");
         assert_eq!(recurrence(&rule(Some(0), Some(3))), "Every 3 years");
         assert_eq!(recurrence(&rule(None, None)), "Repeats");
+    }
+    #[test]
+    fn recurrence_preserves_monthly_yearly_limits_and_flags_complex_rules() {
+        let show = |raw| recurrence(&serde_json::from_value::<WireRule>(raw).unwrap());
+        assert_eq!(
+            show(json!({"frequency":1,"by_n_weekday":[{"n":2,"day":1}]})),
+            "Every month on week 2 Tue"
+        );
+        assert_eq!(
+            show(json!({"frequency":0,"by_month":[6],"by_month_day":[15],"count":4})),
+            "Every year in Jun on day 15; 4 occurrences"
+        );
+        assert!(
+            show(json!({"frequency":3,"end":"2027-01-01T00:00:00Z"}))
+                .contains("until 2027-01-01T00:00:00Z")
+        );
+        for raw in [
+            json!({"frequency":2,"by_weekday":[99]}),
+            json!({"frequency":1,"by_n_weekday":[{"n":8,"day":0}]}),
+            json!({"frequency":0,"by_month_day":[0]}),
+            json!({"frequency":0,"by_year_day":[200]}),
+            json!({"frequency":3,"by_month_day":(1..=31).collect::<Vec<_>>()}),
+        ] {
+            let result = show(raw);
+            assert!(result.starts_with("Complex recurrence"));
+            assert!(result.len() <= MAX_RECURRENCE_CHARS);
+        }
     }
 }

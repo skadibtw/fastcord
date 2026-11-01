@@ -85,13 +85,15 @@ impl GuildEntry {
     }
 
     fn remove_event(&mut self, id: Snowflake) -> bool {
-        if self.gone_events.len() == MAX_GONE {
-            self.gone_events.remove(0);
-        }
         if !self.gone_events.contains(&id) {
+            if self.gone_events.len() == MAX_GONE {
+                self.gone_events.remove(0);
+            }
             self.gone_events.push(id);
         }
         let Some(at) = self.events.iter().position(|held| held.id == id) else {
+            // Unknown events still acquire a tombstone and its allocation cost.
+            self.recompute_meta();
             return false;
         };
         self.events.remove(at);

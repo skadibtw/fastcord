@@ -112,7 +112,8 @@ impl Store {
             // Interactions are tracked by the message worker.
             | Dispatch::InteractionSuccess(_)
             | Dispatch::InteractionFailure(_)
-            | Dispatch::InteractionModalCreate(_) => {}
+            | Dispatch::InteractionModalCreate(_)
+            | Dispatch::ChannelPinsUpdate(_) => {}
             Dispatch::GuildCreate(created) => self.guild_create(*created, &mut changes),
             Dispatch::GuildUpdate(updated) => self.guild_update(*updated, &mut changes),
             Dispatch::GuildEmojisUpdate(update) => {
@@ -236,7 +237,9 @@ impl Store {
             | Dispatch::SoundboardChanged(_)
             | Dispatch::StickersChanged(_)
             // AutoMod rules belong to the open panel, not the reducer.
+            | Dispatch::AutoModerationExecution(_)
             | Dispatch::AutoModeration(_)
+            | Dispatch::WebhooksUpdate(_)
             // Typing is transient and lives outside the store.
             | Dispatch::TypingStart(_) => {}
         }

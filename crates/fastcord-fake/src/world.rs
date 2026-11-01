@@ -34,6 +34,7 @@ pub struct World {
     pub read_state: Vec<Value>,
     pub messages: HashMap<String, Vec<Value>>,
     pub scheduled_events: Map<String, Value>,
+    pub scheduled_event_users: Map<String, Value>,
     pub invites: Map<String, Value>,
     pub member_verification: Map<String, Value>,
     pub chatter: Chatter,
@@ -114,6 +115,11 @@ impl World {
             read_state: list(&doc, "read_state")?,
             messages,
             scheduled_events: map(&doc, "scheduled_events")?,
+            scheduled_event_users: if doc.get("scheduled_event_users").is_some() {
+                map(&doc, "scheduled_event_users")?
+            } else {
+                Map::new()
+            },
             invites: map(&doc, "invites")?,
             member_verification: map(&doc, "member_verification")?,
             chatter: Chatter {

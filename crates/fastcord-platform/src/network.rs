@@ -11,8 +11,34 @@ use fastcord_net::selector::NetworkChangeSource;
 mod helper;
 #[cfg(target_os = "windows")]
 mod packet;
+#[cfg(any(target_os = "windows", test))]
+mod packet_plan;
 #[cfg(target_os = "windows")]
 pub use helper::{PacketFactory, PacketHelper};
+
+/// Native packet operations shipped by this platform build. This is capability,
+/// not runtime helper availability or evidence that a filtered route works.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PacketCapabilities {
+    pub explicit_authorization_required: bool,
+    pub tcp_fake: bool,
+    pub tcp_overlap: bool,
+    pub udp_discovery_fake: bool,
+    pub udp_ipv4_fragment: bool,
+    pub udp_ipv6_fragment: bool,
+}
+
+pub const fn packet_capabilities() -> PacketCapabilities {
+    let windows = cfg!(target_os = "windows");
+    PacketCapabilities {
+        explicit_authorization_required: windows,
+        tcp_fake: windows,
+        tcp_overlap: windows,
+        udp_discovery_fake: windows,
+        udp_ipv4_fragment: windows,
+        udp_ipv6_fragment: false,
+    }
+}
 
 /// Special child entry; malformed helper invocations never start the client.
 pub fn packet_helper_entry(suffix: &str, parent: u32) -> std::io::Result<()> {
@@ -90,3 +116,20 @@ mod tests {
         ));
     }
 }
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod packet_capability_tests {
+    #[test]
+    fn unsupported_operations_refuse_without_starting_a_helper() {
+        let caps = super::packet_capabilities();
+        assert!(!caps.tcp_fake && !caps.tcp_overlap && !caps.udp_discovery_fake);
+        assert!(!caps.udp_ipv4_fragment && !caps.udp_ipv6_fragment);
+        assert!(!caps.explicit_authorization_required);
+        assert_eq!(
+            super::packet_helper_entry("fixture", 1).unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+    }
+}
+#[cfg(target_os = "linux")]
+pub mod profile;

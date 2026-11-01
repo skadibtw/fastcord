@@ -25,11 +25,171 @@ pub const TOKEN: &str = "fake-token";
 
 static PORT: OnceLock<u16> = OnceLock::new();
 static SCRIPT: OnceLock<PathBuf> = OnceLock::new();
+static DRAW_SHELL: OnceLock<iced_renderer::graphics::Shell> = OnceLock::new();
+
+pub(crate) fn set_draw_shell(shell: iced_renderer::graphics::Shell) {
+    let _ = DRAW_SHELL.set(shell);
+}
+
+// At most one scripted screenshot may await a completed draw. A newer
+// request cancels the old one; dropping/timing out its ticket releases it.
+#[derive(Default)]
+struct DrawWaiter {
+    serial: u64,
+    pending: Option<(
+        u64,
+        iced::window::Id,
+        tokio::sync::oneshot::Sender<iced::window::Screenshot>,
+    )>,
+}
+
+static DRAW_WAITER: std::sync::Mutex<DrawWaiter> = std::sync::Mutex::new(DrawWaiter {
+    serial: 0,
+    pending: None,
+});
+
+pub(crate) struct DrawTicket {
+    serial: u64,
+    ready: tokio::sync::oneshot::Receiver<iced::window::Screenshot>,
+}
+
+pub(crate) fn next_draw(window: iced::window::Id) -> DrawTicket {
+    let (send, ready) = tokio::sync::oneshot::channel();
+    let mut waiter = DRAW_WAITER.lock().unwrap_or_else(|p| p.into_inner());
+    waiter.serial = waiter.serial.wrapping_add(1);
+    let serial = waiter.serial;
+    waiter.pending = Some((serial, window, send));
+    drop(waiter);
+    // A script barrier deliberately prevents the next UI action. Wake the
+    // runtime explicitly instead of relying on that action to produce a frame.
+    // iced's shell API redraws all windows; take_capture still selects only
+    // the requested window. No timer or screenshot action is scheduled.
+    if let Some(shell) = DRAW_SHELL.get() {
+        shell.request_redraw();
+    }
+    DrawTicket { serial, ready }
+}
+
+/// Takes a request only at the matching window's presentation boundary.
+/// The caller captures and sends owned pixels synchronously, while its widget
+/// paragraphs are alive; it must not schedule a later screenshot action.
+pub(crate) fn take_capture(
+    window: iced::window::Id,
+) -> Option<tokio::sync::oneshot::Sender<iced::window::Screenshot>> {
+    let mut waiter = DRAW_WAITER.lock().unwrap_or_else(|p| p.into_inner());
+    if waiter
+        .pending
+        .as_ref()
+        .is_some_and(|(_, wanted, _)| *wanted == window)
+    {
+        waiter.pending.take().map(|(_, _, ready)| ready)
+    } else {
+        None
+    }
+}
+
+/// Single pending RGBA snapshot budget, including high-DPI windows.
+pub(crate) fn capture_size_allowed(size: iced::Size<u32>) -> bool {
+    size.width > 0
+        && size.height > 0
+        && u64::from(size.width) * u64::from(size.height) <= 16 * 1024 * 1024
+}
+
+impl DrawTicket {
+    pub(crate) async fn wait(self) -> Option<iced::window::Screenshot> {
+        self.wait_for(Duration::from_secs(3)).await
+    }
+
+    async fn wait_for(mut self, timeout: Duration) -> Option<iced::window::Screenshot> {
+        tokio::time::timeout(timeout, &mut self.ready)
+            .await
+            .ok()
+            .and_then(Result::ok)
+    }
+}
+
+impl Drop for DrawTicket {
+    fn drop(&mut self) {
+        let mut waiter = DRAW_WAITER.lock().unwrap_or_else(|p| p.into_inner());
+        if waiter
+            .pending
+            .as_ref()
+            .is_some_and(|(serial, _, _)| *serial == self.serial)
+        {
+            waiter.pending = None;
+        }
+    }
+}
+
+/// Request-owned completion: clones refer to the same capture, never to a
+/// later request using the same path. Dropping the last clone cancels the wait.
+#[derive(Clone, Debug)]
+pub struct SnapshotAck(std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>);
+
+impl PartialEq for SnapshotAck {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl SnapshotAck {
+    fn new() -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (send, ready) = tokio::sync::oneshot::channel();
+        (
+            Self(std::sync::Arc::new(std::sync::Mutex::new(Some(send)))),
+            ready,
+        )
+    }
+
+    pub(crate) fn finish(&self) {
+        if let Some(send) = self.0.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = send.send(());
+        }
+    }
+}
+
+/// A snap is a barrier through PNG saving, not merely through sending the
+/// app message. If the app stops processing messages, stop this script after
+/// the bounded wait rather than emitting actions against an unknown frame.
+async fn send_step(
+    output: &mut iced::futures::channel::mpsc::Sender<Step>,
+    step: Step,
+    timeout: Duration,
+) -> bool {
+    use iced::futures::SinkExt;
+    let (step, ready) = match step {
+        Step::Snap(path, _) => {
+            let (ack, ready) = SnapshotAck::new();
+            (Step::Snap(path, Some(ack)), Some(ready))
+        }
+        step => (step, None),
+    };
+    if output.send(step).await.is_err() {
+        return false;
+    }
+    if let Some(ready) = ready {
+        // A dropped capture (including an aborted app task) releases the
+        // barrier as a failure. A timeout stops further scripted mutation.
+        if tokio::time::timeout(timeout, ready).await.is_err() {
+            eprintln!("script: screenshot completion timed out; quitting fake app");
+            let _ = output.send(Step::Quit).await;
+            return false;
+        }
+    }
+    true
+}
 
 /// Panels a script can open or close.
 pub const PANELS: &[&str] = &[
     "search",
     "pins",
+    "thread-archive",
+    "archive-public",
+    "archive-private",
+    "archive-joined",
+    "spelling-prepare",
+    "spelling-en-us",
+    "spelling-apply",
     "inbox",
     "friends",
     "emoji",
@@ -43,6 +203,14 @@ pub const PANELS: &[&str] = &[
     "login-token",
     "login-accounts",
     "server-menu",
+    "browse-channels",
+    "events",
+    "event-details",
+    "event-users",
+    "event-users-next",
+    "event-new",
+    "event-weekly",
+    "onboarding-questions",
     "conversation-menu",
     "account-menu",
     "mic-menu",
@@ -76,7 +244,7 @@ pub enum Step {
     /// A voice channel of a server.
     Join(u64, u64),
     /// Where the window's pixels go (the player window's while one is open).
-    Snap(PathBuf),
+    Snap(PathBuf, Option<SnapshotAck>),
     /// Watch a synthetic stream for this many seconds: a player window opens
     /// and 1280x720 pictures arrive at 30 fps (no voice exists offline).
     Stream(f32),
@@ -115,7 +283,7 @@ fn parse_script(text: &str, dir: &std::path::Path) -> Vec<(Duration, Step)> {
                 }
             },
             "snap" if !rest.is_empty() && !rest.contains(['/', '\\']) => {
-                Step::Snap(dir.join(format!("{rest}.png")))
+                Step::Snap(dir.join(format!("{rest}.png")), None)
             }
             "toggle" => match PANELS.iter().find(|panel| **panel == rest) {
                 Some(panel) => Step::Toggle(panel),
@@ -155,7 +323,6 @@ fn parse_script(text: &str, dir: &std::path::Path) -> Vec<(Duration, Step)> {
 /// The steps of `--script`, each after its pause; nothing without one.
 pub fn script() -> impl iced::futures::Stream<Item = Step> {
     iced::stream::channel(1, async move |mut output| {
-        use iced::futures::SinkExt;
         let Some(path) = SCRIPT.get() else {
             std::future::pending::<()>().await;
             return;
@@ -170,7 +337,9 @@ pub fn script() -> impl iced::futures::Stream<Item = Step> {
             .to_owned();
         for (pause, step) in parse_script(&text, &dir) {
             tokio::time::sleep(pause).await;
-            let _ = output.send(step).await;
+            if !send_step(&mut output, step, Duration::from_secs(10)).await {
+                return;
+            }
         }
         std::future::pending::<()>().await;
     })
@@ -316,7 +485,10 @@ mod tests {
                     Step::Open("discord://-/channels/@me".into())
                 ),
                 (Duration::ZERO, Step::Size(1080.0, 672.0)),
-                (Duration::from_secs(1), Step::Snap(dir.join("home.png"))),
+                (
+                    Duration::from_secs(1),
+                    Step::Snap(dir.join("home.png"), None)
+                ),
                 (Duration::ZERO, Step::Toggle("pins")),
                 (Duration::ZERO, Step::Join(5001, 6009)),
                 (Duration::ZERO, Step::Quit),
@@ -340,5 +512,166 @@ mod tests {
         ] {
             assert_eq!(parse_port(bad), None, "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod draw_wait_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn script_snapshot_blocks_next_action_until_saved_or_canceled() {
+        use iced::futures::{FutureExt, StreamExt};
+        for canceled in [false, true] {
+            let (mut output, mut input) = iced::futures::channel::mpsc::channel(1);
+            let driver = tokio::spawn(async move {
+                assert!(
+                    send_step(
+                        &mut output,
+                        Step::Snap(PathBuf::from("same.png"), None),
+                        Duration::from_secs(1),
+                    )
+                    .await
+                );
+                assert!(send_step(&mut output, Step::Toggle("event-new"), Duration::ZERO).await);
+            });
+            let Some(Step::Snap(_, Some(ack))) = input.next().await else {
+                panic!("script must register a request-specific completion before emission");
+            };
+            assert!(
+                input.next().now_or_never().is_none(),
+                "next UI mutation must wait"
+            );
+            if canceled {
+                drop(ack); // aborted capture must not hang the script
+            } else {
+                ack.finish(); // FakeShot calls this only after save returns
+            }
+            assert_eq!(input.next().await, Some(Step::Toggle("event-new")));
+            driver.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn script_snapshot_timeout_stops_actions_and_old_ack_cannot_release_new_request() {
+        use iced::futures::StreamExt;
+        let (mut output, mut input) = iced::futures::channel::mpsc::channel(1);
+        let driver = tokio::spawn(async move {
+            send_step(
+                &mut output,
+                Step::Snap(PathBuf::from("same.png"), None),
+                Duration::ZERO,
+            )
+            .await
+        });
+        let Some(Step::Snap(_, Some(old))) = input.next().await else {
+            panic!("snapshot")
+        };
+        assert!(!driver.await.unwrap());
+        let (current, mut ready) = SnapshotAck::new();
+        old.finish();
+        assert!(matches!(
+            ready.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        current.finish();
+        assert!(ready.await.is_ok());
+        assert_eq!(input.next().await, Some(Step::Quit));
+        assert!(input.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_wait_is_single_window_scoped_and_cancellation_safe() {
+        struct DrawNotifier(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl iced_renderer::graphics::shell::Notifier for DrawNotifier {
+            fn request_redraw(&self) {
+                // Registration precedes notification and releases its mutex.
+                assert!(DRAW_WAITER.try_lock().unwrap().pending.is_some());
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            fn invalidate_layout(&self) {}
+        }
+        let draws = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        set_draw_shell(iced_renderer::graphics::Shell::new(DrawNotifier(
+            draws.clone(),
+        )));
+        let first = iced::window::Id::unique();
+        let second = iced::window::Id::unique();
+        let mut old = next_draw(first);
+        assert!(take_capture(second).is_none());
+        assert!(matches!(
+            old.ready.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        let mut current = next_draw(second);
+        assert!(matches!(
+            old.ready.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        drop(old); // must not cancel its replacement
+        assert!(take_capture(first).is_none());
+        assert!(matches!(
+            current.ready.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        let capture = take_capture(second).unwrap();
+        assert!(take_capture(second).is_none(), "one capture only");
+        let _ = capture.send(iced::window::Screenshot::new(
+            vec![1, 2, 3, 255],
+            iced::Size::new(1, 1),
+            1.0,
+        ));
+        assert_eq!(current.wait().await.unwrap().rgba.as_ref(), &[1, 2, 3, 255]);
+        let canceled = next_draw(first);
+        drop(canceled);
+        assert!(DRAW_WAITER.lock().unwrap().pending.is_none());
+        let timed = next_draw(first);
+        assert!(timed.wait_for(Duration::ZERO).await.is_none());
+        assert!(DRAW_WAITER.lock().unwrap().pending.is_none());
+        assert_eq!(draws.load(std::sync::atomic::Ordering::Relaxed), 4);
+        assert!(capture_size_allowed(iced::Size::new(3840, 2160)));
+        assert!(!capture_size_allowed(iced::Size::new(u32::MAX, u32::MAX)));
+        assert!(!capture_size_allowed(iced::Size::new(0, 100)));
+    }
+}
+
+/// One invented onboarding fixture image, never a public CDN request.
+/// The real bounded decoder still handles these bytes in fake mode.
+pub(crate) fn onboarding_emoji(
+    id: fastcord_model::Snowflake,
+    animated: bool,
+) -> Option<bytes::Bytes> {
+    (id.0 == 900 && !animated).then(|| {
+        bytes::Bytes::from_static(include_bytes!(
+            "../../../fixtures/fake/onboarding-emoji.png"
+        ))
+    })
+}
+
+#[cfg(test)]
+mod onboarding_fixture_tests {
+    #[tokio::test]
+    async fn static_onboarding_fixture_uses_real_bounded_decoder_without_network() {
+        use fastcord_model::Snowflake;
+        assert!(super::onboarding_emoji(Snowflake(901), false).is_none());
+        assert!(super::onboarding_emoji(Snowflake(900), true).is_none());
+        let bytes = super::onboarding_emoji(Snowflake(900), false).unwrap();
+        let cache = crate::attachments::AttachmentCache::new(
+            &fastcord_net::NetworkContext::off(),
+            Snowflake(1),
+            std::env::temp_dir().join(format!(
+                "fastcord-onboarding-fixture-{}",
+                std::process::id()
+            )),
+            "test",
+        )
+        .unwrap();
+        let decoded = cache.decode_emoji(bytes).await.unwrap();
+        assert_eq!(decoded.frames.len(), 1);
+        assert_eq!(
+            (decoded.frames[0].width, decoded.frames[0].height),
+            (32, 32)
+        );
+        assert_eq!(decoded.frames[0].rgba.len(), 4096);
     }
 }

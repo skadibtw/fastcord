@@ -114,6 +114,7 @@ pub(crate) struct OutputCallback {
     /// The previous callback was fully supplied, so running dry now is an
     /// underrun rather than continued idle silence.
     flowing: bool,
+    position: Option<Arc<crate::playout::OutputPosition>>,
 }
 
 impl OutputCallback {
@@ -122,19 +123,36 @@ impl OutputCallback {
             ring,
             counters,
             flowing: false,
+            position: None,
         }
     }
 
+    pub(crate) fn with_position(mut self, position: Arc<crate::playout::OutputPosition>) -> Self {
+        self.position = Some(position);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn process<T>(&mut self, out: &mut [T])
     where
         T: Sample + FromSample<f32>,
     {
+        self.process_timed(out, Some(std::time::Duration::ZERO));
+    }
+    pub(crate) fn process_timed<T>(&mut self, out: &mut [T], latency: Option<std::time::Duration>)
+    where
+        T: Sample + FromSample<f32>,
+    {
+        let now = std::time::Instant::now();
         let _scope = CallbackScope::enter();
         let upper = 1.0_f32.next_down();
         self.counters.callbacks.fetch_add(1, Ordering::Relaxed);
-        let written = self
+        let (written, endpoint) = self
             .ring
             .pop_map(out, |s| T::from_sample(s.clamp(-1.0, upper)));
+        if let Some(position) = &self.position {
+            position.record(endpoint, written, now, latency);
+        }
         let missing = out.len() - written;
         if missing > 0 {
             out[written..].fill(T::EQUILIBRIUM);
@@ -182,6 +200,24 @@ mod tests {
             producer,
             counters,
         )
+    }
+
+    #[test]
+    fn output_clock_observation_keeps_callback_allocation_free() {
+        let (mut callback, mut ring, _) = output(2, 480);
+        let position = Arc::new(crate::playout::OutputPosition::new(48_000, 2));
+        callback = callback.with_position(position.clone());
+        ring.push_available([0.2; 960].into_iter());
+        let mut out = [0.0f32; 960];
+        let before = thread_callback_heap_ops();
+        callback.process_timed(&mut out, Some(std::time::Duration::from_millis(8)));
+        assert_eq!(thread_callback_heap_ops(), before);
+        let point = position.snapshot().unwrap();
+        assert_eq!(point.read, 960);
+        assert_eq!(
+            point.at.duration_since(point.observed_at),
+            std::time::Duration::from_millis(18)
+        );
     }
 
     #[test]

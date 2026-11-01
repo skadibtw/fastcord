@@ -7,6 +7,16 @@ use iced::theme::Palette;
 use iced::widget::container;
 use iced::{Background, Border, Color, Theme};
 
+/// Shared logical-pixel geometry for the native desktop shell.
+pub mod geometry {
+    pub const RAIL_WIDTH: f32 = 72.0;
+    pub const SIDEBAR_WIDTH: f32 = 240.0;
+    /// 48 px content plus the separator.
+    pub const HEADER_HEIGHT: f32 = 49.0;
+    pub const MESSAGE_AVATAR: f32 = 40.0;
+    pub const CONTROL_HEIGHT: f32 = 32.0;
+}
+
 pub const RAIL: Color = Color::from_rgb(0.118, 0.122, 0.133); // #1e1f22
 pub const SIDEBAR: Color = Color::from_rgb(0.169, 0.176, 0.192); // #2b2d31
 pub const CHAT: Color = Color::from_rgb(0.192, 0.200, 0.220); // #313338

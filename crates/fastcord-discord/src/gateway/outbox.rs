@@ -19,6 +19,7 @@ const QUEUE_EVENTS: usize = 256;
 
 struct Delivery {
     event: GatewayEvent,
+    timing: Option<super::StartupStamp>,
     /// Returns the event's bytes to the budget when the consumer drops it.
     _permit: OwnedSemaphorePermit,
 }
@@ -30,8 +31,13 @@ pub(crate) struct EventReceiver {
 
 impl EventReceiver {
     pub(crate) async fn recv(&mut self) -> Option<GatewayEvent> {
-        let Delivery { event, .. } = self.events.recv().await?;
-        Some(event)
+        self.recv_timed().await.map(|(event, _)| event)
+    }
+    pub(crate) async fn recv_timed(
+        &mut self,
+    ) -> Option<(GatewayEvent, Option<super::StartupStamp>)> {
+        let Delivery { event, timing, .. } = self.events.recv().await?;
+        Some((event, timing))
     }
 }
 
@@ -41,6 +47,7 @@ pub(crate) struct ConsumerGone;
 
 struct Queued {
     event: GatewayEvent,
+    timing: Option<super::StartupStamp>,
     cost: u32,
 }
 
@@ -52,6 +59,7 @@ pub(crate) struct Outbox {
     sender: mpsc::Sender<Delivery>,
     budget: Arc<Semaphore>,
     budget_bytes: u32,
+    timing: Option<super::StartupStamp>,
 }
 
 pub(crate) fn channel() -> (Outbox, EventReceiver) {
@@ -66,16 +74,36 @@ pub(crate) fn channel_with_budget(budget_bytes: u32) -> (Outbox, EventReceiver) 
             sender,
             budget: Arc::new(Semaphore::new(budget_bytes as usize)),
             budget_bytes,
+            timing: None,
         },
         EventReceiver { events },
     )
 }
 
 impl Outbox {
+    pub(crate) fn set_timing(&mut self, timing: Option<super::StartupStamp>) {
+        self.timing = timing;
+    }
     /// Queues an event costing about `cost` bytes of consumer-side memory.
     pub(crate) fn push(&mut self, event: GatewayEvent, cost: usize) {
         let cost = cost.clamp(1, self.budget_bytes as usize) as u32;
-        self.pending.push_back(Queued { event, cost });
+        let timing = matches!(
+            event,
+            GatewayEvent::State(super::event::ConnectionState::Ready)
+        )
+        .then_some(self.timing)
+        .flatten();
+        let cost = if timing.is_some() {
+            cost.saturating_add(std::mem::size_of::<super::StartupStamp>() as u32)
+                .min(self.budget_bytes)
+        } else {
+            cost
+        };
+        self.pending.push_back(Queued {
+            event,
+            cost,
+            timing,
+        });
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -101,6 +129,7 @@ impl Outbox {
         if let Some(queued) = self.pending.pop_front() {
             slot.send(Delivery {
                 event: queued.event,
+                timing: queued.timing,
                 _permit: permit,
             });
         }
@@ -134,6 +163,24 @@ mod tests {
         future
             .as_mut()
             .poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[tokio::test]
+    async fn ready_timing_is_bound_to_its_queued_attempt_and_returns_its_budget() {
+        let (mut outbox, mut events) = channel_with_budget(1000);
+        let first = super::super::timing::Timing::new().stamp();
+        let second = super::super::timing::Timing::new().stamp();
+        let ready = || GatewayEvent::State(ConnectionState::Ready);
+        outbox.set_timing(Some(first));
+        outbox.push(ready(), 100);
+        outbox.set_timing(Some(second));
+        outbox.push(ready(), 100);
+        outbox.push(event(3), 100);
+        outbox.flush().await.unwrap();
+        assert_eq!(events.recv_timed().await, Some((ready(), Some(first))));
+        assert_eq!(events.recv_timed().await, Some((ready(), Some(second))));
+        assert_eq!(events.recv_timed().await, Some((event(3), None)));
+        assert_eq!(outbox.budget.available_permits(), 1000);
     }
 
     #[tokio::test]

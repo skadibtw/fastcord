@@ -6494,7 +6494,15 @@
     "entity_type": 2,
     "entity_id": null,
     "entity_metadata": null,
-    "user_count": 12
+    "user_count": 55,
+    "recurrence_rule": {
+     "start": "2026-10-30T18:00:00Z",
+     "frequency": 2,
+     "interval": 2,
+     "by_weekday": [
+      4
+     ]
+    }
    },
    {
     "id": "901",
@@ -6512,6 +6520,450 @@
      "location": "Town hall"
     },
     "user_count": 3
+   }
+  ]
+ },
+ "scheduled_event_users": {
+  "5001:900": [
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40001",
+     "username": "event_guest_01",
+     "global_name": "Interested member 01"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40002",
+     "username": "event_guest_02",
+     "global_name": "Interested member 02"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40003",
+     "username": "event_guest_03",
+     "global_name": "Interested member 03"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40004",
+     "username": "event_guest_04",
+     "global_name": "Interested member 04"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40005",
+     "username": "event_guest_05",
+     "global_name": "Interested member 05"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40006",
+     "username": "event_guest_06",
+     "global_name": "Interested member 06"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40007",
+     "username": "event_guest_07",
+     "global_name": "Interested member 07"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40008",
+     "username": "event_guest_08",
+     "global_name": "Interested member 08"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40009",
+     "username": "event_guest_09",
+     "global_name": "Interested member 09"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40010",
+     "username": "event_guest_10",
+     "global_name": "Interested member 10"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40011",
+     "username": "event_guest_11",
+     "global_name": "Interested member 11"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40012",
+     "username": "event_guest_12",
+     "global_name": "Interested member 12"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40013",
+     "username": "event_guest_13",
+     "global_name": "Interested member 13"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40014",
+     "username": "event_guest_14",
+     "global_name": "Interested member 14"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40015",
+     "username": "event_guest_15",
+     "global_name": "Interested member 15"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40016",
+     "username": "event_guest_16",
+     "global_name": "Interested member 16"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40017",
+     "username": "event_guest_17",
+     "global_name": "Interested member 17"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40018",
+     "username": "event_guest_18",
+     "global_name": "Interested member 18"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40019",
+     "username": "event_guest_19",
+     "global_name": "Interested member 19"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40020",
+     "username": "event_guest_20",
+     "global_name": "Interested member 20"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40021",
+     "username": "event_guest_21",
+     "global_name": "Interested member 21"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40022",
+     "username": "event_guest_22",
+     "global_name": "Interested member 22"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40023",
+     "username": "event_guest_23",
+     "global_name": "Interested member 23"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40024",
+     "username": "event_guest_24",
+     "global_name": "Interested member 24"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40025",
+     "username": "event_guest_25",
+     "global_name": "Interested member 25"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40026",
+     "username": "event_guest_26",
+     "global_name": "Interested member 26"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40027",
+     "username": "event_guest_27",
+     "global_name": "Interested member 27"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40028",
+     "username": "event_guest_28",
+     "global_name": "Interested member 28"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40029",
+     "username": "event_guest_29",
+     "global_name": "Interested member 29"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40030",
+     "username": "event_guest_30",
+     "global_name": "Interested member 30"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40031",
+     "username": "event_guest_31",
+     "global_name": "Interested member 31"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40032",
+     "username": "event_guest_32",
+     "global_name": "Interested member 32"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40033",
+     "username": "event_guest_33",
+     "global_name": "Interested member 33"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40034",
+     "username": "event_guest_34",
+     "global_name": "Interested member 34"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40035",
+     "username": "event_guest_35",
+     "global_name": "Interested member 35"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40036",
+     "username": "event_guest_36",
+     "global_name": "Interested member 36"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40037",
+     "username": "event_guest_37",
+     "global_name": "Interested member 37"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40038",
+     "username": "event_guest_38",
+     "global_name": "Interested member 38"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40039",
+     "username": "event_guest_39",
+     "global_name": "Interested member 39"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40040",
+     "username": "event_guest_40",
+     "global_name": "Interested member 40"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40041",
+     "username": "event_guest_41",
+     "global_name": "Interested member 41"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40042",
+     "username": "event_guest_42",
+     "global_name": "Interested member 42"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40043",
+     "username": "event_guest_43",
+     "global_name": "Interested member 43"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40044",
+     "username": "event_guest_44",
+     "global_name": "Interested member 44"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40045",
+     "username": "event_guest_45",
+     "global_name": "Interested member 45"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40046",
+     "username": "event_guest_46",
+     "global_name": "Interested member 46"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40047",
+     "username": "event_guest_47",
+     "global_name": "Interested member 47"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40048",
+     "username": "event_guest_48",
+     "global_name": "Interested member 48"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40049",
+     "username": "event_guest_49",
+     "global_name": "Interested member 49"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40050",
+     "username": "event_guest_50",
+     "global_name": "Interested member 50"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40051",
+     "username": "event_guest_51",
+     "global_name": "Interested member 51"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40052",
+     "username": "event_guest_52",
+     "global_name": "Interested member 52"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40053",
+     "username": "event_guest_53",
+     "global_name": "Interested member 53"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40054",
+     "username": "event_guest_54",
+     "global_name": "Interested member 54"
+    }
+   },
+   {
+    "guild_scheduled_event_id": "900",
+    "user": {
+     "id": "40055",
+     "username": "event_guest_55",
+     "global_name": "Interested member 55"
+    }
    }
   ]
  },

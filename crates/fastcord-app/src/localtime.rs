@@ -63,6 +63,22 @@ const DAYS: [&str; 7] = [
 /// `<t:unix:style>` as the official client shows it. `None` if `unix` is out
 /// of the representable range.
 pub fn markup(unix: i64, style: TimeStyle, offset: Option<UtcOffset>, now: i64) -> Option<String> {
+    markup_with_order(
+        unix,
+        style,
+        offset,
+        now,
+        fastcord_platform::clock_format::date_order(),
+    )
+}
+
+fn markup_with_order(
+    unix: i64,
+    style: TimeStyle,
+    offset: Option<UtcOffset>,
+    now: i64,
+    order: Option<fastcord_platform::clock_format::DateOrder>,
+) -> Option<String> {
     if style == TimeStyle::Relative {
         return relative(unix, now);
     }
@@ -73,7 +89,7 @@ pub fn markup(unix: i64, style: TimeStyle, offset: Option<UtcOffset>, now: i64) 
         .checked_to_offset(offset.unwrap_or(UtcOffset::UTC))?;
     let (y, m, d) = (at.year(), at.month() as usize, at.day());
     let (h, min, s) = (at.hour(), at.minute(), at.second());
-    let long_date = trf("{} {} {}", &[&d, &tr(MONTHS[m - 1]), &y]);
+    let (short_date, long_date) = dates(y, m, d, order);
     let hour12 = hour12();
     let short = crate::chat_prefs::clock(h, min, hour12);
     Some(match style {
@@ -84,7 +100,7 @@ pub fn markup(unix: i64, style: TimeStyle, offset: Option<UtcOffset>, now: i64) 
             format!("{hm}:{s:02} {suffix}")
         }
         TimeStyle::LongTime => format!("{short}:{s:02}"),
-        TimeStyle::ShortDate => format!("{d:02}/{m:02}/{y}"),
+        TimeStyle::ShortDate => short_date,
         TimeStyle::LongDate => long_date,
         TimeStyle::ShortDateTime => format!("{long_date} {short}"),
         TimeStyle::LongDateTime => format!(
@@ -93,6 +109,30 @@ pub fn markup(unix: i64, style: TimeStyle, offset: Option<UtcOffset>, now: i64) 
         ),
         TimeStyle::Relative => unreachable!(),
     })
+}
+
+fn dates(
+    y: i32,
+    m: usize,
+    d: u8,
+    order: Option<fastcord_platform::clock_format::DateOrder>,
+) -> (String, String) {
+    use fastcord_platform::clock_format::DateOrder;
+    let month = tr(MONTHS[m - 1]);
+    match order.unwrap_or(DateOrder::DayMonthYear) {
+        DateOrder::DayMonthYear => (
+            format!("{d:02}/{m:02}/{y}"),
+            trf("{} {} {}", &[&d, &month, &y]),
+        ),
+        DateOrder::MonthDayYear => (
+            format!("{m:02}/{d:02}/{y}"),
+            trf("{} {} {}", &[&month, &d, &y]),
+        ),
+        DateOrder::YearMonthDay => (
+            format!("{y}/{m:02}/{d:02}"),
+            trf("{} {} {}", &[&y, &month, &d]),
+        ),
+    }
 }
 
 fn relative(unix: i64, now: i64) -> Option<String> {
@@ -148,7 +188,7 @@ mod tests {
 
     #[test]
     fn every_style_at_a_fixed_offset() {
-        let f = |style, off| markup(AT, style, off, AT).unwrap();
+        let f = |style, off| markup_with_order(AT, style, off, AT, None).unwrap();
         assert_eq!(f(TimeStyle::ShortTime, None), "16:20");
         assert_eq!(f(TimeStyle::ShortTime, plus3()), "19:20");
         assert_eq!(f(TimeStyle::LongTime, plus3()), "19:20:30");
@@ -187,5 +227,33 @@ mod tests {
         assert_eq!(r(-(6 * 86_400 + 16 * 3_600)), "7 days ago");
         assert_eq!(r(61 * 86_400), "in 2 months");
         assert_eq!(r(-800 * 86_400), "2 years ago");
+    }
+    #[test]
+    fn cached_date_order_changes_numeric_and_named_dates() {
+        use fastcord_platform::clock_format::DateOrder::*;
+        assert_eq!(
+            markup_with_order(AT, TimeStyle::ShortDate, None, AT, Some(MonthDayYear)).unwrap(),
+            "04/20/2021"
+        );
+        assert_eq!(
+            markup_with_order(AT, TimeStyle::LongDate, None, AT, Some(YearMonthDay)).unwrap(),
+            "2021 April 20"
+        );
+        assert_eq!(
+            dates(2021, 4, 20, Some(DayMonthYear)),
+            ("20/04/2021".into(), "20 April 2021".into())
+        );
+        assert_eq!(
+            dates(2021, 4, 20, Some(MonthDayYear)),
+            ("04/20/2021".into(), "April 20 2021".into())
+        );
+        assert_eq!(
+            dates(2021, 4, 20, Some(YearMonthDay)),
+            ("2021/04/20".into(), "2021 April 20".into())
+        );
+        assert_eq!(
+            dates(2021, 4, 20, None),
+            dates(2021, 4, 20, Some(DayMonthYear))
+        );
     }
 }

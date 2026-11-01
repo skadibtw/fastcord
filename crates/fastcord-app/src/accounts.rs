@@ -12,6 +12,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use fastcord_model::{Snowflake, User};
 
@@ -154,10 +156,52 @@ pub fn load() -> Index {
     index_path().map_or_else(Index::default, |path| load_from(&path))
 }
 
-/// Blocking; call from a worker. A failure only loses labels, never a login.
-pub fn save(index: &Index) -> io::Result<()> {
-    let path = index_path().ok_or_else(|| io::Error::other("index path unavailable"))?;
-    save_to(&path, index)
+#[derive(Default)]
+struct SaveOrder {
+    serial: AtomicU64,
+    lock: Mutex<()>,
+}
+static SAVE_ORDER: LazyLock<Arc<SaveOrder>> = LazyLock::new(Default::default);
+
+/// A snapshot stamped when the UI requests persistence, before its blocking
+/// worker is scheduled. Unique temporary names alone cannot order snapshots.
+pub struct Save {
+    order: Arc<SaveOrder>,
+    serial: u64,
+    index: Index,
+}
+
+impl Save {
+    pub fn new(index: &Index) -> Self {
+        Self::ordered(index, Arc::clone(&SAVE_ORDER))
+    }
+
+    fn ordered(index: &Index, order: Arc<SaveOrder>) -> Self {
+        Self {
+            serial: order.serial.fetch_add(1, Ordering::SeqCst).wrapping_add(1),
+            order,
+            index: index.clone(),
+        }
+    }
+
+    /// Blocking; call from a worker. Older queued work cannot overwrite a
+    /// newer snapshot, including when workers start in reverse order.
+    pub fn run(self) -> io::Result<()> {
+        let path = index_path().ok_or_else(|| io::Error::other("index path unavailable"))?;
+        self.write_to(&path)
+    }
+
+    fn write_to(self, path: &Path) -> io::Result<()> {
+        let _guard = self
+            .order
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.serial != self.order.serial.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        save_to(path, &self.index)
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +216,26 @@ mod tests {
             avatar: avatar.map(str::to_owned),
             bot: false,
         }
+    }
+
+    #[test]
+    fn older_scheduled_save_cannot_restore_a_removed_account() {
+        let path = std::env::temp_dir().join(format!(
+            "fastcord-accounts-order-{}.tsv",
+            std::process::id()
+        ));
+        let mut index = Index::default();
+        index.upsert(&user(10, "old account", None));
+        let order = Arc::new(SaveOrder::default());
+        let old = Save::ordered(&index, Arc::clone(&order));
+        let latest = Index::default();
+        let new = Save::ordered(&latest, order);
+        // The new worker wins the scheduling race, then the old one runs.
+        new.write_to(&path).unwrap();
+        old.write_to(&path).unwrap();
+        assert_eq!(load_from(&path), latest);
+        assert!(fs::read_to_string(&path).unwrap().is_empty());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

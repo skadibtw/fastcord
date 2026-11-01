@@ -240,10 +240,13 @@ impl App {
                 self.reset_login();
             }
             Message::Logout => {
-                if let Some((account, cache)) = self.teardown_account() {
+                if let Some((account, cache, writer)) = self.teardown_account() {
                     // Dropping the account phase aborts attachment workers before purge starts.
                     let delete = self.start_delete(account);
-                    return Task::batch([delete, Self::purge_cache(cache)]);
+                    return Task::batch([
+                        Self::finish_volume_writer(writer).chain(delete),
+                        Self::purge_cache(cache),
+                    ]);
                 }
             }
             Message::SwitchAccount(target) => {
@@ -265,8 +268,12 @@ impl App {
                 }
                 // Everything of the current account is gone (as for logout, but
                 // its saved login stays) before the other one starts signing in.
-                let cache = self.teardown_account().and_then(|(_, cache)| cache);
-                return Task::batch([self.start_restore(target), Self::purge_cache(cache)]);
+                let (_, cache, writer) = self.teardown_account().expect("active account checked");
+                let restore = self.start_restore(target);
+                return Task::batch([
+                    Self::finish_volume_writer(writer).chain(restore),
+                    Self::purge_cache(cache),
+                ]);
             }
             Message::Account(event) => return self.account_event(event),
             Message::AccountRemoved(account, result) => {
@@ -283,6 +290,11 @@ impl App {
                     .fail("The native store could not remove that saved login.");
             }
             Message::AccountIndexSaved | Message::VolumeSettingsLoaded => {}
+            Message::VolumeWriterFinished(status) => {
+                if let Some(notice) = status.notice() {
+                    self.volume_notice = Some(notice.to_owned());
+                }
+            }
             Message::VoiceVolumesPurged { failed } => {
                 if failed && matches!(self.phase, Phase::Login) && self.notice.is_some() {
                     self.notice = Some("Logged out locally. The saved credential was removed, but saved voice volumes could not be cleared. Other Discord sessions were not revoked.".to_owned());

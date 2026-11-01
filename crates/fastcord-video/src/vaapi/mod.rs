@@ -662,7 +662,15 @@ pub(crate) fn clear_references(reference_frames: &mut [VAPictureH264]) {
 /// return `Ok`/some shape, but only the sorted render nodes are kept;
 /// everything else comes from the caller.
 fn render_nodes_in(directory: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut nodes: Vec<(u32, PathBuf)> = fs::read_dir(directory)?
+    // A machine without DRM devices may have no /dev/dri at all. This is an
+    // empty hardware inventory, so the platform's OpenH264 fallback can run.
+    // Keep other discovery errors visible (for example inaccessible devices).
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut nodes: Vec<(u32, PathBuf)> = entries
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             let index = entry
@@ -756,8 +764,36 @@ fn probe_encoder(display: &Display, profile: VAProfile) -> Option<VAProfile> {
     if status != VA_STATUS_SUCCESS as VAStatus {
         return None;
     }
-    (attribs[0].value == VA_RT_FORMAT_YUV420 && attribs[1].value & VA_RC_CBR == VA_RC_CBR)
-        .then_some(profile)
+    encoder_attributes(attribs[0].value, attribs[1].value)
+        .ok()
+        .map(|_| profile)
+}
+
+/// Query values are capability masks; configuration values select one mode.
+/// In particular, passing all advertised rate controls to vaCreateConfig is
+/// invalid on drivers that offer several mutually exclusive modes.
+fn encoder_attributes(
+    rt_formats: u32,
+    rate_controls: u32,
+) -> Result<[VAConfigAttrib; 2], CodecError> {
+    if rt_formats == VA_ATTRIB_NOT_SUPPORTED || rt_formats & VA_RT_FORMAT_YUV420 == 0 {
+        return Err(CodecError::Unsupported("the encoder does not offer 4:2:0"));
+    }
+    if rate_controls == VA_ATTRIB_NOT_SUPPORTED || rate_controls & VA_RC_CBR == 0 {
+        return Err(CodecError::Unsupported(
+            "the encoder does not offer CBR rate control",
+        ));
+    }
+    Ok([
+        VAConfigAttrib {
+            type_: VAConfigAttribType_VAConfigAttribRTFormat,
+            value: VA_RT_FORMAT_YUV420,
+        },
+        VAConfigAttrib {
+            type_: VAConfigAttribType_VAConfigAttribRateControl,
+            value: VA_RC_CBR,
+        },
+    ])
 }
 
 /// Whether the display supports at least one of `profiles` with `VAEntrypointVLD`.
@@ -918,6 +954,27 @@ mod tests {
     use crate::codec::{BackendPreference, CodecError};
 
     #[test]
+    fn encoder_negotiation_selects_one_mode_from_driver_capability_masks() {
+        // radeonsi reports 0x416 (CBR, VBR, CQP and QVBR), not one mode.
+        let chosen = encoder_attributes(VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV422, 0x416).unwrap();
+        assert_eq!(chosen[0].type_, VAConfigAttribType_VAConfigAttribRTFormat);
+        assert_eq!(chosen[0].value, VA_RT_FORMAT_YUV420);
+        assert_eq!(
+            chosen[1].type_,
+            VAConfigAttribType_VAConfigAttribRateControl
+        );
+        assert_eq!(chosen[1].value, VA_RC_CBR);
+        for (formats, rates) in [
+            (VA_ATTRIB_NOT_SUPPORTED, VA_RC_CBR),
+            (VA_RT_FORMAT_YUV420, VA_ATTRIB_NOT_SUPPORTED),
+            (VA_RT_FORMAT_YUV422, VA_RC_CBR),
+            (VA_RT_FORMAT_YUV420, VA_RC_VBR | VA_RC_CQP),
+        ] {
+            assert!(encoder_attributes(formats, rates).is_err());
+        }
+    }
+
+    #[test]
     fn render_nodes_are_sorted_numerically() {
         let directory =
             std::env::temp_dir().join(format!("fastcord-vaapi-test-{}", std::process::id()));
@@ -940,6 +997,27 @@ mod tests {
             .collect();
         assert_eq!(names, ["renderD9", "renderD10"]);
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn absent_drm_directory_is_empty_but_other_discovery_errors_survive() {
+        let directory = std::env::temp_dir().join(format!(
+            "fastcord-vaapi-missing-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        assert!(
+            render_nodes_in(&directory.join("missing"))
+                .unwrap()
+                .is_empty()
+        );
+        let file = directory.join("not-a-directory");
+        fs::write(&file, []).unwrap();
+        assert_eq!(
+            render_nodes_in(&file).unwrap_err().kind(),
+            std::io::ErrorKind::NotADirectory
+        );
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

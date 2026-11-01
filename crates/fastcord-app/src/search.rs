@@ -51,7 +51,7 @@ pub enum Status {
     Loading,
     /// Discord is still indexing; the next ask comes after its delay.
     Indexing(u8),
-    Failed(&'static str),
+    Failed(String),
     Done,
 }
 
@@ -154,21 +154,16 @@ fn has_label(has: Option<SearchHas>) -> &'static str {
     }
 }
 
-fn describe(error: RestError) -> &'static str {
-    match error {
-        RestError::PermissionDenied => tr("You cannot search here."),
-        RestError::ResourceGone => tr("This conversation is no longer available."),
-        RestError::AuthenticationRequired => tr("Discord no longer accepts this login."),
-        RestError::InvalidRateLimit
-        | RestError::RateLimited
-        | RestError::SchedulerCapacityExceeded => {
-            tr("Discord is rate limiting searches. Try again shortly.")
-        }
-        RestError::Retryable(_) | RestError::Http(_) => {
-            tr("Search failed on Discord's side. Try again.")
-        }
-        _ => tr("Search results could not be read."),
-    }
+fn describe(error: RestError) -> String {
+    crate::rest_text::describe(
+        error,
+        &crate::rest_text::Wording {
+            forbidden: "You cannot search here.",
+            gone: "This conversation is no longer available.",
+            unconfirmed: "Search failed on Discord’s side. Try again.",
+            ..crate::rest_text::DEFAULT
+        },
+    )
 }
 
 impl State {
@@ -245,7 +240,7 @@ impl State {
         }
         if !query.is_sendable() {
             self.query = None;
-            self.status = Status::Failed("Type something to search for.");
+            self.status = Status::Failed(tr("Type something to search for.").to_owned());
             return Task::none();
         }
         self.query = Some(query);
@@ -320,8 +315,9 @@ impl State {
                             _ => 1,
                         };
                         if waits > MAX_INDEX_WAITS {
-                            self.status =
-                                Status::Failed("Discord is still indexing this conversation.");
+                            self.status = Status::Failed(
+                                tr("Discord is still indexing this conversation.").to_owned(),
+                            );
                         } else {
                             self.status = Status::Indexing(waits);
                             let serial = self.serial;
@@ -416,7 +412,7 @@ pub fn view(state: &State, in_guild: bool) -> Element<'_, Event> {
         .size(12)
         .color(MUTED)
         .into(),
-        Status::Failed(reason) => text(tr(reason)).size(12).color(WARN).into(),
+        Status::Failed(reason) => text(reason.clone()).size(12).color(WARN).into(),
         Status::Done if state.hits.is_empty() => {
             text(tr("No messages found.")).size(12).color(MUTED).into()
         }
@@ -594,7 +590,10 @@ mod tests {
             Event::Done(state.serial, Err(RestError::PermissionDenied)),
             &ctx(&client),
         );
-        assert_eq!(state.status, Status::Failed("You cannot search here."));
+        assert_eq!(
+            state.status,
+            Status::Failed("You cannot search here.".into())
+        );
     }
 
     #[test]

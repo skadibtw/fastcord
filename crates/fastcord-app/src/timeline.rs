@@ -357,6 +357,8 @@ pub fn chips(row: &Row) -> impl Iterator<Item = Chip<'_>> {
 pub struct Snapshot {
     /// The channel the rows belong to; events carry it back.
     pub channel_id: Option<Snowflake>,
+    /// Coalesced Gateway pin-list invalidation for the open conversation.
+    pub pins_revision: u64,
     pub rows: Vec<Row>,
     pub window: Window,
     /// The list's unacknowledged scroll request; copy it into every snapshot.
@@ -475,6 +477,8 @@ pub enum Publish {
 /// What the UI is doing with a row that the snapshot does not know about.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Interaction {
+    /// One local multi-select draft; no request is sent until Submit.
+    pub component_choices: Option<crate::component_view::Choices>,
     /// The message whose text is in the composer for editing.
     pub editing: Option<Snowflake>,
     /// The message the composer is replying to.
@@ -679,8 +683,12 @@ pub enum Event {
         message_id: Snowflake,
         answer_id: u32,
     },
-    /// A button was pressed or a select option chosen on a message. The worker
-    /// checks it against the message as stored and sends one interaction.
+    /// Toggle a multi-select option locally; no interaction is sent.
+    SelectChoice {
+        key: crate::component_view::Choices,
+        option: usize,
+    },
+    /// Submit a button or completed select. The worker checks the stored message.
     Component {
         channel_id: Snowflake,
         message_id: Snowflake,
@@ -1526,7 +1534,11 @@ fn message_view<'a>(
         body = body.push(poll_view(row, poll, channel_id));
     }
     if !message.components.is_empty() {
-        body = body.push(crate::component_view::view(row, channel_id));
+        body = body.push(crate::component_view::view(
+            row,
+            channel_id,
+            interaction.component_choices,
+        ));
     }
     if message.is_ephemeral() {
         body = body.push(
@@ -1651,12 +1663,17 @@ fn message_view<'a>(
         let key =
             crate::avatars::AvatarKey::user(message.author.id, message.author.avatar.as_deref());
         Some(
-            button(crate::avatars::view(assets.avatars, &key, 40.0, || {
-                container(text(style::initial(name)).size(17).font(BOLD))
-                    .center(40)
-                    .style(style::avatar(style::avatar_color(message.author.id.0)))
-                    .into()
-            }))
+            button(crate::avatars::view(
+                assets.avatars,
+                &key,
+                crate::style::geometry::MESSAGE_AVATAR,
+                || {
+                    container(text(style::initial(name)).size(17).font(BOLD))
+                        .center(40)
+                        .style(style::avatar(style::avatar_color(message.author.id.0)))
+                        .into()
+                },
+            ))
             .padding(0)
             .style(style::plain_button)
             .on_press_with(|| Event::OpenProfile(message.author.clone()))

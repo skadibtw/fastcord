@@ -14,7 +14,9 @@
 //! caller, at most one is in flight, it is never retried, and an unconfirmed
 //! answer says the change may have been applied.
 
-use fastcord_discord::{ArchivedThreads, RestClient, RestError, ThreadError, thread_name};
+use fastcord_discord::{
+    ArchiveKind, ArchivedThreads, RestClient, RestError, ThreadError, thread_name,
+};
 use fastcord_model::{Channel, Snowflake};
 
 use crate::i18n::{tr, trf};
@@ -39,6 +41,7 @@ pub enum Event {
     /// instead of this panel.
     ToggleForumArchived(Snowflake, Snowflake),
     MoreArchived,
+    ArchiveKind(ArchiveKind),
     /// Open the archived thread at this index of the list.
     OpenArchived(usize),
     Join(Snowflake),
@@ -63,7 +66,7 @@ pub enum Event {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Status {
     Loading,
-    Failed(&'static str),
+    Failed(String),
     Done,
 }
 
@@ -77,13 +80,14 @@ struct Archived {
     status: Status,
     /// Listed by the forum pane, not by [`view`].
     inline: bool,
+    kind: ArchiveKind,
 }
 
 /// The archived posts of the forum whose archive is open.
 pub struct ForumArchive<'a> {
     pub posts: &'a [Channel],
     pub loading: bool,
-    pub failure: Option<&'static str>,
+    pub failure: Option<&'a str>,
     pub has_more: bool,
 }
 
@@ -99,7 +103,7 @@ struct Draft {
 pub struct State {
     archived: Option<Archived>,
     draft: Option<Draft>,
-    notice: Option<&'static str>,
+    notice: Option<String>,
     /// An archive or lock request is waiting for Discord.
     state_busy: bool,
     /// Identifies the current archive request; older answers find another.
@@ -108,35 +112,29 @@ pub struct State {
     task: Option<iced::task::Handle>,
 }
 
-fn describe(error: RestError) -> &'static str {
-    match error {
-        RestError::PermissionDenied => tr("You are not allowed to do that with this thread."),
-        RestError::ResourceGone => tr("That thread or message is gone."),
-        RestError::AuthenticationRequired => tr("Discord no longer accepts this login."),
-        RestError::InvalidRateLimit
-        | RestError::RateLimited
-        | RestError::SchedulerCapacityExceeded => {
-            tr("Discord is rate limiting this. Try again shortly.")
-        }
-        RestError::Retryable(_) | RestError::Http(_) => tr("Discord failed. Try again."),
-        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED),
-        _ => tr("Discord did not accept that."),
-    }
+fn describe(error: RestError) -> String {
+    crate::rest_text::describe(
+        error,
+        &crate::rest_text::Wording {
+            forbidden: "You are not allowed to do that with this thread.",
+            gone: "That thread or message is gone.",
+            unconfirmed: "Discord did not confirm. Check the thread before trying again.",
+            ..crate::rest_text::DEFAULT
+        },
+    )
 }
 
 /// What a failed archive or lock request tells the user.
-fn describe_write(error: RestError) -> &'static str {
-    match error {
-        RestError::Retryable(_) => tr(
-            "Discord did not confirm. The change may have been applied; check the thread before trying again.",
-        ),
-        RestError::PermissionDenied => tr("Discord refused: you need Manage Threads here."),
-        RestError::Refused(refusal) if refusal.status.as_u16() == 403 => {
-            tr("Discord refused: you need Manage Threads here.")
-        }
-        RestError::Refused(refusal) if refusal.status.as_u16() == 404 => tr("That thread is gone."),
-        other => describe(other),
-    }
+fn describe_write(error: RestError) -> String {
+    crate::rest_text::describe(
+        error,
+        &crate::rest_text::Wording {
+            forbidden: "Discord refused: you need Manage Threads here.",
+            gone: "That thread is gone.",
+            unconfirmed: "Discord did not confirm. The change may have been applied; check the thread before trying again.",
+            ..crate::rest_text::DEFAULT
+        },
+    )
 }
 
 fn item_bytes(thread: &Channel) -> usize {
@@ -157,7 +155,10 @@ pub fn suggest_name(content: &str) -> String {
 
 impl State {
     pub fn drop_all(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            serial: self.serial.wrapping_add(1),
+            ..Self::default()
+        };
     }
 
     /// The channel whose archive is listed, if the panel is open.
@@ -174,8 +175,8 @@ impl State {
         Some(ForumArchive {
             posts: &archived.items,
             loading: archived.status == Status::Loading,
-            failure: match archived.status {
-                Status::Failed(reason) => Some(reason),
+            failure: match &archived.status {
+                Status::Failed(reason) => Some(reason.as_str()),
                 _ => None,
             },
             has_more: archived.status == Status::Done && archived.has_more,
@@ -207,12 +208,12 @@ impl State {
         };
         archived.status = Status::Loading;
         let (client, before) = (client.clone(), archived.cursor.clone());
-        let (guild, channel) = (archived.guild, archived.channel);
+        let (guild, channel, kind) = (archived.guild, archived.channel, archived.kind);
         let serial = self.serial;
         let (task, handle) = Task::perform(
             async move {
                 client
-                    .archived_threads(guild, channel, before.as_deref())
+                    .archived_threads_kind(guild, channel, kind, before.as_deref())
                     .await
             },
             move |result| Event::ArchivedDone(serial, result),
@@ -236,7 +237,7 @@ impl State {
             return Task::none();
         }
         if !allowed {
-            self.notice = Some(tr("This thread cannot be changed that way any more."));
+            self.notice = Some(tr("This thread cannot be changed that way any more.").to_owned());
             return Task::none();
         }
         self.state_busy = true;
@@ -266,7 +267,23 @@ impl State {
                         has_more: false,
                         status: Status::Loading,
                         inline,
+                        kind: ArchiveKind::Public,
                     });
+                    return self.load(client);
+                }
+            }
+            Event::ArchiveKind(kind) => {
+                if let Some(archived) = &mut self.archived
+                    && !archived.inline
+                    && archived.kind != kind
+                {
+                    archived.kind = kind;
+                    archived.items.clear();
+                    archived.bytes = 0;
+                    archived.cursor = None;
+                    archived.has_more = false;
+                    self.serial = self.serial.wrapping_add(1);
+                    self.task = None;
                     return self.load(client);
                 }
             }
@@ -301,7 +318,7 @@ impl State {
                             archived.bytes += item_bytes(thread);
                             archived.items.push(thread.clone());
                         }
-                        archived.cursor = page.cursor().map(str::to_owned);
+                        archived.cursor = archived.kind.cursor(&page);
                         archived.has_more = page.has_more && !full && archived.cursor.is_some();
                         archived.status = Status::Done;
                     }
@@ -352,7 +369,7 @@ impl State {
                     return Task::none();
                 };
                 if thread_name(&draft.name).is_err() {
-                    self.notice = Some(tr("Give the thread a name."));
+                    self.notice = Some(tr("Give the thread a name.").to_owned());
                     return Task::none();
                 }
                 self.notice = None;
@@ -375,9 +392,9 @@ impl State {
                     draft.busy = false;
                 }
                 self.notice = Some(match error {
-                    ThreadError::InvalidName => tr("Give the thread a name."),
+                    ThreadError::InvalidName => tr("Give the thread a name.").to_owned(),
                     ThreadError::InvalidResponse => {
-                        tr("Discord answered with something unexpected.")
+                        tr("Discord answered with something unexpected.").to_owned()
                     }
                     ThreadError::Rest(error) => describe(error),
                 });
@@ -423,7 +440,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
                 .size(12)
                 .color(MUTED)
                 .into(),
-            Status::Failed(reason) => text(tr(reason)).size(12).color(WARN).into(),
+            Status::Failed(reason) => text(reason.clone()).size(12).color(WARN).into(),
             Status::Done if archived.items.is_empty() => text(tr("No archived threads."))
                 .size(12)
                 .color(MUTED)
@@ -459,6 +476,23 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             Vec::new(),
             Event::ToggleArchived(archived.guild, archived.channel),
         ));
+        let tab = |label, kind| {
+            button(text(tr(label)))
+                .style(if archived.kind == kind {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+                .on_press(Event::ArchiveKind(kind))
+        };
+        body = body.push(
+            row![
+                tab("Public", ArchiveKind::Public),
+                tab("Joined private", ArchiveKind::JoinedPrivate),
+                tab("Private (Manage Threads)", ArchiveKind::Private),
+            ]
+            .spacing(6),
+        );
         body = body.push(status);
         if !archived.items.is_empty() {
             body = body.push(scrollable(list).height(Length::Fixed(180.0)));
@@ -467,8 +501,8 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             body = body.push(button(text(tr("Load more")).size(13)).on_press(Event::MoreArchived));
         }
     }
-    if let Some(notice) = state.notice {
-        body = body.push(text(tr(notice)).size(12).color(WARN));
+    if let Some(notice) = &state.notice {
+        body = body.push(text(notice.clone()).size(12).color(WARN));
     }
     Some(
         container(body)
@@ -520,6 +554,40 @@ mod tests {
         let mut state = State::default();
         let _ = state.update(Event::ToggleArchived(GUILD, PARENT), &client());
         state
+    }
+
+    #[test]
+    fn archive_kind_switch_and_logout_reject_old_pages() {
+        let client = client();
+        let mut state = opened();
+        let old = state.serial;
+        let _ = state.update(Event::ArchiveKind(ArchiveKind::JoinedPrivate), &client);
+        let current = state.serial;
+        assert_ne!(old, current);
+        let _ = state.update(
+            Event::ArchivedDone(old, Ok(page(vec![thread(5, "old", "stamp")], false))),
+            &client,
+        );
+        assert!(state.archived.as_ref().unwrap().items.is_empty());
+        let _ = state.update(
+            Event::ArchivedDone(current, Ok(page(vec![thread(5, "joined", "stamp")], true))),
+            &client,
+        );
+        assert_eq!(
+            state.archived.as_ref().unwrap().cursor.as_deref(),
+            Some("5")
+        );
+        state.drop_all();
+        let _ = state.update(Event::ToggleArchived(GUILD, PARENT), &client);
+        assert_ne!(state.serial, old);
+        let _ = state.update(
+            Event::ArchivedDone(
+                old,
+                Ok(page(vec![thread(9, "previous account", "stamp")], false)),
+            ),
+            &client,
+        );
+        assert!(state.archived.as_ref().unwrap().items.is_empty());
     }
 
     #[test]
@@ -623,7 +691,7 @@ mod tests {
         );
         let _ = state.update(Event::Create, &client());
         assert!(!state.draft.as_ref().unwrap().busy);
-        assert_eq!(state.notice, Some("Give the thread a name."));
+        assert_eq!(state.notice.as_deref(), Some("Give the thread a name."));
         let _ = state.update(Event::Name("plans".into()), &client());
         let _ = state.update(Event::Create, &client());
         assert!(state.draft.as_ref().unwrap().busy);
@@ -657,14 +725,55 @@ mod tests {
         ));
         let _ = state.update(Event::StateDone(Err(unconfirmed)), &client());
         assert!(!state.state_busy);
-        assert!(state.notice.unwrap().contains("may have been applied"));
+        assert!(
+            state
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("may have been applied")
+        );
         let _ = state.update(
             Event::StateDone(Err(RestError::PermissionDenied)),
             &client(),
         );
-        assert!(state.notice.unwrap().contains("Manage Threads"));
+        assert!(state.notice.as_deref().unwrap().contains("Manage Threads"));
         let _ = state.update(Event::StateDone(Ok(())), &client());
         assert!(state.notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn thread_write_failures_distinguish_unsent_timeout_and_authentication() {
+        use fastcord_discord::{MFA_REQUIRED, NetworkFailure, Refusal, RetryableFailure};
+        let mut state = State::default();
+        for (error, expected) in [
+            (
+                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)),
+                "nothing was sent",
+            ),
+            (
+                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout)),
+                "may have been applied",
+            ),
+            (
+                RestError::Http(reqwest::StatusCode::UNAUTHORIZED),
+                "Log in again",
+            ),
+            (
+                RestError::Refused(Refusal::new(
+                    reqwest::StatusCode::FORBIDDEN,
+                    Some(MFA_REQUIRED),
+                    "",
+                )),
+                "two-factor",
+            ),
+        ] {
+            let _ = state.set_state((Snowflake(9), Some(true), None), true, &client());
+            assert!(state.state_busy);
+            let task = state.update(Event::StateDone(Err(error)), &client());
+            assert_eq!(task.units(), 0);
+            assert!(!state.state_busy);
+            assert!(state.notice.as_deref().unwrap().contains(expected));
+        }
     }
 
     #[test]

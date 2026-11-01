@@ -27,6 +27,7 @@ pub type BoxedIo = Box<dyn NetworkIo>;
 pub type TlsStream = tokio_rustls::client::TlsStream<ShapedStream<BoxedIo>>;
 
 struct Shared {
+    source_address: Option<IpAddr>,
     prefix_factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>,
     mode: Mode,
     experimental_udp: bool,
@@ -37,6 +38,7 @@ struct Shared {
     transforms: Arc<Semaphore>,
     tunnels: Arc<Semaphore>,
     pending: Arc<Mutex<Option<Demand>>>,
+    manual_pending: Arc<Mutex<Option<Demand>>>,
     attempts: Arc<crate::connect::Attempts>,
     recovering: Arc<Mutex<Option<crate::connect::Endpoint>>>,
     recovery_gate: Arc<tokio::sync::Mutex<()>>,
@@ -61,6 +63,14 @@ impl Drop for Shared {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtendedSearchOutcome {
+    NoDemand,
+    Restricted,
+    Finished,
+}
+
+#[derive(Clone)]
 struct Demand {
     host: String,
     port: u16,
@@ -150,6 +160,7 @@ impl NetworkContext {
 
     pub fn new(mode: Mode) -> Self {
         Self(Arc::new(Shared {
+            source_address: None,
             prefix_factory: None,
             mode,
             experimental_udp: false,
@@ -160,6 +171,7 @@ impl NetworkContext {
             transforms: Arc::new(Semaphore::new(4)),
             tunnels: Arc::new(Semaphore::new(crate::bridge::TUNNEL_LIMIT)),
             pending: Arc::new(Mutex::new(None)),
+            manual_pending: Arc::new(Mutex::new(None)),
             attempts: Arc::default(),
             recovering: Arc::default(),
             recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -183,6 +195,7 @@ impl NetworkContext {
         proxy: Option<Arc<ProxyCredentials>>,
     ) -> Self {
         Self(Arc::new(Shared {
+            source_address: self.0.source_address,
             prefix_factory,
             mode,
             experimental_udp,
@@ -193,6 +206,7 @@ impl NetworkContext {
             transforms: self.0.transforms.clone(),
             tunnels: self.0.tunnels.clone(),
             pending: self.0.pending.clone(),
+            manual_pending: self.0.manual_pending.clone(),
             attempts: self.0.attempts.clone(),
             recovering: self.0.recovering.clone(),
             recovery_gate: self.0.recovery_gate.clone(),
@@ -211,6 +225,31 @@ impl NetworkContext {
             self.0.experimental_udp,
             self.0.proxy.clone(),
         )
+    }
+
+    /// Session-only source selection for direct connections. Existing views
+    /// and pools keep their previous setting; callers replace them before login.
+    /// Binding selects an address, not an interface/route and cannot escape a TUN.
+    pub fn with_source_address(&self, source: Option<IpAddr>) -> Result<Self, NetworkError> {
+        if source.is_some_and(|ip| {
+            ip.is_unspecified() || ip.is_multicast() || ip == IpAddr::V4(Ipv4Addr::BROADCAST)
+        }) {
+            return Err(NetworkError::InvalidTarget);
+        }
+        let mut view = self.view(
+            self.0.prefix_factory.clone(),
+            self.mode(),
+            self.0.experimental_udp,
+            self.0.proxy.clone(),
+        );
+        Arc::get_mut(&mut view.0)
+            .expect("fresh context view")
+            .source_address = source;
+        Ok(view)
+    }
+    /// Configured direct source. Proxy transport deliberately ignores it.
+    pub fn source_address(&self) -> Option<IpAddr> {
+        self.0.source_address
     }
 
     pub fn mode(&self) -> Mode {
@@ -407,22 +446,64 @@ impl NetworkContext {
     }
 
     pub(crate) async fn wait_for_endpoint(&self, endpoint: &crate::connect::Endpoint) {
-        self.recover(None, Some(endpoint)).await;
+        self.recover(None, Some(endpoint), false).await;
     }
 
     /// Drives a pending failure before the next production dial. The first
     /// failed attempt returns immediately so its owner records the failure and
     /// applies its normal backoff before entering this gate. No request replay.
     pub async fn wait_for_recovery(&self) {
-        self.recover(None, None).await;
+        self.recover(None, None, false).await;
+    }
+
+    /// Explicit user request only. No invented endpoint, authenticated retry,
+    /// enlarged budget, helper-policy override or periodic continuation.
+    pub async fn extended_search(&self) -> ExtendedSearchOutcome {
+        if self.mode() != Mode::Auto || self.packet_helper_available() {
+            return ExtendedSearchOutcome::Restricted;
+        }
+        let generation = self.controller().generation();
+        let demand = self
+            .0
+            .pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .filter(|d| d.generation == generation)
+            .or_else(|| {
+                self.0
+                    .manual_pending
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+                    .filter(|d| d.generation == generation)
+            });
+        let Some(demand) = demand else {
+            return ExtendedSearchOutcome::NoDemand;
+        };
+        if demand.profile.omits_sni() {
+            return ExtendedSearchOutcome::Restricted;
+        }
+        *self
+            .0
+            .manual_pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(demand);
+        self.recover(None, None, true).await;
+        ExtendedSearchOutcome::Finished
     }
 
     #[cfg(debug_assertions)]
     pub async fn debug_recover_with(&self, strategy: Strategy) {
-        self.recover(Some(strategy), None).await;
+        self.recover(Some(strategy), None, false).await;
     }
 
-    async fn recover(&self, forced: Option<Strategy>, endpoint: Option<&crate::connect::Endpoint>) {
+    async fn recover(
+        &self,
+        forced: Option<Strategy>,
+        endpoint: Option<&crate::connect::Endpoint>,
+        extended: bool,
+    ) {
         if self.mode() != Mode::Auto {
             return;
         }
@@ -446,6 +527,15 @@ impl NetworkContext {
             })
         };
         let has_pending = || {
+            if extended {
+                return self
+                    .0
+                    .manual_pending
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .as_ref()
+                    .is_some_and(|d| d.generation == self.controller().generation());
+            }
             self.0
                 .pending
                 .lock()
@@ -460,7 +550,7 @@ impl NetworkContext {
         // it is cancel-safe, so a caller's own deadline just drops this wait.
         let gate = match self.0.recovery_gate.clone().try_lock_owned() {
             Ok(gate) => gate,
-            Err(_) if endpoint.is_some() && !active_matches() => return,
+            Err(_) if endpoint.is_some() && !active_matches() && !has_pending() => return,
             Err(_) => self.0.recovery_gate.clone().lock_owned().await,
         };
         if !has_pending() {
@@ -471,8 +561,10 @@ impl NetworkContext {
         // must neither abort it nor leave `recovering` stuck. The task holds
         // no reference to the context, which aborts it when dropped.
         let env = CampaignEnv {
+            source_address: self.source_address(),
             controller: self.0.controller.clone(),
             pending: self.0.pending.clone(),
+            manual_pending: self.0.manual_pending.clone(),
             recovering: self.0.recovering.clone(),
             transforms: self.0.transforms.clone(),
             // A helper that is gone cannot be probed either: fall back to the
@@ -490,7 +582,7 @@ impl NetworkContext {
             let _gate = gate;
             // Run the campaign one task deeper so a panic is observed here
             // instead of vanishing with a dropped handle.
-            let inner = tokio::spawn(env.run(endpoint, forced));
+            let inner = tokio::spawn(env.run(endpoint, forced, extended));
             let _abort = inner.abort_handle();
             struct AbortOnDrop(tokio::task::AbortHandle);
             impl Drop for AbortOnDrop {
@@ -545,8 +637,10 @@ fn demand_matches(endpoint: Option<&crate::connect::Endpoint>, demand: &Demand) 
 /// Everything a recovery campaign needs, owned, so its task never keeps the
 /// `NetworkContext` alive.
 struct CampaignEnv {
+    source_address: Option<IpAddr>,
     controller: Controller,
     pending: Arc<Mutex<Option<Demand>>>,
+    manual_pending: Arc<Mutex<Option<Demand>>>,
     recovering: Arc<Mutex<Option<crate::connect::Endpoint>>>,
     transforms: Arc<Semaphore>,
     factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>,
@@ -555,9 +649,33 @@ struct CampaignEnv {
 }
 
 impl CampaignEnv {
-    async fn run(self, endpoint: Option<crate::connect::Endpoint>, forced: Option<Strategy>) {
+    async fn run(
+        self,
+        endpoint: Option<crate::connect::Endpoint>,
+        forced: Option<Strategy>,
+        extended: bool,
+    ) {
         self.controller.wait_for_idle().await;
-        let pending = {
+        let pending = if extended {
+            let demand = self
+                .manual_pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            if let Some(demand) = &demand {
+                let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+                if pending.as_ref().is_some_and(|p| {
+                    p.host == demand.host
+                        && p.port == demand.port
+                        && p.role == demand.role
+                        && p.profile == demand.profile
+                        && p.generation == demand.generation
+                }) {
+                    pending.take();
+                }
+            }
+            demand
+        } else {
             let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
             if pending
                 .as_ref()
@@ -574,6 +692,15 @@ impl CampaignEnv {
         if pending.generation != self.controller.generation() {
             return;
         }
+        // An ordinary campaign consumes the production demand, but a later
+        // explicit continuation still needs that same bounded failed target.
+        // Never invent a host from the catalog or retain a successful target.
+        if !extended {
+            *self
+                .manual_pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(pending.clone());
+        }
         // A concrete IP from the failed production flow is mandatory. No DNS
         // lookup is performed outside the campaign's clock/dial budget.
         let Some(address) = pending.address else {
@@ -585,7 +712,7 @@ impl CampaignEnv {
             AddressFamily::V6
         };
         let Ok(target) = DiagnosticTarget::new(
-            pending.host,
+            pending.host.clone(),
             pending.port,
             pending.role,
             family,
@@ -602,8 +729,10 @@ impl CampaignEnv {
             });
         let _scope = RecoveryScope(self.recovering.clone());
         let Self {
+            source_address,
             controller,
             transforms,
+            manual_pending,
             factory,
             #[cfg(debug_assertions)]
             output,
@@ -619,31 +748,59 @@ impl CampaignEnv {
                 .as_ref()
                 .map_or(Strategy::ORDER.as_slice(), |one| one.as_slice())
         };
-        let _ = controller
-            .diagnose_plan(target, pending.failure, plan, move |request| {
-                let transforms = transforms.clone();
-                let factory = factory.clone();
+        let probe = move |request: ProbeRequest| {
+            let transforms = transforms.clone();
+            let factory = factory.clone();
+            #[cfg(debug_assertions)]
+            let output = output.clone();
+            async move {
                 #[cfg(debug_assertions)]
-                let output = output.clone();
-                async move {
-                    #[cfg(debug_assertions)]
-                    let strategy = request.strategy;
-                    #[cfg(debug_assertions)]
-                    let verbose = output.load(Ordering::Relaxed);
-                    #[cfg(not(debug_assertions))]
-                    let verbose = false;
-                    let result = run_probe(address, request, transforms, factory, verbose).await;
-                    #[cfg(debug_assertions)]
-                    if output.load(Ordering::Relaxed) {
-                        println!(
-                            "TLS probe {strategy:?}: {:?}; sent={} received={}",
-                            result.result, result.sent_bytes, result.received_bytes
-                        );
-                    }
-                    result
+                let strategy = request.strategy;
+                #[cfg(debug_assertions)]
+                let verbose = output.load(Ordering::Relaxed);
+                #[cfg(not(debug_assertions))]
+                let verbose = false;
+                let result = run_probe(
+                    address,
+                    request,
+                    transforms,
+                    factory,
+                    verbose,
+                    source_address,
+                )
+                .await;
+                #[cfg(debug_assertions)]
+                if output.load(Ordering::Relaxed) {
+                    println!(
+                        "TLS probe {strategy:?}: {:?}; sent={} received={}",
+                        result.result, result.sent_bytes, result.received_bytes
+                    );
                 }
-            })
-            .await;
+                result
+            }
+        };
+        let result = if extended {
+            controller
+                .diagnose_extended(target, pending.failure, probe)
+                .await
+        } else {
+            controller
+                .diagnose_plan(target, pending.failure, plan, probe)
+                .await
+        };
+        if matches!(result, Ok(Some(_))) {
+            let mut saved = manual_pending.lock().unwrap_or_else(|p| p.into_inner());
+            if saved.as_ref().is_some_and(|d| {
+                d.generation == pending.generation
+                    && d.host == pending.host
+                    && d.port == pending.port
+                    && d.role == pending.role
+                    && d.profile == pending.profile
+                    && d.address == pending.address
+            }) {
+                saved.take();
+            }
+        }
     }
 }
 
@@ -689,6 +846,16 @@ impl SocketBroker {
         port: u16,
         role: Role,
     ) -> Result<TlsStream, NetworkError> {
+        self.connect_tls_timed(host, port, role, None).await
+    }
+
+    pub async fn connect_tls_timed(
+        &self,
+        host: &str,
+        port: u16,
+        role: Role,
+        timing: Option<&crate::timing::ConnectTiming>,
+    ) -> Result<TlsStream, NetworkError> {
         authorize(role, host, port)?;
         let profile = websocket_profile(self.0.mode(), role);
         self.0
@@ -701,7 +868,15 @@ impl SocketBroker {
             .await;
         let mut failed_address = None;
         let mut result = self
-            .connect_tls_once(host, port, role, profile, false, &mut failed_address)
+            .connect_tls_once(
+                host,
+                port,
+                role,
+                profile,
+                false,
+                &mut failed_address,
+                timing,
+            )
             .await;
         // Auto's no-SNI session profile first uses TLS 1.2. If that TLS
         // handshake is unavailable, one fresh pre-application connection may
@@ -712,7 +887,7 @@ impl SocketBroker {
             .is_some_and(|error| retry_default_versions(profile, *error))
         {
             result = self
-                .connect_tls_once(host, port, role, profile, true, &mut failed_address)
+                .connect_tls_once(host, port, role, profile, true, &mut failed_address, timing)
                 .await;
         }
         if let Err(error) = result.as_ref() {
@@ -724,6 +899,7 @@ impl SocketBroker {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn connect_tls_once(
         &self,
         host: &str,
@@ -732,6 +908,7 @@ impl SocketBroker {
         profile: TlsProfile,
         default_versions: bool,
         failed_address: &mut Option<SocketAddr>,
+        timing: Option<&crate::timing::ConnectTiming>,
     ) -> Result<TlsStream, NetworkError> {
         let (io, strategy, control) = if self.0.mode() == Mode::Proxy {
             let proxy = self
@@ -739,7 +916,10 @@ impl SocketBroker {
                 .proxy_credentials()
                 .ok_or(NetworkError::ProxyConfiguration)?;
             (
-                crate::proxy::dial(&proxy, host, port).await?,
+                {
+                    let _phase = timing.map(|t| t.begin(crate::timing::ConnectPhase::Proxy));
+                    crate::proxy::dial(&proxy, host, port).await?
+                },
                 Strategy::Direct,
                 None,
             )
@@ -750,8 +930,16 @@ impl SocketBroker {
             } else {
                 0
             };
-            let (tcp, address) =
-                dial_public_offset(host, port, failed_address, offset, rotate_gateway).await?;
+            let (tcp, address) = dial_public_offset(
+                host,
+                port,
+                failed_address,
+                offset,
+                rotate_gateway,
+                self.0.source_address(),
+                timing,
+            )
+            .await?;
             *failed_address = Some(address);
             let strategy = self.0.strategy(host, port, role, address, profile);
             let native = NativeIo::new(tcp).with_factory(self.0.prefix_factory());
@@ -771,6 +959,7 @@ impl SocketBroker {
         };
         let name =
             ServerName::try_from(host.to_owned()).map_err(|_| NetworkError::InvalidTarget)?;
+        let _phase = timing.map(|t| t.begin(crate::timing::ConnectPhase::Tls));
         timeout(
             Duration::from_secs(4),
             TlsConnector::from(config).connect(name, stream),
@@ -794,11 +983,7 @@ impl SocketBroker {
                 NetworkError::InvalidTarget,
             ));
         }
-        let local: SocketAddr = if server.is_ipv4() {
-            (Ipv4Addr::UNSPECIFIED, 0).into()
-        } else {
-            (Ipv6Addr::UNSPECIFIED, 0).into()
-        };
+        let local = crate::dial::local_endpoint(self.0.source_address(), server)?;
         let socket = UdpSocket::bind(local).await?;
         if self.0.mode() == Mode::Auto
             && let Some(factory) = self.0.prefix_factory()
@@ -1043,8 +1228,9 @@ pub(crate) async fn dial_public(
     host: &str,
     port: u16,
     failed_address: &mut Option<SocketAddr>,
+    source_address: Option<IpAddr>,
 ) -> Result<(TcpStream, SocketAddr), NetworkError> {
-    dial_public_offset(host, port, failed_address, 0, false).await
+    dial_public_offset(host, port, failed_address, 0, false, source_address, None).await
 }
 
 async fn dial_public_offset(
@@ -1053,13 +1239,25 @@ async fn dial_public_offset(
     failed_address: &mut Option<SocketAddr>,
     offset: usize,
     rotate_gateway: bool,
+    source_address: Option<IpAddr>,
+    timing: Option<&crate::timing::ConnectTiming>,
 ) -> Result<(TcpStream, SocketAddr), NetworkError> {
-    let mut addresses = resolve_public(host, port).await?;
+    let mut addresses = {
+        let _phase = timing.map(|t| t.begin(crate::timing::ConnectPhase::Dns));
+        resolve_public(host, port).await?
+    };
     if rotate_gateway {
         addresses.sort_unstable();
     }
     rotate_addresses(&mut addresses, offset);
-    crate::dial::connect(&addresses, Duration::from_secs(3), failed_address).await
+    let _phase = timing.map(|t| t.begin(crate::timing::ConnectPhase::Tcp));
+    crate::dial::connect_bound(
+        &addresses,
+        Duration::from_secs(3),
+        failed_address,
+        source_address,
+    )
+    .await
 }
 
 fn rotate_addresses(addresses: &mut [SocketAddr], offset: usize) {
@@ -1111,15 +1309,19 @@ async fn run_probe(
     transforms: Arc<Semaphore>,
     factory: Option<Arc<dyn crate::tls::FakePrefixFactory>>,
     verbose: bool,
+    source_address: Option<IpAddr>,
 ) -> ProbeOutcome {
     // Count all TLS bytes, including retransmitted records, but never keep
     // their contents. The wrapper fails closed on either byte limit.
     let counters = Arc::new(Mutex::new((0usize, 0usize)));
     let inner = async {
-        let stream = timeout(request.limits.tcp_timeout, TcpStream::connect(address))
-            .await
-            .map_err(|_| NetworkError::TcpTimeout)?
-            .map_err(|error| tcp_error(&error))?;
+        let stream = timeout(
+            request.limits.tcp_timeout,
+            crate::dial::connect_one(address, source_address),
+        )
+        .await
+        .map_err(|_| NetworkError::TcpTimeout)?
+        .map_err(|error| tcp_error(&error))?;
         stream
             .set_nodelay(true)
             .map_err(|_| NetworkError::NoRoute)?;
@@ -1170,6 +1372,158 @@ async fn run_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn manual_search_can_continue_a_consumed_ordinary_demand_without_bypassing_cooldown() {
+        let context = NetworkContext::new(Mode::Auto);
+        let target = DiagnosticTarget::new(
+            "discord.com",
+            443,
+            Role::Rest,
+            AddressFamily::V4,
+            TlsProfile::Http,
+        )
+        .unwrap();
+        context
+            .controller()
+            .diagnose(target, NetworkError::TlsTimeout, |_| async {
+                ProbeOutcome {
+                    result: Ok(()),
+                    sent_bytes: 10,
+                    received_bytes: 10,
+                }
+            })
+            .await
+            .unwrap();
+        *context.0.pending.lock().unwrap() = Some(Demand {
+            host: "discord.com".into(),
+            port: 443,
+            role: Role::Rest,
+            profile: TlsProfile::Http,
+            failure: NetworkError::TlsTimeout,
+            address: Some("1.1.1.1:443".parse().unwrap()),
+            generation: context.controller().generation(),
+        });
+        // Controller cooldown refuses both campaigns before the real probe
+        // callback. No socket can be opened; all four dials were synthetic.
+        context.wait_for_recovery().await;
+        assert!(context.0.pending.lock().unwrap().is_none());
+        assert!(context.0.manual_pending.lock().unwrap().is_some());
+        assert_eq!(
+            context.extended_search().await,
+            ExtendedSearchOutcome::Finished
+        );
+        assert_eq!(context.controller().budget_snapshot().rolling_dials, 4);
+        context.controller().network_changed();
+        assert_eq!(
+            context.extended_search().await,
+            ExtendedSearchOutcome::NoDemand
+        );
+    }
+
+    #[tokio::test]
+    async fn production_udp_bind_is_strict_and_proxy_transport_ignores_direct_source() {
+        let source: IpAddr = "127.0.0.1".parse().unwrap();
+        let context = NetworkContext::off()
+            .with_source_address(Some(source))
+            .unwrap();
+        // Binding sends no packet to this public test destination.
+        let udp = context
+            .bind_udp("1.1.1.1:5000".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(udp.local_addr().unwrap().ip(), source);
+        assert!(
+            context
+                .bind_udp("[2606:4700::1]:5000".parse().unwrap())
+                .await
+                .is_err()
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let n = socket.read(&mut request).await.unwrap();
+            assert!(request[..n].starts_with(b"CONNECT discord.com:443 "));
+            socket
+                .write_all(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let proxy = context
+            .with_source_address(Some("192.0.2.254".parse().unwrap()))
+            .unwrap()
+            .with_proxy(
+                ProxyConfig {
+                    kind: crate::proxy::ProxyKind::Http,
+                    host: "127.0.0.1".into(),
+                    port,
+                    username: None,
+                },
+                zeroize::Zeroizing::new(String::new()),
+            )
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            proxy.connect_tls("discord.com", 443, Role::Rest),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(NetworkError::ProxyAuthentication)));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn source_views_preserve_shared_budgets_and_leave_defaults_unbound() {
+        let initial = NetworkContext::new(Mode::Auto);
+        let source = "127.0.0.1".parse().unwrap();
+        let bound = initial.with_source_address(Some(source)).unwrap();
+        assert_eq!(initial.source_address(), None);
+        assert_eq!(bound.source_address(), Some(source));
+        assert!(Arc::ptr_eq(&initial.0.pending, &bound.0.pending));
+        assert!(Arc::ptr_eq(
+            &initial.0.manual_pending,
+            &bound.0.manual_pending
+        ));
+        assert!(Arc::ptr_eq(
+            &initial.0.recovery_gate,
+            &bound.0.recovery_gate
+        ));
+        assert_eq!(bound.with_mode(Mode::Off).source_address(), Some(source));
+        for invalid in ["0.0.0.0", "::", "224.0.0.1", "ff02::1", "255.255.255.255"] {
+            assert!(
+                initial
+                    .with_source_address(Some(invalid.parse().unwrap()))
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            bound.with_source_address(None).unwrap().source_address(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn extended_search_has_no_invented_target_or_mode_override() {
+        for mode in [Mode::Off, Mode::Proxy] {
+            let context = NetworkContext::new(mode);
+            assert_eq!(
+                context.extended_search().await,
+                ExtendedSearchOutcome::Restricted
+            );
+            assert_eq!(context.controller().budget_snapshot().rolling_dials, 0);
+        }
+        let context = NetworkContext::new(Mode::Auto);
+        assert_eq!(
+            context.extended_search().await,
+            ExtendedSearchOutcome::NoDemand
+        );
+        assert_eq!(context.controller().budget_snapshot().rolling_dials, 0);
+    }
 
     #[test]
     fn tls_configs_are_built_once_so_sessions_can_resume() {
@@ -1710,6 +2064,13 @@ mod recovery_scope_tests {
         // The campaign still owns the gate and still has its demand.
         assert!(context.0.recovery_gate.try_lock().is_err());
         assert!(context.0.pending.lock().unwrap().is_some());
+        // A second matching caller must also wait while the owned campaign
+        // is pending behind the controller, before `recovering` is populated.
+        assert!(
+            timeout(Duration::from_secs(1), context.wait_for_endpoint(&active))
+                .await
+                .is_err()
+        );
         // An unrelated role proceeds at once.
         timeout(
             Duration::from_millis(1),

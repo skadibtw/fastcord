@@ -17,25 +17,22 @@ use crate::attachments::{AttachmentCache, DecodedAnimation};
 #[path = "emoji_index.rs"]
 mod index;
 
-pub struct Entry {
-    pub text: &'static str,
-    pub name: &'static str,
-    pub aliases: &'static str,
-    pub category: &'static str,
+pub struct Entry<'a> {
+    pub text: &'a str,
+    pub name: &'a str,
+    pub aliases: &'a str,
+    pub category: &'a str,
     pub base: u16,
     pub offset: usize,
     pub len: usize,
 }
 
-pub fn entries() -> &'static [Entry] {
-    index::ENTRIES
+pub(crate) fn entries() -> index::Entries {
+    index::Entries
 }
 
 pub fn unicode(sequence: &str) -> Option<u16> {
-    index::LOOKUP
-        .binary_search_by(|(text, _)| text.cmp(&sequence))
-        .ok()
-        .map(|at| index::LOOKUP[at].1)
+    index::unicode(sequence)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -48,10 +45,14 @@ impl Asset {
     async fn load(self, cache: AttachmentCache) -> Result<DecodedAnimation, &'static str> {
         let bytes = match self {
             Self::Unicode(id) => {
-                let entry = index::ENTRIES
+                let entry = entries()
                     .get(usize::from(id))
                     .ok_or_else(|| crate::i18n::tr("Emoji is unavailable."))?;
-                bytes::Bytes::from_static(&index::PNGS[entry.offset..entry.offset + entry.len])
+                bytes::Bytes::from_static(
+                    index::PNGS
+                        .get(entry.offset..entry.offset + entry.len)
+                        .ok_or_else(|| crate::i18n::tr("Emoji is unavailable."))?,
+                )
             }
             Self::Custom { id, animated } => {
                 cache.custom_emoji(id, animated).await.map_err(|_| {
@@ -319,6 +320,9 @@ pub struct State {
     pub views: HashMap<Asset, View>,
     workers: HashMap<Asset, (u64, Handle)>,
     failed: HashSet<Asset>,
+    // Valid decoded assets refused only for capacity: retain their weight,
+    // not their pixels, until the desired pool has enough room to retry.
+    capacity: HashMap<Asset, usize>,
     // Timeline and picker assets wanted right now, indexed like `visible`.
     desired: [Vec<Asset>; 2],
     active: bool,
@@ -376,6 +380,18 @@ impl State {
         self.views.retain(|key, _| wanted(key));
         self.workers.retain(|key, _| wanted(key));
         self.failed.retain(wanted);
+        let mut used = [0usize; 2];
+        for view in self.views.values() {
+            used[usize::from(view.picker)] += view.bytes;
+        }
+        self.capacity.retain(|asset, bytes| {
+            if !wanted(asset) {
+                return false;
+            }
+            let pool = usize::from(!desired[0].contains(asset));
+            let limit = [VISIBLE_BYTES, PICKER_BYTES][pool];
+            *bytes > limit.saturating_sub(used[pool])
+        });
         self.start(account, cache)
     }
 
@@ -395,6 +411,7 @@ impl State {
             if self.views.contains_key(&asset)
                 || self.workers.contains_key(&asset)
                 || self.failed.contains(&asset)
+                || self.capacity.contains_key(&asset)
             {
                 continue;
             }
@@ -446,7 +463,7 @@ impl State {
                 if used + view.bytes <= limit {
                     self.views.insert(asset, view);
                 } else {
-                    self.failed.insert(asset);
+                    self.capacity.insert(asset, view.bytes);
                 }
             }
             Err(_) => {
@@ -637,7 +654,7 @@ mod tests {
 
     #[test]
     fn the_versioned_index_is_complete_sorted_and_asset_ranges_are_valid() {
-        assert!(index::LOOKUP.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert_eq!(entries().iter().count(), entries().len());
         for (id, entry) in entries().iter().enumerate() {
             assert_eq!(unicode(entry.text), Some(id as u16));
             assert!(matches!(
@@ -833,6 +850,70 @@ mod tests {
         let _ = state.synchronize(true, false, 1, None);
         assert!(state.views.is_empty());
         assert!(!state.animating());
+    }
+
+    #[test]
+    fn capacity_refusal_retries_only_after_room_is_available_and_keeps_decode_failures() {
+        let cache = AttachmentCache::new(
+            &fastcord_net::NetworkContext::off(),
+            Snowflake(1),
+            std::env::temp_dir().join(format!("fastcord-emoji-capacity-{}", std::process::id())),
+            "Mozilla/5.0 test",
+        )
+        .unwrap();
+        let mut state = State::default();
+        for id in 1..=6 {
+            state.visibility(occurrence(custom_asset(id), id), true);
+        }
+        let _ = state.synchronize(true, false, 1, None);
+        for id in 1..=5 {
+            load(&mut state, custom_asset(id), id, 120);
+        }
+        let refused = custom_asset(5);
+        assert!(state.capacity.contains_key(&refused));
+        assert!(!state.failed.contains(&refused));
+        let malformed = custom_asset(6);
+        state.workers.insert(
+            malformed,
+            (6, Task::<Message>::none().abortable().1.abort_on_drop()),
+        );
+        let _ = state.loaded(1, malformed, 6, Err("invalid animation"), None);
+        for _ in 0..8 {
+            // Drop the tasks without polling: admission is tested without I/O.
+            let _ = state.synchronize(true, false, 1, Some(&cache));
+            assert!(state.workers.is_empty());
+            assert!(
+                state.capacity.contains_key(&refused),
+                "same pressure must not restart decoding"
+            );
+        }
+        state.retain(|occurrence| occurrence.asset == refused || occurrence.asset == malformed);
+        let _ = state.synchronize(true, false, 1, Some(&cache));
+        assert_eq!(
+            state.workers.len(),
+            1,
+            "exactly the capacity-refused asset starts"
+        );
+        let ticket = state
+            .workers
+            .get(&refused)
+            .expect("retry worker admitted")
+            .0;
+        assert!(state.views.is_empty());
+        assert!(
+            !state.capacity.contains_key(&refused),
+            "freed room releases valid asset for start"
+        );
+        assert!(
+            state.failed.contains(&malformed),
+            "decode errors are not capacity retries"
+        );
+        let _ = state.loaded(1, refused, ticket, Ok(animation(120)), None);
+        assert!(state.views.contains_key(&refused));
+        assert!(decoded_bytes(&state) <= VISIBLE_BYTES);
+        state.retain(|_| false);
+        let _ = state.synchronize(true, false, 1, None);
+        assert!(state.capacity.is_empty() && state.failed.is_empty());
     }
 
     #[test]

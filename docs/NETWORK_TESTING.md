@@ -815,3 +815,72 @@ sharing and a sustained thirty-minute call remain separate acceptance checks.
 ### Live check record (#218, 2026-10-27)
 
 `fastcord --network-check` (debug build, no account, no packet helper) with the `throne-tun` VPN adapter up: Off and Auto both returned anonymous gateway HTTP 200 with zero recovery dials. This does not exercise the SNI-fragment path; that needs the VPN off on the filtered route (maintainer run).
+
+## Opt-in Gateway startup timing (#224)
+
+Set `FASTCORD_GATEWAY_TIMING=1` before launch. Main Gateway attempts produce at most two fixed-size stderr records (READY queued and termination; an interrupted/failed connect reports on teardown). Records contain process-local attempt IDs, elapsed milliseconds, six stage offsets in order: discovery completion/cached address, aggregate DNS/TCP/TLS completion, WebSocket Upgrade, HELLO, Identify/Resume send completion, READY queued. They also contain successful decrypted read count/bytes, first/last read offsets, complete WebSocket message count, decoded Gateway message count and total decode microseconds. Read counts include the HTTP Upgrade response and bytes below WebSocket framing; they never retain or print payloads, addresses, credentials or session identifiers. The opt-in path has fixed memory and no polling. Defaults, pacing and authenticated retry budgets are unchanged.
+
+`gateway::timing::tests::partial_frame_reads_remain_visible_when_the_remainder_stalls` supplies a partial binary frame through a duplex stream, stalls its remaining bytes for30 simulated seconds, and verifies that read evidence survives without a complete-message count. Existing Gateway missing-READY/heartbeat/backpressure fixtures remain required. DNS/TCP/TLS are one aggregate stage; version discovery before Gateway startup and actual reducer/UI publication are not yet individually instrumented. `ReadyQueued` means decoded READY was queued for the consumer, not that UI rendering completed. Cold/warm p50/p95 on direct filtered and unfiltered routes remains pending; this diagnostic change makes no acceleration claim.
+## Issue 229 request-scoped check evidence
+The consuming `HttpBuilder::anonymous_get` creates a fresh one-request client and strips default headers. Its receipt records mode/profile/helper availability, bridge-selected strategy, actual packet factory invocation and successful helper completion separately. Receipts are carried by CONNECT attempt IDs; recovery probes do not write them. `opaque_forwarding_preserves_tls_h2_alpn_and_backpressure` now checks receipts for SNI packet transforms and no-SNI Direct with zero factory calls. `failed_helper_attempt_is_distinct_from_completion_and_other_requests` covers reset and isolation. `anonymous_receipts_do_not_inherit_headers_or_claim_packet_attempts_on_timeout` checks bounded anonymous failures in Off/Auto/Proxy settings against local fixtures (not real proxy-route acceptance). No receipt claims Gateway READY, UDP reachability or censorship recovery.
+## Native packet capability boundary (#226, #227)
+
+`fastcord_platform::network::packet_capabilities()` reports build support separately from whether a helper is running. Windows ships TCP fake/overlap and canonical UDP discovery fake/IPv4 fragmentation behind explicit authorization. IPv6 fragmentation is unsupported. Linux and macOS report all these native packet operations unsupported; their helper entry returns `ErrorKind::Unsupported` before any side effect. The Network page states this explicitly while retaining portable TLS recovery/configured proxies. These facts do not promise provider effectiveness.
+
+Linux NFQUEUE remains unimplemented. The2026-11-01 host process has zero effective/permitted capabilities, but fresh unprivileged user+network namespaces work and provide namespace-scoped capabilities. The reusable synthetic proof below exercises actual kernel NFQUEUE there. No host firewall rules were altered. A future backend needs verified socket/flow ownership beyond UID, peer-credential IPC, per-operation allowlists/deadlines, parent watchdog and session-only cleanup; namespace/veth tests must prove another same-UID application's exclusion before live filtered-route acceptance. No synthetic mock is presented as proof of kernel interception or cleanup.
+
+
+### Fresh isolated NFQUEUE proof (2026-11-01)
+
+`python3 scripts/test_nfqueue_namespace.py` passed on Linux. The launcher creates fresh user/network namespaces and validates a single-user mapping plus a different network namespace before any nft operation. Two child processes with the same UID send only synthetic loopback UDP. A rule matches the registered socket's source port, destination tuple and socket mark. One registered datagram is held in actual NFQUEUE while the unregistered datagram delivers; NF_ACCEPT without replacement then delivers the registered payload byte-for-byte. No second packet appears in the queue. After the queue listener closes, `queue bypass` allows the marked fixture to deliver. Finally the owned table is deleted, an empty ruleset is verified, child processes/sockets close, and namespace teardown removes remaining local state.
+
+This demonstrates kernel feasibility and exclusion of a cooperative same-UID unregistered flow, not authenticated production registration or adversarial mark isolation. The prototype runs namespace-capable child processes, so it does not prove that another privileged process cannot spoof a mark/tuple. Production still needs authenticated Unix IPC and socket-FD/peer validation; narrowly allocated marks and collision handling; revocation/race protection; bounded operation allowlists and byte/deadline ledgers; helper capability dropping; parent watchdog/session cleanup; veth/physical-egress, NAT/TUN/offload/IPv6 coverage; and package/user-authorization integration. The shipping capability remains Unsupported. No packet fakes, protected data or public endpoints are involved in this proof.
+## OS-profile persistence (#222)
+Linux uses read-only NetworkManager ActiveConnections and Connection.Active Uuid/State/Default/Default6/Vpn properties and change signals. Official API: https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/gdbus-org.freedesktop.NetworkManager.Connection.Active.html . UUID identifies a reusable OS profile, so it never proves the current ISP or route. Raw values are not logged. No activation, settings mutation or connectivity-check method is called.
+
+Offline regressions: profile_digest_is_salted_and_ambiguous_routes_have_no_identity; installation_salt_is_stable_and_corrupt_salt_is_not_replaced; profile_hint_reorders_but_needs_two_confirmations_and_failure_evicts_it; failed_saved_probe_is_evicted_and_disallowed_hint_cannot_expand_a_plan; profile_load_rejects_old_generations_and_never_refunds_budgets; profile_preferences_stay_out_of_proxy_and_off_modes. Optional read-only native test live_networkmanager_profile_returns_only_a_digest requires an unambiguous NM-managed default profile. It does not contact any public origin or change network settings. Two distinct filtered-route acceptance is still outstanding.
+`gateway::timing::tests::partial_frame_reads_remain_visible_when_the_remainder_stalls` supplies a partial binary frame through a duplex stream, stalls its remaining bytes for30 simulated seconds, and verifies that read evidence survives without a complete-message count. Existing Gateway missing-READY/heartbeat/backpressure fixtures remain required. Separate fixed transport counters now report DNS, TCP and TLS durations/counts plus the last completion offset, including failure/cancellation. Proxy establishment is explicitly aggregated as `proxy`, without claiming origin DNS/TCP visibility inside that proxy. Manifest/build lookup reports its own bounded pre-Gateway record distinguishing a cached result, the caller performing the fetch, and a caller waiting for the shared fetch. The READY state carries an opt-in process-local stamp through the existing bounded outbox; the app records reducer application, snapshot publication and UI consumption against the original attempt ID. `UiConsumed` means presentation state was applied, not that GPU pixels were displayed. Cold/warm p50/p95 on direct filtered and unfiltered routes remains pending; this diagnostic change makes no acceleration claim.
+
+
+The DNS/TCP/TLS instrumentation is carried explicitly through the socket broker; ordinary callers pass no timing collector. Phase guards also finish when their future is cancelled. Stored fields contain no addresses, payloads or TLS errors. Fixed stamp metadata is included in outbox accounting and is copied onto the READY event when queued, so a later attempt cannot relabel an earlier pending event. Tests cover cancelled DNS accounting, two queued attempts retaining distinct stamps and returning byte permits, and version-fetch timing without changing cached-fetch behavior. No probes, retries, deadlines, buffer limits or authentication rules change.
+
+### Portable packet-plan validation (#225)
+
+Pure TCP and UDP packet layouts now live in `fastcord-platform::network::packet_plan`, shared directly with the Windows WinDivert caller and compiled for offline tests on every host. `cargo test -p fastcord-platform --locked network::packet_plan` runs the existing profile/reassembly/malformed-input tests on Linux too, plus fixed independently calculated completed-UDP/IPv4-fragment vectors and explicit IPv4-options/IPv6 capability checks. The fixed synthetic vector uses documentation-only addresses, SSRC `0x12345678`, a completed UDP checksum `0x2303` and IPv4 checksum `0x3c1c`; expected fragments were calculated with separate Python network-order integer arithmetic, not generated by the Rust planner under test.
+
+This extraction changes no profile or default: six pinned QUIC fakes, then original discovery or IPv4 offsets 8/16. IPv4 options remain accepted only by the unfragmented UDP profile; fragmented profiles reject them. IPv6 profiles retain the original unfragmented datagram and extension headers remain unsupported. Fake checksum completion, interception, interface selection, cancellation/watchdog and egress still belong to the Windows backend. These portable tests cannot establish those native operations, capture-based verification, effectiveness on filtered networks or human-confirmed media. New STUN fixtures, repeat/pacing catalogs and IPv6 fragmentation are not introduced. Fresh execution results are recorded by the central runner separately.
+
+
+### Parameterized TLS catalog (#222, local incremental implementation)
+
+Catalog version 5 retains the existing six initial automatic strategies unchanged.
+The extended catalog adds finite typed profiles:2/4/6 ClientHello
+records, writes one byte before/after record boundaries,0/10/30ms pacing,
+and TLS-record/write splits at the first payload byte, midsld or hostname
+midpoint. There are42 entries including legacy defaults. No arbitrary script,
+offset or timer enters a profile; privilege/helper defaults are unchanged.
+Saved hints carry only these categorical parameters and expire across catalog
+versions; no endpoint or payload is persisted.
+
+Local coverage extends actual rustls TLS1.2/TLS1.3+HRR+application data tests
+across the catalog, plus partial-input/short-write transcript preservation,
+actual fragment-count/write-boundary/timing assertions, protected-data pass
+through, bounded-parameter rejection and hint serialization/version expiry.
+Formatting/diff checks passed; fresh Cargo results are supplied by the central
+runner. Subsequent ordinary recovery campaigns continue a bounded per-target
+catalog cursor after those first six fail; no timer or background traffic starts
+another campaign. The existing six-probe/twelve-dial campaign, 60-second gap and
+24-dial rolling ten-minute cap remain unchanged. A manual full-search action
+continues a concrete failed endpoint under the same limits and cannot override
+Off, Proxy, no-SNI or an explicitly selected packet helper. Progress distinguishes
+incomplete, confirmed and fully tried catalogs, and shows the remaining cooldown.
+At most 16 target cursors are retained, cleared by network generation changes;
+only typed role preferences can be persisted. Per-role confirmed TLS candidates
+are displayed without pretending every pooled connection uses a global winner.
+No filtered-route success is claimed. Session-only source binding now reaches direct HTTP, WebSocket, bridge upstream,
+probe TCP and UDP, with strict family/no-unbound-fallback behavior. Proxy explicitly
+ignores it; the private CONNECT link/fake origins do not inherit it. Added actual
+loopback TCP local-address/family/refused-bind tests, production UDP bind (no
+packets sent), synthetic local proxy isolation, and UI numeric-input/no-persistence
+checks. These prove local socket behavior, not physical-egress/TUN escape or
+filtered-route effectiveness. Central Cargo results remain pending for this increment.

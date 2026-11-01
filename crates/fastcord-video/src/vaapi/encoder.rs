@@ -7,9 +7,10 @@
 //! slice per picture, one short-term reference, picture-order-count type 2, and
 //! a driver-managed reconstruction ring of two slots (plus one source slot).
 //!
-//! The driver packs the slice NAL units itself (`VAEntrypointEncSlice` needs no
-//! slice data buffer). Encoded output is read from the coded buffer of the
-//! previous picture while the next one is submitted, so [`VideoEncoder::encode`]
+//! The driver encodes slice data. When supported, a packed Baseline slice
+//! header supplies its NAL type/reference flags and syntax explicitly; no
+//! encoded macroblock data is submitted. Encoded output is read from the coded
+//! buffer of the previous picture while the next one is submitted, so [`VideoEncoder::encode`]
 //! appends its output with one picture of pipeline depth; [`flush`] collects a
 //! still-pending picture. The driver may or may not emit its own SPS/PPS NAL
 //! units for an IDR picture, so every access unit goes through
@@ -35,7 +36,7 @@ use std::time::Duration;
 
 use super::{
     ConfigId, ContextId, Display, Image, NativeBuffer, Surfaces, Synchronized, backend, check,
-    invalid_picture, picture, sync_surface,
+    encoder_attributes, invalid_picture, picture, sync_surface,
 };
 use crate::bitwriter::{BitWriter, escape};
 use crate::codec::{Backend, BackendKind, CodecError, EncodedFrame, EncoderConfig, VideoEncoder};
@@ -53,9 +54,9 @@ const SOURCE_SURFACE: usize = 0;
 const CODED_BUFFER_CAP: usize = h264::MAX_ACCESS_UNIT_BYTES;
 
 /// `slice_type` of the one I slice covering the picture (all macroblocks I).
-const SLICE_TYPE_I: u8 = 7;
+const SLICE_TYPE_I: u8 = 2;
 /// `slice_type` of the one P slice covering the picture (all macroblocks P).
-const SLICE_TYPE_P: u8 = 5;
+const SLICE_TYPE_P: u8 = 0;
 
 /// Parameter set ids fixed for the encoder's whole lifetime.
 const SEQUENCE_PARAMETER_SET_ID: u8 = 0;
@@ -63,7 +64,9 @@ const PICTURE_PARAMETER_SET_ID: u8 = 0;
 /// Inline QP of the whole sequence (`pic_init_qp_minus26 + 26`).
 const PICTURE_INIT_QP: u8 = 26;
 /// Deblocking is fully disabled in the one slice per picture (`idc = 2`).
-const DEBLOCK_DISABLE_ALL: u8 = 2;
+// H.264 disable_deblocking_filter_idc=1 disables all filtering; 2 only
+// disables filtering across slice boundaries.
+const DEBLOCK_DISABLE_ALL: u8 = 1;
 /// `log2_max_frame_num_minus4` of 4: `frame_num` wraps at 256.
 const FRAME_NUM_MASK: u16 = 0xFF;
 
@@ -416,6 +419,38 @@ fn slice_buffer(
     }
 }
 
+/// Baseline slice header matching our SPS/PPS and VA picture/slice records.
+/// No slice data or RBSP trailing bit is supplied: the driver appends encoded
+/// macroblocks at `bit_length`. Padding in the last byte is not part of it.
+fn packed_slice_header(idr: bool, idr_pic_id: u16, frame_num: u16) -> (Vec<u8>, u32) {
+    let mut bits = BitWriter::default();
+    for byte in [0, 0, 0, 1, if idr { 0x65 } else { 0x41 }] {
+        bits.byte(byte);
+    }
+    bits.ue(0); // first_mb_in_slice
+    bits.ue(u32::from(if idr { SLICE_TYPE_I } else { SLICE_TYPE_P }));
+    bits.ue(u32::from(PICTURE_PARAMETER_SET_ID));
+    bits.bits(u64::from(frame_num), 8); // log2_max_frame_num_minus4 = 4
+    if idr {
+        bits.ue(u32::from(idr_pic_id));
+        bits.flag(false); // no_output_of_prior_pics_flag
+        bits.flag(false); // long_term_reference_flag
+    } else {
+        bits.flag(false); // num_ref_idx_active_override_flag
+        bits.flag(false); // ref_pic_list_modification_flag_l0
+        bits.flag(false); // adaptive_ref_pic_marking_mode_flag
+    }
+    bits.se(0); // slice_qp_delta
+    bits.ue(u32::from(DEBLOCK_DISABLE_ALL));
+    if DEBLOCK_DISABLE_ALL != 1 {
+        bits.se(0); // slice_alpha_c0_offset_div2
+        bits.se(0); // slice_beta_offset_div2
+    }
+    let bit_length = bits.bit_len() as u32;
+    bits.align_zero();
+    (bits.finish(), bit_length)
+}
+
 /// A byte view over a `repr(C)` parameter-set record, for
 /// [`NativeBuffer::create`], which copies the bytes at `vaCreateBuffer` time.
 fn record_bytes<T>(record: &T) -> &[u8] {
@@ -526,6 +561,27 @@ fn walk_segments(mut segments: *const VACodedBufferSegment) -> Result<Vec<u8>, C
     Ok(data)
 }
 
+fn configured_attributes(
+    formats: u32,
+    rates: u32,
+    packed: u32,
+) -> Result<Vec<VAConfigAttrib>, CodecError> {
+    let mut selected = encoder_attributes(formats, rates)?.to_vec();
+    // An unsupported query field must not become a requested configuration
+    // field: retain the driver's original automatic-header path in that case.
+    if packed != VA_ATTRIB_NOT_SUPPORTED {
+        selected.push(VAConfigAttrib {
+            type_: VAConfigAttribType_VAConfigAttribEncPackedHeaders,
+            value: if packed & VA_ENC_PACKED_HEADER_SLICE != 0 {
+                VA_ENC_PACKED_HEADER_SLICE
+            } else {
+                VA_ENC_PACKED_HEADER_NONE
+            },
+        });
+    }
+    Ok(selected)
+}
+
 /// A VA-API hardware H.264 encoder (see [`super::HardwareSource::open_encoder`]).
 ///
 /// [`VideoEncoder::encode`] hands out the previous picture's access unit (one
@@ -539,6 +595,7 @@ pub struct VaEncoder {
     sps: Vec<u8>,
     pps: Vec<u8>,
     level: u8,
+    packed_slice: bool,
     geometry: Geometry,
     config: EncoderConfig,
     backend: Backend,
@@ -589,6 +646,10 @@ impl VaEncoder {
             sps: sps_rbsp(&geometry, level),
             pps: pps_rbsp(),
             level,
+            packed_slice: attribs.iter().any(|attribute| {
+                attribute.type_ == VAConfigAttribType_VAConfigAttribEncPackedHeaders
+                    && attribute.value == VA_ENC_PACKED_HEADER_SLICE
+            }),
             geometry,
             backend: backend(BackendKind::Hardware, name),
             config,
@@ -614,7 +675,7 @@ impl VaEncoder {
     fn attributes(
         display: &Display,
         profile: VAProfile,
-    ) -> Result<[VAConfigAttrib; 2], CodecError> {
+    ) -> Result<Vec<VAConfigAttrib>, CodecError> {
         let mut attribs = [
             VAConfigAttrib {
                 type_: VAConfigAttribType_VAConfigAttribRTFormat,
@@ -624,8 +685,12 @@ impl VaEncoder {
                 type_: VAConfigAttribType_VAConfigAttribRateControl,
                 value: VA_ATTRIB_NOT_SUPPORTED,
             },
+            VAConfigAttrib {
+                type_: VAConfigAttribType_VAConfigAttribEncPackedHeaders,
+                value: VA_ATTRIB_NOT_SUPPORTED,
+            },
         ];
-        // SAFETY: `attribs` is a real two-element array for the driver to fill.
+        // SAFETY: `attribs` is a real three-element array for the driver to fill.
         check("vaGetConfigAttributes", unsafe {
             vaGetConfigAttributes(
                 display.handle(),
@@ -635,17 +700,7 @@ impl VaEncoder {
                 attribs.len() as i32,
             )
         })?;
-        if attribs[0].value != VA_RT_FORMAT_YUV420 {
-            return Err(CodecError::Unsupported(
-                "the encoder reports a format other than 4:2:0",
-            ));
-        }
-        if attribs[1].value & VA_RC_CBR != VA_RC_CBR {
-            return Err(CodecError::Unsupported(
-                "the encoder does not offer CBR rate control",
-            ));
-        }
-        Ok(attribs)
+        configured_attributes(attribs[0].value, attribs[1].value, attribs[2].value)
     }
 
     /// Appends the pending picture's access unit to `out`, if any: it first
@@ -657,6 +712,11 @@ impl VaEncoder {
         };
         pending.wait(&self.display)?;
         let data = pending.read_coded(&self.display)?;
+        if h264::nal_units(&data).any(|nal| h264::nal_unit_type(nal) == 0) {
+            return Err(CodecError::InvalidBitstream(
+                "the encoder returned an unspecified NAL unit",
+            ));
+        }
         if let Some((data, keyframe)) = self.parameter_sets.complete(data)? {
             out.push(EncodedFrame {
                 data,
@@ -736,6 +796,28 @@ impl VaEncoder {
             VABufferType_VAEncSliceParameterBufferType,
             record_bytes(&slice),
         )?);
+
+        if self.packed_slice {
+            let (header, bit_length) = packed_slice_header(idr, idr_pic_id, this_frame_num);
+            let packed = VAEncPackedHeaderParameterBuffer {
+                type_: VAEncPackedHeaderType_VAEncPackedHeaderSlice,
+                bit_length,
+                has_emulation_bytes: 0,
+                va_reserved: [0; 4],
+            };
+            params.push(NativeBuffer::create(
+                &self.display,
+                context,
+                VABufferType_VAEncPackedHeaderParameterBufferType,
+                record_bytes(&packed),
+            )?);
+            params.push(NativeBuffer::create(
+                &self.display,
+                context,
+                VABufferType_VAEncPackedHeaderDataBufferType,
+                &header,
+            )?);
+        }
 
         let mut rendered: Vec<VABufferID> = params.iter().map(NativeBuffer::id).collect();
         // SAFETY: every surface and buffer id belongs to this context; the
@@ -819,7 +901,7 @@ impl VideoEncoder for VaEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::CodecError;
+    use crate::codec::{CodecError, VideoDecoder};
     use crate::frame::ColorDescription;
     use crate::h264::{BitReader, Sps};
     use crate::test_vectors::moving_pattern;
@@ -828,6 +910,43 @@ mod tests {
     use std::time::Duration;
 
     const CONFIG: EncoderConfig = EncoderConfig::SCREEN_SHARE_720P30;
+
+    #[test]
+    fn packed_header_negotiation_preserves_unsupported_and_automatic_drivers() {
+        let select =
+            |packed| configured_attributes(VA_RT_FORMAT_YUV420, VA_RC_CBR, packed).unwrap();
+        assert_eq!(select(VA_ATTRIB_NOT_SUPPORTED).len(), 2);
+        assert_eq!(
+            select(VA_ENC_PACKED_HEADER_NONE)[2].value,
+            VA_ENC_PACKED_HEADER_NONE
+        );
+        assert_eq!(
+            select(VA_ENC_PACKED_HEADER_SEQUENCE)[2].value,
+            VA_ENC_PACKED_HEADER_NONE
+        );
+        assert_eq!(
+            select(VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_SLICE)[2].value,
+            VA_ENC_PACKED_HEADER_SLICE
+        );
+    }
+
+    #[test]
+    fn packed_slice_headers_match_independent_baseline_syntax_vectors() {
+        // Annex B + nal_ref_idc/type, first_mb=0, slice_type=I/P, pps=0,
+        // 8-bit frame_num; IDR id=0; default reference marking; qp_delta=0;
+        // deblocking_idc=1 (no alpha/beta offsets). Final zero alignment
+        // bits are excluded from the driver-visible header bit length.
+        assert_eq!(
+            packed_slice_header(true, 0, 0),
+            (vec![0, 0, 0, 1, 0x65, 0xb8, 0x04, 0xa0], 60)
+        );
+        assert_eq!(
+            packed_slice_header(false, 0, 1),
+            (vec![0, 0, 0, 1, 0x41, 0xe0, 0x22, 0x80], 58)
+        );
+        assert_eq!(slice_buffer(true, 0, 0, None, (10, 8)).slice_type, 2);
+        assert_eq!(slice_buffer(false, 0, 1, None, (10, 8)).slice_type, 0);
+    }
 
     #[test]
     fn chooses_the_lowest_level_meeting_annex_a() {
@@ -1146,6 +1265,27 @@ mod tests {
                 assert!(summary.sps && summary.pps);
             }
         }
+        let mut decoder = crate::openh264::open_decoder(crate::codec::BackendPreference::Software)
+            .unwrap()
+            .codec;
+        let mut decoded = 0;
+        for frame in &out {
+            decoder
+                .decode(&frame.data, frame.timestamp, &mut |picture| {
+                    assert_eq!(
+                        (picture.image.width(), picture.image.height()),
+                        (config.width, config.height)
+                    );
+                    decoded += 1;
+                })
+                .unwrap();
+        }
+        decoder.flush(&mut |_| decoded += 1).unwrap();
+        assert_eq!(
+            decoded,
+            out.len(),
+            "every hardware picture decodes in software"
+        );
         // All pictures of the sequence must be decodable: sizes, start codes,
         // forbidden bits, and SPS limits all check out.
         for frame in &out {

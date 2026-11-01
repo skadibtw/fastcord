@@ -35,6 +35,9 @@ const PACE_BUSY: f64 = 0.6;
 const PACE_RECOVER: f64 = 0.3;
 /// The rate changes at most this often.
 const PACE_HOLD: Duration = Duration::from_secs(2);
+const RESOLUTION_HOLD: Duration = Duration::from_secs(5);
+const RECOVERY_HOLD: Duration = Duration::from_secs(8);
+const MAX_LOAD_LEVEL: usize = 4;
 
 /// Trades frame rate for time when the machine is busy (a game holding the
 /// GPU): a share that encodes fewer pictures smoothly beats one whose encoder
@@ -46,8 +49,9 @@ pub(super) struct Pace {
     level: usize,
     /// Smoothed seconds per encode.
     average: f64,
-    last_admitted: Option<Instant>,
+    next_admitted: Option<Instant>,
     changed_at: Option<Instant>,
+    recovery_since: Option<Instant>,
 }
 
 impl Pace {
@@ -56,46 +60,70 @@ impl Pace {
             capture_fps: capture_fps.max(1),
             level: 0,
             average: 0.0,
-            last_admitted: None,
+            next_admitted: None,
             changed_at: None,
+            recovery_since: None,
         }
     }
 
     /// The encoded rate, or `None` at the full capture rate.
     pub(super) fn paced_fps(&self) -> Option<u32> {
-        let (num, den) = PACE_LEVELS[self.level];
+        let (num, den) = PACE_LEVELS[self.level.min(PACE_LEVELS.len() - 1)];
         (self.level > 0).then(|| (self.capture_fps * num / den).max(1))
     }
 
     /// Whether the picture at `now` is encoded. At the full rate every
     /// picture is (the capture already paces them).
     pub(super) fn admit(&mut self, now: Instant) -> bool {
-        if let Some(fps) = self.paced_fps() {
-            // Three quarters of the interval absorbs capture timing jitter.
-            let spacing = Duration::from_secs(1) * 3 / (4 * fps);
-            if self
-                .last_admitted
-                .is_some_and(|last| now.saturating_duration_since(last) < spacing)
-            {
+        let Some(fps) = self.paced_fps() else {
+            self.next_admitted = None;
+            return true;
+        };
+        let interval = Duration::from_secs(1) / fps;
+        let tolerance = Duration::from_secs(1) / (4 * self.capture_fps);
+        if let Some(due) = self.next_admitted {
+            if due.saturating_duration_since(now) > tolerance {
                 return false;
             }
+            // Preserve fractional cadence against capture ticks (20 fps from
+            // 30 fps alternates one and two ticks). Never replay missed slots.
+            self.next_admitted = Some(if now.saturating_duration_since(due) >= interval {
+                now + interval
+            } else {
+                due + interval
+            });
+        } else {
+            self.next_admitted = Some(now + interval);
         }
-        self.last_admitted = Some(now);
         true
     }
 
     /// Records one encode that took `took`; true when the rate changed.
     pub(super) fn record(&mut self, took: Duration, now: Instant) -> bool {
         self.average += (took.as_secs_f64() - self.average) / 8.0;
+        let frame = 1.0 / self.capture_fps as f64;
+        let hold = if self.average < frame * PACE_RECOVER {
+            let since = *self.recovery_since.get_or_insert(now);
+            if now.saturating_duration_since(since) < RECOVERY_HOLD {
+                return false;
+            }
+            RECOVERY_HOLD
+        } else {
+            self.recovery_since = None;
+            if self.level >= 2 {
+                RESOLUTION_HOLD
+            } else {
+                PACE_HOLD
+            }
+        };
         if self
             .changed_at
-            .is_some_and(|at| now.saturating_duration_since(at) < PACE_HOLD)
+            .is_some_and(|at| now.saturating_duration_since(at) < hold)
         {
             return false;
         }
-        let frame = 1.0 / self.capture_fps as f64;
         let level = if self.average > frame * PACE_BUSY {
-            (self.level + 1).min(PACE_LEVELS.len() - 1)
+            (self.level + 1).min(MAX_LOAD_LEVEL)
         } else if self.average < frame * PACE_RECOVER {
             self.level.saturating_sub(1)
         } else {
@@ -105,6 +133,8 @@ impl Pace {
             return false;
         }
         self.level = level;
+        self.recovery_since = None;
+        self.next_admitted = None;
         self.changed_at = Some(now);
         true
     }
@@ -151,6 +181,10 @@ pub(super) struct Pipeline {
     output: Vec<EncodedFrame>,
     ended: bool,
     pace: Pace,
+    /// One bounded CPU fallback surface; native conversion is preferred.
+    scaled: Vec<u8>,
+    #[cfg(test)]
+    encode_duration: Option<Duration>,
 }
 
 impl Pipeline {
@@ -192,11 +226,25 @@ impl Pipeline {
             output: Vec::new(),
             ended: false,
             pace: Pace::new(config.capture.frame_rate),
+            scaled: Vec::new(),
+            #[cfg(test)]
+            encode_duration: None,
         }
     }
 
     /// One picture from the capture, at `now`.
     pub(super) fn picture(&mut self, sample: &VideoSample<'_>, now: Instant) -> Flow {
+        self.picture_with_scaling(sample, now, false)
+    }
+    pub(super) fn picture_scaled(&mut self, sample: &VideoSample<'_>, now: Instant) -> Flow {
+        self.picture_with_scaling(sample, now, true)
+    }
+    fn picture_with_scaling(
+        &mut self,
+        sample: &VideoSample<'_>,
+        now: Instant,
+        native_scaled: bool,
+    ) -> Flow {
         if self.ended {
             return Flow::Stop;
         }
@@ -225,19 +273,19 @@ impl Pipeline {
                 sample.timestamp,
             )
         }) {
-            Some(Ok(processed)) => self.deliver(&processed, now),
+            Some(Ok(processed)) => self.deliver(&processed, now, native_scaled),
             Some(Err(error)) => {
                 self.end(ShareEnd::Effect(error.to_string()));
                 Flow::Stop
             }
-            None => self.deliver(sample, now),
+            None => self.deliver(sample, now, native_scaled),
         };
         self.effected = effected;
         flow
     }
 
     /// One picture, after the effect: the preview sees it, then the encoder.
-    fn deliver(&mut self, sample: &VideoSample<'_>, now: Instant) -> Flow {
+    fn deliver(&mut self, sample: &VideoSample<'_>, now: Instant, native_scaled: bool) -> Flow {
         if let Some(preview) = self.preview.as_mut() {
             preview(sample);
         }
@@ -256,7 +304,24 @@ impl Pipeline {
             Counters::add(&counters.paced, 1);
             return Flow::Continue;
         }
-        match self.encode(sample, now) {
+        let size = if native_scaled {
+            (sample.width(), sample.height())
+        } else {
+            self.output_size((sample.width(), sample.height()))
+        };
+        let result = if size == (sample.width(), sample.height()) {
+            self.encode(sample, now)
+        } else {
+            let mut pixels = std::mem::take(&mut self.scaled);
+            scale_nv12(sample, size, &mut pixels);
+            let scaled =
+                VideoSample::nv12(size.0, size.1, size.0 as usize, &pixels, sample.timestamp)
+                    .expect("bounded even NV12 scaling");
+            let result = self.encode(&scaled, now);
+            self.scaled = pixels;
+            result
+        };
+        match result {
             Ok(()) => Flow::Continue,
             Err(end) => {
                 self.end(end);
@@ -334,6 +399,8 @@ impl Pipeline {
 
     /// Feeds one encode's duration to the pace and publishes a rate change.
     fn paced(&mut self, took: Duration, now: Instant) {
+        #[cfg(test)]
+        let took = self.encode_duration.unwrap_or(took);
         if self.pace.record(took, now) {
             let fps = self.pace.paced_fps().unwrap_or(0);
             self.shared.counters.paced_fps.store(fps, Ordering::Relaxed);
@@ -636,6 +703,32 @@ impl Pipeline {
 }
 
 impl FrameHandler for Pipeline {
+    fn output_size(&self, source: (u32, u32)) -> (u32, u32) {
+        let (mut num, mut den) = match self.pace.level {
+            3 => (3, 4),
+            4 => (1, 2),
+            _ => return source,
+        };
+        let shortest = source.0.min(source.1);
+        if shortest <= 16 {
+            return source;
+        }
+        if shortest * num / den < 16 {
+            // Stop at the codec's minimum edge without stretching a thin
+            // source into a different aspect ratio.
+            num = 16;
+            den = shortest;
+        }
+        fastcord_platform::capture::convert::fit_output(
+            source.0,
+            source.1,
+            (source.0 * num / den).max(16),
+            (source.1 * num / den).max(16),
+        )
+    }
+    fn scaled_frame(&mut self, sample: &VideoSample<'_>) -> Flow {
+        self.picture_scaled(sample, Instant::now())
+    }
     fn wants_gpu(&self) -> bool {
         self.zero_copy && !self.ended
     }
@@ -650,5 +743,99 @@ impl FrameHandler for Pipeline {
 
     fn tick(&mut self) -> Tick {
         self.tick_at(Instant::now())
+    }
+}
+
+/// CPU fallback for already-NV12 sources (camera/macOS). Box averages luma
+/// and each interleaved chroma component independently; no color conversion.
+/// Input is capture-bounded, output never grows past one 1280x720 surface.
+fn scale_nv12(sample: &VideoSample<'_>, size: (u32, u32), out: &mut Vec<u8>) {
+    let (w, h) = (size.0 as usize, size.1 as usize);
+    out.resize(w * h * 3 / 2, 0);
+    let (y, uv) = sample.planes();
+    for (src, dest, sw, sh, dw, dh, components) in [
+        (
+            y,
+            0,
+            sample.width() as usize,
+            sample.height() as usize,
+            w,
+            h,
+            1,
+        ),
+        (
+            uv,
+            w * h,
+            sample.width() as usize / 2,
+            sample.height() as usize / 2,
+            w / 2,
+            h / 2,
+            2,
+        ),
+    ] {
+        for row in 0..dh {
+            for col in 0..dw {
+                let (left, right) = (col * sw / dw, ((col + 1) * sw / dw).max(col * sw / dw + 1));
+                let (top, bottom) = (row * sh / dh, ((row + 1) * sh / dh).max(row * sh / dh + 1));
+                let count = ((right - left) * (bottom - top)) as u32;
+                for component in 0..components {
+                    let mut sum = 0u32;
+                    for sy in top..bottom {
+                        for sx in left..right {
+                            sum +=
+                                u32::from(src[sy * sample.stride() + sx * components + component]);
+                        }
+                    }
+                    out[dest + (row * dw + col) * components + component] =
+                        ((sum + count / 2) / count) as u8;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl Pipeline {
+    pub(super) fn set_encode_duration(&mut self, took: Duration) {
+        self.encode_duration = Some(took);
+    }
+}
+
+#[cfg(test)]
+mod scaling_tests {
+    use super::*;
+    #[test]
+    fn nv12_downscale_averages_pixels_and_preserves_chroma_and_padding() {
+        let mut input = vec![255u8; 40 * 48];
+        for y in 0..32 {
+            for x in 0..32 {
+                input[y * 40 + x] = (x + y) as u8;
+            }
+        }
+        for y in 0..16 {
+            for x in 0..16 {
+                input[40 * 32 + y * 40 + x * 2] = 70;
+                input[40 * 32 + y * 40 + x * 2 + 1] = 190;
+            }
+        }
+        let sample = VideoSample::nv12(32, 32, 40, &input, Duration::ZERO).unwrap();
+        let mut scaled = Vec::new();
+        scale_nv12(&sample, (16, 16), &mut scaled);
+        assert_eq!(scaled.len(), 16 * 16 * 3 / 2);
+        for y in 0..16 {
+            for x in 0..16 {
+                assert_eq!(scaled[y * 16 + x], (2 * x + 2 * y + 1) as u8);
+            }
+        }
+        for pair in scaled[256..].as_chunks::<2>().0 {
+            assert_eq!(pair, &[70, 190]);
+        }
+        let capacity = scaled.capacity();
+        scale_nv12(&sample, (16, 16), &mut scaled);
+        assert_eq!(
+            scaled.capacity(),
+            capacity,
+            "reuse the bounded fallback buffer"
+        );
     }
 }

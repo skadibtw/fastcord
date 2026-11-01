@@ -78,15 +78,28 @@ fn merged_decoder_candidates(
 /// Opens the platform encoder: VA-API hardware first, OpenH264 last, as
 /// `preference` allows. Settings are validated before any device is touched,
 /// so a rejected configuration is reported as [`OpenError::Invalid`] without
-/// an attempt, and a broken device discovery as [`OpenError::Discovery`].
+/// an attempt. Software skips discovery. For probing preferences an absent DRM
+/// directory is empty; other discovery failures report [`OpenError::Discovery`].
 pub(crate) fn open_encoder(
     config: EncoderConfig,
     preference: BackendPreference,
 ) -> Result<Selected<Box<dyn VideoEncoder>>, OpenError> {
+    open_encoder_with(config, preference, vaapi::encoder_candidates)
+}
+
+fn open_encoder_with(
+    config: EncoderConfig,
+    preference: BackendPreference,
+    discover: impl FnOnce() -> Result<Vec<Candidate<HardwareSource>>, CodecError>,
+) -> Result<Selected<Box<dyn VideoEncoder>>, OpenError> {
     // A rejected configuration never touches the devices (nor the software
     // codec's own validation).
     config.validate().map_err(OpenError::Invalid)?;
-    let hardware = vaapi::encoder_candidates().map_err(OpenError::Discovery)?;
+    let hardware = if preference == BackendPreference::Software {
+        Vec::new()
+    } else {
+        discover().map_err(OpenError::Discovery)?
+    };
     select(
         preference,
         merged_encoder_candidates(hardware),
@@ -107,7 +120,18 @@ pub(crate) fn open_encoder(
 pub(crate) fn open_decoder(
     preference: BackendPreference,
 ) -> Result<Selected<Box<dyn VideoDecoder>>, OpenError> {
-    let hardware = vaapi::decoder_candidates().map_err(OpenError::Discovery)?;
+    open_decoder_with(preference, vaapi::decoder_candidates)
+}
+
+fn open_decoder_with(
+    preference: BackendPreference,
+    discover: impl FnOnce() -> Result<Vec<Candidate<HardwareSource>>, CodecError>,
+) -> Result<Selected<Box<dyn VideoDecoder>>, OpenError> {
+    let hardware = if preference == BackendPreference::Software {
+        Vec::new()
+    } else {
+        discover().map_err(OpenError::Discovery)?
+    };
     let mut selected = select(
         preference,
         merged_decoder_candidates(hardware),
@@ -231,6 +255,35 @@ mod tests {
         assert_eq!(kinds, [BackendKind::Hardware, BackendKind::Software]);
         assert!(matches!(merged[0].source, DecoderSource::Hardware(_)));
         assert!(matches!(merged[1].source, DecoderSource::Software(_)));
+    }
+
+    #[test]
+    fn software_factories_work_without_drm_discovery_and_auto_accepts_no_devices() {
+        for preference in [BackendPreference::Software, BackendPreference::Auto] {
+            let discover = || {
+                assert_eq!(
+                    preference,
+                    BackendPreference::Auto,
+                    "software must not probe DRM"
+                );
+                Ok(Vec::new())
+            };
+            let encoder = open_encoder_with(
+                EncoderConfig {
+                    width: 128,
+                    height: 96,
+                    frame_rate: 30,
+                    bitrate: 2_500_000,
+                    keyframe_interval: 150,
+                },
+                preference,
+                discover,
+            )
+            .unwrap();
+            let decoder = open_decoder_with(preference, discover).unwrap();
+            assert_eq!(encoder.codec.backend().kind, BackendKind::Software);
+            assert_eq!(decoder.codec.backend().kind, BackendKind::Software);
+        }
     }
 
     #[test]

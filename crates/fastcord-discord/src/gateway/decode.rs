@@ -896,19 +896,30 @@ fn mute_active(entry: &serde_json::Value) -> bool {
     if entry.get("muted") != Some(&serde_json::Value::Bool(true)) {
         return false;
     }
-    let end = entry
+    mute_until(entry).is_none_or(|end| {
+        end > (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+    })
+}
+
+fn mute_until(entry: &serde_json::Value) -> Option<i64> {
+    entry
         .get("mute_config")
         .and_then(|config| config.get("end_time"))
         .and_then(serde_json::Value::as_str)
         .and_then(|text| {
             time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
-        });
-    end.is_none_or(|end| end > time::OffsetDateTime::now_utc())
+        })
+        .map(|time| (time.unix_timestamp_nanos() / 1_000_000) as i64)
 }
 
 fn mute_settings(value: &serde_json::Value) -> MuteSettings {
     let mut mutes = MuteSettings::default();
     for entry in entries_of(value) {
+        // Retain flags and deadline metadata together. An omitted settings
+        // entry must not leave behind a timed mute with no way to expire it.
+        if mutes.entries.len() == 1_024 {
+            break;
+        }
         if let Some(update) = mute_update(entry) {
             if let Some(guild) = update.guild_id.filter(|_| update.guild_muted) {
                 mutes.guilds.push(guild);
@@ -920,9 +931,7 @@ fn mute_settings(value: &serde_json::Value) -> MuteSettings {
                     .filter(|(_, m)| *m)
                     .map(|(id, _)| *id),
             );
-            if mutes.entries.len() < 1_024 {
-                mutes.entries.push(update);
-            }
+            mutes.entries.push(update);
         }
     }
     mutes
@@ -931,16 +940,19 @@ fn mute_settings(value: &serde_json::Value) -> MuteSettings {
 /// One settings entry (READY's or an update's) as a [`GuildMuteUpdate`].
 fn mute_update(entry: &serde_json::Value) -> Option<GuildMuteUpdate> {
     let guild_id = entry.get("guild_id").and_then(snowflake_of);
-    let channels = entry
+    // Normalize duplicates before splitting flags, levels and deadlines.
+    // The final override owns all three, including an absent end time.
+    let overrides: std::collections::BTreeMap<_, _> = entry
         .get("channel_overrides")
         .and_then(serde_json::Value::as_array)
-        .map(|overrides| {
-            overrides
-                .iter()
-                .filter_map(|o| Some((snowflake_of(o.get("channel_id")?)?, mute_active(o))))
-                .collect()
-        })
-        .unwrap_or_default();
+        .into_iter()
+        .flatten()
+        .filter_map(|o| Some((snowflake_of(o.get("channel_id")?)?, o)))
+        .collect();
+    let channels = overrides
+        .iter()
+        .map(|(&channel, o)| (channel, mute_active(o)))
+        .collect();
     let level = |value: &serde_json::Value| {
         value
             .get("message_notifications")
@@ -948,19 +960,18 @@ fn mute_update(entry: &serde_json::Value) -> Option<GuildMuteUpdate> {
             .and_then(NotifyLevel::from_wire)
     };
     let flag = |key| entry.get(key) == Some(&serde_json::Value::Bool(true));
-    let channel_levels = entry
-        .get("channel_overrides")
-        .and_then(serde_json::Value::as_array)
-        .map(|overrides| {
-            overrides
-                .iter()
-                .filter_map(|o| Some((snowflake_of(o.get("channel_id")?)?, level(o))))
-                .collect()
-        })
-        .unwrap_or_default();
+    let channel_levels = overrides
+        .iter()
+        .map(|(&channel, o)| (channel, level(o)))
+        .collect();
     entry.is_object().then(|| GuildMuteUpdate {
         guild_id,
         guild_muted: mute_active(entry),
+        guild_mute_until: mute_until(entry),
+        channel_mute_until: overrides
+            .iter()
+            .filter_map(|(&channel, o)| Some((channel, mute_until(o)?)))
+            .collect(),
         channels,
         level: level(entry),
         suppress_everyone: flag("suppress_everyone"),
@@ -1547,6 +1558,20 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
                 unavailable: g.unavailable,
             })
         }),
+        "CHANNEL_PINS_UPDATE" => {
+            #[derive(Deserialize)]
+            struct PinsChanged {
+                channel_id: Snowflake,
+            }
+            json::<PinsChanged>(raw).map(|event| Dispatch::ChannelPinsUpdate(event.channel_id))
+        }
+        "WEBHOOKS_UPDATE" => {
+            #[derive(Deserialize)]
+            struct Updated {
+                channel_id: Snowflake,
+            }
+            json::<Updated>(raw).map(|update| Dispatch::WebhooksUpdate(update.channel_id))
+        }
         "CHANNEL_CREATE" => json::<Channel>(raw).map(|c| Dispatch::ChannelCreate(Box::new(c))),
         "CHANNEL_UPDATE" => json::<Channel>(raw).map(|c| Dispatch::ChannelUpdate(Box::new(c))),
         "CHANNEL_DELETE" => json::<Channel>(raw).map(|c| Dispatch::ChannelDelete(Box::new(c))),
@@ -1626,6 +1651,9 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
                 None => Decoded::Malformed,
             };
         }
+        "AUTO_MODERATION_ACTION_EXECUTION" => {
+            json::<crate::AutoModExecution>(raw).map(Dispatch::AutoModerationExecution)
+        }
         "AUTO_MODERATION_RULE_CREATE"
         | "AUTO_MODERATION_RULE_UPDATE"
         | "AUTO_MODERATION_RULE_DELETE" => {
@@ -1704,6 +1732,23 @@ mod tests {
             Decoded::Ready(ready) => *ready,
             _ => panic!("READY did not decode"),
         }
+    }
+
+    #[test]
+    fn channel_pins_update_requires_a_channel_and_ignores_unused_fields() {
+        for raw in [
+            r#"{"channel_id":"500","last_pin_timestamp":null}"#,
+            r#"{"channel_id":"500","guild_id":"100","last_pin_timestamp":"2026-11-01T00:00:00Z"}"#,
+        ] {
+            assert!(matches!(
+                decode_dispatch("CHANNEL_PINS_UPDATE", raw),
+                Decoded::Event(Dispatch::ChannelPinsUpdate(Snowflake(500)))
+            ));
+        }
+        assert!(matches!(
+            decode_dispatch("CHANNEL_PINS_UPDATE", "{}"),
+            Decoded::Malformed
+        ));
     }
 
     #[test]
@@ -2592,6 +2637,17 @@ mod tests {
     }
 
     #[test]
+    fn webhooks_update_requires_a_channel() {
+        assert!(
+            matches!(decode_dispatch("WEBHOOKS_UPDATE", r#"{"guild_id":"3","channel_id":"4"}"#), Decoded::Event(Dispatch::WebhooksUpdate(channel)) if channel == id(4))
+        );
+        assert!(matches!(
+            decode_dispatch("WEBHOOKS_UPDATE", r#"{"guild_id":"3"}"#),
+            Decoded::Malformed
+        ));
+    }
+
+    #[test]
     fn sticker_updates_name_only_their_guild() {
         assert!(matches!(
             decode_dispatch("GUILD_STICKERS_UPDATE", r#"{"guild_id":"3","stickers":[]}"#),
@@ -3035,6 +3091,76 @@ mod tests {
     }
 
     #[test]
+    fn mute_deadlines_survive_decode_including_fractional_seconds() {
+        let update = mute_update(&serde_json::json!({
+            "guild_id": "1", "muted": true,
+            "mute_config": {"end_time": "2099-01-01T00:00:00.500Z"},
+            "channel_overrides": [{"channel_id":"2", "muted":true,
+                "mute_config":{"end_time":"2099-01-01T00:00:01.750Z"}}]
+        }))
+        .unwrap();
+        assert!(update.guild_muted);
+        let end = update.guild_mute_until.unwrap();
+        assert_eq!(end % 1000, 500);
+        assert_eq!(update.channel_mute_until, [(id(2), end + 1250)]);
+    }
+
+    #[test]
+    fn ready_mute_retention_never_keeps_flags_without_their_deadlines() {
+        let entries: Vec<_> = (1..=1025)
+            .map(|n| {
+                serde_json::json!({
+                    "guild_id": n.to_string(), "muted": true,
+                    "mute_config": {"end_time":"2099-01-01T00:00:00Z"},
+                    "channel_overrides": [{"channel_id": (n + 10000).to_string(), "muted":true,
+                        "mute_config":{"end_time":"2099-01-01T00:00:01Z"}}]
+                })
+            })
+            .collect();
+        let settings = mute_settings(&serde_json::json!(entries));
+        let mut read = crate::state::ReadStates::default();
+        read.replace(Vec::new(), settings);
+        assert!(read.guild_muted(id(1024)));
+        assert!(read.channel_muted(id(11024)));
+        assert!(!read.guild_muted(id(1025)));
+        assert!(!read.channel_muted(id(11025)));
+        assert!(read.expire_mutes(i64::MAX));
+        for n in 1..=1025 {
+            assert!(!read.guild_muted(id(n)));
+            assert!(!read.channel_muted(id(n + 10000)));
+        }
+        assert_eq!(read.next_mute_expiry(), None);
+    }
+
+    #[test]
+    fn duplicate_mute_overrides_use_the_final_deadline_or_its_absence() {
+        let timed = serde_json::json!({"channel_id":"2", "muted":true,
+            "mute_config":{"end_time":"2099-01-01T00:00:01Z"}});
+        let indefinite = serde_json::json!({"channel_id":"2", "muted":true});
+        let unmuted = serde_json::json!({"channel_id":"2", "muted":false});
+        for (overrides, initially_muted, expires) in [
+            (vec![timed.clone(), indefinite.clone()], true, false),
+            (vec![indefinite, timed.clone()], true, true),
+            (vec![timed, unmuted], false, false),
+        ] {
+            let raw = serde_json::json!({"guild_id":"1", "channel_overrides":overrides});
+            // READY and incremental settings must agree on duplicate precedence.
+            let mut ready = crate::state::ReadStates::default();
+            ready.replace(Vec::new(), mute_settings(&serde_json::json!([raw.clone()])));
+            let update = mute_update(&raw).unwrap();
+            let mut incremental = crate::state::ReadStates::default();
+            incremental.update_mutes(update.guild_id, update.guild_muted, &update.channels);
+            incremental.update_levels(&update);
+            for read in [&mut ready, &mut incremental] {
+                assert_eq!(read.channel_muted(id(2)), initially_muted);
+                assert_eq!(read.next_mute_expiry().is_some(), expires);
+                assert_eq!(read.expire_mutes(i64::MAX), expires);
+                assert_eq!(read.channel_muted(id(2)), initially_muted && !expires);
+            }
+        }
+    }
+
+    #[test]
     fn notification_settings_and_folders_decode_from_events() {
         let raw = r#"{"guild_id":"7","muted":false,"message_notifications":1,
             "suppress_everyone":true,"suppress_roles":false,
@@ -3126,5 +3252,44 @@ mod tests {
         let got = folders(both).unwrap();
         assert_eq!(got.folders.len(), 1);
         assert_eq!(got.folders[0].name, None);
+    }
+    #[test]
+    fn execution_metadata_is_bounded_unknown_safe_and_replay_safe() {
+        let mut raw = serde_json::json!({
+            "guild_id":"3", "rule_id":"4", "user_id":"5",
+            "rule_trigger_type":999, "action":{"type":999,"metadata":{"future":"x".repeat(300_000)}},
+            "content":"secret".repeat(50_000), "matched_keyword":null,
+            "matched_content":null, "channel_id":null
+        });
+        let Decoded::Event(Dispatch::AutoModerationExecution(event)) =
+            decode_dispatch("AUTO_MODERATION_ACTION_EXECUTION", &raw.to_string())
+        else {
+            panic!("execution metadata missing")
+        };
+        assert_eq!(event.action.kind, 999);
+        assert_eq!(event.message_id, None);
+        assert!(!format!("{event:?}").contains("secret"));
+        let mut feed = crate::AutoModFeed::default();
+        for seq in 1..=100 {
+            feed.push_execution(seq, event);
+        }
+        assert_eq!(feed.executions.len(), crate::EXECUTION_ITEMS);
+        assert!(
+            feed.executions.capacity() * std::mem::size_of::<(u64, crate::AutoModExecution)>()
+                < 4096
+        );
+        let before = feed.clone();
+        feed.push_execution(100, event);
+        feed.push_execution(1, event);
+        assert_eq!(feed, before);
+        feed.clear();
+        feed.push_execution(1, event);
+        assert_eq!(feed.executions.len(), 1);
+        assert!(feed.latest() > before.latest());
+        raw.as_object_mut().unwrap().remove("user_id");
+        assert!(matches!(
+            decode_dispatch("AUTO_MODERATION_ACTION_EXECUTION", &raw.to_string()),
+            Decoded::Malformed
+        ));
     }
 }

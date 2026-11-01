@@ -1798,6 +1798,8 @@ fn levels_and_suppressed_mentions_shape_what_counts_as_unread_or_a_mention() {
         event: Dispatch::UserGuildSettingsUpdate(Box::new(crate::gateway::GuildMuteUpdate {
             guild_id: Some(id(FIRST)),
             guild_muted: false,
+            guild_mute_until: None,
+            channel_mute_until: Vec::new(),
             channels: Vec::new(),
             level,
             suppress_everyone: suppress,
@@ -1856,6 +1858,8 @@ fn a_category_mute_or_level_is_inherited_by_its_channels() {
         event: Dispatch::UserGuildSettingsUpdate(Box::new(crate::gateway::GuildMuteUpdate {
             guild_id: Some(id(FIRST)),
             guild_muted: false,
+            guild_mute_until: None,
+            channel_mute_until: Vec::new(),
             channels: vec![(id(CATEGORY), muted)],
             level: None,
             suppress_everyone: false,

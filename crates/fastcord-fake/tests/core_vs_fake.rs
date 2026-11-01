@@ -56,6 +56,10 @@ async fn the_client_core_talks_to_the_fake() {
     })
     .await;
 
+    // Exercise the real worker/outbox and REST scheduler across a confirmed
+    // 429, then reconcile the Gateway echo without a second user click.
+    fake.rate_limit_next_message();
+    let limited_before = fake.rate_limited();
     // Send: confirmed by the echo of its own nonce, so the outbox empties.
     assert!(core.send(GENERAL, "hello from the core test"));
     let view = until(&core, "the sent message", |v| {
@@ -63,6 +67,11 @@ async fn the_client_core_talks_to_the_fake() {
     })
     .await;
     assert!(!view.send_trouble);
+    assert_eq!(
+        fake.rate_limited(),
+        limited_before + 1,
+        "the test must exercise one rejected POST before success"
+    );
     let id = view
         .messages
         .iter()

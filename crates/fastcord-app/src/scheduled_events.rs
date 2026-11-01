@@ -9,11 +9,14 @@
 //! by the reducer against current permissions and the event's state just
 //! before sending, and never retried; cancelling and deleting ask first, and
 //! an ambiguous failure reads "may have been applied". Times are shown and
-//! typed in the local time zone as it was at start-up (no DST history).
+//! typed using date-specific native timezone conversion on workers; ambiguous
+//! or nonexistent DST times are refused. Unsupported platforms explicitly use UTC.
 
 use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot};
-use fastcord_discord::{DraftError, EventAction, EventDraft, RestClient, RestError};
+use fastcord_discord::{
+    DraftError, EventAction, EventDraft, EventRecurrence, RestClient, RestError,
+};
 use fastcord_model::markup::TimeStyle;
 use fastcord_model::{
     EventKind, EventStatus, MAX_DESCRIPTION_CHARS, MAX_LOCATION_CHARS, MAX_NAME_CHARS,
@@ -70,6 +73,14 @@ pub enum Event {
     Reload,
     Loaded(u64, Snowflake, Result<Vec<ScheduledEvent>, RestError>),
     Show(Snowflake),
+    ShowUsers(Snowflake),
+    NextUsers,
+    FirstUsers,
+    UsersLoaded(
+        u64,
+        Snowflake,
+        Result<fastcord_discord::EventUsers, RestError>,
+    ),
     List,
     Do(EventAction),
     Ask(Confirm, Snowflake),
@@ -81,17 +92,22 @@ pub enum Event {
     Edit(Snowflake),
     Input(Field, String),
     Kind(EventKind),
+    Repeat(Option<EventRecurrence>),
     Channel(Choice),
     Save,
+    Prepared(u64, Snowflake, Result<EventAction, String>),
     Done(u64, Result<(), RestError>),
     /// Hides the banner of an event.
     Hide(Snowflake),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Form {
     /// The event being edited and the start it had.
     editing: Option<(Snowflake, u64)>,
+    original_end: Option<u64>,
+    original_civil: Option<(String, String)>,
+    recurrence: Option<EventRecurrence>,
     name: String,
     description: String,
     kind: EventKind,
@@ -106,6 +122,7 @@ struct Form {
 enum Screen {
     List,
     Detail(Snowflake),
+    Users(Snowflake),
     Form(Box<Form>),
 }
 
@@ -130,6 +147,11 @@ pub struct State {
     notice: Option<String>,
     confirm: Option<(Confirm, Snowflake)>,
     hidden: Vec<Snowflake>,
+    users: Option<fastcord_discord::EventUsers>,
+    users_epoch: u64,
+    users_loading: bool,
+    users_task: Option<iced::task::Handle>,
+    users_error: Option<String>,
 }
 
 impl Default for State {
@@ -144,12 +166,17 @@ impl Default for State {
             notice: None,
             confirm: None,
             hidden: Vec::new(),
+            users: None,
+            users_epoch: 0,
+            users_loading: false,
+            users_task: None,
+            users_error: None,
         }
     }
 }
 
 /// Unix milliseconds of `YYYY-MM-DD HH:MM` in the given offset.
-fn parse_local(raw: &str, offset: UtcOffset) -> Option<u64> {
+fn parse_civil(raw: &str) -> Option<PrimitiveDateTime> {
     let (date, clock) = raw.trim().split_once([' ', 'T'])?;
     let mut date = date.split('-');
     let (year, month, day) = (date.next()?, date.next()?, date.next()?);
@@ -165,9 +192,12 @@ fn parse_local(raw: &str, offset: UtcOffset) -> Option<u64> {
     )
     .ok()?;
     let clock = Time::from_hms(hour.parse().ok()?, minute.parse().ok()?, 0).ok()?;
-    let seconds = PrimitiveDateTime::new(date, clock)
-        .assume_offset(offset)
-        .unix_timestamp();
+    Some(PrimitiveDateTime::new(date, clock))
+}
+
+#[cfg(test)]
+fn parse_local(raw: &str, offset: UtcOffset) -> Option<u64> {
+    let seconds = parse_civil(raw)?.assume_offset(offset).unix_timestamp();
     u64::try_from(seconds).ok().map(|s| s * 1_000)
 }
 
@@ -188,8 +218,165 @@ fn format_local(ms: u64, offset: UtcOffset) -> String {
     )
 }
 
-fn offset() -> UtcOffset {
-    localtime::offset().unwrap_or(UtcOffset::UTC)
+// At most two timestamps per retained scheduled event (100 per guild).
+type TimeOffsets = Vec<(u64, Option<i32>)>;
+#[derive(Default)]
+struct PublishedOffsets {
+    owner: u64,
+    entries: TimeOffsets,
+}
+static OFFSETS: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<PublishedOffsets>>> =
+    std::sync::OnceLock::new();
+fn offsets() -> &'static std::sync::Arc<std::sync::Mutex<PublishedOffsets>> {
+    OFFSETS.get_or_init(Default::default)
+}
+/// Account-worker owned schedule; the UI only reads the published offsets.
+pub(crate) struct TimeCache {
+    entries: TimeOffsets,
+    deadline: Option<std::time::Instant>,
+    owner: u64,
+    published: std::sync::Arc<std::sync::Mutex<PublishedOffsets>>,
+}
+impl TimeCache {
+    #[cfg(test)]
+    pub(crate) fn isolated() -> Self {
+        Self::with_published(Default::default())
+    }
+
+    pub(crate) fn new() -> Self {
+        Self::with_published(std::sync::Arc::clone(offsets()))
+    }
+
+    fn with_published(published: std::sync::Arc<std::sync::Mutex<PublishedOffsets>>) -> Self {
+        let owner = {
+            let mut current = published.lock().unwrap_or_else(|p| p.into_inner());
+            current.owner = current.owner.wrapping_add(1);
+            current.entries.clear();
+            current.owner
+        };
+        Self {
+            entries: Vec::new(),
+            deadline: None,
+            owner,
+            published,
+        }
+    }
+
+    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+    pub(crate) fn wait(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
+    pub(crate) fn prepare(&mut self, events: &[ScheduledEvent]) {
+        let times = events
+            .iter()
+            .take(100)
+            .flat_map(|e| std::iter::once(e.start_ms).chain(e.end_ms))
+            .collect();
+        self.update(times, std::time::Instant::now());
+    }
+
+    pub(crate) fn refresh_due(&mut self, now: std::time::Instant) -> bool {
+        if self.deadline.is_none_or(|deadline| now < deadline) {
+            return false;
+        }
+        self.update(self.entries.iter().map(|(ms, _)| *ms).collect(), now)
+    }
+
+    fn update(&mut self, times: Vec<u64>, now: std::time::Instant) -> bool {
+        self.update_with(times, now, fastcord_platform::timezone::refresh, |ms| {
+            i64::try_from(ms / 1000)
+                .ok()
+                .and_then(fastcord_platform::timezone::offset_at)
+        })
+    }
+
+    fn update_with(
+        &mut self,
+        times: Vec<u64>,
+        now: std::time::Instant,
+        mut refresh: impl FnMut(),
+        mut resolve: impl FnMut(u64) -> Option<i32>,
+    ) -> bool {
+        let due = self.deadline.is_none_or(|deadline| now >= deadline);
+        let mut next = Vec::with_capacity(times.len().min(200));
+        let mut refreshed = false;
+        for ms in times.into_iter().take(200) {
+            if next.iter().any(|(saved, _)| *saved == ms) {
+                continue;
+            }
+            let saved = (!due)
+                .then(|| self.entries.iter().find(|(saved, _)| *saved == ms))
+                .flatten();
+            let offset = if let Some((_, offset)) = saved {
+                *offset
+            } else {
+                if !refreshed {
+                    refresh();
+                    refreshed = true;
+                }
+                resolve(ms)
+            };
+            next.push((ms, offset));
+        }
+        self.deadline = if next.is_empty() {
+            None
+        } else if due {
+            Some(now + Self::INTERVAL)
+        } else {
+            self.deadline
+        };
+        let changed = next != self.entries;
+        self.entries = next;
+        if changed {
+            let mut published = self.published.lock().unwrap_or_else(|p| p.into_inner());
+            if published.owner == self.owner {
+                published.entries = self.entries.clone();
+            }
+        }
+        changed
+    }
+}
+fn offset_for(ms: u64) -> Option<UtcOffset> {
+    offsets()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entries
+        .iter()
+        .find(|(saved, _)| *saved == ms)
+        .and_then(|(_, offset)| *offset)
+        .and_then(|offset| UtcOffset::from_whole_seconds(offset).ok())
+}
+fn system_time(raw: &str) -> Result<u64, String> {
+    use fastcord_platform::timezone::{Civil, LocalResult};
+    let civil =
+        parse_civil(raw).ok_or_else(|| tr("Write the time as YYYY-MM-DD HH:MM.").to_owned())?;
+    let seconds = match fastcord_platform::timezone::resolve(Civil {
+        year: civil.year(),
+        month: civil.month() as u8,
+        day: civil.day(),
+        hour: civil.hour(),
+        minute: civil.minute(),
+    }) {
+        LocalResult::Unique(seconds) => seconds,
+        LocalResult::Unsupported => civil.assume_utc().unix_timestamp(),
+        LocalResult::Ambiguous => {
+            return Err(tr(
+                "This local time occurs twice during the clock change. Choose an unambiguous time.",
+            )
+            .to_owned());
+        }
+        LocalResult::Missing => return Err(tr(
+            "This local time does not exist or its timezone is unavailable. Choose another time.",
+        )
+        .to_owned()),
+    };
+    u64::try_from(seconds)
+        .ok()
+        .and_then(|s| s.checked_mul(1000))
+        .ok_or_else(|| tr("The event time is out of range.").to_owned())
 }
 
 fn now_ms() -> u64 {
@@ -264,12 +451,31 @@ fn failure(error: RestError, what: &str) -> String {
 }
 
 fn draft_of(form: &Form) -> Result<EventDraft, String> {
-    let start = parse_local(&form.start, offset()).ok_or(tr(
-        "Write the start as YYYY-MM-DD HH:MM in your local time.",
-    ))?;
+    // This function runs on the form-validation worker. Keep known instants
+    // when their displayed civil text is unchanged, even if the OS timezone
+    // changes while the form is open (or the text lies in a DST fold).
+    fastcord_platform::timezone::refresh();
+    let original = form.editing.filter(|_| {
+        form.original_civil
+            .as_ref()
+            .is_some_and(|(start, _)| start == form.start.trim())
+    });
+    let start = match original {
+        Some((_, before)) => before,
+        None => system_time(&form.start)?,
+    };
     let end = match form.end.trim() {
         "" => None,
-        raw => Some(parse_local(raw, offset()).ok_or(tr("Write the end as YYYY-MM-DD HH:MM."))?),
+        raw => Some(
+            match form.original_end.filter(|_| {
+                form.original_civil
+                    .as_ref()
+                    .is_some_and(|(_, end)| end == raw)
+            }) {
+                Some(before) => before,
+                None => system_time(raw)?,
+            },
+        ),
     };
     let draft = EventDraft {
         name: form.name.clone(),
@@ -279,6 +485,7 @@ fn draft_of(form: &Form) -> Result<EventDraft, String> {
         location: form.location.clone(),
         start_ms: start,
         end_ms: end,
+        recurrence: form.editing.is_none().then_some(form.recurrence).flatten(),
     };
     // A new event, or an edit that moves the start, must start in the future.
     // (The form shows minutes only.)
@@ -299,8 +506,10 @@ impl State {
 
     /// Logout or account change.
     pub fn clear(&mut self) {
+        self.clear_users();
         *self = Self {
             serial: self.serial.wrapping_add(1),
+            users_epoch: self.users_epoch.wrapping_add(1),
             generation: self.generation.wrapping_add(1),
             ..Self::default()
         };
@@ -311,8 +520,60 @@ impl State {
         match event {
             Event::Loaded(_, _, r) => auth_rejected(r),
             Event::Done(_, r) => auth_rejected(r),
+            Event::UsersLoaded(_, _, r) => auth_rejected(r),
             _ => false,
         }
+    }
+
+    fn clear_users(&mut self) {
+        if let Some(task) = self.users_task.take() {
+            task.abort();
+        }
+        self.users_epoch = self.users_epoch.wrapping_add(1);
+        self.users = None;
+        self.users_loading = false;
+        self.users_error = None;
+    }
+
+    fn users_visible(&self, navigation: &NavigationSnapshot, event: Snowflake) -> bool {
+        self.guild == navigation.selected_guild
+            && find(navigation, event).is_some()
+            && navigation.readable_events.contains(&event)
+    }
+
+    pub fn sync_users(&mut self, navigation: &NavigationSnapshot) {
+        if let Screen::Users(event) = self.screen
+            && !self.users_visible(navigation, event)
+        {
+            self.clear_users();
+        }
+    }
+
+    fn fetch_users(
+        &mut self,
+        navigation: &NavigationSnapshot,
+        client: &RestClient,
+        event: Snowflake,
+        after: Option<Snowflake>,
+    ) -> Task<Event> {
+        if self.users_loading || !self.users_visible(navigation, event) {
+            return Task::none();
+        }
+        let Some(guild) = self.guild else {
+            return Task::none();
+        };
+        self.clear_users();
+        self.screen = Screen::Users(event);
+        self.users_loading = true;
+        let epoch = self.users_epoch;
+        let client = client.clone();
+        let (task, handle) = Task::perform(
+            async move { client.scheduled_event_users(guild, event, after).await },
+            move |result| Event::UsersLoaded(epoch, event, result),
+        )
+        .abortable();
+        self.users_task = Some(handle.abort_on_drop());
+        task
     }
 
     fn fetch(&mut self, guild: Snowflake, client: &RestClient) -> Task<Event> {
@@ -364,12 +625,14 @@ impl State {
                     hidden: std::mem::take(&mut self.hidden),
                     serial: self.serial,
                     generation: self.generation,
+                    users_epoch: self.users_epoch.wrapping_add(1),
                     pending: self.pending,
                     ..Self::default()
                 };
                 self.fetch(guild, client)
             }
             Event::Close => {
+                self.clear_users();
                 // A write in flight still ends in `Done`; the notice is dropped.
                 self.guild = None;
                 self.screen = Screen::List;
@@ -395,13 +658,48 @@ impl State {
                 }
                 Task::none()
             }
+            Event::ShowUsers(id) => self.fetch_users(navigation, client, id, None),
+            Event::FirstUsers => match self.screen {
+                Screen::Users(id) => self.fetch_users(navigation, client, id, None),
+                _ => Task::none(),
+            },
+            Event::NextUsers => {
+                if let Screen::Users(id) = self.screen
+                    && let Some(next) = self.users.as_ref().and_then(|page| page.next)
+                {
+                    self.fetch_users(navigation, client, id, Some(next))
+                } else {
+                    Task::none()
+                }
+            }
+            Event::UsersLoaded(epoch, id, result) => {
+                if epoch != self.users_epoch
+                    || !self.users_loading
+                    || !matches!(self.screen, Screen::Users(open) if open == id)
+                {
+                    return Task::none();
+                }
+                if !self.users_visible(navigation, id) {
+                    self.clear_users();
+                    return Task::none();
+                }
+                self.users_task = None;
+                self.users_loading = false;
+                match result {
+                    Ok(page) => self.users = Some(page),
+                    Err(error) => self.users_error = Some(failure(error, "Nothing")),
+                }
+                Task::none()
+            }
             Event::Show(id) => {
+                self.clear_users();
                 self.screen = Screen::Detail(id);
                 self.confirm = None;
                 self.notice = None;
                 Task::none()
             }
             Event::List => {
+                self.clear_users();
                 self.screen = Screen::List;
                 self.confirm = None;
                 Task::none()
@@ -428,8 +726,12 @@ impl State {
             Event::Join(..) => Task::none(),
             Event::New => {
                 if self.guild.is_some() && self.pending.is_none() {
+                    self.clear_users();
                     self.screen = Screen::Form(Box::new(Form {
                         editing: None,
+                        original_end: None,
+                        original_civil: None,
+                        recurrence: None,
                         name: String::new(),
                         description: String::new(),
                         kind: EventKind::Voice,
@@ -448,18 +750,33 @@ impl State {
                     && self.guild.is_some()
                     && self.pending.is_none()
                 {
-                    let offset = offset();
+                    if fastcord_platform::timezone::supported()
+                        && (offset_for(event.start_ms).is_none()
+                            || event.end_ms.is_some_and(|end| offset_for(end).is_none()))
+                    {
+                        self.notice = Some(tr("The event timezone is unavailable; editing is disabled until it can be resolved.").to_owned());
+                        return Task::none();
+                    }
+                    self.clear_users();
+                    let start = format_local(
+                        event.start_ms,
+                        offset_for(event.start_ms).unwrap_or(UtcOffset::UTC),
+                    );
+                    let end = event.end_ms.map_or_else(String::new, |e| {
+                        format_local(e, offset_for(e).unwrap_or(UtcOffset::UTC))
+                    });
                     self.screen = Screen::Form(Box::new(Form {
                         editing: Some((id, event.start_ms)),
+                        original_end: event.end_ms,
+                        original_civil: Some((start.clone(), end.clone())),
+                        recurrence: None,
                         name: event.name.clone(),
                         description: event.description.clone(),
                         kind: event.kind,
                         channel: event.channel_id,
                         location: event.location.clone(),
-                        start: format_local(event.start_ms, offset),
-                        end: event
-                            .end_ms
-                            .map_or_else(String::new, |e| format_local(e, offset)),
+                        start,
+                        end,
                         error: None,
                     }));
                     self.notice = None;
@@ -467,7 +784,9 @@ impl State {
                 Task::none()
             }
             Event::Input(field, value) => {
-                if let Screen::Form(form) = &mut self.screen {
+                if let Screen::Form(form) = &mut self.screen
+                    && self.pending.is_none()
+                {
                     let (target, max) = match field {
                         Field::Name => (&mut form.name, MAX_NAME_CHARS),
                         Field::Description => (&mut form.description, MAX_DESCRIPTION_CHARS),
@@ -480,8 +799,19 @@ impl State {
                 }
                 Task::none()
             }
+            Event::Repeat(recurrence) => {
+                if let Screen::Form(form) = &mut self.screen
+                    && self.pending.is_none()
+                    && form.editing.is_none()
+                {
+                    form.recurrence = recurrence;
+                    form.error = None;
+                }
+                Task::none()
+            }
             Event::Kind(kind) => {
                 if let Screen::Form(form) = &mut self.screen
+                    && self.pending.is_none()
                     && form.kind != kind
                 {
                     form.kind = kind;
@@ -492,33 +822,57 @@ impl State {
                 Task::none()
             }
             Event::Channel(choice) => {
-                if let Screen::Form(form) = &mut self.screen {
+                if let Screen::Form(form) = &mut self.screen
+                    && self.pending.is_none()
+                {
                     form.channel = Some(choice.id);
                     form.error = None;
                 }
                 Task::none()
             }
             Event::Save => {
-                let Screen::Form(form) = &mut self.screen else {
+                let Screen::Form(form) = &self.screen else {
+                    return Task::none();
+                };
+                let Some(guild) = self.guild else {
                     return Task::none();
                 };
                 if self.pending.is_some() {
                     return Task::none();
                 }
-                match draft_of(form) {
-                    Err(message) => {
-                        form.error = Some(message);
-                        Task::none()
-                    }
-                    Ok(draft) => {
-                        let action = match form.editing {
-                            Some((id, _)) => EventAction::Edit(id, draft),
-                            None => EventAction::Create(draft),
-                        };
-                        match self.guild {
-                            Some(guild) => self.write(guild, action, bridge),
-                            None => Task::none(),
+                let form = (**form).clone();
+                self.serial = self.serial.wrapping_add(1);
+                let serial = self.serial;
+                self.pending = Some(serial);
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            draft_of(&form).map(|draft| match form.editing {
+                                Some((id, _)) => EventAction::Edit(id, draft),
+                                None => EventAction::Create(draft),
+                            })
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("The timezone worker stopped.".to_owned()))
+                    },
+                    move |result| Event::Prepared(serial, guild, result),
+                )
+            }
+            Event::Prepared(serial, guild, result) => {
+                if self.pending != Some(serial) {
+                    return Task::none();
+                }
+                self.pending = None;
+                if self.guild != Some(guild) || !matches!(self.screen, Screen::Form(_)) {
+                    return Task::none();
+                }
+                match result {
+                    Ok(action) => self.write(guild, action, bridge),
+                    Err(error) => {
+                        if let Screen::Form(form) = &mut self.screen {
+                            form.error = Some(error);
                         }
+                        Task::none()
                     }
                 }
             }
@@ -530,6 +884,7 @@ impl State {
                 match result {
                     Ok(()) => {
                         if matches!(self.screen, Screen::Form(_)) {
+                            self.clear_users();
                             self.screen = Screen::List;
                         }
                         self.notice =
@@ -577,8 +932,11 @@ fn kind_label(kind: EventKind) -> &'static str {
 
 fn when(ms: u64, now: i64) -> String {
     let unix = (ms / 1_000) as i64;
-    let at = localtime::markup(unix, TimeStyle::LongDateTime, localtime::offset(), now)
-        .unwrap_or_default();
+    let offset = offset_for(ms);
+    let mut at = localtime::markup(unix, TimeStyle::LongDateTime, offset, now).unwrap_or_default();
+    if offset.is_none() {
+        at.push_str(" UTC");
+    }
     let relative = localtime::markup(unix, TimeStyle::Relative, None, now).unwrap_or_default();
     format!("{at} ({relative})")
 }
@@ -629,10 +987,12 @@ pub fn view<'a>(
     let body = match &state.screen {
         Screen::List => list_body(state, navigation, busy),
         Screen::Detail(id) => detail_body(state, navigation, *id, busy),
+        Screen::Users(id) => users_body(state, navigation, *id),
         Screen::Form(form) => form_body(form, navigation, busy),
     };
     Some(
-        container(column![head, body].spacing(6))
+        container(column![head, body].spacing(6).width(Length::Fill))
+            .width(Length::Fill)
             .max_width(720)
             .into(),
     )
@@ -790,6 +1150,10 @@ fn detail_body<'a>(
         actions = actions
             .push(primary_button(text(tr("Join")).size(13)).on_press(Event::Join(guild, channel)));
     }
+    if state.users_visible(navigation, id) {
+        actions = actions
+            .push(button(text(tr("Interested members")).size(13)).on_press(Event::ShowUsers(id)));
+    }
     let mut out = column![back, info, actions].spacing(8);
     if manages(navigation, event) {
         let mut manage = row![].spacing(6);
@@ -836,6 +1200,62 @@ fn detail_body<'a>(
         out = out.push(text(notice.as_str()).size(12));
     }
     scrollable(out).height(Length::Fixed(300.0)).into()
+}
+
+fn users_body<'a>(
+    state: &'a State,
+    navigation: &NavigationSnapshot,
+    id: Snowflake,
+) -> Element<'a, Event> {
+    let mut out = column![
+        button(text(tr("Back to event"))).on_press(Event::Show(id)),
+        text(tr("Interested members"))
+    ]
+    .spacing(6)
+    .width(Length::Fill);
+    if !state.users_visible(navigation, id) {
+        return out
+            .push(text(tr("This event is no longer accessible.")))
+            .into();
+    }
+    let mut members = column![].spacing(6).width(Length::Fill);
+    if state.users_loading {
+        members = members.push(text(tr("Loading…")));
+    }
+    if let Some(error) = &state.users_error {
+        members = members.push(text(error.as_str()).style(text::danger));
+    }
+    if let Some(page) = &state.users {
+        if page.rows.is_empty() {
+            members = members.push(text(tr("No interested members on this page.")));
+        }
+        for user in &page.rows {
+            members = members.push(
+                text(format!("{} · {}", user.name, user.id))
+                    .size(13)
+                    .width(Length::Fill),
+            );
+        }
+    }
+    out = out.push(
+        scrollable(members)
+            .height(Length::Fixed(260.0))
+            .width(Length::Fill),
+    );
+    // Paging stays reachable even with fifty rows; it does not scroll away
+    // with the names, and replacing a page starts its member list at the top.
+    out.push(
+        row![
+            button(text(tr("First page / refresh")))
+                .on_press_maybe((!state.users_loading).then_some(Event::FirstUsers)),
+            button(text(tr("Next"))).on_press_maybe(
+                (!state.users_loading && state.users.as_ref().is_some_and(|p| p.next.is_some()))
+                    .then_some(Event::NextUsers)
+            ),
+        ]
+        .spacing(8),
+    )
+    .into()
 }
 
 fn form_body<'a>(
@@ -891,7 +1311,11 @@ fn form_body<'a>(
     }
     out = out
         .push(input(
-            "Starts: YYYY-MM-DD HH:MM (local time)",
+            if fastcord_platform::timezone::supported() {
+                "Starts: YYYY-MM-DD HH:MM (local time)"
+            } else {
+                "Starts: YYYY-MM-DD HH:MM (UTC)"
+            },
             &form.start,
             Field::Start,
         ))
@@ -904,6 +1328,31 @@ fn form_body<'a>(
             &form.end,
             Field::End,
         ));
+    if form.editing.is_none() {
+        let mut choices = row![].spacing(6);
+        for (label, recurrence) in [
+            ("Once", None),
+            ("Weekly (UTC)", Some(EventRecurrence::Weekly)),
+            (
+                "Every other week (UTC)",
+                Some(EventRecurrence::EveryOtherWeek),
+            ),
+        ] {
+            choices = choices.push(
+                button(text(tr(label)).size(12))
+                    .style(if form.recurrence == recurrence {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press_maybe((!busy).then_some(Event::Repeat(recurrence))),
+            );
+        }
+        out = out.push(choices);
+        if form.recurrence.is_some() {
+            out = out.push(text(tr("Repeats at the same UTC time and weekday as the first occurrence. Local times may shift when daylight saving time changes.")).size(12));
+        }
+    }
     if let Some(error) = &form.error {
         out = out.push(text(error.as_str()).size(12).style(text::danger));
     }

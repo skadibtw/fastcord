@@ -37,9 +37,23 @@ pub(crate) async fn connect(
     config: WebSocketConfig,
     limit: Duration,
 ) -> Result<TlsSocket, ConnectError> {
+    connect_timed(network, role, url, origin, browser, config, limit, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn connect_timed(
+    network: &NetworkContext,
+    role: Role,
+    url: &str,
+    origin: &'static str,
+    browser: &ClientProperties,
+    config: WebSocketConfig,
+    limit: Duration,
+    timing: Option<crate::gateway::timing::Timing>,
+) -> Result<TlsSocket, ConnectError> {
     timeout(
         limit,
-        connect_inner(network, role, url, origin, browser, config),
+        connect_inner(network, role, url, origin, browser, config, timing),
     )
     .await
     .map_err(|_| ConnectError)?
@@ -91,6 +105,7 @@ async fn connect_inner(
     origin: &'static str,
     browser: &ClientProperties,
     config: WebSocketConfig,
+    timing: Option<crate::gateway::timing::Timing>,
 ) -> Result<TlsSocket, ConnectError> {
     let mut request = url.into_client_request().map_err(|_| ConnectError)?;
     let uri = request.uri().clone();
@@ -111,14 +126,34 @@ async fn connect_inner(
             .connect_loopback(port)
             .await
             .map_err(|_| ConnectError)?;
-        return handshake(Box::new(tcp) as fastcord_net::BoxedIo, request, config).await;
+        if let Some(timing) = &timing {
+            timing.stage(crate::gateway::timing::Stage::Transport);
+        }
+        let io: fastcord_net::BoxedIo = match &timing {
+            Some(timing) => Box::new(crate::gateway::timing::CountedIo {
+                inner: tcp,
+                timing: timing.clone(),
+            }),
+            None => Box::new(tcp),
+        };
+        return handshake(io, request, config).await.inspect(|_| {
+            if let Some(timing) = &timing {
+                timing.stage(crate::gateway::timing::Stage::Upgrade);
+            }
+        });
     }
     if uri.scheme_str() != Some("wss") {
         return Err(ConnectError);
     }
     let host = uri.host().ok_or(ConnectError)?;
     let tls = network
-        .connect_tls(host, uri.port_u16().unwrap_or(443), role)
+        .broker()
+        .connect_tls_timed(
+            host,
+            uri.port_u16().unwrap_or(443),
+            role,
+            timing.as_ref().map(|t| t.network()),
+        )
         .await
         .map_err(|error| {
             #[cfg(debug_assertions)]
@@ -138,16 +173,32 @@ async fn connect_inner(
             network.mode()
         );
     }
-    let tls: fastcord_net::BoxedIo = Box::new(tls);
-    handshake(tls, request, config).await.inspect_err(|_| {
-        #[cfg(debug_assertions)]
-        if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
-            eprintln!("WebSocket Upgrade: role={role:?} failed");
-        }
-        network
-            .controller()
-            .note_failure(role, fastcord_net::NetworkError::WebSocketUpgrade);
-    })
+    if let Some(timing) = &timing {
+        timing.stage(crate::gateway::timing::Stage::Transport);
+    }
+    let tls: fastcord_net::BoxedIo = match &timing {
+        Some(timing) => Box::new(crate::gateway::timing::CountedIo {
+            inner: tls,
+            timing: timing.clone(),
+        }),
+        None => Box::new(tls),
+    };
+    handshake(tls, request, config)
+        .await
+        .inspect(|_| {
+            if let Some(timing) = &timing {
+                timing.stage(crate::gateway::timing::Stage::Upgrade);
+            }
+        })
+        .inspect_err(|_| {
+            #[cfg(debug_assertions)]
+            if std::env::var_os("FASTCORD_NETWORK_DIAGNOSTICS").is_some() {
+                eprintln!("WebSocket Upgrade: role={role:?} failed");
+            }
+            network
+                .controller()
+                .note_failure(role, fastcord_net::NetworkError::WebSocketUpgrade);
+        })
 }
 
 #[cfg(test)]

@@ -187,7 +187,10 @@ fn failure_text(failure: Failure) -> (String, bool) {
 
 impl State {
     pub fn drop_all(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            serial: self.serial.wrapping_add(1),
+            ..Self::default()
+        };
     }
 
     fn draft(&mut self, forum: Snowflake) -> Option<&mut Draft> {
@@ -936,6 +939,35 @@ mod tests {
         serde_json::from_value(serde_json::json!({"id": id.to_string(), "type": 11,
             "guild_id": "1", "parent_id": "10", "name": "t"}))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn account_reset_does_not_accept_previous_accounts_post_result() {
+        let view = forum(false);
+        let mut state = State::default();
+        typed(&mut state, &view, "old account", "old body");
+        let _ = state.update(Event::Submit, &client(), Some(&view));
+        let old = draft(&state).serial;
+        state.drop_all();
+        typed(&mut state, &view, "new account", "new body");
+        let _ = state.update(Event::Submit, &client(), Some(&view));
+        let current = draft(&state).serial;
+        assert!(
+            run(
+                &mut state,
+                Event::Posted(FORUM, old, Box::new(Ok(thread(8)))),
+                &view
+            )
+            .is_none()
+        );
+        assert_eq!(draft(&state).title, "new account");
+        assert_eq!(draft(&state).stage, Stage::Posting);
+        let opened = run(
+            &mut state,
+            Event::Posted(FORUM, current, Box::new(Ok(thread(9)))),
+            &view,
+        );
+        assert_eq!(opened.map(|thread| thread.id), Some(Snowflake(9)));
     }
 
     #[test]

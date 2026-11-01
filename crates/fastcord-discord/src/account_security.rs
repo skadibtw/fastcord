@@ -19,6 +19,13 @@ use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route};
 pub const MAX_SESSIONS: usize = 50;
 /// Longest kept client-info text, in characters.
 const MAX_INFO_CHARS: usize = 64;
+const MAX_SESSION_HASH_CHARS: usize = 128;
+
+fn valid_session_hash(hash: &str) -> bool {
+    !hash.is_empty()
+        && hash.chars().count() <= MAX_SESSION_HASH_CHARS
+        && !hash.chars().any(char::is_control)
+}
 /// Discord's "multi-factor authentication required" error code.
 pub const MFA_REQUIRED: u32 = 60003;
 
@@ -52,10 +59,12 @@ pub fn parse_sessions(body: &[u8]) -> Result<Vec<AuthSession>, RestError> {
         .user_sessions
         .iter()
         .filter_map(|session| {
-            let id_hash = session["id_hash"].as_str().filter(|h| !h.is_empty())?;
+            let id_hash = session["id_hash"]
+                .as_str()
+                .filter(|h| valid_session_hash(h))?;
             let info = &session["client_info"];
             Some(AuthSession {
-                id_hash: id_hash.chars().take(128).collect(),
+                id_hash: id_hash.to_owned(),
                 os: cut(info["os"].as_str()),
                 platform: cut(info["platform"].as_str()),
                 location: cut(info["location"].as_str()),
@@ -89,7 +98,10 @@ pub fn parse_overview(body: &[u8]) -> Result<SecurityOverview, RestError> {
 
 /// The body of one logout: the hashes exactly as the list gave them.
 pub fn logout_body(hashes: &[String]) -> Result<serde_json::Value, RestError> {
-    if hashes.is_empty() || hashes.len() > MAX_SESSIONS || hashes.iter().any(String::is_empty) {
+    if hashes.is_empty()
+        || hashes.len() > MAX_SESSIONS
+        || hashes.iter().any(|hash| !valid_session_hash(hash))
+    {
         return Err(RestError::InvalidJson);
     }
     Ok(serde_json::json!({ "session_id_hashes": hashes }))
@@ -164,6 +176,28 @@ mod tests {
         let list = parse_sessions(body.as_bytes()).unwrap();
         assert_eq!(list.len(), MAX_SESSIONS);
         assert_eq!(list[0].os, "ab");
+    }
+
+    #[test]
+    fn session_identifiers_are_preserved_or_rejected_never_truncated() {
+        let edge = "a".repeat(MAX_SESSION_HASH_CHARS);
+        let long = format!("{edge}b");
+        let body = serde_json::json!({"user_sessions": [
+            {"id_hash": edge}, {"id_hash": long}, {"id_hash": "bad\nhash"}
+        ]})
+        .to_string();
+        let sessions = parse_sessions(body.as_bytes()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id_hash, edge);
+        assert_eq!(
+            logout_body(std::slice::from_ref(&edge)).unwrap()["session_id_hashes"][0],
+            edge
+        );
+        assert_eq!(logout_body(&[long]), Err(RestError::InvalidJson));
+        assert_eq!(
+            logout_body(&["bad\nhash".into()]),
+            Err(RestError::InvalidJson)
+        );
     }
 
     #[test]

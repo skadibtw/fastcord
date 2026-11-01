@@ -81,6 +81,9 @@ pub(crate) struct RingConsumer {
 }
 
 impl RingProducer {
+    pub(crate) fn write_position(&self) -> usize {
+        self.shared.write.load(Ordering::Acquire)
+    }
     /// Interleaved channel count.
     pub(crate) fn channels(&self) -> usize {
         self.shared.channels
@@ -215,12 +218,18 @@ impl RingConsumer {
     }
 
     /// Reads up to `out.len()` samples (rounded down to whole frames),
-    /// converting each with `map`, and returns how many were written to `out`.
+    /// converting each with `map`, and returns (count, exact consumed endpoint).
+    /// The endpoint comes from the successful CAS, never a later shared read
+    /// which a producer clear could have advanced past the audible samples.
     ///
     /// If the producer discards part of the claimed region meanwhile, the read
     /// restarts from the new oldest sample. Real-time safe: no allocation, no
     /// lock; retries only happen while an overwriting producer is active.
-    pub(crate) fn pop_map<T>(&mut self, out: &mut [T], mut map: impl FnMut(f32) -> T) -> usize {
+    pub(crate) fn pop_map<T>(
+        &mut self,
+        out: &mut [T],
+        mut map: impl FnMut(f32) -> T,
+    ) -> (usize, usize) {
         let shared = &*self.shared;
         let wanted = out.len() / shared.channels * shared.channels;
         loop {
@@ -243,14 +252,14 @@ impl RingConsumer {
                 )
                 .is_ok()
             {
-                return count;
+                return (count, read.wrapping_add(count));
             }
         }
     }
 
     /// Reads up to `out.len()` samples (whole frames) unchanged.
     pub(crate) fn pop(&mut self, out: &mut [f32]) -> usize {
-        self.pop_map(out, |sample| sample)
+        self.pop_map(out, |sample| sample).0
     }
 }
 
@@ -261,6 +270,16 @@ mod tests {
 
     fn values(range: std::ops::Range<u32>) -> impl ExactSizeIterator<Item = f32> {
         range.map(|v| v as f32)
+    }
+
+    #[test]
+    fn consumed_endpoint_survives_a_later_producer_clear() {
+        let (mut producer, mut consumer) = sample_ring(2, 8);
+        producer.push_available([0.5; 16].into_iter());
+        let (count, endpoint) = consumer.pop_map(&mut [0.0; 4], |s| s);
+        producer.clear();
+        assert_eq!((count, endpoint), (4, 4));
+        assert_eq!(consumer.shared.read.load(Ordering::Acquire), 16);
     }
 
     #[test]

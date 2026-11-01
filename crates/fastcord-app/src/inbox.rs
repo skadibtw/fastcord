@@ -65,7 +65,7 @@ pub enum Event {
 pub enum Status {
     Idle,
     Loading,
-    Failed(&'static str),
+    Failed(String),
     Done,
 }
 
@@ -130,7 +130,7 @@ pub struct State {
     task: Option<iced::task::Handle>,
     /// Conversations with a mute request in flight.
     muting: Vec<Snowflake>,
-    notice: Option<&'static str>,
+    notice: Option<String>,
     pending: Option<(Snowflake, Target, Instant)>,
     expired: bool,
 }
@@ -157,23 +157,22 @@ impl Default for State {
     }
 }
 
-pub fn describe(error: RestError) -> &'static str {
-    match error {
-        RestError::NotificationWritesPaused => {
-            "Notification changes are paused pending validation. Use the official Discord client."
-        }
-        RestError::PermissionDenied => "Discord does not allow this.",
-        RestError::ResourceGone => "That conversation is gone.",
-        RestError::AuthenticationRequired => "Discord no longer accepts this login.",
-        RestError::InvalidRateLimit
-        | RestError::RateLimited
-        | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this. Try again shortly."
-        }
-        RestError::Retryable(_) | RestError::Http(_) => "Discord failed. Try again.",
-        RestError::WriteNotVerified(_) => fastcord_discord::WRITE_NOT_VERIFIED,
-        _ => "The inbox request failed.",
+pub fn describe(error: RestError) -> String {
+    if matches!(error, RestError::NotificationWritesPaused) {
+        return tr(
+            "Notification changes are paused pending validation. Use the official Discord client.",
+        )
+        .to_owned();
     }
+    crate::rest_text::describe(
+        error,
+        &crate::rest_text::Wording {
+            forbidden: "Discord does not allow this.",
+            gone: "That conversation is gone.",
+            unconfirmed: "Discord did not confirm. Check the notification setting before trying again.",
+            ..crate::rest_text::DEFAULT
+        },
+    )
 }
 
 impl State {
@@ -238,7 +237,10 @@ impl State {
 
     /// Closes the pane and forgets everything (logout, new account).
     pub fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            serial: self.serial.wrapping_add(1),
+            ..Self::default()
+        };
     }
 
     /// `rows` is the reducer's current inbox; `client` is `None` when no
@@ -471,8 +473,8 @@ pub fn view<'a>(state: &'a State, inbox: &'a Inbox) -> Element<'a, Event> {
         ),
     ]
     .spacing(10);
-    if let Some(notice) = state.notice {
-        body = body.push(text(tr(notice)).size(12).color(WARN));
+    if let Some(notice) = &state.notice {
+        body = body.push(text(notice.clone()).size(12).color(WARN));
     }
     match state.tab {
         Tab::Unread => {
@@ -560,7 +562,9 @@ pub fn view<'a>(state: &'a State, inbox: &'a Inbox) -> Element<'a, Event> {
                 Status::Loading => {
                     body = body.push(text(tr("Loading mentions…")).size(12).color(MUTED))
                 }
-                Status::Failed(reason) => body = body.push(text(tr(reason)).size(12).color(WARN)),
+                Status::Failed(reason) => {
+                    body = body.push(text(reason.clone()).size(12).color(WARN))
+                }
                 Status::Done => {
                     body = body.push(
                         container(text(tr("No recent mentions.")).size(14).color(MUTED))
@@ -678,6 +682,33 @@ mod tests {
 
     fn step(state: &mut State, event: Event, inbox: &Inbox) -> Action {
         state.update(event, inbox, &client()).1
+    }
+
+    #[test]
+    fn account_reset_does_not_accept_previous_accounts_mentions() {
+        let mut state = State::default();
+        let inbox = rows(0);
+        step(&mut state, Event::Toggle, &inbox);
+        step(&mut state, Event::Tab(Tab::Mentions), &inbox);
+        let old = state.serial;
+        state.clear();
+        step(&mut state, Event::Toggle, &inbox);
+        step(&mut state, Event::Tab(Tab::Mentions), &inbox);
+        let current = state.serial;
+        step(
+            &mut state,
+            Event::Loaded(old, Ok(page(&[99], false))),
+            &inbox,
+        );
+        assert!(state.mentions.is_empty());
+        assert_eq!(state.status, Status::Loading);
+        step(
+            &mut state,
+            Event::Loaded(current, Ok(page(&[100], false))),
+            &inbox,
+        );
+        assert_eq!(state.mentions.len(), 1);
+        assert_eq!(state.mentions[0].message, Snowflake(100));
     }
 
     #[test]

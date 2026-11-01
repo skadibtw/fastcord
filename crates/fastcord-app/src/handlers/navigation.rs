@@ -57,16 +57,16 @@ impl App {
                 {
                     // Cancel panels and their in-flight tasks as on logout,
                     // including requests outside the Gateway subscription.
-                    let cache = self.teardown_account().and_then(|(_, cache)| cache);
+                    let (_, cache, writer) =
+                        self.teardown_account().expect("active gateway checked");
                     self.reset_login();
                     self.notice = Some(
                         "Discord no longer accepts this login, or requires an account check. All account connections and requests have stopped. Open the official Discord client to check Account Standing and complete any verification or password reset before signing in here again. A saved copy of the old token can be removed with Forget saved login.".to_owned(),
                     );
-                    return cache.map_or(Task::none(), |cache| {
-                        Task::perform(async move { cache.purge().await }, |result| {
-                            Message::AttachmentPurged(result.is_ok())
-                        })
-                    });
+                    return Task::batch([
+                        Self::finish_volume_writer(writer),
+                        Self::purge_cache(cache),
+                    ]);
                 } else if let Some(gateway) = self.phase.gateway_mut() {
                     gateway.status = status;
                 }
@@ -113,7 +113,19 @@ impl App {
                     inbox_jump(&gateway.controls, channel, target);
                 }
                 let mut invite_task = Task::none();
+                let mut pins_task = Task::none();
+                let mut announce_task = Task::none();
+                let mut apps_task = Task::none();
                 if let Some((session, gateway)) = self.phase.account() {
+                    pins_task = self
+                        .ui
+                        .pins
+                        .sync(
+                            gateway.timeline.channel_id,
+                            gateway.timeline.pins_revision,
+                            &session.client,
+                        )
+                        .map(Message::Pins);
                     self.ui.sticker.sync(gateway.timeline.channel_id);
                     self.ui.invite.cache.sync_guilds(&gateway.navigation);
                     invite_task = self
@@ -123,6 +135,17 @@ impl App {
                         .map(Message::Invite);
                     self.ui.forward.sync(gateway.timeline.channel_id);
                     self.ui.announce.sync(gateway.timeline.channel_id);
+                    announce_task = self
+                        .ui
+                        .announce
+                        .webhooks_changed(&gateway.navigation, &gateway.timeline, &session.client)
+                        .map(Message::Announce);
+                    apps_task = self
+                        .ui
+                        .apps
+                        .webhooks_changed(&gateway.navigation, &session.client)
+                        .map(Message::Apps);
+                    self.ui.events.sync_users(&gateway.navigation);
                     self.ui.group.sync(
                         gateway
                             .navigation
@@ -164,6 +187,9 @@ impl App {
                     self.soundboard_follow(),
                     self.assets_follow(),
                     invite_task,
+                    pins_task,
+                    announce_task,
+                    apps_task,
                 ]);
             }
             Message::ShowDirects(on) => {

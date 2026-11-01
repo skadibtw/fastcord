@@ -133,6 +133,7 @@ pub struct State {
     gate: Gate<Op>,
     /// The newest Gateway rule change already applied.
     seen: u64,
+    execution_since: u64,
 }
 
 fn may_manage(admin: Option<&GuildAdmin>, guild: Snowflake) -> bool {
@@ -143,13 +144,28 @@ const NEED: &str = "You need Manage Server for AutoMod.";
 
 impl Panel {
     fn upsert(&mut self, rule: AutoModRule) {
-        if let Some(at) = self.rules.iter().position(|r| r.id == rule.id) {
-            self.bytes = self.bytes + rule.bytes() - self.rules[at].bytes();
-            self.rules[at] = rule;
-        } else if self.rules.len() < fastcord_discord::MAX_RULES
-            && self.bytes + rule.bytes() <= MAX_RULES_BYTES
+        let existing = self.rules.iter().position(|r| r.id == rule.id);
+        let replaced_bytes = existing.map_or(0, |at| self.rules[at].bytes());
+        let next_bytes = self.bytes - replaced_bytes + rule.bytes();
+        if next_bytes > MAX_RULES_BYTES
+            || (existing.is_none() && self.rules.len() >= fastcord_discord::MAX_RULES)
         {
-            self.bytes += rule.bytes();
+            // Do not leave an obsolete rule editable after refusing its update.
+            self.remove(rule.id);
+            if self
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.id == Some(rule.id))
+            {
+                self.editor = None;
+            }
+            self.error = Some(tr("A rule changed but was too large to retain. Reload the rules before editing it.").to_owned());
+            return;
+        }
+        self.bytes = next_bytes;
+        if let Some(at) = existing {
+            self.rules[at] = rule;
+        } else {
             self.rules.push(rule);
         }
     }
@@ -168,6 +184,15 @@ impl Panel {
     fn apply(&mut self, change: &AutoModChange) -> Option<&'static str> {
         match change {
             AutoModChange::Upsert(rule) => self.upsert((**rule).clone()),
+            AutoModChange::Invalidated { id, .. } => {
+                self.remove(*id);
+                if self.editor.as_ref().is_some_and(|e| e.id == Some(*id)) {
+                    self.editor = None;
+                }
+                return Some(
+                    "A rule changed but was too large to retain. Reload the rules before editing it.",
+                );
+            }
             AutoModChange::Delete { id, .. } => {
                 self.remove(*id);
                 if self.editor.as_ref().is_some_and(|e| e.id == Some(*id)) {
@@ -314,11 +339,31 @@ impl State {
         }
     }
 
+    fn executions<'a>(
+        &self,
+        nav: &'a NavigationSnapshot,
+    ) -> impl Iterator<Item = &'a fastcord_discord::AutoModExecution> {
+        let guild = self.panel.as_ref().map(|panel| panel.guild);
+        let since = self.execution_since;
+        nav.automod
+            .executions
+            .iter()
+            .filter_map(move |(seq, event)| {
+                (Some(event.guild_id) == guild
+                    && *seq > since
+                    && may_manage(nav.admin.as_ref(), event.guild_id))
+                .then_some(event)
+            })
+    }
+
     /// Applies the Gateway's rule changes the panel has not seen yet.
-    pub fn observe(&mut self, feed: &AutoModFeed) {
+    pub fn observe(&mut self, feed: &AutoModFeed, admin: Option<&GuildAdmin>) {
         let Some(panel) = &mut self.panel else {
             return;
         };
+        if !may_manage(admin, panel.guild) {
+            self.execution_since = feed.latest();
+        }
         if panel.loaded {
             for (seq, change) in &feed.items {
                 if *seq > self.seen
@@ -357,6 +402,7 @@ impl State {
                 if !may_manage(admin, guild) {
                     return Task::none();
                 }
+                self.execution_since = navigation.automod.latest();
                 self.panel = Some(Panel {
                     guild,
                     rules: Vec::new(),
@@ -1128,6 +1174,28 @@ pub fn view<'a>(
         .spacing(6);
         view = view.push(scrollable(rows).height(Length::Shrink));
     }
+    if can {
+        for execution in state.executions(navigation) {
+            view = view.push(
+                text(format!(
+                    "AutoMod · action {} · rule {} · user {} · channel {} · message {} · alert {}",
+                    execution.action.kind,
+                    execution.rule_id,
+                    execution.user_id,
+                    execution
+                        .channel_id
+                        .map_or_else(|| "—".into(), |id| id.to_string()),
+                    execution
+                        .message_id
+                        .map_or_else(|| "—".into(), |id| id.to_string()),
+                    execution
+                        .alert_system_message_id
+                        .map_or_else(|| "—".into(), |id| id.to_string()),
+                ))
+                .size(12),
+            );
+        }
+    }
     if panel.loading {
         view = view.push(small(tr("Loading\u{2026}")));
     }
@@ -1334,7 +1402,7 @@ mod tests {
         // The Gateway's echo of the same rule changes nothing.
         let mut feed = AutoModFeed::default();
         feed.push(AutoModChange::Upsert(Box::new(made)));
-        state.observe(&feed);
+        state.observe(&feed, navigation(true).admin.as_ref());
         assert_eq!(panel(&state).rules.len(), 3);
     }
 
@@ -1455,12 +1523,12 @@ mod tests {
         let mut other_guild = rule(4, TRIGGER_SPAM);
         other_guild.guild = Snowflake(999);
         feed.push(AutoModChange::Upsert(Box::new(other_guild)));
-        state.observe(&feed);
+        state.observe(&feed, navigation(true).admin.as_ref());
         let names: Vec<_> = panel(&state).rules.iter().map(|r| r.id.0).collect();
         assert_eq!(names, [1, 3]);
         assert_eq!(panel(&state).rules[0].name, "renamed");
         // A replayed feed changes nothing.
-        state.observe(&feed);
+        state.observe(&feed, navigation(true).admin.as_ref());
         assert_eq!(panel(&state).rules.len(), 2);
         // A rule deleted elsewhere closes its editor.
         let nav = navigation(true);
@@ -1470,13 +1538,34 @@ mod tests {
             guild: G,
             id: Snowflake(3),
         });
-        state.observe(&feed);
+        state.observe(&feed, navigation(true).admin.as_ref());
         assert!(panel(&state).editor.is_none() && panel(&state).rules.len() == 1);
         // Before the list is loaded, changes are not applied.
         let mut fresh = State::default();
         let _ = fresh.update(Event::Open(G), &nav, &client());
-        fresh.observe(&feed);
+        fresh.observe(&feed, navigation(true).admin.as_ref());
         assert!(panel(&fresh).rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_change_removes_stale_rule_and_editor() {
+        let (mut state, nav) = loaded();
+        let _ = state.update(Event::Edit(Snowflake(1)), &nav, &client());
+        let mut changed = rule(1, TRIGGER_KEYWORD);
+        changed
+            .extra
+            .insert("future".into(), serde_json::json!("x".repeat(256 * 1024)));
+        let mut feed = AutoModFeed::default();
+        feed.push(AutoModChange::Upsert(Box::new(changed)));
+        state.observe(&feed, navigation(true).admin.as_ref());
+        assert!(panel(&state).editor.is_none());
+        assert!(
+            panel(&state)
+                .rules
+                .iter()
+                .all(|rule| rule.id != Snowflake(1))
+        );
+        assert_eq!(state.seen, feed.latest());
     }
 
     #[tokio::test]
@@ -1538,5 +1627,75 @@ mod tests {
         );
         rule.exempt_roles = vec![Snowflake(5)];
         assert_eq!(exemptions_line(&rule, None).as_deref(), Some("Exempt: 5"));
+    }
+    #[test]
+    fn executions_follow_permission_and_panel_lifetime() {
+        let (mut state, mut nav) = loaded();
+        let execution = fastcord_discord::AutoModExecution {
+            guild_id: G,
+            rule_id: Snowflake(1),
+            user_id: Snowflake(2),
+            rule_trigger_type: 99,
+            action: fastcord_discord::ExecutionAction { kind: 999 },
+            channel_id: None,
+            message_id: None,
+            alert_system_message_id: None,
+        };
+        nav.automod.push_execution(1, execution);
+        assert_eq!(state.executions(&nav).count(), 1);
+        nav.automod.push_execution(
+            2,
+            fastcord_discord::AutoModExecution {
+                guild_id: Snowflake(999),
+                ..execution
+            },
+        );
+        assert_eq!(state.executions(&nav).count(), 1);
+        nav.admin.as_mut().unwrap().can_manage_guild = false;
+        assert_eq!(state.executions(&nav).count(), 0);
+        state.observe(&nav.automod, nav.admin.as_ref());
+        nav.admin.as_mut().unwrap().can_manage_guild = true;
+        assert_eq!(state.executions(&nav).count(), 0);
+        nav.automod.push_execution(3, execution);
+        assert_eq!(state.executions(&nav).count(), 1);
+        state.clear();
+        assert_eq!(state.executions(&nav).count(), 0);
+        let _ = state.update(Event::Open(G), &nav, &client());
+        assert_eq!(state.executions(&nav).count(), 0);
+    }
+    #[test]
+    fn gateway_replacement_respects_total_rule_budget_and_invalidates_editor() {
+        let (mut state, nav) = loaded();
+        let panel = state.panel.as_mut().unwrap();
+        panel.rules.clear();
+        panel.bytes = 0;
+        for id in 1..=8 {
+            let mut held = rule(id, TRIGGER_KEYWORD);
+            held.actions.push(AutoModAction::Other(
+                serde_json::json!({"type":99,"data":"x".repeat(120_000)}),
+            ));
+            panel.upsert(held);
+        }
+        assert_eq!(panel.rules.len(), 8);
+        panel.editor = Some(Editor::of(&panel.rules[0]));
+        panel.confirm.ask(Snowflake(1));
+        let mut replacement = rule(1, TRIGGER_KEYWORD);
+        replacement.actions.push(AutoModAction::Other(
+            serde_json::json!({"type":99,"data":"x".repeat(240_000)}),
+        ));
+        let mut feed = AutoModFeed::default();
+        feed.push(AutoModChange::Upsert(Box::new(replacement)));
+        assert!(matches!(feed.items[0].1.as_ref(), AutoModChange::Upsert(_)));
+        state.observe(&feed, nav.admin.as_ref());
+        let panel = state.panel.as_ref().unwrap();
+        assert!(panel.bytes <= MAX_RULES_BYTES);
+        assert_eq!(
+            panel.bytes,
+            panel.rules.iter().map(AutoModRule::bytes).sum::<usize>()
+        );
+        assert!(!panel.rules.iter().any(|rule| rule.id == Snowflake(1)));
+        assert!(panel.editor.is_none());
+        assert!(!panel.confirm.is(Snowflake(1)));
+        assert!(panel.error.is_some());
     }
 }

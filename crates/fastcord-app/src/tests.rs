@@ -3,8 +3,8 @@
 
 use super::*;
 
-#[test]
-fn participant_volume_change_survives_account_teardown_without_release() {
+#[tokio::test]
+async fn participant_volume_change_survives_account_teardown_without_release() {
     let mut app = login_app();
     let session = authenticate(&mut app, Persistence::MemoryOnly);
     let path = std::env::temp_dir()
@@ -28,7 +28,20 @@ fn participant_volume_change_survives_account_teardown_without_release() {
             62
         );
     }
-    app.teardown_account();
+    let (_, _, writer) = app.teardown_account().unwrap();
+    // Drive the production completion Task rather than dropping its writer.
+    // Logout/switch chain delete/restore after this task; no credential operation
+    // is performed by this test.
+    use iced::futures::StreamExt;
+    let mut task = iced_runtime::task::into_stream(App::finish_volume_writer(writer)).unwrap();
+    let mut finished = false;
+    while let Some(action) = task.next().await {
+        if let iced_runtime::Action::Output(Message::VolumeWriterFinished(status)) = action {
+            assert_eq!(status, voice_settings::Status::Saved);
+            finished = true;
+        }
+    }
+    assert!(finished);
     let restored = gateway::NavigationBridge::new();
     restored.set_volume_settings(voice_settings::load_from(&path, session.user.id));
     assert_eq!(restored.voice_controls().volume_percent(Snowflake(99)), 62);
@@ -835,6 +848,10 @@ async fn switching_tears_down_the_account_before_the_other_one_signs_in() {
     assert!(matches!(app.phase, Phase::Authenticating { .. }));
     // Unlike logout, the old account's saved login stays.
     assert!(app.saved_accounts.contains(&account));
+    // Secret Service's blocking proxy also owns a runtime during Drop.
+    // Tear down the native store outside Tokio, just as it was constructed.
+    let store = app.store.take();
+    std::thread::spawn(move || drop(store)).join().unwrap();
 }
 
 #[test]
@@ -1466,4 +1483,47 @@ fn a_link_from_a_second_launch_waits_for_sign_in_and_is_opened_once() {
     assert!(app.pending_link.is_some());
     authenticate(&mut app, Persistence::MemoryOnly);
     assert_eq!(app.pending_link, None, "taken once signed in");
+}
+
+#[test]
+fn production_footer_keeps_six_direct_actions_inside_the_fixed_sidebar() {
+    use crate::variable_list::harness::Ui;
+    use std::collections::BTreeSet;
+    let mut app = login_app();
+    authenticate(&mut app, Persistence::MemoryOnly);
+    if let Some(gateway) = app.phase.gateway_mut() {
+        let nav = Arc::make_mut(&mut gateway.navigation);
+        nav.requests.total = 12_345;
+    }
+    for (width, height) in [(960.0, 640.0), (1280.0, 720.0)] {
+        let mut ui = Ui::new(width, height, app.view());
+        let mut hit = BTreeSet::new();
+        for y in ((height as i32 - 150)..height as i32).step_by(3) {
+            for x in (72..312).step_by(3) {
+                for message in ui.click(x as f32, y as f32) {
+                    match message {
+                        Message::Settings(settings::Event::Open(settings::Section::Profile)) => {
+                            hit.insert("profile");
+                        }
+                        Message::Settings(settings::Event::Open(settings::Section::Voice)) => {
+                            hit.insert("audio");
+                        }
+                        Message::Safety(safety::Event::Toggle) => {
+                            hit.insert("safety");
+                        }
+                        Message::Account(account_panel::Event::Logout) => {
+                            hit.insert("logout");
+                        }
+                        Message::Status(_) => {
+                            hit.insert("identity");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for action in ["profile", "audio", "safety", "logout", "identity"] {
+            assert!(hit.contains(action), "{action} missing at {width}x{height}");
+        }
+    }
 }

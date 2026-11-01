@@ -345,7 +345,8 @@ pub fn created_code(body: &[u8]) -> Option<String> {
         code: String,
     }
     let code = serde_json::from_slice::<Created>(body).ok()?.code;
-    (code.len() <= MAX_CODE_BYTES && code.bytes().all(code_byte)).then_some(code)
+    ((MIN_CODE_BYTES..=MAX_CODE_BYTES).contains(&code.len()) && code.bytes().all(code_byte))
+        .then_some(code)
 }
 
 /// Whether an account may not leave its server.
@@ -573,6 +574,19 @@ mod tests {
         let long = "a".repeat(33);
         for bad in ["", "a", "../x", "a/b", "ab?x", "ab cd", long.as_str()] {
             assert!(code_route(Method::GET, bad, true).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn created_links_accept_only_codes_that_can_be_resolved() {
+        for code in ["", "a", "../x", "a/b", "ab?x", "ab cd", &"a".repeat(33)] {
+            let body = serde_json::json!({ "code": code }).to_string();
+            assert_eq!(created_code(body.as_bytes()), None, "{code}");
+        }
+        for code in ["ab", "a-b12", &"a".repeat(32)] {
+            let body = serde_json::json!({ "code": code }).to_string();
+            let accepted = created_code(body.as_bytes()).unwrap();
+            assert!(code_route(Method::GET, &accepted, true).is_ok());
         }
     }
 

@@ -487,7 +487,7 @@ async fn write_split_has_one_async_delay_at_the_structural_position() {
 #[tokio::test(start_paused = true)]
 async fn hello_retry_request_compatibility_ccs_then_protected_data() {
     let hello = handshake(b"example.test");
-    for strategy in Strategy::LEGACY {
+    for strategy in Strategy::catalog() {
         let (io, output) = ShortIo::new(7);
         let mut stream = ShapedStream::new(io, strategy);
         let first = record(&hello);
@@ -654,7 +654,7 @@ async fn real_rustls_tls12_tls13_alpn_hrr_and_application_data() {
             if version == &rustls::version::TLS12 && hrr {
                 continue;
             }
-            for strategy in Strategy::LEGACY {
+            for strategy in Strategy::catalog() {
                 let mut roots = RootCertStore::empty();
                 roots.add(certificate.clone()).unwrap();
                 let mut client =
@@ -895,4 +895,139 @@ async fn production_config_rejects_an_untrusted_self_signed_server() {
     let server = tokio_rustls::TlsAcceptor::from(Arc::new(server)).accept(server_io);
     let (client, _) = tokio::join!(client, server);
     assert!(client.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn extended_catalog_preserves_transcript_under_partial_input_and_short_writes() {
+    let original = handshake(b"gateway.discord.gg");
+    let bytes = record(&original);
+    let catalog = Strategy::catalog();
+    assert_eq!(catalog.len(), 42);
+    assert_eq!(&catalog[..Strategy::ORDER.len()], &Strategy::ORDER);
+    for (index, strategy) in catalog.iter().copied().enumerate() {
+        assert!(!catalog[..index].contains(&strategy));
+        assert!(strategy.in_catalog());
+        for boundary in [1, 5, 7, bytes.len() / 2, bytes.len() - 1] {
+            let (io, output) = ShortIo::new(3);
+            let mut stream = ShapedStream::new(io, strategy);
+            stream.write_all(&bytes[..boundary]).await.unwrap();
+            stream.write_all(&bytes[boundary..]).await.unwrap();
+            stream.flush().await.unwrap();
+            assert_eq!(
+                reassemble(&output.lock().unwrap().bytes),
+                original,
+                "{strategy:?}"
+            );
+            assert_eq!(stream.bytes.capacity(), 0);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn extended_fragment_counts_offsets_and_delays_reach_the_actual_writer() {
+    for count in [FragmentCount::Two, FragmentCount::Four, FragmentCount::Six] {
+        for offset in [WriteOffset::Before, WriteOffset::After] {
+            for pacing in [WritePacing::Immediate, WritePacing::Ms10, WritePacing::Ms30] {
+                let bytes = record(&handshake(b"gateway.discord.gg"));
+                let mut expected = bytes.clone();
+                let hello = parsed(&bytes);
+                let boundaries =
+                    fragment_record_count(&mut expected, hello, count.count()).unwrap();
+                let (io, output) = ShortIo::new(usize::MAX);
+                let strategy = Strategy::Profile(TlsShape::Fragments {
+                    count,
+                    offset,
+                    pacing,
+                });
+                let mut stream = ShapedStream::new(io, strategy);
+                let start = tokio::time::Instant::now();
+                stream.write_all(&bytes).await.unwrap();
+                stream.flush().await.unwrap();
+                let output = output.lock().unwrap();
+                assert_eq!(output.bytes, expected);
+                assert_eq!(output.writes.len(), count.count());
+                for (i, (at, position)) in output.writes.iter().enumerate().skip(1) {
+                    assert_eq!(
+                        *position,
+                        match offset {
+                            WriteOffset::Before => boundaries[i - 1] - 1,
+                            WriteOffset::After => boundaries[i - 1] + 1,
+                        }
+                    );
+                    assert_eq!(*at, start + pacing.delay() * i as u32);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn profile_parameters_are_finite_and_cannot_deserialize_arbitrary_delays_or_offsets() {
+    for strategy in Strategy::catalog() {
+        assert_eq!(
+            serde_json::from_slice::<Strategy>(&serde_json::to_vec(&strategy).unwrap()).unwrap(),
+            strategy
+        );
+    }
+    for value in [
+        r#"{"Profile":{"Fragments":{"count":"Seven","offset":"Before","pacing":"Ms10"}}}"#,
+        r#"{"Profile":{"Fragments":{"count":"Two","offset":999,"pacing":"Ms10"}}}"#,
+        r#"{"Profile":{"WriteSplit":{"at":"SniMiddle","pacing":999999}}}"#,
+        r#"{"Profile":{"WriteSplit":{"at":"SniMiddle","pacing":"Immediate","extra":true}}}"#,
+    ] {
+        assert!(serde_json::from_str::<Strategy>(value).is_err());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn extended_split_points_control_actual_record_and_write_boundaries() {
+    let bytes = record(&handshake(b"gateway.discord.gg"));
+    let hello = parsed(&bytes);
+    for (at, point) in [
+        (SplitPoint::FirstByte, 6),
+        (SplitPoint::DomainMiddle, hello.sni_mid),
+        (SplitPoint::SniMiddle, hello.sni_center),
+    ] {
+        for pacing in [WritePacing::Immediate, WritePacing::Ms10, WritePacing::Ms30] {
+            for records in [false, true] {
+                let shape = if records {
+                    TlsShape::RecordSplit { at, pacing }
+                } else {
+                    TlsShape::WriteSplit { at, pacing }
+                };
+                let (io, output) = ShortIo::new(usize::MAX);
+                let mut stream = ShapedStream::new(io, Strategy::Profile(shape));
+                let start = tokio::time::Instant::now();
+                stream.write_all(&bytes).await.unwrap();
+                stream.flush().await.unwrap();
+                let output = output.lock().unwrap();
+                assert_eq!(output.writes, [(start, 0), (start + pacing.delay(), point)]);
+                if records {
+                    assert_eq!(&output.bytes[point..point + 3], &[22, 3, 3]);
+                } else {
+                    assert_eq!(output.bytes, bytes);
+                }
+            }
+        }
+    }
+    // A parsed target exactly at an existing record end must not create an
+    // empty TLS record or move the write into a guessed hostname offset.
+    let payload = handshake(b"gateway.discord.gg");
+    let cut = hello.sni_mid - 5;
+    let mut split = record(&payload[..cut]);
+    split.extend(record(&payload[cut..]));
+    let point = parsed(&split).sni_mid;
+    let (io, output) = ShortIo::new(usize::MAX);
+    let mut stream = ShapedStream::new(
+        io,
+        Strategy::Profile(TlsShape::RecordSplit {
+            at: SplitPoint::DomainMiddle,
+            pacing: WritePacing::Ms10,
+        }),
+    );
+    stream.write_all(&split).await.unwrap();
+    stream.flush().await.unwrap();
+    let output = output.lock().unwrap();
+    assert_eq!(output.bytes, split);
+    assert_eq!(output.writes[1].1, point);
 }

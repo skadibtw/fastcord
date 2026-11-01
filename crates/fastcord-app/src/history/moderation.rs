@@ -65,6 +65,17 @@ pub fn failure(error: BulkRequestError) -> &'static str {
         BulkRequestError::Invalid(BulkError::TooOld) => return tr(TOO_OLD),
         BulkRequestError::Rest(error) => error,
     };
+    if matches!(error, RestError::Retryable(_))
+        && crate::rest_text::severity(&error) == crate::rest_text::Severity::NotSent
+    {
+        return tr("Could not reach Discord; nothing was sent.");
+    }
+    if matches!(error, RestError::AuthenticationRequired)
+        || matches!(error, RestError::Http(status) if status.as_u16() == 401)
+        || matches!(error, RestError::Refused(refusal) if refusal.status.as_u16() == 401)
+    {
+        return tr("Your session has expired. Log in again.");
+    }
     match error {
         RestError::PermissionDenied => tr("Discord refused: you need Manage Messages here."),
         RestError::ResourceGone => tr("That message is already gone."),
@@ -409,5 +420,28 @@ impl History {
             }
         }
         rejected
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn moderation_connection_failure_is_not_an_ambiguous_write() {
+        use fastcord_discord::{NetworkFailure, RetryableFailure};
+        let describe = |kind| {
+            failure(BulkRequestError::Rest(RestError::Retryable(
+                RetryableFailure::Network(kind),
+            )))
+        };
+        assert!(describe(NetworkFailure::Connection).contains("nothing was sent"));
+        assert!(describe(NetworkFailure::Timeout).contains("may have been applied"));
+        assert!(
+            failure(BulkRequestError::Rest(RestError::Http(
+                reqwest::StatusCode::UNAUTHORIZED
+            )))
+            .contains("Log in again")
+        );
     }
 }

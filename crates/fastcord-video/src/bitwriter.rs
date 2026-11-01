@@ -44,6 +44,11 @@ impl BitWriter {
         self.ue(u32::try_from(code).expect("se value fits"));
     }
 
+    /// Number of meaningful bits, before optional byte-alignment padding.
+    pub(crate) fn bit_len(&self) -> usize {
+        self.bytes.len() * 8 + usize::from(self.used)
+    }
+
     /// Zero bits up to the next byte boundary.
     pub(crate) fn align_zero(&mut self) {
         while self.used != 0 {

@@ -86,6 +86,12 @@ impl RateConverter {
         })
     }
 
+    pub(crate) fn output_delay(&self) -> usize {
+        self.inner
+            .as_ref()
+            .map_or(0, |c| c.resampler.output_delay())
+    }
+
     /// Whether input passes through unchanged.
     #[cfg(test)]
     pub(crate) fn is_passthrough(&self) -> bool {

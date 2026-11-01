@@ -354,6 +354,16 @@ impl Store {
         self.budget
     }
 
+    /// Earliest retained timed mute, in UTC Unix milliseconds.
+    pub fn next_mute_expiry(&self) -> Option<i64> {
+        self.read.next_mute_expiry()
+    }
+
+    /// Local expiry only; never sends settings changes to Discord.
+    pub fn expire_mutes(&mut self, now: i64) -> bool {
+        self.read.expire_mutes(now)
+    }
+
     // ----- read state -----
 
     /// What a channel (or DM, `guild` `None`) shows, given its newest message.

@@ -35,6 +35,8 @@ struct Speaker {
     last_transit: Option<i32>,
     active_since: Option<Instant>,
     next_due: Option<Instant>,
+    mixed_timestamp: Option<u32>,
+    next_timestamp: Option<u32>,
     last_packet: Instant,
     pcm: Box<[f32]>,
     consecutive_plc: usize,
@@ -58,6 +60,8 @@ impl Speaker {
             last_transit: None,
             active_since: None,
             next_due: None,
+            mixed_timestamp: None,
+            next_timestamp: None,
             last_packet: Instant::now(),
             pcm: vec![0.0; MAX_FRAME_SAMPLES * CHANNELS].into_boxed_slice(),
             consecutive_plc: 0,
@@ -358,7 +362,7 @@ impl JitterMixer {
         self.push_at(frame, Instant::now());
     }
 
-    fn push_at(&mut self, frame: RemoteFrame, now: Instant) {
+    pub(crate) fn push_at(&mut self, frame: RemoteFrame, now: Instant) {
         let index = match self
             .speakers
             .iter()
@@ -466,6 +470,12 @@ impl JitterMixer {
     }
 
     /// Produces one 20 ms stereo block when any speaker is due; zeroes `out` otherwise.
+    pub(crate) fn mixed_timestamps(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.speakers
+            .iter()
+            .filter_map(|s| s.mixed_timestamp.map(|t| (s.ssrc, t)))
+    }
+
     pub(crate) fn mix(&mut self, out: &mut [f32; FRAME_SAMPLES * CHANNELS], now: Instant) -> bool {
         out.fill(0.0);
         self.speakers
@@ -473,6 +483,7 @@ impl JitterMixer {
         let mut active = false;
 
         for speaker in &mut self.speakers {
+            speaker.mixed_timestamp = None;
             let Some(due) = speaker.next_due else {
                 continue;
             };
@@ -491,6 +502,16 @@ impl JitterMixer {
             }
 
             let packet = speaker.pop_expected();
+            let timestamp = packet
+                .as_ref()
+                .map(|p| p.frame.timestamp)
+                .or(speaker.next_timestamp)
+                .or_else(|| {
+                    speaker.queue[..speaker.len]
+                        .first()
+                        .and_then(Option::as_ref)
+                        .map(|p| p.frame.timestamp.wrapping_sub(FRAME_SAMPLES as u32))
+                });
             // Linear fade over this frame for open-ended concealment: 1.0 → 0.0 across the run.
             let mut fade = None;
             let decoded = if let Some(packet) = packet {
@@ -546,6 +567,8 @@ impl JitterMixer {
             };
 
             if let Some(frames) = decoded {
+                speaker.mixed_timestamp = timestamp;
+                speaker.next_timestamp = timestamp.map(|t| t.wrapping_add(FRAME_SAMPLES as u32));
                 let count = frames.min(FRAME_SAMPLES) * CHANNELS;
                 let step = fade.map_or(0.0, |(from, to)| (to - from) / (count / CHANNELS) as f32);
                 let mut level = fade.map_or(1.0, |(from, _)| from);

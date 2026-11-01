@@ -73,9 +73,8 @@ impl Core {
     pub fn view(&self) -> View {
         use std::sync::atomic::Ordering::Relaxed;
         let consumed = self.bridge.consume();
-        if matches!(consumed.status, Some(GatewayStatus::Ready(_))) {
-            self.ready.store(true, Relaxed);
-        }
+        let ready = matches!(consumed.status, Some(GatewayStatus::Ready(_)));
+        self.ready.store(ready, Relaxed);
         let timeline = &consumed.timeline;
         View {
             ready: self.ready.load(Relaxed),

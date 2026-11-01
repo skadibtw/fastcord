@@ -661,3 +661,13 @@ fastcord under its license, and contain no third-party images.
    See the License for the specific language governing permissions and
    limitations under the License.
 ```
+
+## ashpd ScreenCast v6 compatibility
+
+The Linux portal client uses ashpd 0.11.1 under the MIT license, with a small
+local patch exposing the optional `pipewire-serial` stream property. Upstream:
+https://github.com/bilelmoussaoui/ashpd. Source, original license and exact
+package provenance are retained in `vendor/ashpd`; `FASTCORD_PATCH.md` describes
+the source changes, including explicit inferred-lifetime syntax for Rust 1.99.
+The complete MIT text is also included in the generated
+`THIRD_PARTY_CRATES.md`.

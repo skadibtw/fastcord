@@ -90,6 +90,8 @@ pub enum VoiceStatus {
     Rekeying {
         transition_id: Option<u16>,
     },
+    /// Sustained incoming DAVE failures; retained until audio decrypts successfully.
+    IncomingAudioDecryptionFailed,
     /// Media flows.
     Connected {
         mode: TransportMode,
@@ -167,9 +169,39 @@ impl fmt::Display for CloseReason {
     }
 }
 
+/// Bounded secret-free reason for a signaling retry. Never contains server text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryCause {
+    ConnectFailed,
+    ReadError,
+    EndOfStream,
+    ServerClose(Option<u16>),
+    SendError,
+    SendTimeout,
+    HeartbeatAckTimeout,
+    PhaseTimeout(RetryPhase),
+    MediaLivenessTimeout,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryPhase {
+    Hello,
+    Identify,
+    Discovery,
+    Negotiation,
+    Resume,
+    Connected,
+}
+
 /// Voice Gateway events about other participants and link quality.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VoiceEvent {
+    /// A retry keeps media only when `resume` is true. Delivered through the
+    /// existing bounded event queue; never blocks signaling or media.
+    Retry {
+        cause: RetryCause,
+        attempt: u32,
+        resume: bool,
+    },
     ClientsConnected(Vec<Snowflake>),
     ClientDisconnected(Snowflake),
     /// A participant's speaking flags ([`speaking`]) and audio SSRC.
@@ -177,6 +209,16 @@ pub enum VoiceEvent {
         user_id: Snowflake,
         ssrc: u32,
         flags: u32,
+    },
+    /// Authenticated RTCP clock pair for a known primary audio/video SSRC.
+    /// A sender's audio and video share the NTP clock; RTP rates differ.
+    SenderClock {
+        user_id: Snowflake,
+        ssrc: u32,
+        video: bool,
+        rtp_timestamp: u32,
+        ntp_timestamp: u64,
+        received_at: std::time::Instant,
     },
     /// Round trip of a UDP ping.
     UdpLatency(Duration),

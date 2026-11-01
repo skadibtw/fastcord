@@ -32,7 +32,7 @@ pub enum Event {
 enum Status {
     Idle,
     Loading,
-    Failed(&'static str),
+    Failed(String),
     Done,
 }
 
@@ -61,20 +61,16 @@ impl Default for State {
     }
 }
 
-fn describe(error: RestError) -> &'static str {
-    match error {
-        RestError::PermissionDenied | RestError::AuthenticationRequired => {
-            tr("Discord refused the GIF search.")
-        }
-        RestError::ResourceGone => tr("Discord has no GIF search for this account."),
-        RestError::InvalidRateLimit
-        | RestError::RateLimited
-        | RestError::SchedulerCapacityExceeded => {
-            tr("Discord is rate limiting GIF searches. Try again shortly.")
-        }
-        RestError::Retryable(_) | RestError::Http(_) => tr("GIF search failed. Try again."),
-        _ => tr("GIF results could not be read."),
-    }
+fn describe(error: RestError) -> String {
+    crate::rest_text::describe(
+        error,
+        &crate::rest_text::Wording {
+            forbidden: "Discord did not allow this GIF search.",
+            gone: "That GIF search is no longer available.",
+            unconfirmed: "GIF search failed. Try again.",
+            ..crate::rest_text::DEFAULT
+        },
+    )
 }
 
 impl State {
@@ -201,7 +197,7 @@ pub fn view(state: &State) -> Option<Element<'_, Event>> {
             .size(12)
             .color(crate::style::muted())
             .into(),
-        Status::Failed(reason) => text(tr(reason)).size(12).style(text::danger).into(),
+        Status::Failed(reason) => text(reason.clone()).size(12).style(text::danger).into(),
         Status::Done if state.results.is_empty() => text(tr("No GIFs found."))
             .size(12)
             .color(crate::style::muted())

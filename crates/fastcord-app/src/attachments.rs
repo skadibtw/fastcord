@@ -780,6 +780,11 @@ impl AttachmentCache {
         id: Snowflake,
         animated: bool,
     ) -> Result<bytes::Bytes, AttachmentError> {
+        #[cfg(feature = "fake-discord")]
+        if crate::fake::active() {
+            self.ensure_active()?;
+            return crate::fake::onboarding_emoji(id, animated).ok_or(AttachmentError::Network);
+        }
         let extension = if animated { "gif" } else { "png" };
         // Discord channel IDs are nonzero; the reserved zero-channel identity
         // cannot collide with an account's private attachment cache entry.

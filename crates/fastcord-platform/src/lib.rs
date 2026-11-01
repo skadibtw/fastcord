@@ -5,6 +5,7 @@
 pub mod autostart;
 pub mod capture;
 pub mod clipboard;
+pub mod clock_format;
 pub mod host;
 pub mod instance;
 pub mod loopback;
@@ -14,6 +15,8 @@ pub mod paths;
 pub mod realtime;
 pub mod shortcut;
 pub mod speech;
+pub mod spellcheck;
+pub mod timezone;
 pub mod tray;
 
 pub use host::{OsRelease, os_release};

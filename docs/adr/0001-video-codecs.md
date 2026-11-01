@@ -38,11 +38,12 @@ Screen share must send H.264 and receive whatever official clients send (H.264 b
   ascending order, probed for `VAEntrypointEncSlice` with 4:2:0 + CBR rate
   control (encoder) or `VAEntrypointVLD` on the H.264 constrained
   Baseline/Main/High/Baseline profiles (decoder); a device that will not probe
-  is skipped, and `/dev/dri` being unreadable is a discovery error, as with the
+  is skipped, an absent `/dev/dri` is an empty hardware inventory so OpenH264 remains available,
+  and other errors reading `/dev/dri` are discovery errors, as with the
   other platforms' enumeration step.
 - **Selection**: single `select` pass for all OSes — hardware candidates first
   in device order, then OpenH264 last in automatic mode; explicit
-  Hardware/Software preferences never fall back.
+  Hardware/Software preferences never fall back; Software skips DRM discovery.
 - Runtime hardware decode failure recovery stays in the transport layer
   (`stream_video`): a decoder that stops answering is replaced and the next
   keyframe rebuilds the stream, exactly as Media Foundation behaves on Windows.

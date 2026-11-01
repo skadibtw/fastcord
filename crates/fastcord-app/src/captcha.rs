@@ -114,6 +114,37 @@ pub async fn solve(_challenge: CaptchaChallenge) -> Result<CaptchaSolution, Capt
     Err(CaptchaError::Unsupported)
 }
 
+/// A fresh profile for one challenge; never reuse storage from an earlier login.
+#[cfg(any(windows, test))]
+struct Profile(std::path::PathBuf);
+
+#[cfg(any(windows, test))]
+impl Profile {
+    fn create() -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "fastcord-captcha-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+impl Drop for Profile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(windows)]
 fn run_window(script: String) -> Result<String, CaptchaError> {
     use std::sync::{Arc, Mutex};
@@ -132,8 +163,8 @@ fn run_window(script: String) -> Result<String, CaptchaError> {
         .with_inner_size(LogicalSize::new(440.0, 640.0))
         .build(&event_loop)
         .map_err(|_| CaptchaError::Unsupported)?;
-    let profile = std::env::temp_dir().join(format!("fastcord-captcha-{}", std::process::id()));
-    let mut context = WebContext::new(Some(profile.clone()));
+    let profile = Profile::create().map_err(|_| CaptchaError::Unsupported)?;
+    let mut context = WebContext::new(Some(profile.0.clone()));
     let answer: Arc<Mutex<Option<Result<String, CaptchaError>>>> = Arc::default();
     let sink = Arc::clone(&answer);
     let proxy = event_loop.create_proxy();
@@ -155,7 +186,9 @@ fn run_window(script: String) -> Result<String, CaptchaError> {
     let webview = match webview {
         Ok(webview) => webview,
         Err(error) => {
-            let _ = std::fs::remove_dir_all(&profile);
+            // Release WebView2 storage handles before removing its directory.
+            drop(context);
+            drop(profile);
             return Err(error);
         }
     };
@@ -173,7 +206,7 @@ fn run_window(script: String) -> Result<String, CaptchaError> {
     drop(webview);
     drop(window);
     drop(context);
-    let _ = std::fs::remove_dir_all(&profile);
+    drop(profile);
     answer
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -193,6 +226,21 @@ mod tests {
             rqtoken: None,
             session_id: None,
         }
+    }
+
+    #[test]
+    fn challenge_profiles_are_isolated_and_removed_on_early_return() {
+        let first = Profile::create().unwrap();
+        let second = Profile::create().unwrap();
+        assert_ne!(first.0, second.0);
+        std::fs::write(first.0.join("session"), b"synthetic").unwrap();
+        let path = first.0.clone();
+        drop(first);
+        assert!(!path.exists());
+        assert!(second.0.exists());
+        let path = second.0.clone();
+        drop(second);
+        assert!(!path.exists());
     }
 
     #[test]

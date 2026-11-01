@@ -293,6 +293,9 @@ pub struct GuildMuteUpdate {
     /// `None` for the account's direct messages.
     pub guild_id: Option<Snowflake>,
     pub guild_muted: bool,
+    /// UTC Unix milliseconds; absent means no expiry.
+    pub guild_mute_until: Option<i64>,
+    pub channel_mute_until: Vec<(Snowflake, i64)>,
     pub channels: Vec<(Snowflake, bool)>,
     /// The server's level; `None` follows the server's own default.
     pub level: Option<NotifyLevel>,
@@ -654,7 +657,10 @@ pub enum Dispatch {
     GuildDelete(GuildDelete),
     ChannelCreate(Box<Channel>),
     ChannelUpdate(Box<Channel>),
+    /// Pins changed; consumers refresh only a visible list.
+    ChannelPinsUpdate(Snowflake),
     ChannelDelete(Box<Channel>),
+    WebhooksUpdate(Snowflake),
     ThreadListSync(Box<ThreadListSync>),
     ThreadMemberUpdate(ThreadMemberUpdate),
     ThreadMembersUpdate(Box<ThreadMembersUpdate>),
@@ -689,6 +695,7 @@ pub enum Dispatch {
     },
     /// An AutoMod rule was created, changed or deleted (issue #96).
     AutoModeration(Box<crate::AutoModChange>),
+    AutoModerationExecution(crate::AutoModExecution),
     /// A server's soundboard sounds were created, edited, deleted or replaced.
     SoundboardChanged(Snowflake),
     /// A server's stickers were created, edited or deleted (`GUILD_STICKERS_UPDATE`).
@@ -743,7 +750,9 @@ impl Dispatch {
             Self::GuildDelete(_) => "GUILD_DELETE",
             Self::ChannelCreate(_) => "CHANNEL_CREATE",
             Self::ChannelUpdate(_) => "CHANNEL_UPDATE",
+            Self::ChannelPinsUpdate(_) => "CHANNEL_PINS_UPDATE",
             Self::ChannelDelete(_) => "CHANNEL_DELETE",
+            Self::WebhooksUpdate(_) => "WEBHOOKS_UPDATE",
             Self::ThreadListSync(_) => "THREAD_LIST_SYNC",
             Self::ThreadMemberUpdate(_) => "THREAD_MEMBER_UPDATE",
             Self::ThreadMembersUpdate(_) => "THREAD_MEMBERS_UPDATE",
@@ -769,6 +778,7 @@ impl Dispatch {
             Self::ScheduledEventUser { .. } => "GUILD_SCHEDULED_EVENT_USER_REMOVE",
             Self::SoundboardChanged(_) => "GUILD_SOUNDBOARD_SOUNDS_UPDATE",
             Self::StickersChanged(_) => "GUILD_STICKERS_UPDATE",
+            Self::AutoModerationExecution(_) => "AUTO_MODERATION_ACTION_EXECUTION",
             Self::AutoModeration(_) => "AUTO_MODERATION_RULE_UPDATE",
             Self::CallCreate(_) => "CALL_CREATE",
             Self::CallUpdate(_) => "CALL_UPDATE",

@@ -87,6 +87,8 @@ pub struct Screening {
     pub fields: Vec<ScreeningField>,
     /// Discord sent more fields than [`MAX_FIELDS`].
     truncated: bool,
+    /// At least one rule was not shown in full.
+    rules_truncated: bool,
 }
 
 impl Screening {
@@ -104,12 +106,24 @@ impl Screening {
         }
         let all = wire.form_fields.unwrap_or_default();
         let truncated = all.len() > MAX_FIELDS;
+        let mut rules_truncated = false;
         let fields = all
             .into_iter()
             .take(MAX_FIELDS)
             .filter_map(|raw| {
                 let text = |key: &str| raw.get(key).and_then(Value::as_str).unwrap_or_default();
                 let kind = cut_at(text("field_type").to_owned(), 32);
+                if kind == "TERMS" {
+                    rules_truncated |=
+                        raw.get("values")
+                            .and_then(Value::as_array)
+                            .is_none_or(|values| {
+                                values.len() > MAX_RULES
+                                    || values.iter().any(|rule| {
+                                        rule.as_str().is_none_or(|text| text.len() > MAX_RULE_BYTES)
+                                    })
+                            });
+                }
                 let rules = raw
                     .get("values")
                     .and_then(Value::as_array)
@@ -139,6 +153,7 @@ impl Screening {
             description: note(wire.description),
             fields,
             truncated,
+            rules_truncated,
         })
     }
 
@@ -165,6 +180,7 @@ impl Screening {
     /// required is left to the official client, and nothing was cut off.
     pub fn can_accept(&self) -> bool {
         !self.truncated
+            && !self.rules_truncated
             && self.unsupported().is_none()
             && self.fields.iter().any(ScreeningField::is_terms)
     }
@@ -224,8 +240,9 @@ pub struct OnboardingOption {
     pub id: Snowflake,
     pub title: String,
     pub description: String,
-    /// The Unicode emoji, if the option has one (custom emoji are not drawn).
+    /// Unicode emoji or a custom emoji fallback name (at most32 UTF-8 bytes).
     pub emoji: String,
+    pub custom_emoji: Option<Snowflake>,
     pub role_ids: Vec<Snowflake>,
     pub channel_ids: Vec<Snowflake>,
 }
@@ -318,9 +335,9 @@ impl Onboarding {
                         id: o.id,
                         title: title(o.title.unwrap_or_default()),
                         description: note(o.description),
+                        custom_emoji: o.emoji.as_ref().and_then(|e| e.id).filter(|id| id.0 != 0),
                         emoji: o
                             .emoji
-                            .filter(|e| e.id.is_none())
                             .and_then(|e| e.name)
                             .map(|name| cut_at(name, 32))
                             .unwrap_or_default(),
@@ -584,7 +601,7 @@ mod tests {
         assert_eq!(one.fields[0].rules.len(), MAX_RULES);
         assert!(one.fields[0].rules[0].len() <= MAX_RULE_BYTES);
         assert!(one.fields[0].label.len() <= MAX_TITLE_BYTES);
-        assert!(one.can_accept());
+        assert!(!one.can_accept(), "unseen rules cannot be accepted");
 
         let small = json!({"field_type": "TERMS", "label": "x", "required": true, "values": ["r"]});
         let many = vec![small; MAX_FIELDS + 5];
@@ -594,6 +611,32 @@ mod tests {
         assert!(!many.can_accept(), "cut-off fields cannot be answered");
         let huge = vec![b' '; MAX_BODY_BYTES + 1];
         assert!(Screening::from_json(&huge).is_none());
+    }
+
+    #[test]
+    fn accepting_rules_requires_every_rule_to_be_shown_in_full() {
+        for values in [
+            Value::Null,
+            json!("undisplayed rule"),
+            json!({"rule": "undisplayed"}),
+            json!(["x".repeat(MAX_RULE_BYTES + 1)]),
+            json!(vec!["short"; MAX_RULES + 1]),
+            json!(["visible", null]),
+        ] {
+            let form = json!({"version": "v", "form_fields": [{
+                "field_type": "TERMS", "required": true, "values": values
+            }]});
+            assert!(!Screening::from_json(&bytes(&form)).unwrap().can_accept());
+        }
+        let missing = json!({"version": "v", "form_fields": [{
+            "field_type": "TERMS", "required": true
+        }]});
+        assert!(!Screening::from_json(&bytes(&missing)).unwrap().can_accept());
+        let form = json!({"version": "v", "form_fields": [{
+            "field_type": "TERMS", "required": true,
+            "values": vec!["x".repeat(MAX_RULE_BYTES); MAX_RULES]
+        }]});
+        assert!(Screening::from_json(&bytes(&form)).unwrap().can_accept());
     }
 
     #[test]
@@ -626,6 +669,22 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_custom_emoji_id_and_utf8_fallback_are_bounded() {
+        let body = json!({"prompts":[{"id":"1","options":[
+            {"id":"2","emoji":{"id":"123","name":"😀".repeat(100)}},
+            {"id":"3","emoji":{"id":"0","name":"fallback"}},
+            {"id":"4","emoji":{"name":"🎉"}}
+        ]}]});
+        let parsed = Onboarding::from_json(body.to_string().as_bytes()).unwrap();
+        let rows = &parsed.prompts[0].options;
+        assert_eq!(rows[0].custom_emoji, Some(Snowflake(123)));
+        assert!(rows[0].emoji.len() <= 32 && rows[0].emoji.is_char_boundary(rows[0].emoji.len()));
+        assert_eq!(rows[1].custom_emoji, None);
+        assert_eq!(rows[2].custom_emoji, None);
+        assert_eq!(rows[2].emoji, "🎉");
+    }
+
+    #[test]
     fn onboarding_prompts_and_options_decode() {
         let parsed = Onboarding::from_json(&bytes(&fixture("onboarding"))).unwrap();
         assert!(parsed.enabled);
@@ -639,7 +698,10 @@ mod tests {
         assert_eq!(first.options[0].emoji, "\u{265f}\u{fe0f}");
         assert_eq!(first.options[0].role_ids, vec![Snowflake(401)]);
         assert_eq!(first.options[0].channel_ids, vec![Snowflake(203)]);
-        assert_eq!(first.options[1].emoji, "", "a custom emoji is not drawn");
+        assert!(
+            first.options[1].custom_emoji.is_some(),
+            "custom ID is retained for static preview"
+        );
         assert_eq!(first.options[1].description, "");
         assert!(parsed.prompts[1].single_select && !parsed.prompts[1].required);
         assert!(!parsed.prompts[2].in_onboarding);

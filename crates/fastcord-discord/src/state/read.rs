@@ -55,6 +55,8 @@ pub struct ReadStates {
     entries: HashMap<Snowflake, Entry>,
     muted_guilds: HashSet<Snowflake>,
     muted_channels: HashSet<Snowflake>,
+    guild_expiry: HashMap<Snowflake, i64>,
+    channel_expiry: HashMap<Snowflake, i64>,
     /// Explicit notification levels; absent means inherit.
     guild_levels: HashMap<Snowflake, NotifyLevel>,
     channel_levels: HashMap<Snowflake, NotifyLevel>,
@@ -80,6 +82,8 @@ impl ReadStates {
             .collect();
         self.muted_guilds = mutes.guilds.into_iter().take(MAX_MUTED).collect();
         self.muted_channels = mutes.channels.into_iter().take(MAX_MUTED).collect();
+        self.guild_expiry.clear();
+        self.channel_expiry.clear();
         self.guild_levels.clear();
         self.channel_levels.clear();
         self.suppress_everyone.clear();
@@ -94,6 +98,23 @@ impl ReadStates {
     pub fn update_levels(&mut self, update: &GuildMuteUpdate) -> bool {
         let mut changed = false;
         if let Some(guild) = update.guild_id {
+            self.guild_expiry.remove(&guild);
+            if update.guild_muted
+                && self.muted_guilds.contains(&guild)
+                && let Some(end) = update.guild_mute_until
+            {
+                self.guild_expiry.insert(guild, end);
+            }
+        }
+        for &(channel, _) in &update.channels {
+            self.channel_expiry.remove(&channel);
+        }
+        for &(channel, end) in &update.channel_mute_until {
+            if self.muted_channels.contains(&channel) {
+                self.channel_expiry.insert(channel, end);
+            }
+        }
+        if let Some(guild) = update.guild_id {
             changed |= put(&mut self.guild_levels, guild, update.level);
             changed |= set(&mut self.suppress_everyone, guild, update.suppress_everyone);
             changed |= set(&mut self.suppress_roles, guild, update.suppress_roles);
@@ -101,6 +122,33 @@ impl ReadStates {
         for &(channel, level) in &update.channel_levels {
             changed |= put(&mut self.channel_levels, channel, level);
         }
+        changed
+    }
+
+    pub fn next_mute_expiry(&self) -> Option<i64> {
+        self.guild_expiry
+            .values()
+            .chain(self.channel_expiry.values())
+            .copied()
+            .min()
+    }
+
+    pub fn expire_mutes(&mut self, now: i64) -> bool {
+        let mut changed = false;
+        self.guild_expiry.retain(|guild, end| {
+            if *end > now {
+                return true;
+            }
+            changed |= self.muted_guilds.remove(guild);
+            false
+        });
+        self.channel_expiry.retain(|channel, end| {
+            if *end > now {
+                return true;
+            }
+            changed |= self.muted_channels.remove(channel);
+            false
+        });
         changed
     }
 
@@ -153,9 +201,11 @@ impl ReadStates {
     ) -> bool {
         let mut changed = false;
         if let Some(guild) = guild {
+            self.guild_expiry.remove(&guild);
             changed |= set(&mut self.muted_guilds, guild, guild_muted);
         }
         for &(channel, muted) in channels {
+            self.channel_expiry.remove(&channel);
             changed |= set(&mut self.muted_channels, channel, muted);
         }
         changed
@@ -269,12 +319,14 @@ impl ReadStates {
     pub fn forget(&mut self, channel: Snowflake) {
         self.entries.remove(&channel);
         self.muted_channels.remove(&channel);
+        self.channel_expiry.remove(&channel);
         self.channel_levels.remove(&channel);
     }
 
     /// Forgets a server the account left: its mute, level and suppressions.
     pub fn forget_guild(&mut self, guild: Snowflake) {
         self.muted_guilds.remove(&guild);
+        self.guild_expiry.remove(&guild);
         self.guild_levels.remove(&guild);
         self.suppress_everyone.remove(&guild);
         self.suppress_roles.remove(&guild);
@@ -282,6 +334,9 @@ impl ReadStates {
 
     pub fn bytes(&self) -> usize {
         table_bytes::<Snowflake, Entry>(self.entries.capacity())
+            + table_bytes::<Snowflake, i64>(
+                self.guild_expiry.capacity() + self.channel_expiry.capacity(),
+            )
             + table_bytes::<Snowflake, ()>(self.muted_guilds.capacity())
             + table_bytes::<Snowflake, ()>(self.muted_channels.capacity())
             + table_bytes::<Snowflake, NotifyLevel>(
@@ -350,6 +405,8 @@ mod tests {
         GuildMuteUpdate {
             guild_id: Some(Snowflake(guild)),
             guild_muted: false,
+            guild_mute_until: None,
+            channel_mute_until: Vec::new(),
             channels: Vec::new(),
             level,
             suppress_everyone: true,
@@ -359,6 +416,38 @@ mod tests {
                 .into_iter()
                 .collect(),
         }
+    }
+
+    #[test]
+    fn timed_mutes_expire_without_a_settings_event_and_replacement_cancels_deadline() {
+        let mut read = states(50, 2);
+        let mut update = entry(G.0, None, None);
+        update.guild_muted = true;
+        update.guild_mute_until = Some(1000);
+        update.channels = vec![(A, true)];
+        update.channel_mute_until = vec![(A, 2000)];
+        read.update_mutes(Some(G), true, &update.channels);
+        read.update_levels(&update);
+        assert_eq!(read.next_mute_expiry(), Some(1000));
+        assert!(!read.expire_mutes(999));
+        assert!(read.expire_mutes(1000));
+        assert!(!read.guild_muted(G));
+        assert!(read.channel_muted(A));
+        assert!(!all(&read, A, Some(G), Some(Snowflake(60))).unread);
+        assert_eq!(read.next_mute_expiry(), Some(2000));
+        assert!(read.expire_mutes(2000));
+        assert!(all(&read, A, Some(G), Some(Snowflake(60))).unread);
+        assert_eq!(all(&read, A, Some(G), Some(Snowflake(60))).mentions, 2);
+        assert_eq!(read.next_mute_expiry(), None);
+        // Replacing a timed mute with an indefinite one cancels its expiry.
+        read.update_mutes(Some(G), true, &[]);
+        read.update_levels(&update);
+        update.guild_mute_until = None;
+        read.update_levels(&update);
+        assert!(!read.expire_mutes(3000));
+        assert!(read.guild_muted(G));
+        read.forget_guild(G);
+        assert_eq!(read.next_mute_expiry(), None);
     }
 
     #[test]

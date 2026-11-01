@@ -39,7 +39,7 @@ pub enum Event {
 pub enum Status {
     Idle,
     Loading,
-    Failed(&'static str),
+    Failed(String),
     Done,
 }
 
@@ -71,6 +71,7 @@ impl Pin {
 
 pub struct State {
     open: bool,
+    observed: Option<(Snowflake, u64)>,
     /// The channel the list belongs to.
     channel: Option<Snowflake>,
     /// Identifies the current request; answers of older ones find another.
@@ -89,6 +90,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             open: false,
+            observed: None,
             channel: None,
             serial: 0,
             status: Status::Idle,
@@ -101,20 +103,16 @@ impl Default for State {
     }
 }
 
-fn describe(error: RestError) -> &'static str {
-    match error {
-        RestError::PermissionDenied => tr("You cannot see or change pins here."),
-        RestError::ResourceGone => tr("That message or conversation is gone."),
-        RestError::AuthenticationRequired => tr("Discord no longer accepts this login."),
-        RestError::InvalidRateLimit
-        | RestError::RateLimited
-        | RestError::SchedulerCapacityExceeded => {
-            tr("Discord is rate limiting this. Try again shortly.")
-        }
-        RestError::Retryable(_) | RestError::Http(_) => tr("Discord failed. Try again."),
-        RestError::WriteNotVerified(_) => tr(fastcord_discord::WRITE_NOT_VERIFIED),
-        _ => tr("Pinned messages could not be read."),
-    }
+fn describe(error: RestError) -> String {
+    crate::rest_text::describe(
+        error,
+        &crate::rest_text::Wording {
+            forbidden: "You cannot see or change pins here.",
+            gone: "That message or conversation is gone.",
+            unconfirmed: "Discord did not confirm. Check the pins before trying again.",
+            ..crate::rest_text::DEFAULT
+        },
+    )
 }
 
 impl State {
@@ -130,6 +128,30 @@ impl State {
     /// Whether the panel is open on `channel`.
     pub fn shows(&self, channel: Snowflake) -> bool {
         self.open && self.channel == Some(channel)
+    }
+
+    /// Refresh a visible list once per coalesced Gateway invalidation. Cold
+    /// channels never cause a fetch; switching away also releases previews.
+    pub fn sync(
+        &mut self,
+        channel: Option<Snowflake>,
+        revision: u64,
+        client: &RestClient,
+    ) -> Task<Event> {
+        let current = channel.map(|channel| (channel, revision));
+        if self.channel.is_some() && self.channel != channel {
+            self.open = false;
+            self.reset(None);
+        }
+        let changed = self.observed != current;
+        self.observed = current;
+        if changed
+            && let Some(channel) = channel
+            && self.shows(channel)
+        {
+            return self.update(Event::Refresh, client, channel);
+        }
+        Task::none()
     }
 
     pub fn pin(&self, index: usize) -> Option<&Pin> {
@@ -253,7 +275,7 @@ pub fn view(state: &State) -> Element<'_, Event> {
             .size(12)
             .color(MUTED)
             .into(),
-        Status::Failed(reason) => text(tr(reason)).size(12).color(WARN).into(),
+        Status::Failed(reason) => text(reason.clone()).size(12).color(WARN).into(),
         Status::Done if state.pins.is_empty() => {
             text(tr("No pinned messages.")).size(12).color(MUTED).into()
         }
@@ -337,6 +359,36 @@ mod tests {
             ClientProperties::bundled(HostOs::Linux, "en-US"),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn gateway_pin_invalidation_refreshes_only_the_visible_list() {
+        let client = client();
+        let mut state = State::default();
+        let _ = state.sync(Some(CHANNEL), 0, &client);
+        assert!(state.task.is_none(), "closed panels never fetch");
+        let _ = state.update(Event::Toggle, &client, CHANNEL);
+        let old = state.serial;
+        let _ = state.update(
+            Event::Done(old, page(vec![item(1, "old")], false)),
+            &client,
+            CHANNEL,
+        );
+        let _ = state.sync(Some(CHANNEL), 1, &client);
+        assert_eq!(state.status, Status::Loading);
+        assert!(state.pins.is_empty());
+        assert_ne!(state.serial, old);
+        let current = state.serial;
+        let _ = state.sync(Some(CHANNEL), 1, &client);
+        assert_eq!(state.serial, current, "one fetch per revision");
+        let _ = state.update(
+            Event::Done(old, page(vec![item(1, "stale")], false)),
+            &client,
+            CHANNEL,
+        );
+        assert!(state.pins.is_empty(), "old pages cannot resurrect pins");
+        let _ = state.sync(None, 1, &client);
+        assert!(!state.open && state.task.is_none());
     }
 
     fn item(id: u64, text: &str) -> PinnedMessage {
@@ -432,7 +484,7 @@ mod tests {
             &client,
             CHANNEL,
         );
-        assert!(matches!(state.status, Status::Failed(m) if m.contains("cannot")));
+        assert!(matches!(&state.status, Status::Failed(m) if m.contains("cannot")));
         let _ = state.update(Event::Toggle, &client, CHANNEL);
         assert!(!state.open && state.pins.is_empty() && state.channel.is_none());
         // Opening, then the user moves to another channel: the panel is not shown.

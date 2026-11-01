@@ -66,6 +66,7 @@ fn draft() -> EventDraft {
         location: String::new(),
         start_ms: 2_000_000_000_000,
         end_ms: None,
+        recurrence: None,
     }
 }
 
@@ -238,4 +239,28 @@ fn an_event_the_creator_owns_can_be_managed_with_create_events_alone() {
     assert!(store.event_allows(id(GUILD), &EventAction::Start(id(910))));
     assert!(store.event_allows(id(GUILD), &EventAction::Delete(id(910))));
     assert!(!store.event_allows(id(GUILD), &EventAction::Start(id(900))));
+}
+
+#[test]
+fn weekly_creation_uses_the_resolved_utc_weekday_and_edits_preserve_server_rules() {
+    let mut value = draft();
+    //2026-11-02 00:30 UTC: Monday, even where the local date is still Sunday.
+    value.start_ms = 1_793_579_400_000;
+    value.recurrence = Some(EventRecurrence::Weekly);
+    let body = value.body(false);
+    assert_eq!(body["recurrence_rule"]["frequency"], 2);
+    assert_eq!(body["recurrence_rule"]["interval"], 1);
+    assert_eq!(body["recurrence_rule"]["by_weekday"], json!([0]));
+    assert_eq!(
+        body["recurrence_rule"]["start"],
+        body["scheduled_start_time"]
+    );
+    value.recurrence = Some(EventRecurrence::EveryOtherWeek);
+    assert_eq!(value.body(false)["recurrence_rule"]["interval"], 2);
+    assert!(value.body(true).get("recurrence_rule").is_none());
+    let create = request(id(GUILD), &EventAction::Create(value.clone())).unwrap();
+    assert_eq!(create.write_group(), crate::WriteGroup::ScheduledEvents);
+    assert!(!crate::WriteGroup::ScheduledEvents.default_on());
+    value.start_ms = u64::MAX;
+    assert_eq!(value.check(0, true), Err(DraftError::Start));
 }

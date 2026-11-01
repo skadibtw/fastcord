@@ -84,28 +84,22 @@ const CHOICES: [Choice; 4] = [
 pub struct State {
     open: bool,
     busy: bool,
-    notice: Option<&'static str>,
+    notice: Option<String>,
 }
 
-fn describe(error: RestError) -> &'static str {
-    match error {
-        RestError::NotificationWritesPaused => PAUSED,
-        RestError::AccountVerificationRequired => {
-            "Discord requires an account check. All account requests have stopped; open the official Discord client."
-        }
-        RestError::PermissionDenied => "Discord does not allow this.",
-        RestError::ResourceGone => "That server or conversation is gone.",
-        RestError::AuthenticationRequired => "Discord no longer accepts this login.",
-        RestError::InvalidRateLimit
-        | RestError::RateLimited
-        | RestError::SchedulerCapacityExceeded => {
-            "Discord is rate limiting this. Try again shortly."
-        }
-        RestError::Retryable(_) | RestError::Http(_) => {
-            "Discord did not answer; the change may have been applied."
-        }
-        _ => "The notification change failed.",
+fn describe(error: RestError) -> String {
+    if matches!(error, RestError::NotificationWritesPaused) {
+        return tr(PAUSED).to_owned();
     }
+    crate::rest_text::describe(
+        error,
+        &crate::rest_text::Wording {
+            forbidden: "Discord does not allow this.",
+            gone: "That server or conversation is gone.",
+            unconfirmed: "Discord did not answer; the change may have been applied.",
+            rejected: "The notification change failed.",
+        },
+    )
 }
 
 impl State {
@@ -158,7 +152,7 @@ impl State {
             }
             Event::Set(target, setting) => {
                 if !NOTIFICATION_WRITES_ENABLED {
-                    self.notice = Some(PAUSED);
+                    self.notice = Some(tr(PAUSED).to_owned());
                     return Task::none();
                 }
                 if self.busy
@@ -204,8 +198,8 @@ pub fn view<'a>(
     if !NOTIFICATION_WRITES_ENABLED {
         body = body.push(text(tr(PAUSED)).size(12).color(WARN));
     }
-    if let Some(notice) = state.notice {
-        body = body.push(text(tr(notice)).size(12).color(WARN));
+    if let Some(notice) = &state.notice {
+        body = body.push(text(notice.clone()).size(12).color(WARN));
     }
     let n = notifications;
     // One block per target: level, then mute.
@@ -349,10 +343,49 @@ mod tests {
         ] {
             assert_eq!(state.update(event, &view, &client).units(), 0);
             assert!(!state.busy);
-            assert_eq!(state.notice, Some(PAUSED));
+            assert_eq!(state.notice.as_deref(), Some(PAUSED));
         }
         assert_eq!(state.update(Event::Toggle, &view, &client).units(), 0);
         assert!(!state.is_open());
+    }
+
+    #[test]
+    fn notification_errors_distinguish_unsent_and_unconfirmed_changes() {
+        use fastcord_discord::{MFA_REQUIRED, NetworkFailure, Refusal, RetryableFailure};
+        let (client, view) = (client(), view());
+        let mut state = State::default();
+        for (error, expected) in [
+            (
+                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Connection)),
+                "nothing was sent",
+            ),
+            (
+                RestError::Retryable(RetryableFailure::Network(NetworkFailure::Timeout)),
+                "may have been applied",
+            ),
+            (
+                RestError::Refused(Refusal::new(
+                    reqwest::StatusCode::FORBIDDEN,
+                    Some(MFA_REQUIRED),
+                    "",
+                )),
+                "two-factor",
+            ),
+            (
+                RestError::Http(reqwest::StatusCode::UNAUTHORIZED),
+                "Log in again",
+            ),
+        ] {
+            state.busy = true;
+            assert_eq!(
+                state
+                    .update(Event::Done(Err(error)), &view, &client)
+                    .units(),
+                0
+            );
+            assert!(!state.busy);
+            assert!(state.notice.as_deref().unwrap().contains(expected));
+        }
     }
 
     #[test]

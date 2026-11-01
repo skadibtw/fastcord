@@ -450,6 +450,8 @@ pub struct ChannelSelection {
 pub struct NavigationSnapshot {
     pub guilds: Window<GuildRow>,
     pub channels: Window<ChannelRow>,
+    /// One on-demand page, independent of the folded sidebar.
+    pub browse: Option<BrowseChannels>,
     pub private_channels: Window<PrivateChannelRow>,
     pub private_selection: Option<PrivateChannelSelection>,
     pub selected_guild: Option<Snowflake>,
@@ -482,6 +484,8 @@ pub struct NavigationSnapshot {
     pub events: Vec<fastcord_model::ScheduledEvent>,
     /// What the account may do with events in the selected guild.
     pub event_permissions: crate::EventPermissions,
+    /// Held events whose channel is viewable (or external with known membership).
+    pub readable_events: Vec<Snowflake>,
     /// Friends, blocks and pending requests (shared, rebuilt per change).
     pub relationships: std::sync::Arc<[fastcord_model::Relationship]>,
     /// Presence of referenced users (shared, copied on write).
@@ -504,6 +508,8 @@ pub struct NavigationSnapshot {
     pub assets: Option<GuildAssets>,
     /// The latest AutoMod rule changes, for the panel that is open.
     pub automod: crate::AutoModFeed,
+    /// Global webhook revision; conservatively invalidates the visible follower list.
+    pub webhooks_revision: u64,
     /// Message requests awaiting an explicit accept or decline.
     pub requests: MessageRequests,
     /// Ignored and blocked users (shared, rebuilt only when it changes).
@@ -1092,6 +1098,7 @@ impl Navigation {
         NavigationSnapshot {
             guilds: self.guild_window(store, guild_offset, guild_count),
             channels: self.channel_window(store, channel_offset, channel_count),
+            browse: None,
             private_channels: self.private_window(
                 store,
                 private_rows.start,
@@ -1169,6 +1176,23 @@ impl Navigation {
                     events
                 })
                 .unwrap_or_default(),
+            readable_events: selected_guild
+                .and_then(|id| store.guild(id))
+                .map(|guild| {
+                    guild
+                        .scheduled_events()
+                        .iter()
+                        .filter(|event| {
+                            selected_guild.is_some_and(|id| store.own_scope(id).is_some())
+                                && event.channel_id.is_none_or(|channel| {
+                                    enabled_channel(store, guild, channel).is_some()
+                                })
+                        })
+                        .take(super::MAX_EVENTS)
+                        .map(|event| event.id)
+                        .collect()
+                })
+                .unwrap_or_default(),
             event_permissions: selected_guild
                 .map(|id| store.event_permissions(id))
                 .unwrap_or_default(),
@@ -1200,6 +1224,7 @@ impl Navigation {
             follow: None,
             assets: None,
             automod: crate::AutoModFeed::default(),
+            webhooks_revision: 0,
             quick: Vec::new(),
             requests: self.message_requests(store),
             suppressed: store.suppressed(),
@@ -1456,3 +1481,6 @@ pub use quick::{
 
 #[cfg(test)]
 mod tests;
+
+mod browse;
+pub use browse::{BROWSE_PAGE, BROWSE_QUERY_CHARS, BrowseChannels, BrowseRow};
