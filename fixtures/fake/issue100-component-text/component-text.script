@@ -1,0 +1,13 @@
+size 1080 720
+wait 2
+open discord://-/channels/5001/6005
+wait 2
+snap markup-wide-hidden
+component-text reveal 1549999999999999999 0 0
+snap markup-wide-first-revealed
+size 760 640
+wait 1
+snap markup-narrow-first-revealed
+component-text reveal 1549999999999999999 1 0
+snap markup-narrow-both-revealed
+quit

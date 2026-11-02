@@ -242,6 +242,7 @@ pub enum Step {
     Slash(String),
     /// Exercise a scoped local entity selector.
     Entity(String),
+    ComponentText(String),
     Size(f32, f32),
     /// One of [`PANELS`].
     Toggle(&'static str),
@@ -278,6 +279,7 @@ fn parse_script(text: &str, dir: &std::path::Path) -> Vec<(Duration, Step)> {
             "open" => Step::Open(rest.to_owned()),
             "slash" => Step::Slash(rest.to_owned()),
             "entity" if rest.len() <= 512 => Step::Entity(rest.to_owned()),
+            "component-text" if rest.len() <= 128 => Step::ComponentText(rest.to_owned()),
             "size" => match rest
                 .split_once(' ')
                 .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
@@ -475,6 +477,14 @@ pub fn feed(session: std::sync::Arc<crate::playback::Session>, seconds: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_text_script_step_is_bounded() {
+        let steps = parse_script("component-text reveal 10 0 0\n", std::path::Path::new("."));
+        assert!(matches!(&steps[0].1,Step::ComponentText(command) if command=="reveal 10 0 0"));
+        let too_long = format!("component-text {}", "x".repeat(129));
+        assert!(parse_script(&too_long, std::path::Path::new(".")).is_empty());
+    }
 
     #[test]
     fn scripts_parse_steps_with_their_pauses() {

@@ -3867,6 +3867,7 @@ pub struct GatewayPanel {
     /// Spoilers the viewer uncovered (message, spoiler), at most
     /// [`rich::MAX_REVEALED`].
     pub revealed: HashSet<(Snowflake, u16)>,
+    pub component_text: crate::component_text::State,
     /// The sidebar lists direct messages rather than a server's channels.
     pub directs: bool,
     /// How the call's videos are laid out and which one is pinned or full.
@@ -4111,6 +4112,7 @@ impl GatewayPanel {
             emoji_picker: emoji_picker::Picker::default(),
             emoji_snapshot: Arc::default(),
             revealed: HashSet::new(),
+            component_text: Default::default(),
             directs: false,
             call_view: crate::call_layout::CallView::default(),
             share_picker: SharePicker::default(),
@@ -4144,6 +4146,13 @@ impl GatewayPanel {
         let consumed = self.controls.consume();
         self.navigation = consumed.navigation;
         self.timeline = consumed.timeline;
+        self.component_text.reconcile(
+            self.navigation
+                .current_user
+                .as_ref()
+                .map(|user| (user.id, self.id, self.timeline.interaction_session)),
+            &self.timeline,
+        );
         self.emoji_snapshot = consumed.emoji;
         if self.emoji_picker.request.channel != self.timeline.channel_id {
             self.emoji_picker.close();

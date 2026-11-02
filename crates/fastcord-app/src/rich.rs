@@ -80,11 +80,13 @@ pub fn wanted<'a>(contents: impl IntoIterator<Item = &'a str>) -> (Vec<Snowflake
 pub enum Link {
     Url(String),
     Spoiler(Snowflake, u16),
+    Component(Box<crate::component_text::Event>),
 }
 
 fn to_event(link: Link) -> Event {
     match link {
         Link::Url(url) => Event::OpenLink(url),
+        Link::Component(event) => Event::ComponentText(*event),
         Link::Spoiler(message_id, spoiler) => Event::ToggleSpoiler {
             message_id,
             spoiler,
@@ -156,6 +158,10 @@ struct Renderer<'a> {
     images: bool,
     /// Emoji run ordinal, matching [`emoji_assets`].
     ordinal: usize,
+    component: Option<(
+        crate::component_text::Target,
+        &'a crate::component_text::State,
+    )>,
 }
 
 /// The emoji of `content` that are shown as images, in display order. This is
@@ -209,8 +215,33 @@ pub fn body<'a>(
         revision,
         images: true,
         ordinal: 0,
+        component: None,
     };
     Some(renderer.blocks(&parsed.blocks))
+}
+
+/// Text Display Markdown: text-only emoji fallback, no sensed images/assets.
+pub fn component<'a>(
+    content: &'a str,
+    message: &'a Message,
+    target: crate::component_text::Target,
+    view: crate::component_text::View<'a>,
+) -> Element<'a, Event> {
+    let Some(parsed) = crate::component_text::parse(content) else {
+        return text(crate::i18n::tr("Hidden spoiler content"))
+            .size(14)
+            .into();
+    };
+    let mut renderer = Renderer {
+        cx: view.rich,
+        message: message.into(),
+        channel: target.channel,
+        revision: target.revision,
+        images: false,
+        ordinal: 0,
+        component: Some((target, view.state)),
+    };
+    renderer.blocks(&parsed.blocks)
 }
 
 /// Largest box of an embed thumbnail and of an embed image, in pixels.
@@ -269,6 +300,7 @@ pub fn embeds<'a>(
         revision,
         images: false,
         ordinal: 0,
+        component: None,
     };
     renderer
         .message
@@ -445,7 +477,10 @@ impl<'a> Renderer<'a> {
     fn spoiler_hidden(&self, part: &Part<'_>) -> bool {
         let prefs = crate::chat_prefs::current();
         part.spoiler.is_some_and(|id| {
-            prefs.spoiler_hidden(self.cx.revealed.contains(&(self.message.id, id)))
+            self.component.map_or_else(
+                || prefs.spoiler_hidden(self.cx.revealed.contains(&(self.message.id, id))),
+                |(target, state)| state.hidden(target, id),
+            )
         })
     }
 
@@ -528,13 +563,28 @@ impl<'a> Renderer<'a> {
                 item = item
                     .color(SPOILER)
                     .background(SPOILER)
-                    .link(Link::Spoiler(message.id, id));
+                    .link(
+                        self.component
+                            .map_or(Link::Spoiler(message.id, id), |(target, _)| {
+                                Link::Component(Box::new(crate::component_text::Event::Spoiler(
+                                    target, id,
+                                )))
+                            }),
+                    );
             } else {
                 item = item.background(FAINT);
             }
         }
         if !hidden && let Some(url) = target {
-            item = item.link(Link::Url(url.to_owned()));
+            item = item.link(self.component.map_or_else(
+                || Link::Url(url.to_owned()),
+                |(target, _)| {
+                    Link::Component(Box::new(crate::component_text::Event::Link(
+                        target,
+                        url.to_owned(),
+                    )))
+                },
+            ));
         }
         out.push(item);
         // A masked link also names where it goes, so the label cannot hide it.
@@ -703,6 +753,14 @@ pub fn link_target(raw: &str) -> Option<reqwest::Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_link_targets_do_not_inflate_ordinary_rich_span_links() {
+        assert!(
+            std::mem::size_of::<Link>() <= 2 * std::mem::size_of::<String>(),
+            "account/session targets must not be inline in every body span"
+        );
+    }
 
     #[test]
     fn urls_for_the_os_are_http_only_and_single_token() {

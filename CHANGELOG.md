@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Components V2 Text Displays render bounded Markdown with independent account/session/revision-scoped spoilers and validated links. Custom emoji stay literal; no component media is fetched. Unsupported spoiler syntax remains hidden (#100).
+
+
 - Components V2 containers display optional RGB accents. Spoiler containers (including malformed spoiler flags) now retain only a hidden-content placeholder; their text and controls are discarded until scoped reveal support exists (#263; partial #100).
 
 

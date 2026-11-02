@@ -26,6 +26,7 @@ mod captcha;
 mod changes;
 mod chat_prefs;
 mod community;
+mod component_text;
 mod component_view;
 mod composer;
 mod desktop;
@@ -1664,6 +1665,20 @@ impl App {
             fake::Step::Open(text) => {
                 self.pending_link = desktop::parse(&text);
                 Task::none()
+            }
+            fake::Step::ComponentText(command) => {
+                if !fake::active() {
+                    return Task::none();
+                }
+                if let Some(event) = self
+                    .phase
+                    .gateway()
+                    .and_then(|gateway| component_text::scripted(gateway, &command))
+                {
+                    self.handle(Message::Timeline(timeline::Event::ComponentText(event)))
+                } else {
+                    Task::none()
+                }
             }
             fake::Step::Entity(command) => {
                 if let Some(event) = self

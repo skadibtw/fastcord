@@ -104,3 +104,5 @@ Plain `--workspace` includes `fastcord-fake`, whose dev-dependency turns `fastco
 `platform::timezone` provides worker-only date-specific Unix civil-time conversion with DST ambiguity/gap rejection; scheduled_events validates form snapshots asynchronously and the account worker prepares the bounded display-offset cache before publication.
 
 `platform::spellcheck` owns the optional Linux Enchant child lifetime, bounds and protocol; `app::composer::spelling` owns ephemeral selection/result serials. `app::onboarding::preview` owns visible custom emoji interests and cancellation. Event timezone refresh remains worker-only and account-owner scoped.
+
+`app::component_text` owns the bounded account/session/revision/Text Display identity and local spoiler state. Its text-only `rich` renderer mode emits no emoji/media asset interests; component URLs pass current-source and spoiler validation before ordinary link routing. Childless spoiler containers remain separate.
