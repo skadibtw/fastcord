@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Respect supported native numeric Gregorian short-date patterns on Linux, Windows and macOS, including separators, padding and two-digit years. Unsupported calendars/digits/patterns retain a conservative documented fallback; date/timezone conversion and explicit 12/24-hour choices are unchanged.
+
 ### Fixed
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).

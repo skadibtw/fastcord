@@ -16,6 +16,13 @@ pub(super) fn read() -> Option<bool> {
 }
 
 fn read_with(fetch: impl FnOnce(&mut [u16]) -> i32) -> Option<bool> {
+    fetch_with(fetch, |units| parse(units, false))
+}
+
+fn fetch_with<T>(
+    fetch: impl FnOnce(&mut [u16]) -> i32,
+    parse: impl FnOnce(&[u16]) -> Option<T>,
+) -> Option<T> {
     let mut buffer = [0xffff; MAX_UNITS];
     let count = usize::try_from(fetch(&mut buffer)).ok()?;
     // GetLocaleInfoEx counts the trailing NUL. Never parse partial data after
@@ -23,7 +30,42 @@ fn read_with(fetch: impl FnOnce(&mut [u16]) -> i32) -> Option<bool> {
     if count < 2 || count > buffer.len() || buffer[count - 1] != 0 {
         return None;
     }
-    parse(&buffer[..count - 1], false)
+    parse(&buffer[..count - 1])
+}
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+pub(super) fn read_date() -> Option<super::DatePattern> {
+    use ::windows::core::PCWSTR;
+    date_from_locale(PCWSTR::null(), 0)
+}
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn date_from_locale(locale: ::windows::core::PCWSTR, flags: u32) -> Option<super::DatePattern> {
+    use ::windows::Win32::Globalization::{
+        GetLocaleInfoEx, LOCALE_ICALENDARTYPE, LOCALE_SNATIVEDIGITS, LOCALE_SSHORTDATE,
+    };
+    let fetch = |item, buffer: &mut [u16]| unsafe {
+        // SAFETY: locale is either the user-default sentinel or a test-owned
+        // static locale string; every call supplies an exclusive fixed buffer.
+        GetLocaleInfoEx(locale, item | flags, Some(buffer))
+    };
+    let gregorian = fetch_with(
+        |buffer| fetch(LOCALE_ICALENDARTYPE, buffer),
+        |units| Some(units == [b'1' as u16]),
+    )?;
+    let latin = fetch_with(
+        |buffer| fetch(LOCALE_SNATIVEDIGITS, buffer),
+        |units| Some(units.iter().copied().eq("0123456789".encode_utf16())),
+    )?;
+    if !gregorian || !latin {
+        return None;
+    }
+    fetch_with(
+        |buffer| fetch(LOCALE_SSHORTDATE, buffer),
+        |units| super::DatePattern::from_native(units, false),
+    )
 }
 
 #[cfg(test)]
@@ -81,5 +123,27 @@ mod tests {
             );
         }
         let _ = read(); // Current-user smoke: custom unsupported patterns may fall back.
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn native_numeric_dates_follow_explicit_locales_and_reject_alternate_calendars() {
+        use ::windows::Win32::Globalization::LOCALE_NOUSEROVERRIDE;
+        use ::windows::core::w;
+        for (locale, expected) in [
+            (w!("en-US"), "2/3/2001"),
+            (w!("de-DE"), "03.02.2001"),
+            (w!("ja-JP"), "2001/02/03"),
+        ] {
+            assert_eq!(
+                date_from_locale(locale, LOCALE_NOUSEROVERRIDE)
+                    .unwrap()
+                    .format(2001, 2, 3)
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        assert!(date_from_locale(w!("th-TH"), LOCALE_NOUSEROVERRIDE).is_none());
+        assert!(date_from_locale(w!("ar-SA"), LOCALE_NOUSEROVERRIDE).is_none());
+        let _ = read_date();
     }
 }

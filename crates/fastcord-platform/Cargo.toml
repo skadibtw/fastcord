@@ -87,7 +87,7 @@ dispatch2.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-core-audio-types.workspace = true
-objc2-core-foundation = { workspace = true, features = ["CFLocale", "CFDateFormatter"] }
+objc2-core-foundation = { workspace = true, features = ["CFLocale", "CFDateFormatter", "CFDate", "CFTimeZone"] }
 objc2-core-graphics.workspace = true
 objc2-core-media.workspace = true
 objc2-core-video.workspace = true
