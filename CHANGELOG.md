@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Bound each Unix second-launch handoff by one total deadline and validate private runtime directories and lock files before use (#265, #266).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).
 - Compile the VA-API-only RBSP bit-length helper only on Linux, keeping Windows and macOS all-target test builds clean under warnings-as-errors.

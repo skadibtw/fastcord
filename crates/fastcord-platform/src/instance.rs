@@ -271,10 +271,11 @@ mod sys {
 
 #[cfg(unix)]
 mod sys {
-    use std::io::{Read, Write};
+    use std::io::{self, Read, Write};
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{Forwarded, Instance, MAX_ARG_BYTES, Start, TAG, decode, encode};
 
@@ -294,24 +295,72 @@ mod sys {
         } else {
             "XDG_RUNTIME_DIR"
         };
-        let dir = match std::env::var_os(runtime).map(PathBuf::from) {
-            Some(dir) if dir.is_absolute() && dir.is_dir() => dir,
-            _ => private_cache()?,
-        };
+        let dir = std::env::var_os(runtime)
+            .and_then(|dir| private_location(Path::new(&dir), user_id()))
+            .or_else(private_cache)?;
         Some(dir.join(".fastcord-instance.sock"))
     }
 
     fn private_cache() -> Option<PathBuf> {
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        use std::os::unix::fs::DirBuilderExt;
         let home = PathBuf::from(std::env::var_os("HOME")?);
-        let owner = std::fs::metadata(&home).ok()?.uid();
+        if !home.is_absolute() || std::fs::metadata(&home).ok()?.uid() != user_id() {
+            return None;
+        }
         let dir = home.join(".cache").join("fastcord");
         let _ = std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&dir);
-        let meta = std::fs::symlink_metadata(&dir).ok()?;
-        (meta.is_dir() && meta.uid() == owner && meta.mode() & 0o077 == 0).then_some(dir)
+        private_location(&dir, user_id())
+    }
+
+    #[allow(unsafe_code)]
+    fn user_id() -> u32 {
+        // SAFETY: geteuid takes no pointers and has no preconditions.
+        unsafe { libc::geteuid() }
+    }
+
+    /// Return a canonical private endpoint under ancestors that another user
+    /// cannot replace. Keep this returned path for all subsequent operations,
+    /// so changing a symlink in the original prefix cannot redirect them.
+    fn private_location(dir: &Path, owner: u32) -> Option<PathBuf> {
+        // `symlink/` follows the final link even for lstat on Unix.
+        let normalized: PathBuf = dir.components().collect();
+        if !dir.is_absolute()
+            || dir
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+        {
+            return None;
+        }
+        let meta = std::fs::symlink_metadata(&normalized).ok()?;
+        if !meta.is_dir() || meta.uid() != owner || meta.mode() & 0o077 != 0 {
+            return None;
+        }
+        let canonical = normalized.canonicalize().ok()?;
+        let ancestors: Vec<_> = canonical.ancestors().collect();
+        // Walk from root downward. Root/the current user are trusted; a sticky
+        // root-owned /tmp is safe, but a foreign owner or writable non-sticky
+        // ancestor could replace even a private child directory.
+        for ancestor in ancestors.into_iter().rev() {
+            let meta = std::fs::symlink_metadata(ancestor).ok()?;
+            if !meta.is_dir()
+                || (meta.uid() != 0 && meta.uid() != owner)
+                || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0)
+            {
+                return None;
+            }
+            if ancestor == canonical && (meta.uid() != owner || meta.mode() & 0o077 != 0) {
+                return None;
+            }
+        }
+        Some(canonical)
+    }
+
+    #[cfg(test)]
+    pub(super) fn private_directory(dir: &Path, owner: u32) -> bool {
+        private_location(dir, owner).is_some()
     }
 
     pub fn acquire(arg: Option<&str>, sink: Sink) -> Start {
@@ -327,14 +376,40 @@ mod sys {
 
     pub(super) fn acquire_at(path: &Path, arg: Option<&str>, sink: Sink) -> Start {
         use std::os::unix::fs::OpenOptionsExt;
+        let location = path
+            .parent()
+            .and_then(|dir| private_location(dir, user_id()));
+        let Some(location) = location else {
+            return Start::Primary(Instance {
+                socket: None,
+                _lock: None,
+            });
+        };
+        let Some(name) = path.file_name() else {
+            return Start::Primary(Instance {
+                socket: None,
+                _lock: None,
+            });
+        };
+        let canonical_path = location.join(name);
+        let path = canonical_path.as_path();
         let lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path.with_extension("lock"));
-        let Ok(lock) = lock else {
+        let lock = lock.ok().filter(|file| {
+            file.metadata().is_ok_and(|meta| {
+                meta.is_file()
+                    && meta.uid() == user_id()
+                    && meta.mode() & 0o077 == 0
+                    && meta.nlink() == 1
+            })
+        });
+        let Some(lock) = lock else {
             // The private directory refused the file: run unguarded rather
             // than exit with no window.
             return Start::Primary(Instance {
@@ -395,15 +470,37 @@ mod sys {
     fn serve(listener: UnixListener, mut sink: Sink) {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            let _ = stream.set_read_timeout(Some(READ_WAIT));
-            let mut payload = Vec::new();
-            if stream
-                .take(MAX_ARG_BYTES as u64 + 1)
-                .read_to_end(&mut payload)
-                .is_ok()
+            if let Ok(payload) = read_handoff(stream)
                 && let Some(request) = decode(TAG, &payload)
             {
                 sink(request);
+            }
+        }
+    }
+
+    /// One deadline for the complete request, including successful partial
+    /// reads. A peer sending one byte at a time cannot renew its admission.
+    fn read_handoff(mut stream: UnixStream) -> io::Result<Vec<u8>> {
+        let deadline = Instant::now() + READ_WAIT;
+        let mut payload = Vec::with_capacity(MAX_ARG_BYTES + 1);
+        let mut chunk = [0; MAX_ARG_BYTES + 1];
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            stream.set_read_timeout(Some(remaining))?;
+            let available = MAX_ARG_BYTES + 1 - payload.len();
+            match stream.read(&mut chunk[..available]) {
+                Ok(0) => return Ok(payload),
+                Ok(count) => {
+                    payload.extend_from_slice(&chunk[..count]);
+                    if payload.len() > MAX_ARG_BYTES {
+                        return Err(io::ErrorKind::InvalidData.into());
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
             }
         }
     }
@@ -458,12 +555,150 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn shared_foreign_relative_and_symlink_directories_are_refused() {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
+        let root =
+            std::env::temp_dir().join(format!("fastcord-instance-privacy-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let owner = std::fs::metadata(&root).unwrap().uid();
+        assert!(sys::private_directory(&root, owner));
+        assert!(!sys::private_directory(&root, owner.wrapping_add(1)));
+        assert!(!sys::private_directory(std::path::Path::new("."), owner));
+        let alias = root.join("alias");
+        symlink(&root, &alias).unwrap();
+        assert!(!sys::private_directory(&alias, owner));
+        assert!(!sys::private_directory(&alias.join(""), owner));
+        assert!(!sys::private_directory(&alias.join("."), owner));
+        let writable_parent = root.join("shared");
+        std::fs::create_dir(&writable_parent).unwrap();
+        let private_child = writable_parent.join("private");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&private_child)
+            .unwrap();
+        std::fs::set_permissions(&writable_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!sys::private_directory(&private_child, owner));
+        // The sticky bit prevents foreign users from replacing an owned child.
+        std::fs::set_permissions(&writable_parent, std::fs::Permissions::from_mode(0o1777))
+            .unwrap();
+        assert!(sys::private_directory(&private_child, owner));
+        let path = root.join("i.sock");
+        // A shared runtime directory must be rejected before its existing
+        // socket or lock is read, removed, or overwritten.
+        std::fs::write(&path, b"foreign sentinel").unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let Start::Primary(guard) = sys::acquire_at(&path, None, Box::new(|_| {})) else {
+            panic!("unguarded fallback");
+        };
+        assert!(guard.socket.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), b"foreign sentinel");
+        assert!(!path.with_extension("lock").exists());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonprivate_or_linked_lock_files_are_not_used() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+        let root =
+            std::env::temp_dir().join(format!("fastcord-instance-lock-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let path = root.join("i.sock");
+        let lock = path.with_extension("lock");
+        let target = root.join("target");
+        std::fs::write(&target, b"unchanged").unwrap();
+        symlink(&target, &lock).unwrap();
+        for case in 0..3 {
+            let Start::Primary(guard) = sys::acquire_at(&path, None, Box::new(|_| {})) else {
+                panic!("unguarded fallback");
+            };
+            assert!(guard.socket.is_none());
+            assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
+            assert!(!path.exists());
+            std::fs::remove_file(&lock).unwrap();
+            if case == 0 {
+                std::fs::write(&lock, b"private ownership required").unwrap();
+                std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+            } else if case == 1 {
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+                std::fs::hard_link(&target, &lock).unwrap();
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_handoff_cannot_extend_the_total_read_deadline() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let dir =
+            std::env::temp_dir().join(format!("fastcord-instance-deadline-{}", std::process::id()));
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        }
+        let path = dir.join("i.sock");
+        let (tx, rx) = mpsc::channel();
+        let Start::Primary(_guard) = sys::acquire_at(
+            &path,
+            None,
+            Box::new(move |r| {
+                let _ = tx.send(r);
+            }),
+        ) else {
+            panic!("first launch");
+        };
+        let mut slow = UnixStream::connect(&path).unwrap();
+        slow.write_all(b"d").unwrap();
+        let started = Instant::now();
+        let writer = std::thread::spawn(move || {
+            // Each interval is below the old per-read timeout. Keep the
+            // connection alive well beyond the whole-request deadline.
+            for _ in 0..60 {
+                std::thread::sleep(Duration::from_millis(100));
+                if slow.write_all(b"x").is_err() {
+                    break;
+                }
+            }
+        });
+        let mut next = UnixStream::connect(&path).unwrap();
+        next.write_all(b"discord://-/channels/1/2").unwrap();
+        drop(next);
+        let result = rx.recv_timeout(Duration::from_secs(4));
+        let elapsed = started.elapsed();
+        writer.join().unwrap();
+        assert_eq!(
+            result,
+            Ok(Forwarded::Open("discord://-/channels/1/2".into())),
+            "a slow partial handoff must be dropped before accepting the next"
+        );
+        assert!(elapsed < Duration::from_secs(4));
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_second_launch_hands_its_link_over_a_socket_and_a_stale_socket_is_replaced() {
         use std::sync::mpsc;
         use std::time::Duration;
 
         let dir = std::env::temp_dir().join(format!("fastcord-instance-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        }
         let path = dir.join("i.sock");
         // A socket file nobody listens on, as a crashed process leaves it.
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
