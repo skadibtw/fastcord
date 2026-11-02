@@ -8,6 +8,7 @@ pub mod clipboard;
 pub mod clock_format;
 pub mod host;
 pub mod instance;
+pub mod link_handler;
 pub mod loopback;
 pub mod network;
 pub mod notify;

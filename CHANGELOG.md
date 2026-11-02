@@ -55,6 +55,7 @@
 - Preserve categorical voice reconnect causes and record them in the release voice log, distinguishing signaling Resume (retained UDP/keys) from a new media session (#230).
 
 ### Added
+- Add explicit, device-local registration for app-owned `fastcord://` channel and invite links on Linux and Windows, refusing foreign handlers and keeping invite Join confirmation; reject malformed URL launch envelopes before other command-line modes. macOS URL registration remains unsupported (#105).
 - Add an explicit Mark as read action to desktop notifications while Fastcord runs, using the existing ACK queue with account/session and current permission checks; reject forged Linux notification replies/signals and recover service ownership on the next toast after daemon replacement (#105). Reply and activation after process exit remain pending.
 - Browse public, joined-private and manager-only private thread archives with their respective pagination cursors (#63).
 - Browse accessible server channels with bounded search/pages, independently of folded sidebar categories; selection rechecks current permissions (#91).

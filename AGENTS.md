@@ -104,3 +104,5 @@ Plain `--workspace` includes `fastcord-fake`, whose dev-dependency turns `fastco
 `platform::timezone` provides worker-only date-specific Unix civil-time conversion with DST ambiguity/gap rejection; scheduled_events validates form snapshots asynchronously and the account worker prepares the bounded display-offset cache before publication.
 
 `platform::spellcheck` owns the optional Linux Enchant child lifetime, bounds and protocol; `app::composer::spelling` owns ephemeral selection/result serials. `app::onboarding::preview` owns visible custom emoji interests and cancellation. Event timezone refresh remains worker-only and account-owner scoped.
+
+`platform::link_handler` owns explicit per-user `fastcord://` registration (Linux bounded process group + desktop entry, Windows exact owned Classes shape + HKCR/UserChoice conflict checks); `app::link_registration` owns its account-independent single-flight worker/result UI. `desktop::link_launch` validates the dedicated URL argv envelope before other launch modes. No registration occurs at startup or in fake mode, and `discord://` is never registered. macOS URL event delivery remains unsupported.

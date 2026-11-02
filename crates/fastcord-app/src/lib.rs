@@ -50,6 +50,7 @@ mod icons;
 mod inbox;
 mod interactions;
 mod invite;
+mod link_registration;
 mod localtime;
 mod login;
 mod login_screen;
@@ -211,6 +212,11 @@ fn open_link(url: &str) {
 
 /// The whole application; the `fastcord` binary only calls this.
 pub fn run() -> iced::Result {
+    let registered_link = match desktop::link_launch(std::env::args_os().skip(1)) {
+        desktop::LinkLaunch::Invalid => return Ok(()),
+        desktop::LinkLaunch::Open(url) => Some(url),
+        desktop::LinkLaunch::Ordinary => None,
+    };
     if std::env::args_os().any(|arg| arg == "--packet-helper") {
         let args: Vec<_> = std::env::args().collect();
         if args.len() == 4
@@ -254,7 +260,9 @@ pub fn run() -> iced::Result {
     fake::init();
     // Fake mode takes no part in the hand-off: it neither receives a real
     // instance's links nor is found by one.
-    let arg = std::env::args().nth(1).filter(|_| !fake_mode());
+    let arg = registered_link
+        .or_else(|| std::env::args().nth(1))
+        .filter(|_| !fake_mode());
     let (forwarded, requests) = tokio::sync::mpsc::channel(8);
     let _instance = if fake_mode() {
         None
@@ -348,6 +356,7 @@ struct App {
     autostart: Option<bool>,
     /// An autostart read or write is running on a blocking thread; toggles wait.
     autostart_busy: bool,
+    link_registration: link_registration::State,
     /// A link from the command line or a second launch, opened once signed in.
     pending_link: Option<desktop::DeepLink>,
     /// The window was put in full screen by the call view's button.
@@ -704,6 +713,8 @@ enum Message {
     AutostartToggled(bool),
     /// The autostart read or write finished: the setting now, or why it failed.
     AutostartDone(Result<bool, String>),
+    RegisterLinks,
+    LinksRegistered(u64, Result<(), fastcord_platform::link_handler::Error>),
     /// Enter or leave compact call mode (small, always on top).
     ToggleCompact,
     WindowSize(iced::Size),
@@ -774,6 +785,7 @@ impl App {
                 window_size: iced::Size::new(1080.0, 640.0),
                 autostart: None,
                 autostart_busy: false,
+                link_registration: link_registration::State::default(),
                 pending_link: desktop::take_startup(),
                 window_fullscreen: false,
                 mic_panel: mic_panel::State::default(),
@@ -1761,6 +1773,15 @@ impl App {
                     "friends" => Message::Friends(friends::Event::Open),
                     "emoji" => Message::EmojiPicker(emoji_picker::Event::Toggle),
                     "audio" => Message::OpenAudioSettings,
+                    "links-register" => Message::RegisterLinks,
+                    "links-pending" => {
+                        self.link_registration.begin();
+                        return Task::none();
+                    }
+                    "links-conflict" => {
+                        self.link_registration.fake_conflict();
+                        return Task::none();
+                    }
                     "app" => Message::Settings(settings::Event::Open(settings::Section::App)),
                     "network" => {
                         if self.network_settings.open {
@@ -1924,6 +1945,8 @@ and a fourth"
             | Message::CloseToTrayToggled(..)
             | Message::AutostartToggled(..)
             | Message::AutostartDone(..)
+            | Message::RegisterLinks
+            | Message::LinksRegistered(..)
             | Message::ToggleCompact
             | Message::ShortcutKey(..)
             | Message::GlobalShortcut(..)

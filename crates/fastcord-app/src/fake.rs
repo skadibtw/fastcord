@@ -195,6 +195,9 @@ pub const PANELS: &[&str] = &[
     "emoji",
     "audio",
     "app",
+    "links-register",
+    "links-conflict",
+    "links-pending",
     "network",
     "chat",
     "account",
@@ -673,5 +676,39 @@ mod onboarding_fixture_tests {
             (32, 32)
         );
         assert_eq!(decoded.frames[0].rgba.len(), 4096);
+    }
+}
+
+#[cfg(test)]
+mod link_registration_fixture {
+    use super::*;
+    #[test]
+    fn script_uses_only_navigation_and_simulated_registration() {
+        let script = include_str!("../../../fixtures/ui/desktop-links.script");
+        let steps = parse_script(script, std::path::Path::new("/tmp/fastcord-links-fixture"));
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|(_, step)| matches!(step, Step::Snap(..)))
+                .count(),
+            5
+        );
+        for (_, step) in steps {
+            match step {
+                Step::Open(link) => assert!(crate::desktop::parse(&link).is_some()),
+                Step::Toggle(panel) => assert!(
+                    [
+                        "app",
+                        "links-pending",
+                        "links-conflict",
+                        "links-register",
+                        "escape"
+                    ]
+                    .contains(&panel)
+                ),
+                Step::Snap(..) | Step::Quit => {}
+                _ => panic!("fixture must not join, send or call"),
+            }
+        }
     }
 }
