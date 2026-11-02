@@ -480,8 +480,12 @@ mod sys {
 
     /// One deadline for the complete request, including successful partial
     /// reads. A peer sending one byte at a time cannot renew its admission.
-    fn read_handoff(mut stream: UnixStream) -> io::Result<Vec<u8>> {
+    pub(super) fn read_handoff(mut stream: UnixStream) -> io::Result<Vec<u8>> {
         let deadline = Instant::now() + READ_WAIT;
+        // Darwin may reject setsockopt after the peer has closed, even while
+        // its payload remains buffered. Nonblocking reads drain those bytes;
+        // poll bounds waiting without reconfiguring a disconnected socket.
+        stream.set_nonblocking(true)?;
         let mut payload = Vec::with_capacity(MAX_ARG_BYTES + 1);
         let mut chunk = [0; MAX_ARG_BYTES + 1];
         loop {
@@ -489,7 +493,6 @@ mod sys {
             if remaining.is_zero() {
                 return Err(io::ErrorKind::TimedOut.into());
             }
-            stream.set_read_timeout(Some(remaining))?;
             let available = MAX_ARG_BYTES + 1 - payload.len();
             match stream.read(&mut chunk[..available]) {
                 Ok(0) => return Ok(payload),
@@ -500,7 +503,46 @@ mod sys {
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_readable(&stream, deadline)?;
+                }
                 Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn wait_readable(stream: &UnixStream, deadline: Instant) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            let timeout = remaining
+                .as_nanos()
+                .div_ceil(1_000_000)
+                .min(i32::MAX as u128) as i32;
+            let mut fd = libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one initialized pollfd for a live borrowed socket, held
+            // throughout this call; the wait is capped by the request deadline.
+            match unsafe { libc::poll(&mut fd, 1, timeout) } {
+                -1 => {
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                }
+                0 => continue,
+                _ if fd.revents & libc::POLLNVAL != 0 => {
+                    return Err(io::ErrorKind::InvalidInput.into());
+                }
+                // HUP/ERR must also reach read: buffered bytes precede EOF.
+                _ => return Ok(()),
             }
         }
     }
@@ -632,6 +674,32 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn buffered_handoffs_survive_sender_close_before_reading() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        for payload in [
+            Vec::new(),
+            b"discord://-/channels/1/2".to_vec(),
+            vec![b'x'; MAX_ARG_BYTES],
+        ] {
+            let (receiver, mut sender) = UnixStream::pair().unwrap();
+            sender.write_all(&payload).unwrap();
+            // Deterministically enter Darwin's disconnected-peer state before
+            // receiving, while its payload and EOF remain available to read.
+            drop(sender);
+            assert_eq!(sys::read_handoff(receiver).unwrap(), payload);
+        }
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        sender.write_all(&vec![b'x'; MAX_ARG_BYTES + 1]).unwrap();
+        drop(sender);
+        assert_eq!(
+            sys::read_handoff(receiver).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     #[cfg(unix)]
