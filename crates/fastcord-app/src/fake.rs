@@ -259,6 +259,11 @@ pub const PANELS: &[&str] = &[
     "event-edit",
     "event-once",
     "event-keep-repeat",
+    "community-list-open",
+    "community-list-onboarding",
+    "community-list-question",
+    "community-list-answer",
+    "community-list-end",
     "onboarding-questions",
     "community-setup",
     "community-onboarding",
@@ -1203,5 +1208,47 @@ mod dm_sort_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod community_list_tests {
+    use super::*;
+    #[test]
+    fn community_list_native_fixture_only_opens_and_inspects() {
+        let steps = parse_script(
+            include_str!("../../../fixtures/ui/community-lists.script"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let panels: Vec<_> = steps
+            .iter()
+            .filter_map(|(_, step)| match step {
+                Step::Toggle(panel) => Some(*panel),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            panels,
+            [
+                "community-list-open",
+                "community-list-onboarding",
+                "community-list-question",
+                "community-list-answer",
+                "community-list-end",
+                "community-list-end"
+            ]
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|(_, step)| matches!(step, Step::Snap(..)))
+                .count(),
+            3
+        );
+        assert!(steps.iter().all(|(_, step)| matches!(
+            step,
+            Step::Open(_) | Step::Size(..) | Step::Toggle(_) | Step::Snap(..) | Step::Quit
+        )));
     }
 }
