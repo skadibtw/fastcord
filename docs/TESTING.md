@@ -17,6 +17,9 @@
   Global search/direct discovery joining, real user-account route acceptance,
   and Windows/macOS native acceptance remain outstanding.
 
+Channel mention privacy (#257): `gateway::tests::channel_completions_follow_view_permission_changes_and_account_ownership` applies Gateway events through the actual worker, checks that revocation schedules a snapshot rebuild, publishes candidates through the real bridge, and queries the actual composer. Hidden text/announcement channels are absent; channel permission grants/revocations update the results, unknown membership fails closed, owner/administrator permissions remain valid, unsupported kinds stay excluded, and the existing channel candidate cap remains in force. Native fake check: open `discord://-/channels/5002/6101`, type `#sta` without sending, and verify the denied `staff-only` channel is absent from suggestions as well as the sidebar.
+
+
 ## Stranger friend-request confirmation (#211, 2026-10-25)
 
 - Offline coverage: the relationship request tests check plain acceptance,
