@@ -11,6 +11,7 @@
 
 - Grouped slash-command forms with scoped group/subcommand controls and explicit Run. Command trees are validated and budgeted before typed allocation; obsolete branch fields clear visibly. Interaction routes remain unverified and gated off by default (#100).
 - Hide channel-name completions from the composer when the current account lacks VIEW_CHANNEL, including after permission revocation (#257).
+- Respect supported native numeric Gregorian short-date patterns on Linux, Windows and macOS, including separators, padding and two-digit years. Unsupported calendars/digits/patterns retain a conservative documented fallback; date/timezone conversion and explicit 12/24-hour choices are unchanged.
 
 ### Fixed
 - Reject scripted launches without a valid fake loopback origin before GUI or account startup; validate missing script/port inputs and keep script streams and dispatch inert outside fake mode (#241).
