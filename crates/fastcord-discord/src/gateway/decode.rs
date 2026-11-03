@@ -1498,6 +1498,15 @@ pub(crate) fn decode_dispatch(name: &str, raw: &str) -> Decoded {
         "USER_SETTINGS_PROTO_UPDATE" => json::<serde_json::Value>(raw).and_then(|value| {
             // `{"settings": {"type": 1, "proto": base64}, "partial": bool}`; a
             // blob without `guild_folders` leaves the folders as they are.
+            // Other settings types have a different field14; they must never
+            // be interpreted as PreloadedUserSettings or clear server folders.
+            if value
+                .pointer("/settings/type")
+                .and_then(serde_json::Value::as_u64)
+                != Some(1)
+            {
+                return Err(Malformed);
+            }
             value
                 .pointer("/settings/proto")
                 .and_then(serde_json::Value::as_str)
@@ -3197,6 +3206,72 @@ mod tests {
             decode_dispatch("USER_SETTINGS_PROTO_UPDATE", &proto("cgA=")),
             Decoded::Event(Dispatch::UserFoldersUpdate(f)) if f.folders.is_empty()
         ));
+    }
+
+    #[test]
+    fn protobuf_folder_updates_converge_without_replacing_state_on_invalid_input() {
+        use super::super::event::GatewayEvent;
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
+
+        let mut store = crate::state::Store::new();
+        store.apply(GatewayEvent::Dispatch {
+            sequence: 1,
+            event: Dispatch::Ready(Box::new(ready(READY).ready)),
+        });
+        let mut sequence = 1;
+        let mut apply =
+            |store: &mut crate::state::Store, raw: serde_json::Value| match decode_dispatch(
+                "USER_SETTINGS_PROTO_UPDATE",
+                &raw.to_string(),
+            ) {
+                Decoded::Event(event @ Dispatch::UserFoldersUpdate(_)) => {
+                    sequence += 1;
+                    store.apply(GatewayEvent::Dispatch { sequence, event });
+                    true
+                }
+                Decoded::Malformed => false,
+                _ => panic!("unexpected settings dispatch"),
+            };
+        // Field14 -> folders.field1 -> folder.guild_ids fixed64(100),
+        // followed by a valid unknown fixed32 field at each message level.
+        let mut folder = vec![0x09];
+        folder.extend(100u64.to_le_bytes());
+        folder.extend([0x2d, 1, 2, 3, 4]);
+        let mut folders = vec![0x0a, folder.len() as u8];
+        folders.extend(&folder);
+        folders.extend([0x2d, 1, 2, 3, 4]);
+        let mut settings = vec![0x72, folders.len() as u8];
+        settings.extend(&folders);
+        settings.extend([0x2d, 1, 2, 3, 4]);
+        let payload = |bytes: &[u8]| {
+            serde_json::json!({
+                "settings": {"type": 1, "proto": STANDARD.encode(bytes)}, "partial": true
+            })
+        };
+        assert!(apply(&mut store, payload(&settings)));
+        assert_eq!(store.folders().folders[0].guilds, [Snowflake(100)]);
+        let held = store.folders();
+        // Malformed trailing bytes must not publish an otherwise valid prefix.
+        let mut malformed = settings.clone();
+        malformed.extend([0x2d, 1]);
+        for raw in [
+            payload(&malformed),
+            payload(&[0x72, 5, 0x0a, 3, 0x12, 1, 0]), // malformed ID wrapper
+            payload(&[0x72, 5, 0x0a, 3, 0x0a, 1, 1]), // partial packed fixed64
+            payload(&[0x08, 1]),                      // valid settings, no folders field
+            serde_json::json!({"settings": {"type": 2, "proto": "cgA="}}),
+            serde_json::json!({"settings": {"type": 3, "proto": "cgA="}}),
+            serde_json::json!({"settings": {"proto": "cgA="}}),
+            serde_json::json!({"settings": {"type": "1", "proto": "cgA="}}),
+        ] {
+            assert!(!apply(&mut store, raw));
+            assert!(std::sync::Arc::ptr_eq(&held, &store.folders()));
+        }
+        // An explicit empty folders message is a real replacement, not unknown.
+        assert!(apply(&mut store, payload(&[0x72, 0])));
+        assert!(store.folders().folders.is_empty());
+        assert!(!std::sync::Arc::ptr_eq(&held, &store.folders()));
     }
 
     #[test]
