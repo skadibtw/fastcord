@@ -508,6 +508,7 @@ pub struct Interaction {
 /// What the timeline asks of the worker. Each event names its channel.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    ComponentText(crate::component_text::Event),
     EntitySelect(crate::entity_select::Event),
     /// An inline asset entered or left the actual clipped viewport.
     EmojiVisibility(Occurrence, bool),
@@ -862,6 +863,7 @@ pub struct Attachments<'a> {
     pub emojis: &'a HashMap<emoji::Asset, emoji::View>,
     pub avatars: &'a crate::avatars::Views,
     pub revealed: &'a std::collections::HashSet<(Snowflake, u16)>,
+    pub component_text: &'a crate::component_text::State,
     /// Held members of the open server, for nicknames (empty in a DM).
     pub members: &'a HashMap<Snowflake, fastcord_discord::state::navigation::MemberView>,
     /// Resolved invites for the cards under messages.
@@ -1543,6 +1545,10 @@ fn message_view<'a>(
             channel_id,
             interaction.component_choices,
             interaction.entity_owner,
+            Some(crate::component_text::View {
+                rich: cx,
+                state: assets.component_text,
+            }),
         ));
     }
     if message.is_ephemeral() {
@@ -2496,6 +2502,8 @@ mod tests {
         > = std::sync::LazyLock::new(HashMap::new);
         static INVITES: std::sync::LazyLock<crate::invite::Cache> =
             std::sync::LazyLock::new(Default::default);
+        static COMPONENT_TEXT: std::sync::LazyLock<crate::component_text::State> =
+            std::sync::LazyLock::new(Default::default);
         Attachments {
             account: Snowflake(1),
             views,
@@ -2503,6 +2511,7 @@ mod tests {
             emojis: &EMOJI,
             avatars: &AVATARS,
             revealed: &REVEALED,
+            component_text: &COMPONENT_TEXT,
             members: &MEMBERS,
             invites: &INVITES,
         }

@@ -225,6 +225,19 @@ impl App {
                         timeline::Event::CopyId { message_id } => {
                             return iced::clipboard::write(message_id.to_string());
                         }
+                        timeline::Event::ComponentText(event) => {
+                            let owner = gateway.navigation.current_user.as_ref().map(|user| {
+                                (user.id, gateway.id, gateway.timeline.interaction_session)
+                            });
+                            if let Some(url) =
+                                gateway
+                                    .component_text
+                                    .update(event, owner, &gateway.timeline)
+                            {
+                                return self
+                                    .handle(Message::Timeline(timeline::Event::OpenLink(url)));
+                            }
+                        }
                         timeline::Event::OpenLink(url) => {
                             if let Some(link) = message_link::parse(&url) {
                                 // Only a channel the account can open is selected;
