@@ -1832,8 +1832,12 @@ fn production_footer_keeps_six_direct_actions_inside_the_fixed_sidebar() {
     if let Some(gateway) = app.phase.gateway_mut() {
         let nav = Arc::make_mut(&mut gateway.navigation);
         nav.requests.total = 12_345;
+        nav.selected_guild = Some(Snowflake(100));
+        nav.own_nick =
+            Some("A very long server nickname that must not cover any footer action".into());
+        gateway.directs = false;
     }
-    for (width, height) in [(960.0, 640.0), (1280.0, 720.0)] {
+    for (width, height) in [(760.0, 640.0), (960.0, 640.0), (1280.0, 720.0)] {
         let mut ui = Ui::new(width, height, app.view());
         let mut hit = BTreeSet::new();
         for y in ((height as i32 - 150)..height as i32).step_by(3) {
@@ -2074,4 +2078,94 @@ fn private_sort_real_controls_route_and_reject_retired_account_generations() {
             .units(),
         0
     );
+}
+
+#[test]
+fn sidebar_nickname_tracks_guild_dm_reset_and_account_without_renaming_account_menu() {
+    use crate::variable_list::harness::Ui;
+    use iced::advanced::widget::{Id, Operation};
+    #[derive(Default)]
+    struct Names(Vec<String>);
+    impl Operation for Names {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+            self.0.push(text.to_owned());
+        }
+    }
+
+    fn names(app: &App) -> Names {
+        let mut ui = Ui::new(760.0, 640.0, app.view());
+        ui.draw();
+        let mut names = Names::default();
+        ui.inspect(&mut names);
+        names
+    }
+    fn expect(app: &App, sidebar: &str, account: &str) {
+        let actual = names(app);
+        assert!(
+            actual.0.iter().any(|text| text == sidebar),
+            "{:?}",
+            actual.0
+        );
+        assert!(
+            actual.0.iter().any(|text| text == account),
+            "{:?}",
+            actual.0
+        );
+        if sidebar == account {
+            assert!(
+                actual.0.iter().filter(|text| *text == account).count() >= 2,
+                "both sidebar and menu: {:?}",
+                actual.0
+            );
+        }
+    }
+
+    let mut app = login_app();
+    let session = authenticate(&mut app, Persistence::MemoryOnly);
+    let global = session.user.display_name().to_owned();
+    app.ui.status.open = true;
+    let set = |app: &mut App, guild: Option<u64>, directs: bool, nick: Option<&str>| {
+        let gateway = app.phase.gateway_mut().unwrap();
+        gateway.directs = directs;
+        let navigation = Arc::make_mut(&mut gateway.navigation);
+        navigation.selected_guild = guild.map(Snowflake);
+        navigation.own_nick = nick.map(str::to_owned);
+    };
+    set(&mut app, Some(100), false, Some("Server A"));
+    expect(&app, "Server A", &global);
+    set(&mut app, Some(200), false, Some("Server B"));
+    expect(&app, "Server B", &global);
+    // DMs may retain the previous selected guild: the directs flag wins.
+    set(&mut app, Some(200), true, Some("Server B"));
+    expect(&app, &global, &global);
+    for (guild, nick) in [
+        (None, Some("stale")),
+        (Some(100), None),
+        (Some(100), Some("")),
+        (Some(100), Some("  ")),
+    ] {
+        set(&mut app, guild, false, nick);
+        expect(&app, &global, &global);
+    }
+    set(&mut app, Some(100), false, Some("Member update"));
+    expect(&app, "Member update", &global);
+    drop(app.teardown_account());
+    app.phase = Phase::Authenticating {
+        saved_account: None,
+    };
+    let mut next = login::fixture_session();
+    let next_user = &mut Arc::get_mut(&mut next).unwrap().user;
+    next_user.id = Snowflake(999_106);
+    next_user.global_name = Some("Second account".into());
+    drop(
+        app.update(Message::LoginFinished(Ok(LoginOutcome::Authenticated(
+            next,
+            Persistence::MemoryOnly,
+        )))),
+    );
+    app.ui.status.open = true;
+    expect(&app, "Second account", "Second account");
 }

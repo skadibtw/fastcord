@@ -1605,6 +1605,23 @@ fn own_nick_members_and_roles_follow_the_selected_guild_and_member_events() {
     let snapshot = navigation.snapshot(&store, 0, 128, 0, 128);
     assert_eq!(snapshot.own_nick.as_deref(), Some("Nell"));
     assert_eq!(snapshot.members[&id(1)].nick.as_deref(), Some("Nell"));
+    // Switching servers must never reuse the previous server's self-name.
+    apply(
+        &mut store,
+        "GUILD_CREATE",
+        r#"{"id":"200","name":"Other server"}"#,
+    );
+    navigation.reconcile(&store);
+    assert!(navigation.select_guild(&store, id(200)));
+    assert_eq!(navigation.snapshot(&store, 0, 128, 0, 128).own_nick, None);
+    assert!(navigation.select_guild(&store, id(100)));
+    assert_eq!(
+        navigation
+            .snapshot(&store, 0, 128, 0, 128)
+            .own_nick
+            .as_deref(),
+        Some("Nell")
+    );
     assert_eq!(snapshot.members[&id(1)].roles, [id(101), id(102)]);
 
     // An explicit null clears it; an empty nickname is no nickname.
