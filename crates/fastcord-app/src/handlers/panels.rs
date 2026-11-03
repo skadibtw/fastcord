@@ -60,10 +60,9 @@ impl App {
                     .set_state((thread, archived, locked), allowed, &session.client)
                     .map(Message::Threads)
             }
-            threads::Event::Created(Ok(thread)) => {
-                self.ui.threads.close();
-                if let Some(guild) = thread.guild_id {
-                    gateway.controls.open_thread(guild, *thread);
+            threads::Event::Created(serial, result) => {
+                if let Some((guild, thread)) = self.ui.threads.finish_create(serial, result) {
+                    gateway.controls.open_thread(guild, thread);
                 }
                 Task::none()
             }
@@ -101,7 +100,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let rejected = assets::State::is_rejected(&event);
+        let rejected = self.ui.assets.is_rejected(&event);
         let env = assets::Env {
             client: &session.client,
             navigation: &gateway.navigation,
@@ -137,7 +136,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let rejected = apps::State::is_rejected(&event);
+        let rejected = self.ui.apps.is_rejected(&event);
         let (task, action) = self
             .ui
             .apps
@@ -160,7 +159,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let rejected = announce::State::is_rejected(&event);
+        let rejected = self.ui.announce.is_rejected(&event);
         let task = self.ui.announce.update(
             event,
             &gateway.navigation,
@@ -231,7 +230,7 @@ impl App {
             interaction: &gateway.timeline.interaction,
             now: std::time::Instant::now(),
         };
-        let rejected = slash::State::is_rejected(&event);
+        let rejected = self.ui.slash.is_rejected(&event);
         let (task, used) = self.ui.slash.update(event, &env);
         if used {
             gateway.composer.clear_text();
@@ -506,7 +505,7 @@ impl App {
         let Some(env) = Self::soundboard_env(&self.phase, output) else {
             return Task::none();
         };
-        let rejected = soundboard::State::is_rejected(&event);
+        let rejected = self.ui.soundboard.is_rejected(&event);
         let task = self.ui.soundboard.update(event, &env);
         if rejected && let Some(gateway) = self.phase.gateway() {
             // Discord rejected the login: stop the account like any other 401.
@@ -546,7 +545,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let rejected = group_dm::State::is_rejected(&event);
+        let rejected = self.ui.group.is_rejected(&event);
         let task =
             self.ui
                 .group
@@ -589,7 +588,7 @@ impl App {
             }
             _ => {}
         }
-        let rejected = onboarding::State::is_rejected(&event);
+        let rejected = self.ui.onboarding.is_rejected(&event);
         let task = self
             .ui
             .onboarding
@@ -621,7 +620,7 @@ impl App {
             }
             return Task::none();
         }
-        let rejected = scheduled_events::State::is_rejected(&event);
+        let rejected = self.ui.events.is_rejected(&event, &gateway.navigation);
         let task = self.ui.events.update(
             event,
             &gateway.navigation,
@@ -638,7 +637,7 @@ impl App {
         let Some(session) = self.phase.session() else {
             return Task::none();
         };
-        let rejected = discover::State::is_rejected(&event);
+        let rejected = self.ui.discover.is_rejected(&event);
         let task = self.ui.discover.update(event, &session.client);
         if rejected && let Some(gateway) = self.phase.gateway() {
             return self.reject_login(gateway.id);
@@ -650,7 +649,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let rejected = invite::State::is_rejected(&event);
+        let rejected = self.ui.invite.is_rejected(&event);
         let task = self.ui.invite.update(
             event,
             &gateway.navigation,
@@ -667,7 +666,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let rejected = community::State::is_rejected(&event);
+        let rejected = self.ui.community.is_rejected(&event);
         let task =
             self.ui
                 .community
@@ -747,7 +746,7 @@ impl App {
                 moderation::Event::Bans(guild)
             });
         }
-        let rejected = guild_admin::State::is_rejected(&event);
+        let rejected = self.ui.guild_admin.is_rejected(&event);
         let task = self
             .ui
             .guild_admin
@@ -762,7 +761,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let rejected = moderation::State::is_rejected(&event);
+        let rejected = self.ui.moderation.is_rejected(&event);
         let task = self
             .ui
             .moderation
@@ -777,7 +776,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let rejected = automod::State::is_rejected(&event);
+        let rejected = self.ui.automod.is_rejected(&event);
         let task = self
             .ui
             .automod
@@ -792,7 +791,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let rejected = profile_edit::State::is_rejected(&event);
+        let rejected = self.ui.identity.is_rejected(&event);
         let task = self.ui.identity.update(
             event,
             &gateway.navigation,
@@ -993,7 +992,7 @@ impl App {
             .sync(self.ui.report.watched().and_then(|(channel, message)| {
                 timeline::is_retained(&gateway.timeline, channel, message)
             }));
-        let rejected = report::State::is_rejected(&event);
+        let rejected = self.ui.report.is_rejected(&event);
         let mut task = self
             .ui
             .report
@@ -1023,7 +1022,7 @@ impl App {
         let Some((session, gateway)) = self.phase.account() else {
             return Task::none();
         };
-        let rejected = safety::State::is_rejected(&event);
+        let rejected = self.ui.safety.is_rejected(&event);
         let task = self
             .ui
             .safety

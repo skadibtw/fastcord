@@ -149,7 +149,17 @@ impl State {
     }
 
     /// Whether Discord rejected the login (the account must stop).
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::BansDone(serial, ..)
+            | Event::AuditDone(serial, ..)
+            | Event::Unbanned(serial, ..) => self.gate.is_current(*serial),
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         match event {
             Event::BansDone(_, r) => auth_rejected(r),
             Event::AuditDone(_, r) => auth_rejected(r),
@@ -881,17 +891,16 @@ mod tests {
 
     #[test]
     fn a_rejected_login_is_detected_on_every_answer() {
-        assert!(State::is_rejected(&Event::BansDone(
-            1,
-            Err(RestError::AuthenticationRequired)
-        )));
-        assert!(State::is_rejected(&Event::AuditDone(
-            1,
-            Err(RestError::AuthenticationRequired)
-        )));
-        assert!(!State::is_rejected(&Event::BansDone(
-            1,
-            Err(RestError::PermissionDenied)
-        )));
+        assert!(
+            State::default()
+                .is_rejected(&Event::BansDone(0, Err(RestError::AuthenticationRequired)))
+        );
+        assert!(
+            State::default()
+                .is_rejected(&Event::AuditDone(0, Err(RestError::AuthenticationRequired)))
+        );
+        assert!(
+            !State::default().is_rejected(&Event::BansDone(0, Err(RestError::PermissionDenied)))
+        );
     }
 }

@@ -143,7 +143,18 @@ impl State {
         };
     }
 
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Published(serial, ..)
+            | Event::Followed(serial, ..)
+            | Event::Removed(serial, ..)
+            | Event::Loaded(serial, ..) => self.life.is_current(*serial),
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         match event {
             Event::Published(_, r) | Event::Followed(_, r) | Event::Removed(_, _, r) => {
                 auth_rejected(r)
@@ -728,10 +739,10 @@ mod tests {
             run(&mut state, Event::Published(0, Err(error)), &nav, &rows);
             assert!(state.life.notice.unwrap().contains(expect));
         }
-        assert!(State::is_rejected(&Event::Published(
-            0,
-            Err(RestError::AuthenticationRequired)
-        )));
+        assert!(
+            State::default()
+                .is_rejected(&Event::Published(0, Err(RestError::AuthenticationRequired)))
+        );
     }
 
     fn targets(ids: &[u64]) -> Option<FollowTargets> {

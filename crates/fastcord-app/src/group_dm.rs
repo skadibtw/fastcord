@@ -367,7 +367,15 @@ impl State {
     }
 
     /// A 401 from this panel's request: the caller stops the account.
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Done(serial, ..) => self.life.is_current(*serial),
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         matches!(event, Event::Done(_, _, r) if auth_rejected(r))
     }
 }
@@ -786,12 +794,12 @@ mod tests {
         ] {
             assert!(describe(error).contains(word), "{error:?}");
         }
-        assert!(State::is_rejected(&Event::Done(
+        assert!(State::default().is_rejected(&Event::Done(
             0,
             Action::Leave,
             Err(RestError::AuthenticationRequired)
         )));
-        assert!(!State::is_rejected(&Event::Done(0, Action::Leave, Ok(()))));
+        assert!(!State::default().is_rejected(&Event::Done(0, Action::Leave, Ok(()))));
     }
 
     #[test]

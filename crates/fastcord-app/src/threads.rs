@@ -60,7 +60,7 @@ pub enum Event {
     CancelCreate,
     ArchivedDone(u64, Result<ArchivedThreads, RestError>),
     Membership(Result<(), RestError>),
-    Created(Result<Box<Channel>, ThreadError>),
+    Created(u64, Result<Box<Channel>, ThreadError>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +108,8 @@ pub struct State {
     state_busy: bool,
     /// Identifies the current archive request; older answers find another.
     serial: u64,
+    /// The current naming draft/request, independent of archive pagination.
+    create_serial: u64,
     /// Dropping this aborts the archive request in flight.
     task: Option<iced::task::Handle>,
 }
@@ -157,6 +159,7 @@ impl State {
     pub fn drop_all(&mut self) {
         *self = Self {
             serial: self.serial.wrapping_add(1),
+            create_serial: self.create_serial.wrapping_add(1),
             ..Self::default()
         };
     }
@@ -196,10 +199,52 @@ impl State {
 
     /// Closes the archive and naming panels (a thread was opened).
     pub fn close(&mut self) {
+        // The independent create task keeps running; only its UI ownership
+        // ends. Never cancel or retry a write whose outcome may be ambiguous.
+        self.create_serial = self.create_serial.wrapping_add(1);
         self.serial = self.serial.wrapping_add(1);
         self.task = None;
         self.archived = None;
         self.draft = None;
+    }
+
+    /// Settle only the draft that started this create. The router may navigate
+    /// only after this ownership check succeeds; old answers cannot close a
+    /// replacement draft, release its busy marker or change the account.
+    pub fn finish_create(
+        &mut self,
+        serial: u64,
+        result: Result<Box<Channel>, ThreadError>,
+    ) -> Option<(Snowflake, Channel)> {
+        let draft = self.draft.as_mut().filter(|draft| draft.busy)?;
+        if serial != self.create_serial {
+            return None;
+        }
+        draft.busy = false;
+        let result = result.and_then(|thread| {
+            if thread.guild_id == Some(draft.guild) && thread.parent_id == Some(draft.channel) {
+                Ok(thread)
+            } else {
+                Err(ThreadError::InvalidResponse)
+            }
+        });
+        match result {
+            Ok(thread) => {
+                let guild = draft.guild;
+                self.close();
+                Some((guild, *thread))
+            }
+            Err(error) => {
+                self.notice = Some(match error {
+                    ThreadError::InvalidName => tr("Give the thread a name.").to_owned(),
+                    ThreadError::InvalidResponse => {
+                        tr("Discord answered with something unexpected.").to_owned()
+                    }
+                    ThreadError::Rest(error) => describe(error),
+                });
+                None
+            }
+        }
     }
 
     fn load(&mut self, client: &RestClient) -> Task<Event> {
@@ -374,6 +419,8 @@ impl State {
                 }
                 self.notice = None;
                 draft.busy = true;
+                self.create_serial = self.create_serial.wrapping_add(1);
+                let serial = self.create_serial;
                 let (client, name) = (client.clone(), draft.name.clone());
                 let (guild, channel, message) = (draft.guild, draft.channel, draft.message);
                 return Task::perform(
@@ -383,25 +430,16 @@ impl State {
                             .await
                             .map(Box::new)
                     },
-                    Event::Created,
+                    move |result| Event::Created(serial, result),
                 );
             }
             Event::CancelCreate => self.draft = None,
-            Event::Created(Err(error)) => {
-                if let Some(draft) = &mut self.draft {
-                    draft.busy = false;
-                }
-                self.notice = Some(match error {
-                    ThreadError::InvalidName => tr("Give the thread a name.").to_owned(),
-                    ThreadError::InvalidResponse => {
-                        tr("Discord answered with something unexpected.").to_owned()
-                    }
-                    ThreadError::Rest(error) => describe(error),
-                });
+            Event::Created(serial, result) => {
+                let _ = self.finish_create(serial, result);
             }
             // Opening is the caller's: it needs the gateway. Stale answers and
             // events for panels since closed change nothing.
-            Event::OpenArchived(_) | Event::Created(Ok(_)) | Event::ArchivedDone(..) => {}
+            Event::OpenArchived(_) | Event::ArchivedDone(..) => {}
         }
         Task::none()
     }
@@ -556,6 +594,115 @@ mod tests {
         state
     }
 
+    fn authenticated_app() -> crate::App {
+        let (mut app, _) = crate::App::boot();
+        authenticate(&mut app);
+        app
+    }
+
+    fn authenticate(app: &mut crate::App) {
+        app.phase = crate::Phase::Authenticating {
+            saved_account: None,
+        };
+        let _ = app.update(crate::Message::LoginFinished(Ok(
+            crate::LoginOutcome::Authenticated(
+                crate::login::fixture_session(),
+                crate::Persistence::MemoryOnly,
+            ),
+        )));
+    }
+
+    fn start_create(app: &mut crate::App, parent: Snowflake, name: &str) -> u64 {
+        let _ = app.handle(crate::Message::Threads(Event::Start(
+            GUILD,
+            parent,
+            Snowflake(77),
+            name.into(),
+        )));
+        let task = app.handle(crate::Message::Threads(Event::Create));
+        assert_eq!(task.units(), 1, "one write task, deliberately not polled");
+        assert!(app.ui.threads.draft.as_ref().unwrap().busy);
+        app.ui.threads.create_serial
+    }
+
+    #[test]
+    fn create_router_ignores_old_results_after_navigation_and_account_reset() {
+        for reset_account in [false, true] {
+            let mut app = authenticated_app();
+            let old = start_create(&mut app, PARENT, "first");
+            if reset_account {
+                let _ = app.teardown_account();
+                authenticate(&mut app);
+            } else {
+                let _ = app.handle(crate::Message::SelectChannel(GUILD, Snowflake(11)));
+            }
+            let current = start_create(&mut app, Snowflake(11), "second");
+            assert_ne!(old, current);
+            for result in [
+                Ok(Box::new(thread(90, "first", "stamp"))),
+                Err(ThreadError::Rest(RestError::PermissionDenied)),
+            ] {
+                let _ = app.handle(crate::Message::Threads(Event::Created(old, result)));
+                let draft = app.ui.threads.draft.as_ref().unwrap();
+                assert_eq!(draft.name, "second");
+                assert_eq!(draft.channel, Snowflake(11));
+                assert!(draft.busy, "stale failure cannot release the current write");
+                assert!(app.ui.threads.notice.is_none());
+                assert!(
+                    app.phase
+                        .gateway()
+                        .unwrap()
+                        .controls
+                        .requested_thread()
+                        .is_none()
+                );
+            }
+            let _ = app.handle(crate::Message::Threads(Event::Created(
+                current,
+                Err(ThreadError::Rest(RestError::PermissionDenied)),
+            )));
+            assert!(!app.ui.threads.draft.as_ref().unwrap().busy);
+            assert_eq!(app.ui.threads.draft.as_ref().unwrap().name, "second");
+            assert!(app.ui.threads.notice.is_some());
+            let _ = app.handle(crate::Message::Threads(Event::Create));
+            let retry = app.ui.threads.create_serial;
+            assert_ne!(retry, current);
+            let mut created = thread(91, "second", "stamp");
+            created.parent_id = Some(Snowflake(11));
+            let _ = app.handle(crate::Message::Threads(Event::Created(
+                retry,
+                Ok(Box::new(created)),
+            )));
+            assert!(app.ui.threads.draft.is_none());
+            assert_eq!(
+                app.phase.gateway().unwrap().controls.requested_thread(),
+                Some((GUILD, Snowflake(91)))
+            );
+        }
+    }
+
+    #[test]
+    fn create_router_rejects_a_response_for_another_parent() {
+        let mut app = authenticated_app();
+        let serial = start_create(&mut app, Snowflake(11), "second");
+        let _ = app.handle(crate::Message::Threads(Event::Created(
+            serial,
+            Ok(Box::new(thread(90, "wrong parent", "stamp"))),
+        )));
+        let draft = app.ui.threads.draft.as_ref().unwrap();
+        assert_eq!(draft.name, "second");
+        assert!(!draft.busy);
+        assert!(app.ui.threads.notice.is_some());
+        assert!(
+            app.phase
+                .gateway()
+                .unwrap()
+                .controls
+                .requested_thread()
+                .is_none()
+        );
+    }
+
     #[test]
     fn archive_kind_switch_and_logout_reject_old_pages() {
         let client = client();
@@ -699,7 +846,10 @@ mod tests {
         let _ = state.update(Event::Name("other".into()), &client());
         assert_eq!(state.draft.as_ref().unwrap().name, "plans");
         let _ = state.update(
-            Event::Created(Err(ThreadError::Rest(RestError::PermissionDenied))),
+            Event::Created(
+                state.create_serial,
+                Err(ThreadError::Rest(RestError::PermissionDenied)),
+            ),
             &client(),
         );
         assert!(!state.draft.as_ref().unwrap().busy);

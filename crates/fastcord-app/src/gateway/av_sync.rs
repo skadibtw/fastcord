@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 const REPORT_AGE: Duration = Duration::from_secs(12);
-const MAX_WAIT: Duration = Duration::from_millis(500);
+pub(super) const MAX_WAIT: Duration = Duration::from_millis(500);
 const LATE: Duration = Duration::from_millis(80);
 #[derive(Clone, Copy)]
 struct Mapping {

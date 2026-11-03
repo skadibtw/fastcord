@@ -106,6 +106,40 @@ pub fn toggle(current: Option<Choices>, row: &Row, key: Choices, option: usize) 
     Some(next)
 }
 
+/// Carry a draft across unrelated message updates without retaining another
+/// component tree. Both snapshots are already held by the account panel. A
+/// changed tree, hidden/deleted row or pending interaction invalidates it.
+pub fn reconcile(
+    current: Option<Choices>,
+    previous: &crate::timeline::Snapshot,
+    next: &crate::timeline::Snapshot,
+) -> Option<Choices> {
+    let mut choices = current?;
+    if previous.channel_id != Some(choices.channel) || next.channel_id != Some(choices.channel) {
+        return None;
+    }
+    let before = previous
+        .rows
+        .iter()
+        .find(|row| row.message.id == choices.message)?;
+    let after = next
+        .rows
+        .iter()
+        .find(|row| row.message.id == choices.message)?;
+    if before.revision != choices.revision
+        || before.hidden.is_some()
+        || after.hidden.is_some()
+        || before.component_pending.is_some()
+        || after.component_pending.is_some()
+        || before.message.components != after.message.components
+        || select_at(&after.message.components, choices.select).is_none()
+    {
+        return None;
+    }
+    choices.revision = after.revision;
+    Some(choices)
+}
+
 fn same_select(a: Choices, b: Choices) -> bool {
     (a.channel, a.message, a.revision, a.select) == (b.channel, b.message, b.revision, b.select)
 }
@@ -473,6 +507,71 @@ mod tests {
             toggle(Some(chosen), &row, key, 0),
             Some(chosen),
             "pending request"
+        );
+    }
+
+    #[test]
+    fn reconciliation_rejects_changed_trees_and_conversation_ownership() {
+        let row = multi_row();
+        let before = crate::timeline::Snapshot {
+            channel_id: Some(Snowflake(5)),
+            rows: vec![row],
+            ..Default::default()
+        };
+        let choices = Choices {
+            channel: Snowflake(5),
+            message: Snowflake(7),
+            revision: 1,
+            select: 0,
+            mask: 3,
+        };
+        // Every semantic component mutation, including ordering and defaults,
+        // must invalidate the positional bitmask.
+        for change in 0..8 {
+            let mut after = before.clone();
+            after.rows[0].revision += 1;
+            let message = Arc::make_mut(&mut after.rows[0].message);
+            let Component::Container { body, .. } = &mut message.components[0] else {
+                panic!()
+            };
+            let Component::Row(body) = &mut body[0] else {
+                panic!()
+            };
+            let Component::Select(select) = &mut body[0] else {
+                panic!()
+            };
+            match change {
+                0 => select.options.swap(0, 1),
+                1 => select.options[0].value = "replacement".into(),
+                2 => select.custom_id = "replacement".into(),
+                3 => select.disabled = true,
+                4 => select.min_values = 1,
+                5 => select.max_values = 3,
+                6 => select.options[0].default = false,
+                _ => {
+                    select.options.pop();
+                }
+            }
+            assert_eq!(
+                reconcile(Some(choices), &before, &after),
+                None,
+                "change {change}"
+            );
+        }
+        let mut after = before.clone();
+        after.rows[0].revision += 1;
+        Arc::make_mut(&mut after.rows[0].message).content = "edited text".into();
+        assert_eq!(reconcile(Some(choices), &before, &after).unwrap().mask, 3);
+        after.rows[0].hidden = Some(fastcord_discord::state::Suppression::Blocked);
+        assert_eq!(reconcile(Some(choices), &before, &after), None);
+        after.rows[0].hidden = None;
+        after.channel_id = Some(Snowflake(6));
+        assert_eq!(reconcile(Some(choices), &before, &after), None);
+        assert_eq!(reconcile(Some(choices), &Default::default(), &before), None);
+        assert_eq!(
+            reconcile(None, &before, &before),
+            None,
+            "a new account owns no draft"
         );
     }
 

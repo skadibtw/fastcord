@@ -13,6 +13,11 @@ const MAX_ENTRIES: usize = 512;
 const MAX_ACCOUNT_ENTRIES: usize = 256;
 static FILE_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(test)]
+pub(crate) fn lock_persistence() -> std::sync::MutexGuard<'static, ()> {
+    FILE_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     Saved,

@@ -398,7 +398,21 @@ impl State {
         self.guild
     }
 
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Stickers(serial, ticket, _) => {
+                *serial == self.serial && *ticket == self.stickers.ticket
+            }
+            Event::Sounds(serial, ticket, _) => {
+                *serial == self.serial && *ticket == self.sounds.ticket
+            }
+            Event::Done(serial, ..) => *serial == self.serial,
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         matches!(
             event,
             Event::Done(
@@ -1599,8 +1613,8 @@ mod tests {
     #[test]
     fn only_a_rejected_token_stops_the_account() {
         let done = |error| Event::Done(0, Err(AdminRequestError::Rest(error)));
-        assert!(State::is_rejected(&done(RestError::AuthenticationRequired)));
-        assert!(!State::is_rejected(&done(RestError::PermissionDenied)));
+        assert!(State::default().is_rejected(&done(RestError::AuthenticationRequired)));
+        assert!(!State::default().is_rejected(&done(RestError::PermissionDenied)));
     }
 
     #[test]
