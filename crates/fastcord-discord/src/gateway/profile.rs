@@ -19,16 +19,16 @@ pub const PROFILE_VERSION: u32 = 4;
 /// `PIN_HOST_VERSION` (its `package.json` holds the same values). The
 /// scheduled `identity-pin` check fails once the manifest moves past that host,
 /// and the pair is reviewed before the pin and the bundled values are bumped.
-pub const ELECTRON_VERSION: &str = "42.11.15";
-pub const CHROMIUM_VERSION: &str = "148.0.7778.280";
-pub const PIN_HOST_VERSION: &str = "1.0.9265";
+pub const ELECTRON_VERSION: &str = "44.9.3";
+pub const CHROMIUM_VERSION: &str = "152.0.7977.167";
+pub const PIN_HOST_VERSION: &str = "1.0.9266";
 
-/// `client_build_number` of discord.com's web client observed on 2026-10-25.
+/// `client_build_number` of discord.com's web client observed on 2026-11-03.
 /// Used only when the live value cannot be fetched.
-pub const BUNDLED_BUILD_NUMBER: u32 = 649_389;
-/// Windows/Linux metadata fallback observed on 2026-10-25. macOS has its
+pub const BUNDLED_BUILD_NUMBER: u32 = 660_103;
+/// Windows and macOS metadata fallback observed on 2026-11-03. Linux has its
 /// own fallback; the wire field is nullable for hosts without native metadata.
-pub const BUNDLED_NATIVE_BUILD_NUMBER: u32 = 96_160;
+pub const BUNDLED_NATIVE_BUILD_NUMBER: u32 = 97_026;
 
 const APP_URL: &str = "https://discord.com/app";
 const MANIFEST_URL: &str = "https://updates.discord.com/distributions/app/manifests/latest";
@@ -84,15 +84,15 @@ impl Versions {
 
     pub(super) fn bundled_for(os: HostOs, arch: &str) -> Self {
         let client_version = match (os, arch) {
-            (HostOs::Windows, "arm64") => "1.0.57",
+            (HostOs::Windows, "arm64") => "1.0.58",
             (HostOs::Windows, _) => PIN_HOST_VERSION,
-            (HostOs::MacOs, _) => "0.0.419",
-            (HostOs::Linux, _) => "1.0.166",
+            (HostOs::MacOs, _) => "0.0.420",
+            (HostOs::Linux, _) => "1.0.168",
         };
         Self {
             client_version: client_version.to_owned(),
             native_build_number: Some(match os {
-                HostOs::MacOs => 96_312,
+                HostOs::Linux => 97_685,
                 _ => BUNDLED_NATIVE_BUILD_NUMBER,
             }),
             client_build_number: BUNDLED_BUILD_NUMBER,
@@ -832,7 +832,7 @@ mod tests {
         let mac = ClientProperties::bundled(HostOs::MacOs, "en-US");
         assert_eq!(mac.os, "Mac OS X");
         assert!(mac.browser_user_agent.contains("Macintosh"));
-        assert!(mac.browser_user_agent.contains("discord/0.0.419 "));
+        assert!(mac.browser_user_agent.contains("discord/0.0.420 "));
         let linux = Host {
             window_manager: Some("GNOME,ubuntu".to_owned()),
             distro: Some("Ubuntu 24.04.4 LTS".to_owned()),
@@ -886,11 +886,11 @@ mod tests {
     #[test]
     fn browser_headers_follow_chromium() {
         let properties = ClientProperties::bundled(HostOs::Windows, "ru-RU");
-        // Chromium 148: seed 148 -> '/' and ')', version "99", GREASE first. The same
+        // Chromium 152: seed 152 -> '?' and '_', version "24", GREASE first. The same
         // rule gives Chrome 120 "Not_A Brand";v="8" and 124 "Not-A.Brand";v="99".
         assert_eq!(
             properties.sec_ch_ua(),
-            "\"Not/A)Brand\";v=\"99\", \"Chromium\";v=\"148\""
+            "\"Not?A_Brand\";v=\"24\", \"Chromium\";v=\"152\""
         );
         assert!(properties.sec_ch_ua().contains(&format!(
             "\"Chromium\";v=\"{}\"",
@@ -1064,12 +1064,12 @@ mod tests {
     fn native_metadata_is_nullable_in_both_wire_views_and_platform_specific() {
         use base64::Engine;
         assert_eq!(
-            Versions::bundled(HostOs::MacOs).native_build_number,
-            Some(96_312)
+            Versions::bundled(HostOs::Linux).native_build_number,
+            Some(97_685)
         );
         assert_eq!(
             Versions::bundled(HostOs::Windows).native_build_number,
-            Some(96_160)
+            Some(97_026)
         );
         let versions = Versions {
             native_build_number: None,

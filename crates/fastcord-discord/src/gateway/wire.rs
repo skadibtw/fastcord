@@ -358,6 +358,11 @@ mod tests {
             assert!(sent["d"]["properties"][field].is_string(), "{field}");
             sent["d"]["properties"][field] = recorded["d"]["properties"][field].clone();
         }
+        // Keep the capture intact when the independently tested runtime pin moves.
+        for field in ["browser_user_agent", "browser_version"] {
+            assert!(sent["d"]["properties"][field].is_string(), "{field}");
+            sent["d"]["properties"][field] = recorded["d"]["properties"][field].clone();
+        }
         assert_eq!(sent, recorded);
         // Opcode 2, no bot intents, no payload compression, empty version cache.
         assert_eq!(sent["op"], 2);
