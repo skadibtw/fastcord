@@ -90,8 +90,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "У каждого вопроса должен быть хотя бы один ответ.",
     ),
     (
-        "Use a Unicode emoji (custom emoji are kept, not added).",
-        "Используйте эмодзи Unicode (пользовательские эмодзи сохраняются, но не добавляются).",
+        "Enter a Unicode emoji in this field.",
+        "Введите в это поле эмодзи Unicode.",
     ),
     (
         "A chosen role no longer exists.",

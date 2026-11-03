@@ -662,6 +662,9 @@ pub struct AssetEmoji {
     pub id: Snowflake,
     pub name: String,
     pub animated: bool,
+    /// Available and allowed by the current member’s emoji role restrictions.
+    /// Management still lists unusable assets so they can be administered.
+    pub usable: bool,
     pub creator: Option<Snowflake>,
     /// The creator's name when the account holds that user.
     pub creator_name: Option<String>,
@@ -721,6 +724,7 @@ pub fn guild_assets(store: &Store, guild_id: Snowflake) -> Option<GuildAssets> {
                 id: emoji.id,
                 name: capped_name(emoji.name.as_deref(), "unnamed"),
                 animated: emoji.animated,
+                usable: guild.emoji_usable(emoji, me),
                 creator: emoji.creator,
                 creator_name: emoji
                     .creator

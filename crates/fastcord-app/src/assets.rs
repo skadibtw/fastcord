@@ -1407,6 +1407,7 @@ mod tests {
             id: Snowflake(id),
             name: format!("e{id}"),
             animated,
+            usable: true,
             creator: Some(creator),
             creator_name: None,
         }
