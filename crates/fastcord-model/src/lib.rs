@@ -25,9 +25,9 @@ pub use channel::{
     MAX_FORUM_TAGS, ThreadMember, ThreadMetadata,
 };
 pub use component::{
-    BUTTON_LINK, BUTTON_PREMIUM, Button, Component, EPHEMERAL_FLAG, MAX_COMPONENT_DEPTH,
-    MAX_COMPONENTS, MAX_SELECT_OPTIONS, Select, SelectOption, compact_components,
-    components_heap_bytes, parse_components,
+    BUTTON_LINK, BUTTON_PREMIUM, Button, Component, EPHEMERAL_FLAG, EntityKind, EntityValue,
+    MAX_COMPONENT_DEPTH, MAX_COMPONENTS, MAX_SELECT_OPTIONS, Select, SelectOption,
+    compact_components, components_heap_bytes, known_channel_type, parse_components,
 };
 pub use embed::{
     Embed, EmbedField, EmbedFooter, EmbedMedia, EmbedText, MAX_EMBED_FIELDS, MAX_EMBEDS,

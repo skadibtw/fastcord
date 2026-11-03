@@ -34,6 +34,7 @@ mod disk_index;
 mod drafts;
 mod emoji;
 mod emoji_picker;
+mod entity_select;
 #[cfg(feature = "fake-discord")]
 mod fake;
 mod forum;
@@ -1673,6 +1674,18 @@ impl App {
             fake::Step::Open(text) => {
                 self.pending_link = desktop::parse(&text);
                 Task::none()
+            }
+            fake::Step::Entity(command) => {
+                if let Some(event) = self
+                    .phase
+                    .gateway()
+                    .and_then(|gateway| entity_select::scripted(gateway, &command))
+                {
+                    self.handle(Message::Timeline(timeline::Event::EntitySelect(event)))
+                } else {
+                    eprintln!("script: entity control unavailable");
+                    Task::none()
+                }
             }
             fake::Step::Slash(command) => {
                 if let Some(text) = command.strip_prefix("type ") {

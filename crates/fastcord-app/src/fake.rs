@@ -303,6 +303,8 @@ pub enum Step {
     /// Type a query or activate a scoped slash-command form control.
     Slash(String),
     DmSort(fastcord_discord::state::navigation::PrivateSort),
+    /// Exercise a scoped local entity selector.
+    Entity(String),
     Size(f32, f32),
     /// One of [`PANELS`].
     Toggle(&'static str),
@@ -375,6 +377,7 @@ fn parse_script(
                     continue;
                 }
             },
+            "entity" if rest.len() <= 512 => Step::Entity(rest.to_owned()),
             "size" => match rest
                 .split_once(' ')
                 .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))

@@ -359,6 +359,7 @@ pub struct Snapshot {
     pub channel_id: Option<Snowflake>,
     /// Coalesced Gateway pin-list invalidation for the open conversation.
     pub pins_revision: u64,
+    pub interaction_session: u64,
     pub rows: Vec<Row>,
     pub window: Window,
     /// The list's unacknowledged scroll request; copy it into every snapshot.
@@ -399,6 +400,7 @@ pub struct Snapshot {
     pub names: rich::Names,
     /// What `@` and `#` can complete to in this channel's server.
     pub candidates: Vec<crate::composer::Candidate>,
+    pub entity_candidates: Vec<fastcord_discord::state::navigation::EntityCandidate>,
     /// Display names of the other people typing here, longest-typing first.
     pub typing: Vec<String>,
     /// Slash commands and forms of applications (see [`crate::interactions`]).
@@ -479,6 +481,7 @@ pub enum Publish {
 pub struct Interaction {
     /// One local multi-select draft; no request is sent until Submit.
     pub component_choices: Option<crate::component_view::Choices>,
+    pub entity_owner: Option<(Snowflake, u64, u64)>,
     /// The message whose text is in the composer for editing.
     pub editing: Option<Snowflake>,
     /// The message the composer is replying to.
@@ -505,6 +508,7 @@ pub struct Interaction {
 /// What the timeline asks of the worker. Each event names its channel.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    EntitySelect(crate::entity_select::Event),
     /// An inline asset entered or left the actual clipped viewport.
     EmojiVisibility(Occurrence, bool),
     /// Copy original text/tokens, never rendered asset names or pixels.
@@ -1538,6 +1542,7 @@ fn message_view<'a>(
             row,
             channel_id,
             interaction.component_choices,
+            interaction.entity_owner,
         ));
     }
     if message.is_ephemeral() {
