@@ -1721,6 +1721,18 @@ impl App {
                 }
                 Task::none()
             }
+            fake::Step::DmSort(sort) => {
+                let Some((session, gateway)) = self.phase.account() else {
+                    return Task::none();
+                };
+                self.handle(Message::Organize(organize::Event::PrivateSort(
+                    organize::SortTarget {
+                        account: session.user.id,
+                        generation: gateway.id,
+                    },
+                    sort,
+                )))
+            }
             fake::Step::Toggle(panel) => {
                 let message = match panel {
                     "search" => Message::Search(search::Event::Toggle),

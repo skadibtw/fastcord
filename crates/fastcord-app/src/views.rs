@@ -821,6 +821,10 @@ impl App {
                 },
                 navigation::Chrome {
                     directs: gateway.directs,
+                    sort_target: organize::SortTarget {
+                        account: session.user.id,
+                        generation: gateway.id,
+                    },
                     footer: foot.into(),
                     banner,
                     speaking: talking,

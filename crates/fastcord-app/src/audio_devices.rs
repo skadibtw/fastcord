@@ -768,6 +768,16 @@ mod tests {
             organize: {
                 let mut local = crate::organize::Local::default();
                 local.apply(7, crate::organize::Event::Folder(3));
+                local.apply(
+                    7,
+                    crate::organize::Event::PrivateSort(
+                        crate::organize::SortTarget {
+                            account: fastcord_model::Snowflake(7),
+                            generation: 1,
+                        },
+                        fastcord_discord::state::navigation::PrivateSort::UnreadFirst,
+                    ),
+                );
                 local
             },
             speech: crate::speech::Prefs {

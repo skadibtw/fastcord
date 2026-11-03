@@ -41,6 +41,7 @@ pub fn alerts_preview() -> iced::Result {
             space::vertical().into(),
             &state.avatars,
             Vec::new(),
+            None,
         );
         let panel = if state.alerts {
             crate::notify_settings::view(
@@ -94,6 +95,7 @@ pub fn alerts_preview() -> iced::Result {
 pub struct Chrome<'a> {
     /// Direct messages instead of a server's channels in the sidebar.
     pub directs: bool,
+    pub sort_target: crate::organize::SortTarget,
     /// The user and voice panel at the foot of the sidebar.
     pub footer: Element<'a, Message>,
     /// Connection and notice lines above the conversation.
@@ -124,6 +126,7 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     let Chrome {
         directs,
+        sort_target,
         footer,
         banner,
         speaking,
@@ -134,7 +137,14 @@ pub fn view<'a>(
         wide,
     } = chrome;
     let rail = rail(snapshot, directs, inbox.is_some(), attachments.avatars);
-    let sidebar = sidebar(snapshot, directs, footer, attachments.avatars, speaking);
+    let sidebar = sidebar(
+        snapshot,
+        directs,
+        footer,
+        attachments.avatars,
+        speaking,
+        Some(sort_target),
+    );
     let main = match inbox.or(friends.filter(|_| directs)) {
         Some(panel) => {
             // Startup failures must remain visible on Friends and message
@@ -587,12 +597,44 @@ pub(crate) fn occupant_row<'a>(
         .into()
 }
 
+/// Scoped controls share the same event constructor with the native fake script.
+pub(crate) fn private_sort_controls(
+    target: crate::organize::SortTarget,
+    selected: fastcord_discord::state::navigation::PrivateSort,
+) -> Element<'static, Message> {
+    use fastcord_discord::state::navigation::PrivateSort;
+    let choice = |label, sort| {
+        button(text(tr(label)).size(11))
+            .padding([4, 6])
+            .on_press(Message::Organize(crate::organize::Event::PrivateSort(
+                target, sort,
+            )))
+            .style(style::row_button(selected == sort, false))
+    };
+    container(
+        column![
+            row![
+                choice("Recent", PrivateSort::Recent),
+                choice("Unread first", PrivateSort::UnreadFirst)
+            ]
+            .spacing(4),
+            text(tr("Order on this device"))
+                .size(10)
+                .color(crate::style::muted()),
+        ]
+        .spacing(2),
+    )
+    .padding([4, 16])
+    .into()
+}
+
 fn sidebar<'a>(
     snapshot: &'a NavigationSnapshot,
     directs: bool,
     footer: Element<'a, Message>,
     avatar_views: &'a crate::avatars::Views,
     speaking: Vec<fastcord_model::Snowflake>,
+    sort_target: Option<crate::organize::SortTarget>,
 ) -> Element<'a, Message> {
     let title = |title: String| {
         container(
@@ -701,6 +743,9 @@ fn sidebar<'a>(
                     .color(crate::style::muted())
             )
             .padding(Padding::new(0.0).left(16.0).top(14.0).bottom(4.0)),
+            sort_target
+                .map(|target| private_sort_controls(target, snapshot.private_sort))
+                .unwrap_or_else(|| space::vertical().height(0).into()),
             virtual_list::view(
                 "private-list",
                 snapshot.private_channels.offset,
@@ -1326,6 +1371,7 @@ mod occupant_tests {
                 space::vertical().into(),
                 &avatars,
                 Vec::new(),
+                None,
             ),
         );
         ui.draw();
