@@ -297,6 +297,7 @@ pub enum Step {
     Open(String),
     /// Type a query or activate a scoped slash-command form control.
     Slash(String),
+    DmSort(fastcord_discord::state::navigation::PrivateSort),
     Size(f32, f32),
     /// One of [`PANELS`].
     Toggle(&'static str),
@@ -359,6 +360,16 @@ fn parse_script(
             }
             "open" => Step::Open(rest.to_owned()),
             "slash" => Step::Slash(rest.to_owned()),
+            "sort-dms" => match rest {
+                "recent" => Step::DmSort(fastcord_discord::state::navigation::PrivateSort::Recent),
+                "unread-first" => {
+                    Step::DmSort(fastcord_discord::state::navigation::PrivateSort::UnreadFirst)
+                }
+                _ => {
+                    eprintln!("script: bad DM sort: {line}");
+                    continue;
+                }
+            },
             "size" => match rest
                 .split_once(' ')
                 .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
@@ -1146,5 +1157,51 @@ mod onboarding_fixture_tests {
             (32, 32)
         );
         assert_eq!(decoded.frames[0].rgba.len(), 4096);
+    }
+}
+
+#[cfg(test)]
+mod dm_sort_tests {
+    use super::*;
+    #[test]
+    fn native_dm_sort_script_uses_explicit_modes_and_no_message_write_steps() {
+        use fastcord_discord::state::navigation::PrivateSort;
+        let steps = parse_script(
+            include_str!("../../../fixtures/ui/dm-sort.script"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let modes: Vec<_> = steps
+            .iter()
+            .filter_map(|(_, step)| match step {
+                Step::DmSort(sort) => Some(*sort),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            modes,
+            [
+                PrivateSort::Recent,
+                PrivateSort::UnreadFirst,
+                PrivateSort::Recent,
+                PrivateSort::UnreadFirst
+            ]
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|(_, s)| matches!(s, Step::Snap(..)))
+                .count(),
+            5
+        );
+        assert!(steps.iter().all(|(_, s)| matches!(
+            s,
+            Step::Open(_) | Step::DmSort(_) | Step::Snap(..) | Step::Quit
+        )));
+        assert!(
+            parse_script("sort-dms unknown", std::path::Path::new("."))
+                .unwrap()
+                .is_empty()
+        );
     }
 }

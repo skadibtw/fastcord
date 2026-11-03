@@ -1962,3 +1962,116 @@ fn community_asset_demand_matches_visible_settings_and_releases_hidden_editors()
     app.ui.community.clear();
     assert_eq!(app.asset_demand(), None);
 }
+
+#[test]
+fn private_sort_real_controls_route_and_reject_retired_account_generations() {
+    use crate::variable_list::harness::Ui;
+    use fastcord_discord::state::navigation::PrivateSort;
+    fn enter(app: &mut App, account: u64) -> organize::SortTarget {
+        let mut session = login::fixture_session();
+        Arc::get_mut(&mut session).unwrap().user.id = Snowflake(account);
+        app.phase = Phase::Authenticating {
+            saved_account: None,
+        };
+        drop(
+            app.update(Message::LoginFinished(Ok(LoginOutcome::Authenticated(
+                session,
+                Persistence::MemoryOnly,
+            )))),
+        );
+        organize::SortTarget {
+            account: Snowflake(account),
+            generation: gateway_status(app).0,
+        }
+    }
+    fn click(target: organize::SortTarget, selected: PrivateSort, unread: bool) -> Message {
+        let mut ui = Ui::new(
+            240.0,
+            60.0,
+            navigation::private_sort_controls(target, selected),
+        );
+        ui.draw();
+        let mut events = ui.click(if unread { 120.0 } else { 35.0 }, 15.0);
+        assert_eq!(events.len(), 1, "{events:?}");
+        events.remove(0)
+    }
+    let mut app = login_app();
+    let a = enter(&mut app, 9_906_106);
+    let old = click(a, PrivateSort::Recent, true);
+    let action = click(a, PrivateSort::Recent, true);
+    assert!(
+        matches!(action, Message::Organize(organize::Event::PrivateSort(
+        target, PrivateSort::UnreadFirst
+    )) if target == a)
+    );
+    let save = app.update(action);
+    assert!(
+        save.units() > 0,
+        "existing local settings writer is scheduled"
+    );
+    drop(save); // Do not write the host's settings during this reducer test.
+    assert_eq!(
+        app.audio_preferences
+            .organize
+            .layout(a.account.0)
+            .private_sort,
+        PrivateSort::UnreadFirst
+    );
+    // The existing save coalescer must retain a second choice made mid-save.
+    drop(app.update(click(a, PrivateSort::UnreadFirst, false)));
+    assert_eq!(
+        app.audio_preferences
+            .organize
+            .layout(a.account.0)
+            .private_sort,
+        PrivateSort::Recent
+    );
+    assert!(app.update(Message::AudioPreferencesSaved(Ok(()))).units() > 0);
+    assert_eq!(
+        app.audio_saving.as_ref().unwrap().organize,
+        app.audio_preferences.organize
+    );
+
+    drop(app.teardown_account());
+    let b = enter(&mut app, 9_906_107);
+    drop(app.update(old));
+    assert_eq!(
+        app.audio_preferences
+            .organize
+            .layout(b.account.0)
+            .private_sort,
+        PrivateSort::Recent
+    );
+    drop(app.update(click(b, PrivateSort::Recent, true)));
+    assert_eq!(
+        app.audio_preferences
+            .organize
+            .layout(b.account.0)
+            .private_sort,
+        PrivateSort::UnreadFirst
+    );
+    drop(app.teardown_account());
+    let again = enter(&mut app, a.account.0);
+    assert_ne!(again.generation, a.generation);
+    let before = app.audio_preferences.organize.clone();
+    assert_eq!(app.update(click(a, PrivateSort::Recent, true)).units(), 0);
+    assert_eq!(
+        app.audio_preferences.organize, before,
+        "A → B → A rejects A's old control"
+    );
+    drop(app.update(click(again, PrivateSort::Recent, true)));
+    assert_eq!(
+        app.audio_preferences
+            .organize
+            .layout(a.account.0)
+            .private_sort,
+        PrivateSort::UnreadFirst
+    );
+    drop(app.teardown_account());
+    app.phase = Phase::Login;
+    assert_eq!(
+        app.update(click(again, PrivateSort::UnreadFirst, false))
+            .units(),
+        0
+    );
+}
