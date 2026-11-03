@@ -1169,7 +1169,8 @@ mod dm_sort_tests {
         let steps = parse_script(
             include_str!("../../../fixtures/ui/dm-sort.script"),
             std::path::Path::new("."),
-        );
+        )
+        .unwrap();
         let modes: Vec<_> = steps
             .iter()
             .filter_map(|(_, step)| match step {
@@ -1197,6 +1198,10 @@ mod dm_sort_tests {
             s,
             Step::Open(_) | Step::DmSort(_) | Step::Snap(..) | Step::Quit
         )));
-        assert!(parse_script("sort-dms unknown", std::path::Path::new(".")).is_empty());
+        assert!(
+            parse_script("sort-dms unknown", std::path::Path::new("."))
+                .unwrap()
+                .is_empty()
+        );
     }
 }
