@@ -80,13 +80,15 @@ fn base64_url(bytes: &[u8]) -> String {
 struct FakeExchange {
     tickets: Mutex<Vec<String>>,
     reply: Mutex<Option<Result<String, RemoteAuthError>>>,
+    challenge: Mutex<Option<CaptchaChallenge>>,
+    solutions: Mutex<Vec<CaptchaSolution>>,
 }
 
 impl FakeExchange {
     fn replying(reply: Result<String, RemoteAuthError>) -> Self {
         Self {
-            tickets: Mutex::default(),
             reply: Mutex::new(Some(reply)),
+            ..Self::default()
         }
     }
 
@@ -100,13 +102,24 @@ impl FakeExchange {
 }
 
 impl TicketExchange for FakeExchange {
-    async fn exchange(&self, ticket: &str) -> Result<String, RemoteAuthError> {
+    async fn exchange(
+        &self,
+        ticket: &str,
+        captcha: Option<&CaptchaSolution>,
+    ) -> Result<ExchangeStep, RemoteAuthError> {
         self.tickets.lock().unwrap().push(ticket.to_owned());
+        if let Some(solution) = captcha {
+            self.solutions.lock().unwrap().push(solution.clone());
+        }
+        if let Some(challenge) = self.challenge.lock().unwrap().take() {
+            return Ok(ExchangeStep::Captcha(challenge));
+        }
         self.reply
             .lock()
             .unwrap()
             .take()
             .expect("one exchange per attempt")
+            .map(ExchangeStep::EncryptedToken)
     }
 }
 
@@ -175,6 +188,149 @@ impl Harness {
 
 const EVENTS: usize = 8;
 const PAYLOAD: &[u8] = b"175928847299117063:0:0:alt_fixture";
+
+fn captcha_challenge() -> CaptchaChallenge {
+    CaptchaChallenge {
+        sitekey: "synthetic-sitekey".into(),
+        service: "hcaptcha".into(),
+        rqdata: Some("synthetic-rqdata".into()),
+        rqtoken: Some("synthetic-rqtoken".into()),
+        session_id: Some("synthetic-session".into()),
+    }
+}
+
+fn captcha_answer(challenge: CaptchaChallenge) -> CaptchaSolution {
+    CaptchaSolution {
+        key: "synthetic-human-answer".into(),
+        rqtoken: challenge.rqtoken,
+        session_id: challenge.session_id,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn manual_captcha_keeps_heartbeats_and_resumes_the_same_ticket_once() {
+    let mut h = Harness::new(FakeExchange::default()).await;
+    *h.exchange.challenge.lock().unwrap() = Some(captcha_challenge());
+    let exchange = Arc::clone(&h.exchange);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let answered = Arc::new(tokio::sync::Notify::new());
+    let solver = {
+        let entered = Arc::clone(&entered);
+        let answered = Arc::clone(&answered);
+        move |challenge| {
+            let entered = Arc::clone(&entered);
+            let answered = Arc::clone(&answered);
+            async move {
+                assert_eq!(challenge, captcha_challenge());
+                entered.notify_one();
+                answered.notified().await;
+                Ok(captcha_answer(challenge))
+            }
+        }
+    };
+    let socket = h.client_socket.take().unwrap();
+    let mut gateway = h.gateway.take().unwrap();
+    let script = async move {
+        gateway.hello(1000, 5000).await;
+        let public_key = gateway.complete_key_exchange().await;
+        gateway
+            .send(json!({"op":"pending_remote_init","fingerprint":fingerprint_of(&public_key)}))
+            .await;
+        exchange.set_reply(Ok(encrypt_for(&public_key, b"synthetic-token")));
+        gateway
+            .send(json!({"op":"pending_login","ticket":"synthetic-ticket"}))
+            .await;
+        entered.notified().await;
+        assert_eq!(
+            gateway.recv().await["op"],
+            "heartbeat",
+            "human wait must not block heartbeat"
+        );
+        gateway.send(json!({"op":"heartbeat_ack"})).await;
+        answered.notify_one();
+    };
+    let (result, ()) = tokio::join!(
+        drive_with_captcha(socket, &h.key, &*h.exchange, &h.events, &solver),
+        script
+    );
+    assert_eq!(result.unwrap().expose_secret(), "synthetic-token");
+    assert_eq!(
+        h.exchange.tickets(),
+        ["synthetic-ticket", "synthetic-ticket"]
+    );
+    assert_eq!(h.exchange.solutions.lock().unwrap().len(), 1);
+    assert!(matches!(
+        h.drain().as_slice(),
+        [RemoteAuthEvent::Qr(_), RemoteAuthEvent::Captcha]
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn unanswered_captcha_expires_without_another_exchange() {
+    let mut h = Harness::new(FakeExchange::default()).await;
+    *h.exchange.challenge.lock().unwrap() = Some(captcha_challenge());
+    let socket = h.client_socket.take().unwrap();
+    let mut gateway = h.gateway.take().unwrap();
+    let script = async move {
+        gateway.hello(1000, 5000).await;
+        let public_key = gateway.complete_key_exchange().await;
+        gateway
+            .send(json!({"op":"pending_remote_init","fingerprint":fingerprint_of(&public_key)}))
+            .await;
+        gateway
+            .send(json!({"op":"pending_login","ticket":"synthetic-ticket"}))
+            .await;
+        // A QR socket may close after issuing the final ticket.
+    };
+    let solver = |_| std::future::pending::<Result<CaptchaSolution, RemoteAuthError>>();
+    let (result, ()) = tokio::join!(
+        drive_with_captcha(socket, &h.key, &*h.exchange, &h.events, &solver),
+        script
+    );
+    assert_eq!(result.unwrap_err(), RemoteAuthError::Expired);
+    assert_eq!(h.exchange.tickets(), ["synthetic-ticket"]);
+    assert!(h.exchange.solutions.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn repeated_or_mismatched_captcha_stops_without_unconfirmed_retries() {
+    for repeat in [false, true] {
+        let key = AttemptKey::generate().unwrap();
+        let exchange = FakeExchange::default();
+        *exchange.challenge.lock().unwrap() = Some(captcha_challenge());
+        let (events, _receiver) = mpsc::channel(EVENTS);
+        let solver = |challenge| {
+            if repeat {
+                *exchange.challenge.lock().unwrap() = Some(captcha_challenge());
+            }
+            async move {
+                let mut answer = captcha_answer(challenge);
+                if !repeat {
+                    answer.session_id = Some("different-session".into());
+                }
+                Ok(answer)
+            }
+        };
+        let error = finish_exchange(
+            Zeroizing::new("synthetic-ticket".into()),
+            &key,
+            &exchange,
+            &events,
+            &solver,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            if repeat {
+                RemoteAuthError::CaptchaRejected
+            } else {
+                RemoteAuthError::Protocol
+            }
+        );
+        assert_eq!(exchange.tickets().len(), if repeat { 2 } else { 1 });
+    }
+}
 
 #[tokio::test]
 async fn full_flow_authorizes_and_exchanges_the_ticket_exactly_once() {

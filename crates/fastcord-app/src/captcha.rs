@@ -69,7 +69,9 @@ fn widget_script(challenge: &CaptchaChallenge) -> Option<String> {
     let sitekey = serde_json::to_string(&challenge.sitekey).ok()?;
     let rqdata = serde_json::to_string(&challenge.rqdata).ok()?;
     Some(format!(
-        r#"window.setTimeout(function () {{
+        r#"(function () {{
+if (window.top !== window) {{ return; }}
+window.setTimeout(function () {{
   if (!window.fcWidgetReady) {{ window.ipc.postMessage('{FAILED}'); }}
 }}, 20000);
 document.addEventListener('DOMContentLoaded', function () {{
@@ -77,15 +79,21 @@ document.addEventListener('DOMContentLoaded', function () {{
   window.fcLoaded = function () {{
     var options = {{ sitekey: {sitekey}, callback: function (t) {{ window.ipc.postMessage(t); }} }};
     var rqdata = {rqdata};
-    if (rqdata) {{ options.rqdata = rqdata; }}
+    try {{
+      var widget = hcaptcha.render('c', options);
+      if (rqdata) {{ hcaptcha.setData(widget, {{ rqdata: rqdata }}); }}
+    }} catch (_) {{
+      window.ipc.postMessage('{FAILED}');
+      return;
+    }}
     window.fcWidgetReady = true;
-    hcaptcha.render('c', options);
   }};
   var s = document.createElement('script');
   s.src = 'https://js.hcaptcha.com/1/api.js?render=explicit&onload=fcLoaded';
   s.onerror = function () {{ window.ipc.postMessage('{FAILED}'); }};
   document.head.appendChild(s);
-}});"#
+}});
+}})();"#
     ))
 }
 
@@ -96,7 +104,8 @@ pub async fn solve(challenge: CaptchaChallenge) -> Result<CaptchaSolution, Captc
     std::thread::Builder::new()
         .name("captcha-view".into())
         .spawn(move || {
-            let _ = tx.send(run_window(script));
+            let result = run_window(script, || tx.is_closed());
+            let _ = tx.send(result);
         })
         .map_err(|_| CaptchaError::Unsupported)?;
     let key = rx.await.map_err(|_| CaptchaError::Dismissed)??;
@@ -146,23 +155,35 @@ impl Drop for Profile {
 }
 
 #[cfg(windows)]
-fn run_window(script: String) -> Result<String, CaptchaError> {
+fn create_window(
+    event_loop: &tao::event_loop::EventLoop<()>,
+) -> Result<tao::window::Window, CaptchaError> {
+    use tao::platform::windows::WindowBuilderExtWindows;
+    // Both tao and iced's winit default to "Window Class". Reusing winit's
+    // class dispatches tao window data to the wrong callback and crashes.
+    tao::window::WindowBuilder::new()
+        .with_window_classname("fastcord.CaptchaWindow")
+        .with_title(tr("fastcord - complete the CAPTCHA"))
+        .with_inner_size(tao::dpi::LogicalSize::new(440.0, 640.0))
+        .build(event_loop)
+        .map_err(|_| CaptchaError::Unsupported)
+}
+
+#[cfg(windows)]
+fn run_window(script: String, cancelled: impl Fn() -> bool) -> Result<String, CaptchaError> {
+    if cancelled() {
+        return Err(CaptchaError::Dismissed);
+    }
     use std::sync::{Arc, Mutex};
 
-    use tao::dpi::LogicalSize;
     use tao::event::{Event, WindowEvent};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
     use tao::platform::run_return::EventLoopExtRunReturn;
     use tao::platform::windows::EventLoopBuilderExtWindows;
-    use tao::window::WindowBuilder;
     use wry::{WebContext, WebViewBuilder};
 
     let mut event_loop = EventLoopBuilder::new().with_any_thread(true).build();
-    let window = WindowBuilder::new()
-        .with_title(tr("fastcord - complete the CAPTCHA"))
-        .with_inner_size(LogicalSize::new(440.0, 640.0))
-        .build(&event_loop)
-        .map_err(|_| CaptchaError::Unsupported)?;
+    let window = create_window(&event_loop)?;
     let profile = Profile::create().map_err(|_| CaptchaError::Unsupported)?;
     let mut context = WebContext::new(Some(profile.0.clone()));
     let answer: Arc<Mutex<Option<Result<String, CaptchaError>>>> = Arc::default();
@@ -193,7 +214,15 @@ fn run_window(script: String) -> Result<String, CaptchaError> {
         }
     };
     event_loop.run_return(|event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        // Only a live challenge polls. Dropping the owning QR attempt closes
+        // the native view too, rather than leaving a retired CAPTCHA behind.
+        *control_flow = ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(250),
+        );
+        if cancelled() {
+            *control_flow = ControlFlow::Exit;
+            return;
+        }
         match event {
             Event::UserEvent(()) => *control_flow = ControlFlow::Exit,
             Event::WindowEvent {
@@ -207,6 +236,9 @@ fn run_window(script: String) -> Result<String, CaptchaError> {
     drop(window);
     drop(context);
     drop(profile);
+    if cancelled() {
+        return Err(CaptchaError::Dismissed);
+    }
     answer
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -217,6 +249,57 @@ fn run_window(script: String) -> Result<String, CaptchaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "opens native windows; no account or network"]
+    fn native_window_coexists_with_iced_window_class() {
+        const CHILD: &str = "FASTCORD_CAPTCHA_CLASS_TEST_CHILD";
+        if std::env::var(CHILD).as_deref() == Ok("1") {
+            use tao::platform::windows::EventLoopBuilderExtWindows as _;
+            use winit::platform::windows::EventLoopBuilderExtWindows as _;
+            let app_loop = winit::event_loop::EventLoop::builder()
+                .with_any_thread(true)
+                .build()
+                .unwrap();
+            #[allow(deprecated)]
+            let _app_window = app_loop
+                .create_window(winit::window::Window::default_attributes().with_visible(false))
+                .unwrap();
+            let captcha_loop = tao::event_loop::EventLoopBuilder::new()
+                .with_any_thread(true)
+                .build();
+            let window = create_window(&captcha_loop).unwrap();
+            assert!(window.inner_size().width > 0);
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "captcha::tests::native_window_coexists_with_iced_window_class",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "iced + CAPTCHA native window process failed: {status}"
+                );
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("iced + CAPTCHA native window process exceeded 30 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     fn challenge(service: &str, sitekey: &str) -> CaptchaChallenge {
         CaptchaChallenge {

@@ -901,6 +901,25 @@ fn cancel_returns_to_login_and_drops_the_attempt() {
 }
 
 #[test]
+fn qr_captcha_is_visible_and_retired_attempts_cannot_reopen_it() {
+    let mut app = login_app();
+    app.acknowledged = true;
+    let _ = app.update(Message::StartQr);
+    let first = qr_id(&app);
+    let _ = app.update(Message::Qr(first, RemoteAuthEvent::Captcha));
+    assert!(matches!(qr_stage(&app), QrStage::Captcha));
+    let _ = app.view();
+    let _ = app.update(Message::StartQr);
+    let _ = app.update(Message::Qr(first, RemoteAuthEvent::Captcha));
+    assert!(matches!(qr_stage(&app), QrStage::Connecting));
+    let second = qr_id(&app);
+    let _ = app.update(Message::Qr(second, RemoteAuthEvent::Captcha));
+    let _ = app.update(Message::CancelQr);
+    let _ = app.update(Message::Qr(second, RemoteAuthEvent::Captcha));
+    assert!(matches!(app.phase, Phase::Login));
+}
+
+#[test]
 fn timeout_phone_cancel_and_captcha_end_the_attempt_with_clear_text() {
     use fastcord_discord::RemoteAuthError;
     for (error, regenerate) in [

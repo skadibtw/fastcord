@@ -491,6 +491,10 @@ fn qr_tab<'a>(stage: Option<&'a QrStage>, inputs: &Inputs<'a>) -> Element<'a, Me
             )),
             ui::neutral(tr("Cancel"), Some(Message::CancelQr)),
         ],
+        QrStage::Captcha => column![
+            waiting(tr("Complete the CAPTCHA in the window that opened.")),
+            ui::neutral(tr("Cancel"), Some(Message::CancelQr)),
+        ],
         QrStage::Ended(error) => {
             let mut actions = row![].spacing(12).align_y(Alignment::Center);
             if error.can_regenerate() {

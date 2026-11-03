@@ -3,9 +3,9 @@
 //! One [`RemoteAuth`] is one attempt: it owns a fresh RSA key pair, one gateway
 //! WebSocket, and nothing else. Dropping it (cancel, regenerate, window
 //! teardown) aborts the attempt and drops every secret. Password login, MFA,
-//! CAPTCHA solving, and account verification are deliberately absent: a
-//! challenge from Discord is surfaced as [`RemoteAuthError::Captcha`] and the
-//! flow stops.
+//! CAPTCHA solving and account verification are deliberately absent. A caller
+//! can display one challenge for a person to complete; no automated solving or
+//! unconfirmed retry is performed.
 
 mod crypto;
 mod exchange;
@@ -24,6 +24,7 @@ pub use protocol::RemoteUser;
 
 use crate::UserToken;
 use crate::gateway::ClientProperties;
+use crate::{CaptchaChallenge, CaptchaSolution};
 use crypto::AttemptKey;
 use exchange::HttpTicketExchange;
 
@@ -72,6 +73,8 @@ pub enum RemoteAuthEvent {
     Qr(QrLink),
     /// A phone scanned the code; its owner must now confirm there.
     PendingUser(RemoteUser),
+    /// A person must complete the challenge in the caller's native window.
+    Captcha,
     /// Terminal. Still unvalidated: the caller must run the normal
     /// `GET /users/@me` validation and storage path.
     Authorized(Arc<UserToken>),
@@ -84,6 +87,7 @@ impl fmt::Debug for RemoteAuthEvent {
         match self {
             Self::Qr(link) => f.debug_tuple("Qr").field(link).finish(),
             Self::PendingUser(user) => f.debug_tuple("PendingUser").field(user).finish(),
+            Self::Captcha => f.write_str("Captcha"),
             Self::Authorized(_) => f.write_str("Authorized([REDACTED])"),
             Self::Failed(error) => f.debug_tuple("Failed").field(error).finish(),
         }
@@ -113,6 +117,8 @@ pub enum RemoteAuthError {
     Closed(Option<u16>),
     /// Ticket exchange requires a CAPTCHA, which fastcord does not solve.
     Captcha,
+    CaptchaUnavailable,
+    CaptchaRejected,
     RateLimited,
     ExchangeNetwork,
     ExchangeRejected(u16),
@@ -140,6 +146,8 @@ impl fmt::Display for RemoteAuthError {
             Self::HeartbeatLost => f.write_str("The connection to Discord's QR login service stopped responding."),
             Self::Closed(_) => f.write_str("Discord's QR login service closed the connection."),
             Self::Captcha => f.write_str("Discord requires a CAPTCHA to finish this QR login. fastcord cannot solve CAPTCHAs and does not bypass them. Use token login (advanced) or log in with the official Discord client."),
+            Self::CaptchaUnavailable => f.write_str("The CAPTCHA was closed or could not be displayed. QR login stopped. Try a new code or use another login method."),
+            Self::CaptchaRejected => f.write_str("Discord requested another CAPTCHA after the answer was sent. Try a new QR code or use another login method."),
             Self::RateLimited => f.write_str("Discord is rate limiting QR logins. Wait a few minutes before trying again."),
             Self::ExchangeNetwork => f.write_str("Could not reach Discord to finish the QR login. Try again."),
             Self::ExchangeRejected(status) => write!(f, "Discord rejected the QR login (HTTP {status}). Try a new QR code."),
@@ -167,9 +175,25 @@ impl RemoteAuth {
     /// happens only because the caller (an explicit user action) asked for it.
     /// `properties` is the identity the handshake and the exchange present.
     pub fn start(network: fastcord_net::NetworkContext, properties: ClientProperties) -> Self {
+        Self::start_with_captcha(network, properties, |_| async {
+            Err(RemoteAuthError::Captcha)
+        })
+    }
+
+    /// The callback may show one server-issued challenge to the person. It is
+    /// owned by this attempt and dropped on cancellation or expiry.
+    pub fn start_with_captcha<F, Fut>(
+        network: fastcord_net::NetworkContext,
+        properties: ClientProperties,
+        captcha: F,
+    ) -> Self
+    where
+        F: Fn(CaptchaChallenge) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<CaptchaSolution, RemoteAuthError>> + Send,
+    {
         let (events_tx, events) = mpsc::channel(EVENT_QUEUE);
         let task = tokio::spawn(async move {
-            let event = match run(&network, &events_tx, &properties).await {
+            let event = match run(&network, &events_tx, &properties, captcha).await {
                 Ok(token) => RemoteAuthEvent::Authorized(Arc::new(token)),
                 Err(RemoteAuthError::Cancelled) => return,
                 Err(error) => RemoteAuthEvent::Failed(error),
@@ -191,11 +215,16 @@ impl Drop for RemoteAuth {
     }
 }
 
-async fn run(
+async fn run<F, Fut>(
     network: &fastcord_net::NetworkContext,
     events: &mpsc::Sender<RemoteAuthEvent>,
     properties: &ClientProperties,
-) -> Result<UserToken, RemoteAuthError> {
+    captcha: F,
+) -> Result<UserToken, RemoteAuthError>
+where
+    F: Fn(CaptchaChallenge) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<CaptchaSolution, RemoteAuthError>> + Send,
+{
     let exchange = HttpTicketExchange::new(network, properties)?;
     // Key generation overlaps the network handshake so `init` can be sent as
     // soon as the gateway's hello arrives.
@@ -204,7 +233,7 @@ async fn run(
         transport::connect(network, properties)
     );
     let key = key.map_err(|_| RemoteAuthError::KeyGeneration)??;
-    session::drive(socket?, &key, &exchange, events).await
+    session::drive_with_captcha(socket?, &key, &exchange, events, &captcha).await
 }
 
 /// Manual checks against Discord's real, unauthenticated remote-auth endpoints
@@ -251,7 +280,10 @@ mod live {
             &ClientProperties::bundled(crate::gateway::HostOs::current(), "en-US"),
         )
         .unwrap();
-        let error = exchange.exchange("bogus.ticket.value").await.unwrap_err();
+        let error = exchange
+            .exchange("bogus.ticket.value", None)
+            .await
+            .unwrap_err();
         println!("exchange outcome for a bogus ticket: {error:?}");
         assert!(matches!(
             error,

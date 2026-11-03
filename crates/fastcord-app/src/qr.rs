@@ -22,9 +22,14 @@ pub fn events(network: fastcord_net::NetworkContext) -> impl Stream<Item = Remot
         |(attempt, network)| async move {
             let mut attempt = match attempt {
                 Some(attempt) => attempt,
-                None => RemoteAuth::start(
+                None => RemoteAuth::start_with_captcha(
                     network.clone(),
                     crate::login::client_properties(&network).await,
+                    |challenge| async move {
+                        crate::captcha::solve(challenge)
+                            .await
+                            .map_err(|_| RemoteAuthError::CaptchaUnavailable)
+                    },
                 ),
             };
             let event = attempt.next_event().await?;
@@ -40,6 +45,7 @@ pub enum QrStage {
         expires_in: Duration,
     },
     Scanned(RemoteUser),
+    Captcha,
     Ended(RemoteAuthError),
 }
 
@@ -69,6 +75,7 @@ impl fmt::Debug for QrAttempt {
                     QrStage::Connecting => "Connecting",
                     QrStage::Showing { .. } => "Showing",
                     QrStage::Scanned(_) => "Scanned",
+                    QrStage::Captcha => "Captcha",
                     QrStage::Ended(_) => "Ended",
                 },
             )
@@ -100,6 +107,7 @@ impl QrAttempt {
                 };
             }
             RemoteAuthEvent::PendingUser(user) => self.stage = QrStage::Scanned(user),
+            RemoteAuthEvent::Captcha => self.stage = QrStage::Captcha,
             RemoteAuthEvent::Authorized(token) => return Applied::Authorized(token),
             RemoteAuthEvent::Failed(error) => self.stage = QrStage::Ended(error),
         }

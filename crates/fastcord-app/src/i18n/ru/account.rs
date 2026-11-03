@@ -674,6 +674,14 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ("New message", "Новое сообщение"),
     // captcha
     (
+        "Discord requested another CAPTCHA after the answer was sent. Try a new QR code or use another login method.",
+        "Discord снова запросил капчу после отправки ответа. Создайте новый QR-код или выберите другой способ входа.",
+    ),
+    (
+        "The CAPTCHA was closed or could not be displayed. QR login stopped. Try a new code or use another login method.",
+        "Капча закрыта или её не удалось показать. Вход по QR-коду остановлен. Создайте новый код или выберите другой способ входа.",
+    ),
+    (
         "Discord asked for a CAPTCHA, which this platform cannot show. Use QR or token login.",
         "Discord запросил капчу, а на этой платформе её показать нельзя. Войдите по QR-коду или токену.",
     ),

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Give the Windows CAPTCHA window its own native class so tao does not reuse iced/winit's incompatible window callback; this fixes an access violation before the CAPTCHA window appears. A child-process native regression creates both window systems together.
+
+- Show one server-issued CAPTCHA for manual completion during QR login on Windows, preserving the attempt's ticket, expiry and heartbeat. Cancellation closes the native view; a repeated challenge or failed exchange never triggers an automatic retry. Keep the CAPTCHA bootstrap out of provider subframes.
+
 - Components V2 Text Displays render bounded Markdown with independent account/session/revision-scoped spoilers and validated links. Custom emoji stay literal; no component media is fetched. Unsupported spoiler syntax remains hidden (#100).
 
 

@@ -58,5 +58,9 @@ wry.workspace = true
 iced_runtime.workspace = true
 fastcord-audio = { workspace = true, features = ["test-support"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+# Reproduce the iced/winit + tao native window-class interaction in one process.
+winit.workspace = true
+
 [lints]
 workspace = true

@@ -2,6 +2,7 @@
 //! WebSocket. Everything secret (private key, ticket, token) stays inside this
 //! function's stack frame and is zeroized or dropped when it returns.
 
+use std::pin::Pin;
 use std::time::Duration;
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
@@ -11,10 +12,10 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use zeroize::Zeroizing;
 
 use super::crypto::AttemptKey;
-use super::exchange::TicketExchange;
+use super::exchange::{ExchangeStep, TicketExchange};
 use super::protocol::{Incoming, Outgoing, RemoteUser};
 use super::{QrLink, RemoteAuthError, RemoteAuthEvent};
-use crate::UserToken;
+use crate::{CaptchaChallenge, CaptchaSolution, UserToken};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -31,15 +32,17 @@ enum Stage {
     Fingerprint,
     Scan,
     Confirm,
+    Exchanging,
 }
 
 enum Flow {
     Continue,
-    Authorized(UserToken),
+    Ticket(Zeroizing<String>),
 }
 
+#[cfg(test)]
 pub(crate) async fn drive<S, E>(
-    mut socket: S,
+    socket: S,
     key: &AttemptKey,
     exchange: &E,
     events: &mpsc::Sender<RemoteAuthEvent>,
@@ -47,6 +50,25 @@ pub(crate) async fn drive<S, E>(
 where
     S: Stream<Item = Result<Message, WsError>> + Sink<Message, Error = WsError> + Unpin,
     E: TicketExchange,
+{
+    drive_with_captcha(socket, key, exchange, events, &|_| async {
+        Err(RemoteAuthError::Captcha)
+    })
+    .await
+}
+
+pub(crate) async fn drive_with_captcha<S, E, F, Fut>(
+    mut socket: S,
+    key: &AttemptKey,
+    exchange: &E,
+    events: &mpsc::Sender<RemoteAuthEvent>,
+    captcha: &F,
+) -> Result<UserToken, RemoteAuthError>
+where
+    S: Stream<Item = Result<Message, WsError>> + Sink<Message, Error = WsError> + Unpin,
+    E: TicketExchange,
+    F: Fn(CaptchaChallenge) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<CaptchaSolution, RemoteAuthError>> + Send,
 {
     let (heartbeat_every, session_for) = match timeout(HELLO_TIMEOUT, read_incoming(&mut socket))
         .await
@@ -76,27 +98,47 @@ where
     let mut heartbeat = interval_at(Instant::now() + heartbeat_every, heartbeat_every);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut awaiting_ack = false;
+    let mut connected = true;
+    type Completion<'a> =
+        Pin<Box<dyn Future<Output = Result<UserToken, RemoteAuthError>> + Send + 'a>>;
+    let mut completion: Option<Completion<'_>> = None;
     let result = loop {
         tokio::select! {
             biased;
             () = events.closed() => break Err(RemoteAuthError::Cancelled),
             () = sleep_until(deadline) => break Err(RemoteAuthError::Expired),
-            incoming = read_incoming(&mut socket) => {
+            result = async {
+                match completion.as_mut() {
+                    Some(future) => future.await,
+                    None => std::future::pending().await,
+                }
+            } => break result,
+            incoming = read_incoming(&mut socket), if connected => {
                 let incoming = match incoming {
                     Ok(incoming) => incoming,
+                    // The final ticket no longer needs the QR socket. Some
+                    // servers close it after phone confirmation; a human may
+                    // still finish the one challenge before this deadline.
+                    Err(RemoteAuthError::Closed(None | Some(1000))) if completion.is_some() => {
+                        connected = false;
+                        continue;
+                    }
                     Err(error) => break Err(error),
                 };
                 if matches!(incoming, Incoming::HeartbeatAck) {
                     awaiting_ack = false;
                     continue;
                 }
-                match handle(incoming, &mut stage, key, exchange, events, &mut socket, deadline).await {
+                match handle(incoming, &mut stage, key, events, &mut socket, deadline).await {
                     Ok(Flow::Continue) => {}
-                    Ok(Flow::Authorized(token)) => break Ok(token),
+                    Ok(Flow::Ticket(ticket)) => {
+                        stage = Stage::Exchanging;
+                        completion = Some(Box::pin(finish_exchange(ticket, key, exchange, events, captcha)));
+                    }
                     Err(error) => break Err(error),
                 }
             }
-            _ = heartbeat.tick() => {
+            _ = heartbeat.tick(), if connected => {
                 if awaiting_ack {
                     break Err(RemoteAuthError::HeartbeatLost);
                 }
@@ -112,18 +154,16 @@ where
     result
 }
 
-async fn handle<S, E>(
+async fn handle<S>(
     incoming: Incoming,
     stage: &mut Stage,
     key: &AttemptKey,
-    exchange: &E,
     events: &mpsc::Sender<RemoteAuthEvent>,
     socket: &mut S,
     deadline: Instant,
 ) -> Result<Flow, RemoteAuthError>
 where
     S: Stream<Item = Result<Message, WsError>> + Sink<Message, Error = WsError> + Unpin,
-    E: TicketExchange,
 {
     match (*stage, incoming) {
         (Stage::Nonce, Incoming::NonceProof { encrypted_nonce }) => {
@@ -156,11 +196,9 @@ where
             *stage = Stage::Confirm;
         }
         (Stage::Scan | Stage::Confirm, Incoming::PendingLogin { ticket }) => {
-            let encrypted_token = exchange.exchange(&ticket).await?;
-            drop(ticket);
-            return Ok(Flow::Authorized(decrypt_token(key, &encrypted_token)?));
+            return Ok(Flow::Ticket(ticket));
         }
-        (Stage::Scan | Stage::Confirm, Incoming::Cancel) => {
+        (Stage::Scan | Stage::Confirm | Stage::Exchanging, Incoming::Cancel) => {
             return Err(RemoteAuthError::CancelledOnPhone);
         }
         (_, Incoming::Unknown) => {}
@@ -169,6 +207,44 @@ where
         _ => return Err(RemoteAuthError::Protocol),
     }
     Ok(Flow::Continue)
+}
+
+async fn finish_exchange<E, F, Fut>(
+    ticket: Zeroizing<String>,
+    key: &AttemptKey,
+    exchange: &E,
+    events: &mpsc::Sender<RemoteAuthEvent>,
+    captcha: &F,
+) -> Result<UserToken, RemoteAuthError>
+where
+    E: TicketExchange,
+    F: Fn(CaptchaChallenge) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<CaptchaSolution, RemoteAuthError>> + Send,
+{
+    let encrypted = match exchange.exchange(&ticket, None).await? {
+        ExchangeStep::EncryptedToken(token) => token,
+        ExchangeStep::Captcha(challenge) => {
+            let rqtoken = challenge.rqtoken.clone();
+            let session_id = challenge.session_id.clone();
+            emit(events, RemoteAuthEvent::Captcha).await?;
+            let solution = captcha(challenge).await?;
+            if solution.key.is_empty()
+                || solution.key.len() > 8192
+                || !solution.key.bytes().all(|b| b.is_ascii_graphic())
+                || solution.rqtoken != rqtoken
+                || solution.session_id != session_id
+            {
+                return Err(RemoteAuthError::Protocol);
+            }
+            // Only an explicit challenge and a human answer permit one more
+            // exchange. Ambiguous failures and repeated challenges stop here.
+            match exchange.exchange(&ticket, Some(&solution)).await? {
+                ExchangeStep::EncryptedToken(token) => token,
+                ExchangeStep::Captcha(_) => return Err(RemoteAuthError::CaptchaRejected),
+            }
+        }
+    };
+    decrypt_token(key, &encrypted)
 }
 
 fn decrypt_token(key: &AttemptKey, encrypted_token: &str) -> Result<UserToken, RemoteAuthError> {

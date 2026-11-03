@@ -42,3 +42,8 @@ CAPTCHA, MFA and no-bypass rules above are unchanged. Password login and
 the QR exchange send the fingerprint (once per process,
 `fastcord-discord::fingerprint`), the `discord.com` cookie jar and the same
 header set as the REST client.
+
+
+## Amendment (2026-11-03): manual CAPTCHA during QR exchange
+
+The maintainer reported the QR-only CAPTCHA stop while testing the native release. The QR client now preserves complete bounded challenge fields and asks the Windows application to display the existing temporary CAPTCHA view for the person. The ticket/private key stay in the QR worker; only one human answer can authorize a second exchange, using `x-captcha-key`, `x-captcha-rqtoken` and `x-captcha-session-id`. No automatic solver or blind retry is added. Heartbeats and the original expiry stay active during the wait; a normal socket close after the final ticket does not discard the pending HTTP completion. Cancellation drops the callback and closes its native view. Missing/unsupported challenges, another CAPTCHA and ambiguous HTTP failures stop. The old unconditional QR-CAPTCHA stop above is superseded only for this manual path. The bootstrap must not execute in the provider's child frames (Wry injects initialization scripts into Windows subframes). Native rendering and offline protocol tests do not claim live Discord acceptance.

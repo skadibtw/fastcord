@@ -248,6 +248,22 @@ struct CaptchaResponse {
     captcha_session_id: Option<String>,
 }
 
+pub(crate) fn captcha_challenge(body: &[u8]) -> Option<CaptchaChallenge> {
+    let response: CaptchaResponse = serde_json::from_slice(body).ok()?;
+    let sitekey = response.captcha_sitekey?;
+    let service = response.captcha_service?;
+    if sitekey.is_empty() || service.is_empty() {
+        return None;
+    }
+    Some(CaptchaChallenge {
+        sitekey,
+        service,
+        rqdata: response.captcha_rqdata,
+        rqtoken: response.captcha_rqtoken,
+        session_id: response.captcha_session_id,
+    })
+}
+
 pub struct PasswordAuth {
     http: fastcord_net::HttpClient,
 }
@@ -381,17 +397,8 @@ pub(crate) fn classify_login(
     if status == StatusCode::TOO_MANY_REQUESTS {
         return Err(PasswordAuthError::RateLimited);
     }
-    if let Ok(challenge) = serde_json::from_slice::<CaptchaResponse>(body)
-        && let (Some(sitekey), Some(service)) =
-            (challenge.captcha_sitekey, challenge.captcha_service)
-    {
-        return Ok(PasswordLogin::Captcha(CaptchaChallenge {
-            sitekey,
-            service,
-            rqdata: challenge.captcha_rqdata,
-            rqtoken: challenge.captcha_rqtoken,
-            session_id: challenge.captcha_session_id,
-        }));
+    if let Some(challenge) = captcha_challenge(body) {
+        return Ok(PasswordLogin::Captcha(challenge));
     }
     if status == StatusCode::BAD_REQUEST && mentions_invalid_credentials(body) {
         return Err(PasswordAuthError::Rejected);
